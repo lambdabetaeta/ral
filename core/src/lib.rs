@@ -22,6 +22,7 @@ pub mod diagnostic;
 pub mod egress;
 pub mod elaborator;
 pub mod engine;
+pub mod external_editor;
 pub mod fact;
 pub mod host;
 pub mod invocation;

@@ -20,8 +20,9 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-    GetSecurityDescriptorControl, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_USER,
+    ACCESS_ALLOWED_ACE, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+    GetSecurityDescriptorControl, INHERITED_ACE, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR,
+    SE_DACL_PROTECTED, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -680,8 +681,8 @@ fn a_recreated_file_meets_the_deny_by_position_under_another_id() {
 
 /// What the DACL of `path` holds: whether it is protected from inheritance,
 /// and for each entry whether it allows, whether it names the process's owner,
-/// and the rights it grants.
-fn dacl_of(path: &Path) -> (bool, Vec<(bool, bool, u32)>) {
+/// the rights it grants, and its inheritance flags.
+fn dacl_of(path: &Path) -> (bool, Vec<(bool, bool, u32, u32)>) {
     let file = std::fs::OpenOptions::new()
         .access_mode(READ_CONTROL)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
@@ -731,6 +732,7 @@ fn dacl_of(path: &Path) -> (bool, Vec<(bool, bool, u32)>) {
                     (*ace).Header.AceType == 0,
                     EqualSid(sid, owner_sid) != 0,
                     (*ace).Mask,
+                    u32::from((*ace).Header.AceFlags),
                 )
             }
         })
@@ -739,6 +741,152 @@ fn dacl_of(path: &Path) -> (bool, Vec<(bool, bool, u32)>) {
     // `LocalAlloc`, and nothing reads it after this.
     unsafe { LocalFree(sd) };
     (control & SE_DACL_PROTECTED != 0, aces)
+}
+
+/// An inheritable user-temp ACL, with trusted full control and optional public rights.
+fn set_temp_acl(path: &Path, public_rights: &str) {
+    set_temp_acl_with_inheritance(path, public_rights, "OICI");
+}
+
+fn set_temp_acl_with_inheritance(path: &Path, public_rights: &str, inheritance: &str) {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    };
+    use windows_sys::Win32::Security::{PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
+    let user = host::owner_only::current_process_owner().unwrap();
+    // SAFETY: `user` holds an aligned TOKEN_USER with its SID inline.
+    let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut text = std::ptr::null_mut();
+    // SAFETY: the SID is live; `text` receives a LocalAlloc string.
+    assert_ne!(unsafe { ConvertSidToStringSidW(sid, &raw mut text) }, 0);
+    let mut length = 0;
+    // SAFETY: the API returns a NUL-terminated string.
+    while unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    // SAFETY: the string contains `length` UTF-16 units before its terminator.
+    let user_sid = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).unwrap();
+    // SAFETY: the conversion allocated this string, now copied.
+    unsafe { LocalFree(text.cast()) };
+    let sddl = format!(
+        "D:P(A;OICI;FA;;;{user_sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;{inheritance};{public_rights};;;WD)"
+    );
+    let wide: Vec<_> = sddl.encode_utf16().chain(Some(0)).collect();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the terminated input and output pointer outlive the call.
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let path: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: the path is terminated and the descriptor is live.
+    let ok = unsafe {
+        SetFileSecurityW(
+            path.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    // SAFETY: the conversion allocated this descriptor, now copied by Windows.
+    unsafe { LocalFree(descriptor) };
+    assert_ne!(ok, 0, "{}", io::Error::last_os_error());
+}
+
+#[test]
+fn a_scoped_directory_accepts_an_inherited_user_temp_acl() {
+    let tmp = tempfile::tempdir().unwrap();
+    set_temp_acl(tmp.path(), "GRGX");
+    let parent = tmp.path().join("inherited/temp");
+    std::fs::create_dir_all(&parent).unwrap();
+    assert!(!dacl_of(&parent).0, "ordinary user temp inherits its ACL");
+    let path = parent.join("workspace");
+    let scoped = walked(&path).create_scoped_dir().unwrap();
+    assert_eq!(
+        dacl_of(&path),
+        (
+            true,
+            vec![(
+                true,
+                true,
+                FILE_ALL_ACCESS,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            )]
+        )
+    );
+    drop(scoped);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_scoped_directory_rejects_a_safe_acl_below_an_attacker_controlled_ancestor() {
+    for rights in ["WD", "WO"] {
+        let tmp = tempfile::tempdir().unwrap();
+        // Everyone can change only the ancestor, not the current parent ACL.
+        set_temp_acl_with_inheritance(tmp.path(), rights, "");
+        let parent = tmp.path().join("inherited/temp");
+        std::fs::create_dir_all(&parent).unwrap();
+        let (protected, aces) = dacl_of(&parent);
+        assert!(!protected);
+        assert_eq!(aces.len(), 3, "only trusted full-control ACEs inherit");
+        let path = parent.join("workspace");
+        let error = walked(&path).create_scoped_dir().err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{rights}");
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn a_scoped_parent_requires_a_bounded_protected_inheritance_boundary() {
+    let tmp = tempfile::tempdir().unwrap();
+    set_temp_acl(tmp.path(), "GRGX");
+    let parent = tmp.path().join("inherited");
+    std::fs::create_dir(&parent).unwrap();
+    let inherited = attributes_of(&parent);
+    let boundary = attributes_of(tmp.path());
+    let error = host::validate_scoped_parents([&inherited]).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    host::validate_scoped_parents([&inherited, &boundary]).unwrap();
+    let error =
+        host::validate_scoped_parents(std::iter::repeat_n(&inherited, 256).chain([&boundary]))
+            .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn a_scoped_directory_rejects_parent_replacement_or_security_rights_for_everyone() {
+    // Modify, delete-child, write-DACL, write-owner, generic-all.
+    for rights in ["0x1301bf", "0x40", "WD", "WO", "GA"] {
+        let tmp = tempfile::tempdir().unwrap();
+        set_temp_acl(tmp.path(), rights);
+        let path = tmp.path().join("workspace");
+        let error = walked(&path).create_scoped_dir().err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{rights}");
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn a_scoped_directory_rejects_a_public_substitute() {
+    let tmp = tempfile::tempdir().unwrap();
+    set_temp_acl(tmp.path(), "GRGX");
+    let path = tmp.path().join("workspace");
+    super::SCOPED_MKDIR.with(|hook| {
+        let path = path.clone();
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        }));
+    });
+    let error = walked(&path).create_scoped_dir().err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(!dacl_of(&path).0, "the rejected substitute is not removed");
 }
 
 /// `Secret` is a protected DACL naming the owner alone, over a leaf that
@@ -761,7 +909,7 @@ fn a_staged_write_is_owner_only_when_it_is_secret() {
         let (protected, aces) = dacl_of(&at);
         assert_eq!(protected, owner_only, "{visibility:?}");
         if owner_only {
-            assert_eq!(aces, [(true, true, FILE_ALL_ACCESS)]);
+            assert_eq!(aces, [(true, true, FILE_ALL_ACCESS, 0)]);
         }
     }
 }
@@ -784,7 +932,7 @@ fn a_data_open_makes_an_absent_leaf_as_asked() {
         let (protected, aces) = dacl_of(&at);
         assert_eq!(protected, owner_only, "{visibility:?}");
         if owner_only {
-            assert_eq!(aces, [(true, true, FILE_ALL_ACCESS)]);
+            assert_eq!(aces, [(true, true, FILE_ALL_ACCESS, 0)]);
         }
     }
 
@@ -804,6 +952,43 @@ fn a_data_open_makes_an_absent_leaf_as_asked() {
     file.write_all(b"b").unwrap();
     drop(file);
     assert_eq!(read_all(&appended), "ab");
+}
+
+#[test]
+fn a_secret_directory_passes_its_owner_only_acl_to_descendants() {
+    let tmp = tempfile::tempdir().unwrap();
+    let inheritable = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    for visibility in [Visibility::Public, Visibility::Private, Visibility::Secret] {
+        let at = tmp.path().join(format!("{visibility:?}"));
+        drop(walked(&at).create_dir(visibility).unwrap());
+        let (protected, aces) = dacl_of(&at);
+        assert_eq!(
+            protected,
+            visibility == Visibility::Secret,
+            "{visibility:?}"
+        );
+        if visibility != Visibility::Secret {
+            continue;
+        }
+        assert_eq!(aces, [(true, true, FILE_ALL_ACCESS, inheritable)]);
+
+        let child = at.join("child");
+        std::fs::create_dir(&child).unwrap();
+        assert_eq!(
+            dacl_of(&child),
+            (
+                false,
+                vec![(true, true, FILE_ALL_ACCESS, inheritable | INHERITED_ACE)]
+            )
+        );
+        for file in [at.join("backup"), child.join("replacement")] {
+            std::fs::write(&file, b"draft").unwrap();
+            assert_eq!(
+                dacl_of(&file),
+                (false, vec![(true, true, FILE_ALL_ACCESS, INHERITED_ACE)])
+            );
+        }
+    }
 }
 
 /// The making walk makes each absent name of the spelling and steps onto it,

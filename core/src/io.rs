@@ -5,6 +5,7 @@
 //! terminal output, using the escape vocabulary in [`ansi`].
 
 pub mod ansi;
+mod bounded;
 mod edge;
 pub(crate) mod frame;
 mod poll;
@@ -13,6 +14,7 @@ mod sink;
 mod source;
 mod state;
 pub mod terminal;
+pub use bounded::read_bounded;
 pub(crate) use edge::{Edge, WriteStopped};
 #[cfg(unix)]
 pub(crate) use poll::poll_slice;

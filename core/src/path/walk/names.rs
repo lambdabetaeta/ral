@@ -119,7 +119,7 @@ impl EntryName {
     ///
     /// # Errors
     /// [`NotAnEntryName`] where the name made is not one.
-    pub(crate) fn fresh(prefix: &str) -> Result<Self, NotAnEntryName> {
+    pub fn fresh(prefix: &str) -> Result<Self, NotAnEntryName> {
         Self::parse(OsStr::new(&Self::fresh_text(prefix, "")))
     }
 }

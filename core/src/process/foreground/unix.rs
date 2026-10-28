@@ -24,7 +24,7 @@ pub fn termios_snapshot() -> Option<Termios> {
 // wrote — anything calling `cfmakeraw` — for the classic Unix staircase output.
 
 /// One lending of the session's [`TerminalLease`] to a group, for a run: it
-/// snapshots both on acquire and restores both on drop.
+/// snapshots both before spawn and restores both on drop.
 ///
 /// It cannot be constructed without borrowing a [`TerminalLease`]: holding one
 /// is the proof that ral owns the controlling terminal's foreground, and only a
@@ -44,22 +44,13 @@ pub struct TerminalLoan {
     pressed: Option<CancelCause>,
 }
 
-impl TerminalLoan {
-    /// Hand the controlling tty to `target` for the run under `frame`,
-    /// recording the prior pgid and termios for the restore.  `None` when the
-    /// pgid handoff itself fails, so there is then nothing to restore; a
-    /// failed termios snapshot is not fatal and leaves only the pgid half to
-    /// put back on drop.
-    pub(crate) fn try_acquire(
-        target: i32,
-        _lease: &crate::process::TerminalLease,
-        frame: &ScopeNode,
-    ) -> Option<Self> {
-        if target <= 0 {
-            return None;
-        }
+/// Terminal state captured before spawn, awaiting the child's process group.
+pub(crate) struct PreparedTerminalLoan(TerminalLoan);
+
+impl PreparedTerminalLoan {
+    /// A failed handoff restores through the same guard as a completed run.
+    pub(crate) fn lend(self, target: i32) -> Option<TerminalLoan> {
         let target = Pid::from_raw(target)?;
-        let saved = rustix::process::getpgrp();
         #[cfg_attr(
             not(debug_assertions),
             allow(
@@ -75,16 +66,27 @@ impl TerminalLoan {
             );
             return None;
         }
-        let saved_termios = termios_snapshot();
-        if saved_termios.is_none() {
-            crate::dbg_trace!("fg", "acquire: tcgetattr failed");
-        }
-        Some(Self {
-            saved_pgid: saved,
-            saved_termios,
+        Some(self.0)
+    }
+}
+
+impl TerminalLoan {
+    /// Capture before spawning: a background child can ignore SIGTTOU and
+    /// change terminal modes even before the foreground handoff.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Windows preparation may find no console handles"
+    )]
+    pub(crate) fn prepare(
+        _lease: &crate::process::TerminalLease,
+        frame: &ScopeNode,
+    ) -> Option<PreparedTerminalLoan> {
+        Some(PreparedTerminalLoan(Self {
+            saved_pgid: rustix::process::getpgrp(),
+            saved_termios: termios_snapshot(),
             frame: frame.clone(),
             pressed: None,
-        })
+        }))
     }
 
     /// A loan with no handoff, so the strike can be tested alone: restoring

@@ -1,5 +1,7 @@
 use std::fs::File;
 use std::io::{self, Stdout, Write as _};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,6 +18,7 @@ use crossterm::{
         supports_keyboard_enhancement,
     },
 };
+use ral_core::external_editor::{EditorCommand, admit_draft, after_cleanup, read_draft};
 use ral_core::own::OwnDir;
 use ral_core::path::{Visibility, XdgKind};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -100,80 +103,182 @@ pub(super) fn restore_terminal_modes() {
     let _ = disable_raw_mode();
 }
 
-/// The editor spec used when neither `$VISUAL` nor `$EDITOR` is set.
-#[cfg(windows)]
-pub(super) const DEFAULT_EDITOR: &str = "notepad";
-#[cfg(not(windows))]
-pub(super) const DEFAULT_EDITOR: &str = "vi";
-
-/// The first non-blank of `visual`, `editor`, `default`.  Split out of
-/// [`editor_command`] so the fallback is testable without the environment.
-pub(super) fn pick_editor_spec(
-    visual: Option<&str>,
-    editor: Option<&str>,
-    default: &str,
-) -> String {
-    visual
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| editor.filter(|s| !s.trim().is_empty()))
-        .unwrap_or(default)
-        .to_string()
+/// Drafts live in exarch's cache, beside its scratch subtree, never inside it:
+/// the built-in grants leave the cache read-only and only scratch writable.
+fn draft_dir() -> Result<OwnDir, String> {
+    EXARCH
+        .own(XdgKind::Cache)
+        .and_then(|cache| cache.make_dir("editor-drafts"))
+        .map_err(|e| format!("could not open editor draft directory: {e}"))
 }
 
-/// Resolve the editor to launch for `C-x C-e`.  Split on whitespace so a spec
-/// like `emacsclient -t` keeps its arguments.
-pub(super) fn editor_command() -> (String, Vec<String>) {
-    let visual = ral_core::host::var("VISUAL");
-    let editor = ral_core::host::var("EDITOR");
-    let spec = pick_editor_spec(visual.as_deref(), editor.as_deref(), DEFAULT_EDITOR);
-    let mut parts = spec.split_whitespace().map(str::to_string);
-    let program = parts
-        .next()
-        .expect("spec is non-empty and non-whitespace, so it has a first token");
-    (program, parts.collect())
+fn editor_command() -> Result<EditorCommand, String> {
+    EditorCommand::select(
+        ral_core::host::var("VISUAL").as_deref(),
+        ral_core::host::var("EDITOR").as_deref(),
+    )
+    .map_err(|e| format!("cannot run the external editor: {e}"))
 }
 
-/// Compose `draft` in the user's `$EDITOR`: a draft file in the app's cache
-/// directory, owner-only, under a name of its own invention; suspend the
-/// terminal modes so the child owns the tty, run, re-enter, read back.  One
-/// trailing newline is trimmed, the prompt being newline-joined.  `None` keeps
-/// the original draft; only failure to re-enter the modes propagates.
-pub(super) fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
-    let Ok(cache) = EXARCH.own(XdgKind::Cache) else {
-        return Ok(None);
-    };
-    let Ok((name, mut file)) = cache.create_fresh("prompt-", ".md", Visibility::Private) else {
-        return Ok(None);
-    };
-    let written = file.write_all(draft.as_bytes());
-    drop(file);
-    if written.is_err() {
-        let _ = cache.remove(&name);
-        return Ok(None);
-    }
-    let (program, args) = editor_command();
+/// A secret draft file.  [`Self::remove`] consumes it, so it is attempted once.
+struct DraftFile {
+    dir: OwnDir,
+    name: String,
+}
 
-    restore_terminal_modes();
-    let mut cmd = site!(Silent::EditorCompose, std::process::Command::new(&program));
-    cmd.args(&args).arg(cache.path().join(&name));
-    let status = ral_core::process::status(&mut cmd);
-    if let Err(e) = apply_terminal_modes() {
-        let _ = cache.remove(&name);
-        return Err(e);
+impl DraftFile {
+    /// Written whole, or removed again before the error returns.
+    fn create(dir: OwnDir, text: &str) -> Result<Self, String> {
+        let bytes = admit_draft(text).map_err(|e| format!("could not write editor draft: {e}"))?;
+        let (name, mut file) = dir
+            .create_fresh("prompt-", ".md", Visibility::Secret)
+            .map_err(|e| format!("could not create secret editor draft: {e}"))?;
+        let draft = Self { dir, name };
+        let written = file
+            .write_all(bytes)
+            .map_err(|e| format!("could not write editor draft: {e}"));
+        drop(file);
+        match written {
+            Ok(()) => Ok(draft),
+            Err(error) => after_cleanup(Err(error), draft.remove(), joined),
+        }
     }
 
-    let edited = match status {
-        Ok(s) if s.success() => match cache.read(&name).map(String::from_utf8) {
-            Ok(Ok(text)) => {
-                let text = text.strip_suffix('\n').unwrap_or(&text);
-                Some(text.strip_suffix('\r').unwrap_or(text).to_string())
+    fn path(&self) -> PathBuf {
+        self.dir.path().join(&self.name)
+    }
+
+    fn read(&self) -> Result<String, String> {
+        let file = self
+            .dir
+            .open(&self.name)
+            .map_err(|e| format!("could not read editor draft: {e}"))?;
+        read_draft(file).map_err(|e| format!("could not read editor draft: {e}"))
+    }
+
+    fn remove(self) -> Result<(), String> {
+        self.dir.remove(&self.name).map_err(|e| {
+            format!(
+                "could not remove secret editor draft at {}: {e}; remove it manually",
+                ral_core::path::shown(self.path()),
+            )
+        })
+    }
+
+    /// Lend the draft to `edit`, then remove it: whether `edit` returns, fails
+    /// to restore the terminal, or unwinds.
+    fn edit<T>(
+        self,
+        edit: impl FnOnce(&Self) -> io::Result<Result<T, String>>,
+    ) -> io::Result<Result<T, String>> {
+        let edited = panic::catch_unwind(AssertUnwindSafe(|| edit(&self)));
+        let removed = self.remove();
+        match edited {
+            Ok(Ok(edited)) => Ok(after_cleanup(edited, removed, joined)),
+            Ok(Err(terminal)) => Err(match removed {
+                Ok(()) => terminal,
+                Err(removal) => {
+                    io::Error::new(terminal.kind(), joined(terminal.to_string(), removal))
+                }
+            }),
+            Err(payload) => {
+                if let Err(removal) = removed {
+                    ral_core::errln!("{removal}");
+                }
+                panic::resume_unwind(payload)
             }
-            Ok(Err(_)) | Err(_) => None,
-        },
-        _ => None,
-    };
-    let _ = cache.remove(&name);
-    Ok(edited)
+        }
+    }
+}
+
+fn joined(first: String, second: String) -> String {
+    [first, second].join("; ")
+}
+
+/// Unwinding must leave a cooked terminal, not re-enter the TUI after its hook.
+struct EditorTerminal;
+
+impl EditorTerminal {
+    fn suspend() -> Self {
+        restore_terminal_modes();
+        Self
+    }
+
+    fn resume(self) -> io::Result<()> {
+        apply_terminal_modes()?;
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+
+impl Drop for EditorTerminal {
+    fn drop(&mut self) {
+        restore_terminal_modes();
+    }
+}
+
+fn editor_stderr() -> io::Result<File> {
+    #[cfg(unix)]
+    let path = "/dev/tty";
+    #[cfg(windows)]
+    let path = "CONOUT$";
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    site!(Silent::EditorCompose, options => open(path))
+}
+
+/// Outer errors mean terminal restoration failed. Inner errors leave the input
+/// unchanged and must be displayed by the caller. Successful text is never submitted.
+pub(super) fn edit_text_in_editor(text: &str) -> io::Result<Result<String, String>> {
+    match prepare_edit(text) {
+        Ok((command, stderr, draft)) => draft.edit(|draft| run_editor(&command, stderr, draft)),
+        Err(diagnostic) => Ok(Err(diagnostic)),
+    }
+}
+
+/// Everything fallible before the terminal is suspended.  The draft comes
+/// last: nothing may fail between its creation and [`DraftFile::edit`].
+fn prepare_edit(text: &str) -> Result<(EditorCommand, File, DraftFile), String> {
+    let command = editor_command()?;
+    let drafts = draft_dir()?;
+    let stderr = editor_stderr()
+        .map_err(|e| format!("could not open terminal for editor diagnostics: {e}"))?;
+    let draft = DraftFile::create(drafts, text)?;
+    Ok((command, stderr, draft))
+}
+
+fn run_editor(
+    command: &EditorCommand,
+    stderr: File,
+    draft: &DraftFile,
+) -> io::Result<Result<String, String>> {
+    let terminal = EditorTerminal::suspend();
+    let mut cmd = site!(
+        Silent::EditorCompose,
+        std::process::Command::new(command.program())
+    );
+    cmd.args(command.args())
+        .arg(draft.path())
+        .stderr(std::process::Stdio::from(stderr));
+    let status = ral_core::process::status(&mut cmd);
+    terminal.resume()?;
+    Ok(editor_result(command.program(), status, draft))
+}
+
+fn editor_result(
+    program: &str,
+    status: io::Result<std::process::ExitStatus>,
+    draft: &DraftFile,
+) -> Result<String, String> {
+    match status {
+        Ok(status) if status.success() => draft.read(),
+        Ok(status) => Err(format!(
+            "editor {program:?} exited with {status}; draft unchanged"
+        )),
+        Err(error) => Err(format!(
+            "could not run editor {program:?}: {error}; draft unchanged"
+        )),
+    }
 }
 
 /// RAII guard over the terminal modes and a redirect of fd 2.
@@ -436,26 +541,129 @@ pub(super) fn restore_stderr(backup: WindowsStderrBackup) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::pick_editor_spec;
+    use super::{DraftFile, editor_result};
+    use ral_core::external_editor::MAX_DRAFT_BYTES;
+    use ral_core::own::OwnDir;
 
     #[test]
-    fn visual_wins_when_set_and_non_blank() {
-        assert_eq!(
-            pick_editor_spec(Some("emacsclient -t"), Some("nano"), "vi"),
-            "emacsclient -t"
+    fn a_draft_is_lossless_secret_and_removed_after_its_edit() {
+        let dir = OwnDir::for_test("editor-draft").unwrap();
+        let draft = DraftFile::create((*dir).clone(), "one\r\ntwo\n\n").unwrap();
+        let path = draft.path();
+        assert_eq!(draft.read().unwrap(), "one\r\ntwo\n\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(
+            draft
+                .edit(|draft| Ok(draft.read().map(drop)))
+                .unwrap()
+                .is_ok()
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_unwinding_edit_still_removes_its_draft() {
+        let dir = OwnDir::for_test("editor-unwind").unwrap();
+        let draft = DraftFile::create((*dir).clone(), "original").unwrap();
+        let path = draft.path();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            draft.edit(|_| -> std::io::Result<Result<(), String>> { panic!("editor") })
+        }));
+        assert!(unwound.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_failed_terminal_restore_still_removes_the_draft() {
+        let dir = OwnDir::for_test("editor-restore").unwrap();
+        let draft = DraftFile::create((*dir).clone(), "original").unwrap();
+        let path = draft.path();
+        let error = draft
+            .edit(|_| -> std::io::Result<Result<(), String>> {
+                Err(std::io::Error::other("no tty"))
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "no tty");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn readback_is_bounded_and_the_draft_still_removed() {
+        let dir = OwnDir::for_test("editor-bounds").unwrap();
+        let draft = DraftFile::create((*dir).clone(), "original").unwrap();
+        let path = draft.path();
+        dir.open_write(&draft.name)
+            .unwrap()
+            .set_len((MAX_DRAFT_BYTES + 1) as u64)
+            .unwrap();
+        let error = draft
+            .edit(|draft| Ok(draft.read().map(drop)))
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("16 MiB limit"), "{error}");
+        assert!(!path.exists());
+        assert!(
+            DraftFile::create((*dir).clone(), &"x".repeat(MAX_DRAFT_BYTES + 1))
+                .err()
+                .unwrap()
+                .contains("16 MiB limit")
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn editor_wins_when_visual_is_unset_or_blank() {
-        assert_eq!(pick_editor_spec(None, Some("nano"), "vi"), "nano");
-        assert_eq!(pick_editor_spec(Some("   "), Some("nano"), "vi"), "nano");
+    fn readback_refuses_symlinks_and_removal_does_not_follow_them() {
+        let dir = OwnDir::for_test("editor-link").unwrap();
+        let draft = DraftFile::create((*dir).clone(), "original").unwrap();
+        let path = draft.path();
+        dir.remove(&draft.name).unwrap();
+        std::os::unix::fs::symlink("nonexistent-target", &path).unwrap();
+        assert!(draft.read().unwrap_err().contains("could not read"));
+        draft.remove().unwrap();
+        assert!(std::fs::symlink_metadata(path).is_err());
     }
 
     #[test]
-    fn default_wins_when_both_are_unset_or_blank() {
-        assert_eq!(pick_editor_spec(None, None, "vi"), "vi");
-        assert_eq!(pick_editor_spec(Some(""), Some("  "), "notepad"), "notepad");
+    fn spawn_and_read_errors_are_recoverable_diagnostics() {
+        let dir = OwnDir::for_test("editor-errors").unwrap();
+        let draft = DraftFile::create((*dir).clone(), "original").unwrap();
+        let error = editor_result(
+            "missing-editor",
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            &draft,
+        )
+        .unwrap_err();
+        assert!(error.contains("missing-editor"));
+        assert!(error.contains("draft unchanged"));
+        assert_eq!(draft.read().unwrap(), "original");
+        std::fs::write(draft.path(), [0xff]).unwrap();
+        assert!(draft.read().unwrap_err().contains("not UTF-8"));
+        dir.remove(&draft.name).unwrap();
+        assert!(draft.read().unwrap_err().contains("could not read"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsuccessful_editor_does_not_return_its_partial_edit() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let dir = OwnDir::for_test("editor-cancel").unwrap();
+        let draft = DraftFile::create((*dir).clone(), "partial edit").unwrap();
+        for status in [
+            std::process::ExitStatus::from_raw(256),
+            std::process::ExitStatus::from_raw(2),
+        ] {
+            let error = editor_result("editor", Ok(status), &draft).unwrap_err();
+            assert!(error.contains("draft unchanged"));
+        }
+        draft.remove().unwrap();
     }
 }

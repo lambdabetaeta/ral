@@ -1,0 +1,34 @@
+OpenAI Codex
+Copyright 2025 OpenAI
+
+This distribution includes changed adaptations of algorithms from OpenAI Codex
+(https://github.com/openai/codex), upstream commit
+3cacafa0b7c668b5378f83a1b0988da77ee8e7a9, licensed under Apache-2.0.
+The Apache License, Version 2.0 is provided in LICENSE-APACHE.
+
+Upstream sources and local adaptation boundaries:
+- codex-rs/tui/src/external_editor.rs: editor command parsing and external-editor
+  handoff/readback policies adapted in exarch/src/tui/terminal.rs and
+  ral/src/repl/external_editor.rs.
+- codex-rs/tui/src/bottom_pane/textarea.rs and textarea/editing.rs: kill/yank
+  and grapheme-boundary editing policies adapted in
+  exarch/src/tui/prompt/editor/editing.rs.
+- codex-rs/tui/src/bottom_pane/chat_composer/history_search.rs: reverse-history
+  search interaction adapted in exarch/src/tui/prompt.rs and
+  exarch/src/tui/prompt/search.rs.
+- codex-rs/tui/src/bottom_pane/paste_burst.rs: unbracketed-paste classification
+  adapted in exarch/src/tui/paste_burst.rs.
+
+These are modified derivatives, not unmodified copies: editor integration uses
+ral's authority/transport and exarch's terminal/draft ownership; editing uses
+exarch's editor wrapper; search keeps the draft untouched until acceptance and
+uses local bounded history. Codex execution and command semantics are not imported.
+The Codex-derived portions remain Apache-2.0-only; the workspace's MIT OR
+Apache-2.0 licensing does not offer an MIT alternative for those portions.
+This notice does not relicense unrelated code in the named files.
+
+The upstream Codex NOTICE includes the following attribution, retained here:
+This project includes code derived from Ratatui
+(https://github.com/ratatui/ratatui), licensed under the MIT license.
+Copyright (c) 2016-2022 Florian Dehau
+Copyright (c) 2023-2025 The Ratatui Developers

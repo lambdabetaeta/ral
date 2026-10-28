@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
-generated_at_date: 2026-10-26
-covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/cursor.rs, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, core/src/text.rs]
+generated_at_commit: 578dcf04
+generated_at_date: 2026-10-28
+covers_paths: [ral/src/repl/external_editor.rs, core/src/external_editor.rs, ral/src/startup.rs, ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/cursor.rs, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, core/src/text.rs]
 ---
 
 # Map: repl / frontend
@@ -88,6 +88,55 @@ handle is held by the ambient forwarder.
   session observes the durable root before interpreting the returned input,
   then follows its ordinary history, worker, and terminal cleanup.
 
+## Explicit newline and external editor
+
+**Editing gestures return a draft, never an executed line.** After plugin
+bindings are synchronized, `rustyline.rs::bind_newlines` reserves Ctrl-J and
+Shift/Alt-Enter for `Cmd::Newline`; ordinary Enter still uses the parser's
+continuation verdict. Modified-key recognition depends on terminal reporting.
+The minimal frontend has no corresponding raw-key bindings.
+
+- `ExternalEditorKey` reserves Ctrl-G and Ctrl-X Ctrl-E, capturing rustyline's
+  byte cursor before accepting the buffer back to the frontend. This acceptance
+  is not session submission: the frontend erases the old drawing, calls the
+  `external-editor` session hook through `ReplHost::run_hook`, and returns
+  `Read::Edit`. `edited_buffer` adopts successful text at its end, or reports a
+  failed/non-text outcome and restores the original text and character cursor.
+- `startup.rs::engine::repl_surface` installs `_external-editor` only on the
+  REPL surface; interactive boot registers it with a leased hook policy.
+  `core/src/external_editor.rs`, shared with exarch, owns the pure contract:
+  `EditorCommand::select` chooses nonblank VISUAL, then EDITOR, then `vi`
+  (`notepad` on Windows), refuses a NUL anywhere in the chosen spec, and splits
+  quoted argv with `shlex` on Unix or `winsplit` on Windows, without shell
+  expansion or evaluation; its errors name the variable. `admit_draft` and
+  `read_draft` cap both directions at `MAX_DRAFT_BYTES` (16 MiB) via
+  `ral_core::io::read_bounded`; `after_cleanup` never drops a removal failure.
+  `Shell::run_external_argv` invokes the ordinary admitted external-command
+  path with the hook's mooring, grants, audit and terminal authority.
+- `external_editor.rs::Workspace` owns a private scoped temporary directory
+  and exclusively creates `buffer.ral`. Readback re-locates the edited file
+  after exit, permitting atomic replacement but refusing symlinks and special
+  files; only successful UTF-8 readback becomes the returned draft, with
+  trailing newlines intact. Initial text and readback are capped at 16 MiB.
+  Creation, readback and cleanup retain current grant checks; no temporary
+  authority is added for the editor. Cleanup freshly write-judges the actual held tree,
+  then removes it without name re-walking or following links; `finish` consumes
+  the workspace, so removal is attempted once. When the edit and the removal
+  both fail, an error keeps its status and gains the removal's message; an
+  escape wins and the removal's message goes to stderr. No unwind guard: removal
+  needs a fresh judgment, which only the shell can make, so a panic leaves the
+  private directory. The create judgment permits only empty-directory rollback on drop. Windows secret
+  directories have protected, inheritable owner-only DACLs, covering editor
+  backups and replacements as well as the initial file. Scoped creation checks
+  physical Unix ancestors or the Windows safe inheritance chain through a
+  protected boundary, revalidated top-down; see
+  [[map/core/capabilities|scoped-directory guarantees and residuals]].
+  The leased external-command path snapshots terminal state before spawn and
+  lends it afterwards on every platform; failure, exit and unwind restore it.
+  These are ral's hook/transport boundaries, not Codex command semantics;
+  exarch's host-side editor suspension and restoration are mapped separately
+  in [[map/exarch/frontend|exarch frontend]].
+
 ## Completion
 
 The completion *engine* is frontend-neutral: `completion.rs` classifies the
@@ -140,3 +189,6 @@ exactly a `{replacement, display}` record.
 name is owned and every descriptor is close-on-exec. The child hook only
 creates its session and acquires its controlling terminal. `pty_isolation.rs`
 checks that parallel sessions retain distinct terminals and independent I/O.
+`send_line` sends CR (Enter), leaving LF for the explicit Ctrl-J newline.
+`prompt_lifecycle.rs` covers non-executing newline insertion;
+`external_editor.rs` covers editor return-to-draft, failure and readback.

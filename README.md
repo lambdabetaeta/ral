@@ -61,9 +61,21 @@ brew tap lambdabetaeta/ral https://github.com/lambdabetaeta/ral
 brew install ral exarch
 ```
 
-On Windows, run `ral-windows.msi` from the
-[latest release](https://github.com/lambdabetaeta/ral/releases/latest).
-From source: `cargo install --path ral`.
+For a manual macOS/Linux install, download the matching `.tar.gz` from the
+[latest release](https://github.com/lambdabetaeta/ral/releases/latest) and extract
+it into a dedicated directory, for example:
+
+```sh
+tar -xzf ral-linux-x86_64.tar.gz
+./ral-linux-x86_64
+```
+
+The executable keeps the archive's platform name (including `-allutils` for
+with-utils builds). Keep `NOTICE`, `LICENSE-APACHE`, and `LICENSE-MIT` with it;
+if installing the executable elsewhere as `ral`, retain those files too.
+
+On Windows, run `ral-windows.msi` from the same release; the installer retains
+these legal files. From source: `cargo install --path ral`.
 
 ## Usage
 
@@ -91,4 +103,6 @@ POSIX command strings and scripts go to `/bin/sh`, so scp and rsync never notice
 
 ## License
 
-MIT / Apache-2.0. Funded by the Advanced Research + Invention Agency (ARIA).
+Original workspace code is MIT OR Apache-2.0. Codex-derived portions are
+Apache-2.0-only; see [NOTICE](NOTICE). Bundled MIT-licensed dependencies retain
+their own terms. Funded by the Advanced Research + Invention Agency (ARIA).

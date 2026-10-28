@@ -2,7 +2,7 @@
 //! entry name, none of which resolves a path.  A host module re-exports these
 //! beside the primitives it writes itself (see the seam in `walk.rs`).
 
-use super::{Access, EntryName, Kind, Seen, Stat, Visibility, host};
+use super::{Access, EntryName, Kind, ObjectId, Seen, Stat, Visibility, host};
 use crate::path::site::{Silent, Surface};
 use crate::site::site;
 use rustix::fs::{Access as Amode, AtFlags, Mode, OFlags, RawMode};
@@ -17,6 +17,103 @@ use std::vec::IntoIter;
 /// no child against the directory's own path.
 #[derive(Clone)]
 pub(super) struct DirInfo;
+
+/// Check physical ancestry: a walk's held lineage can predate a rename.
+pub(super) fn validate_scoped_parent(file: &File) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let search = OFlags::PATH;
+    #[cfg(target_os = "macos")]
+    let search = OFlags::from_bits_retain(libc::O_SEARCH.cast_unsigned());
+    let flags = search | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = file.try_clone()?;
+    loop {
+        validate_scoped_ancestor(&directory)?;
+        let mode = Mode::empty();
+        let parent = File::from(site!(
+            Silent::WalkStep,
+            rustix::fs::openat(&directory, "..", flags, mode)
+        )?);
+        if ObjectId::of(&directory)? == ObjectId::of(&parent)? {
+            return Ok(());
+        }
+        directory = parent;
+    }
+}
+
+/// Reject ancestors that permit another user to replace a trusted child.
+fn validate_scoped_ancestor(file: &File) -> io::Result<()> {
+    let stat = rustix::fs::fstat(file)?;
+    let uid = rustix::process::geteuid().as_raw();
+    if (stat.st_uid != uid && stat.st_uid != 0)
+        || (stat.st_mode & 0o022 != 0 && stat.st_mode & 0o1000 == 0)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private workspace requires ancestors owned by the current user or root, with no group/other write permission unless sticky",
+        ));
+    }
+    validate_scoped_acl(file)
+}
+
+/// Check the object actually opened, not the preceding mkdir's intention.
+pub(super) fn validate_scoped_directory(file: &File) -> io::Result<()> {
+    let stat = rustix::fs::fstat(file)?;
+    if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private workspace must be owned by the current user with no group/other permissions",
+        ));
+    }
+    validate_scoped_acl(file)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps, reason = "the macOS ACL check is fallible")]
+fn validate_scoped_acl(_: &File) -> io::Result<()> {
+    // POSIX ACL effective permissions are bounded by the mode's group mask.
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_scoped_acl(file: &File) -> io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::fd::AsRawFd;
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
+        fn acl_get_entry(
+            acl: *mut c_void,
+            index: libc::c_int,
+            entry: *mut *mut c_void,
+        ) -> libc::c_int;
+        fn acl_free(acl: *mut c_void) -> libc::c_int;
+    }
+    // Darwin ACL_TYPE_EXTENDED and ACL_FIRST_ENTRY (sys/acl.h).
+    // SAFETY: the descriptor is live; the returned ACL is owned until acl_free.
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) };
+    if acl.is_null() {
+        // Darwin's filesec reports an object with no extended ACL as ENOENT.
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) => Ok(()),
+            _ => Err(error),
+        };
+    }
+    let mut entry = std::ptr::null_mut();
+    // SAFETY: acl is valid, entry is an out-parameter, and neither escapes.
+    let result = unsafe { acl_get_entry(acl, 0, &raw mut entry) };
+    let error = io::Error::last_os_error();
+    // SAFETY: this allocation came from acl_get_fd_np and is freed once.
+    unsafe { acl_free(acl) };
+    match result {
+        -1 if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        -1 => Err(error),
+        _ => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private workspace requires ancestors and workspace without extended ACL entries",
+        )),
+    }
+}
 
 /// The flags a data open of `access` asks, beside what the host adds.
 pub(super) fn oflags(access: Access) -> OFlags {
@@ -141,6 +238,11 @@ pub(super) fn remove(
         Silent::WalkRemove,
         rustix::fs::unlinkat(dir, name.as_os_str(), flags)
     )?)
+}
+
+/// Roll back a create without entering or traversing the directory.
+pub(super) fn remove_empty_dir(dir: &File, name: &EntryName) -> io::Result<()> {
+    remove(dir, None, name, Kind::Dir)
 }
 
 /// `renameat` under `dir`, over whatever `to` is: POSIX renames by name, so

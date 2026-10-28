@@ -5,7 +5,7 @@ name: Build Binaries
 #   * workflow_dispatch (manual button) → rolling `latest` prerelease
 #   * push of a `v*` tag                → versioned, non-prerelease
 #
-# What a release carries: a bare executable for every Linux and macOS target,
+# What a release carries: a licensed archive for every Linux and macOS target,
 # and on Windows an installer instead — `packaging/wix/ral.wxs` argues why a
 # copied .exe is the wrong shape there.  The Windows build still happens, but
 # it is the MSI's payload rather than an asset of its own.
@@ -115,7 +115,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             features: coreutils,diffutils,ripgrep
 
-          # exarch, which ships as a bare executable everywhere including
+          # exarch, which ships in a licensed archive everywhere including
           # Windows.  No `-allutils` variant: those utilities are ral's, and
           # exarch runs its work through ral.
           - out: exarch-linux-x86_64
@@ -160,10 +160,16 @@ jobs:
           cargo build --release -p ${{ matrix.pkg }} --target ${{ matrix.target }} \
             ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
           mv target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.out }}
+      - name: Package binary and legal files
+        if: startsWith(matrix.artifact, 'release-')
+        shell: bash
+        run: |
+          bash scripts/package-release.sh '${{ matrix.out }}' \
+            '${{ matrix.out == 'exarch-windows.exe' && 'exarch-windows.zip' || format('{0}.tar.gz', matrix.out) }}'
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.out }}
+          path: ${{ !startsWith(matrix.artifact, 'release-') && matrix.out || matrix.out == 'exarch-windows.exe' && 'exarch-windows.zip' || format('{0}.tar.gz', matrix.out) }}
           if-no-files-found: error
 
   # The Windows installer: ral.exe into Program Files\ral, on PATH, with an

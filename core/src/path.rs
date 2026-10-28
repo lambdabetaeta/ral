@@ -68,8 +68,8 @@ pub(crate) use walk::is_loop;
 pub use walk::{
     Authority, Dir, DirEntry, EntryName, Excluded, Hold, Installing, Judged, Kind, LeafMode,
     Listing, Lists, Located, NotAnEntryName, ObjectId, Op, Peeks, Reading, Reads, RealPath,
-    RootName, Stat, Step, Trace, Unjudged, Visibility, Walked, Writing, exists, is_dir, kind_of,
-    walk, walk_dir, walk_lenient,
+    RootName, ScopedDir, Stat, Step, Trace, Unjudged, Visibility, Walked, Writing, exists, is_dir,
+    kind_of, walk, walk_dir, walk_lenient,
 };
 pub(crate) use walk::{StagedWrite, Streamed, Streaming, open_discard};
 #[cfg(windows)]

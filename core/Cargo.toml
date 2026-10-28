@@ -160,6 +160,7 @@ seccompiler = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc        = "3"
+winsplit     = "0.1"
 windows-sys  = { workspace = true, features = [
     # NtCreateFile: component-wise opens relative to a held parent directory.
     "Wdk_Foundation",

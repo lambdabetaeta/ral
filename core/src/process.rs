@@ -41,6 +41,7 @@ pub use cancel::{
 pub(crate) use cancel::{POLL_SLICE, TEARDOWN_GRACE};
 
 pub use child::ChildHandle;
+pub(crate) use foreground::PreparedTerminalLoan;
 pub(crate) use group::{Group, Membership};
 pub use group::{Pgid, PgidPolicy};
 #[cfg(unix)]

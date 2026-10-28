@@ -121,6 +121,7 @@ fn indent(r: Rect) -> Rect {
 
 /// Paint one frame into `term`.
 pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Result<()> {
+    app.reconcile_input_focus();
     let area = Rect::from((Position::ORIGIN, term.size()?));
     let focused = app.tabs.focused();
     // Both strips are owned lines, so this frame's rows are read here and
@@ -132,6 +133,19 @@ pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Resul
     let cursor = app.matrix_cursor(&rows);
     let matrix_lines = (tab_h > 0).then(|| strip(&rows, focused, cursor, usize::from(tab_h)));
     let navigating = app.matrix_navigating();
+    let prompt_status = app
+        .is_steerable()
+        .then(|| {
+            [
+                app.prompt_state.search_status(),
+                app.prompt_state.paste_preview(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" | ")
+        })
+        .filter(|status| !status.is_empty());
     let s = strips(
         app,
         area,
@@ -255,24 +269,31 @@ pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Resul
                     inner.y + y.min(inner.height.saturating_sub(1)),
                 ));
             }
+            // The slash-command popup rises out of the prompt box over the
+            // transcript, reserving no row of its own: nothing below the prompt
+            // is free, and a layout that grew and shrank with the typing would
+            // shift the whole frame under the reader.
+            if overlay.is_none()
+                && !navigating
+                && let Some(menu) = prompt_state.menu()
+            {
+                let h = menu.height().min(s.prompt.y);
+                menu.render(
+                    f,
+                    Rect {
+                        x: inner.x,
+                        y: s.prompt.y - h,
+                        width: inner.width,
+                        height: h,
+                    },
+                );
+            }
         }
-        // The slash-command popup rises out of the prompt box over the
-        // transcript, reserving no row of its own: nothing below the prompt
-        // is free, and a layout that grew and shrank with the typing would
-        // shift the whole frame under the reader.
-        if let Some(menu) = prompt_state.menu() {
-            let h = menu.height().min(s.prompt.y);
-            menu.render(
-                f,
-                Rect {
-                    x: inner.x,
-                    y: s.prompt.y - h,
-                    width: inner.width,
-                    height: h,
-                },
-            );
-        }
-        f.render_widget(Paragraph::new(footer_hint(navigating)), s.footer);
+        let footer = prompt_status.map_or_else(
+            || footer_hint(navigating),
+            |status| Line::from(Span::styled(status, Style::default().fg(SLATE))),
+        );
+        f.render_widget(Paragraph::new(footer), s.footer);
         if let Some(toast) = gesture.toast() {
             let msg = match toast {
                 Toast::Copied(n) => format!("[{n} characters copied]"),
@@ -442,7 +463,7 @@ fn footer_hint(navigating: bool) -> Line<'static> {
     let hint = if navigating {
         " ↑↓ select | Enter attach | Esc leave "
     } else {
-        " Tab agents | drag copy (⇧ native) | Ctrl-X Ctrl-E editor | Ctrl-C cancel | /quit to leave "
+        " Tab agents | drag copy (⇧ native) | Ctrl-G editor | Ctrl-C copy/cancel | /quit to leave "
     };
     Line::from(Span::styled(hint, st))
 }

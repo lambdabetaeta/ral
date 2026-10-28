@@ -8,7 +8,7 @@
 //! spawned *from inside* a stage still comes through here and joins the
 //! stage's group.
 
-use crate::process::{Membership, Pgid, PgidPolicy, TerminalLoan};
+use crate::process::{Membership, Pgid, PgidPolicy, PreparedTerminalLoan, TerminalLoan};
 use crate::shell::runtime::{Mooring, Shell};
 
 /// Whether a freshly-spawned standalone external takes the controlling
@@ -58,38 +58,12 @@ impl ForegroundDecision {
         matches!(self.0, PgidPolicy::NewLeader)
     }
 
-    /// Lend the controlling terminal to the freshly-spawned child, for the run
-    /// under `mooring`.
-    ///
-    /// `None` when this decision declined foreground or the platform handoff
-    /// failed.  The [`TerminalLoan`]'s `Drop` is what restores ral's pgid,
-    /// and it must be RAII: any early return between spawn and `child.wait()`
-    /// would otherwise strand the shell in a background pgroup.
-    pub(super) fn acquire(
-        &self,
-        child_id: u32,
-        shell: &Shell,
-        mooring: &Mooring,
-    ) -> Option<TerminalLoan> {
+    /// Capture terminal state before spawning; lend it once the pid is known.
+    pub(super) fn prepare(&self, shell: &Shell, mooring: &Mooring) -> Option<PreparedTerminalLoan> {
         if !matches!(self.0, PgidPolicy::NewLeader) {
             return None;
         }
-        // Foreground already required the lease, so the `?` never fires; the
-        // borrow is the unforgeable proof `try_acquire` demands.
-        let lease = shell.terminal_lease(mooring)?;
-        #[cfg(unix)]
-        {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "child_id is a live OS pid from Child::id(): positive and below i32::MAX, so the u32→pid_t reinterpretation never wraps"
-            )]
-            let pid = child_id as libc::pid_t;
-            TerminalLoan::try_acquire(pid, lease, &mooring.home)
-        }
-        #[cfg(windows)]
-        {
-            TerminalLoan::try_acquire(child_id.cast_signed(), lease, &mooring.home)
-        }
+        TerminalLoan::prepare(shell.terminal_lease(mooring)?, &mooring.home)
     }
 }
 

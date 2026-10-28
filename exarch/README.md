@@ -15,6 +15,42 @@ The name is the role: in Byzantine usage, an *exarch* was a viceroy
 who acted on behalf of a distant sovereign within a bounded province.
 Here the sovereign is the LLM and the province is the `grant`.
 
+## Install
+
+On macOS or Linux:
+
+```sh
+curl -fsSL https://lambdabetaeta.github.io/ral/scripts/exarch-install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://lambdabetaeta.github.io/ral/scripts/exarch-install.ps1 | iex
+```
+
+For a manual install, download the matching archive from the
+[latest release](https://github.com/lambdabetaeta/ral/releases/latest) and extract
+it into a dedicated directory. For example, on Linux x86_64:
+
+```sh
+tar -xzf exarch-linux-x86_64.tar.gz
+./exarch-linux-x86_64
+```
+
+On Windows:
+
+```powershell
+Expand-Archive exarch-windows.zip -DestinationPath exarch-windows
+.\exarch-windows\exarch-windows.exe
+```
+
+Unix executables likewise keep their platform names. If installing on `PATH`,
+rename the executable to `exarch` (`exarch.exe` on Windows). Retain `NOTICE`,
+`LICENSE-APACHE`, `LICENSE-MIT`, and `LICENSE-EDTUI` with your installation;
+the archive includes all four. `LICENSE-EDTUI` is the vendored editor's verbatim
+MIT licence, not a replacement for the Apache-only portions described in `NOTICE`.
+
 ## Run
 
 ```

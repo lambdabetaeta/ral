@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
 verified_at_date: 2026-10-27
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
+anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -147,8 +147,10 @@ a zero readiness byte after installing all signal dispositions; `prepare`
 waits for it before exposing the group. A key on the lent terminal therefore
 cannot race the anchor's handler installation.
 `PipeNode::run` lends the terminal as soon as the group exists, before
-any edge is opened and so before any stage runs — `PipelineGroup::lend`
-(`group.rs`) borrows the `&TerminalLease`, and only an owning group lends.
+any edge is opened and so before any stage runs — `TerminalLoan::prepare`
+borrows the `&TerminalLease` and captures the terminal's state before the
+anchor spawns, `PreparedTerminalLoan::lend` hands the foreground to the
+anchor's pgid, and only an owning group prepares a loan.
 The `TerminalLoan` goes to the collector, and `LaunchCx.holds_terminal`
 freezes whether it was made.
 With the terminal settled before user code exists, no start-gate frame is

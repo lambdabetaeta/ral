@@ -2,7 +2,7 @@
 name = "ral"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "Apache-2.0"
 default-run = "ral"
 
 [lints]
@@ -50,7 +50,7 @@ tikv-jemallocator = { version = "0.7", optional = true }
 name = "ral"
 maintainer = "Alex Kavvos <alex.kavvos@bristol.ac.uk>"
 copyright = "2024 Alex Kavvos"
-license-file = ["../LICENSE-MIT", "4"]
+license-file = ["../LICENSE-APACHE", "0"]
 extended-description = """\
 ral is a shell based on algebraic effects. It provides a clean, typed
 command language with first-class pipelines, structured data, and
@@ -65,6 +65,9 @@ assets = [
     { source = "../target/release/ral",    dest = "/usr/bin/ral",    mode = "755" },
     { source = "../docs/SPEC.md",          dest = "/usr/share/doc/ral/SPEC.md",          mode = "644" },
     { source = "../docs/TUTORIAL.md",      dest = "/usr/share/doc/ral/TUTORIAL.md",       mode = "644" },
+    { source = "../LICENSE-APACHE", dest = "/usr/share/doc/ral/LICENSE-APACHE", mode = "644" },
+    { source = "../LICENSE-MIT", dest = "/usr/share/doc/ral/LICENSE-MIT", mode = "644" },
+    { source = "../NOTICE", dest = "/usr/share/doc/ral/NOTICE", mode = "644" },
 ]
 
 [build-dependencies]

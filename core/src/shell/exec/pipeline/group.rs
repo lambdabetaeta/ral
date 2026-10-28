@@ -5,12 +5,13 @@
 //! an enclosing stage's pgid has no anchor.  The shell is not a member, so a
 //! signal the tty delivers to the group reaches it only as the anchor's
 //! [`Event::Heard`] — the kernel having already given that signal to every
-//! other member — which only the group's [`TerminalLoan`] reads as a key.
+//! other member — which only the pipeline's
+//! [`TerminalLoan`](crate::process::TerminalLoan) reads as a key.
 
 use super::super::command;
 use super::collect::Event;
-use crate::process::{Group, Membership, Pgid, PgidPolicy, Scope, TerminalLoan};
-use crate::shell::runtime::{Error, Mooring, Settled, Shell, sig};
+use crate::process::{Group, Membership, Pgid, PgidPolicy, Scope};
+use crate::shell::runtime::{Error, Settled, Shell, sig};
 use std::sync::mpsc::Sender;
 
 /// Pgid lifecycle for one pipeline: the anchor, finished before the fold or on
@@ -57,21 +58,6 @@ impl PipelineGroup {
 
     pub(super) fn leader_pgid(&self) -> Pgid {
         self.group.leader()
-    }
-
-    /// Lend the terminal to the group this pipeline owns, for the run under
-    /// `mooring`; a joined group is its owner's to lend.
-    pub(super) fn lend(&self, shell: &Shell, mooring: &Mooring) -> Option<TerminalLoan> {
-        let Group::Owns(leader) = &self.group else {
-            return None;
-        };
-        // `resolve_terminal_plan` already gated the foreground plan on the
-        // lease; re-borrowing it here is the proof `try_acquire` demands.
-        TerminalLoan::try_acquire(
-            leader.as_raw(),
-            shell.terminal_lease(mooring)?,
-            &mooring.home,
-        )
     }
 
     /// Finish the anchor, after which every report it made is on the channel.
@@ -282,14 +268,6 @@ mod tests {
                 "the inner scope must not stand in for the outer one"
             );
         }
-    }
-
-    /// A default shell mints no terminal lease, so `lend` lends nothing.
-    #[test]
-    fn a_group_without_a_lease_lends_nothing() {
-        let shell = crate::test_helper::core_shell();
-        let group = prepared(&shell);
-        assert!(group.lend(&shell, &Mooring::adrift()).is_none());
     }
 
     #[cfg(windows)]

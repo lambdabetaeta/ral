@@ -46,20 +46,21 @@ esac
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
-url="https://github.com/${REPO}/releases/download/${TAG}/${artifact}"
+archive="${artifact}.tar.gz"
+url="https://github.com/${REPO}/releases/download/${TAG}/${archive}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading ${artifact} from ${REPO} (${TAG})"
-curl -fL --progress-bar "$url"        -o "${tmp}/exarch"
-curl -fL          --silent "$url.sha256" -o "${tmp}/exarch.sha256"
+echo "Downloading ${archive} from ${REPO} (${TAG})"
+curl -fL --progress-bar "$url"           -o "${tmp}/${archive}"
+curl -fL --silent "$url.sha256"         -o "${tmp}/${archive}.sha256"
 
-expected="$(cat "${tmp}/exarch.sha256")"
+expected="$(cut -d ' ' -f 1 < "${tmp}/${archive}.sha256")"
 if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "${tmp}/exarch" | cut -d' ' -f1)"
+    actual="$(sha256sum "${tmp}/${archive}" | cut -d' ' -f1)"
 elif command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "${tmp}/exarch" | cut -d' ' -f1)"
+    actual="$(shasum -a 256 "${tmp}/${archive}" | cut -d' ' -f1)"
 else
     echo "Warning: sha256sum and shasum not found; skipping checksum verification." >&2
     actual="$expected"
@@ -71,6 +72,13 @@ if [ "$actual" != "$expected" ]; then
     exit 1
 fi
 echo "Checksum OK."
+tar -xzf "${tmp}/${archive}" -C "$tmp" "$artifact" LICENSE-APACHE LICENSE-MIT NOTICE LICENSE-EDTUI
+
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/exarch"
+mkdir -p "$data_dir"
+for file in LICENSE-APACHE LICENSE-MIT NOTICE LICENSE-EDTUI; do
+    install -m 644 "$tmp/$file" "$data_dir/$file"
+done
 
 # ── Install binary ────────────────────────────────────────────────────────────
 
@@ -81,7 +89,7 @@ else
     mkdir -p "$install_dir"
 fi
 
-install -m 755 "${tmp}/exarch" "${install_dir}/exarch"
+install -m 755 "${tmp}/${artifact}" "${install_dir}/exarch"
 echo "Installed ${install_dir}/exarch"
 
 if [ "$os" = "Darwin" ]; then

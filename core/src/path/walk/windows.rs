@@ -658,12 +658,65 @@ pub(super) fn derive(
     Ok(file)
 }
 
-/// The security descriptor `visibility` asks of a file it makes: the
+/// Held, actual parents through a protected inheritance boundary. No-delete
+/// sharing fixes their identities, not their ACLs: prove safety top-down.
+/// As with any ACL check, previously granted attacker WRITE_DAC/WRITE_OWNER
+/// handles are outside this proof: changing a DACL does not revoke handles.
+pub(super) fn validate_scoped_parents<'a>(
+    directories: impl IntoIterator<Item = &'a File>,
+) -> io::Result<()> {
+    let validate = |dir| {
+        scoped_security(dir)
+            .and_then(|file| owner_only::validate_parent(&file))
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("unsafe scoped temporary inheritance chain: {error}"),
+                )
+            })
+    };
+    let mut chain = Vec::new();
+    for dir in directories.into_iter().take(256) {
+        chain.push(dir);
+        if validate(dir)? {
+            // An attacker may have propagated ACLs before the boundary was
+            // proved safe. Recheck descendants from that stable boundary down.
+            for descendant in chain.into_iter().rev() {
+                validate(descendant)?;
+            }
+            return Ok(());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "cannot prove the scoped temporary parent's ACL inheritance safe: no protected boundary within 256 held ancestors; choose a private temporary directory with a protected DACL",
+    ))
+}
+
+/// Verify the held object, not its name; its protected parent prevents replacement.
+pub(super) fn validate_scoped_directory(dir: &File) -> io::Result<()> {
+    owner_only::validate_directory(&scoped_security(dir)?)
+}
+
+fn scoped_security(dir: &File) -> io::Result<File> {
+    let basic: FILE_BASIC_INFO = query(dir, FileBasicInfo)?;
+    if basic.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+        != FILE_ATTRIBUTE_DIRECTORY
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "a scoped directory must be a directory without a reparse point",
+        ));
+    }
+    reopen_shared(dir, windows_sys::Win32::Storage::FileSystem::READ_CONTROL)
+}
+
+/// The security descriptor `visibility` asks of an entry it makes: the
 /// owner-only one for `Secret`, none for the others, which inherit the
 /// directory's ACL.
-fn descriptor_for(visibility: Visibility) -> io::Result<Option<owner_only::OwnerOnly>> {
+fn descriptor_for(visibility: Visibility, kind: Kind) -> io::Result<Option<owner_only::OwnerOnly>> {
     match visibility {
-        Visibility::Secret => owner_only::OwnerOnly::new().map(Some),
+        Visibility::Secret => owner_only::OwnerOnly::new(kind).map(Some),
         Visibility::Public | Visibility::Private => Ok(None),
     }
 }
@@ -731,7 +784,7 @@ pub(super) fn create(
     access: Access,
     visibility: Visibility,
 ) -> io::Result<File> {
-    let descriptor = descriptor_for(visibility)?;
+    let descriptor = descriptor_for(visibility, Kind::File)?;
     made_under(
         dir,
         name,
@@ -771,7 +824,7 @@ pub(super) fn create_sibling(
     name: &EntryName,
     visibility: Visibility,
 ) -> io::Result<File> {
-    let descriptor = descriptor_for(visibility)?;
+    let descriptor = descriptor_for(visibility, Kind::File)?;
     made_under(
         dir,
         name,
@@ -803,33 +856,41 @@ pub(super) fn create_sibling(
 }
 
 /// Make the directory `name` in `dir` ([`made_under`]).  The handle it opens
-/// is closed at once; the caller steps onto the name.  The directory inherits
-/// the held one's ACL, whatever the visibility.
+/// is closed at once; the caller steps onto the name. `Secret` uses a protected
+/// owner-only DACL inherited by descendants; other visibilities inherit.
 ///
 /// # Errors
 /// `AlreadyExists` where the name is taken; the create's.
-pub(super) fn mkdir(dir: &File, name: &EntryName, _visibility: Visibility) -> io::Result<()> {
-    made_under(dir, name, None, |handle, attributes, block| {
-        // SAFETY: as in `create`.
-        unsafe {
-            site!(
-                Silent::WalkMkdir,
-                NtCreateFile(
-                    handle,
-                    FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                    attributes,
-                    block,
-                    null(),
-                    FILE_ATTRIBUTE_NORMAL,
-                    SHARED,
-                    FILE_CREATE,
-                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
-                    null(),
-                    0,
+pub(super) fn mkdir(dir: &File, name: &EntryName, visibility: Visibility) -> io::Result<()> {
+    let descriptor = descriptor_for(visibility, Kind::Dir)?;
+    made_under(
+        dir,
+        name,
+        descriptor.as_ref(),
+        |handle, attributes, block| {
+            // SAFETY: as in `create`.
+            unsafe {
+                site!(
+                    Silent::WalkMkdir,
+                    NtCreateFile(
+                        handle,
+                        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        attributes,
+                        block,
+                        null(),
+                        FILE_ATTRIBUTE_NORMAL,
+                        SHARED,
+                        FILE_CREATE,
+                        FILE_DIRECTORY_FILE
+                            | FILE_SYNCHRONOUS_IO_NONALERT
+                            | FILE_OPEN_REPARSE_POINT,
+                        null(),
+                        0,
+                    )
                 )
-            )
-        }
-    })
+            }
+        },
+    )
     .map(drop)
 }
 
@@ -966,6 +1027,15 @@ pub(super) fn remove(
     Ok(())
 }
 
+/// Roll back a create without entering or traversing the directory.
+pub(super) fn remove_empty_dir(dir: &File, name: &EntryName) -> io::Result<()> {
+    let file = open_entry(dir, name.as_os_str(), Sharing::Leaf)?;
+    if seen(&file)?.stat.kind != Kind::Dir {
+        return Err(io::ErrorKind::NotADirectory.into());
+    }
+    remove(dir, Some(&file), name, Kind::Dir)
+}
+
 /// Mark the staged `sibling` for deletion by its own handle: it was created
 /// with `DELETE` access, and its name goes when the handle closes.  No name
 /// is resolved.
@@ -1091,25 +1161,33 @@ impl Iterator for Lister<'_> {
     }
 }
 
-/// The security descriptor of a file only its owner may reach: one entry
+/// The security descriptor of an entry only its owner may reach: one entry
 /// granting the process's owner full control and nobody else anything, the
 /// DACL protected so the parent directory's inheritable entries are not merged
-/// in.  It rides in on the create's object attributes, so the file never
+/// in.  It rides in on the create's object attributes, so the entry never
 /// exists, not even for an instant, under an inherited ACL.
 pub(super) mod owner_only {
+    use super::Kind;
+    use std::fs::File;
     use std::io;
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::GENERIC_ALL;
     use windows_sys::Win32::Foundation::{ERROR_SUCCESS, FALSE, HANDLE, LocalFree, TRUE};
     use windows_sys::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
-        TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
+        SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::{
-        ACL, InitializeSecurityDescriptor, NO_INHERITANCE, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+        EqualSid, GetAce, GetSecurityDescriptorControl, INHERIT_ONLY_ACE,
+        InitializeSecurityDescriptor, IsWellKnownSid, NO_INHERITANCE, OBJECT_INHERIT_ACE,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
         SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY,
-        TOKEN_USER, TokenUser,
+        TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
-    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ALL_ACCESS, FILE_DELETE_CHILD, WRITE_DAC, WRITE_OWNER,
+    };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// The only revision Win32 defines (`winnt.h`), restated rather than
@@ -1174,7 +1252,7 @@ pub(super) mod owner_only {
     /// A single-ACE ACL granting the process owner full control and nobody
     /// else anything. The caller owns the allocation and frees it once the
     /// create has copied the descriptor into the new file object.
-    fn owner_only_acl() -> io::Result<*mut ACL> {
+    fn owner_only_acl(kind: Kind) -> io::Result<*mut ACL> {
         let owner_buf = current_process_owner()?;
         // SAFETY: `owner_buf` holds a populated `TOKEN_USER` in a `u64`
         // buffer, so aligned for it, and outlives every use of the `PSID`.
@@ -1193,7 +1271,11 @@ pub(super) mod owner_only {
         let ea = EXPLICIT_ACCESS_W {
             grfAccessPermissions: FILE_ALL_ACCESS,
             grfAccessMode: GRANT_ACCESS,
-            grfInheritance: NO_INHERITANCE,
+            grfInheritance: if kind == Kind::Dir {
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            } else {
+                NO_INHERITANCE
+            },
             Trustee: trustee,
         };
 
@@ -1207,6 +1289,149 @@ pub(super) mod owner_only {
         Ok(acl)
     }
 
+    /// Deliberately accept only our exact protected, inheritable directory ACL.
+    pub(super) fn validate_directory(file: &File) -> io::Result<()> {
+        let expected = OwnerOnly::new(Kind::Dir)?;
+        let user = current_process_owner()?;
+        // SAFETY: `user` is an aligned TOKEN_USER and keeps its SID alive.
+        let user_sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        with_security(file, |owner, acl, descriptor| {
+            validate_owner_only(owner, acl, descriptor, user_sid, &expected)
+        })
+    }
+
+    fn with_security(
+        file: &File,
+        validate: impl FnOnce(PSID, *mut ACL, PSECURITY_DESCRIPTOR) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut owner = std::ptr::null_mut();
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: the live handle has READ_CONTROL; all outputs outlive the call.
+        let rc = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &raw mut owner,
+                std::ptr::null_mut(),
+                &raw mut acl,
+                std::ptr::null_mut(),
+                &raw mut descriptor,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(rc.cast_signed()));
+        }
+        let result = validate(owner, acl, descriptor);
+        // SAFETY: GetSecurityInfo allocated this descriptor through LocalAlloc.
+        unsafe { LocalFree(descriptor) };
+        result
+    }
+
+    fn validate_owner_only(
+        owner: PSID,
+        acl: *mut ACL,
+        descriptor: PSECURITY_DESCRIPTOR,
+        user_sid: PSID,
+        expected: &OwnerOnly,
+    ) -> io::Result<()> {
+        let mut control = 0;
+        let mut revision = 0;
+        // SAFETY: GetSecurityInfo returned a valid descriptor.
+        if unsafe { GetSecurityDescriptorControl(descriptor, &raw mut control, &raw mut revision) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: non-null owner and ACL point into the live descriptor;
+        // expected.acl is valid and both ACLs contain their AclSize bytes.
+        let matches = unsafe {
+            !owner.is_null()
+                && !acl.is_null()
+                && control & SE_DACL_PROTECTED != 0
+                && EqualSid(owner, user_sid) != 0
+                && (*acl).AclSize == (*expected.acl).AclSize
+                && std::slice::from_raw_parts(acl.cast::<u8>(), usize::from((*acl).AclSize))
+                    == std::slice::from_raw_parts(
+                        expected.acl.cast::<u8>(),
+                        usize::from((*expected.acl).AclSize),
+                    )
+        };
+        if !matches {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "a scoped directory must be owned by the current process user and have exactly ral's protected, owner-only inheritable DACL",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether this safe ACL stops inheritance. Denies can only restrict.
+    pub(super) fn validate_parent(file: &File) -> io::Result<bool> {
+        let user = current_process_owner()?;
+        // SAFETY: `user` keeps this populated TOKEN_USER and its SID alive.
+        let user_sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        let trusted = |sid: PSID| {
+            // SAFETY: callers supply SIDs from the live security descriptor.
+            !sid.is_null()
+                && unsafe {
+                    EqualSid(sid, user_sid) != 0
+                        || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                        || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                }
+        };
+        let refused = || {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "a scoped temporary parent must be owned by the current user, SYSTEM or Administrators, and must not let other users delete children or change its ownership or DACL; choose a private temporary directory",
+            )
+        };
+        let mut protected = false;
+        with_security(file, |owner, acl, descriptor| {
+            let mut control = 0;
+            let mut revision = 0;
+            // SAFETY: GetSecurityInfo returned a live security descriptor.
+            if unsafe {
+                GetSecurityDescriptorControl(descriptor, &raw mut control, &raw mut revision)
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            protected = control & SE_DACL_PROTECTED != 0;
+            if !trusted(owner) || acl.is_null() {
+                return Err(refused());
+            }
+            // SAFETY: `acl` belongs to the live GetSecurityInfo descriptor.
+            for index in 0..unsafe { (*acl).AceCount } {
+                let mut ace = std::ptr::null_mut();
+                // SAFETY: the index is in range and the descriptor remains live.
+                if unsafe { GetAce(acl, u32::from(index), &raw mut ace) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: GetAce returns an aligned ACE with this common header.
+                let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+                if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 || header.AceType == 1 {
+                    continue;
+                }
+                // Only ordinary allow ACEs have the layout and meaning used below.
+                if header.AceType != 0 {
+                    return Err(refused());
+                }
+                // SAFETY: an ordinary allow ACE contains this mask and inline SID.
+                let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+                let dangerous = DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
+                if allowed.Mask & dangerous != 0
+                    && !trusted((&raw const allowed.SidStart).cast_mut().cast())
+                {
+                    return Err(refused());
+                }
+            }
+            Ok(())
+        })?;
+        Ok(protected)
+    }
+
     /// The descriptor and the ACL it points at, which this owns and frees.
     pub(in crate::path::walk) struct OwnerOnly {
         descriptor: SECURITY_DESCRIPTOR,
@@ -1214,14 +1439,14 @@ pub(super) mod owner_only {
     }
 
     impl OwnerOnly {
-        /// The owner-only descriptor, with `SE_DACL_PROTECTED` in force.
+        /// Protected owner-only access, inheritable by children of directories.
         ///
         /// # Errors
         /// The OS's, as a token, an ACL or a descriptor refuses.
-        pub(in crate::path::walk) fn new() -> io::Result<Self> {
+        pub(in crate::path::walk) fn new(kind: Kind) -> io::Result<Self> {
             let mut owner = Self {
                 descriptor: SECURITY_DESCRIPTOR::default(),
-                acl: owner_only_acl()?,
+                acl: owner_only_acl(kind)?,
             };
             let sd: PSECURITY_DESCRIPTOR = (&raw mut owner.descriptor).cast();
             // SAFETY: `sd` is the descriptor `owner` holds, which

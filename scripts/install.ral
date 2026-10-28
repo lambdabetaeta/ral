@@ -10,11 +10,20 @@ if $[not !{is-file "$repo_root/ral/Cargo.toml"}] {
     fail [status: 1, message: 'ral/Cargo.toml not found — repository may be incomplete']
 }
 
-cargo +stable install --force --locked --path ral
-cargo +stable install --force --locked --path exarch
+cargo +stable install --force --locked --path "$repo_root/ral"
+cargo +stable install --force --locked --path "$repo_root/exarch"
 
 let cargo_home = try { return !{env}[CARGO_HOME] } { |_| return "~/.cargo" }
 let ral_bin    = "$cargo_home/bin/ral"
+
+for ['ral', 'exarch'] { |package|
+    let legal_dir = "$cargo_home/share/$package"
+    mkdir -p $legal_dir
+    cp "$repo_root/LICENSE-APACHE" "$repo_root/LICENSE-MIT" "$repo_root/NOTICE" $legal_dir
+    if $[$package == 'exarch'] {
+        cp "$repo_root/vendor/edtui/LICENSE.md" "$legal_dir/LICENSE-EDTUI"
+    }
+}
 
 # ral-sh is a name, not a binary: the POSIX bridge lives in ral and keys on
 # argv[0].  Only a host with /bin/sh has anything to bridge to.

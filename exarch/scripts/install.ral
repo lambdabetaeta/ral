@@ -14,6 +14,12 @@ cargo install --force --path "$repo_root/exarch"
 
 let cargo_home = try { return !{env}[CARGO_HOME] } { |_| return "~/.cargo" }
 let exarch_bin    = "$cargo_home/bin/exarch"
+
+let legal_dir = "$cargo_home/share/exarch"
+mkdir -p $legal_dir
+cp "$repo_root/LICENSE-APACHE" "$repo_root/LICENSE-MIT" "$repo_root/NOTICE" $legal_dir
+cp "$repo_root/vendor/edtui/LICENSE.md" "$legal_dir/LICENSE-EDTUI"
+
 let kernel     = uname -s
 
 if $[$kernel == 'Darwin' && !{is-file $exarch_bin}] {

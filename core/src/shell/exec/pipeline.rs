@@ -67,13 +67,20 @@ impl PipeNode {
         let started = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let group = match shell.io.stage.as_ref() {
-            Some(membership) => PipelineGroup::joining(membership.clone()),
-            None => PipelineGroup::prepare(shell, tx.clone())?,
+        // A joined group never prepares a loan: dropping one restores the
+        // terminal, out from under the owning pipeline.
+        let (group, loan) = if let Some(membership) = shell.io.stage.as_ref() {
+            (PipelineGroup::joining(membership.clone()), None)
+        } else {
+            // Capture before even the anchor can run; stages share this snapshot.
+            let prepared = (plan.terminal == TerminalPlan::ForegroundExternalGroup)
+                .then(|| shell.terminal_lease(mooring))
+                .flatten()
+                .and_then(|lease| crate::process::TerminalLoan::prepare(lease, &mooring.home));
+            let group = PipelineGroup::prepare(shell, tx.clone())?;
+            let loan = prepared.and_then(|loan| loan.lend(group.leader_pgid().as_raw()));
+            (group, loan)
         };
-        let loan = (plan.terminal == TerminalPlan::ForegroundExternalGroup)
-            .then(|| group.lend(shell, mooring))
-            .flatten();
 
         let collect = CollectState::new(
             rx,
