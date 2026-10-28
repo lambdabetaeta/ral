@@ -106,3 +106,40 @@
       .layout { flex-direction: column; }
     }
 
+    .composer {
+      flex: none;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      padding: 14px clamp(16px, 4vw, 40px) 20px;
+      border-top: 1px solid var(--line);
+      background: var(--raised);
+    }
+    textarea#message {
+      flex: 1;
+      min-width: 0;
+      field-sizing: content;
+      box-sizing: content-box; /* lh limits count lines, not padding */
+      min-height: 1lh;
+      max-height: 5lh;
+      resize: none;
+      font-family: var(--sans);
+      font-size: 15.5px;
+      line-height: 1.5;
+      color: var(--ink);
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    textarea#message::placeholder { color: var(--ink-faint); }
+    textarea#message:disabled { opacity: 0.6; }
+    .btn-send {
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 15px;
+      font-weight: 600;
+      padding: 13px 20px;
+      flex: none;
+    }
+    .btn-send:not(:disabled):hover { background: var(--accent-hover); }

@@ -64,6 +64,3 @@ authors published them to npm, each beside its licence.
    `find . -type f ! -name README.md ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort -f | xargs sha256sum -b > SHA256SUMS`
 3. Check the page still renders prose, code and mathematics, and that
    `DOMPurify`'s `SCRUB` configuration in `js/math.js` still behaves as before.
-   Also run the `live-html` smoke page in the "Smoke page" section of
-   `docs/ral-wiki/design/live-page-egress.md`: every library on
-   it must render.

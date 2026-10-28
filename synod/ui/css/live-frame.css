@@ -8,3 +8,6 @@ html {
 body { margin: 0; }
 
 html, body { height: auto !important; }
+
+/* The host sizes the frame to its content: its own scrollbars only clip it. */
+html { overflow-x: hidden !important; scrollbar-width: none !important; }

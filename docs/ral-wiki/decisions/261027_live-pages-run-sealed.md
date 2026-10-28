@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 14cd830e3885ef4fb3f22778a359e825fede95e0
+generated_at_commit: 3b76d0db9bb6a50452bb643af0beb67f8b11c26c
 verified_at_commit: 14cd830e3885ef4fb3f22778a359e825fede95e0
 verified_at_date: 2026-10-27
 anchors: [live::serve, live::SCHEME, is_live_frame, PRELUDE_FILES, POLICY]
@@ -125,8 +125,13 @@ assistant prose ──marked──▶ <pre><code class="language-live-html">SRC<
   lost on every round, which drifted the frame down to the 24 px minimum in a
   real WKWebView run. The prelude therefore forces
   `html, body { height: auto !important }`, which beats the page's own
-  stylesheets and its inline `style.height`. Viewport units (`vh`) can still
-  grow a frame, but only up to `MAX_PX`.
+  stylesheets and its inline `style.height`. The prelude also hides the frame's
+  own scrollbars (`overflow-x: hidden`, `scrollbar-width: none`): the frame is
+  sized to its content and the sizer cannot see a scrollbar's thickness, so a
+  classic horizontal bar would clip the page's last 15 px and force a vertical
+  one. A page wider than the frame is clipped; a page taller than `MAX_PX` still
+  scrolls, without a bar. Viewport units (`vh`) can still grow a frame, but only
+  up to `MAX_PX`.
 - **Streaming.** While a fence is open (the live tail) it renders as a quiet
   placeholder box, never as source: to the user no script exists
   (`synod/data/system.md`). It becomes a frame when its chunk settles;
@@ -186,8 +191,8 @@ navigation or a dropped link, runs nothing the model wrote.
 
 ## Audit
 
-The empirical egress audit, its two pages (the egress probe and the smoke page),
-the pass criteria and the log of runs are on
+The empirical egress audit, its page (the egress probe), the pass criteria and
+the log of runs are on
 [[design/live-page-egress|live-page-egress]]. The first macOS run found DNS
 lookups and a WebRTC STUN exchange that the frame's CSP and
 `X-DNS-Prefetch-Control: off` do not govern; macOS pages now run only once the
