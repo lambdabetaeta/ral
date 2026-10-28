@@ -148,6 +148,68 @@ fn a_mismatched_body_misses_the_digest() {
 }
 
 #[test]
+fn complete_malformed_lines_are_named_refusals_not_crash_tails() {
+    for interior in [false, true] {
+        let dir = temp_dir(&format!("complete-garbage-{interior}"));
+        let path = dir.path().join(RECORD);
+        let log = Log::create(&dir).unwrap();
+        let record = Record::Forensic(Forensic::Cancelled);
+        let committed = log.append(&record).unwrap();
+        drop(log);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"garbage\n").unwrap();
+        if interior {
+            file.write_all(&crate::record::envelope_line(&record))
+                .unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        drop(file);
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            Log::complete_len(&mut File::open(&path).unwrap()).unwrap(),
+            before.len() as u64
+        );
+        let mut records = read(&path).unwrap();
+        assert_eq!(records.next().unwrap().unwrap().locus(), &committed);
+        let error = records.next().unwrap().unwrap_err().to_string();
+        assert!(error.contains("line 2"), "{error}");
+        assert!(error.contains(&ral_core::path::shown(&path)), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn availability_keeps_append_mutex_poison() {
+    for failed in [false, true] {
+        let dir = temp_dir(&format!("poison-{failed}"));
+        let path = dir.path().join(RECORD);
+        let log = Log::create(&dir).unwrap();
+        if failed {
+            log.fail_after(0);
+            let error = log
+                .append(&Record::Forensic(Forensic::Cancelled))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+            assert!(!log.inner.is_poisoned());
+        }
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = log.inner.lock_strict().unwrap();
+            panic!("a torn append critical section")
+        }));
+        assert!(panic.is_err());
+        let error = log.check_available().unwrap_err().to_string();
+        assert!(error.contains("panicked"), "{error}");
+        assert_eq!(
+            log.append(&Record::Forensic(Forensic::Cancelled))
+                .unwrap_err()
+                .to_string(),
+            error
+        );
+        assert_eq!(std::fs::read(path).unwrap(), [] as [u8; 0]);
+    }
+}
+
+#[test]
 fn read_ignores_an_unterminated_tail() {
     let dir = temp_dir("torn-tail");
     let path = dir.path().join(RECORD);

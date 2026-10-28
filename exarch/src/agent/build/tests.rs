@@ -143,7 +143,7 @@ fn a_closed_root_is_not_resumable() {
 }
 
 #[test]
-fn clear_fences_the_old_incarnation_even_if_boot_fails() {
+fn clear_fences_the_old_incarnation_only_after_successful_preparation() {
     use ral_core::carrier::Transport as _;
     thread_local! {
         static REFUSE_BOOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -176,15 +176,189 @@ fn clear_fences_the_old_incarnation_even_if_boot_fails() {
             session.inbox.life_mailbox().vouched_by(incarnation.clone()),
         );
         sink.deliver(vec![ral_core::data::FOValue::Unit]);
-        assert!(!session.inbox.is_empty());
+        session.seed("keep on refusal".into());
+        let work = session.inbox.mailbox();
         REFUSE_BOOT.set(fails);
         assert_eq!(session.clear().is_err(), fails);
-        assert!(incarnation.is_cancelled());
-        assert_ne!(incarnation.id(), session.engine.scope().id());
+        assert_eq!(incarnation.is_cancelled(), !fails);
+        assert_eq!(incarnation.id() == session.engine.scope().id(), fails);
         assert!(!session.engine.scope().is_cancelled());
+        assert_eq!(work.is_current(), fails);
         sink.deliver(vec![ral_core::data::FOValue::Unit]);
-        assert!(session.inbox.is_empty());
+        assert_eq!(session.inbox.is_empty(), !fails);
         assert_eq!(old.session_ended().unwrap(), (!fails).then_some(143));
+        if fails {
+            assert_eq!(session.handle().queued(), ["keep on refusal"]);
+            session.clear().unwrap();
+            assert!(incarnation.is_cancelled());
+            assert!(session.inbox.is_empty());
+        }
+    }
+}
+
+#[test]
+fn failed_clear_preserves_the_live_session() {
+    use genai::chat::{ContentPart, ToolCall};
+    use ral_core::carrier::Transport as _;
+    thread_local! {
+        static REFUSE_BOOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static BOOTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    static INSTALLERS: [EngineInstaller; 1] = [EngineInstaller {
+        tag: crate::shell_eval::builtins::INSTALLER_TAG,
+        runtime: |spec| {
+            BOOTS.set(BOOTS.get() + 1);
+            if REFUSE_BOOT.replace(false) {
+                return Err("test boot refusal".into());
+            }
+            let mut runtime = crate::boot::engine_runtime(spec)?;
+            runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+            Ok(runtime)
+        },
+        root: crate::boot::engine_root,
+        narrow: crate::policy::base_layer,
+    }];
+    for failure in ["unready", "unavailable", "boot", "commit"] {
+        let mut session = Agent::for_test_with(TestTrunk {
+            installers: &INSTALLERS,
+            ..TestTrunk::new("system")
+        })
+        .unwrap();
+        let (emit, rx) = crate::bus::dummy_emitter();
+        let result = session.ral(
+            &DurableRoot::default().child(),
+            r#"let keep = 1
+spawn "blocker" { test-clear-block-forever }
+exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#,
+            5,
+            &emit,
+        );
+        assert!(!result.failed, "{}", result.text);
+        let workers = workers(&session);
+        assert_eq!(workers.len(), 1);
+        let mailbox = session.inbox.mailbox();
+        let child = test_agent(
+            &session.fleet,
+            TestAgentSpec::child("child", &session.handle(), mailbox.clone()),
+        )
+        .unwrap();
+        session
+            .schedules
+            .schedule(
+                crate::schedule::Trigger::After(Duration::from_hours(1)),
+                "ping".into(),
+                "ping".into(),
+                &mailbox,
+            )
+            .unwrap();
+        session.seed("keep queued".into());
+        session.readings.measure = Some(crate::agent::gauge::Measure { tokens: 17, at: 2 });
+        assert!(session.readings.gauges.disk(2, 1).is_some());
+        let facts = crate::agent::nudge::Facts {
+            must_reply: false,
+            pinned: Some("keep".into()),
+            quiet: true,
+        };
+        assert!(
+            session
+                .readings
+                .nudges
+                .react(
+                    Ok(&crate::agent::outcome::Outcome::Complete),
+                    &facts,
+                    &session.log.borrow()
+                )
+                .is_some()
+        );
+        {
+            let mut log = session.log.borrow_mut();
+            log.append_user("keep history".into(), None, Voice::Human)
+                .unwrap();
+            if failure == "unready" {
+                log.append_assistant(
+                    ChatMessage::assistant(vec![ContentPart::ToolCall(ToolCall {
+                        call_id: "pending".into(),
+                        fn_name: "ral".into(),
+                        fn_arguments: serde_json::json!({"command": "pwd"}),
+                        thought_signatures: None,
+                    })]),
+                    vec!["pending".into()],
+                    None,
+                )
+                .unwrap();
+            }
+        }
+        let before = serde_json::to_vec(&session.rendered_messages()).unwrap();
+        let incarnation = session.engine.scope();
+        let crate::agent::engine::EngineKind::Identity(old) = session.engine.kind() else {
+            panic!("an identity root");
+        };
+        let boots = BOOTS.get();
+        match failure {
+            "boot" => REFUSE_BOOT.set(true),
+            "commit" => session.recorder().fail_after(1),
+            "unavailable" => {
+                let recorder = session.recorder();
+                recorder.fail_after(1);
+                assert!(
+                    recorder
+                        .emit(crate::record::Forensic::SystemNote {
+                            text: "fail".into()
+                        })
+                        .is_err()
+                );
+            }
+            "unready" => {}
+            _ => unreachable!(),
+        }
+        let why = session.clear().unwrap_err();
+        assert_eq!(
+            BOOTS.get() - boots,
+            u32::from(matches!(failure, "boot" | "commit"))
+        );
+        assert_ne!(why.to_string(), "");
+        assert!(mailbox.is_current(), "{failure}");
+        assert!(!incarnation.is_cancelled(), "{failure}");
+        assert_eq!(incarnation.id(), session.engine.scope().id());
+        assert_eq!(old.session_ended().unwrap(), None);
+        assert!(
+            session
+                .engine
+                .read(|t| t.bindings())
+                .unwrap()
+                .iter()
+                .any(|binding| binding.name == "keep" && binding.preview == "1")
+        );
+        assert!(!workers[0].handle.cancel.is_cancelled());
+        assert!(child.is_live());
+        assert!(session.handle().has_busy_children());
+        assert_eq!(session.handle().queued(), ["keep queued"]);
+        assert_eq!(session.schedules.list().len(), 1);
+        assert_eq!(session.pins.lock_ignore_poison().len(), 1);
+        assert_eq!(
+            session.readings.measure.map(|m| (m.tokens, m.at)),
+            Some((17, 2))
+        );
+        assert!(session.readings.gauges.disk(2, 1).is_none());
+        assert!(
+            session
+                .readings
+                .nudges
+                .react(
+                    Ok(&crate::agent::outcome::Outcome::Complete),
+                    &facts,
+                    &session.log.borrow()
+                )
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::to_vec(&session.rendered_messages()).unwrap(),
+            before
+        );
+        assert!(crate::bus::drain_records(&rx).iter().all(|r| !matches!(
+            r,
+            crate::record::Record::Protocol(crate::record::Protocol::Cleared)
+        )));
     }
 }
 
@@ -257,6 +431,119 @@ fn clear_cancels_registered_workers_and_drops_their_late_surface() {
         session.inbox.draw(|_| ParkMode::Quiesce).is_none(),
         "a reboot's late batches must not enter the rebuilt context"
     );
+}
+
+#[test]
+fn clear_preserves_human_input_during_preparation_and_outgoing_teardown() {
+    use crate::provider::scripted::Reply;
+    use std::sync::{Mutex, mpsc};
+    let (started, ready) = mpsc::channel();
+    let (stopping, teardown) = mpsc::channel();
+    let (release_old, finish_old) = mpsc::channel();
+    let finish_old = Mutex::new(finish_old);
+    let held: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
+        Cow::Borrowed("test-held"),
+        scheme_test_clear_block_forever,
+        "test-only: pause during outgoing teardown.",
+        BuiltinBody::Captured(Arc::new(move |_, _, shell| {
+            started.send(()).unwrap();
+            loop {
+                if let Err(stopped) = shell.poll() {
+                    stopping.send(()).unwrap();
+                    finish_old
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("release outgoing teardown");
+                    return Err(stopped);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })),
+    )]);
+    let mut session = dressed_trunk_over(
+        move |runtime| runtime.install_captured_builtins(&held),
+        |shell| shell.set_worker_drain_grace(Duration::from_secs(15)),
+    );
+    close_exchange(&session, "old context", "old answer");
+    let (emit, rx) = crate::bus::dummy_emitter();
+    let result = session.ral(
+        &DurableRoot::default().child(),
+        "let held = spawn \"held\" { test-held }",
+        5,
+        &emit,
+    );
+    assert!(!result.failed, "{}", result.text);
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    session.seed("discard this old tail".into());
+    let old_work = session.inbox.mailbox();
+    let old_engine = session.engine.scope();
+    let (preparing, preparation) = mpsc::channel();
+    let (release_boot, finish_boot) = mpsc::channel();
+    let _ = dressed(move |_| {
+        preparing.send(()).unwrap();
+        finish_boot
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release prepared boot");
+    });
+    let handle = session.handle();
+    std::thread::scope(|scope| {
+        let poster = scope.spawn(move || {
+            preparation.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(old_work.is_current());
+            assert!(!old_engine.is_cancelled());
+            assert!(handle.steer("during boot".into()).is_ok());
+            assert!(handle.steer("another fragment".into()).is_ok());
+            assert_eq!(
+                handle.queued(),
+                ["discard this old tail\nduring boot\nanother fragment"]
+            );
+            release_boot.send(()).unwrap();
+            teardown.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(!old_work.is_current());
+            assert!(old_engine.is_cancelled());
+            assert!(!old_work.post(crate::bus::Scoped::Surface {
+                id: handle.id(),
+                values: vec![ral_core::data::FOValue::Unit],
+            }));
+            assert!(handle.steer("during teardown".into()).is_ok());
+            release_old.send(()).unwrap();
+        });
+        session.clear().unwrap();
+        poster.join().unwrap();
+    });
+    let prompt = "during boot\nanother fragment\nduring teardown";
+    assert_eq!(session.handle().queued(), [prompt]);
+    assert!(session.rendered_messages().is_empty());
+    assert_eq!(
+        crate::bus::drain_records(&rx)
+            .iter()
+            .filter(|r| matches!(
+                r,
+                crate::record::Record::Protocol(crate::record::Protocol::Cleared)
+            ))
+            .count(),
+        1
+    );
+    set_provider(
+        &session,
+        scripted(
+            "fresh",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "reply",
+                "exarch-agents `reply \"fresh answer\"",
+            )])),
+        ),
+    );
+    assert!(matches!(
+        session.attend(&emit),
+        crate::bus::AgentOutcome::Replied
+    ));
+    let messages = serde_json::to_string(&session.rendered_messages()).unwrap();
+    assert!(messages.contains("during boot\\nanother fragment\\nduring teardown"));
+    assert!(!messages.contains("old context"));
+    assert!(!messages.contains("discard this old tail"));
+    assert!(session.is_ready());
 }
 
 #[test]
@@ -566,6 +853,33 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
         record,
         crate::record::Record::Forensic(crate::record::Forensic::SessionResumed { .. })
     )));
+}
+
+#[test]
+fn clear_keeps_human_input_posted_by_its_commit_publication() {
+    struct OnClear(Mailbox, Arc<AtomicU64>);
+    impl crate::record::Publish for OnClear {
+        fn fact(&self, recorded: crate::record::Recorded<crate::record::Record>) {
+            if matches!(
+                recorded.value(),
+                crate::record::Record::Protocol(crate::record::Protocol::Cleared)
+            ) {
+                assert!(self.0.is_current());
+                assert!(self.0.steer("during publication".into()));
+                self.1.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn transient(&self, _transient: crate::record::Transient) {}
+    }
+    let mut session = Agent::for_test("system").unwrap();
+    session.seed("old queued".into());
+    let count = Arc::new(AtomicU64::new(0));
+    session
+        .recorder()
+        .attach(Box::new(OnClear(session.inbox.mailbox(), count.clone())));
+    session.clear().unwrap();
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+    assert_eq!(session.handle().queued(), ["during publication"]);
 }
 
 #[test]

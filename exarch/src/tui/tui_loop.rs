@@ -218,7 +218,6 @@ fn ui_loop(
                     dispatch(tui, rx, sig);
                     Ok(())
                 })?;
-                tui.app.mark_ready();
                 draw(&mut tui.app, tui.guard.term(), ctx.bureau)?;
                 emit_tab_title(&mut tui.app);
                 return Ok(());

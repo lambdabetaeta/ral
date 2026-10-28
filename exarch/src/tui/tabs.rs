@@ -41,15 +41,13 @@ impl Status {
     /// the state already held is a no-op: a turn that re-drives the same wait
     /// must not reset the clock measuring how long that wait has run.
     pub(super) fn set_state(&mut self, state: AgentState) {
-        if self.state.state != state {
-            self.state = StateSpan::new(state);
-        }
+        self.state.enter(state);
     }
 
     /// Count `chars` of arriving model text against the current state — what
     /// separates a stream that is delivering from one that has gone silent.
     pub(super) fn note_streamed(&mut self, chars: usize) {
-        self.state.streamed = self.state.streamed.saturating_add(chars);
+        self.state.note_streamed(chars);
     }
 
     // ── pinned state (the register) ────────────────────────────────────────
@@ -157,7 +155,10 @@ impl Tab {
     /// Freeze a live tab as of `at`; a tab already frozen or gone keeps its life.
     fn retire(&mut self, at: Instant) {
         self.life = match std::mem::replace(&mut self.life, Life::Gone) {
-            Life::Live(sb) => Life::Lingering(sb, at),
+            Life::Live(sb) => {
+                self.status.state = StateSpan::Ended;
+                Life::Lingering(sb, at)
+            }
             other => other,
         };
     }
@@ -320,7 +321,7 @@ impl Tabs {
             tab.life = match std::mem::replace(&mut tab.life, Life::Gone) {
                 Life::Lingering(_, at) if now.duration_since(at) >= LINGER => {
                     expired.push(tab.id);
-                    tab.status = Status::new();
+                    tab.status.pins.clear();
                     Life::Gone
                 }
                 other => other,

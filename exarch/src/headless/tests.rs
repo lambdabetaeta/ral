@@ -12,6 +12,10 @@ use std::sync::Arc;
 /// A fresh conversing trunk over a scripted provider, in a throwaway run
 /// dir beside its scratch — both go when the trunk does.
 fn converse_trunk(tag: &str, script: Script) -> Agent {
+    frontend_trunk(tag, script, Trunk::Embedded)
+}
+
+fn frontend_trunk(tag: &str, script: Script, trunk: Trunk) -> Agent {
     let scratch =
         Arc::new(crate::app::Scratch::for_test(crate::app::EXARCH, tag).expect("scratch dir"));
     let dir = scratch.test_sibling("run").expect("temp run dir");
@@ -19,7 +23,7 @@ fn converse_trunk(tag: &str, script: Script) -> Agent {
         RootConfig {
             system: "system".into(),
             run_dir: dir,
-            trunk: Trunk::Embedded,
+            trunk,
             tools: Toolset::offered(false),
             allow_schedule: false,
             resume_on_reset: false,
@@ -82,6 +86,109 @@ fn the_interactive_trunk_parks_rather_than_replying() {
         !matches!(outcome, AgentOutcome::Replied),
         "a conversing trunk never completes by returning a value: {outcome:?}"
     );
+}
+
+#[test]
+fn headless_recording_failure_ends_the_run_in_both_formats() {
+    for format in [OutputFormat::Text, OutputFormat::Json] {
+        // An empty script fails if a request crosses the failed prompt commit.
+        let mut session = frontend_trunk("recording-failure", Script::new(), Trunk::Headless);
+        session.recorder().fail_after(7);
+        let why = run(
+            &mut session,
+            &SessionInfo {
+                system_size: 0,
+                system_files: &[],
+                base: "dangerous",
+                extend: None,
+                restrict_files: &[],
+                cwd: &ral_core::host::cwd().expect("test process has a cwd"),
+            },
+            &Provider::scripted("test-model", Script::new()),
+            Some("must be recorded before sending".into()),
+            format,
+        )
+        .expect_err("a failed recording is not a successful run");
+        assert!(session.check_available().is_err(), "{why}");
+        assert!(session.severance().is_none(), "this is not engine loss");
+        assert!(session.handle().reply().is_none());
+        assert_eq!(
+            session.handle().steer("later".into()),
+            Err(crate::agent::Ended)
+        );
+    }
+}
+
+#[test]
+fn settled_conversation_reports_recording_failure_instead_of_quiescent_success() {
+    let root = converse_trunk("unavailable-job", Script::new());
+    let recorder = root.recorder();
+    let mut conversation = SettledConversation::new(root).unwrap();
+    conversation.handle().steer("first".into()).unwrap();
+    let job = conversation.await_job().expect("the prompt opens a job");
+    recorder.fail_after(7);
+    recorder
+        .emit(Display::Card {
+            card: Card(Vec::new()),
+        })
+        .expect_err("a display producer fails on the shared writer before attendance");
+    let mut sink = Collecting::default();
+
+    let why = conversation
+        .run(job, &mut sink)
+        .outcome
+        .expect_err("an unavailable session cannot report ordinary quiescence");
+
+    assert!(conversation.root.check_available().is_err(), "{why}");
+    assert!(
+        conversation.severance().is_none(),
+        "recording failed, not the engine"
+    );
+    assert!(
+        sink.transients
+            .iter()
+            .any(|t| matches!(t, Transient::Fault { .. }))
+    );
+    assert!(
+        !sink
+            .transients
+            .iter()
+            .any(|t| matches!(t, Transient::State(AgentState::Ready)))
+    );
+    assert_eq!(
+        conversation.handle().steer("later".into()),
+        Err(crate::agent::Ended)
+    );
+    assert!(conversation.await_job().is_none());
+}
+
+mod late_failure;
+
+#[test]
+fn ordinary_failed_conversation_remains_usable_for_the_next_job() {
+    let root = converse_trunk(
+        "failed-usable-job",
+        Script::new()
+            .then(Reply::error(crate::provider::ProviderError::Other(
+                "request refused".into(),
+            )))
+            .then(Reply::text("next job succeeds")),
+    );
+    let mut conversation = SettledConversation::new(root).unwrap();
+    let mut sink = Collecting::default();
+    for prompt in ["first", "next"] {
+        conversation.handle().steer(prompt.into()).unwrap();
+        let job = conversation
+            .await_job()
+            .expect("the session still accepts jobs");
+        conversation.run(job, &mut sink).outcome.unwrap();
+        conversation
+            .root
+            .check_available()
+            .expect("a request failure leaves recording usable");
+    }
+    let context = format!("{:?}", conversation.root.rendered_messages());
+    assert!(context.contains("next job succeeds"), "{context}");
 }
 
 /// `pump` absorbs the unwind and returns normally, so `run` builds its
@@ -462,7 +569,8 @@ fn settled_conversation_holds_for_a_live_child_then_quiesces() {
         release_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the exchange must park on the child within the timeout");
-        child.settle(AgentOutcome::Stopped("done".into()));
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        child.settle(AgentOutcome::Stopped("done".into()), &emit);
     });
 
     let mut sink = SignalOnWaiting {
@@ -751,7 +859,8 @@ fn a_stopped_job_settles_though_its_helper_had_not_replied() {
         assert!(!child.handle().has_reply());
         assert_eq!(handle.stop(id), Some(Vec::new()));
         assert!(!child.handle().is_live());
-        child.settle(AgentOutcome::Stopped("late result".into()));
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        child.settle(AgentOutcome::Stopped("late result".into()), &emit);
     });
     let mut sink = SignalOnWaiting {
         inner: Collecting::default(),
@@ -986,6 +1095,7 @@ fn dropping_an_unattended_job_closes_it_without_consuming_the_prompt() {
 
 struct TeardownGate {
     emit: crate::bus::Emitter,
+    recorder: crate::record::Emitter,
     entered: std::sync::mpsc::Sender<()>,
     release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
@@ -1002,7 +1112,13 @@ impl Drop for TeardownGate {
             .unwrap()
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
-        self.emit.fleet_sink().transient(Transient::Died);
+        self.recorder.attach(self.emit.fleet_sink());
+        let _ = self
+            .recorder
+            .emit(Display::Answer {
+                text: "helper teardown complete".into(),
+            })
+            .unwrap();
     }
 }
 
@@ -1015,8 +1131,10 @@ fn a_stopped_job_waits_for_its_helpers_engine_teardown_even_if_the_fleet_ends() 
         let (release, held) = std::sync::mpsc::channel();
         let mut settled = SettledConversation::new(root).unwrap();
         let helper_id = child.id();
+        let helper_emit = settled.bus.emitter(helper_id);
         child.engine.install_raw(Arc::new(TeardownGate {
             emit: settled.bus.emitter(helper_id),
+            recorder: child.recorder(),
             entered,
             release: std::sync::Mutex::new(held),
         }));
@@ -1025,7 +1143,9 @@ fn a_stopped_job_waits_for_its_helpers_engine_teardown_even_if_the_fleet_ends() 
         let job = settled.await_job().unwrap();
         let id = job.id();
         assert!(handle.stop(id).is_some());
-        let helper = std::thread::spawn(move || drop(child));
+        let helper = std::thread::spawn(move || {
+            child.settle(AgentOutcome::Cancelled, &helper_emit);
+        });
         tearing_down
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();

@@ -9,6 +9,148 @@ use ral_core::data::FOValue;
 use ral_core::process::{CancelCause, DurableRoot};
 use std::time::Duration;
 
+fn leave_tool_owed(session: &Agent) {
+    let mut log = session.log.borrow_mut();
+    log.append_user("unfinished".into(), None, crate::record::Voice::Human)
+        .unwrap();
+    log.append_assistant(
+        genai::chat::ChatMessage::assistant(vec![genai::chat::ContentPart::ToolCall(ral_call(
+            "owed", "pwd",
+        ))]),
+        vec!["owed".into()],
+        None,
+    )
+    .unwrap();
+}
+
+#[test]
+fn failed_mandatory_repair_ends_only_its_session_and_reports_to_its_parent() {
+    let mut parent = Agent::for_test("system").unwrap();
+    let mut child = parent.fork().unwrap();
+    let descendant = child.fork().unwrap();
+    let handle = child.handle();
+    leave_tool_owed(&child);
+    child.seed("must not request a model".into());
+    let recorder = child.recorder();
+    recorder.fail_after(19);
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, child.id());
+    let outcome = child.attend(&emit);
+    assert!(
+        matches!(&outcome, AgentOutcome::Failed(why) if why.contains("required protocol repair")),
+        "{outcome:?}"
+    );
+    assert!(!child.is_ready());
+    assert!(!handle.is_live());
+    assert!(!descendant.handle().is_live());
+    assert!(handle.steer("no more work".into()).is_err());
+    assert!(!child.log.borrow().context().is_ready());
+    let records =
+        crate::record::read_records(&child.log_dir().path().join("record.jsonl")).unwrap();
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        Record::Protocol(crate::record::Protocol::ToolResults { .. })
+            | Record::Forensic(Forensic::TurnStarted { .. })
+    )));
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|signal| matches!(
+            signal,
+            crate::bus::Signal::Transient(_, Transient::Fault { .. })
+        ))
+    );
+    drop(descendant);
+    child.settle(outcome, &emit);
+    let report = pop(&parent.inbox).expect("the parent receives failure");
+    assert!(
+        matches!(report, Next::Item(Item::Agent(result)) if matches!(&result.outcome, AgentOutcome::Failed(why) if why.contains("required protocol repair")))
+    );
+    assert!(parent.handle().is_live());
+    assert!(parent.check_available().is_ok());
+    set_provider(
+        &parent,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "reply",
+                "exarch-agents `reply 42",
+            )])),
+        ),
+    );
+    parent.seed("independent work".into());
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, parent.id());
+    assert!(matches!(parent.attend(&emit), AgentOutcome::Replied));
+}
+
+#[test]
+fn a_late_recording_failure_reaches_the_parent_even_after_cancelled_attendance() {
+    for cancelled in [false, true] {
+        let parent = Agent::for_test("system").unwrap();
+        let mut child = parent.fork().unwrap();
+        child.seed("work".into());
+        if cancelled {
+            child.handle().end();
+        } else {
+            set_provider(
+                &child,
+                scripted(
+                    "test-model",
+                    Script::new().then(Reply::error(ProviderError::Other(
+                        "ordinary refusal".into(),
+                    ))),
+                ),
+            );
+        }
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, child.id());
+        let outcome = child.attend(&emit);
+        assert!(child.check_available().is_ok());
+        assert!(matches!(
+            outcome,
+            AgentOutcome::Failed(_) | AgentOutcome::Cancelled
+        ));
+        let recorder = child.recorder();
+        recorder.fail_after(11);
+        let why = recorder
+            .emit(crate::record::Display::Answer {
+                text: "late".into(),
+            })
+            .unwrap_err()
+            .to_string();
+        child.settle(outcome, &emit);
+        let report = pop(&parent.inbox).expect("the parent receives terminal failure");
+        assert!(
+            matches!(report, Next::Item(Item::Agent(result)) if matches!(&result.outcome, AgentOutcome::Failed(error) if *error == why))
+        );
+        assert!(parent.handle().is_live());
+    }
+}
+
+#[test]
+fn ordinary_log_refusal_repairs_and_remains_usable() {
+    let mut session = Agent::for_test("system").unwrap();
+    leave_tool_owed(&session);
+    session.seed("refused while results owed".into());
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    assert!(matches!(session.attend(&emit), AgentOutcome::Failed(_)));
+    assert!(session.is_ready());
+    assert!(session.check_available().is_ok());
+    assert!(session.handle().is_live());
+    set_provider(
+        &session,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "reply",
+                "exarch-agents `reply 42",
+            )])),
+        ),
+    );
+    session.seed("now admissible".into());
+    assert!(matches!(session.attend(&emit), AgentOutcome::Replied));
+}
+
 fn assert_refused_human(session: &Agent, records: &[Record], expected: &str) {
     assert!(session.is_ready());
     assert!(session.inbox.exchange().is_cancelled());

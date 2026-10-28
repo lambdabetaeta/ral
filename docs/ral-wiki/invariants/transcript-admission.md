@@ -40,6 +40,14 @@ why `AwaitingToolResults` and `validate_result_ids` exist, and why a quiesce
 answers every call that never ran before the next prompt is admitted: a
 dangling `tool_use` must never reach the wire.
 
+**Admission requires an available durable record, not merely a ready
+`Context`.** Quiesce advances that context only after each owed repair record
+commits. If a mandatory repair cannot commit, or any producer faults the
+shared writer, the owner refuses further requests and reports the session as
+unavailable. Explicit resume after storage repair replays what really
+committed and answers only the tool ids still outstanding; it never inserts
+an unrecorded result to make a live session look sendable.
+
 Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tags):
 
 - **Tool-call arguments are objects (X2).** A `ContentPart::ToolCall` whose

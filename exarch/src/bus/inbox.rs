@@ -41,6 +41,7 @@ impl From<u64> for JobId {
 pub(crate) enum Queue {
     Keep,
     Recall,
+    #[cfg(test)]
     Discard,
 }
 
@@ -184,6 +185,7 @@ impl State {
         match queue {
             Queue::Keep => Vec::new(),
             Queue::Recall => self.posts.recall(),
+            #[cfg(test)]
             Queue::Discard => {
                 self.posts.clear();
                 Vec::new()
@@ -321,64 +323,83 @@ impl Post {
         }
     }
 }
-/// Queued posts. Every observation fences dead provenance first (I2), then
-/// coalesces newly adjacent human posts.
+/// Human fragments retain their arrival until consumed, so a clear can split
+/// a coalesced prompt without changing the queue during preparation.
 #[derive(Default)]
-struct Posts(VecDeque<Post>);
+struct Posts {
+    queue: VecDeque<(u64, Post)>,
+    next: u64,
+}
+#[must_use]
+pub(crate) struct ClearBoundary(u64);
 impl Posts {
+    fn stamp(&mut self, post: Post) -> (u64, Post) {
+        let order = self.next;
+        self.next = order
+            .checked_add(1)
+            .expect("inbox arrival counter exhausted");
+        (order, post)
+    }
     fn push(&mut self, post: Post) {
         let replace = match &post {
             Post::Scoped {
                 kind: Scoped::Wakeup { id, .. },
                 ..
-            } => self.0.iter().position(|p| p.is_wakeup(*id)),
+            } => self.queue.iter().position(|(_, p)| p.is_wakeup(*id)),
             Post::Scoped {
                 kind: Scoped::Nudge { .. },
                 ..
-            } => self.0.iter().position(|p| p.source() == Source::Nudge),
+            } => self
+                .queue
+                .iter()
+                .position(|(_, p)| p.source() == Source::Nudge),
             _ => None,
         };
+        let stamped = self.stamp(post);
         if let Some(index) = replace {
-            self.0[index] = post;
-            return;
+            self.queue[index] = stamped;
+        } else {
+            self.queue.push_back(stamped);
         }
-        if let Post::Human(text) = &post
-            && let Some(Post::Human(tail)) = self.0.back_mut()
-        {
-            tail.push('\n');
-            tail.push_str(text);
-            return;
-        }
-        self.0.push_back(post);
     }
     fn push_front(&mut self, post: Post) {
-        self.0.push_front(post);
+        let stamped = self.stamp(post);
+        self.queue.push_front(stamped);
     }
     fn pop(&mut self) -> Option<Post> {
         self.fence();
-        self.0.pop_front()
+        let (_, mut post) = self.queue.pop_front()?;
+        if let Post::Human(text) = &mut post {
+            while matches!(self.queue.front(), Some((_, Post::Human(_)))) {
+                if let Some((_, Post::Human(next))) = self.queue.pop_front() {
+                    text.push('\n');
+                    text.push_str(&next);
+                }
+            }
+        }
+        Some(post)
     }
     fn is_empty(&mut self) -> bool {
         self.fence();
-        self.0.is_empty()
+        self.queue.is_empty()
     }
     fn has_wakeup(&mut self, id: ScheduleId) -> bool {
         self.fence();
-        self.0.iter().any(|p| p.is_wakeup(id))
+        self.queue.iter().any(|(_, p)| p.is_wakeup(id))
     }
     fn has_human(&mut self) -> bool {
         self.fence();
-        self.0.iter().any(|p| matches!(p, Post::Human(_)))
+        self.queue.iter().any(|(_, p)| matches!(p, Post::Human(_)))
     }
     fn has_input(&mut self) -> bool {
         self.fence();
-        self.0.iter().any(Post::is_input)
+        self.queue.iter().any(|(_, p)| p.is_input())
     }
     fn take_owed(&mut self) -> Vec<Owed> {
         self.fence();
-        self.0
+        self.queue
             .iter_mut()
-            .filter_map(|post| match post {
+            .filter_map(|(_, post)| match post {
                 Post::Scoped {
                     kind: Scoped::Message { owed, .. },
                     ..
@@ -390,50 +411,67 @@ impl Posts {
     fn recall(&mut self) -> Vec<String> {
         self.fence();
         let mut prompts = Vec::new();
-        let mut kept = Self::default();
-        for post in std::mem::take(&mut self.0) {
-            match post {
-                Post::Human(text) => prompts.push(text),
-                other => kept.push(other),
+        let mut human_tail = false;
+        self.queue.retain(|(_, post)| {
+            if let Post::Human(text) = post {
+                Self::join(&mut prompts, human_tail, text);
+                human_tail = true;
+                false
+            } else {
+                human_tail = false;
+                true
             }
-        }
-        *self = kept;
+        });
         prompts
     }
+    #[cfg(test)]
     fn clear(&mut self) {
-        self.0.clear();
+        self.queue.clear();
     }
     fn texts(&mut self) -> Vec<String> {
         self.fence();
-        self.0
-            .iter()
-            .filter_map(|p| match p {
-                Post::Human(text) => Some(text.clone()),
-                Post::Read(r) => Some(r.to_string()),
-                Post::Rewrite(r) => Some(r.to_string()),
-                Post::Scoped { .. } => None,
-            })
-            .collect()
+        let mut texts = Vec::new();
+        let mut human_tail = false;
+        for (_, post) in &self.queue {
+            match post {
+                Post::Human(text) => Self::join(&mut texts, human_tail, text),
+                Post::Read(r) => texts.push(r.to_string()),
+                Post::Rewrite(r) => texts.push(r.to_string()),
+                Post::Scoped { .. } => {}
+            }
+            human_tail = matches!(post, Post::Human(_));
+        }
+        texts
+    }
+    fn join(texts: &mut Vec<String>, human_tail: bool, text: &str) {
+        if human_tail {
+            let tail = texts
+                .last_mut()
+                .expect("a human tail has a preceding fragment");
+            tail.push('\n');
+            tail.push_str(text);
+        } else {
+            texts.push(text.to_string());
+        }
     }
     fn depths(&mut self) -> Vec<(Source, u64)> {
         self.fence();
         let mut rows: Vec<_> = Source::ALL.into_iter().map(|s| (s, 0)).collect();
-        for post in &self.0 {
-            if let Some((_, count)) = rows.iter_mut().find(|(s, _)| *s == post.source()) {
+        let mut human_tail = false;
+        for (_, post) in &self.queue {
+            let human = matches!(post, Post::Human(_));
+            if !(human && human_tail)
+                && let Some((_, count)) = rows.iter_mut().find(|(s, _)| *s == post.source())
+            {
                 *count += 1;
             }
+            human_tail = human;
         }
         rows
     }
     fn fence(&mut self) {
-        let before = self.0.len();
-        self.0
-            .retain(|post| !matches!(post, Post::Scoped { from, .. } if from.is_cancelled()));
-        if self.0.len() != before {
-            for post in std::mem::take(&mut self.0) {
-                self.push(post);
-            }
-        }
+        self.queue
+            .retain(|(_, post)| !matches!(post, Post::Scoped { from, .. } if from.is_cancelled()));
     }
 }
 impl Shared {
@@ -709,6 +747,20 @@ impl Inbox {
         let recalled = self.0.lock().abandon(&self.0.life, queue);
         self.0.notify();
         recalled
+    }
+    pub(crate) fn clear_boundary(&self) -> ClearBoundary {
+        ClearBoundary(self.0.lock().posts.next)
+    }
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "consuming the non-Copy witness prevents applying a clear boundary twice"
+    )]
+    pub(crate) fn apply_clear(&self, boundary: ClearBoundary) {
+        let mut state = self.0.lock();
+        state.abandon(&self.0.life, Queue::Keep);
+        state.posts.queue.retain(|(order, _)| *order >= boundary.0);
+        drop(state);
+        self.0.notify();
     }
     pub(crate) fn await_job(&self) -> Option<Job> {
         let mut state = self.0.lock();

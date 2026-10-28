@@ -17,26 +17,47 @@ use unicode_width::UnicodeWidthStr;
 /// The instant anchors the elapsed-wait bar to that transition rather than to
 /// the last event of any kind, which is what makes a silent stream legible.
 #[derive(Clone, Copy)]
-pub(super) struct StateSpan {
-    pub(super) state: crate::record::AgentState,
-    since: Instant,
-    /// Characters of model text arrived in this state.  A count that stops
-    /// growing under a growing [`Self::elapsed`] is a stalled stream.
-    pub(super) streamed: usize,
+pub(super) enum StateSpan {
+    Active {
+        state: AgentState,
+        since: Instant,
+        streamed: usize,
+    },
+    Ended,
 }
 
 impl StateSpan {
-    pub(super) fn new(state: crate::record::AgentState) -> Self {
-        Self {
+    pub(super) fn new(state: AgentState) -> Self {
+        Self::Active {
             state,
             since: Instant::now(),
             streamed: 0,
         }
     }
 
-    /// Time in state.
-    pub(super) fn elapsed(self) -> Duration {
-        self.since.elapsed()
+    pub(super) fn enter(&mut self, next: AgentState) {
+        if let Self::Active { state, .. } = self
+            && *state != next
+        {
+            *self = Self::new(next);
+        }
+    }
+
+    pub(super) fn note_streamed(&mut self, chars: usize) {
+        if let Self::Active { streamed, .. } = self {
+            *streamed = streamed.saturating_add(chars);
+        }
+    }
+
+    pub(super) fn pending(self) -> bool {
+        matches!(self, Self::Active { state, .. } if state.pending())
+    }
+
+    fn timing(self) -> Option<Duration> {
+        match self {
+            Self::Active { state, since, .. } if state.pending() => Some(since.elapsed()),
+            Self::Active { .. } | Self::Ended => None,
+        }
     }
 }
 
@@ -55,7 +76,7 @@ pub(super) fn rule_line(
     // own start: a streamed count that freezes under a wait reading minutes is
     // a stalled stream, which a per-event reset could never show.  `Ready` is
     // settled, so it reads as a clock at rest rather than a clock removed.
-    let timing = state.state.pending().then(|| state.elapsed());
+    let timing = state.timing();
     spans.extend(wait_bar(timing));
     // The clock and the streamed count are both magnitudes: without the rule's
     // own separator between them they read as one field, or worse as two
@@ -141,13 +162,15 @@ pub(super) fn scroll_text(pct: u16) -> String {
 /// state: the elapsed bar beside it already says whether anything is
 /// outstanding, and an ellipsis would only say it again.
 fn state_label(span: StateSpan) -> Span<'static> {
-    let streaming = span.state == AgentState::AwaitingModel;
-    let label = if streaming {
-        streamed_count(span.streamed)
-    } else {
-        span.state.label().to_owned()
+    let (label, ink) = match span {
+        StateSpan::Active {
+            state: AgentState::AwaitingModel,
+            streamed,
+            ..
+        } => (streamed_count(streamed), PURPLE),
+        StateSpan::Active { state, .. } => (state.label().to_owned(), SLATE),
+        StateSpan::Ended => ("ended".to_owned(), SLATE),
     };
-    let ink = if streaming { PURPLE } else { SLATE };
     Span::styled(STATE_SLOT.left(&label), Style::default().fg(ink))
 }
 

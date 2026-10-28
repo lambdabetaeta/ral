@@ -50,6 +50,89 @@ fn attend_until_reply(child: &mut Agent, expected: &str, emit: &Emitter) -> Agen
     outcome
 }
 
+#[test]
+fn public_deliberate_refuses_a_display_first_recording_failure_before_any_request() {
+    let mut session = Agent::for_test("system").unwrap();
+    let recorder = session.recorder();
+    let before = session.rendered_messages();
+    recorder.fail_after(7);
+    recorder
+        .emit(Display::Answer {
+            text: "display was first".into(),
+        })
+        .unwrap_err();
+    let bytes = session.log_dir().read("record.jsonl").unwrap();
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    let provider = scripted("must not be called", Script::new());
+    let result = session.deliberate(
+        &DurableRoot::default().child(),
+        &provider,
+        Some(("refused".into(), Voice::Human)),
+        None,
+        &emit,
+    );
+    assert!(matches!(result, Err(Fault::Unavailable(_))), "{result:?}");
+    assert!(!session.is_ready());
+    assert!(!session.handle().is_live());
+    assert_eq!(
+        serde_json::to_value(session.rendered_messages()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    assert_eq!(session.log_dir().read("record.jsonl").unwrap(), bytes);
+}
+
+#[test]
+fn a_real_tool_display_failure_stops_the_batch_and_the_next_model_request() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
+    let recorder = session.recorder();
+    T2_ARRIVAL.set(Some(Box::new(move || recorder.fail_after(17))));
+    let ran_second = Arc::new(AtomicBool::new(false));
+    let ran = ran_second.clone();
+    T2_CANCEL.set(Some(Box::new(move || ran.store(true, Ordering::Release))));
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![
+                ral_call("first", "t2-arrive"),
+                ral_call("second", "t2-cancel-now"),
+            ]))
+            .then(Reply::panicking()),
+    );
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    let result = session.deliberate(
+        &DurableRoot::default().child(),
+        &provider,
+        Some(("run both".into(), Voice::Human)),
+        None,
+        &emit,
+    );
+    let _ = T2_CANCEL.take();
+    assert!(matches!(result, Err(Fault::Unavailable(_))), "{result:?}");
+    assert!(!ran_second.load(Ordering::Acquire));
+    assert!(
+        !session.log.borrow().context().is_ready(),
+        "no tool results may be fabricated"
+    );
+    assert!(!session.handle().is_live());
+    let records =
+        crate::record::read_records(&session.log_dir().path().join("record.jsonl")).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::Forensic(Forensic::TurnStarted { .. })))
+            .count(),
+        1
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record, Record::Protocol(Protocol::ToolResults { .. })))
+    );
+}
+
 thread_local! {
     static T2_CANCEL: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
     static T2_QUEUE: std::cell::RefCell<Option<crate::agent::AgentHandle>> = const { std::cell::RefCell::new(None) };

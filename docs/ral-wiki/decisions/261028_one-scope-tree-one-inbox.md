@@ -1,7 +1,7 @@
 ---
 status: active
-generated_at_commit: fc497f7577bfce957329627870a1f9292520b782
-verified_at_commit: fc497f7577bfce957329627870a1f9292520b782
+generated_at_commit: 2b930e85
+verified_at_commit: 2b930e85
 verified_at_date: 2026-10-28
 anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Owed, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report]
 ---
@@ -46,16 +46,17 @@ fleet root (DurableRoot)
 | gesture | scope cancelled | cause |
 |---|---|---|
 | TUI Esc / Ctrl-C; SIGINT forwarded to roots | exchange, including an opening drawn item | `Interrupted` |
-| Synod Stop / Esc; `/clear`; `reply` | work, replaced by fresh work | `Cancelled` |
-| `/clear` | engine incarnation, replaced even if boot fails | `Cancelled` |
+| Synod Stop / Esc; committed `/clear`; `reply` | work, replaced by fresh work | `Cancelled` |
+| committed `/clear` | engine incarnation, replaced by its prepared successor | `Cancelled` |
 | `end`; `/close`; agent cancel; owner drop | life | `Cancelled` |
 | idle reply lease lapse | life | `TimedOut` |
 | `/quit`; `end_fleet`; SIGTERM / SIGHUP | fleet root | `Cancelled` / `Terminated` |
 | process abort | fleet root | `Aborted` |
 
 - An engine incarnation is owned by `Incarnation`, which owns the tenancy
-  and so the engine; `reboot` fences its scope first, even if boot then fails,
-  and certifies the outgoing engine once its replacement boots.
+  and so the engine. Clear prepares a successor without changing that scope;
+  only committed `Cleared` permits fencing it, installing the prepared engine
+  and certifying the outgoing one. Failed preparation preserves the old scope.
 - An interrupt preserves helpers. Abandoning work ends every adopted
   descendant and its current exchange, but preserves the agent.
 - Ending life ends its subtree. Dropping the owner also ends life; there
@@ -120,7 +121,7 @@ and the scope vouching for a post. The inbox belongs in `bus`, below
   predicate mixes live and dead posts. `Posts::push` alone never fences.
 - Lock order: descendant inbox, then ancestor inbox; inbox, then the
   schedule registry's leaf. There are no reverse edges. An `Owed` dropped
-  under its child's lock (by a fence or `Queue::Discard`) pays into its
+  under its child's lock (by a provenance fence or clear boundary) pays into its
   parent through `deliver` and `push`, which never fences, so a payment drops
   no further `Owed` and acquisitions strictly climb the tree. A `Result`
   carries receipts, which take no lock when dropped. Scope cancellation and
@@ -131,12 +132,15 @@ and the scope vouching for a post. The inbox belongs in `bus`, below
 - An engine's loose ral workers survive Stop and `reply`; their batches
   survive too. Identity workers retain their birth sink, wire batches use the
   currently installed sink; engine-incarnation provenance gives both the
-  same admission. `/clear` cancels and replaces that scope even if boot fails,
-  fencing queued and future batches. A successful reboot also terminates the
-  old transport before replacing it, even if another holder retains it.
+  same admission. A committed `/clear` cancels and replaces that scope,
+  fencing queued and future batches; failed preparation or commit leaves it
+  untouched. Installation certifies the outgoing transport even if another
+  holder retains it.
 - Wakeups coalesce by never-reused schedule id, nudges replace queued nudges,
-  and trailing human posts join with a newline. Source-depth probes remain
-  observations, not quotas.
+  and adjacent human fragments are observed as one newline-joined prompt.
+  Private arrival ordinals let clear preserve a post-boundary suffix through
+  that coalescing; provenance remains exclusively scope-vouched. Source-depth
+  probes remain observations, not quotas.
 
 ## Work and exact outstanding replies
 
@@ -145,8 +149,10 @@ and the scope vouching for a post. The inbox belongs in `bus`, below
 debts no longer count, applies the queue policy, and notifies.
 
 - `Keep` leaves posts queued for `reply`; `Recall` withdraws human text
-  oldest first for Stop; `Discard` drops everything for `/clear`.
-  Other posts survive Stop according to their provenance.
+  oldest first for Stop. Other posts survive Stop according to provenance.
+  Clear captures a non-destructive queue boundary before preparing an engine;
+  after `Cleared` commits, it abandons work and drops only old-boundary posts.
+  Later human input survives preparation, publication and outgoing teardown.
 - Owner-side abandonment clears schedules after unlocking. Stop clears no
   owner register; schedule callbacks retire entries whose weak mailbox has
   died or whose work is cancelled. Schedule ids never reset.
@@ -206,8 +212,9 @@ a *job* is Synod's human-opened unit through fleet settlement.
 - A stopped job pops nothing more. Text sent after Stop stays queued and
   opens the next job. Every `run` waits for ended agents' teardown through
   `Fleet::wait_settled`, inside the output pump, before linearising closing
-  against Stop; if Stop wins, it settles again. Only then does it return
-  `JobEnd`; the closing folder
+  against Stop; if Stop wins, it settles again. A late recording fault ends
+  the affected life and requires settlement of helpers thereby ended, still
+  under output pumping, before failed `JobEnd`. The closing folder
   walk and “Stopped.” cannot overtake helpers' last writes or final output.
 
 Synod publishes `JobBegan` / `JobDone` and accepts synchronous `stop_job` and
@@ -225,7 +232,10 @@ second backend job arbiter is needed.
 - Owner drop cancels life first, clears schedules and records `SessionEnded`
   unless panicking; the inbox's own drop reports any owed failure. Fields then
   drop in order: the engine's owner is its `Tenancy`, whose drop certifies and
-  ends the engine before its `Claim` releases the name and census entry.
+  ends and drops the engine before its `Claim` releases the name and census
+  entry. An armed claim publishes final `Died` before that release, outside
+  the census lock. Terminal failure reporting uses the independent fleet sink
+  even if append state is poisoned; parent retirement precedes the cue. The last owner cannot empty the census ahead of its death cue.
 - The `Census` holds, under one lock, the name table, the `tenants` map and
   the teardown failures. `Fleet::claim` reserves the name and an unbound
   tenant, so construction counts. `Claim::bind` records the owner's handle;
@@ -262,7 +272,7 @@ Protocol version 34 adds the carrier lifecycle exchange `Detach → Ended`.
   that every session worker's live-thread ticket has gone before `Ended`.
 - Timeout, severance or an undrained roster produces no acknowledgment.
   **Every outgoing and final engine is certified**: a `Tenancy` certifies on
-  drop and when `reboot` replaces its engine, and failures accumulate in the
+  drop and when `Tenancy::install` replaces its engine, and failures accumulate in the
   census, so a later clean teardown never absolves an earlier one. Settlement
   reports them; Synod ends the conversation without
   a closing folder scan. EOF alone never authorises that scan.
@@ -286,8 +296,10 @@ D1–D8 fix the policy as well as the mechanism.
    from a normally ended sender but not an abandoned tree.
 6. Stop recalls human text; other deliveries live or die by provenance.
    Engine workers are not cancelled by Stop.
-7. `/clear` checks `Engine::rebootable` before changing anything. A boot
-   failure after that check leaves the old engine with work/queue discarded.
+7. `/clear` preflights recording/readiness and prepares a rebootable engine
+   before mutation. Only committed `Cleared` permits applying the captured
+   queue boundary and installing it. Failed preparation or commit preserves
+   live bindings, work, incarnation, queued input and owner registers.
 8. Stop and recall are synchronous commands; settlement waits on the driver
    thread. `withdrawals.js` remains the ordering boundary for restoration.
 

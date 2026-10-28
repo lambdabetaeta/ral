@@ -21,7 +21,7 @@ use crate::agent::fleet::Fleet;
 use crate::bus::{BusReceiver, Read, Rewrite, UsageMeter};
 use crate::card::Card;
 use crate::provider::{Bureau, Usage};
-use crate::record::{AgentId, AgentState, Born, Record, Recorded, Resumed, Transient};
+use crate::record::{AgentId, Born, Record, Recorded, Resumed, Transient};
 use clipboard::Clipboard;
 
 use ratatui::crossterm::event::{
@@ -307,16 +307,6 @@ impl App {
         }
     }
 
-    /// Settle the focused tab's state for the final frame.  The worker emits its
-    /// own [`AgentState::Ready`] at every park; this covers the one boundary it
-    /// cannot — the exit, where the loop is over and nothing more will arrive.
-    pub fn mark_ready(&mut self) {
-        let focused = self.tabs.focused();
-        if let Some(status) = self.tabs.status_mut(focused) {
-            status.set_state(AgentState::Ready);
-        }
-    }
-
     /// True while a time-driven visual must keep repainting with no event to
     /// drive it: the elapsed-wait bar, the tab-title spinner, a copy toast —
     /// which needs one draw past its own expiry to erase itself, hence `margin` —
@@ -325,7 +315,7 @@ impl App {
         let pending = self
             .tabs
             .focused_status()
-            .is_some_and(|status| status.state.state.pending());
+            .is_some_and(|status| status.state.pending());
         pending
             || self.gesture.toast_live(margin)
             || !self.focused_waiting()

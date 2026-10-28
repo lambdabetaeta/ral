@@ -101,6 +101,105 @@ fn surface() -> Scoped {
 }
 
 #[test]
+fn abandoning_a_clear_boundary_changes_nothing() {
+    let inbox = active();
+    let mailbox = inbox.mailbox();
+    mailbox.steer("old".into());
+    mailbox.post(wakeup(1, "old", "@", "go"));
+    let boundary = inbox.clear_boundary();
+    mailbox.steer("new".into());
+    let _ = boundary;
+    assert!(mailbox.is_current());
+    assert_eq!(mailbox.queued(), ["old", "new"]);
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "old"));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "new"));
+}
+
+#[test]
+fn clear_splits_a_coalesced_human_tail_at_its_captured_boundary() {
+    for observe in [false, true] {
+        let inbox = active();
+        let mailbox = inbox.mailbox();
+        mailbox.steer("old α".into());
+        mailbox.steer("old β".into());
+        let boundary = inbox.clear_boundary();
+        mailbox.steer(String::new());
+        mailbox.steer("new γ".into());
+        if observe {
+            assert_eq!(mailbox.queued(), ["old α\nold β\n\nnew γ"]);
+            assert_eq!(depth_of(&inbox, Source::User), 1);
+        }
+        inbox.apply_clear(boundary);
+        assert_eq!(mailbox.queued(), ["\nnew γ"]);
+        assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "\nnew γ"));
+        assert!(inbox.is_empty());
+    }
+}
+
+#[test]
+fn clear_boundary_survives_provenance_fencing_and_a_racing_recall() {
+    for recall in [false, true] {
+        let inbox = active();
+        let mailbox = inbox.mailbox();
+        mailbox.steer("old".into());
+        inbox.nudge(1, "old exchange".into());
+        let boundary = inbox.clear_boundary();
+        mailbox.steer("after boundary".into());
+        inbox.close_exchange();
+        assert_eq!(mailbox.queued(), ["old\nafter boundary"]);
+        if recall {
+            assert_eq!(mailbox.recall(), ["old\nafter boundary"]);
+            mailbox.steer("after recall".into());
+        }
+        inbox.apply_clear(boundary);
+        assert_eq!(
+            mailbox.queued(),
+            [if recall {
+                "after recall"
+            } else {
+                "after boundary"
+            }]
+        );
+    }
+}
+
+#[test]
+fn committed_clear_preserves_later_commands_but_refuses_old_scoped_producers() {
+    let inbox = active();
+    let old = inbox.mailbox();
+    old.steer("old".into());
+    old.post_read(Read::Resources);
+    let boundary = inbox.clear_boundary();
+    old.steer("new".into());
+    old.post_read(Read::Resources);
+    old.post_rewrite(Rewrite::Evict);
+    for kind in [
+        surface(),
+        message(),
+        wakeup(1, "old", "@", "go"),
+        result(AgentOutcome::Replied),
+    ] {
+        assert!(old.post(kind));
+    }
+    inbox.apply_clear(boundary);
+    for kind in [
+        surface(),
+        message(),
+        wakeup(1, "late", "@", "go"),
+        result(AgentOutcome::Replied),
+    ] {
+        assert!(!old.post(kind));
+    }
+    assert!(!old.is_current());
+    assert!(inbox.mailbox().is_current());
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "new"));
+    assert!(matches!(pop(&inbox), Some(Next::Read(Read::Resources))));
+    assert!(matches!(pop(&inbox), Some(Next::Rewrite(Rewrite::Evict))));
+    assert!(inbox.is_empty());
+}
+
+#[test]
 fn every_scoped_kind_is_fenced_at_pop() {
     let cases: [(Source, fn() -> Scoped); 5] = [
         (Source::Agent, || {

@@ -21,11 +21,11 @@
 use super::{Cursor, Entry, Locus, Publish, RECORD, Record, Recorded, Seq, Transient};
 use crate::app::now_unix_ms;
 use ral_core::own::OwnDir;
-use ral_core::sync::LockExt as _;
+use ral_core::sync::{LockExt as _, Torn};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// `inner` takes its lock with poison kept
 /// ([`lock_strict`](ral_core::sync::LockExt::lock_strict)) on purpose: `seq` and `pos` are the file's own position, restated in memory,
@@ -35,18 +35,40 @@ use std::sync::Mutex;
 /// bytes. A poisoned log must stay poisoned.
 pub(crate) struct Log {
     inner: Mutex<Inner>,
+    /// Set only under `inner`; observed without it to avoid inbox lock inversion.
+    failure: OnceLock<Arc<io::Error>>,
 }
 
 /// The session directory a log is kept in, and the writer on its record file.
 struct Writer {
     dir: OwnDir,
-    file: BufWriter<File>,
+    file: File,
+    #[cfg(test)]
+    fail_after: Option<usize>,
 }
 
 impl Writer {
     /// The record file, as messages name it.
     fn name(&self) -> PathBuf {
         self.dir.path().join(RECORD)
+    }
+
+    fn append(&mut self, line: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(remaining) = self.fail_after.as_mut() {
+            let written = line.len().min(*remaining);
+            self.file.write_all(&line[..written])?;
+            *remaining -= written;
+            return if written < line.len() {
+                Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "injected record write failure",
+                ))
+            } else {
+                Ok(())
+            };
+        }
+        self.file.write_all(line)
     }
 }
 
@@ -57,8 +79,7 @@ struct Inner {
     writer: Option<Writer>,
     sink: Option<Box<dyn Publish>>,
     seq: u64,
-    /// This process's own append cursor, tracked rather than re-derived from
-    /// `Seek`, so a flush never has to double as a position query.
+    /// The committed prefix's end, excluding any failed write's tail.
     pos: u64,
 }
 
@@ -110,9 +131,13 @@ impl Log {
 
     /// A log over `dir`'s record opened for append, from `seq` and `pos`.
     fn writing(dir: &OwnDir, seq: u64, pos: u64) -> io::Result<Self> {
-        let file = BufWriter::new(dir.append(RECORD)?);
-        let dir = OwnDir::clone(dir);
-        Ok(Self::over(Some(Writer { dir, file }), seq, pos))
+        let writer = Writer {
+            dir: dir.clone(),
+            file: dir.append(RECORD)?,
+            #[cfg(test)]
+            fail_after: None,
+        };
+        Ok(Self::over(Some(writer), seq, pos))
     }
 
     /// A log with no file, for tests: it still stamps and publishes.
@@ -129,6 +154,7 @@ impl Log {
                 seq,
                 pos,
             }),
+            failure: OnceLock::new(),
         }
     }
 
@@ -169,13 +195,45 @@ impl Log {
         Ok((from, Self::records(source, from.seq, from.end, until)?))
     }
 
+    /// Observation only: append rechecks under the mutex before writing.
+    pub(super) fn check_available(&self) -> io::Result<()> {
+        if self.inner.is_poisoned() {
+            return Err(Torn.into());
+        }
+        self.failure.get().map_or(Ok(()), |error| {
+            Err(io::Error::new(error.kind(), Arc::clone(error)))
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_after(&self, bytes: usize) {
+        let mut inner = self.inner.lock_strict().expect("the append lock is intact");
+        inner
+            .writer
+            .as_mut()
+            .expect("fault injection needs a file-backed log")
+            .fail_after = Some(bytes);
+    }
+
+    #[cfg(test)]
+    pub(super) fn poison_append(&self) {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = self.inner.lock_strict().expect("the append lock is intact");
+                panic!("injected append-lock poison");
+            }))
+            .is_err()
+        );
+    }
+
     /// Append `record`, then publish it on the attached channel before
     /// releasing the lock — the whole reason the sink lives in here rather
-    /// than beside it.  Flushed per record (never `fsync`): process-crash
+    /// than beside it. Written directly per record (never `fsync`): process-crash
     /// durable, which is what lets a killed session resume, but not
     /// power-loss durable.
     pub(super) fn append(&self, record: &Record) -> io::Result<Locus> {
         let mut inner = self.inner.lock_strict()?;
+        self.check_available()?;
         let mut line = serde_json::to_vec(&Entry {
             at_unix_ms: now_unix_ms(),
             record,
@@ -183,9 +241,19 @@ impl Log {
         .map_err(io::Error::other)?;
         line.push(b'\n');
         let start = inner.pos;
-        if let Some(Writer { file, .. }) = inner.writer.as_mut() {
-            file.write_all(&line)?;
-            file.flush()?;
+        if let Some(writer) = inner.writer.as_mut()
+            && let Err(error) = writer.append(&line)
+        {
+            let failure = self.failure.get_or_init(|| {
+                Arc::new(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "recording failed for {}: {error}; this writer is unavailable; repair storage and resume the session before recording more work",
+                        ral_core::path::shown(writer.name())
+                    ),
+                ))
+            });
+            return Err(io::Error::new(failure.kind(), Arc::clone(failure)));
         }
         inner.pos = start + line.len() as u64;
         inner.seq += 1;

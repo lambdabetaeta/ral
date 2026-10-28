@@ -5,13 +5,26 @@
 
 use crate::agent::Agent;
 use crate::bus::{AgentOutcome, Emitter};
-use crate::record::{AgentLog, Born, Memory, Resumed, Transient};
+use crate::record::{AgentLog, Born, Memory, Resumed};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 impl Agent {
-    pub(crate) fn settle(self, outcome: AgentOutcome) {
+    pub(crate) fn settle(mut self, outcome: AgentOutcome, emit: &Emitter) {
+        let sink = emit.fleet_sink();
+        let outcome = match self.check_available() {
+            Ok(()) => outcome,
+            Err(error) => {
+                self.end_unavailable_with(&error, |error| {
+                    crate::record::Emitter::report_fault_with(error, |fault| sink.transient(fault));
+                });
+                AgentOutcome::Failed(error.to_string())
+            }
+        };
         self.inbox.retire(outcome);
+        self.engine.publish_death_on_release(sink);
+        // SessionEnded and engine teardown precede the claim's terminal cue.
+        drop(self);
     }
 }
 
@@ -107,9 +120,25 @@ pub(crate) struct SpawnedChild {
 /// # Errors
 /// Returns `Err(String)` if the worker thread could not be spawned.
 pub(crate) fn spawn_async(
+    child: Agent,
+    spec: AsyncSpawn,
+    emit: &Emitter,
+) -> Result<SpawnedChild, String> {
+    spawn_async_with(
+        child,
+        spec,
+        emit,
+        #[cfg(test)]
+        || {},
+    )
+}
+
+/// Tests can hold the boundary between attendance and finalization.
+pub(crate) fn spawn_async_with(
     mut child: Agent,
     spec: AsyncSpawn,
     emit: &Emitter,
+    #[cfg(test)] before_settle: impl FnOnce() + Send + 'static,
 ) -> Result<SpawnedChild, String> {
     let AsyncSpawn {
         name,
@@ -145,10 +174,10 @@ pub(crate) fn spawn_async(
     // The dispatch's own row is authored at each caller with session access —
     // `spawn_root`'s `Display::ToolCall` beside this call, a harness spawn's
     // at the desk's own commitment arm — so this spine mints no row of its own.
-    // Taken before the move below, so a spawn that never runs can still
-    // report through them, and end the birth already announced.
-    let spawn_recorder = child.recorder();
-    let mourner = child_emit.fleet_sink();
+    // Arm before handing ownership to spawn: failed launches drop the closure.
+    child
+        .engine
+        .publish_death_on_release(child_emit.fleet_sink());
     let worker = thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
         .stack_size(8 * 1024 * 1024)
@@ -163,19 +192,16 @@ pub(crate) fn spawn_async(
                 });
                 AgentOutcome::Failed("sub-agent panicked".into())
             });
-            child.recorder().transient(Transient::Died);
+            #[cfg(test)]
+            before_settle();
             // A root reports to nobody; `settle` pays only what is still owed.
-            child.settle(outcome);
+            child.settle(outcome, &child_emit);
         });
     match worker {
         Ok(_) => Ok(SpawnedChild { id: agent_id, name }),
-        Err(e) => {
-            // The closure never ran, so `child` fell with it, and that drop is
-            // the whole of the unwind.
-            let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
-            spawn_recorder.emit_or_report(crate::record::Forensic::Error { text: msg.clone() });
-            mourner.transient(Transient::Died);
-            Err(msg)
-        }
+        // The failed launch already dropped the owner; its caller reports why.
+        Err(e) => Err(format!(
+            "could not spawn a worker thread for agent {agent_id}: {e}"
+        )),
     }
 }

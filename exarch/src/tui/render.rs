@@ -17,7 +17,6 @@ use ratatui::{
 };
 
 use crate::provider::{Bureau, effort_label, identity};
-use crate::record::AgentState;
 
 use super::App;
 use super::app::Overlay;
@@ -199,7 +198,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Resul
     let state = app
         .tabs
         .status(focused)
-        .map_or_else(|| StateSpan::new(AgentState::Ready), |status| status.state);
+        .map_or(StateSpan::Ended, |status| status.state);
     let (last_input, context_window) = app
         .tabs
         .scrollback(focused)

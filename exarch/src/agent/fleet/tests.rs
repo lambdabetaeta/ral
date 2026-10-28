@@ -38,6 +38,136 @@ fn a_claim_counts_construction_until_it_is_dropped() {
 }
 
 #[test]
+fn death_is_published_after_the_engine_drops_but_before_the_last_claim_releases() {
+    use crate::agent::engine::EngineKind;
+    use crate::agent::testkit::bare_transport;
+    use crate::record::{Publish, Record, Recorded, Transient};
+    use ral_core::carrier::IdentityTransport;
+    use std::sync::{Weak, mpsc};
+
+    const NAME: &str = "departing";
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct DeathWitness {
+        transport: Weak<IdentityTransport>,
+        census: Arc<Census>,
+        tenant: TenantId,
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Publish for DeathWitness {
+        fn fact(&self, recorded: Recorded<Record>) {
+            panic!("claim release must publish no recorded fact: {recorded:?}");
+        }
+
+        fn transient(&self, transient: Transient) {
+            assert!(matches!(transient, Transient::Died), "{transient:?}");
+            assert!(
+                self.transport.upgrade().is_none(),
+                "Died must follow the actual transport drop, not merely engine.end()"
+            );
+            {
+                let registry = self
+                    .census
+                    .registry
+                    .try_lock()
+                    .expect("Died publication must not hold the census registry lock");
+                assert!(registry.tenants.contains_key(&self.tenant));
+                assert_eq!(registry.names.get(NAME), Some(&self.tenant));
+            }
+            assert!(!self.census.is_empty());
+            assert_eq!(
+                self.census.claim(NAME).err(),
+                Some(Unborn::NameTaken(NAME.into()))
+            );
+            self.entered.send(()).unwrap();
+            self.release.recv_timeout(TIMEOUT).unwrap();
+        }
+    }
+
+    let fleet = Fleet::for_test();
+    let census = fleet.census();
+    let claim = fleet.claim(NAME).unwrap();
+    let tenant = claim.id();
+    let mut tenancy = claim.occupy(Engine::adopted(bare_transport()));
+    let transport = match tenancy.kind() {
+        EngineKind::Identity(transport) => Arc::downgrade(&transport),
+        EngineKind::Wire { .. } => panic!("a bare engine uses identity transport"),
+    };
+    assert!(transport.upgrade().is_some());
+    let (entered, publishing) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    tenancy.publish_death_on_release(Box::new(DeathWitness {
+        transport,
+        census: census.clone(),
+        tenant,
+        entered,
+        release: resume,
+    }));
+    let worker = std::thread::spawn(move || drop(tenancy));
+
+    publishing.recv_timeout(TIMEOUT).unwrap();
+    assert!(!fleet.is_empty());
+    assert_eq!(
+        fleet.claim(NAME).err(),
+        Some(Unborn::NameTaken(NAME.into()))
+    );
+    drop(fleet);
+    assert!(
+        !census.is_empty(),
+        "the final census still counts publication"
+    );
+    release.send(()).unwrap();
+    worker.join().unwrap();
+    assert!(census.is_empty());
+    assert!(census.claim(NAME).is_ok());
+}
+
+#[test]
+fn rearming_death_publication_replaces_the_sink_and_publishes_once() {
+    use crate::agent::testkit::bare_transport;
+    use crate::record::{Publish, Record, Recorded, Transient};
+    use std::sync::mpsc;
+
+    struct DeathCount {
+        sink: u8,
+        deaths: mpsc::Sender<u8>,
+    }
+
+    impl Publish for DeathCount {
+        fn fact(&self, recorded: Recorded<Record>) {
+            panic!("claim release must publish no recorded fact: {recorded:?}");
+        }
+
+        fn transient(&self, transient: Transient) {
+            assert!(matches!(transient, Transient::Died), "{transient:?}");
+            self.deaths.send(self.sink).unwrap();
+        }
+    }
+
+    let fleet = Fleet::for_test();
+    let mut tenancy = fleet
+        .claim("rearmed")
+        .unwrap()
+        .occupy(Engine::adopted(bare_transport()));
+    let (deaths, received) = mpsc::channel();
+    for sink in [1, 2] {
+        tenancy.publish_death_on_release(Box::new(DeathCount {
+            sink,
+            deaths: deaths.clone(),
+        }));
+    }
+    assert!(matches!(
+        received.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    drop(tenancy);
+    assert_eq!(received.try_iter().collect::<Vec<_>>(), [2]);
+    assert!(fleet.is_empty());
+}
+
+#[test]
 fn owner_drop_ends_descendants_and_releases_its_name() {
     let fleet = Fleet::for_test();
     let root = agent(&fleet, "root", None);

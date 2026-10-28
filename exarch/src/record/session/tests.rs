@@ -419,7 +419,7 @@ fn the_newest_withdrawn_turn_reads_back() {
     let mut s = fresh_root();
     s.append_user("abandoned".into(), None, Voice::Human)
         .unwrap();
-    s.quiesce(QuiesceReason::Cancelled);
+    s.quiesce(QuiesceReason::Cancelled).unwrap();
     complete_round(&mut s, "next", "answer");
     s.rewind(2).expect("rewind past the abandoned exchange");
     assert!(s.context().is_awaiting_assistant());
@@ -879,7 +879,7 @@ fn abandoned_work_is_kept_whole_and_read_whole() {
     let mut s = fresh_root();
     s.append_user("interrupted".into(), None, Voice::Human)
         .unwrap();
-    s.quiesce(QuiesceReason::Cancelled);
+    s.quiesce(QuiesceReason::Cancelled).unwrap();
     assert!(s.context().is_ready());
     assert!(
         !records(&s)
@@ -911,7 +911,7 @@ fn abandoned_work_keeps_its_tool_turns_in_context() {
         content: "result".into(),
     }])
     .unwrap();
-    s.quiesce(QuiesceReason::Cancelled);
+    s.quiesce(QuiesceReason::Cancelled).unwrap();
     complete_round(&mut s, "next", "answer");
     assert_eq!(
         s.context()
@@ -929,6 +929,132 @@ fn abandoned_work_keeps_its_tool_turns_in_context() {
     );
 }
 
+#[test]
+fn failed_required_repair_preserves_the_fold_and_resume_refuses_until_repair_commits() {
+    for bytes in [0, 17] {
+        let mut log = fresh_root();
+        log.append_user("run".into(), None, Voice::Human).unwrap();
+        log.append_assistant(assistant_with_tool("owed"), vec!["owed".into()], None)
+            .unwrap();
+        let before = serde_json::to_value(log.context().rendered()).unwrap();
+        let prefix = records(&log);
+        log.record_emitter().fail_after(bytes);
+        let error = log.quiesce(QuiesceReason::Aborted).unwrap_err();
+        assert!(
+            error.to_string().contains("required protocol repair"),
+            "{error}"
+        );
+        assert!(!log.context().is_ready());
+        assert!(log.check_available().is_err());
+        assert_eq!(
+            serde_json::to_value(log.context().rendered()).unwrap(),
+            before
+        );
+        assert_eq!(
+            serde_json::to_value(records(&log)).unwrap(),
+            serde_json::to_value(&prefix).unwrap()
+        );
+        assert!(
+            log.append_user("must refuse".into(), None, Voice::Human)
+                .is_err()
+        );
+
+        let failed = AgentLog::resume_with(log.sessions_root(), log.id(), |dir| {
+            let seam = crate::record::Emitter::append_to(dir)?;
+            seam.fail_after(bytes);
+            Ok(seam)
+        });
+        let error = failed.err().expect("resume must commit the owed repair");
+        assert!(
+            error.to_string().contains("required protocol repair"),
+            "{error}"
+        );
+        assert_eq!(
+            serde_json::to_value(records(&log)).unwrap(),
+            serde_json::to_value(prefix).unwrap()
+        );
+
+        let mut resumed = AgentLog::resume(log.sessions_root(), log.id()).unwrap();
+        assert!(resumed.context().is_ready());
+        assert!(resumed.check_available().is_ok());
+        let results: Vec<_> = records(&resumed)
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Protocol(Protocol::ToolResults { results }) => Some(results),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0].id, "owed");
+        complete_round(&mut resumed, "next", "answer");
+        assert!(resumed.context().is_ready());
+    }
+}
+
+#[test]
+fn partial_quiesce_keeps_the_committed_result_without_fabricating_a_capstone() {
+    let pending = || {
+        let mut log = fresh_root();
+        log.append_user("run".into(), None, Voice::Human).unwrap();
+        log.append_assistant(assistant_with_tool("owed"), vec!["owed".into()], None)
+            .unwrap();
+        log
+    };
+    let mut control = pending();
+    let repairs = control.context().quiesce_records(QuiesceReason::Replied);
+    assert_eq!(repairs.len(), 2);
+    let before = fs::metadata(record_path(&control)).unwrap().len();
+    control.record_protocol(repairs[0].clone()).unwrap();
+    let first_bytes = fs::metadata(record_path(&control)).unwrap().len() - before;
+
+    let mut log = pending();
+    log.record_emitter()
+        .fail_after(usize::try_from(first_bytes).unwrap() + 11);
+    log.quiesce(QuiesceReason::Replied).unwrap_err();
+    assert!(
+        log.context().is_ready(),
+        "the first repair really committed"
+    );
+    assert!(
+        log.check_available().is_err(),
+        "readiness is not availability"
+    );
+    assert_eq!(
+        serde_json::to_value(log.context().rendered()).unwrap(),
+        serde_json::to_value(control.context().rendered()).unwrap()
+    );
+    assert!(
+        log.append_user("must refuse".into(), None, Voice::Human)
+            .is_err()
+    );
+    let committed = records(&log);
+    assert!(matches!(
+        committed.last(),
+        Some(Record::Protocol(Protocol::ToolResults { .. }))
+    ));
+    let resumed = AgentLog::resume(log.sessions_root(), log.id()).unwrap();
+    assert!(resumed.check_available().is_ok());
+    assert_eq!(
+        serde_json::to_value(records(&resumed)).unwrap(),
+        serde_json::to_value(committed).unwrap()
+    );
+    assert_eq!(resumed.context().next_id(), log.context().next_id());
+}
+
+#[test]
+fn mandatory_repair_latch_is_independent_of_physical_writer_availability() {
+    let mut log = fresh_root();
+    log.unavailable = Some(io::Error::other("required protocol repair failed"));
+    assert!(log.record_emitter().check_available().is_ok());
+    assert!(log.check_available().is_err());
+    assert!(log.quiesce(QuiesceReason::Aborted).is_err());
+    assert!(
+        log.append_user("refused".into(), None, Voice::Human)
+            .is_err()
+    );
+    assert!(log.context().rendered().is_empty());
+}
+
 /// Tool calls that never ran are the one thing a quiesce still owes: the
 /// calls were really made, and a dangling tool-call block is not a legal
 /// request.
@@ -943,7 +1069,7 @@ fn quiesce_answers_tool_calls_that_never_ran_and_nothing_else() {
         !s.context().is_ready(),
         "outstanding tool calls hold the log"
     );
-    s.quiesce(QuiesceReason::Aborted);
+    s.quiesce(QuiesceReason::Aborted).unwrap();
     assert!(s.context().is_ready());
     assert!(records(&s).iter().any(|record| matches!(
         record,
@@ -976,7 +1102,7 @@ fn a_reply_keeps_its_capstone_and_stays_visible() {
         content: "done".into(),
     }])
     .unwrap();
-    s.quiesce(QuiesceReason::Replied);
+    s.quiesce(QuiesceReason::Replied).unwrap();
     complete_round(&mut s, "follow-up", "answer");
     assert!(
         s.context().rendered().iter().any(|message| {
@@ -1416,7 +1542,7 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
         .unwrap();
     live.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
-    live.quiesce(QuiesceReason::Aborted);
+    live.quiesce(QuiesceReason::Aborted).unwrap();
     complete_round(&mut live, "second", "answer");
     let path = sessions.path().join("0/record.jsonl");
     drop(live);
@@ -1537,7 +1663,7 @@ fn resume_rebuilds_the_same_rows_and_residues() {
     .unwrap();
     live.append_user("interrupted".into(), None, Voice::Human)
         .unwrap();
-    live.quiesce(QuiesceReason::Cancelled);
+    live.quiesce(QuiesceReason::Cancelled).unwrap();
     for prompt in ["one", "two", "three"] {
         complete_round(&mut live, prompt, prompt);
     }

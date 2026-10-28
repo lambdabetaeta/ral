@@ -140,7 +140,17 @@ impl Agent {
     /// # Panics
     /// Panics on reentrant log access.
     pub fn is_ready(&self) -> bool {
-        self.log.borrow().context().is_ready()
+        let log = self.log.borrow();
+        log.check_available().is_ok() && log.context().is_ready()
+    }
+    /// # Errors
+    /// Recording failed or required protocol repair could not commit. Resume
+    /// the durable prefix after repairing storage; this owner cannot accept work.
+    ///
+    /// # Panics
+    /// Panics on reentrant log access.
+    pub fn check_available(&self) -> std::io::Result<()> {
+        self.log.borrow().check_available()
     }
     /// # Panics
     /// Panics on reentrant log access.

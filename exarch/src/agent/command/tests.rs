@@ -2,6 +2,40 @@ use crate::agent::Agent;
 use crate::bus::{Emitter, Read, Rewrite};
 use crate::record::{Forensic, Record};
 
+#[test]
+fn commands_after_a_display_first_failure_do_not_open_or_rewrite_sessions() {
+    let mut session = Agent::for_test("system").unwrap();
+    let recorder = session.recorder();
+    recorder.fail_after(3);
+    recorder
+        .emit(crate::record::Display::Answer {
+            text: "failed display".into(),
+        })
+        .unwrap_err();
+    let before = session.log_dir().read("record.jsonl").unwrap();
+    session.handle().post_read(Read::Hatch {
+        memory: crate::record::Memory::Amnemon,
+        name: Some("must-not-open".into()),
+    });
+    session.handle().post_rewrite(Rewrite::Clear);
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    assert!(matches!(
+        session.attend(&emit),
+        crate::bus::AgentOutcome::Failed(_)
+    ));
+    assert!(!session.handle().is_live());
+    assert_eq!(session.log_dir().read("record.jsonl").unwrap(), before);
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|signal| matches!(signal, crate::bus::Signal::Born(..)))
+    );
+    assert_eq!(
+        crate::record::AgentLog::session_ids(session.log.borrow().sessions_root()).unwrap(),
+        vec![session.id()]
+    );
+}
+
 /// `/resources` rides the inbox to the attend loop and folds into exactly
 /// one event with no provider round-trip.
 #[test]

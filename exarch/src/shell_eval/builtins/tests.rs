@@ -241,7 +241,7 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
         crate::app::Scratch::for_test(crate::app::EXARCH, "detach-clear").expect("scratch dir"),
     );
     let cwd = ral_core::host::cwd().expect("test process has a cwd");
-    let mut engine = crate::agent::engine::Engine::root(
+    let engine = crate::agent::engine::Engine::root(
         &crate::INSTALLERS,
         cwd,
         ral_core::authority::policy::GrantStack::default(),
@@ -250,7 +250,7 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
     )
     .expect("the recipe boots");
 
-    let engine = engine.reborn().expect("an identity root reboots");
+    let engine = engine.prepare_rebirth().expect("an identity root reboots");
     let names = engine
         .read(|t| t.builtin_names())
         .expect("an identity engine never severs");

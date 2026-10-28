@@ -16,7 +16,7 @@ use crate::record::ToolResult as SessionToolResult;
 use crate::record::commit::Stream;
 use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient, Voice};
 use ral_core::data::FOValue;
-use ral_core::process::Scope;
+use ral_core::process::{CancelCause, Scope};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -46,6 +46,25 @@ impl Agent {
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
         self.couple(emit);
+        let result = self
+            .check_available()
+            .map_err(|error| Fault::Unavailable(error.to_string()))
+            .and_then(|()| self.deliberation(exchange, provider, prompt, continues, emit));
+        if let Err(error) = self.abort_unready() {
+            self.end_unavailable(&error);
+            return Err(Fault::Unavailable(error.to_string()));
+        }
+        result
+    }
+
+    fn deliberation(
+        &mut self,
+        exchange: &Scope,
+        provider: &Arc<Provider>,
+        prompt: Option<(String, Voice)>,
+        continues: Option<u64>,
+        emit: &Emitter,
+    ) -> Result<Outcome, Fault> {
         self.inbox.disarm_reply_lease();
         // Entry is the one point every route into a deliberation crosses, so a
         // reply staged by a batch a cancel or an error cut short dies here.
@@ -58,10 +77,12 @@ impl Agent {
         }
         let mut retried = false;
         loop {
+            self.check_available()
+                .map_err(|error| Fault::Unavailable(error.to_string()))?;
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand.
             if exchange.is_cancelled() {
-                return Ok(self.cancelled());
+                return self.cancelled();
             }
             if self.must_force_evict(provider) {
                 self.force_eviction();
@@ -90,6 +111,8 @@ impl Agent {
         provider: &Provider,
         retried: bool,
     ) -> Result<Turn, Fault> {
+        self.check_available()
+            .map_err(|error| Fault::Unavailable(error.to_string()))?;
         let recorder = self.recorder();
         let turn = self.log.borrow().context().next_id();
         recorder
@@ -103,6 +126,7 @@ impl Agent {
         let system = self.log.borrow().context().system().clone();
         recorder.transient(Transient::State(AgentState::AwaitingModel));
         let mut stream = Stream::default();
+        let request = exchange.child();
         let taken = provider.complete(
             crate::provider::Request {
                 system: &system,
@@ -130,16 +154,21 @@ impl Agent {
                         error: cause.clone(),
                     });
                 }
+                if recorder.check_available().is_err() {
+                    request.cancel(CancelCause::Cancelled);
+                }
             },
-            exchange,
+            &request,
         );
         let cancelled =
             exchange.is_cancelled() || matches!(taken, Err(ProviderError::Cancelled(_)));
         let closed = stream.close(&recorder);
+        self.check_available()
+            .map_err(|error| Fault::Unavailable(error.to_string()))?;
         match taken {
             _ if cancelled => {
                 abandoned(&recorder, closed);
-                Ok(Turn::Ends(self.cancelled()))
+                self.cancelled().map(Turn::Ends)
             }
             Ok(step) => {
                 closed?;
@@ -258,7 +287,7 @@ impl Agent {
         provider: &Provider,
         emit: &Emitter,
     ) -> Result<ControlFlow<Outcome>, Fault> {
-        let results = self.run_batch(exchange, calls, emit);
+        let results = self.run_batch(exchange, calls, emit)?;
         self.log
             .borrow_mut()
             .append_tool_results(results)
@@ -271,11 +300,11 @@ impl Agent {
         // A cancelled batch admits nothing: a read run or a steer recorded
         // here would belong to the exchange being dropped.
         if exchange.is_cancelled() {
-            return Ok(ControlFlow::Break(self.cancelled()));
+            return self.cancelled().map(ControlFlow::Break);
         }
         // Reply abandons work; arrivals stay queued for the next draw.
         if let Some(payload) = self.reply.borrow_mut().take() {
-            return Ok(ControlFlow::Break(self.replied(payload)));
+            return self.replied(payload).map(ControlFlow::Break);
         }
         // Arrivals are taken in the order typed: a read runs against the
         // context as it stands at its place in the queue, a delivery lands as
@@ -295,7 +324,7 @@ impl Agent {
             }
         }
         if exchange.is_cancelled() {
-            return Ok(ControlFlow::Break(self.cancelled()));
+            return self.cancelled().map(ControlFlow::Break);
         }
         let climbed = self.climbed(provider)?;
         let steering = self.tell(climbed);
@@ -353,10 +382,12 @@ impl Agent {
         exchange: &Scope,
         tool_calls: Vec<ToolCall>,
         emit: &Emitter,
-    ) -> Vec<SessionToolResult> {
+    ) -> Result<Vec<SessionToolResult>, Fault> {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
+            self.check_available()
+                .map_err(|error| Fault::Unavailable(error.to_string()))?;
             if exchange.is_cancelled() {
                 results.push(cancelled_result(call.call_id));
                 results.extend(it.map(|r| cancelled_result(r.call_id)));
@@ -373,7 +404,9 @@ impl Agent {
             }
             results.push(self.invoke(exchange, call, emit));
         }
-        results
+        self.check_available()
+            .map_err(|error| Fault::Unavailable(error.to_string()))?;
+        Ok(results)
     }
 
     fn invoke(&self, exchange: &Scope, call: ToolCall, emit: &Emitter) -> SessionToolResult {
@@ -415,23 +448,23 @@ impl Agent {
     /// session sits in `AwaitingAssistantAfterToolResults` — is wound back
     /// with its own breadcrumb.  A child then parks, deposit and all; only a
     /// parentless agent's `attend` loop stops here.
-    fn replied(&self, payload: FOValue) -> Outcome {
+    fn replied(&self, payload: FOValue) -> Result<Outcome, Fault> {
+        self.log.borrow_mut().quiesce(QuiesceReason::Replied)?;
         self.abandon(Queue::Keep);
         self.recorder()
             .transient(Transient::State(AgentState::Ready));
         if let Some(lease) = self.inbox.deposit_reply(payload) {
             self.fleet.lease_reply(&self.handle, lease);
         }
-        self.log.borrow_mut().quiesce(QuiesceReason::Replied);
-        Outcome::Replied
+        Ok(Outcome::Replied)
     }
 
     /// The log already carries `Cancelled` through `quiesce`'s own
     /// `Forensic::Cancelled` record; the view fold draws it, so there is no
     /// separate user-facing companion left to emit.
-    fn cancelled(&self) -> Outcome {
-        self.log.borrow_mut().quiesce(QuiesceReason::Cancelled);
-        Outcome::Cancelled
+    fn cancelled(&self) -> Result<Outcome, Fault> {
+        self.log.borrow_mut().quiesce(QuiesceReason::Cancelled)?;
+        Ok(Outcome::Cancelled)
     }
 }
 

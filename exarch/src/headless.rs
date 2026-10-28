@@ -461,15 +461,21 @@ pub fn run(
     // `reply`, deposited on its agent.  A panic arrives as `Ok(None)`, already
     // latched by the sink.
     headless.reply = session.handle().reply();
-    let mut r: Result<(), String> = match outcome {
-        Ok(Some(agent_outcome)) => match agent_outcome {
-            AgentOutcome::Replied => Ok(()),
-            AgentOutcome::Stopped(s) => Err(s),
-            AgentOutcome::Cancelled => Err("cancelled".to_string()),
-            AgentOutcome::Failed(e) => Err(e),
+    let mut r: Result<(), String> = match session.check_available() {
+        Ok(()) => match outcome {
+            Ok(Some(agent_outcome)) => match agent_outcome {
+                AgentOutcome::Replied => Ok(()),
+                AgentOutcome::Stopped(s) => Err(s),
+                AgentOutcome::Cancelled => Err("cancelled".to_string()),
+                AgentOutcome::Failed(e) => Err(e),
+            },
+            Ok(None) => Err("worker panicked".to_string()),
+            Err(e) => Err(e.to_string()),
         },
-        Ok(None) => Err("worker panicked".to_string()),
-        Err(e) => Err(e.to_string()),
+        Err(error) => {
+            session.end_unavailable(&error);
+            Err(error.to_string())
+        }
     };
     // Summed at the emit seam, so it includes async children muted on this
     // per-exchange bus whose usage never reached the sink.
@@ -508,10 +514,9 @@ pub fn run(
     r
 }
 
-/// A severed session is over, not merely a job that went badly.
 fn job_ending(session: &Agent, outcome: io::Result<Option<AgentOutcome>>) -> Result<(), String> {
     match outcome {
-        Ok(Some(AgentOutcome::Failed(lost))) if session.severance().is_some() => Err(lost),
+        Ok(Some(AgentOutcome::Failed(reason))) if session.severance().is_some() => Err(reason),
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("worker panicked".to_string()),
         Err(e) => Err(e.to_string()),
@@ -595,10 +600,27 @@ impl SettledConversation {
             }
             (outcome, stopped)
         });
+        let stopped = matches!(ended, Ok(Some((_, true))));
+        let outcome = match root.check_available() {
+            Ok(()) => job_ending(root, ended.map(|ran| ran.map(|(outcome, _)| outcome))),
+            Err(error) => {
+                let reason = error.to_string();
+                // Final draining can fault recording after the first settlement.
+                let _ = pump(sink, &self.bus, root.id(), &recorder, move |_, pumping| {
+                    root.end_unavailable(&error);
+                    if let Err(why) = root.fleet.wait_settled(root.tenant(), pumping) {
+                        root.engine
+                            .transport()
+                            .sever(ral_core::carrier::Severed::Faulted(why));
+                    }
+                });
+                Err(reason)
+            }
+        };
         JobEnd {
             id,
-            stopped: matches!(ended, Ok(Some((_, true)))),
-            outcome: job_ending(root, ended.map(|ran| ran.map(|(outcome, _)| outcome))),
+            stopped,
+            outcome,
         }
     }
 }

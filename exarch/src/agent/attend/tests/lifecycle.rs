@@ -11,7 +11,7 @@ fn attend_and_deliver(mut child: Agent) -> std::thread::JoinHandle<AgentOutcome>
         let emit = Emitter::new(tx, id);
         let outcome = child.attend(&emit);
         assert!(child.is_ready());
-        child.settle(outcome.clone());
+        child.settle(outcome.clone(), &emit);
         outcome
     })
 }
@@ -377,7 +377,9 @@ fn retirement_reports_input_accepted_before_an_older_reply_was_deposited() {
         if matches!(r.outcome, AgentOutcome::Replied))
     );
     assert!(parent.handle().has_busy_children());
-    child.settle(AgentOutcome::Replied);
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, child.id());
+    child.settle(AgentOutcome::Replied, &emit);
     assert!(
         matches!(wait_for_settle(&parent.inbox), Next::Item(Item::Agent(r))
         if matches!(r.outcome, AgentOutcome::Cancelled))
@@ -417,7 +419,7 @@ fn cancellation_before_followup_pop_reports_new_work_once() {
         1,
         "cancellation won before dequeue"
     );
-    child.settle(outcome);
+    child.settle(outcome, &emit);
     let Next::Item(item @ Item::Agent(_)) = wait_for_settle(&parent.inbox) else {
         panic!("cancel result")
     };

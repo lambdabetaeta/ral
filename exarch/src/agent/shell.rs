@@ -118,6 +118,21 @@ impl Agent {
             .emit_or_report(crate::record::Forensic::SystemNote { text });
     }
 
+    pub(crate) fn end_unavailable(&self, error: &io::Error) {
+        self.end_unavailable_with(error, |error| self.recorder().report_fault(error));
+    }
+
+    pub(super) fn end_unavailable_with(&self, error: &io::Error, report: impl Fn(&io::Error)) {
+        report(error);
+        self.handle.end();
+        self.schedules.clear();
+        if let Err(severed) = self.engine.end() {
+            report(&io::Error::other(
+                EngineLost::running(&severed, self.run_dir()).to_string(),
+            ));
+        }
+    }
+
     /// Plain values captured once per call; desks run only on the owner thread.
     pub(crate) fn host_services(&self, emit: &Emitter) -> desk::HostServices {
         desk::HostServices {
@@ -145,6 +160,12 @@ impl Agent {
         emit: &Emitter,
     ) -> Evaluated {
         self.couple(emit);
+        if let Err(error) = self.check_available() {
+            return Evaluated {
+                text: error.to_string(),
+                failed: true,
+            };
+        }
         // The assistant turn is recorded before its results are built, so this
         // is the id of the turn this result closes — and the call's source name.
         let turn = self.log.borrow().context().current_turn();

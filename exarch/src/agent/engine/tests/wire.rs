@@ -365,11 +365,14 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
 fn wire_engine_clear_answers_a_sentence() {
     let (host, _guest) = UnixStream::pair().expect("socketpair");
     let transport = WireTransport::adopt(host, Liveness::default()).expect("adopt");
-    let mut engine = Engine::Wire {
+    let engine = Engine::Wire {
         transport: Box::new(transport),
         engine: crate::boot::test_attach().0,
     };
-    let why = engine.reborn().err().expect("a wire engine cannot reboot");
+    let why = engine
+        .prepare_rebirth()
+        .err()
+        .expect("a wire engine cannot reboot");
     assert!(why.contains("new conversation"), "{why}");
 }
 

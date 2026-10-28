@@ -36,6 +36,8 @@ pub enum Fault {
     /// The session log refused or failed an append; the context is left as
     /// it lay.
     Log(String),
+    /// Recording or mandatory repair failed: this session cannot accept work.
+    Unavailable(String),
     /// A host-side panic: transport, surface decode, render.  An eval-side
     /// panic is caught at `Shell::run`, which rolls the dynamic state back,
     /// so it never unwinds this far.

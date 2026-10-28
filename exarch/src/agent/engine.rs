@@ -27,6 +27,7 @@ pub(crate) enum Engine {
         engine: EngineSpec,
     },
 }
+#[derive(Clone)]
 pub(crate) struct Rebirth {
     installers: &'static [EngineInstaller],
     attach: Attach,
@@ -106,6 +107,7 @@ impl Engine {
             ProbeError::Rejected(why) => transport.sever(Severed::Faulted(why)),
         })
     }
+    #[cfg(test)]
     pub(crate) fn rebootable(&self) -> bool {
         matches!(
             self,
@@ -122,18 +124,20 @@ impl Engine {
             Self::Wire { transport, .. } => transport.end(),
         }
     }
-    /// Boot a fresh identity engine, moving the `Rebirth` into it; on failure
-    /// `self` is unchanged.
-    pub(crate) fn reborn(&mut self) -> Result<Self, String> {
-        let Self::Identity { rebirth, .. } = self else {
+    /// Boot without touching the live transport, recipe, or cancellation scope.
+    pub(crate) fn prepare_rebirth(&self) -> Result<Self, String> {
+        let Self::Identity {
+            rebirth: Some(born),
+            ..
+        } = self
+        else {
             return Err(Self::CANNOT_REBOOT.to_string());
         };
-        let born = rebirth.as_ref().ok_or(Self::CANNOT_REBOOT)?;
         let fresh =
             IdentityTransport::boot(born.installers, &born.attach).map_err(|s| s.to_string())?;
         Ok(Self::Identity {
             transport: Arc::new(fresh),
-            rebirth: rebirth.take(),
+            rebirth: Some(born.clone()),
         })
     }
     pub(crate) const CANNOT_REBOOT: &str = "/clear cannot start this conversation over: its engine was not booted here; start a new conversation instead";
@@ -158,14 +162,17 @@ impl Incarnation {
             mailbox.vouched_by((*self.scope).clone()),
         ));
     }
-    /// Fence unconditionally, then boot; on success the old engine is certified and replaced.
-    pub(crate) fn reboot(&mut self) -> Result<(), String> {
+    /// Fence the outgoing producers before its certified teardown.
+    pub(crate) fn install_rebirth(&mut self, fresh: Engine) {
         self.scope.cancel(CancelCause::Cancelled);
         self.scope = self.life.child();
-        self.tenancy.reboot()
+        self.tenancy.install(fresh);
     }
     pub(crate) fn tenant(&self) -> TenantId {
         self.tenancy.claim().id()
+    }
+    pub(crate) fn publish_death_on_release(&mut self, sink: Box<dyn crate::record::Publish>) {
+        self.tenancy.publish_death_on_release(sink);
     }
     #[cfg(test)]
     pub(crate) fn install_raw(&self, sink: Arc<dyn ral_core::shell::runtime::DeferredSink>) {

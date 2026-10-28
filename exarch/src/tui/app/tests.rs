@@ -1,8 +1,11 @@
 use super::*;
 use crate::agent::testkit::{TestAgent, TestAgentSpec, pop, test_agent};
+use crate::bus::Signal;
 use crate::card::Mark;
+use crate::record::AgentState;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
+use crate::tui::status::StateSpan;
 use ral_core::shell::runtime::{Observation, Observed};
 
 fn prompt(vi: bool) -> PromptState {
@@ -75,6 +78,454 @@ pub(in crate::tui) fn text(app: &mut App, id: AgentId) -> String {
         .map(Row::plain)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn assert_fault_visible(app: &mut App, id: AgentId, fault: &str) {
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    for width in [48, READ_W, 160] {
+        let window = app
+            .tabs
+            .scrollback_mut(id)
+            .unwrap()
+            .render_window(width, 40);
+        let visible = window.lines.iter().map(Row::plain).collect::<String>();
+        let text = compact(&visible);
+        let fault = compact(fault);
+        let from = text.find(&fault).unwrap_or_else(|| panic!("{visible}"));
+        let until = from + fault.len();
+        let mut offset = 0;
+        // The opening banner has its own fixed width.
+        for row in &window.lines {
+            let start = offset;
+            offset += compact(&row.plain()).len();
+            if start < until && from < offset {
+                assert!(
+                    row.width() <= usize::from(width) + crate::tui::palette::RAIL_W,
+                    "content budget {width}, diagnostic row width {}: {:?}",
+                    row.width(),
+                    row.plain()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn recording_failure_ends_only_its_tab_and_leaves_an_independent_root_usable() {
+    for poison in [false, true] {
+        recording_failure_with_independent_root(poison);
+    }
+}
+
+fn recording_failure_with_independent_root(poison: bool) {
+    use crate::agent::outcome::Outcome;
+    use crate::agent::spawn::{AsyncSpawn, hatch_root, spawn_async};
+    use crate::agent::testkit::{scripted, trunk};
+    use crate::bus::FleetBus;
+    use crate::provider::scripted::{Reply, Script};
+    use crate::record::{Memory, Voice};
+    use ral_core::process::DurableRoot;
+
+    let root = trunk(true);
+    let id = root.id();
+    let fleet = root.fleet.clone();
+    let mut other = hatch_root(&root, Memory::Amnemon, Some("independent".into()))
+        .expect("an independent root");
+    let bus = FleetBus::session();
+    let emit = bus.emitter(id);
+    let other_born = Born {
+        log_dir: other.log_dir().clone(),
+        name: other.handle().0.name.clone(),
+        parent: None,
+        resumed: None,
+        recorder: other.recorder(),
+    };
+    root.couple(&emit);
+    if poison {
+        root.recorder().poison_append();
+    } else {
+        root.recorder().fail_after(7);
+    }
+    spawn_async(
+        root,
+        AsyncSpawn {
+            name: "main".into(),
+            prompt: Some("must be recorded before sending".into()),
+            resumed: None,
+        },
+        &emit,
+    )
+    .expect("the attended worker starts");
+    let rx = bus.rx();
+    let Signal::Born(born_id, born) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("birth precedes the attended worker's output");
+    };
+    assert_eq!(born_id, id);
+    let mut app = App::new(
+        id,
+        &born,
+        fleet.clone(),
+        bus.meter(),
+        prompt(false),
+        Card(Vec::new()),
+        mpsc::channel().0,
+    );
+    app.born(other.id(), &other_born);
+    let mut fault = None;
+    loop {
+        let signal = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("recording failure must end attendance, not park Ready");
+        let died = matches!(&signal, Signal::Transient(agent, Transient::Died) if *agent == id);
+        match signal {
+            Signal::Born(agent, born) => app.born(agent, &born),
+            Signal::Fact(agent, fact) => app.fact(agent, &fact),
+            Signal::Transient(agent, transient) => {
+                if agent == id {
+                    assert!(!matches!(&transient, Transient::State(AgentState::Ready)));
+                    if let Transient::Fault { text } = &transient {
+                        fault = Some(text.clone());
+                    }
+                }
+                app.transient(agent, transient, rx);
+            }
+        }
+        if died {
+            break;
+        }
+    }
+
+    assert!(born.recorder.check_available().is_err());
+    let fault = fault.expect("the terminal recording fault reaches the screen");
+    assert_fault_visible(&mut app, id, &fault);
+    assert!(matches!(
+        app.tabs.status(id).unwrap().state,
+        StateSpan::Ended
+    ));
+    assert!(app.tabs.lingering(id));
+    assert_eq!(app.tabs.focused(), other.id());
+    assert!(other.handle().is_live() && app.is_steerable());
+
+    let provider = scripted(
+        "test-model",
+        Script::new().then(Reply::text("still usable")),
+    );
+    assert!(matches!(
+        other.deliberate(
+            &DurableRoot::default().child(),
+            &provider,
+            Some(("independent work".into(), Voice::Human)),
+            None,
+            &bus.emitter(other.id()),
+        ),
+        Ok(Outcome::Complete)
+    ));
+    other
+        .check_available()
+        .expect("the other root's writer remains usable");
+    let context = format!("{:?}", other.rendered_messages());
+    assert!(context.contains("still usable"), "{context}");
+    drop(other);
+    fleet.wait_empty();
+}
+
+#[test]
+fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
+    use crate::agent::outcome::Outcome;
+    use crate::agent::spawn::{AsyncSpawn, spawn_async_with};
+    use crate::agent::testkit::{inbox, scripted, set_provider, trunk};
+    use crate::bus::{AgentOutcome, FleetBus, Item, Next};
+    use crate::provider::ProviderError;
+    use crate::provider::scripted::{Reply, Script};
+    use crate::record::{Display, Voice};
+    use ral_core::process::DurableRoot;
+
+    for poison in [false, true] {
+        let mut parent = trunk(true);
+        let fleet = parent.fleet.clone();
+        let child = parent.fork_named("failing").unwrap();
+        let id = child.id();
+        let recorder = child.recorder();
+        let handle = child.handle();
+        let path = child.log_dir().path().join("record.jsonl");
+        set_provider(
+            &child,
+            scripted(
+                "test-model",
+                Script::new().then(Reply::error(ProviderError::Other(
+                    "ordinary refusal".into(),
+                ))),
+            ),
+        );
+        let bus = FleetBus::session();
+        let parent_born = Born {
+            log_dir: parent.log_dir().clone(),
+            name: parent.handle().0.name.clone(),
+            parent: None,
+            resumed: None,
+            recorder: parent.recorder(),
+        };
+        let mut app = App::new(
+            parent.id(),
+            &parent_born,
+            fleet.clone(),
+            bus.meter(),
+            prompt(false),
+            Card(Vec::new()),
+            mpsc::channel().0,
+        );
+        let (arrived, finalizing) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        spawn_async_with(
+            child,
+            AsyncSpawn {
+                name: "failing".into(),
+                prompt: Some("finish attendance first".into()),
+                resumed: None,
+            },
+            &bus.emitter(parent.id()),
+            move || {
+                arrived.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            },
+        )
+        .unwrap();
+        finalizing
+            .recv_timeout(Duration::from_secs(5))
+            .expect("attendance reaches the finalization boundary while still usable");
+        recorder.check_available().unwrap();
+        if poison {
+            recorder.poison_append();
+        } else {
+            recorder.fail_after(11);
+            assert!(
+                recorder
+                    .emit(Display::Answer {
+                        text: "late".into()
+                    })
+                    .is_err()
+            );
+        }
+        let cause = recorder.check_available().unwrap_err().to_string();
+        let bytes = std::fs::read(&path).unwrap();
+        release.send(()).unwrap();
+
+        let rx = bus.rx();
+        let mut fault = None;
+        loop {
+            let signal = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the owner must retire");
+            match signal {
+                Signal::Born(agent, born) => {
+                    app.born(agent, &born);
+                    app.tabs.set_focus(agent);
+                }
+                Signal::Fact(agent, fact) => app.fact(agent, &fact),
+                Signal::Transient(agent, transient) => {
+                    if agent == id {
+                        match &transient {
+                            Transient::Fault { text } => {
+                                assert!(text.contains(&cause), "{text}");
+                                fault = Some(text.clone());
+                            }
+                            Transient::Died => {
+                                assert_fault_visible(
+                                    &mut app,
+                                    id,
+                                    fault.as_deref().expect("fault precedes Died"),
+                                );
+                                assert!(!handle.is_live());
+                                let report =
+                                    pop(inbox(&parent)).expect("parent retirement precedes Died");
+                                assert!(matches!(report, Next::Item(Item::Agent(result))
+                                    if matches!(result.outcome, AgentOutcome::Failed(ref why) if *why == cause)));
+                                app.transient(agent, transient, rx);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    app.transient(agent, transient, rx);
+                }
+            }
+        }
+        assert_fault_visible(&mut app, id, fault.as_deref().unwrap());
+        assert!(matches!(
+            app.tabs.status(id).unwrap().state,
+            StateSpan::Ended
+        ));
+        assert!(app.tabs.lingering(id));
+        assert_eq!(app.tabs.focused(), parent.id());
+        let frozen = text(&mut app, id);
+        app.transient(id, Transient::State(AgentState::Ready), rx);
+        app.transient(id, Transient::Token("must not revive".into()), rx);
+        assert!(matches!(
+            app.tabs.status(id).unwrap().state,
+            StateSpan::Ended
+        ));
+        assert_eq!(text(&mut app, id), frozen);
+        assert_eq!(recorder.check_available().unwrap_err().to_string(), cause);
+        assert_eq!(
+            recorder
+                .emit(Display::Answer {
+                    text: "refused".into()
+                })
+                .unwrap_err()
+                .to_string(),
+            cause,
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(app.is_steerable() && parent.handle().is_live());
+        let provider = scripted(
+            "test-model",
+            Script::new().then(Reply::text("still usable")),
+        );
+        assert!(matches!(
+            parent.deliberate(
+                &DurableRoot::default().child(),
+                &provider,
+                Some(("independent work".into(), Voice::Human)),
+                None,
+                &bus.emitter(parent.id()),
+            ),
+            Ok(Outcome::Complete)
+        ));
+        assert!(parent.check_available().is_ok());
+        assert!(format!("{:?}", parent.rendered_messages()).contains("still usable"));
+        drop(parent);
+        fleet.wait_empty();
+    }
+}
+
+#[test]
+fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
+    use crate::agent::spawn::{AsyncSpawn, spawn_async};
+    use crate::agent::testkit::trunk;
+    use crate::bus::FleetBus;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct EngineTeardown {
+        entered: mpsc::Sender<()>,
+        release: std::sync::Mutex<mpsc::Receiver<()>>,
+        complete: Arc<AtomicBool>,
+    }
+
+    impl ral_core::shell::runtime::DeferredSink for EngineTeardown {
+        fn deliver(&self, _values: Vec<ral_core::data::FOValue>) {}
+    }
+
+    impl Drop for EngineTeardown {
+        fn drop(&mut self) {
+            self.entered.send(()).unwrap();
+            self.release
+                .get_mut()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            self.complete.store(true, Ordering::Release);
+        }
+    }
+
+    for poison in [false, true] {
+        let root = trunk(true);
+        let id = root.id();
+        let handle = root.handle();
+        let fleet = root.fleet.clone();
+        let recorder = root.recorder();
+        let bus = FleetBus::session();
+        let emit = bus.emitter(id);
+        let (entered, tearing_down) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let complete = Arc::new(AtomicBool::new(false));
+        root.engine.install_raw(Arc::new(EngineTeardown {
+            entered,
+            release: std::sync::Mutex::new(held),
+            complete: complete.clone(),
+        }));
+        if poison {
+            recorder.poison_append();
+        } else {
+            recorder.fail_after(7);
+        }
+        spawn_async(
+            root,
+            AsyncSpawn {
+                name: "main".into(),
+                prompt: Some("recording must fail before provider work".into()),
+                resumed: None,
+            },
+            &emit,
+        )
+        .unwrap();
+        let rx = bus.rx();
+        let Signal::Born(born_id, born) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("birth precedes worker output");
+        };
+        assert_eq!(born_id, id);
+        let mut app = App::new(
+            id,
+            &born,
+            fleet.clone(),
+            bus.meter(),
+            prompt(false),
+            Card(Vec::new()),
+            mpsc::channel().0,
+        );
+        tearing_down.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!handle.is_live());
+        assert!(!fleet.is_empty(), "the only owner is still tearing down");
+        assert!(!complete.load(Ordering::Acquire));
+        let mut signals = Vec::new();
+        while let Ok(signal) = rx.try_recv() {
+            assert!(!matches!(&signal, Signal::Transient(_, Transient::Died)));
+            signals.push(signal);
+        }
+        release.send(()).unwrap();
+        fleet.wait_empty();
+        assert!(complete.load(Ordering::Acquire));
+        // The TUI's final uncapped, nonblocking drain after observing empty.
+        while let Ok(signal) = rx.try_recv() {
+            signals.push(signal);
+        }
+        let mut deaths = 0;
+        let mut fault = None;
+        for signal in signals {
+            match signal {
+                Signal::Born(agent, born) => app.born(agent, &born),
+                Signal::Fact(agent, fact) => app.fact(agent, &fact),
+                Signal::Transient(agent, transient) => {
+                    assert_eq!(agent, id);
+                    match &transient {
+                        Transient::Fault { text } => fault = Some(text.clone()),
+                        Transient::Died => {
+                            deaths += 1;
+                            assert_fault_visible(
+                                &mut app,
+                                id,
+                                fault.as_deref().expect("the fault precedes Died"),
+                            );
+                        }
+                        _ => {}
+                    }
+                    app.transient(agent, transient, rx);
+                }
+            }
+        }
+        assert_eq!(deaths, 1, "empty census certifies the final cue is queued");
+        assert!(recorder.check_available().is_err());
+        assert!(matches!(
+            app.tabs.status(id).unwrap().state,
+            StateSpan::Ended
+        ));
+        assert!(app.tabs.lingering(id));
+        assert!(!app.is_steerable());
+        assert_fault_visible(&mut app, id, fault.as_deref().unwrap());
+    }
 }
 
 #[test]
@@ -718,14 +1169,28 @@ fn a_clear_wipes_the_pins_and_the_state() {
         &rx,
     );
     let status = app.tabs.status(root.id()).expect("root has a status");
-    assert!(status.state.state == AgentState::Evaluating && !status.pins().is_empty());
+    assert!(
+        matches!(
+            status.state,
+            StateSpan::Active {
+                state: AgentState::Evaluating,
+                ..
+            }
+        ) && !status.pins().is_empty()
+    );
 
     let _recorded = recorder.emit(Protocol::Cleared).expect("the log appends");
     hear(&mut app);
 
     let status = app.tabs.status(root.id()).expect("root has a status");
     assert!(
-        status.state.state == AgentState::Ready && status.pins().is_empty(),
+        matches!(
+            status.state,
+            StateSpan::Active {
+                state: AgentState::Ready,
+                ..
+            }
+        ) && status.pins().is_empty(),
         "the clear wiped both"
     );
 }

@@ -11,6 +11,10 @@ use crate::record::Forensic;
 impl Agent {
     /// Survey the context or open a session from it; it is left as it was.
     pub(crate) fn read(&self, cmd: &Read, emit: &Emitter) {
+        if let Err(error) = self.check_available() {
+            self.recorder().report_fault(&error);
+            return;
+        }
         match cmd {
             Read::Hatch { memory, name } => {
                 match crate::agent::spawn::spawn_root(self, *memory, name.clone(), emit) {
@@ -27,6 +31,10 @@ impl Agent {
 
     /// Rewrite or end the context; `Break` ends the attend loop.
     pub(crate) fn rewrite(&mut self, cmd: &Rewrite, emit: &Emitter) -> ControlFlow<()> {
+        if let Err(error) = self.check_available() {
+            self.recorder().report_fault(&error);
+            return ControlFlow::Break(());
+        }
         match cmd {
             Rewrite::Clear => {
                 if let Err(error) = self.clear() {

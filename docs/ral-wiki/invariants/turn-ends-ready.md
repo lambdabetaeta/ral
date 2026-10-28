@@ -1,4 +1,4 @@
-# An exchange ends ready
+# An exchange ends ready or explicitly unavailable
 
 An **exchange** here is a human round — a prompt and all the work it draws,
 the same unit the fleet's clock counts. It is not a unit of the context, which
@@ -31,10 +31,13 @@ Consecutive same-role messages are routine and reach the provider as written
 `tool_use` block is the shape that is actually illegal, and it is the one the
 phases exist to prevent.
 
-The invariant that keeps the loop sound: **`Agent::take_up` never hands control
-back to `Agent::attend`'s loop until a fresh prompt is admissible, however the
-exchange ended** — a clean reply, a user cancellation, or a surfaced provider
-error. `Agent::deliberate` commits a prompt (or a tool-result batch) before the
+The owner boundary has two outcomes: **a fresh prompt is admissible and the
+session is usable, or recording has failed and the session is explicitly
+unavailable.** A clean reply, user cancellation or provider error normally
+leaves the former. A failed mandatory repair cannot: `Context` remains the
+fold of committed records, never an invented ready state. The affected owner
+ends with a recording failure, retires its work and accepts no more requests;
+other sessions remain independent. `Agent::deliberate` commits a prompt (or a tool-result batch) before the
 round-trip it drives, so a failure between that commit and the next assistant
 reply leaves the machine in an `AwaitingAssistant*` phase with no reply
 recorded. That phase is now a legal resting place, and costs nothing:
@@ -42,9 +45,9 @@ recorded. That phase is now a legal resting place, and costs nothing:
 with `QuiesceReason::Replied`/`Cancelled`, `take_up` calls
 `quiesce(QuiesceReason::Aborted)` whenever `is_ready` does not already hold —
 whether `deliberate` returned cleanly or was caught out of a panic — and
-`Agent::attend` (with its bounded twin `attend_backlog`) repeats the check with
-a `debug_assert` once its own loop exits, a backstop against a future exit path
-that bypasses `take_up`.
+`Agent::attend` repeats reconciliation on exit, returning a recording failure
+if it cannot commit. Its readiness assertion applies only to usable sessions,
+a backstop against a future exit path that bypasses `take_up`.
 
 `quiesce` records only what the log still owes, and never a turn the model did
 not take:
@@ -94,10 +97,15 @@ refuses the same turn, and that refusal names the closed turns of the work in
 hand, which are readable
 ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
-The hard rule: a path that ends an exchange must leave a fresh prompt
-admissible. Add a new exchange-ending outcome through `quiesce` (extend
-`QuiesceReason`), never by returning with tool calls unanswered. Eviction
-reads `is_ready` too ([[map/exarch/agent|agent]] `can_evict`).
+The hard rule: a usable session ends an exchange prompt-admissible. Add a
+new exchange-ending outcome through fallible `quiesce` (extend
+`QuiesceReason`), never by pretending an uncommitted tool result exists.
+Failed writes are terminal for the shared writer, including failures first
+encountered by display or forensic producers. After storage is repaired,
+explicit resume reconstructs the durable prefix and commits any repair still
+owed before admitting work. No automatic retry or alternate in-memory log
+supplies an unavailable session's authority. Eviction reads `is_ready` too
+([[map/exarch/agent|agent]] `can_evict`).
 
 See also [[internals/session-record|session-record]] (the durable protocol and
 its model fold),

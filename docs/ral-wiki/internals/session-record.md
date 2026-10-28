@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 62f8f2a9
-verified_at_date: 2026-10-19
+verified_at_commit: 2b930e85
+verified_at_date: 2026-10-28
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable]
 ---
 
@@ -23,11 +23,26 @@ protects the whole critical section:
 
 1. Serialize the record under its append timestamp as an `Entry` envelope, from
    a borrow.
-2. Write and flush the line.
+2. Write the complete serialized line directly to its owned `File`.
 3. Advance the `Seq` and byte cursor and build the `Recorded<Record>` locus.
 4. Meter usage where applicable and publish `Signal::Fact(AgentId, recorded)`
    through the attached weak fleet sink before releasing the lock; the record
    is cloned only for that channel.
+
+**An actual write failure is terminal for every clone of that writer.** The
+first failure retains its cause in a shared monotone latch; later appends
+refuse before serialization, writing or publication. Availability observation
+reads that latch and mutex poison without taking the append lock, so an inbox
+park decision cannot deadlock with a publisher posting back to the inbox.
+Append itself rechecks availability under its lock. Committed sequence and byte cursors do not advance,
+and the owned `File` has no user-space buffer to flush on drop. Serialization
+failure before I/O does not fault the physical writer. An ordinary write fault
+still permits transient publication. If append state is mutex-poisoned,
+terminal lifecycle delivery uses the owner's independent fleet sink without
+recovering the poisoned state; stderr remains the diagnostic fallback. The
+final failure report precedes the terminal death cue, never a durable retry. Records
+are surrendered to the OS, not `fsync`ed: process-crash durability is not a
+power-loss guarantee.
 
 Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
@@ -378,7 +393,12 @@ forensic one through a `Selection`. `Log::read` reads only through the last
 newline, so an unterminated tail is never parsed; one function in `log.rs`
 answers that length for the reader and for the quarantine. There is no second
 fold and nothing to compare: what guards a read-back is the digest, at the moment
-of the read, where the risk is. A missing `record.jsonl` is a named refusal, not
+of the read, where the risk is. A failed live append leaves at most one terminal
+partial line: that writer never appends behind it. Live catch-up remains
+bounded by the last committed byte cursor. Explicit resume quarantines an
+unterminated tail, refuses any complete malformed line, and reopens at the
+measured complete prefix. A complete valid line written before a crash but
+not yet published is recovered by replay. A missing `record.jsonl` is a named refusal, not
 an invitation to start an empty resumed session. `AgentLog::resume` takes
 the session id alone: the name is `live_roots`', read off the same head record,
 and `live_roots` refuses a session whose record does not parse rather than
@@ -441,9 +461,18 @@ resumed root's tab reads only the bytes that predate this run and then draws the
 "resumed" note at the true boundary. Cumulative usage comes from the replayed
 forensic deltas.
 
-`/clear` cancels the in-flight exchange, abandons the agent's subtree, reboots the
-shell, and records `Protocol::Cleared` through the same seam and in the same
-file. The frontend learns of it from the record itself: the mirror steps
+**`/clear` prepares, commits, then installs.** Its separately requested
+interrupt cancels the in-flight exchange. The owner preflights context
+readiness and engine rebirth eligibility, captures a non-destructive inbox
+boundary, and boots a replacement without touching the live engine. Only a
+committed `Protocol::Cleared` permits discarding old-boundary input,
+abandoning work and schedules, replacing the engine and resetting pins and
+readings. Refusal, failed preparation or failed append leaves those live
+resources untouched. Human input arriving after the captured boundary
+survives, including a suffix coalesced with an older prompt; cancelled old
+producer scopes cannot deliver into the new context. The inbox boundary is
+applied before outgoing engine teardown. No fallible boot remains after the
+commit. The frontend learns of it from the record itself: the mirror steps
 `Delta::Cleared`, retires every block it held, resets its open lines and scroll
 state, redraws the opening, and `App` retires the cleared agent's descendant
 tabs. No file is replaced, so existing `Emitter` clones and the attached bus keep

@@ -10,7 +10,7 @@ use crate::agent::handle::Shared;
 use crate::agent::index::BuiltinIndex;
 use crate::agent::{Agent, AgentHandle, LogCell, ProviderHandle, Readings, ReplyCell, Role};
 use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
-use crate::bus::{Emitter, Inbox, Mailbox, Queue};
+use crate::bus::{Emitter, Inbox, Mailbox};
 use crate::provider::{Provider, Toolset};
 use crate::record::{AgentId, AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
 use crate::shell_eval::builtins;
@@ -456,14 +456,16 @@ impl Agent {
         .map_err(|why| why.to_string())
     }
     pub(crate) fn clear(&mut self) -> io::Result<()> {
-        if !self.engine.rebootable() {
-            return Err(io::Error::other(Engine::CANNOT_REBOOT));
-        }
-        self.abandon(Queue::Discard);
-        self.pins.lock_ignore_poison().clear();
-        self.engine.reboot().map_err(io::Error::other)?;
+        self.log.borrow().prepare_clear()?;
+        let boundary = self.inbox.clear_boundary();
+        let fresh = self.engine.prepare_rebirth().map_err(io::Error::other)?;
         self.log.borrow_mut().clear()?;
+
+        self.inbox.apply_clear(boundary);
+        self.schedules.clear();
+        self.pins.lock_ignore_poison().clear();
         self.readings = self.readings.reborn();
+        self.engine.install_rebirth(fresh);
         Ok(())
     }
     pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {

@@ -121,6 +121,8 @@ pub struct AgentLog {
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
     /// `Agent::couple` has attached, in that order, under one lock.
     seam: crate::record::Emitter,
+    /// A required repair failed; only explicit resume may reconstruct it.
+    unavailable: Option<io::Error>,
 }
 
 /// What a `mnemon` child is forked with: its parent's turn table and residues.
@@ -201,6 +203,7 @@ impl AgentLog {
         system: &str,
         memory: Memory,
     ) -> io::Result<Self> {
+        self.check_available()?;
         let mut log = Self::open_fresh(self.sessions_root.clone(), child_id)?;
         let inherited = (memory == Memory::Mnemon).then(|| self.inherited_context());
         log.open(Some(self.id), name, model, account, system, inherited)?;
@@ -220,6 +223,14 @@ impl AgentLog {
     /// Returns an error when the log is missing, malformed, foreign, or
     /// cannot be reopened after validation.
     pub fn resume(sessions_root: &OwnDir, session_id: AgentId) -> io::Result<Self> {
+        Self::resume_with(sessions_root, session_id, crate::record::Emitter::append_to)
+    }
+
+    fn resume_with(
+        sessions_root: &OwnDir,
+        session_id: AgentId,
+        reopen: impl FnOnce(&OwnDir) -> io::Result<crate::record::Emitter>,
+    ) -> io::Result<Self> {
         let dir = sessions_root.dir(&session_id.to_string())?;
         let record_path = dir.path().join(RECORD);
         if dir.stat(RECORD).is_none() {
@@ -239,7 +250,7 @@ impl AgentLog {
                     ),
                 )
             })?;
-        let seam = crate::record::Emitter::append_to(&dir)?;
+        let seam = reopen(&dir)?;
         let mut resumed = Self {
             id: session_id,
             dir,
@@ -249,9 +260,10 @@ impl AgentLog {
             context,
             seam,
             learned: selection.learned(),
+            unavailable: None,
         };
         if !resumed.context.is_ready() {
-            resumed.quiesce(QuiesceReason::Aborted);
+            resumed.quiesce(QuiesceReason::Aborted)?;
         }
         Ok(resumed)
     }
@@ -281,6 +293,7 @@ impl AgentLog {
         system: &str,
         at_unix_ms: u64,
     ) -> io::Result<()> {
+        self.check_available()?;
         self.seam
             .emit(Forensic::SessionResumed {
                 model: model.name.clone(),
@@ -319,6 +332,15 @@ impl AgentLog {
     /// takes for themselves.
     pub fn record_emitter(&self) -> crate::record::Emitter {
         self.seam.clone()
+    }
+
+    /// # Errors
+    /// The shared writer failed, or a mandatory protocol repair could not commit.
+    pub fn check_available(&self) -> io::Result<()> {
+        if let Some(error) = &self.unavailable {
+            return Err(io::Error::new(error.kind(), error.to_string()));
+        }
+        self.seam.check_available()
     }
 
     pub fn id(&self) -> AgentId {
@@ -392,6 +414,7 @@ impl AgentLog {
     /// # Errors
     /// The session is not awaiting an assistant reply.
     pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
+        self.check_available().map_err(|error| error.to_string())?;
         if !self.context.is_awaiting_assistant() {
             return Err(format!(
                 "cannot render request while the session is {}",
@@ -537,15 +560,30 @@ impl AgentLog {
     /// the log still owes: an answer to tool calls that never ran, and a
     /// capstone for work that ended on `reply`.  Work abandoned short of a
     /// reply is left as it lies, and the next prompt opens a turn after it.
-    pub fn quiesce(&mut self, reason: QuiesceReason) {
+    ///
+    /// # Errors
+    /// A required repair could not commit; the session becomes unavailable.
+    pub fn quiesce(&mut self, reason: QuiesceReason) -> io::Result<()> {
+        self.check_available()?;
         for record in self.context.quiesce_records(reason) {
-            self.record_protocol_lossy(record);
+            if let Err(error) = self.record_protocol(record) {
+                let error = io::Error::new(
+                    error.kind(),
+                    format!(
+                        "session {} is unavailable: required protocol repair failed: {error}; repair storage and resume the session",
+                        self.id
+                    ),
+                );
+                self.unavailable = Some(io::Error::new(error.kind(), error.to_string()));
+                return Err(error);
+            }
         }
         // Only a cancellation earns its own breadcrumb; an abort's marker is
         // the `ProviderError` already on disk.
         if matches!(reason, QuiesceReason::Cancelled) {
             self.seam.emit_or_report(Forensic::Cancelled);
         }
+        self.check_available()
     }
 
     /// The span a forced eviction would take to spend no more
@@ -591,13 +629,19 @@ impl AgentLog {
     ///
     /// # Errors
     /// The session is awaiting tool results, or recording failed.
-    pub(crate) fn clear(&mut self) -> io::Result<()> {
+    pub(crate) fn prepare_clear(&self) -> io::Result<()> {
+        self.check_available()?;
         if !self.context.is_ready() {
             return Err(io::Error::other(format!(
                 "cannot clear while the session is {}",
                 self.context.waiting_for()
             )));
         }
+        Ok(())
+    }
+
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
+        self.prepare_clear()?;
         self.record_protocol(Protocol::Cleared)
     }
 
@@ -617,6 +661,7 @@ impl AgentLog {
             _scratch: None,
             learned: None,
             seam,
+            unavailable: None,
         })
     }
 
@@ -660,17 +705,9 @@ impl AgentLog {
     /// A failed append to the one authoritative log is a session error, and so
     /// is a link whose ancestor file will not read back.
     fn record_protocol(&mut self, p: Protocol) -> io::Result<()> {
+        self.check_available()?;
         let recorded = self.seam.emit(p)?;
         self.advance(recorded)
-    }
-
-    /// [`Self::record_protocol`] with its failure reported as a fault: its
-    /// remit is exactly the harness-synthesized records where refusing would
-    /// wedge the session — what [`Self::quiesce`] owes.
-    fn record_protocol_lossy(&mut self, p: Protocol) {
-        if let Err(error) = self.record_protocol(p) {
-            self.seam.report_fault(&error);
-        }
     }
 }
 

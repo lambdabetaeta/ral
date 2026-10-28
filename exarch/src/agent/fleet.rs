@@ -7,6 +7,7 @@ use crate::app::Scratch;
 use crate::bus::{Lease, Pumping, Refused};
 use crate::enquiry::check_name;
 use crate::provider::{Bureau, Toolset, roles::Roles};
+use crate::record::{Publish, Transient};
 use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
@@ -167,6 +168,7 @@ impl Census {
             census: self.clone(),
             id,
             name,
+            terminal: None,
         })
     }
     pub(crate) fn is_empty(&self) -> bool {
@@ -181,12 +183,13 @@ impl Census {
         );
     }
 }
-/// A name and a census entry; dropping it releases both silently.
+/// A name and a census entry; terminal publication precedes their release.
 #[must_use = "a claim only holds its name until it is dropped"]
 pub(crate) struct Claim {
     census: Arc<Census>,
     id: TenantId,
     name: Arc<str>,
+    terminal: Option<Box<dyn Publish>>,
 }
 impl Claim {
     pub(crate) fn name(&self) -> &str {
@@ -220,6 +223,9 @@ impl Claim {
 }
 impl Drop for Claim {
     fn drop(&mut self) {
+        if let Some(sink) = self.terminal.take() {
+            sink.transient(Transient::Died);
+        }
         let mut registry = self.census.registry.lock_ignore_poison();
         registry.names.remove(&*self.name);
         let tenant = registry.tenants.remove(&self.id);
@@ -238,11 +244,13 @@ impl Tenancy {
     pub(crate) fn claim(&self) -> &Claim {
         &self.claim
     }
-    /// Boot a fresh engine; on success certify and replace the old one.
-    pub(crate) fn reboot(&mut self) -> Result<(), String> {
-        let fresh = self.engine.reborn()?;
+    /// Publish after engine drop, before census release, without its lock.
+    pub(crate) fn publish_death_on_release(&mut self, sink: Box<dyn Publish>) {
+        self.claim.terminal = Some(sink);
+    }
+    /// Install an already-booted engine and certify the outgoing one.
+    pub(crate) fn install(&mut self, fresh: Engine) {
         self.claim.certify(&mem::replace(&mut self.engine, fresh));
-        Ok(())
     }
 }
 impl Deref for Tenancy {

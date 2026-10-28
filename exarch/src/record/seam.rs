@@ -83,6 +83,27 @@ impl Emitter {
         self.log.since(after)
     }
 
+    /// Observe this shared writer's availability without taking the append lock.
+    /// An observation reserves nothing; append checks again under the lock.
+    ///
+    /// # Errors
+    /// Returns the terminal write failure, or a poisoned append-lock error.
+    pub fn check_available(&self) -> io::Result<()> {
+        self.log.check_available()
+    }
+
+    /// Fail after writing `bytes` more bytes to this writer's real file.
+    #[cfg(test)]
+    pub(crate) fn fail_after(&self, bytes: usize) {
+        self.log.fail_after(bytes);
+    }
+
+    /// Panic while holding the actual append lock, without changing its state.
+    #[cfg(test)]
+    pub(crate) fn poison_append(&self) {
+        self.log.poison_append();
+    }
+
     /// Append `record` and publish it, in that order, under one lock.
     ///
     /// # Errors
@@ -114,40 +135,17 @@ impl Emitter {
     /// loses the diagnostic outright even before a printer draws the chrome
     /// lane it lands in.
     pub fn report_fault(&self, error: &io::Error) {
+        Self::report_fault_with(error, |fault| self.transient(fault));
+    }
+
+    /// Terminal owners retain a publisher independent of the append lock.
+    pub(crate) fn report_fault_with(error: &io::Error, publish: impl FnOnce(Transient)) {
         let text = format!("a record was not appended to record.jsonl: {error}");
-        self.transient(Transient::Fault { text: text.clone() });
+        publish(Transient::Fault { text: text.clone() });
         ral_core::errln!("exarch: {text}");
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
-mod tests {
-    use super::*;
-    use crate::bus::{FleetSink, Signal, UsageMeter, channel};
-    use crate::record::AgentId;
-
-    #[test]
-    fn a_seam_fault_reaches_the_screen_as_a_transient() {
-        let dir = OwnDir::for_test("seam-fault").expect("a test directory");
-        let emit = Emitter::create(&dir).expect("temp record log");
-        let (tx, rx) = channel();
-        emit.attach(Box::new(FleetSink {
-            id: AgentId::new(7),
-            tx: tx.downgrade(),
-            meter: UsageMeter::default(),
-        }));
-
-        emit.report_fault(&io::Error::other("disk is full"));
-
-        match rx.recv().expect("the fault publishes") {
-            Signal::Transient(id, Transient::Fault { text }) => {
-                assert_eq!(id, AgentId::new(7));
-                assert!(text.contains("disk is full"), "{text}");
-            }
-            Signal::Fact(..) | Signal::Born(..) | Signal::Transient(..) => {
-                panic!("expected a Transient::Fault")
-            }
-        }
-    }
-}
+mod tests;

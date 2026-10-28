@@ -39,6 +39,9 @@ impl Agent {
         self.couple(emit);
         let mut settled = None;
         let lost = loop {
+            if self.check_available().is_err() {
+                break None;
+            }
             if let Some(s) = self.engine.severed() {
                 break Some(s);
             }
@@ -78,14 +81,20 @@ impl Agent {
                 }
             }),
         };
-        self.abort_unready();
+        if let Err(error) = self.abort_unready() {
+            self.end_unavailable(&error);
+            return AgentOutcome::Failed(error.to_string());
+        }
         debug_assert!(
             self.log.borrow().context().is_ready(),
-            "attend must leave the agent ReadyForUser"
+            "a usable attended session must admit a fresh prompt"
         );
         settled
     }
     fn draw(&self) -> Option<Drawn> {
+        if self.check_available().is_err() {
+            return None;
+        }
         if self.inbox.is_empty() {
             let mode = self.park_snapshot();
             self.inbox.set_resting(mode == ParkMode::Engaged);
@@ -95,6 +104,12 @@ impl Agent {
         self.inbox.draw(|state| self.park_mode(state))
     }
     fn take_up(&mut self, drawn: Drawn, emit: &Emitter) -> Result<Step, Severed> {
+        if let Err(error) = self.check_available() {
+            return Ok(Step::settled(
+                AgentOutcome::Failed(error.to_string()),
+                ControlFlow::Break(()),
+            ));
+        }
         let Drawn { next, opening } = drawn;
         let item = match &next {
             Next::Read(cmd) => {
@@ -119,6 +134,12 @@ impl Agent {
                 Err(error)
             }
             Err(Fault::Severed(s)) => return Err(s),
+            Err(Fault::Unavailable(why)) => {
+                return Ok(Step::settled(
+                    AgentOutcome::Failed(why),
+                    ControlFlow::Break(()),
+                ));
+            }
             Err(Fault::Log(why) | Fault::Panicked(why)) => {
                 self.note_error(&why);
                 return Ok(Step::settled(
@@ -127,6 +148,12 @@ impl Agent {
                 ));
             }
         };
+        if self.check_available().is_err() {
+            return Ok(Step::settled(
+                agent_outcome(&outcome),
+                ControlFlow::Break(()),
+            ));
+        }
         self.follow_up(outcome.as_ref())?;
         let flow = if matches!(
             (&self.handle.0.role, &outcome),
@@ -149,7 +176,8 @@ impl Agent {
                 emit,
             )
         }));
-        self.abort_unready();
+        self.abort_unready()
+            .map_err(|error| Fault::Unavailable(error.to_string()))?;
         attempt.unwrap_or_else(|payload| {
             Err(Fault::Panicked(format!(
                 "{WORKER_PANIC_PREFIX}{}",
@@ -162,6 +190,7 @@ impl Agent {
             error: error.clone(),
         });
         if let ProviderError::Refused(refusal) = error
+            && self.check_available().is_ok()
             && self.resumes_at_reset()
             && let Recovery::Deferred(at) = refusal.recovery()
         {
@@ -182,6 +211,9 @@ impl Agent {
         else {
             return Ok(());
         };
+        if self.check_available().is_err() {
+            return Ok(());
+        }
         match self.log.borrow().context().current_prompt() {
             Some(prompt) => self.inbox.nudge(prompt, text),
             None => self.note_error(&format!(
@@ -207,7 +239,7 @@ impl Agent {
         self.residency(state.leased(), state.has_busy_children())
     }
     fn residency(&self, leased: bool, busy: bool) -> ParkMode {
-        if self.engine.severed().is_some() {
+        if self.engine.severed().is_some() || self.check_available().is_err() {
             return ParkMode::Quiesce;
         }
         if matches!(self.handle.0.role, Role::Converses) && self.fleet.launch.trunk.attended() {
@@ -250,11 +282,13 @@ impl Agent {
             )),
         }
     }
-    fn abort_unready(&self) {
+    pub(super) fn abort_unready(&self) -> std::io::Result<()> {
         let mut log = self.log.borrow_mut();
+        log.check_available()?;
         if !log.context().is_ready() {
-            log.quiesce(QuiesceReason::Aborted);
+            log.quiesce(QuiesceReason::Aborted)?;
         }
+        Ok(())
     }
 }
 fn idle_state(mode: ParkMode) -> AgentState {

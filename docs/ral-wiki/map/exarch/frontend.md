@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 578dcf04
+generated_at_commit: 2b930e85
 generated_at_date: 2026-10-28
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
@@ -24,8 +24,9 @@ mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
 - Results are vouched by parental work, wakeups by arming work, nudges by
   their exchange, worker batches by engine incarnation, and messages by the
   sender's containing scope. Stop preserves worker batches and messages from
-  outside the abandoned tree; `/clear` discards the queue and cancels the old
-  incarnation, fencing future batches too.
+  outside the abandoned tree. A committed `/clear` discards its captured
+  queue boundary and cancels the old incarnation, fencing future batches
+  while preserving later human input.
 - Releasing a result's receipts and taking up a message's `Owed` are atomic
   with pop. Busy is receipts outstanding for the current work; each reply
   pays the debts it covers, and a dropped debt pays `Cancelled`.
@@ -71,7 +72,10 @@ mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
 - `record/seam.rs::Emitter::emit` appends each `Record` to `record.jsonl`
   and publishes its witnessed `Recorded<Record>` under the writer's mutex.
   `Protocol`, `Display` and `Forensic` are disjoint durable classes;
-  `Transient` has no sequence or durable form.
+  `Transient` has no sequence or durable form. The writer owns a `File`
+  directly; an actual write error latches terminal unavailability across
+  clones. `Emitter::check_available` exposes it without attempting another
+  record. Fault delivery remains transient, with stderr fallback.
 - `bus/signal.rs::Signal` is `Fact`, `Born`, or `Transient`, addressed by
   `AgentId`. `Emitter::child` publishes birth before that emitter can send
   any work. `bus/sink.rs::Sink` consumes `fact` / `transient`.
@@ -116,7 +120,10 @@ elapsed time, actual ending and how to use `await` / `workers`.
   human text remains queued for the next job.
 - Every job waits through `Fleet::wait_settled` for ended helpers' teardown
   inside the output pump before closing; if Stop wins that race, it settles again.
-  Missing remote teardown acknowledgment makes the conversation terminal.
+  Missing remote teardown acknowledgment or unavailable session recording
+  makes the conversation terminal. A fault first observed during final
+  draining cancels the affected life and requires another pumped settlement
+  of newly ended helpers before returning `JobEnd`.
   The next job, “Stopped.” and Synod's closing folder walk cannot overtake
   those writes or final output
   ([[decisions/260806_exchange-ends-at-fleet-quiescence|job settlement]]).
@@ -130,7 +137,9 @@ elapsed time, actual ending and how to use `await` / `workers`.
 
 - `record/session.rs::AgentLog` owns the model `Context` and record seam.
   `render_messages` builds the provider view on call; it is memoised nowhere.
-  `quiesce` leaves a fresh prompt admissible however attendance ends
+  Fallible `quiesce` commits owed protocol repairs before advancing the
+  fold. Success leaves a fresh prompt admissible; failure makes the owner
+  explicitly unavailable and reaches the host as a failed session
   ([[internals/session-record|session-record]],
   [[invariants/turn-ends-ready|exchange-ends-ready]]).
 - `record/log.rs::Log::since` fixes extent and read handle under the writer
@@ -163,8 +172,10 @@ elapsed time, actual ending and how to use `await` / `workers`.
   `Status` / `Life`; there is no special root tab. `Tabs::agent` resolves an
   `AgentHandle` through fleet names and checks id. Retained addresses hold
   no engine and cannot prolong teardown.
-- `Transient::Died` remains the ordered presentation death cue; buffered
-  records preceding it must still draw. Descendants retired by `/clear`
+- `Transient::Died` is the final owner presentation cue, after availability
+  classification, failure reporting and retirement. Terminal delivery uses
+  the owner's fleet sink even when append state is poisoned; the poisoned
+  log is never recovered. Buffered records preceding death must still draw. Descendants retired by `/clear`
   linger through the same path. After `LINGER`, scrollback, render memos and
   pins drop; held log directories remain for export.
 - Focus and matrix navigation are presentation identities. `matrix.rs`
@@ -281,8 +292,11 @@ elapsed time, actual ending and how to use `await` / `workers`.
   overlays run in the one UI loop; background results apply only to their
   originating overlay generation. `/rewind` previews and posts to the tab
   it opened on, not whichever tab later acquires focus.
-- The status rule times state transitions rather than arriving events;
-  usage and context figures use the same provider data as other frontends.
+- The status rule times state transitions rather than arriving events.
+  `StateSpan` is active activity or `Ended`; retirement cannot be overwritten
+  by a later Ready or streaming update. A recording failure is transient
+  error chrome followed by ordinary owner retirement, not a fake ready tab.
+  Usage and context figures use the same provider data as other frontends.
   `tui/resources.rs` adds frontend-owned probes to the owner's resource card.
 
 ## Keys and signals
@@ -299,8 +313,10 @@ elapsed time, actual ending and how to use `await` / `workers`.
   `dispatch_to_report`, whose own dispatcher strikes its own id. Cancellation
   never writes to a transport from a cancelling thread.
 - `AgentHandle::end`, `/close`, lease lapse and owner drop cancel life;
-  `/quit` cancels the fleet root. `/clear` checks rebootability before
-  abandoning work/queue and replacing its engine. No target is republished.
+  `/quit` cancels the fleet root. `/clear` prepares a replacement and commits
+  `Cleared` before abandoning old work/input or replacing its engine.
+  A failed prepare/commit preserves live resources; a successful clear
+  retains input posted after its captured boundary. No target is republished.
 - Overlays consume their close gestures without cancelling work; matrix
   Esc leaves navigation. Prompt searches consume their own Esc / Ctrl-C, and
   Ctrl-C copies a prompt selection when present; only after these owners
