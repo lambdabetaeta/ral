@@ -1,11 +1,10 @@
 use super::super::block::Chrome;
 use super::*;
 use crate::agent::fleet::Fleet;
-use crate::agent::testkit::{TestAgentSpec, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
 
-/// A root that stays resolvable for as long as the returned `Arc` lives,
-/// which is the whole of each test.
-fn root(idle: Duration) -> (Arc<Fleet>, Arc<Agent>) {
+/// A root that stays resolvable while its fixture lives.
+fn root(idle: Duration) -> (Arc<Fleet>, TestAgent) {
     let fleet = Fleet::for_test();
     let root = test_agent(
         &fleet,

@@ -119,7 +119,7 @@ fn resource_rows_survey_the_agents_accumulators() {
         runtime.install_builtins(&RESOURCES_TEST_BUILTINS);
     });
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
 
     session.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
     session.ral(

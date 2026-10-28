@@ -52,6 +52,11 @@ impl Token {
         self.0.fetch_max(cause as u8, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub(crate) fn cause(&self) -> Option<CancelCause> {
+        CancelCause::from_repr(self.0.load(Ordering::Relaxed))
+    }
+
     /// Clear a bare interrupt, leaving any terminate-class cause in force: an
     /// exchange boundary must never erase a cascade cancellation that landed
     /// between the attend loop's pop and this reset.
@@ -102,13 +107,6 @@ impl Reach {
     pub(crate) fn interrupt(&self) {
         self.token.cancel(CancelCause::Interrupted);
         self.target.interrupt();
-    }
-
-    /// End the agent across both layers: the token the attend loop polls and
-    /// its engine's durable root.
-    pub(crate) fn cancel(&self, cause: CancelCause) {
-        self.token.cancel(cause);
-        self.target.terminate();
     }
 }
 
@@ -174,7 +172,7 @@ mod tests {
             "an interrupt unwinds the exchange and never ends the agent"
         );
 
-        reach.cancel(CancelCause::Terminated);
+        agent.cancel(CancelCause::Terminated);
         assert!(agent.token.terminated(), "a cancel ends the agent");
     }
 }

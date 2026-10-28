@@ -2,7 +2,6 @@
 //! events through, and [`FleetBus`], which owns the channel and mints emitters.
 
 use super::channel::{BusReceiver, BusSender, WeakSender, channel};
-use super::inbox::{Inbox, Mailbox};
 use super::signal::Signal;
 use crate::provider::Usage;
 use crate::record::AgentId;
@@ -77,26 +76,15 @@ pub(crate) enum Children {
 pub struct Emitter {
     tx: BusSender,
     id: AgentId,
-    /// The owning session's mailbox — root's for the root emitter, the child's
-    /// own for a child.  Never another agent's.
-    mailbox: Mailbox,
     children: Children,
     meter: UsageMeter,
 }
 
 impl Emitter {
-    /// An emitter with an orphan mailbox — for tests, whose events land
-    /// nowhere durable.
     pub fn new(tx: BusSender, id: AgentId) -> Self {
-        Self::with_mailbox(tx, id, Inbox::new().mailbox())
-    }
-
-    /// [`Self::new`] over a caller-supplied mailbox.
-    pub(crate) fn with_mailbox(tx: BusSender, id: AgentId, mailbox: Mailbox) -> Self {
         Self {
             tx,
             id,
-            mailbox,
             children: Children::Muted,
             meter: UsageMeter::default(),
         }
@@ -110,23 +98,20 @@ impl Emitter {
         Self {
             tx,
             id,
-            mailbox: Inbox::new().mailbox(),
             children: Children::Muted,
             meter: self.meter.clone(),
         }
     }
 
-    /// A sibling emitter on the same channel for a child session: the child's
-    /// own mailbox, never the parent's, but the shared run meter.  Minting it
-    /// announces `born`, so the birth precedes every signal it can stamp.
-    pub(crate) fn child(&self, id: AgentId, mailbox: Mailbox, born: Born) -> Self {
+    /// A child emitter sharing the channel and run meter. Its birth precedes
+    /// every signal it can stamp.
+    pub(crate) fn child(&self, id: AgentId, born: Born) -> Self {
         if self.tx.send_signal(Signal::Born(id, born)).is_err() {
             // A dead channel: the birth goes nowhere, as all that follows would.
         }
         Self {
             tx: self.tx.clone(),
             id,
-            mailbox,
             children: self.children,
             meter: self.meter.clone(),
         }
@@ -141,12 +126,6 @@ impl Emitter {
             tx: self.tx.downgrade(),
             meter: self.meter.clone(),
         })
-    }
-
-    /// The owning session's mailbox, for `shell_eval::deferred_sink`, which
-    /// posts a spawn worker's surface batch back into this agent's own inbox.
-    pub(crate) fn mailbox(&self) -> Mailbox {
-        self.mailbox.clone()
     }
 
     /// This emitter's own agent id, for `shell_eval::deferred_sink`, which
@@ -196,14 +175,11 @@ impl FleetBus {
         &self.rx
     }
 
-    /// A root's emitter on this bus, stamping `mailbox`, its own; children
-    /// derive from it with [`Emitter::child`] / [`Emitter::muted_child`] and
-    /// inherit the meter.
-    pub(crate) fn emitter(&self, id: AgentId, mailbox: Mailbox) -> Emitter {
+    /// A root emitter; children inherit its run meter.
+    pub(crate) fn emitter(&self, id: AgentId) -> Emitter {
         Emitter {
             tx: self.tx.clone(),
             id,
-            mailbox,
             children: self.children,
             meter: self.meter.clone(),
         }
@@ -228,7 +204,7 @@ pub(crate) fn dummy_emitter() -> (Emitter, BusReceiver) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FleetBus, Inbox};
+    use super::FleetBus;
 
     /// Accounting follows the fact through the record seam, not its emitter:
     /// no sink ever sees the muted child's usage, yet the run total includes
@@ -253,7 +229,7 @@ mod tests {
         };
 
         let bus = FleetBus::per_exchange();
-        let root = bus.emitter(AgentId::new(0), Inbox::new().mailbox());
+        let root = bus.emitter(AgentId::new(0));
         let child = root.muted_child(AgentId::new(1));
 
         let root_seam = Recorder::none();

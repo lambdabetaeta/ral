@@ -1,4 +1,5 @@
 use crate::wire::WindowReport;
+use exarch::agent::Helm;
 use exarch::provider::Holdings;
 use ral_core::sync::LockExt;
 use std::path::PathBuf;
@@ -52,6 +53,10 @@ impl Owner {
     pub(crate) fn owned_by(&self, generation: u64) -> Option<&Handle> {
         self.current().filter(|h| h.generation == generation)
     }
+
+    pub(crate) fn owned_by_mut(&mut self, generation: u64) -> Option<&mut Handle> {
+        self.open()?.as_mut().filter(|h| h.generation == generation)
+    }
 }
 
 /// Only the first close owns shutdown; consume it outside the owner lock.
@@ -82,11 +87,59 @@ impl Running {
     }
 }
 
+/// Where a message goes: held while the machine boots, then steered.
+pub(crate) enum Inlet {
+    Booting(Vec<String>),
+    Live(Helm),
+}
+
+impl Inlet {
+    pub(crate) fn steer(&mut self, text: String) -> Result<(), String> {
+        match self {
+            Self::Booting(messages) => {
+                messages.push(text);
+                Ok(())
+            }
+            Self::Live(helm) => helm
+                .steer(text)
+                .map_err(|_| "The assistant has already finished; nothing was sent.".to_string()),
+        }
+    }
+
+    pub(crate) fn queued(&self) -> Vec<String> {
+        match self {
+            Self::Booting(messages) => messages.clone(),
+            Self::Live(helm) => helm.queued(),
+        }
+    }
+
+    pub(crate) fn recall(&mut self) -> Vec<String> {
+        match self {
+            Self::Booting(messages) => std::mem::take(messages),
+            Self::Live(helm) => helm.recall(),
+        }
+    }
+
+    pub(crate) fn install(&mut self, helm: Helm) -> Vec<String> {
+        match std::mem::replace(self, Self::Live(helm)) {
+            Self::Booting(messages) => messages,
+            Self::Live(_) => Vec::new(),
+        }
+    }
+
+    pub(crate) fn end(self) {
+        if let Self::Live(helm) = self {
+            helm.end();
+        }
+    }
+}
+
 /// Generation gates publication; the window's attempt gates incoming messages.
 pub(crate) struct Handle {
     pub(crate) generation: u64,
     pub(crate) attempt: String,
-    pub(crate) sender: mpsc::Sender<String>,
+    pub(crate) inlet: Inlet,
+    pub(super) exchanges: Arc<super::exchange::Exchanges>,
     pub(crate) join: JoinHandle<()>,
     /// Restart and close stop the baseline before joining its worker.
     pub(crate) baseline_stop: crate::folder::manifest::Stop,
@@ -94,7 +147,7 @@ pub(crate) struct Handle {
 
 impl Handle {
     pub(crate) fn stop(self) -> JoinHandle<()> {
-        drop(self.sender);
+        self.inlet.end();
         self.baseline_stop.stop();
         self.join
     }

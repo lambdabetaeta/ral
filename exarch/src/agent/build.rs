@@ -82,8 +82,8 @@ pub enum Trunk {
     /// Converses — `reply` withheld, parked between messages — with a human
     /// attached who types into it: the TUI.
     Attended,
-    /// Converses, driven one exchange at a time by an embedder with no human
-    /// at the inbox: synod.
+    /// Converses through an embedding host that steers it, one settled exchange
+    /// at a time: synod.
     Embedded,
 }
 
@@ -330,9 +330,10 @@ impl Avatar {
             reach: seat.reach(),
             mailbox: inbox.mailbox(),
         });
-        fleet.enrol(&agent, claim)?;
+        let membership = fleet.enrol(&agent, claim)?;
         let readings = Readings::new(!fleet.launch.tools.is_empty());
         Ok(Self {
+            work: inbox.mailbox().stamp(),
             agent,
             log: LogCell::new(log),
             seat,
@@ -340,6 +341,7 @@ impl Avatar {
             reply: ReplyCell::default(),
             fleet,
             readings,
+            _membership: membership,
         })
     }
 
@@ -523,7 +525,7 @@ impl Avatar {
     /// A severed engine, a log that will not fork, or whatever
     /// [`Fleet::enrol`] refuses; in words that read after "refused:".
     pub(crate) fn child_of(
-        parent: &Arc<Agent>,
+        (parent, consumer): (&Arc<Agent>, crate::bus::Stamp),
         parent_log: &AgentLog,
         fleet: &Arc<Fleet>,
         claim: Claim,
@@ -533,7 +535,10 @@ impl Avatar {
     ) -> Result<Self, String> {
         let launch = &fleet.launch;
         let fuel = parent.fuel.saturating_sub(1);
-        let role = Role::child(parent);
+        let role = Role::Child {
+            parent: parent.clone(),
+            consumer,
+        };
         // Against the *child's* grants, never the parent's, so the opening
         // records the child's real prompt.  Its grant layer was resolved in
         // its own engine, so only that engine can name it.
@@ -570,13 +575,12 @@ impl Avatar {
         // typed during the reboot was typed against an already-blanked screen
         // and belongs to the new one.  Sweeping it afterwards eats it in
         // silence — the queue holds no record of what it dropped.
-        self.inbox.clear();
+        self.agent.forget();
+        self.work = self.agent.mailbox.stamp();
         // Rebooting the seat drops the outgoing shell, whose teardown cancels
         // its registered workers — `/clear` ends them whatever their owner. First of
         // the rest, so a seat that cannot reboot refuses before anything goes.
         self.seat.clear().map_err(io::Error::other)?;
-        // `/clear` ends the subtree; this agent itself stays live.
-        self.agent.forget();
         self.log.borrow_mut().clear()?;
         // A rebuilt context has been measured and told nothing.
         self.readings = self.readings.reborn();
@@ -612,7 +616,7 @@ impl Avatar {
         let seat = self.fleet.launch.seat().map_err(|e| e.to_string())?;
         let claim = self.fleet.claim(name).map_err(|e| e.to_string())?;
         Self::child_of(
-            &self.agent,
+            (&self.agent, self.agent.mailbox.stamp()),
             &self.log.borrow(),
             &self.fleet,
             claim,
@@ -729,14 +733,15 @@ impl TestTrunk {
 }
 
 impl Drop for Avatar {
-    /// The one exit every life takes, and the whole of deregistration: the
-    /// agent's last strong reference goes with this, so its parent's subtree
-    /// and both fleet indices prune it at the next walk.  A cascade cancels
-    /// only an agent's *eval root*, leaving its armed schedules for whoever
-    /// drops it, so they are cleared here unconditionally and its workers die
-    /// with the seat below: a settled-but-never-cancelled agent leaks neither.
-    /// `/clear` never reaches this — it rebuilds in place, clearing its own.
+    /// Close admission and schedules before resource teardown. Membership
+    /// leaves last; retained identities remain available to tree walks.
+    /// `/clear` rebuilds in place and never reaches this.
     fn drop(&mut self) {
+        self.agent.mailbox.admission(|| {
+            self.agent
+                .token
+                .cancel(ral_core::process::CancelCause::Cancelled);
+        });
         self.agent.schedules.clear();
         // A panic may have poisoned the log under its guard, and a second
         // panic here would abort the process.

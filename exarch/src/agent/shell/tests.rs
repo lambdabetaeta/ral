@@ -141,7 +141,7 @@ fn large_binding_install_warns_on_its_own_run_stderr() {
     );
 
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     let result = session
         .ral(
             "let large_binding_x = 'well over eight bytes long'",
@@ -159,7 +159,7 @@ fn large_binding_install_warns_on_its_own_run_stderr() {
 
     // `return` binds nothing, so no install meets the threshold again.
     let (tx2, _rx2) = crate::bus::channel();
-    let emit2 = Emitter::with_mailbox(tx2, session.agent.id, session.inbox.mailbox());
+    let emit2 = Emitter::new(tx2, session.agent.id);
     let result2 = session.ral("return 1", 5, &emit2).text;
     assert!(
         !result2.contains("large binding"),
@@ -176,7 +176,7 @@ fn large_binding_install_warns_on_its_own_run_stderr() {
 fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
     let session = Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
 
     let result = session
         .ral(
@@ -215,7 +215,7 @@ fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
 fn the_wall_names_the_workers_that_survived_it() {
     let session = Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
 
     let result = session
         .ral(
@@ -241,7 +241,7 @@ fn the_wall_names_the_workers_that_survived_it() {
 fn a_call_that_returns_says_nothing_about_its_workers() {
     let session = Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
 
     let result = session
         .ral("let ok = spawn \"ok\" { return 1 }", 10, &emit)
@@ -261,7 +261,7 @@ fn a_call_that_returns_says_nothing_about_its_workers() {
 fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
     let session = Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
 
     let result = session
         .ral(

@@ -1,6 +1,5 @@
 use super::*;
-use crate::agent::Agent;
-use crate::agent::testkit::{TestAgentSpec, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
 use crate::card::Mark;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
@@ -8,12 +7,12 @@ use ral_core::shell::runtime::{Observation, Observed};
 
 /// The root is returned alongside its `App` because the frontend resolves
 /// it through the fleet only: dropping it here would settle the agent mid-test.
-pub(in crate::tui) fn app() -> (App, BusReceiver, Arc<Agent>) {
+pub(in crate::tui) fn app() -> (App, BusReceiver, TestAgent) {
     app_born(&Born::for_test("main", None))
 }
 
 /// [`app`] over a root announced as `born`.
-pub(in crate::tui) fn app_born(born: &Born) -> (App, BusReceiver, Arc<Agent>) {
+pub(in crate::tui) fn app_born(born: &Born) -> (App, BusReceiver, TestAgent) {
     let (_tx, rx) = crate::bus::channel();
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");

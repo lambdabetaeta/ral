@@ -267,8 +267,19 @@ impl Avatar {
         // Arrivals are taken in the order typed: a read runs against the
         // context as it stands at its place in the queue, a delivery lands as
         // a steering line of its own.  The warnings trail them.
-        for next in self.inbox.drain_mid_exchange() {
-            match next {
+        for drawn in self.inbox.drain_drawn(&self.work, &self.agent.token) {
+            #[cfg(test)]
+            tests::after_drain_draw(self);
+            if drawn.stamp.admit(&self.agent.token, || ()).is_none() {
+                if let Next::Item(crate::bus::Item::Human(text)) = drawn.next {
+                    self.log
+                        .borrow_mut()
+                        .append_steering(text, Voice::Human)
+                        .map_err(Fault::Log)?;
+                }
+                continue;
+            }
+            match drawn.next {
                 Next::Read(read) => self.read(&read, emit),
                 Next::Item(item) => {
                     if self.arrive(&item)? {
@@ -280,6 +291,9 @@ impl Avatar {
                 }
                 Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
             }
+        }
+        if self.agent.token.is_cancelled() || !self.work.current(&self.agent.token) {
+            return Ok(ControlFlow::Break(self.cancelled()));
         }
         let climbed = self.climbed(provider)?;
         let steering = self.tell(climbed);
@@ -392,7 +406,8 @@ impl Avatar {
     /// parentless agent's `attend` loop stops here.
     fn replied(&self, payload: FOValue) -> Outcome {
         self.agent.cancel_descendants(CancelCause::Cancelled);
-        self.recorder().transient(Transient::State(AgentState::Ready));
+        self.recorder()
+            .transient(Transient::State(AgentState::Ready));
         self.agent.deposit_reply(&self.fleet, payload);
         self.log.borrow_mut().quiesce(QuiesceReason::Replied);
         Outcome::Replied

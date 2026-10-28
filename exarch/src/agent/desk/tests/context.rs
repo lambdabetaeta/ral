@@ -29,7 +29,7 @@ fn transcript_grep_request(pattern: &str, turns: Option<&[u64]>) -> Request {
 /// the turns no residue covers.
 #[test]
 fn context_survey_rows_every_item_in_the_context() {
-    let desk = desk();
+    let (desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "closed\nturn", "answer");
@@ -81,7 +81,7 @@ fn context_survey_rows_every_item_in_the_context() {
 /// sayable.  A read is a listing, so it commits no act and draws no row.
 #[test]
 fn transcript_answers_one_record_per_turn_without_committing_an_act() {
-    let mut desk = desk();
+    let (mut desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "first prompt", "first answer");
@@ -142,7 +142,7 @@ fn transcript_answers_one_record_per_turn_without_committing_an_act() {
 /// being written, are refused by the state they meet.
 #[test]
 fn transcript_read_names_the_role_of_every_turn_it_answers() {
-    let desk = desk();
+    let (desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "first prompt", "first answer");
@@ -197,7 +197,7 @@ fn transcript_read_names_the_role_of_every_turn_it_answers() {
 )]
 fn grep_refuses_a_bad_regex_with_the_crate_message() {
     const UNCLOSED: &str = "(unclosed";
-    let desk = desk();
+    let (desk, _agent) = desk();
     let expected = Regex::new(UNCLOSED)
         .expect_err("an unclosed group is not a regex")
         .to_string();
@@ -217,7 +217,7 @@ fn grep_refuses_a_bad_regex_with_the_crate_message() {
 /// reader accepted the payload and no one ever asked for that field.
 #[test]
 fn transcript_grep_refuses_a_field_it_does_not_read() {
-    let desk = desk();
+    let (desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "first prompt", "first answer");
@@ -253,7 +253,7 @@ fn transcript_grep_refuses_a_field_it_does_not_read() {
 /// [`DeskAct::ContextEvict`], and the audit sentence names it.
 #[test]
 fn context_evict_answers_the_survey_it_leaves_behind_and_commits_the_act() {
-    let desk = desk();
+    let (desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "one", "a longer answer");
@@ -306,7 +306,7 @@ fn survey_rows(answer: &FOValue) -> &[FOValue] {
 /// at decode rather than drawn.
 #[test]
 fn context_evict_refuses_a_note_that_is_not_one_short_line() {
-    let desk = desk();
+    let (desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "one", "answer");
@@ -342,7 +342,7 @@ fn context_evict_refuses_a_note_that_is_not_one_short_line() {
 /// ignored `through` would cut turns the model never named.
 #[test]
 fn context_evict_refuses_a_field_it_does_not_read() {
-    let desk = desk();
+    let (desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "one", "answer");
@@ -373,7 +373,7 @@ fn context_evict_refuses_a_field_it_does_not_read() {
 /// names the residue's whole span.
 #[test]
 fn the_index_and_grep_name_items_by_span() {
-    let desk = desk();
+    let (desk, _agent) = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "one", "answer");

@@ -14,7 +14,8 @@ fn every_schedule_tag_is_refused_in_the_models_own_vocabulary() {
         ),
         (remove_req("sched-0"), "exarch-schedules `remove"),
     ] {
-        let err = desk()
+        let (desk, _agent) = desk();
+        let err = desk
             .ask(request)
             .expect_err("every schedule tag is refused without the grant");
         assert!(
@@ -35,7 +36,7 @@ fn every_schedule_tag_is_refused_in_the_models_own_vocabulary() {
 /// table, so no tag needs a second call to learn what it did.
 #[test]
 fn schedules_lists_what_add_registered() {
-    let desk = granted_desk();
+    let (desk, _agent) = granted_desk();
     let rows = table(
         desk.ask(add_req("2h", "nightly", "wake"))
             .expect("a valid `add must succeed"),
@@ -67,7 +68,7 @@ fn schedules_lists_what_add_registered() {
 #[test]
 fn a_duplicate_schedule_is_refused_and_tiers_its_act_row() {
     let (tx, rx) = channel();
-    let mut desk = granted_desk();
+    let (mut desk, _agent) = granted_desk();
     desk.services
         .log
         .borrow_mut()

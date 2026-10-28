@@ -14,6 +14,69 @@ use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use std::borrow::Cow;
 
+type DrainHook = Box<dyn FnOnce(&Avatar)>;
+
+thread_local! {
+    static AFTER_DRAIN_DRAW: std::cell::Cell<Option<DrainHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+pub(super) fn after_drain_draw(avatar: &Avatar) {
+    if let Some(hook) = AFTER_DRAIN_DRAW.take() {
+        hook(avatar);
+    }
+}
+
+#[test]
+fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_request() {
+    let mut session = Avatar::for_test("system").unwrap();
+    session.agent.steer("first".into());
+    session.agent.post(Post::Nudge {
+        prompt: 1,
+        text: "separator".into(),
+    });
+    session.agent.steer("second".into());
+    AFTER_DRAIN_DRAW.set(Some(Box::new(|avatar| {
+        assert_eq!(avatar.agent.stop(), Vec::<String>::new());
+        avatar.agent.steer("fresh".into());
+    })));
+    let provider = scripted(
+        "test-model",
+        Script::new().then(Reply::tool_calls(vec![ral_call("one", "let x = 1")])),
+    );
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.agent.id);
+    let outcome = session
+        .deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit)
+        .unwrap();
+    assert!(matches!(outcome, Outcome::Cancelled));
+    assert!(session.agent.token.is_cancelled());
+    assert!(session.is_ready());
+    assert_eq!(session.agent.queued(), vec!["fresh"]);
+    let records = crate::bus::drain_records(&rx);
+    let humans: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            crate::record::Record::Protocol(crate::record::Protocol::Steering {
+                text,
+                voice: Voice::Human,
+            }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(humans, vec!["first", "second"]);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record,
+                crate::record::Record::Forensic(Forensic::TurnStarted { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
 /// A sub-agent returns through `reply`: the payload is deposited raw, it
 /// settles `Replied`, and the run ends `ReadyForUser`.
 #[test]
@@ -650,7 +713,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
     ));
     session.seed("go".into());
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
+    let emit = Emitter::new(tx, session.agent.id);
     session.attend(&emit);
     T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
 
@@ -716,7 +779,7 @@ fn a_read_queued_after_a_prompt_runs_after_it_lands() {
     ));
     session.seed("go".into());
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
+    let emit = Emitter::new(tx, session.agent.id);
     session.attend(&emit);
     T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
 
@@ -883,7 +946,7 @@ fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
     let child = started_child(&parent, "child", "`inherit");
 
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());
+    let emit = Emitter::new(tx, child.agent.id);
     let _ = child.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
 
     let entries = workers(&child);
@@ -948,7 +1011,7 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
     let _release = DeliberateReleaseGuard(&DELIBERATE_STOP_RELEASE);
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(&DELIBERATE_HOLD_BUILTINS));
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
 
     // Pre-create one Stopping worker (#1) and one Consumed worker (#2).
     session.ral(
@@ -1032,7 +1095,7 @@ fn answer_delivers_unclaimed_ready_and_non_done_surfaces_and_fences_stale_epoch(
 
     let mut session = Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
 
     let stale_stamp = session.inbox.mailbox().stamp();
     session.clear().unwrap();
@@ -1196,7 +1259,7 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
 
 #[test]
 fn reply_boundary_preserves_each_delivery_until_the_next_ingress() {
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum Delivery {
         Message,
         Steering,
@@ -1280,7 +1343,11 @@ fn reply_boundary_preserves_each_delivery_until_the_next_ingress() {
                 .contains("boundary delivery")
         );
 
-        assert!(matches!(child.attend_backlog(&emit), AgentOutcome::Replied));
+        let outcome = child.attend_backlog(&emit);
+        assert!(
+            matches!(outcome, AgentOutcome::Replied),
+            "{source:?} must resume to a reply, got {outcome:?}"
+        );
         assert_eq!(
             child.agent.reply(),
             Some(FOValue::String {

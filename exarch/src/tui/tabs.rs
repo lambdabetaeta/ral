@@ -178,7 +178,7 @@ impl Tab {
         }
         let agent = self.live(fleet)?;
         let idle = agent.idle();
-        (agent.mailbox.waiting_for_input() && idle >= DEMOTE_IDLE).then_some(idle)
+        (agent.waiting_for_input() && idle >= DEMOTE_IDLE).then_some(idle)
     }
 }
 

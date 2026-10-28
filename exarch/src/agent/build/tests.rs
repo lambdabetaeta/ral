@@ -209,7 +209,7 @@ fn clear_cancels_registered_workers_and_drops_their_late_surface() {
     // must be this session's own inbox for the late-surface assertion
     // below to mean anything.
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     for _ in 0..2 {
         let _ = session.ral(
             "spawn \"held\" { test-clear-block-until-released }",
@@ -320,7 +320,7 @@ fn agent_drop_cancels_its_own_unclosed_workers() {
     let avatar = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
 
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, avatar.agent.id, avatar.inbox.mailbox());
+    let emit = Emitter::new(tx, avatar.agent.id);
     let _ = avatar.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
 
     let entries = workers(&avatar);
@@ -674,13 +674,14 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
     let runtime = crate::shell_eval::builtins::host_surface()
         .runtime(ral_core::io::terminal::TerminalState::default())
         .expect("the engine's baseline resolves");
-    let explicit_reads = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec![here.clone()],
-            ..FsPolicy::default()
-        }),
-        ..Capabilities::default()
-    })]);
+    let explicit_reads =
+        ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![here.clone()],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        })]);
     for path in [&a, &b] {
         assert!(
             !explicit_reads.admits_fs(

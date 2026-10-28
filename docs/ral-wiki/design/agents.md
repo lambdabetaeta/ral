@@ -1,7 +1,3 @@
----
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
----
-
 # Agents: the uniform node, the forest, and the parent-less root
 
 **An exarch run is a *fleet* of structurally identical *agents* arranged in a
@@ -70,11 +66,28 @@ the agent quiesces. Whether a node converses and whether a human will type
 into it are two facts — one per node, one per run — and the park verdict
 reads both.
 
-Embedded exchanges share one root-bound `SettledConversation` bus. A helper's
-`Ready` is published before its reply deposit notifies the parent, so completion
-reaches the sink before the parent's result. Quiescence measures outstanding
-work; replied helpers retain their one-hour follow-up lease, and their signals
-between exchanges wait for the next drain.
+**An embedded conversation owns its root, but its host holds only a weak
+`Helm`.** `SettledConversation` waits for human steering before opening an
+exchange; a shell worker's surface batch alone never starts work. Its bus
+lives across exchanges. A helper's `Ready` precedes its reply notification,
+so completion reaches the sink before the parent's result. Quiescence measures
+outstanding work; replied helpers retain their follow-up lease, and their
+signals between exchanges wait for the next drain. Explicit
+`SettledConversation::end_fleet` instead ends every root in the shared fleet,
+then drops the driver/root and awaits detached teardown completion; it is
+whole-launch shutdown, not a synonym for ending this root's subtree.
+
+The host's control order is **interrupt < stop < end**: interrupt unwinds the
+turn with helpers intact; stop returns queued prompts, drains and fences the
+remaining inbox, cancels descendants, then unwinds the root's turn; end
+terminates the whole subtree for good. A stop leaves the root available for
+another human message. Admission remains closed through out-of-lock stop
+delivery; only accepted current-generation uptake may reset interruption.
+Delegation retains its originating stamp through final atomic enrollment.
+Synod addresses Stop to a per-attempt exchange ID; stale Stop leaves the queue
+untouched, and backend completion alone certifies “Stopped.” The TUI's Esc
+remains an interrupt
+([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
 
 ## Roots are sessions
 
@@ -478,14 +491,16 @@ by name the same way.
 
 ## Cancellation: a key interrupts one exchange; a terminator cascades the subtree
 
-`Esc` and `Ctrl-C` are a **per-tab exchange interrupt** — they unwind only the focused
+In the TUI, `Esc` and `Ctrl-C` are a **per-tab exchange interrupt** — they unwind only the focused
 tab's current exchange, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
-but only behind the **lifecycle terminators**: the `` exarch-agents `cancel `` tag, the
-per-agent idle-lease reaper, `/clear` and `/close`. They share one cascade over the
+behind **lifecycle terminators** and the host's exchange stop: the
+`` exarch-agents `cancel `` tag, the per-agent idle-lease reaper, `/clear`,
+`/close`, and `Helm::stop`. They share one cascade over the
 agent tree itself (`Role::Child`/`Agent::children`), so terminating a
 mid-tree agent (`Agent::cancel_tree`) reaps everything below it
-(`Agent::cancel_descendants`, a walk over `children`); `/clear`
+(each node closes admission before snapshotting direct children, then
+recurses without ancestor locks); `/clear`
 (`Agent::forget`) additionally drains this agent's own inbox, whose
 clear-epoch bump drops a late result or deferred surface batch addressed
 into the rebuilt context; `/close` cancels the descendants and ends the root.
@@ -495,8 +510,18 @@ cancels only the replier's proper descendants — a
 parent may abandon unfinished children, but never leave live agents registered
 beneath a node that has answered. This refines
 [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus cancel
-token interrupts one exchange in place, while the subtree cascade is the
-terminators' alone.
+token interrupts one exchange in place; terminating a node cascades through
+it, while a host stop cancels only its descendants and preserves the node.
+
+**Retained identity is not consumer liveness.** A child strongly retains its
+parent, but Avatar drop retires that parent's token under admission before
+teardown, without itself cancelling descendants. Weak shutdown walks retain
+terminated ancestors while descendants remain. Fleet emptiness instead counts
+Avatar-owned membership guards, released last after seat/log and fleet/identity
+references. Their detached `Departures` counter retains no launch or factory,
+so a shutdown waiter does not prevent the resource recovery it awaits.
+Identity references and temporary Helm upgrades do not count as outstanding
+teardown.
 
 In the TUI, that break is a distinct cancelled rail shape: it wears the `╳`
 marker used for errors, while the matrix's failure cell remains reserved for

@@ -104,8 +104,7 @@ impl ActFragment {
     }
 }
 
-/// Everything a desk handler may read off `&Avatar`, snapshotted fresh at every
-/// [`crate::agent::Avatar::ral`] install so no capture goes stale mid-call.
+/// A call's local services, retaining its originating work generation.
 pub(crate) struct HostServices {
     /// This run's own agent: parent of what it spawns, root of the descendant
     /// check `` `message ``/`` `cancel `` enforce, and the source every
@@ -121,8 +120,7 @@ pub(crate) struct HostServices {
     pub reply: ReplyCell,
     /// A `mnemon` spawn forks its inherited context off this.
     pub log: LogCell,
-    /// The calling agent's own envelope, minted at install, so a desk older
-    /// than *its* `/clear` refuses to spawn.
+    /// The originating work's envelope; never refreshed at installation.
     pub stamp: Stamp,
     /// What this call has committed so far: minted per `ral` call, and read
     /// back by [`crate::shell_eval::report::tool_result`] when a raise discards

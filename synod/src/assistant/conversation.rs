@@ -1,4 +1,4 @@
-//! One folder and one guest; each exchange is judged against the opening baseline.
+//! One folder and one guest; queued human messages open settled exchanges.
 
 use super::accounts::{Selected, select_account};
 use super::baseline::Baseline;
@@ -23,12 +23,12 @@ pub(crate) struct Conversation {
     baseline: Baseline,
     /// Cumulative against the opening baseline, remade after each exchange.
     report: Option<JobReport>,
-    /// Set once; later exchanges repeat the loss without reaching the dead engine.
-    ended: Option<String>,
+    /// A lost engine ends the conversation loop.
+    lost: bool,
 }
 
 impl Conversation {
-    /// Networking must start successfully; the baseline settles at the first exchange.
+    /// Networking must start successfully; the host then settles the baseline.
     pub(crate) fn begin(
         folder: &Path,
         holdings: &Holdings,
@@ -134,7 +134,7 @@ impl Conversation {
                 _run_lock: run_lock,
                 baseline,
                 report: None,
-                ended: None,
+                lost: false,
             },
             Opening {
                 label,
@@ -144,17 +144,22 @@ impl Conversation {
         ))
     }
 
-    /// Settle the baseline before guest writes; walk again after quiescence, even on failure.
-    pub(crate) fn exchange<S: exarch::bus::Sink>(
-        &mut self,
-        message: String,
-        sink: &mut S,
-    ) -> Result<(), String> {
-        if let Some(sentence) = &self.ended {
-            return Err(sentence.clone());
-        }
+    pub(crate) fn helm(&self) -> exarch::agent::Helm {
+        self.guest.helm()
+    }
+
+    pub(crate) fn await_message(&self) -> bool {
+        self.guest.await_message()
+    }
+
+    pub(crate) fn settle_baseline(&mut self) -> Result<(), String> {
+        self.baseline.manifest().map(drop)
+    }
+
+    /// Guard guest writes with the baseline; walk after quiescence, even on failure.
+    pub(crate) fn exchange<S: exarch::bus::Sink>(&mut self, sink: &mut S) -> Result<(), String> {
         self.baseline.manifest()?;
-        let outcome = self.guest.exchange(message, sink);
+        let outcome = self.guest.exchange(sink);
         let after = Manifest::of_folder(self.grant.root());
         self.report = match (self.baseline.manifest(), &after) {
             (Ok(before), Ok(after)) => Some(job_report(before, after)),
@@ -174,8 +179,12 @@ impl Conversation {
         let Some(sentence) = self.guest.severance() else {
             return Ok(());
         };
-        self.ended = Some(sentence.clone());
+        self.lost = true;
         Err(sentence)
+    }
+
+    pub(crate) fn lost(&self) -> bool {
+        self.lost
     }
 
     pub(crate) fn end(self) -> Result<(), String> {

@@ -32,8 +32,9 @@ The after-checkpoint and the report refresh happen only when:
 2. no live children remain, **and**
 3. their results are drained and announced.
 
-`exarch::headless::converse_settled` is the driver this law is built into: it
-runs the ordinary `attend` loop, not `attend_backlog`, under a park policy that
+`exarch::headless::SettledConversation::{await_message, exchange}` is the
+driver this law is built into: it waits for a human message, then runs the
+ordinary `attend` loop under a park policy that
 answers `HeldByChildren` — not `Held` — while children are live, and only
 treats the trunk as settled once the fleet is childless and empty. The
 `park_mode` semantics that decide focus and cancellation for exarch's own TUI
@@ -46,9 +47,10 @@ Every wait this law imposes ends on its own: `MAX_STEPS` bounds a runaway
 turn, a returning child that finishes without `reply` is re-nudged then fails
 honestly, and a child parked `HeldByChildren` terminates by induction on its
 own subtree. The two `ParkMode` variants that do *not* end by themselves —
-`Engaged` (needs a human `steer`, which synod's UI never sends) and
-`UntilCancelled` (needs an armed self-schedule) — are refused at
-`converse_settled`'s own construction for a synod trunk, the same class of
+`Engaged` (child-only, waiting for follow-up work) and
+`UntilCancelled` (needs an armed self-schedule) — cannot hold synod's trunk.
+Synod steers only its root; `SettledConversation::new` refuses
+self-scheduling and reset-resume, the same class of
 refusal a fuelled wire trunk without a hatchery gets. So the fleet the driver
 waits on always quiesces; the one case the wait rule does not catch is two
 helpers `message`-ing each other in a loop, each turn real work and fuel
@@ -60,30 +62,42 @@ law, and the persona's to discourage.
 - Synod's `fuel: 0` becomes `SPAWN_FUEL`, and the comment at
   `synod/src/session.rs` that justified id-blind sink routing by "no
   sub-agents exist" is retired along with the fuel figure that made it true.
-- `Conversation::exchange` drives `converse_settled` instead of
-  `converse_sink`; the after-checkpoint's position in `exchange` does not
-  move — this law is what makes that position correct rather than
-  coincidental.
+- `Conversation::exchange` drives `SettledConversation::exchange` after
+  `await_message` admits a human message; the closing account belongs after
+  fleet settlement, never merely after the trunk's first quiet moment.
 - The status bar gains a `WaitingOnAgents` state, read off the same
   `HeldByChildren` park verdict the driver computes — a synod window that
   never had a fleet before now has something honest to say while one runs.
-- A long exchange has no user-side brake yet: the law holds the exchange open
-  as long as helpers genuinely work, and whether synod wants a "wrap up now"
-  gesture is a product question for after the first real transcripts, not
-  machinery to presuppose here.
+- Synod's Stop and Esc abandon the exchange through `Helm::stop`: queued
+  prompts return to the composer, remaining inbox posts are drained and
+  fenced, descendants are cancelled, and the trunk's turn unwinds. The
+  exchange still ends by fleet settlement before its report is written.
+  Stop is addressed to the active `ExchangeId`; a stale request leaves the
+  queue untouched. Accepted delivery must finish before backend completion,
+  whose `stopped` verdict alone draws “Stopped.”
+  ([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
 
 ## Amendment — "live" reads "busy"
 
 Since [[decisions/260826_reply-parks|reply-parks]] a child that has replied
 stays registered, parked under its idle lease. Clause 2 therefore reads "no
 *busy* children remain": the exchange ends once every child has replied or
-died, and the repliers linger, fetchable by `` agents `reply ``.
+died, and the repliers linger, fetchable by `` agents `reply ``. This is not
+`Fleet::is_empty`: process shutdown waits for every Avatar-owned teardown
+membership to leave, after seat/log and fleet/identity references drop.
+Retained ancestor identity is neither a busy consumer nor an outstanding
+teardown membership. Explicit `SettledConversation::end_fleet` cancels every
+root in the shared fleet, drops the driver/root and waits on detached
+`Departures`, retaining no launch or factory; Synod does this before recovering
+its machine factory. This whole-launch boundary is stronger than Stop.
 
 > **Amended 2026-10-27.** `exarch::headless::SettledConversation::new`
-> binds a root and its conversation-lived bus; `exchange` drives each message
-> to fleet quiescence. Synod keeps this driver beside its root in
-> `assistant/guest.rs`. The constructor refuses self-scheduling and reset-resume;
-> ready resident helpers do not hold an exchange open. The law is unchanged.
+> owns a root and its conversation-lived bus; `await_message` opens on human
+> steering only, and `exchange` attends the queue to fleet quiescence.
+> Synod's `Guest` holds this owning driver in `assistant/guest.rs`.
+> The constructor refuses self-scheduling and reset-resume; ready resident
+> helpers do not hold an exchange open. Stop answers the user-side brake
+> question without weakening the settlement law.
 
 ## See also
 

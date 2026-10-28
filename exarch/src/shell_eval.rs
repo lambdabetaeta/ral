@@ -118,9 +118,9 @@ impl DeferredSink for InboxDeferred {
 /// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
 /// Core clones it into each worker's run state, so a nested `spawn` inherits it
 /// and flushes at its own completion.
-pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
+pub(crate) fn deferred_sink(emit: &Emitter, stamp: Stamp) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
-        stamp: emit.mailbox().stamp(),
+        stamp,
         root: emit.id(),
     })
 }

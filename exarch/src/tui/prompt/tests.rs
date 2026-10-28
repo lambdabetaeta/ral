@@ -132,17 +132,17 @@ fn queued_recall_is_fresh_and_keeps_history_bookkeeping() {
     prompt.submit();
     inbox.push_user("one".into());
     inbox.push_user("two".into());
-    assert!(prompt.edit_queued_prompt(&mailbox));
+    assert!(prompt.edit_queued_prompt(|| mailbox.recall()));
     assert_eq!(mailbox.queued_human_messages(), Vec::<String>::new());
     undo(&mut prompt);
     assert_eq!(prompt.prompt_text(), "one\ntwo");
     assert_eq!(prompt.hist_pos, None);
     assert_eq!(prompt.history, ["submitted"]);
     inbox.push_user("waiting".into());
-    assert!(!prompt.edit_queued_prompt(&mailbox));
+    assert!(!prompt.edit_queued_prompt(|| panic!("a draft must guard recall")));
     assert_eq!(mailbox.queued_human_messages(), ["waiting"]);
     prompt.history_prev();
-    assert!(!prompt.edit_queued_prompt(&mailbox));
+    assert!(!prompt.edit_queued_prompt(|| panic!("history must guard recall")));
     prompt.history_next();
     assert_eq!(prompt.prompt_text(), "one\ntwo");
 }

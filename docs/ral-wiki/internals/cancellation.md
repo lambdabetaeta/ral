@@ -1,7 +1,7 @@
 ---
-verified_at_commit: efbf42011e7c77f2b8c4f6ba1df0563ef202d650
-verified_at_date: 2026-10-27
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood]
+verified_at_commit: e6941768
+verified_at_date: 2026-10-28
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, Helm::stop]
 ---
 
 # Cancellation
@@ -518,6 +518,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |
 | **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent, root or child (reached through that tab's own `Weak`) | cancels the focused agent's `Token` and, as `Control::Interrupt`, its dispatch in flight; nothing process-wide, since no exarch shell is ever foregrounded |
+| **Stop / Esc** | synod, active exchange | exchange-addressed backend reservation, then `Helm::stop` on the root | fences and interrupts cooperatively under admission, holds uptake closed through descendant cancellation and engine interrupt; stale exchange IDs do nothing; backend completion certifies Stop after settlement |
 | **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to every live root's `Agent::interrupt` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
@@ -565,9 +566,10 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
 - **`Token`** is an `Arc<AtomicU8>` carrying a `CancelCause` (`0` while
   uncancelled), one sticky token per agent for its whole life; the attend loop
   threads clones through `deliberate`/`run_batch`/tools, so cancelling any share
-  halts that agent's exchange (provider streaming, invoked tools). A genuine
-  exchange boundary `Token::reset`s the flag, so a prior exchange's Esc never
-  bleeds into the next.
+  halts that agent's exchange (provider streaming, invoked tools). Accepted
+  current-generation uptake resets bare interruption and queued nudges under
+  admission (`Stamp::reset`). Suppressed completion resets nothing; a stale
+  draw cannot clear a Stop delivered during arrival.
 - **The tree cascade is two-layer.** `Agent::cancel_tree` (behind
   `` exarch-agents `cancel ``, the per-agent idle lease, and the
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
@@ -616,6 +618,40 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   `Scrollback::last_is_error` matches only the fold's `Error`,
   `ProviderError` and `Stalled` blocks, keeping the matrix's failure cell for
   actual failures.
+
+### Synod: abandon an exchange, preserve its root
+
+**Stop is stronger than an interrupt and weaker than ending the agent.**
+`Helm::stop` drains/fences, publishes cooperative interruption, clears
+outstanding delegation and snapshots direct children under one local admission
+boundary. A scoped hold blocks uptake and enrollment through descendant
+cancellation and engine interrupt outside locks; overlapping holds reopen only
+after the last delivery. Human text may queue meanwhile. Each terminated node
+closes its own admission before snapshotting direct children, then recurses
+without ancestor locks. The originating delegation stamp governs final child
+enrollment, so construction racing Stop cannot adopt into the new generation.
+Late stamped results and deferred surface batches are refused at pop, so
+abandoned helpers cannot reopen the exchange. Already-drawn human text is
+different: if admission or reset refuses it, the attend path records it once
+as `UserPrompt` and quiesces as cancelled; the mid-exchange drain records it
+once as `Steering`. Neither starts another provider round. Stop must not
+silently discard human input that has already left the queue. An
+unstamped peer message already in flight may still land. Queued prompts return
+to the composer; nothing resumes them automatically. The root's shell workers
+keep running and remain available to poll.
+
+Synod reserves Stop against the active `ExchangeId` before out-of-lock delivery.
+Idle, completed, mismatched and duplicate requests leave the queue untouched.
+Completion waits for accepted delivery and carries `stopped`; only that backend
+fact draws “Stopped.”, independent of command acknowledgement timing
+([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
+
+Whole-launch shutdown is explicit: `SettledConversation::end_fleet` cancels
+all fleet roots, drops its driver/root, then waits on detached `Departures`.
+Each Avatar's final membership drops after seat/log and fleet/identity
+references. The waiter retains no launch or factory; Synod recovers its
+`MachineFactory` only after this barrier. Ordinary Avatar drop retires its
+consumer but does not itself cancel descendants.
 
 ## Why interactive Ctrl-C cannot force-exit
 

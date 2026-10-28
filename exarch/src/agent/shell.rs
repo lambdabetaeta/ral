@@ -119,7 +119,7 @@ impl Avatar {
 
     /// Everything a desk handler may read off `&Avatar`, since the reentrancy
     /// law bars it from reaching back through `&mut Avatar`/`&mut Shell`.
-    /// Built fresh at each [`Self::ral`] install, so no capture goes stale.
+    /// Built per call, preserving the invocation's work generation.
     pub(crate) fn host_services(&self, emit: &Emitter) -> desk::HostServices {
         desk::HostServices {
             fleet: self.fleet.clone(),
@@ -128,7 +128,7 @@ impl Avatar {
             emit: emit.clone(),
             reply: self.reply.clone(),
             log: self.log.clone(),
-            stamp: self.agent.mailbox.stamp(),
+            stamp: self.agent.mailbox.admission(|| self.work.clone()),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
@@ -148,9 +148,11 @@ impl Avatar {
             },
             apply: shell_eval::surface::SurfaceApplier::new(self.recorder()),
         });
-        // Stamped with this session's inbox epoch as read now, so a batch
-        // from a worker that settles after a `/clear` is dropped.
-        self.seat.install_deferred(shell_eval::deferred_sink(emit));
+        // Preserve the invocation's generation, including for deferred batches.
+        self.seat.install_deferred(shell_eval::deferred_sink(
+            emit,
+            host.desk.services.stamp.clone(),
+        ));
         self.recorder()
             .transient(crate::record::Transient::State(AgentState::Evaluating));
         let report = shell_eval::run_shell(

@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use exarch::agent::{Avatar, Factory, RootConfig, RootSeat};
+use exarch::agent::{Avatar, Factory, Helm, RootConfig, RootSeat};
 use exarch::bus::Sink;
 use exarch::headless::SettledConversation;
 use exarch::provider::Provider;
@@ -35,7 +35,6 @@ impl Factory for MachineFactory {
 
 pub(crate) struct Guest {
     factory: Arc<MachineFactory>,
-    agent: Avatar,
     settled: SettledConversation,
     net: netgate::Session,
 }
@@ -59,28 +58,31 @@ impl Guest {
         config.factory = Some(factory.clone());
         let agent = Avatar::root(config, root_seat, provider)
             .map_err(|why| start_failed(&factory, &why))?;
-        let settled = SettledConversation::new(&agent)?;
+        let settled = SettledConversation::new(agent)?;
         let net = netgate::run(wires.net.into(), net)
             .map_err(|why| format!("could not start guest networking: {why}"))?;
         Ok(Self {
             factory,
-            agent,
             settled,
             net,
         })
     }
 
-    pub(crate) fn exchange<S: Sink>(
-        &mut self,
-        message: String,
-        sink: &mut S,
-    ) -> Result<(), String> {
-        self.settled.exchange(&mut self.agent, message, sink)
+    pub(crate) fn helm(&self) -> Helm {
+        self.settled.root().helm()
+    }
+
+    pub(crate) fn await_message(&self) -> bool {
+        self.settled.await_message()
+    }
+
+    pub(crate) fn exchange<S: Sink>(&mut self, sink: &mut S) -> Result<(), String> {
+        self.settled.exchange(sink)
     }
 
     pub(crate) fn severance(&self) -> Option<String> {
-        let cause = self.agent.severance()?;
-        let run_dir = self.agent.run_dir();
+        let cause = self.settled.root().severance()?;
+        let run_dir = self.settled.root().run_dir();
         let lost = exarch::agent::EngineLost::running(&cause, run_dir);
         capture(run_dir, &lost.logged(), &self.console());
         Some(lost.to_string())
@@ -93,18 +95,13 @@ impl Guest {
     pub(crate) fn end(self) -> Result<(), String> {
         let Self {
             factory,
-            agent,
             settled,
             net,
         } = self;
-        // EXARCH-VM end order: drop driver and agent (control EOF), recover machine, join net, shut down.
-        drop(settled);
-        drop(agent);
+        // Control EOF and fleet teardown precede machine recovery, net join, and shutdown.
+        settled.end_fleet();
         let machine = Arc::into_inner(factory)
-            .expect(
-                "the guest factory outlived the agent that was its only other owner: a helper \
-                 must have leaked past the exchange that was supposed to settle it",
-            )
+            .expect("settled conversation teardown must release every guest factory owner")
             .0
             .into_inner_ignore_poison();
         net.stop();

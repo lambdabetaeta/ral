@@ -13,8 +13,8 @@
 //! what is live or what the run was launched with.  `names` is a lookup index;
 //! `roots` holds every session — a root reports to nobody, so a walk over it
 //! is how `nearest_reap` reaches every live agent in the run.  Both hold
-//! [`Weak`], so an agent leaves the fleet by its avatar being dropped and
-//! nothing else, and a lookup prunes.
+//! [`Weak`], preserving identity walks independently of avatar membership.
+//! Each avatar owns a membership until its teardown finishes.
 //!
 //! There is one late-settle fence, and it lives on the inbox, not the agent:
 //! each session's own `crate::bus::inbox` counts its clears as a
@@ -252,21 +252,47 @@ impl Drop for Claim {
     }
 }
 
+/// An avatar's membership, released only after its resources have dropped.
+pub(crate) struct Membership(Arc<Departures>);
+
+/// Independent of the launch, so the final decrement follows its release.
+#[derive(Default)]
+pub(crate) struct Departures {
+    count: Mutex<usize>,
+    changed: Condvar,
+}
+
+impl Departures {
+    pub(crate) fn wait_after(&self, waiting: impl FnOnce()) {
+        let count = self.count.lock_ignore_poison();
+        waiting();
+        drop(self.changed.wait_while_ignore_poison(count, |n| *n != 0));
+    }
+}
+
+impl Drop for Membership {
+    fn drop(&mut self) {
+        let mut count = self.0.count.lock_ignore_poison();
+        *count -= 1;
+        if *count == 0 {
+            self.0.changed.notify_all();
+        }
+    }
+}
+
 /// The fleet's two indices, each independently locked, plus the launch and
 /// the idle bound every node shares.
 ///
 /// [`Self::names`] is touched by every spawn and every name lookup;
 /// [`Self::roots`] only by a root's birth and a walk from the top.
 pub struct Fleet {
-    /// Each name's [`Slot`]; a live one is `Weak`, so an agent leaves by its
-    /// avatar being dropped and nothing else.
+    /// Each name's [`Slot`], retaining no identity.
     names: Mutex<HashMap<String, Slot>>,
     /// Every root: one reports to nobody, so this is where a walk over the
     /// whole run starts.
     roots: Mutex<Vec<Weak<Agent>>>,
-    /// Held by [`Self::departed`] and [`Self::wait_empty`] alone.
-    exits: Mutex<()>,
-    departures: Condvar,
+    /// Avatar memberships, independent of retained identities.
+    departures: Arc<Departures>,
     /// [`AGENT_LEASE_IDLE`] outside tests.
     lease: Duration,
     pub(crate) launch: Launch,
@@ -278,8 +304,7 @@ impl Fleet {
         Arc::new(Self {
             names: Mutex::new(HashMap::new()),
             roots: Mutex::new(Vec::new()),
-            exits: Mutex::new(()),
-            departures: Condvar::new(),
+            departures: Arc::default(),
             lease,
             launch,
         })
@@ -333,23 +358,30 @@ impl Fleet {
     /// # Errors
     /// [`Unborn::SessionDead`] when the parent is already terminated — a spawn
     /// racing a cancel on its own parent.  The claim is then given back.
-    pub(crate) fn enrol(self: &Arc<Self>, agent: &Arc<Agent>, claim: Claim) -> Result<(), Unborn> {
-        let mut names = self.names.lock_ignore_poison();
-        if let Some(parent) = agent.role.parent()
-            && parent.token.terminated()
-        {
-            return Err(Unborn::SessionDead);
-        }
-        names.insert(claim.name.clone(), Slot::Live(Arc::downgrade(agent)));
-        // The guard goes first: the claim's drop locks `names` again.
-        drop((names, claim));
-        // Adopted (or rooted) only after the name is live: a refused agent
-        // must never appear in the fleet, however briefly.
-        match agent.role.parent() {
-            Some(parent) => parent.adopt(agent),
-            None => self.roots.lock_ignore_poison().push(Arc::downgrade(agent)),
-        }
-        Ok(())
+    pub(crate) fn enrol(
+        self: &Arc<Self>,
+        agent: &Arc<Agent>,
+        claim: Claim,
+    ) -> Result<Membership, Unborn> {
+        let enrol = || {
+            *self.departures.count.lock_ignore_poison() += 1;
+            let membership = Membership(self.departures.clone());
+            self.names
+                .lock_ignore_poison()
+                .insert(claim.name.clone(), Slot::Live(Arc::downgrade(agent)));
+            match agent.role.parent() {
+                Some(parent) => parent.adopt(agent),
+                None => self.roots.lock_ignore_poison().push(Arc::downgrade(agent)),
+            }
+            membership
+        };
+        let accepted = match &agent.role {
+            super::Role::Child { parent, consumer } => consumer.admit(&parent.token, enrol),
+            super::Role::Converses | super::Role::Headless => Some(enrol()),
+        };
+        // Claim and rejected-engine destruction must occur outside admission.
+        drop(claim);
+        accepted.ok_or(Unborn::SessionDead)
     }
 
     /// This fleet's live roots, pruning the settled ones as it snapshots —
@@ -372,27 +404,23 @@ impl Fleet {
         names.get(name).and_then(Slot::agent)
     }
 
-    /// Whether any root is still live.
+    /// Whether every avatar has finished teardown.
     pub fn is_empty(&self) -> bool {
-        self.roots().is_empty()
+        *self.departures.count.lock_ignore_poison() == 0
     }
 
-    /// Wake every [`Self::wait_empty`], once an avatar has fully dropped.
-    /// Taking the mutex after the drop is what rules out a lost wakeup: a
-    /// waiter is either before its emptiness check, and sees the drop, or
-    /// already parked, and is woken.
-    pub(crate) fn departed(&self) {
-        drop(self.exits.lock_ignore_poison());
-        self.departures.notify_all();
-    }
-
-    /// Block until no root is live.
+    /// Block until every avatar has finished teardown.
     pub fn wait_empty(&self) {
-        let exits = self.exits.lock_ignore_poison();
-        drop(
-            self.departures
-                .wait_while_ignore_poison(exits, |()| !self.is_empty()),
-        );
+        self.wait_empty_after(|| {});
+    }
+
+    // The callback lets tests observe the boundary without timing assumptions.
+    pub(super) fn wait_empty_after(&self, waiting: impl FnOnce()) {
+        self.departures.wait_after(waiting);
+    }
+
+    pub(crate) fn departures(&self) -> Arc<Departures> {
+        self.departures.clone()
     }
 
     /// The nearest time-to-reap across the leased agents, `None` when none is
@@ -450,5 +478,7 @@ fn lease_fire(agent: &Weak<Agent>, since: Instant) {
     }
 }
 
+#[cfg(test)]
+mod admission_tests;
 #[cfg(test)]
 mod tests;

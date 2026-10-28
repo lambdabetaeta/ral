@@ -25,6 +25,16 @@ export function sendMessage(attempt, message) {
   return invoke("send_message", { attempt, message });
 }
 
+/** @param {string} attempt @param {import("./bindings/ExchangeId.ts").ExchangeId} exchange @returns {Promise<string[]>} */
+export function stopExchange(attempt, exchange) {
+  return invoke("stop_exchange", { attempt, exchange });
+}
+
+/** @param {string} attempt @returns {Promise<string[]>} */
+export function recallQueued(attempt) {
+  return invoke("recall_queued", { attempt });
+}
+
 /** @param {number} index @param {string} path @returns {Promise<void>} */
 export function openFile(index, path) {
   return invoke("open_file", { index, path });

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::agent::roster::summary;
-use crate::agent::testkit::{ral_call, wait_for_settle};
+use crate::agent::testkit::{TestAgent, ral_call, wait_for_settle};
 use crate::bus::FleetSink;
 use crate::bus::{Inbox, Signal, channel};
 use crate::card::Card;
@@ -39,7 +39,7 @@ fn fresh_log() -> AgentLog {
 fn services_with(
     fuel: u32,
     launch: crate::agent::fleet::Launch,
-) -> (HostServices, Arc<Fleet>, Inbox) {
+) -> (HostServices, Arc<Fleet>, Inbox, TestAgent) {
     let parent_inbox = Inbox::new();
     let fleet = Fleet::new(launch, crate::agent::fleet::AGENT_LEASE_IDLE);
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
@@ -52,25 +52,20 @@ fn services_with(
         fleet: fleet.clone(),
         kind: SeatKind::Identity(Arc::new(crate::boot::test_transport())),
         stamp: agent.mailbox.stamp(),
-        agent,
+        agent: agent.clone(),
         emit,
         reply: ReplyCell::default(),
         log: LogCell::new(fresh_log()),
         acts: ActFragment::default(),
     };
-    (services, fleet, parent_inbox)
+    (services, fleet, parent_inbox, agent)
 }
 
 /// The base capture every desk below builds on, so growing [`HostServices`]
 /// means touching one literal, not three.
-fn base_services() -> HostServices {
-    services_with(3, crate::agent::fleet::Launch::for_test()).0
-}
-
-fn desk() -> ExarchDesk {
-    ExarchDesk {
-        services: base_services(),
-    }
+fn desk() -> (ExarchDesk, TestAgent) {
+    let (services, _, _, agent) = services_with(3, crate::agent::fleet::Launch::for_test());
+    (ExarchDesk { services }, agent)
 }
 
 fn append_prompt_and_answer(log: &mut AgentLog, prompt: &str, answer: &str) {
@@ -163,26 +158,29 @@ fn table(answer: FOValue) -> Vec<FOValue> {
 }
 
 /// [`desk`] holding the self-wakeup grant, so a schedule test reaches past it.
-fn granted_desk() -> ExarchDesk {
-    ExarchDesk {
-        services: services_with(
-            3,
-            crate::agent::fleet::Launch {
-                allow_schedule: true,
-                ..crate::agent::fleet::Launch::for_test()
-            },
-        )
-        .0,
-    }
+fn granted_desk() -> (ExarchDesk, TestAgent) {
+    let (services, _, _, agent) = services_with(
+        3,
+        crate::agent::fleet::Launch {
+            allow_schedule: true,
+            ..crate::agent::fleet::Launch::for_test()
+        },
+    );
+    (ExarchDesk { services }, agent)
 }
 
 /// A desk whose parent holds the very inbox this returns, so
 /// `` `start ``/`` `cancel ``/`` `message `` run end to end and a child's
 /// result is observable — unlike [`desk`].
-fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, Inbox) {
-    let (services, fleet, parent_inbox) =
+fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, Inbox, TestAgent) {
+    let (services, fleet, parent_inbox, agent) =
         services_with(fuel, crate::agent::fleet::Launch::for_test());
-    (Arc::new(ExarchDesk { services }), fleet, parent_inbox)
+    (
+        Arc::new(ExarchDesk { services }),
+        fleet,
+        parent_inbox,
+        agent,
+    )
 }
 
 type Parked<R> = Box<dyn FnOnce(&ExarchDesk, NurseryId) -> R + Send>;
@@ -263,7 +261,8 @@ fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
 
 #[test]
 fn unknown_class_answers_the_extension_error() {
-    let err = desk()
+    let (desk, _agent) = desk();
+    let err = desk
         .handle(&FOValue::Variant {
             label: "no-such-class".into(),
             payload: None,
@@ -277,7 +276,8 @@ fn unknown_class_answers_the_extension_error() {
 #[test]
 fn unknown_tag_answers_the_extension_error_too() {
     for class in ["agents", "schedules", "pins", "context", "transcript"] {
-        let err = desk()
+        let (desk, _agent) = desk();
+        let err = desk
             .handle(&family_req(class, "no-such-tag", None))
             .expect_err("an unrecognised tag must not answer Ok");
         assert!(
@@ -293,7 +293,8 @@ fn unknown_tag_answers_the_extension_error_too() {
 /// Names the expected shape rather than panicking or silently defaulting.
 #[test]
 fn non_variant_request_errors_didactically() {
-    let err = desk()
+    let (desk, _agent) = desk();
+    let err = desk
         .handle(&FOValue::Unit)
         .expect_err("a non-variant request must not answer Ok");
     assert!(
@@ -307,7 +308,7 @@ fn non_variant_request_errors_didactically() {
 /// must name every committed act, in the order the call committed them.
 #[test]
 fn the_fragment_keeps_committed_acts_in_the_order_they_landed() {
-    let desk = granted_desk();
+    let (desk, _agent) = granted_desk();
     desk.ask(add_req("2h", "nightly", "wake"))
         .expect("a valid schedule must succeed");
     desk.ask(remove_req("nightly"))
@@ -332,7 +333,7 @@ fn the_fragment_keeps_committed_acts_in_the_order_they_landed() {
 #[test]
 fn rail_draws_every_attempt_the_fragment_holds_only_what_landed() {
     let (tx, rx) = channel();
-    let mut desk = granted_desk();
+    let (mut desk, _agent) = granted_desk();
     desk.services
         .log
         .borrow_mut()

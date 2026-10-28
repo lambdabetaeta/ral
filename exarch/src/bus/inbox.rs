@@ -20,8 +20,7 @@ use std::time::{Duration, Instant};
 /// `Avatar::park_mode` recomputes on every wake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ParkMode {
-    /// A live human conversation: park *and ignore cancellation* entirely, for
-    /// an Esc cancels the exchange, not the agent.
+    /// A live human conversation: ignore interrupts, but never termination.
     Held,
     /// A child's current reply completion, parked under its reply lease.
     /// A terminate-cause cancel ends this residency.
@@ -48,16 +47,8 @@ struct Shared {
     /// waking the consumer, so a frontend can tell "prompt is editable" from
     /// "the root is still working" without minting a presentation event.
     waiting_for_input: AtomicBool,
-    /// Bumped by [`Inbox::clear`] under the queue mutex.  A [`Stamped`]
-    /// message — one whose producer cannot judge its own staleness — is
-    /// composed elsewhere and pushed as a second step, with a `/clear` free
-    /// to fall between, so it arrives through a [`Stamp`] minted at
-    /// composition and [`pop_next`] compares that against this counter under
-    /// the lock `clear` holds: a push landing before the bump is swept with
-    /// the queue, one landing after is refused as stale.  A single `/clear`
-    /// gesture may bump this more than once — the TUI's pre-drain
-    /// `App::clear` and `Avatar::clear`'s own drain both run on the same
-    /// inbox — which only widens refusal, never narrows it.
+    /// Bumped under admission whenever delegated work is abandoned.
+    /// Old captures cannot enroll children, deliver results or reset Stop.
     epoch: AtomicU64,
 }
 
@@ -69,6 +60,22 @@ struct Queue {
     /// [`Agent::message`](crate::agent::Agent::message) — that reached this
     /// inbox; `None` before the first.
     last_exchange: Option<Instant>,
+    stopping: usize,
+}
+
+/// Declare before queue guards: drop reacquires admission.
+pub(crate) struct AdmissionHold(Arc<Shared>);
+
+impl Drop for AdmissionHold {
+    fn drop(&mut self) {
+        self.0.lock().stopping -= 1;
+        self.0.signal.notify_all();
+    }
+}
+
+pub(crate) struct Drawn {
+    pub(crate) next: Next,
+    pub(crate) stamp: Stamp,
 }
 
 impl Shared {
@@ -77,6 +84,7 @@ impl Shared {
             queue: Mutex::new(Queue {
                 posts: VecDeque::new(),
                 last_exchange: None,
+                stopping: 0,
             }),
             signal: Condvar::new(),
             waiting_for_input: AtomicBool::new(true),
@@ -107,6 +115,19 @@ impl Shared {
         enqueue(&mut q.posts, msg);
         drop(q);
         self.wake();
+    }
+
+    fn abandon(&self, q: &mut Queue) -> Vec<String> {
+        let prompts = q
+            .posts
+            .drain(..)
+            .filter_map(|post| match post {
+                Post::UserSteering(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        self.epoch.fetch_add(1, Ordering::Release);
+        prompts
     }
 
     fn wake(&self) {
@@ -241,7 +262,7 @@ impl Mailbox {
     /// Pull every queued user prompt back out for editing, oldest first,
     /// wherever it sits: a prompt queued behind a wakeup is still the user's
     /// draft, and the wakeup, left in place, is not.
-    pub(crate) fn pop_back_user_all(&self) -> Option<Vec<String>> {
+    pub(crate) fn recall(&self) -> Vec<String> {
         let mut guard = self.shared.lock();
         let q = &mut guard.posts;
         let mut prompts: Vec<String> = Vec::new();
@@ -254,7 +275,62 @@ impl Mailbox {
         }
         *q = kept;
         drop(guard);
-        (!prompts.is_empty()).then_some(prompts)
+        prompts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abandon(&self) -> Vec<String> {
+        self.shared.abandon(&mut self.shared.lock())
+    }
+
+    /// Only brief local register operations belong inside this boundary.
+    pub(crate) fn admission<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _queue = self.shared.lock();
+        action()
+    }
+
+    pub(crate) fn steer_live(&self, text: String, token: &cancel::Token) -> bool {
+        let mut q = self.shared.lock();
+        if token.terminated() {
+            return false;
+        }
+        q.last_exchange = Some(Instant::now());
+        enqueue(&mut q.posts, Post::UserSteering(text));
+        drop(q);
+        self.shared.wake();
+        true
+    }
+
+    /// Pause admission without abandoning queued deliveries or their stamps.
+    pub(crate) fn hold<T>(&self, snapshot: impl FnOnce() -> T) -> (AdmissionHold, T) {
+        let hold;
+        let mut q = self.shared.lock();
+        q.stopping += 1;
+        hold = AdmissionHold(self.shared.clone());
+        let captured = snapshot();
+        drop(q);
+        (hold, captured)
+    }
+
+    pub(crate) fn begin_abandon<T>(
+        &self,
+        interrupt: Option<&cancel::Token>,
+        snapshot: impl FnOnce() -> T,
+    ) -> Option<(AdmissionHold, Vec<String>, T)> {
+        let hold;
+        let mut q = self.shared.lock();
+        if interrupt.is_some_and(cancel::Token::terminated) {
+            return None;
+        }
+        q.stopping += 1;
+        hold = AdmissionHold(self.shared.clone());
+        let prompts = self.shared.abandon(&mut q);
+        if let Some(token) = interrupt {
+            token.cancel(ral_core::process::CancelCause::Interrupted);
+        }
+        let captured = snapshot();
+        drop(q);
+        Some((hold, prompts, captured))
     }
 
     /// Mint the addressed envelope for a message composed now but pushed
@@ -286,6 +362,31 @@ impl Stamp {
             epoch: Minted(self.epoch),
             kind,
         });
+    }
+
+    pub(crate) fn current(&self, token: &cancel::Token) -> bool {
+        let q = self.mailbox.shared.lock();
+        q.stopping == 0 && !self.is_stale() && !token.terminated()
+    }
+
+    pub(crate) fn admit<T>(&self, token: &cancel::Token, action: impl FnOnce() -> T) -> Option<T> {
+        let q = self.mailbox.shared.lock();
+        if q.stopping != 0 || self.is_stale() || token.is_cancelled() {
+            return None;
+        }
+        let accepted = action();
+        drop(q);
+        Some(accepted)
+    }
+
+    pub(crate) fn reset(&self, token: &cancel::Token) -> bool {
+        let mut q = self.mailbox.shared.lock();
+        if q.stopping != 0 || self.is_stale() || token.terminated() {
+            return false;
+        }
+        token.reset();
+        remove_where(&mut q.posts, |post| matches!(post, Post::Nudge { .. }));
+        true
     }
 
     /// Whether the minting inbox has cleared since — the desk's spawn
@@ -357,17 +458,34 @@ impl Inbox {
     /// The scan stops at a rewrite, which drains only at the exchange boundary
     /// and holds everything typed after it; a [`Next::Rewrite`] is therefore
     /// never among the results.
+    #[cfg(test)]
     pub(crate) fn drain_mid_exchange(&self) -> Vec<Next> {
+        self.drain_drawn(&self.mailbox().stamp(), &cancel::Token::new())
+            .into_iter()
+            .map(|drawn| drawn.next)
+            .collect()
+    }
+
+    pub(crate) fn drain_drawn(&self, work: &Stamp, token: &cancel::Token) -> Vec<Drawn> {
         let mut guard = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         let mut arrivals = Vec::new();
+        if guard.stopping != 0 || work.is_stale() || token.is_cancelled() {
+            return arrivals;
+        }
         while let Some(next) = pop_next(&mut guard.posts, epoch) {
             match next {
                 Next::Rewrite(r) => {
                     guard.posts.push_front(Post::Rewrite(r));
                     break;
                 }
-                read_or_item => arrivals.push(read_or_item),
+                next => arrivals.push(Drawn {
+                    next,
+                    stamp: Stamp {
+                        mailbox: self.mailbox(),
+                        epoch,
+                    },
+                }),
             }
         }
         drop(guard);
@@ -376,6 +494,7 @@ impl Inbox {
 
     /// The next exchange-boundary deliverable.  Never blocks —
     /// [`Self::next_or_idle`] is the parking variant the attend loop uses.
+    #[cfg(test)]
     pub(crate) fn next_item(&self) -> Option<Next> {
         let mut q = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
@@ -393,28 +512,43 @@ impl Inbox {
     /// between verdict and wait and no wakeup is lost.  And it runs
     /// *before* the pop, so a `Quiesce` can never win against a delivery
     /// already queued.
+    #[cfg(test)]
     pub(crate) fn next_or_idle(
         &self,
         park: impl Fn() -> ParkMode,
         cancel: &cancel::Token,
     ) -> Option<Next> {
+        self.draw(park, cancel).map(|drawn| drawn.next)
+    }
+
+    pub(crate) fn draw(
+        &self,
+        park: impl Fn() -> ParkMode,
+        cancel: &cancel::Token,
+    ) -> Option<Drawn> {
         let mut q = self.shared.lock();
         loop {
             let mode = park();
-            // A *terminate*-cause cancel ends every park but `Held`; an
-            // *interrupt* drops the in-flight exchange and the agent re-parks.
-            // Only a live human conversation ignores cancellation entirely.
-            if mode != ParkMode::Held && cancel.terminated() {
+            // Interrupts end exchanges; termination ends every residency.
+            if cancel.terminated() {
                 return None;
             }
             let epoch = self.shared.epoch.load(Ordering::Acquire);
-            if let Some(next) = pop_next(&mut q.posts, epoch) {
+            if q.stopping == 0
+                && let Some(next) = pop_next(&mut q.posts, epoch)
+            {
                 self.shared
                     .waiting_for_input
                     .store(false, Ordering::Release);
-                return Some(next);
+                return Some(Drawn {
+                    next,
+                    stamp: Stamp {
+                        mailbox: self.mailbox(),
+                        epoch,
+                    },
+                });
             }
-            if mode == ParkMode::Quiesce {
+            if q.stopping == 0 && mode == ParkMode::Quiesce {
                 self.shared
                     .waiting_for_input
                     .store(false, Ordering::Release);
@@ -434,11 +568,28 @@ impl Inbox {
     /// separate release: dropping it from the queue is itself what
     /// [`Mailbox::has_queued_wakeup`] will see.  Bumps the clear-epoch under
     /// the same lock as the drain ([`Shared::epoch`]).
+    #[cfg(test)]
     pub(crate) fn clear(&self) {
+        drop(self.mailbox().abandon());
+    }
+
+    pub(crate) fn await_human(&self, cancel: &cancel::Token) -> bool {
         let mut q = self.shared.lock();
-        q.posts.clear();
-        self.shared.epoch.fetch_add(1, Ordering::Release);
-        drop(q);
+        loop {
+            if cancel.terminated() {
+                return false;
+            }
+            if q.stopping == 0
+                && q.posts
+                    .iter()
+                    .any(|post| matches!(post, Post::UserSteering(_)))
+            {
+                return true;
+            }
+            self.shared.waiting_for_input.store(true, Ordering::Release);
+            let (guard, _timeout) = self.shared.signal.wait_timeout_ignore_poison(q, PARK_POLL);
+            q = guard;
+        }
     }
 
     /// Drop queued self-nudges while preserving user, command, and worker
@@ -496,5 +647,7 @@ fn to_next(msg: Post) -> Next {
     }
 }
 
+#[cfg(test)]
+mod admission_tests;
 #[cfg(test)]
 mod tests;

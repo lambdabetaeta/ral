@@ -2,10 +2,8 @@
 //!
 //! Headless text and JSON both project the root's deliberate `reply` to `out`
 //! once the run finishes; progress, tool calls, cards, failures, and the run
-//! summary go to `err`. A conversational host takes a different projection
-//! through [`converse_on`], which streams assistant tokens, or drives
-//! [`converse_sink`] with its own [`Sink`], seeing raw `Signal`s rather than
-//! rendered text.
+//! summary go to `err`. A conversational host drives [`SettledConversation`]
+//! with its own [`Sink`], seeing raw signals rather than rendered text.
 //! Recording is not this module's concern: every session writes its own
 //! record at the seam, through [`crate::record`].
 
@@ -35,16 +33,7 @@ pub enum OutputFormat {
     Json,
 }
 
-/// The three outbound projections have distinct names so a conversational
-/// token stream cannot be confused with either headless reply sink.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Projection {
-    HeadlessText,
-    HeadlessJson,
-    Conversation,
-}
-
-/// The [`Sink`] behind [`run`] and [`converse_on`], accumulating the run's
+/// The [`Sink`] behind [`run`], accumulating the run's
 /// totals for the closing `[done]` line and the deliberate reply.
 pub struct Headless<'a> {
     out: &'a mut (dyn Write + Send),
@@ -55,7 +44,6 @@ pub struct Headless<'a> {
     usage: Usage,
     root_id: AgentId,
     started: Instant,
-    projection: Projection,
     /// Counted, not tracked: a `Forensic::TurnStarted { turn }` names the request's own
     /// id, and a cancelled request retaken names it twice.
     turns: u32,
@@ -76,7 +64,6 @@ pub struct Headless<'a> {
 
 impl<'a> Headless<'a> {
     fn new(
-        projection: Projection,
         root_id: AgentId,
         out: &'a mut (dyn Write + Send),
         err: &'a mut (dyn Write + Send),
@@ -87,7 +74,6 @@ impl<'a> Headless<'a> {
             usage: Usage::default(),
             root_id,
             started: Instant::now(),
-            projection,
             turns: 0,
             last_stop: None,
             reply: None,
@@ -212,13 +198,6 @@ impl Sink for Headless<'_> {
             return;
         }
         match t {
-            Transient::Token(text) if self.projection == Projection::Conversation => {
-                let _ = self.out.write_all(text.as_bytes());
-                let _ = self.out.flush();
-                if let Some(last) = text.as_bytes().last() {
-                    self.ended_with_newline = *last == b'\n';
-                }
-            }
             Transient::StopReason(raw) => {
                 self.last_stop = Some(raw.clone());
                 let _ = writeln!(self.err, "[stop: {raw}]");
@@ -462,11 +441,7 @@ pub fn run(
         p.model(),
         info.base
     );
-    let projection = match format {
-        OutputFormat::Text => Projection::HeadlessText,
-        OutputFormat::Json => Projection::HeadlessJson,
-    };
-    let mut headless = Headless::new(projection, session.agent.id, &mut stdout, &mut stderr);
+    let mut headless = Headless::new(session.agent.id, &mut stdout, &mut stderr);
     // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
     // any in-exchange producer share one queue.  It closes when the worker
     // finishes, muting async children on the display — never in the trace.
@@ -478,8 +453,7 @@ pub fn run(
     let recorder = session.recorder();
     // An OS signal must reach the fleet's roots for as long as this one attends.
     let _signals = crate::signals::face(&session.fleet);
-    let mailbox = session.agent.mailbox.clone();
-    let outcome = pump(&mut headless, &bus, root_id, mailbox, &recorder, |emit| {
+    let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit| {
         session.attend(emit)
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
@@ -533,73 +507,6 @@ pub fn run(
     r
 }
 
-/// One exchange of a converse session, over the process's own stdout/stderr.
-///
-/// [`converse_on`] carries the contract.
-///
-/// # Errors
-/// Returns `Err` if the attend worker panics or the sink's drive fails.
-pub fn converse(session: &mut Avatar, message: String) -> Result<(), String> {
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-    converse_on(session, message, &mut stdout, &mut stderr)
-}
-
-/// One exchange of a converse session: assistant tokens stream to `out`,
-/// everything else to `err`.
-///
-/// This remains conversational — unlike headless text, it does not wait for
-/// or print a deliberate root reply.
-///
-/// `session` must have been built with
-/// [`RootConfig::interactive`](crate::agent::RootConfig) set: a conversing
-/// trunk withholds `reply` and parks between messages rather than returning
-/// once, so there is no result to report and a digest saying "no reply" is not
-/// an error.  Call it once per user message on the *same* session, so each
-/// exchange sees what came before.
-///
-/// # Errors
-/// Returns `Err` if the attend worker panics or the sink's drive fails.
-pub fn converse_on(
-    session: &mut Avatar,
-    message: String,
-    out: &mut (dyn Write + Send),
-    err: &mut (dyn Write + Send),
-) -> Result<(), String> {
-    let mut sink = Headless::new(Projection::Conversation, session.agent.id, out, err);
-    let outcome = converse_sink(session, message, &mut sink);
-    if outcome.is_ok() && !sink.ended_with_newline {
-        let _ = writeln!(sink.out);
-    }
-    outcome
-}
-
-/// One exchange of a converse session, projected onto any [`Sink`].
-///
-/// The structured twin of [`converse_on`], which carries the contract: here the
-/// caller supplies the sink and so sees raw `Signal`s rather than rendered
-/// text.
-///
-/// # Errors
-/// Returns `Err` if the attend worker panics or the sink's drive fails.
-pub fn converse_sink<S: Sink>(
-    session: &mut Avatar,
-    message: String,
-    sink: &mut S,
-) -> Result<(), String> {
-    // Per-exchange: this call's channel closes when the exchange parks, so
-    // draining can never block on a message the caller has not sent yet.
-    let bus = FleetBus::per_exchange();
-    session.seed(message);
-    let root_id = session.agent.id;
-    let recorder = session.recorder();
-    let mailbox = session.agent.mailbox.clone();
-    let outcome = pump(sink, &bus, root_id, mailbox, &recorder, |emit| {
-        session.attend_backlog(emit)
-    });
-    exchange_ending(session, outcome)
-}
-
 /// A converse exchange's verdict. A severed session is over, not an exchange
 /// that went badly: its `Err` is the sentence `EngineLost` settled it with.
 fn exchange_ending(
@@ -618,7 +525,7 @@ fn exchange_ending(
 /// Helper signals between exchanges remain queued for the next exchange.
 pub struct SettledConversation {
     bus: FleetBus,
-    root: AgentId,
+    root: Avatar,
 }
 
 impl SettledConversation {
@@ -626,7 +533,7 @@ impl SettledConversation {
     ///
     /// # Errors
     /// Refuses roots that allow self-scheduling or reset-resume wakeups.
-    pub fn new(root: &Avatar) -> Result<Self, String> {
+    pub fn new(root: Avatar) -> Result<Self, String> {
         if root.fleet.launch.allow_schedule || root.fleet.launch.resume_on_reset {
             return Err(
                 "A settled conversation ends each exchange only once the fleet quiesces, and an armed \
@@ -637,31 +544,43 @@ impl SettledConversation {
         }
         Ok(Self {
             bus: FleetBus::session(),
-            root: root.agent.id,
+            root,
         })
     }
 
-    /// Attend one message until the root and its busy descendants settle.
+    pub fn root(&self) -> &Avatar {
+        &self.root
+    }
+
+    /// Wait for a queued human message; false once the root has ended.
+    pub fn await_message(&self) -> bool {
+        self.root.await_human()
+    }
+
+    /// End every root in the fleet and wait for all avatars to finish teardown.
+    /// This shuts down the whole shared launch, not just this conversation's tree.
+    pub fn end_fleet(self) {
+        self.end_fleet_after(|| {});
+    }
+
+    fn end_fleet_after(self, waiting: impl FnOnce()) {
+        let departures = self.root.fleet.departures();
+        for root in self.root.fleet.roots() {
+            root.end();
+        }
+        drop(self);
+        departures.wait_after(waiting);
+    }
+
+    /// Attend the queue until the root and its busy descendants settle.
     ///
     /// # Errors
-    /// Refuses another root; propagates engine loss, worker panic or sink failure.
-    pub fn exchange<S: Sink>(
-        &mut self,
-        root: &mut Avatar,
-        message: String,
-        sink: &mut S,
-    ) -> Result<(), String> {
-        if root.agent.id != self.root {
-            return Err(format!(
-                "this settled conversation belongs to agent {}, not {}",
-                self.root, root.agent.id
-            ));
-        }
-        root.seed(message);
+    /// Propagates engine loss, worker panic or sink failure.
+    pub fn exchange<S: Sink>(&mut self, sink: &mut S) -> Result<(), String> {
+        let root = &mut self.root;
         let recorder = root.recorder();
         let _signals = crate::signals::face(&root.fleet);
-        let mailbox = root.agent.mailbox.clone();
-        let outcome = pump(sink, &self.bus, self.root, mailbox, &recorder, |emit| {
+        let outcome = pump(sink, &self.bus, root.agent.id, &recorder, |emit| {
             root.attend(emit)
         });
         exchange_ending(root, outcome)

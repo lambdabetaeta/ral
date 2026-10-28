@@ -10,7 +10,7 @@ fn resources_command_routes_through_attend_and_emits_once() {
     session.agent.mailbox.push(Post::Read(Read::Resources));
 
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
+    let emit = Emitter::new(tx, session.agent.id);
     let _ = session.attend(&emit);
 
     // The fold is a transient; the session's own head bookend rides the
@@ -61,7 +61,7 @@ fn rewind_past_the_last_turn_reports_the_bad_anchor() {
         .push(Post::Rewrite(Rewrite::Rewind(7)));
 
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
+    let emit = Emitter::new(tx, session.agent.id);
     let _ = session.attend(&emit);
 
     assert!(

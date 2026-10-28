@@ -268,6 +268,10 @@ pub(crate) enum Preparation {
 #[ts(export, export_to = "../ui/js/bindings/")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum SynodEvent {
+    /// What the user said, drawn where the trunk took it up.
+    Human {
+        text: String,
+    },
     Token {
         text: String,
     },
@@ -336,6 +340,10 @@ pub(crate) struct ConversationEvent {
     pub(crate) update: ConversationUpdate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+pub(crate) struct ExchangeId(pub(crate) u32);
+
 #[derive(Clone, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export, export_to = "../ui/js/bindings/")]
@@ -346,7 +354,16 @@ pub(crate) enum ConversationUpdate {
     Event {
         event: SynodEvent,
     },
+    ExchangeBegan {
+        exchange: ExchangeId,
+    },
+    /// The prompts still waiting, oldest first; replaces the previous snapshot.
+    Queue {
+        messages: Vec<String>,
+    },
     ExchangeDone {
+        exchange: ExchangeId,
+        stopped: bool,
         /// None means the walk failed, never an empty report.
         report: Option<WindowReport>,
     },
@@ -522,16 +539,22 @@ mod tests {
 
     #[test]
     fn an_unavailable_report_is_null() {
-        let update = ConversationUpdate::ExchangeDone { report: None };
+        let update = ConversationUpdate::ExchangeDone {
+            exchange: ExchangeId(1),
+            stopped: false,
+            report: None,
+        };
         assert_eq!(
             serde_json::to_string(&update).expect("serializable update"),
-            r#"{"type":"exchange_done","report":null}"#,
+            r#"{"type":"exchange_done","exchange":1,"stopped":false,"report":null}"#,
         );
     }
 
     #[test]
     fn an_available_report_is_an_object() {
         let update = ConversationUpdate::ExchangeDone {
+            exchange: ExchangeId(2),
+            stopped: true,
             report: Some(WindowReport {
                 files: vec![ChangeFile {
                     path: "report.pdf".into(),
@@ -546,6 +569,8 @@ mod tests {
             serde_json::to_value(&update).expect("serializable update"),
             serde_json::json!({
                 "type": "exchange_done",
+                "exchange": 2,
+                "stopped": true,
                 "report": {
                     "files": [{
                         "path": "report.pdf",

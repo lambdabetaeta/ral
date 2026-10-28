@@ -153,7 +153,9 @@ ui-check:
     #!/bin/sh
     set -eu
     cargo test -p synod --quiet export_bindings
-    cd synod/ui && deno check --unstable-sloppy-imports js/*.js
+    cd synod/ui
+    deno check --unstable-sloppy-imports js/*.js
+    deno test --unstable-sloppy-imports tests/
 
 # Both run scripts/ci.sh — the same step list GitHub Actions runs, differing
 # only in where cargo runs.  It calls the recipes above rather than spelling

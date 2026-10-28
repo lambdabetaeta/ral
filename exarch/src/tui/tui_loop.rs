@@ -63,7 +63,7 @@ pub fn run(
     let bus = FleetBus::session();
     let _signals = crate::signals::face(&fleet);
     for (root, resumed) in roots {
-        let emit = bus.emitter(root.agent.id, root.agent.mailbox.clone());
+        let emit = bus.emitter(root.id());
         let spec = AsyncSpawn {
             name: root.agent.name.clone(),
             prompt: seed.take(),

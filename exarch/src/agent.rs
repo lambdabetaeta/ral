@@ -18,6 +18,7 @@ mod engine_lost;
 mod factory;
 pub mod fleet;
 pub(crate) mod gauge;
+mod helm;
 pub(crate) mod index;
 pub mod nudge;
 pub mod outcome;
@@ -37,6 +38,7 @@ pub(crate) use build::fresh_id;
 pub use build::{RootConfig, RootSeat, Trunk};
 pub use engine_lost::{EngineLost, EnginePhase};
 pub use factory::Factory;
+pub use helm::{Ended, Helm};
 pub(crate) use shell::{Evaluated, LogCell, ReplyCell, SharedCell};
 
 use crate::agent::fleet::Fleet;
@@ -54,9 +56,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-/// What the fleet knows an agent as: identity and config fixed at birth, plus
-/// the registers other threads read.  Live exactly while its [`Avatar`] holds
-/// the `Arc`.
+/// Retained agent identity and shared registers.
+///
+/// Its token records consumer retirement; children may retain the identity
+/// after its [`Avatar`] has gone.
 pub struct Agent {
     pub id: AgentId,
     /// Unique among live agents, enforced at [`Fleet::claim`].
@@ -107,9 +110,7 @@ pub(crate) enum Role {
 }
 
 impl Role {
-    /// A child of `parent`.  A `/clear` racing this only widens refusal —
-    /// the stamp would fall one epoch further behind — so minting it
-    /// unlocked is safe.
+    #[cfg(test)]
     pub(crate) fn child(parent: &Arc<Agent>) -> Self {
         Self::Child {
             consumer: parent.mailbox.stamp(),
@@ -170,9 +171,10 @@ pub struct Avatar {
     reply: ReplyCell,
     pub(crate) fleet: Arc<Fleet>,
     readings: Readings,
-    // Last: the fleet's `Weak` must outlive the seat's teardown and the log's
-    // `SessionEnded`, since a root's death is what ends the process.
+    work: Stamp,
     pub(crate) agent: Arc<Agent>,
+    // Last: emptiness follows seat teardown and the log's `SessionEnded`.
+    _membership: fleet::Membership,
 }
 
 /// What an avatar has measured and told about one context: reborn whole on
@@ -271,6 +273,61 @@ impl Agent {
                 awaiting: BTreeSet::new(),
             }),
         })
+    }
+
+    pub(crate) fn steer(&self, text: String) {
+        self.mailbox.steer(text);
+    }
+
+    pub(crate) fn post(&self, post: Post) {
+        self.mailbox.push(post);
+    }
+
+    pub(crate) fn queued(&self) -> Vec<String> {
+        self.mailbox.queued_human_messages()
+    }
+
+    pub(crate) fn recall(&self) -> Vec<String> {
+        self.mailbox.recall()
+    }
+
+    pub(crate) fn waiting_for_input(&self) -> bool {
+        self.mailbox.waiting_for_input()
+    }
+
+    /// Abandon this exchange and its descendants; leave the agent live.
+    pub(crate) fn stop(&self) -> Vec<String> {
+        // Hold admission through all out-of-lock cancellation delivery.
+        let Some((_hold, recalled, children)) =
+            self.mailbox.begin_abandon(Some(&self.token), || {
+                self.status.lock_ignore_poison().awaiting.clear();
+                self.children()
+            })
+        else {
+            return Vec::new();
+        };
+        for child in children {
+            child.cancel_tree(CancelCause::Cancelled);
+        }
+        self.reach.interrupt();
+        recalled
+    }
+
+    /// End this agent and its subtree for good.
+    pub(crate) fn end(&self) {
+        self.cancel_tree(CancelCause::Cancelled);
+    }
+
+    fn abandon_delegation(&self) {
+        let Some((_hold, _, children)) = self.mailbox.begin_abandon(None, || {
+            self.status.lock_ignore_poison().awaiting.clear();
+            self.children()
+        }) else {
+            return;
+        };
+        for child in children {
+            child.cancel_tree(CancelCause::Cancelled);
+        }
     }
 
     pub(crate) fn current_provider(&self) -> Arc<Provider> {
@@ -398,7 +455,8 @@ impl Agent {
     /// Cancel this agent across both terminate-class layers: the cooperative
     /// [`cancel::Token`] the attend loop polls and its engine's durable root.
     pub(crate) fn cancel(&self, cause: CancelCause) {
-        self.reach().cancel(cause);
+        self.mailbox.admission(|| self.token.cancel(cause));
+        self.reach.terminate();
     }
 
     /// Unwind this agent's in-flight run without ending it: the Esc/Ctrl-C
@@ -479,8 +537,14 @@ impl Agent {
     /// across both layers, so an in-flight eval unwinds instead of grinding on
     /// as an orphan whose result nobody will collect.
     pub(crate) fn cancel_tree(&self, cause: CancelCause) {
-        self.cancel(cause);
-        self.cancel_descendants(cause);
+        let children = self.mailbox.admission(|| {
+            self.token.cancel(cause);
+            self.children()
+        });
+        self.reach.terminate();
+        for child in children {
+            child.cancel_tree(cause);
+        }
     }
 
     /// Cancel this agent's proper descendants, leaving it live — a settling
@@ -489,24 +553,31 @@ impl Agent {
     /// cause there is permanent ([`cancel::Token::reset`] clears only a bare
     /// [`CancelCause::Interrupted`]) and every later run would fail.
     pub(crate) fn cancel_descendants(&self, cause: CancelCause) {
-        for node in self.walk() {
-            node.cancel(cause);
+        let (_hold, children) = self.mailbox.hold(|| self.children());
+        for child in children {
+            child.cancel_tree(cause);
         }
     }
 
     /// `/clear`: abandon the subtree the rebuilt context no longer owns, and
     /// every register the model wrote into it — what it was awaiting, its
-    /// wakeups, its pins.  The inbox fence is bumped by the drain in
-    /// `Avatar::clear`, not here.
+    /// wakeups, its pins. Admission stays closed through subtree cancellation.
     pub(crate) fn forget(&self) {
-        self.cancel_descendants(CancelCause::Cancelled);
-        self.status.lock_ignore_poison().awaiting.clear();
+        self.abandon_delegation();
         self.schedules.clear();
         self.pins.lock_ignore_poison().clear();
     }
 }
 
 impl Avatar {
+    pub fn helm(&self) -> Helm {
+        Helm(Arc::downgrade(&self.agent))
+    }
+
+    pub(crate) fn await_human(&self) -> bool {
+        self.inbox.await_human(&self.agent.token)
+    }
+
     pub fn id(&self) -> AgentId {
         self.agent.id
     }
@@ -570,5 +641,144 @@ impl Avatar {
     #[cfg(test)]
     pub(crate) fn next_item_for_test(&self) -> Option<crate::bus::Next> {
         self.inbox.next_item()
+    }
+}
+
+#[cfg(test)]
+mod helm_tests {
+    use super::testkit::{started_child, trunk};
+    use super::*;
+    use crate::bus::Emitter;
+
+    #[test]
+    fn stop_cancels_every_descendant_and_leaves_the_agent_live() {
+        let root = trunk(false);
+        let child = started_child(&root, "helper", "`inherit");
+        let grandchild = started_child(&child, "nested", "`inherit");
+        assert!(root.agent.has_busy_children());
+        root.agent.stop();
+        assert!(child.agent.token.terminated());
+        assert!(grandchild.agent.token.terminated());
+        assert!(root.agent.token.is_cancelled());
+        assert!(!root.agent.token.terminated());
+        assert!(!root.agent.has_busy_children());
+    }
+
+    #[test]
+    fn retiring_an_avatar_closes_admission_but_preserves_descendant_identity() {
+        let root = trunk(false);
+        let child = started_child(&root, "helper", "`inherit");
+        let helm = root.helm();
+        let fleet = root.fleet.clone();
+        let identity = Arc::downgrade(&root.agent);
+        drop(root);
+        let retired = identity.upgrade().expect("the child retains its parent");
+        assert!(retired.token.terminated());
+        assert!(!child.agent.token.terminated());
+        assert_eq!(helm.steer("late".into()), Err(Ended));
+        assert_eq!(helm.queued(), Vec::<String>::new());
+        assert!(!fleet.is_empty());
+        assert!(child.fork_named("late-grandchild").is_ok());
+        retired.end();
+        assert!(child.agent.token.terminated());
+        drop(retired);
+        drop(child);
+        assert!(identity.upgrade().is_none());
+        assert!(fleet.is_empty());
+    }
+
+    #[test]
+    fn wait_empty_ignores_retained_resolved_identity_and_helm() {
+        let root = trunk(false);
+        let fleet = root.fleet.clone();
+        let identity = fleet.resolve(&root.agent.name).unwrap();
+        let helm = root.helm();
+        assert!(!fleet.is_empty());
+        drop(root);
+        assert!(fleet.is_empty());
+        let (done, finished) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            fleet.wait_empty();
+            done.send(()).unwrap();
+        });
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiter.join().unwrap();
+        assert!(identity.token.terminated());
+        assert_eq!(helm.steer("late".into()), Err(Ended));
+    }
+
+    #[test]
+    fn wait_empty_counts_child_teardown_after_its_root_retires() {
+        let root = trunk(false);
+        let child = started_child(&root, "helper", "`inherit");
+        let fleet = root.fleet.clone();
+        let identity = fleet.resolve("helper").unwrap();
+        let helm = child.helm();
+        drop(root);
+        assert!(!fleet.is_empty());
+        // Retained ancestors still let shutdown reach the live child.
+        for root in fleet.roots() {
+            root.end();
+        }
+        assert!(identity.token.terminated());
+        assert!(!fleet.is_empty(), "cancellation is not teardown");
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let waiting_fleet = fleet.clone();
+        let waiter = std::thread::spawn(move || {
+            waiting_fleet.wait_empty_after(|| started.send(()).unwrap());
+            done.send(()).unwrap();
+        });
+        waiting.recv().unwrap();
+        assert!(matches!(
+            finished.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        drop(child);
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiter.join().unwrap();
+        assert!(fleet.is_empty());
+        assert!(fleet.resolve("helper").is_some());
+        assert_eq!(helm.steer("late".into()), Err(Ended));
+    }
+
+    #[test]
+    fn clear_has_one_abandonment_boundary_and_rebinds_service_captures() {
+        let mut root = trunk(false);
+        let (sender, _receiver) = crate::bus::channel();
+        let emit = Emitter::new(sender, root.agent.id);
+        let before = root.host_services(&emit).stamp;
+        let epoch = root.agent.mailbox.epoch();
+        root.clear().unwrap();
+        assert_eq!(root.agent.mailbox.epoch(), epoch + 1);
+        assert!(before.is_stale());
+        assert!(!root.host_services(&emit).stamp.is_stale());
+    }
+
+    #[test]
+    fn an_abandoned_invocation_cannot_capture_a_fresh_service_stamp() {
+        let root = trunk(false);
+        let (sender, _receiver) = crate::bus::channel();
+        let emit = Emitter::new(sender, root.agent.id);
+        let before = root.host_services(&emit).stamp;
+        root.agent.stop();
+        let after = root.host_services(&emit).stamp;
+        assert!(before.is_stale());
+        assert!(after.is_stale());
+        assert!(root.agent.mailbox.stamp().reset(&root.agent.token));
+        assert!(root.host_services(&emit).stamp.is_stale());
+    }
+
+    #[test]
+    fn stop_returns_queued_prompts_oldest_first() {
+        let root = trunk(false);
+        root.agent.steer("first".into());
+        root.agent.post(Post::Nudge {
+            prompt: 1,
+            text: "continue".into(),
+        });
+        root.agent.steer("second".into());
+        assert_eq!(root.agent.stop(), ["first", "second"]);
+        assert!(root.inbox.is_empty());
     }
 }

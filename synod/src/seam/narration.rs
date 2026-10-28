@@ -8,7 +8,7 @@ use exarch::provider::ProviderError;
 use exarch::record::fault::Readout;
 use exarch::record::{AgentId, Born};
 use exarch::record::{
-    Display, Forensic, Protocol, Record, Recorded, Settlement, Transient, context_rows_card,
+    Display, Forensic, Protocol, Record, Recorded, Settlement, Transient, Voice, context_rows_card,
 };
 use std::collections::BTreeSet;
 
@@ -36,9 +36,18 @@ fn provider_error_severity(record: &ProviderError) -> Severity {
     }
 }
 
-/// Protocol payloads return to the provider and are never drawn.
-fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
+/// Only the trunk's human messages reach the transcript.
+fn project_protocol(role: Role, protocol: &Protocol) -> Option<SynodEvent> {
     match protocol {
+        Protocol::UserPrompt {
+            text,
+            voice: Voice::Human,
+            ..
+        }
+        | Protocol::Steering {
+            text,
+            voice: Voice::Human,
+        } if role == Role::Trunk => Some(SynodEvent::Human { text: text.clone() }),
         Protocol::UserPrompt { .. }
         | Protocol::Steering { .. }
         | Protocol::System { .. }
@@ -139,7 +148,7 @@ fn forensic(role: Role, forensic: &Forensic) -> Option<SynodEvent> {
 
 fn project(role: Role, record: &Record) -> Option<SynodEvent> {
     match record {
-        Record::Protocol(protocol) => project_protocol(protocol),
+        Record::Protocol(protocol) => project_protocol(role, protocol),
         Record::Display(record) => display(role, record),
         Record::Forensic(record) => forensic(role, record),
     }
@@ -304,6 +313,43 @@ mod tests {
 
     fn observation_wire(what: Observed) -> ral_core::data::FOValue {
         Observation::instant(None, None, what).encode()
+    }
+
+    #[test]
+    fn a_trunk_human_prompt_projects_as_human() {
+        for protocol in [
+            Protocol::UserPrompt {
+                turn: 1,
+                text: "hello".into(),
+                voice: Voice::Human,
+            },
+            Protocol::Steering {
+                text: "hello".into(),
+                voice: Voice::Human,
+            },
+        ] {
+            assert!(matches!(
+                project(Role::Trunk, &Record::Protocol(protocol)),
+                Some(SynodEvent::Human { text }) if text == "hello"
+            ));
+        }
+    }
+
+    #[test]
+    fn a_helper_prompt_projects_nothing() {
+        for protocol in [
+            Protocol::UserPrompt {
+                turn: 1,
+                text: "hello".into(),
+                voice: Voice::Human,
+            },
+            Protocol::Steering {
+                text: "hello".into(),
+                voice: Voice::Human,
+            },
+        ] {
+            assert!(project(Role::Helper, &Record::Protocol(protocol)).is_none());
+        }
     }
 
     #[test]

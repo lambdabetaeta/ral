@@ -338,7 +338,7 @@ fn queued_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     let queued = app
         .tabs
         .focused_agent()
-        .map(|agent| agent.mailbox.queued_human_messages())
+        .map(|agent| agent.queued())
         .unwrap_or_default();
     if queued.is_empty() {
         return Vec::new();

@@ -25,6 +25,7 @@ use std::ops::ControlFlow;
 #[derive(Clone, Copy)]
 enum Idle {
     Park,
+    #[cfg(test)]
     Return,
 }
 
@@ -68,11 +69,8 @@ impl Avatar {
         self.attend_until(emit, Idle::Park)
     }
 
-    /// [`Self::attend`]'s per-exchange half, for
-    /// [`converse`](crate::headless::converse): drain the seeded message and
-    /// any nudge continuation it raises, then return instead of blocking for
-    /// the next one.  Converse posts no command, so a slash-shaped user
-    /// message reaches the model as ordinary text.
+    /// Drain queued work without parking; tests drive children with this.
+    #[cfg(test)]
     pub(crate) fn attend_backlog(&mut self, emit: &Emitter) -> AgentOutcome {
         self.attend_until(emit, Idle::Return)
     }
@@ -88,7 +86,7 @@ impl Avatar {
                 break None;
             };
             self.agent.set_resting(false);
-            match self.take_up(&next, emit) {
+            match self.take_up_drawn(&next.next, &next.stamp, emit) {
                 Ok(step) => {
                     if let Some(outcome) = step.settled {
                         settled = Some(outcome);
@@ -140,11 +138,12 @@ impl Avatar {
     /// not drained here: core pushes its `` `notice `` on the surface stream
     /// of the run that observes it, so a reap during a long idle surfaces once
     /// an item next runs.
-    fn draw(&self, idle: Idle) -> Option<Next> {
+    fn draw(&self, idle: Idle) -> Option<crate::bus::Drawn> {
         #[cfg(test)]
         tests::before_draw(self);
         match idle {
-            Idle::Return => self.inbox.next_item(),
+            #[cfg(test)]
+            Idle::Return => self.inbox.draw(|| ParkMode::Quiesce, &self.agent.token),
             Idle::Park => {
                 // The state a frontend shows over the coming silence is this
                 // park's own verdict.  Only on an empty queue: with an item
@@ -157,18 +156,30 @@ impl Avatar {
                         .transient(Transient::State(idle_state(mode)));
                 }
                 // The verdict is recomputed on every wake.
-                self.inbox
-                    .next_or_idle(|| self.park_mode(), &self.agent.token)
+                self.inbox.draw(|| self.park_mode(), &self.agent.token)
             }
         }
     }
 
-    /// Take up one drawn item.  A drawn item is always admissible: staleness
-    /// is settled at the inbox's own pop, against that inbox's clear-epoch.
+    /// Take up one drawn item under its dequeue generation.
     ///
     /// # Errors
     /// The engine's severance, after which no item can run.
+    #[cfg(test)]
     fn take_up(&mut self, next: &Next, emit: &Emitter) -> Result<Step, Severed> {
+        self.take_up_drawn(next, &self.agent.mailbox.stamp(), emit)
+    }
+
+    fn take_up_drawn(
+        &mut self,
+        next: &Next,
+        stamp: &crate::bus::Stamp,
+        emit: &Emitter,
+    ) -> Result<Step, Severed> {
+        if !stamp.current(&self.agent.token) {
+            self.record_refused_human(next);
+            return Ok(Step::command(ControlFlow::Continue(())));
+        }
         let item = match next {
             Next::Read(cmd) => {
                 self.read(cmd, emit);
@@ -180,14 +191,19 @@ impl Avatar {
         if !self.arrive(item)? {
             return Ok(Step::command(ControlFlow::Continue(())));
         }
+        #[cfg(test)]
+        tests::after_arrival(self);
         // Only a genuine boundary clears the latches, a prior exchange's Esc,
         // and any nudge still queued behind it — that nudge continued the
         // exchange this one closes.  A self-nudge is the same exchange
         // continuing.
         if item.opens_exchange() {
+            if !stamp.reset(&self.agent.token) {
+                self.record_refused_human(next);
+                return Ok(Step::command(ControlFlow::Continue(())));
+            }
+            self.work = stamp.clone();
             self.readings.nudges.reset();
-            self.agent.token.reset();
-            self.inbox.drop_nudges();
         }
         let outcome = match self.attempt(item, emit) {
             Ok(outcome) => Ok(outcome),
@@ -218,6 +234,20 @@ impl Avatar {
             ControlFlow::Continue(())
         };
         Ok(Step::settled(agent_outcome(&outcome), flow))
+    }
+
+    /// A drawn human prompt is accepted even when its work was abandoned.
+    fn record_refused_human(&self, next: &Next) {
+        if let Next::Item(Item::Human(text)) = next {
+            let recorded =
+                self.log
+                    .borrow_mut()
+                    .append_user(text.clone(), None, crate::record::Voice::Human);
+            if let Err(why) = recorded {
+                self.note_error(&why);
+            }
+            self.log.borrow_mut().quiesce(QuiesceReason::Cancelled);
+        }
     }
 
     /// Deliberate over `item`, a host-side panic caught as a fault; the log

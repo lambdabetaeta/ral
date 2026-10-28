@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 14cd830e3885ef4fb3f22778a359e825fede95e0
-generated_at_date: 2026-10-27
+generated_at_commit: e6941768
+generated_at_date: 2026-10-28
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
 
@@ -230,7 +230,7 @@ and composes the desktop application.
   schemas in `synod/gen/` are ignored build products.
 - `main.rs` runs `exit_if_re_exec_child` first, prepares credentials before
   starting threads, installs plugins and state, registers the `synod-live`
-  scheme (`live::serve`) and registers 14 commands. `open_main_window` builds
+  scheme (`live::serve`) and registers the window commands. `open_main_window` builds
   the main window in `setup` (`"create": false` in `tauri.conf.json`); on macOS
   it hands the builder the sealed `WKWebViewConfiguration` from `seal.rs`, and
   live pages stay unserved until the `Sealed` state exists.
@@ -319,20 +319,29 @@ is judged; shared machinery stays with exarch and vm-manager.
   `netgate::run` adopts net. `MachineFactory(Mutex<Box<dyn Machine>>)`
   implements exarch's `Factory` through `Machine::dial_engine`; the mutex
   supplies `Sync`. `exarch::app::SCRATCH_VAR` names the guest scratch variable.
-- `Guest` holds one `SettledConversation` beside its agent. Its bus lives
-  across exchanges, including late helper edges; an exchange waits for the
-  trunk and busy descendants with their results drained
+- `Guest` holds one `SettledConversation`, which owns its root avatar and
+  bus. `helm`, `await_message` and `exchange(sink)` forward to that driver;
+  severance reads `settled.root()`. The bus lives across exchanges, including
+  late helper edges; an exchange waits for the trunk and busy descendants
+  with their results drained
   ([[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]).
   A resident helper that is ready no longer holds the exchange open.
-- `Conversation::exchange` settles the baseline, runs the message, then
-  takes a closing walk even after failure. Each report is cumulative against
-  the opening baseline. A failed walk clears the report; a later successful
-  walk can restore the account. A lost engine is captured into `engine.log`
-  while the machine is still up, and later exchanges refuse with its sentence.
-  The capture repeats the failure so `engine.log` stands alone; its name
-  promises engine diagnostics, not host stderr. Capture failure is secondary.
-- `Guest::end` drops the settled driver and agent, recovers the uniquely
-  owned machine, stops and joins netgate, then shuts the machine down.
+- `Conversation::settle_baseline` joins the opening walk before the message
+  loop and before publishing Ready. `exchange(sink)` retains the cached
+  baseline guard as its first operation, attends queued work, then takes a
+  closing walk even after failure. Reports are cumulative against the opening
+  baseline; a failed walk clears the report, and a later success restores it.
+- `Conversation::{helm, await_message}` expose steering and the human-only
+  wait. `lost()` records engine loss; the loop ends without another exchange.
+  Engine diagnostics are captured into `engine.log` while the machine is up.
+  Capture repeats the failure so the file stands alone; capture failure is
+  secondary.
+- `Guest::end` calls `SettledConversation::end_fleet`, intentionally cancelling
+  every root in the shared fleet. The driver/root drops before waiting on the
+  detached `Departures` counter. Membership drops last, after seat/log and
+  fleet/identity references, so this wait retains no launch or factory.
+  Only then does `Guest::end` recover the uniquely owned `MachineFactory`
+  machine, stop and join netgate, and shut the machine down.
   `Conversation::end` drops its baseline after guest teardown. The guest's
   control EOF initiates shutdown from inside.
 
@@ -344,6 +353,11 @@ Publication and ownership agree at one generation boundary.
   Helper}`. `Router` latches the first signaling agent id as root; helper
   prose is suppressed, helper cards become process cards, usage still counts,
   and plumbing faults remain visible. `SubagentDone` becomes `HelperDone`.
+  A trunk `UserPrompt` or `Steering` with `Voice::Human` projects as
+  `SynodEvent::Human { text }`; helper prompts project nothing. Transcript
+  position is uptake, not submission. Already-drawn human text refused by
+  admission is also recorded and projected exactly once; it starts no provider
+  work and is never silently lost.
 - `Router::busy` is a `BTreeSet<AgentId>`: birth or a pending state inserts;
   ready or death removes. `SynodEvent::Helpers { busy }` is emitted only on
   a change. `Narrator<F>` implements `Sink` using a callback, independent
@@ -357,16 +371,36 @@ Publication and ownership agree at one generation boundary.
   Raw marks become lossy text once at the seam, avoiding arrays of byte numbers.
 - `window/state.rs` owns `Accounts`, `Running`, `Owner`, `Handle`, `Close`,
   `Review` and `SignIn`. `Owner::{Open, Closing}` admits one close owner;
-  its five-second grace bounds the wait for teardown. Supersession stops the
-  old sender and baseline, then joins outside the owner lock before opening
-  the next conversation.
-- `window/conversation.rs::Emitter` publishes only under
-  `Owner::owned_by(generation)`. Every update carries the window's attempt;
-  `send_message` checks that attempt against the registered handle.
-- `ExchangeDone { report: Option<WindowReport> }` carries the account with
-  completion. `None` means the folder could not be walked, never no changes.
+  its five-second grace bounds the wait for teardown. `Handle` holds an
+  `Inlet`: `Booting(Vec<String>)` buffers human messages, then `Live(Helm)`
+  steers them. Queue observation and recall work in both states; exchange Stop
+  requires a live helm and a matching active exchange.
+  Supersession ends the old inlet and stops its baseline, then joins outside
+  the owner lock before opening the next conversation.
+- `window/conversation.rs::Emitter` publishes only while its generation owns
+  the slot. `install` transfers buffered messages to the root's weak helm
+  under the slot lock. Every update carries the window's attempt.
+  `registered` checks that attempt for `send_message` and `recall_queued`.
+  `stop_exchange(attempt, exchange)` reserves only a matching running exchange;
+  stale or duplicate requests return no prompts and leave the queue untouched.
+  Stop and recall return withdrawn prompts oldest first.
+- `window/exchange.rs::Exchanges` assigns per-attempt monotonic `ExchangeId`s
+  and arbitrates idle/running/stopping under one mutex. A scoped `Delivery`
+  reserves Stop while `Helm::stop` runs outside the slot lock; `finish` waits
+  on its condvar until delivery ends, before completion or another exchange.
+- **Queue snapshots are read and published under the same slot lock.**
+  `ConversationUpdate::Queue { messages }` replaces the strip, oldest first.
+  Commands, installation, human uptake and exchange completion refresh it;
+  an older snapshot cannot publish after a newer one.
+- `converse` installs the helm, settles the baseline, publishes Ready, then
+  loops over `await_message` and `exchange`. `ExchangeBegan { exchange }`
+  announces each admitted exchange before attendance. A superseded worker ends quietly;
+  baseline failure or engine loss ends the current attempt.
+- `ExchangeDone { exchange, stopped, report: Option<WindowReport> }` carries
+  the account and backend Stop verdict with addressed completion. `None` means the folder could not be walked, never no changes.
   `Emitter::exchange_done` replaces `Review` and publishes under the same
-  generation lock, taking Running before Review. Registration clears Review
+  generation lock, taking Running before Review, then refreshes the queue.
+  Registration clears Review
   inside its own critical section; a superseded worker cannot replace it.
 - `Ended { explained }` terminates the attempt. A panic gives
   `explained: false`; a narrated failure gives `true`. `Held` retains the
@@ -417,9 +451,24 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
 - Screens feed the projector, which feeds the chat document and renderers.
   `chat-document.js::onChange` registers the projector's render callback,
   removing its import back into the projector.
-- `conversation.js` filters attempts before projection and uses a pure
-  reducer to admit exchange activity. Terminal attempts cannot revive;
-  composer enablement follows the same transition law.
+- `conversation.js` filters attempts before projection. Only backend
+  `exchange_began` and `exchange_done` move exchange activity; accepted and
+  ready attempts admit composition even while busy. Terminal attempts cannot
+  revive. Sending queues text without drawing a transcript prompt.
+- `Queue` replaces the dimmed, text-only queue strip; Edit or Up in an empty
+  composer recalls it. `Human` closes open prose and work before drawing the
+  recorded prompt. Failed sends restore their text ahead of the live draft.
+  `withdrawals.js` serializes Stop and recall requests per attempt, accumulating
+  overlapping withdrawals in gesture order before one restoration ahead of
+  the current draft. Superseded attempts cannot restore or report into a new one.
+- Stop and Esc capture the attempt and exchange ID **at gesture time**, then
+  enqueue `stop_exchange(attempt, exchange)` with those captured values;
+  waiting behind recall never retargets Stop to a newer exchange. A pending ID suppresses
+  duplicate clicks, not completion. Only matching backend
+  `ExchangeDone { stopped: true, .. }` draws “Stopped.” after in-flight output,
+  even if completion precedes command acknowledgement. Nothing starts automatically after a stop. Ending
+  an attempt restores the last queue snapshot and clears the strip
+  ([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
 - `change-report.js::showReport` consumes the completion's report without
   another command. `null` displays the unavailable-account sentence and no
   cards; an empty report displays “Nothing has changed…”. Reset reuses a

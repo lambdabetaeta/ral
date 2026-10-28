@@ -27,7 +27,7 @@ fn test_log() -> AgentLog {
 
 /// The trunk a wire desk's handlers scope against — inert: this file's
 /// tests never spawn from it.
-fn test_trunk(fleet: &Arc<Fleet>) -> Arc<crate::agent::Agent> {
+fn test_trunk(fleet: &Arc<Fleet>) -> crate::agent::testkit::TestAgent {
     let mut spec = crate::agent::testkit::TestAgentSpec::new("wire-trunk");
     spec.role = crate::agent::Role::Headless;
     crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
@@ -168,9 +168,12 @@ fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     let fleet = Fleet::for_test();
     let trunk = test_trunk(&fleet);
     let root_id = trunk.id;
-    let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());
+    let emit = Emitter::new(tx, root_id);
 
-    seat.install_deferred(crate::shell_eval::deferred_sink(&emit));
+    seat.install_deferred(crate::shell_eval::deferred_sink(
+        &emit,
+        inbox.mailbox().stamp(),
+    ));
     let host: Arc<dyn Host> = Arc::new(RunHost {
         desk: ExarchDesk {
             services: wire_host_services(&emit, &trunk),

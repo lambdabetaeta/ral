@@ -8,6 +8,8 @@ import {
   clearOpenDial,
   openStreamingProse,
   addSystemMessage,
+  addUserMessage,
+  closeStreamingProse,
   dialAddNote,
   dialAddReadout,
   dialAddCall,
@@ -187,6 +189,11 @@ export function onOpening(p) {
 /** @param {import("./bindings/SynodEvent.ts").SynodEvent} p */
 export function onSynodEvent(p) {
   switch (p.type) {
+    case "human":
+      closeStreamingProse();
+      clearOpenDial();
+      addUserMessage(p.text);
+      break;
     case "token":
       // Whitespace before prose must not open an empty bubble or split the dial.
       if (!streamingProse && !p.text.trim()) break;

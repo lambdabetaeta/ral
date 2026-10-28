@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3dbbe8f3
-generated_at_date: 2026-10-27
+generated_at_commit: e6941768
+generated_at_date: 2026-10-28
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -60,7 +60,13 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   next boundary in order. So the variant alone decides the drain point:
   `drain_mid_exchange` (from `agent::deliberate`, after a continuing tool batch)
   yields the reads and deliveries in the order typed and stops at a rewrite;
-  `next_or_idle` pops anything. Within one tool boundary each arrival is taken
+  `draw` and `drain_drawn` carry dequeue stamps, and stopping holds block uptake.
+  Accepted arrival resets bare interruption and queued nudges only if that
+  stamp is still current under admission; a suppressed completion resets
+  nothing. Refused already-drawn human text is recorded exactly once as
+  `UserPrompt` at the attend boundary or `Steering` mid-exchange, without
+  starting provider work; fencing does not silently lose human input.
+  Within one tool boundary each arrival is taken
   at its place: a read runs against the context as it then stands, a delivery
   lands as a steering line of its own — so a `/branch` typed beside a prompt
   forks with it or without it exactly as typed. The attend thread runs the commands
@@ -86,7 +92,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   exchange ends even while a background producer keeps the channel non-empty —
   never the channel's state; the TUI's own `drain_signals` (`tui/tui_loop.rs`)
   reads the fleet's emptiness before each pass instead, since its run ends
-  with its last root
+  after every Avatar's teardown membership is released
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 - the channel itself (`bus/channel.rs`) is coalescing but unbounded in depth, not a bare `mpsc` pair
   (`BusSender`/`BusReceiver`, same `send`/`try_recv`/`recv_timeout` shape):
@@ -153,11 +159,30 @@ publishes through its `Publish` trait and knows no `bus`, and `bus` knows no
 The TUI mints one **session-lived** bus, so an async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
 uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]);
-the one-shot/headless conversational drivers use a **per-exchange** bus with
-muted children. `headless::SettledConversation` binds a **conversation-lived**
-session bus to one root, retaining helper delivery across exchanges. Each
-exchange drains to fleet quiescence; late helper edges queue until the next
-exchange, while replied helpers remain leased residents.
+the one-shot headless driver uses a **per-exchange** bus with muted children.
+`headless::SettledConversation` owns its root and a **conversation-lived**
+session bus, retaining helper delivery across exchanges.
+
+- `new(root)` consumes the avatar; self-scheduling and reset-resume are refused.
+  `root()` borrows that one root; no exchange can name a different one.
+- A host retains `root().helm()` and queues text with `Helm::steer`.
+  `await_message()` waits for human steering only, returning false on
+  termination; a worker surface batch cannot start work by itself.
+- `exchange(sink)` attends what is queued until the root and busy descendants
+  settle with results drained. Late helper edges wait for the next exchange;
+  replied helpers remain leased residents.
+- `end_fleet(self)` intentionally ends **every root in the shared fleet**, not
+  only this conversation's subtree. It retains the detached `Departures`,
+  cancels all roots, drops the driver/root, then waits for teardown membership
+  to reach zero without retaining the launch or its factory.
+- `Helm::{queued, recall, stop, end}` observe the queue, withdraw prompts,
+  abandon an exchange or end the agent respectively
+  ([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
+
+**The TUI uses `Agent` conversation methods, never its mailbox.**
+`steer`, `post`, `queued`, `recall` and `waiting_for_input` form its crate-local
+boundary. `PromptState::edit_queued_prompt` accepts a recall closure and checks
+for a draft or history browse before invoking it; Up takes only text it can show.
 
 `record/session.rs` is the canonical per-session record. `AgentLog` owns two things:
 
@@ -405,9 +430,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  predicate `parent_focus` climbs by. The frontend holds the
  `Fleet`, to resolve a tab's name and to reach the live roots on `/quit`, and
  no `Arc<Agent>`: reach is `Tabs::agent(id)`, an upgrade held for one handler
- and never stored, so the avatar alone decides how long an agent lives. Liveness and death are
- different questions asked of different things — a failed upgrade says the
- agent is gone *now*, while `Transient::Died` sits at a *position* in the bus
+ and never stored. An upgrade proves retained identity, not consumer liveness:
+ Avatar drop retires the token even while children retain the parent.
+ Consumer retirement and ordered death are different questions — `Transient::Died`
+ sits at a *position* in the bus
  queue, and only that position can say which buffered events preceded it, so
  `Died` (and `/clear`'s `retire_subtree`, the frontend declaring its
  descendants' death ahead of the fact) remains the death cue, and `App` drops
@@ -482,7 +508,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  first typed as the one `Command::Hatch(Memory, Option<name>)`, mirroring
  `Read::Hatch`; `/context`, `/resources`) or a `Rewrite` (`/clear`, `/close`, `/evict`,
  `/rewind`) and enter the focused agent's inbox. `/quit` calls
- `Agent::cancel_tree` on every root directly, without an inbox consumer;
+ `Agent::end` on every root directly, without an inbox consumer;
  descendants cannot retain an idle parent indefinitely after it ends.
  A session command on a tab whose agent has ended
  answers "this tab's agent has ended". Every command acts on, and reports
@@ -504,9 +530,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  for them rather than seeded with a prompt — blank for `/new`, carrying the
  focused tab's context for `/branch`, with a fresh shell either way. `/close`
  ends the focused tab's session for good (`--resume` will not reopen it) and
- `/quit` ends every root, resumable; the process exits once the last root's
- avatar has dropped (`Fleet::wait_empty`, woken by each worker's
- `Fleet::departed`, not polled). The idle wait
+ `/quit` ends every root, resumable; the process exits once every Avatar's
+ teardown membership has dropped (`Fleet::wait_empty`, notified by the last
+ `Membership`, not polled). Retained identities do not prolong this wait. The idle wait
  selects over input, inbox (`bus/inbox.rs`), and the session bus (`bus/channel.rs`)
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
@@ -583,10 +609,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   human-readable value projection; `--output-format json` writes one faithful
   result object from that same reply. Every other event condenses to one line
   on `err`, and the process exits after one seed exchange. The sink projects
-  onto an explicit writer pair: `run` is the CLI's headless wrapper, while
-  `converse_on` is the conversational projection that keeps streaming tokens
-  to a non-CLI host (synod's GUI) one exchange at a time on a parked embedded
-  trunk.
+  onto an explicit writer pair: `run` is the CLI's headless wrapper.
+  An embedding host supplies its own `Sink` to `SettledConversation`, above.
   `Headless` takes `Sink::drive` as it comes and keeps one `Blocks` memo per
   source agent; it takes a per-exchange bus, so its async children stay muted.
   It is a display only — the durable `record.jsonl` is written by each

@@ -73,7 +73,7 @@ fn quit_terminates_every_root_and_descendant_without_queuing() {
             avatar.agent.name
         );
         assert!(
-            avatar.agent.mailbox.queued_human_messages().is_empty(),
+            avatar.agent.queued().is_empty(),
             "quit is a shutdown, not a queued command"
         );
     }
@@ -93,7 +93,6 @@ fn quit_finishes_a_parked_child_after_its_parent_loop_has_ended() {
     use crate::bus::{FleetBus, Signal};
     use crate::record::{AgentState, Transient};
     use ral_core::data::FOValue;
-    use ral_core::process::CancelCause;
     use ral_core::test_helper::eventually;
     use std::sync::Arc;
 
@@ -103,7 +102,7 @@ fn quit_finishes_a_parked_child_after_its_parent_loop_has_ended() {
     let id = child.id();
     child.agent.deposit_reply(&fleet, FOValue::Unit);
     let bus = FleetBus::session();
-    let emit = bus.emitter(main.id(), main.agent.mailbox.clone());
+    let emit = bus.emitter(main.id());
     spawn_async(
         child,
         AsyncSpawn {
@@ -133,7 +132,7 @@ fn quit_finishes_a_parked_child_after_its_parent_loop_has_ended() {
     let finished = eventually(Duration::from_secs(5), || fleet.is_empty().then_some(()));
     if finished.is_none() {
         for root in fleet.roots() {
-            root.cancel_tree(CancelCause::Cancelled);
+            root.end();
         }
     }
     assert!(

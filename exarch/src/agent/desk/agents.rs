@@ -58,7 +58,7 @@ impl ExarchDesk {
 
         let seat = self.fork_seat(fork)?;
         let child = Avatar::child_of(
-            &s.agent,
+            (&s.agent, s.stamp.clone()),
             &s.log.borrow(),
             &s.fleet,
             claim,

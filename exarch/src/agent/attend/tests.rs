@@ -12,12 +12,121 @@ type DrawHook = Box<dyn FnOnce(&Avatar)>;
 thread_local! {
     static BEFORE_DRAW: std::cell::Cell<Option<DrawHook>> =
         const { std::cell::Cell::new(None) };
+    static AFTER_ARRIVAL: std::cell::Cell<Option<DrawHook>> =
+        const { std::cell::Cell::new(None) };
 }
 
 pub(super) fn before_draw(avatar: &Avatar) {
     if let Some(hook) = BEFORE_DRAW.take() {
         hook(avatar);
     }
+}
+
+pub(super) fn after_arrival(avatar: &Avatar) {
+    if let Some(hook) = AFTER_ARRIVAL.take() {
+        hook(avatar);
+    }
+}
+
+#[test]
+fn stop_after_arrival_acceptance_preserves_stop_and_new_queue_contents() {
+    let mut session = Avatar::for_test("system").unwrap();
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.agent.id);
+    session.couple(&emit);
+    session.inbox.push_user("old".into());
+    let drawn = session.draw(Idle::Return).unwrap();
+    let (accepted, accepting) = std::sync::mpsc::channel();
+    let (stopped, stopping) = std::sync::mpsc::channel();
+    let agent = session.agent.clone();
+    let worker = std::thread::spawn(move || {
+        accepting.recv().unwrap();
+        agent.stop();
+        agent.post(Post::Nudge {
+            prompt: 2,
+            text: "new nudge".into(),
+        });
+        agent.steer("fresh".into());
+        stopped.send(()).unwrap();
+    });
+    AFTER_ARRIVAL.set(Some(Box::new(move |_| {
+        accepted.send(()).unwrap();
+        stopping.recv().unwrap();
+    })));
+    let step = session
+        .take_up_drawn(&drawn.next, &drawn.stamp, &emit)
+        .unwrap();
+    worker.join().unwrap();
+    assert!(step.settled.is_none());
+    assert!(session.agent.token.is_cancelled());
+    assert_refused_human(&session, &crate::bus::drain_records(&rx), "old");
+    assert!(
+        matches!(session.inbox.next_item(), Some(Next::Item(Item::Nudge { text, .. })) if text == "new nudge")
+    );
+    assert_eq!(session.agent.queued(), vec!["fresh"]);
+}
+
+fn assert_refused_human(session: &Avatar, records: &[Record], expected: &str) {
+    assert!(session.is_ready());
+    assert!(session.agent.token.is_cancelled());
+    assert_eq!(records.iter().filter(|record| matches!(
+        record,
+        Record::Protocol(crate::record::Protocol::UserPrompt { text, voice: crate::record::Voice::Human, .. }) if text == expected
+    )).count(), 1);
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record, Record::Forensic(Forensic::TurnStarted { .. })))
+    );
+}
+
+#[test]
+fn stop_after_draw_records_the_removed_human_without_running_old_work() {
+    let mut session = Avatar::for_test("system").unwrap();
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.agent.id);
+    session.couple(&emit);
+    session.agent.steer("old".into());
+    let drawn = session.draw(Idle::Return).unwrap();
+    assert_eq!(session.agent.stop(), Vec::<String>::new());
+    session.agent.steer("fresh".into());
+    let step = session
+        .take_up_drawn(&drawn.next, &drawn.stamp, &emit)
+        .unwrap();
+    assert!(step.settled.is_none());
+    assert_refused_human(&session, &crate::bus::drain_records(&rx), "old");
+    assert_eq!(session.agent.queued(), vec!["fresh"]);
+}
+
+#[test]
+fn a_pre_stop_draw_is_refused_before_any_arrival_fact() {
+    let mut session = Avatar::for_test("system").unwrap();
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.agent.id);
+    session.couple(&emit);
+    session
+        .agent
+        .mailbox
+        .stamp()
+        .post(crate::bus::Stamped::AgentResult(crate::bus::AgentResult {
+            id: crate::record::AgentId::new(77),
+            name: "old helper".into(),
+            outcome: AgentOutcome::Cancelled,
+            elapsed: Duration::ZERO,
+        }));
+    let drawn = session.draw(Idle::Return).unwrap();
+    session.agent.stop();
+    let step = session
+        .take_up_drawn(&drawn.next, &drawn.stamp, &emit)
+        .unwrap();
+    assert!(step.settled.is_none());
+    assert!(session.agent.token.is_cancelled());
+    assert!(
+        !crate::bus::drain_records(&rx).iter().any(|record| matches!(
+            record,
+            Record::Display(crate::record::Display::SubagentDone { .. })
+        ))
+    );
 }
 
 #[test]
@@ -180,7 +289,7 @@ fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
 fn pinned_state_reminder_reads_the_live_register_and_becomes_the_next_prompt() {
     let mut session = Avatar::for_test("system").unwrap();
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     session.ral(
         r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "ship the reminder"]]]]"#,
         5,
@@ -234,7 +343,7 @@ fn pinned_state_reminder_reads_the_live_register_and_becomes_the_next_prompt() {
 fn pin_reminder_does_not_relivelock_the_interactive_root() {
     let mut session = trunk(true);
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     session.ral(
         r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep going"]]]]"#,
         5,
@@ -282,7 +391,7 @@ fn pin_reminder_does_not_relivelock_the_interactive_root() {
 fn chat_trunk_never_nudges() {
     let mut session = chat_trunk();
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     session
         .agent
         .provider
@@ -323,7 +432,7 @@ fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Avatar {
     let script = Script::new().then(refusal()).then(refusal());
     session.agent.provider.swap(scripted("test-model", script));
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     session.couple(&emit);
     for prompt in ["first", "again"] {
         session.seed(prompt.into());
@@ -370,7 +479,7 @@ fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
 
     let mut session = Avatar::for_test("system").unwrap();
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     session.couple(&emit);
 
     session.ral("let h = spawn \"claimed\" { 7 }\nawait $h", 10, &emit);
@@ -451,7 +560,7 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
 
     let mut session = Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     session.couple(&emit);
 
     // 1. `/clear` epoch fence: stamped before clear is rejected at inbox pop.

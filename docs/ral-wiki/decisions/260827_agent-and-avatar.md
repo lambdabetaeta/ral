@@ -10,8 +10,33 @@ touch what.** [`Agent`] holds the public half — identity, the two cancel
 doors, mailbox, provider, immutable config, and a small single-writer
 `Status` — behind an `Arc` the fleet shares. [`Avatar`] holds the private
 half — the log, the seat, the inbox, everything only the attend thread
-touches — plus the `Arc<Agent>` it embodies. An agent is *live* while its
-avatar holds that `Arc`; nothing deregisters.
+touches — plus the `Arc<Agent>` it embodies. **An identity may outlive its
+consumer:** the lifetime amendment below distinguishes retirement from identity
+retention and teardown completion.
+
+## Consumer lifetime amendment, 2026-10-28
+
+[[261027_a-host-holds-a-helm]] refines the original lifetime criterion without
+changing the public/private split:
+
+- Children retain strong upward identity; parents and fleet indices retain
+  only weak downward edges. A terminated ancestor remains traversable while
+  descendants exist, so shutdown walks must not filter it by token state.
+- Avatar drop retires its token under local admission before resource teardown,
+  including unwind. Final enrollment shares that boundary; a weak Helm rejects
+  the retired consumer even when its identity upgrades. Drop does not itself
+  cancel the subtree.
+- Fleet emptiness counts Avatar-owned `Membership` guards released last, after
+  seat/log teardown and fleet/identity references. Detached `Departures` owns
+  the count and condvar, retaining no launch or factory. Neither retained
+  identity Arcs nor temporary Helm upgrades count as outstanding teardown.
+  `SettledConversation::end_fleet` cancels every shared-fleet root, drops its
+  driver/root, then waits on that detached counter before Synod recovers its
+  machine factory.
+
+The diagnosis and original decision below record the split's motivation;
+current admission and teardown details are in that amendment and
+[[map/exarch/agent|agent]].
 
 ## The diagnosis
 
@@ -54,13 +79,10 @@ comment):
   plus the `Arc<Agent>` — so every method the loop calls is plain
   `&mut self`, with no lock and no lookup between a call and the field it
   reads.
-- **Liveness is the avatar holding the `Arc`.** Nothing deregisters; the
-  parent's `children` and the fleet's `roots`/`names` hold `Weak`, and every
-  walk prunes what fails to upgrade. `Avatar`'s `Drop` is the whole of what
-  `deregister` used to do explicitly: it clears the avatar's own armed
-  schedules and records the session-ended bookend, and the last strong
-  reference going with it is what a parent's or the fleet's next walk prunes
-  away.
+- **Original lifetime criterion (superseded by the lifetime amendment).**
+  Weak tree indices prune failed upgrades; Avatar drop clears its schedules
+  and records the session-ended bookend. Weak upgrade alone does not establish
+  that the consumer remains alive.
 - **Status has one writer.** Of `Entry`'s mutable fields, `generation`,
   `rest`, and `reply` are written by the avatar alone and read by everyone
   else — a process publishing its own status. `Agent::status` is a `Mutex`
@@ -186,17 +208,16 @@ by roots and children. Resume reopens every root not ended by the new
 door went with the special case it served: `BranchOrder`, the
 `_exarch-branch` builtin, the `Agents::Branch` enquiry and `Avatar::fork_with` are
 deleted, `Avatar::child_of` is the one child builder, and a root is never a
-fork. `Avatar` declares `agent` last, since the fleet's `Weak` must outlive
-the seat's teardown and the log's `SessionEnded` when a root's death ends the
-process. In the frontend `Tabs` has no root and `FleetBus` no mailbox; every
+fork. The field-order requirement is refined by the 2026-10-28 amendment:
+`Membership`, not a weak identity upgrade, witnesses completed teardown. In the frontend `Tabs` has no root and `FleetBus` no mailbox; every
 command acts on the focused tab's agent.
 
 *Amended 2026-10-27: an `Agent` holds no engine connection.* Its `reach`
 is a control sender, and a wire sender holds its seat's line weakly
-([[design/engine-protocol|engine-protocol]]). Liveness, which is the
-avatar's `Arc`, and the connection, which is the avatar's seat, never
-couple: an `Arc<Agent>` held past its avatar keeps neither an engine nor
-a descriptor, and the session ends at the avatar's drop.
+([[design/engine-protocol|engine-protocol]]). Retained identity and the
+connection, which is the avatar's seat, never couple: an `Arc<Agent>` held
+past its avatar keeps neither an engine nor a descriptor. Consumer retirement
+and completed teardown have the distinct witnesses in the 2026-10-28 amendment.
 
 ## Supersession
 

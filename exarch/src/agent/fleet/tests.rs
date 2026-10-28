@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::roster;
-use crate::agent::testkit::{TestAgentSpec, bare_transport, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, bare_transport, test_agent};
 use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, Next, ParkMode, Post, Stamped};
 use crate::cancel::InterruptTarget;
 use crate::cancel::Token;
@@ -14,7 +14,7 @@ use std::time::Instant;
 /// A root (`parent` `None`) or a reporting child, with handles no test
 /// below inspects.  The caller holds the only strong reference: dropping
 /// it is what settles the agent.
-fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&Arc<Agent>>) -> Arc<Agent> {
+fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&Arc<Agent>>) -> TestAgent {
     born(fleet, spec(name, parent)).expect("a fresh name under a live parent is always born")
 }
 
@@ -24,8 +24,26 @@ fn spec(name: &str, parent: Option<&Arc<Agent>>) -> TestAgentSpec {
     spec
 }
 
-fn born(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Arc<Agent>, Unborn> {
+fn born(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<TestAgent, Unborn> {
     test_agent(fleet, spec)
+}
+
+#[test]
+fn synthetic_consumer_retirement_is_terminal_without_cancelling_descendants() {
+    let fleet = Fleet::for_test();
+    let root = agent(&fleet, "root", None);
+    let child = agent(&fleet, "child", Some(&root));
+    let retained = Arc::clone(&root);
+    drop(root);
+    assert!(retained.token.terminated());
+    assert!(!child.token.terminated());
+    assert!(matches!(
+        born(&fleet, spec("late", Some(&retained))),
+        Err(Unborn::SessionDead)
+    ));
+    assert!(!fleet.is_empty());
+    drop(child);
+    assert!(fleet.is_empty());
 }
 
 /// A reach into a real engine, and the engine it reaches.
@@ -586,19 +604,27 @@ fn observing_status_does_not_disarm_the_reply_lease() {
 
 #[test]
 fn settling_before_the_fire_ends_the_chain_silently() {
-    let ttl = Duration::from_millis(80);
-    let fleet = Fleet::leased_for_test(ttl);
+    let fleet = Fleet::leased_for_test(Duration::from_secs(60));
     let trunk = agent(&fleet, "trunk", None);
     let child = born(&fleet, spec("child", Some(&trunk))).expect("a fresh child of a live trunk");
     let token = child.token.clone();
+    let weak = Arc::downgrade(&child);
     child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
+    let since = child.reply_since().expect("reply armed the lease");
+    assert!(fleet.nearest_reap().is_some());
+    assert_eq!(token.cause(), None);
 
     drop(child);
 
-    std::thread::sleep(ttl * 4);
-    assert!(
-        !token.is_cancelled(),
-        "the chain's late fire found nothing to upgrade and never touched the settled token"
+    assert!(weak.upgrade().is_none(), "retirement released the agent");
+    assert!(fleet.resolve("child").is_none());
+    assert!(fleet.nearest_reap().is_none());
+    assert_eq!(token.cause(), Some(CancelCause::Cancelled));
+    lease_fire(&weak, since);
+    assert_eq!(
+        token.cause(),
+        Some(CancelCause::Cancelled),
+        "the late lease must not replace retirement with a timeout"
     );
 }
 

@@ -6,6 +6,7 @@
 use super::super::*;
 use super::{message_req, spec, start};
 use crate::agent::roster::summary;
+use crate::agent::testkit::TestAgent;
 use crate::bus::Inbox;
 use crate::cancel::InterruptTarget;
 use crate::enquiry::ForkClaim;
@@ -108,7 +109,10 @@ fn fake_wire_reach() -> InterruptTarget {
 /// A wire-seat desk fixture whose parent holds the very inbox this
 /// returns, exactly [`super::spawnable_desk`]'s identity shape with
 /// `kind: SeatKind::Wire` and a factory installed.
-fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc<Fleet>, Inbox) {
+fn wire_spawnable_desk(
+    fuel: u32,
+    factory: Arc<FakeFactory>,
+) -> (ExarchDesk, Arc<Fleet>, Inbox, TestAgent) {
     let parent_inbox = Inbox::new();
     let fleet = Fleet::new(
         crate::agent::fleet::Launch {
@@ -132,14 +136,14 @@ fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc
                 engine: crate::boot::test_attach().0,
             },
             stamp: agent.mailbox.stamp(),
-            agent,
+            agent: agent.clone(),
             emit,
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),
             acts: ActFragment::default(),
         },
     };
-    (desk, fleet, parent_inbox)
+    (desk, fleet, parent_inbox, agent)
 }
 
 /// The parent's bequest as a wire engine seals it, carrying `PARENT_MARK=1`.
@@ -159,7 +163,7 @@ fn wire_start_req(name: &str, seed: Sealed) -> Request {
 #[test]
 fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
     let factory = FakeFactory::new(Guest::Closes);
-    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory);
+    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory);
 
     let err = desk
         .ask(wire_start_req("unattached", parent_seal()))
@@ -181,7 +185,7 @@ fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
 #[test]
 fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
     let factory = FakeFactory::new(Guest::Refuses("connection reset by peer".to_string()));
-    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory);
+    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory);
 
     let err = desk
         .ask(wire_start_req("never-made", parent_seal()))
@@ -199,7 +203,7 @@ fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
 #[test]
 fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
     let factory = FakeFactory::new(Guest::Spawns);
-    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
+    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory.clone());
 
     let err = desk
         .ask(super::start_req(NurseryId(0), "go", "in-process"))
@@ -222,7 +226,7 @@ fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
 #[test]
 fn a_sealed_bequest_reaches_the_child_engine() {
     let factory = FakeFactory::new(Guest::Spawns);
-    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
+    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory.clone());
     let SeatKind::Wire { engine } = &desk.services.kind else {
         panic!("a wire desk makes its children over a wire")
     };
@@ -282,7 +286,7 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
                 engine: crate::boot::test_attach().0,
             },
             stamp: parent.mailbox.stamp(),
-            agent: parent,
+            agent: parent.clone(),
             emit,
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),

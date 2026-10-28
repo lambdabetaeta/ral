@@ -2,7 +2,6 @@ pub(super) mod editor;
 
 use super::commands;
 use super::palette::SLATE;
-use crate::bus::Mailbox;
 use editor::completion::Menu;
 use editor::{EditMode, PromptEditor};
 use ratatui::crossterm::event::KeyCode;
@@ -48,13 +47,14 @@ impl PromptState {
 
     /// Pull every queued prompt back for revision, blank-line separated.  Declines
     /// while a draft or a history browse is live, so Up never discards typed text.
-    pub(super) fn edit_queued_prompt(&mut self, mailbox: &Mailbox) -> bool {
+    pub(super) fn edit_queued_prompt(&mut self, recall: impl FnOnce() -> Vec<String>) -> bool {
         if self.hist_pos.is_some() || !self.editor.is_empty() {
             return false;
         }
-        let Some(prompts) = mailbox.pop_back_user_all() else {
+        let prompts = recall();
+        if prompts.is_empty() {
             return false;
-        };
+        }
         let joined = prompts.join("\n\n");
         self.set_prompt(&joined);
         true

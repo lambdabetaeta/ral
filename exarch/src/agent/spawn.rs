@@ -6,7 +6,6 @@
 use crate::agent::Avatar;
 use crate::bus::{AgentOutcome, Emitter};
 use crate::record::{AgentLog, Born, Memory, Resumed, Transient};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -115,7 +114,6 @@ pub(crate) fn spawn_async(
         resumed,
     } = spec;
     let agent_id = child.agent.id;
-    let fleet = Arc::clone(&child.fleet);
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
     // way its own record seam is recorded through whether or not anyone
@@ -128,7 +126,7 @@ pub(crate) fn spawn_async(
             resumed,
             recorder: child.recorder(),
         };
-        emit.child(agent_id, child.agent.mailbox.clone(), born)
+        emit.child(agent_id, born)
     } else {
         emit.muted_child(agent_id)
     };
@@ -164,7 +162,6 @@ pub(crate) fn spawn_async(
             // retirement: a parent that finds this child gone always finds
             // the result already queued.
             child.settle(outcome);
-            fleet.departed();
         });
     match worker {
         Ok(_) => Ok(SpawnedChild { id: agent_id, name }),

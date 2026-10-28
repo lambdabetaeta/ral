@@ -44,18 +44,21 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
 /// rendered context must carry the first's user text and reply.
 #[test]
 fn converse_carries_context_from_one_exchange_into_the_next() {
-    let mut session = converse_trunk(
+    let session = converse_trunk(
         "context",
         Script::new()
             .then(Reply::text("hello back"))
             .then(Reply::text("and again")),
     );
-    converse(&mut session, "first message".into())
-        .expect("a conversing trunk never fails for want of a reply");
-    converse(&mut session, "second message".into())
-        .expect("the second exchange runs on the same, unbroken session");
+    let mut settled = SettledConversation::new(session).unwrap();
+    let mut sink = Collecting::default();
+    for message in ["first message", "second message"] {
+        settled.root().helm().steer(message.into()).unwrap();
+        assert!(settled.await_message());
+        settled.exchange(&mut sink).unwrap();
+    }
 
-    let rendered = format!("{:?}", session.rendered_messages());
+    let rendered = format!("{:?}", settled.root().rendered_messages());
     assert!(rendered.contains("first message"), "{rendered}");
     assert!(rendered.contains("hello back"), "{rendered}");
     assert!(rendered.contains("second message"), "{rendered}");
@@ -90,7 +93,7 @@ fn recovered_worker_panic_reports_error_not_success() {
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
     h.accept(Signal::Fact(
         root,
         Recorded::new(
@@ -116,7 +119,7 @@ fn num_turns_counts_root_turns() {
     let sub: AgentId = AgentId::new(2);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
     let mut seq = 0u64;
     let mut turn_started = |id: AgentId, turn: u64| {
         seq += 1;
@@ -149,7 +152,7 @@ fn a_card_fact_reaches_stderr_through_the_view_fold() {
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
+    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
     let card = Card(vec![Mark::Raw {
         bytes: b"a rendered surface".to_vec(),
     }]);
@@ -175,7 +178,7 @@ fn a_transient_fault_reaches_stderr_from_any_agent() {
     let sub: AgentId = AgentId::new(2);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
+    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
     h.accept(Signal::Transient(
         sub,
         Transient::Fault {
@@ -193,7 +196,7 @@ fn structured_result_is_faithful_not_stringified() {
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
     h.reply = Some(ral_core::data::FOValue::Map {
         entries: vec![(
             "files".into(),
@@ -227,7 +230,7 @@ fn no_reply_root_is_error_with_null_result() {
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+    let h = Headless::new(root, &mut sink_out, &mut sink_err);
     let out = result_json(
         &h,
         &Err("ended without calling `reply`".to_string()),
@@ -246,7 +249,7 @@ fn user_json_projected_result_keeps_a_string_reply_raw() {
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
     let payload = ral_core::data::FOValue::String {
         value: "plain text reply".into(),
     };
@@ -263,7 +266,7 @@ fn user_json_projected_result_keeps_structure_ordinary_json() {
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
-    let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
     let payload = ral_core::data::FOValue::Map {
         entries: vec![(
             "files".to_string(),
@@ -320,28 +323,6 @@ fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
             .expect("no --file to read")
             .as_deref(),
         Some(" x ")
-    );
-}
-
-/// A host's own writers get the same split `converse` gives the process's
-/// stdout/stderr — reply text on `out`, breadcrumbs on `err`.
-#[test]
-fn converse_on_projects_into_the_given_writers() {
-    let mut session = converse_trunk("writers", Script::new().then(Reply::text("hi there")));
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    converse_on(&mut session, "hello".into(), &mut out, &mut err)
-        .expect("a conversing trunk never fails for want of a reply");
-    assert!(
-        String::from_utf8_lossy(&out).contains("hi there"),
-        "reply text must land on `out`: {:?}",
-        String::from_utf8_lossy(&out)
-    );
-    // One exchange spends two ids: the prompt takes 1, the reply 2.
-    assert!(
-        String::from_utf8_lossy(&err).contains("[turn 2]"),
-        "turn breadcrumbs must land on `err`: {:?}",
-        String::from_utf8_lossy(&err)
     );
 }
 
@@ -454,7 +435,7 @@ impl<S: Sink> Sink for SignalOnWaiting<S> {
 /// rather than pass, so this also proves the hold is real.
 #[test]
 fn settled_conversation_holds_for_a_live_child_then_quiesces() {
-    let mut session = settled_trunk(
+    let session = settled_trunk(
         "slow-child",
         Script::new()
             .then(Reply::text("on it"))
@@ -476,9 +457,11 @@ fn settled_conversation_holds_for_a_live_child_then_quiesces() {
         inner: Collecting::default(),
         release: release_tx,
     };
-    SettledConversation::new(&session)
-        .unwrap()
-        .exchange(&mut session, "please help".into(), &mut sink)
+    let mut settled = SettledConversation::new(session).unwrap();
+    settled.root().helm().steer("please help".into()).unwrap();
+    assert!(settled.await_message());
+    settled
+        .exchange(&mut sink)
         .expect("the exchange itself must not fail for want of a reply");
     settler.join().expect("the settling thread must not panic");
 
@@ -508,7 +491,7 @@ fn settled_conversation_holds_for_a_live_child_then_quiesces() {
 /// nothing races the parent's independent one.
 #[test]
 fn settled_conversation_ends_even_when_a_child_never_replies() {
-    let mut session = settled_trunk(
+    let session = settled_trunk(
         "child-no-reply",
         Script::new()
             .then(Reply::text("on it"))
@@ -540,9 +523,11 @@ fn settled_conversation_ends_even_when_a_child_never_replies() {
     .expect("spawn must succeed");
 
     let mut sink = Collecting::default();
-    SettledConversation::new(&session)
-        .unwrap()
-        .exchange(&mut session, "please help".into(), &mut sink)
+    let mut settled = SettledConversation::new(session).unwrap();
+    settled.root().helm().steer("please help".into()).unwrap();
+    assert!(settled.await_message());
+    settled
+        .exchange(&mut sink)
         .expect("the exchange itself must not fail merely because a child did");
 
     assert!(
@@ -571,50 +556,205 @@ fn settled_conversation_refuses_a_trunk_that_arms_its_own_wakeups() {
             resume_on_reset,
             crate::agent::fleet::AGENT_LEASE_IDLE,
         );
-        let before = format!("{:?}", session.rendered_messages());
-        let err = SettledConversation::new(&session)
+        let helm = session.helm();
+        let err = SettledConversation::new(session)
             .err()
             .expect("a trunk that arms its own wakeups must be refused, not run");
         assert!(
             err.contains("wakeup"),
             "the refusal must name what it refuses: {err}"
         );
-        assert!(
-            session.inbox().is_empty() && format!("{:?}", session.rendered_messages()) == before,
-            "a refused construction must seed no message"
-        );
+        assert_eq!(helm.steer("refused".into()), Err(crate::agent::Ended));
     }
 }
 
 #[test]
-fn settled_conversation_refuses_another_root_before_seeding() {
-    let root = settled_trunk(
-        "owner",
-        Script::new(),
-        false,
-        false,
-        crate::agent::fleet::AGENT_LEASE_IDLE,
+fn owning_end_fleet_waits_for_a_held_helper_even_with_retained_identities() {
+    let root = crate::agent::testkit::trunk(false);
+    let child = crate::agent::testkit::started_child(&root, "helper", "`inherit");
+    let identity = child.agent.clone();
+    let settled = SettledConversation::new(root).unwrap();
+    let (waiting, parked) = std::sync::mpsc::channel();
+    let (done, finished) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        settled.end_fleet_after(|| waiting.send(()).unwrap());
+        done.send(()).unwrap();
+    });
+    parked
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(identity.token.terminated());
+    assert!(matches!(
+        finished.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    drop(child);
+    finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn owning_end_fleet_waits_for_helper_teardown_and_releases_the_factory() {
+    struct HeldFactory {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        _resource: Arc<()>,
+    }
+    impl crate::agent::Factory for HeldFactory {
+        fn engine(&self) -> Result<ral_core::protocol::channel::WireStream, String> {
+            unreachable!("this fixture uses identity seats")
+        }
+    }
+    impl Drop for HeldFactory {
+        fn drop(&mut self) {
+            self.entered.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+    }
+    let mut root = crate::agent::testkit::trunk(false);
+    let resource = Arc::new(());
+    let released = Arc::downgrade(&resource);
+    let (entered, tearing_down) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    Arc::get_mut(&mut root.fleet).unwrap().launch.factory = Some(Arc::new(HeldFactory {
+        entered,
+        release: std::sync::Mutex::new(held),
+        _resource: resource,
+    }));
+    let child = crate::agent::testkit::started_child(&root, "helper", "`inherit");
+    let root_identity = root.agent.clone();
+    let child_identity = child.agent.clone();
+    let helm = child.helm();
+    let settled = SettledConversation::new(root).unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    let ending = std::thread::spawn(move || {
+        settled.end_fleet();
+        assert!(
+            released.upgrade().is_none(),
+            "end_fleet must release the launch factory"
+        );
+        done.send(()).unwrap();
+    });
+    let helper = std::thread::spawn(move || drop(child));
+    tearing_down
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(root_identity.token.terminated());
+    assert!(child_identity.token.terminated());
+    assert!(matches!(
+        finished.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    release.send(()).unwrap();
+    finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    helper.join().unwrap();
+    ending.join().unwrap();
+    assert_eq!(helm.steer("late".into()), Err(crate::agent::Ended));
+}
+
+#[test]
+fn owning_end_fleet_cancels_other_roots_and_consumer_siblings_with_retained_identities() {
+    let root = crate::agent::testkit::trunk(false);
+    let first = crate::agent::testkit::started_child(&root, "first", "`inherit");
+    let second = crate::agent::testkit::started_child(&root, "second", "`inherit");
+    let inbox = crate::bus::Inbox::new();
+    let mut spec = crate::agent::testkit::TestAgentSpec::new("other-root");
+    spec.mailbox = inbox.mailbox();
+    let other = crate::agent::testkit::test_agent(&root.fleet, spec).unwrap();
+    let identities = [
+        root.agent.clone(),
+        first.agent.clone(),
+        second.agent.clone(),
+        Arc::clone(&other),
+    ];
+    let settled = SettledConversation::new(root).unwrap();
+    let consumer = std::thread::spawn(move || {
+        assert!(!inbox.await_human(&other.token));
+        drop(other);
+    });
+    let (release, held) = std::sync::mpsc::channel();
+    let helpers = std::thread::spawn(move || {
+        held.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(first);
+        drop(second);
+    });
+    let (done, finished) = std::sync::mpsc::channel();
+    let ending = std::thread::spawn(move || {
+        settled.end_fleet_after(|| {
+            assert!(identities.iter().all(|agent| agent.token.terminated()));
+            release.send(()).unwrap();
+        });
+        assert!(identities.iter().all(|agent| agent.token.terminated()));
+        done.send(()).unwrap();
+    });
+    finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("fleet teardown must finish despite retained identities");
+    consumer.join().unwrap();
+    helpers.join().unwrap();
+    ending.join().unwrap();
+}
+
+#[test]
+fn await_message_is_false_once_the_root_has_ended() {
+    let settled = SettledConversation::new(converse_trunk("ended", Script::new())).unwrap();
+    let helm = settled.root().helm();
+    helm.steer("queued".into()).unwrap();
+    helm.end();
+    assert!(!settled.await_message());
+    assert_eq!(helm.steer("too late".into()), Err(crate::agent::Ended));
+}
+
+#[test]
+fn a_stopped_exchange_settles_though_its_helper_had_not_replied() {
+    let root = crate::agent::testkit::trunk(false);
+    crate::agent::testkit::set_provider(
+        &root,
+        crate::agent::testkit::scripted(
+            "test-model",
+            Script::new().then(Reply::text("waiting for help")),
+        ),
     );
-    let mut other = settled_trunk(
-        "other",
-        Script::new(),
-        false,
-        false,
-        crate::agent::fleet::AGENT_LEASE_IDLE,
+    let child = crate::agent::testkit::started_child(&root, "helper", "`inherit");
+    let mut settled = SettledConversation::new(root).unwrap();
+    let helm = settled.root().helm();
+    helm.steer("please help".into()).unwrap();
+    let (release, held) = std::sync::mpsc::sync_channel(1);
+    let stopper = std::thread::spawn(move || {
+        held.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the root must park on its busy helper");
+        assert!(!child.agent.has_reply());
+        helm.stop();
+        assert!(child.agent.token.terminated());
+        child.settle(AgentOutcome::Stopped("late result".into()));
+    });
+    let mut sink = SignalOnWaiting {
+        inner: Collecting::default(),
+        release,
+    };
+    let token = settled.root.agent.token.clone();
+    let timeout = ral_core::process::arm_callback(std::time::Duration::from_secs(5), move || {
+        token.cancel(ral_core::process::CancelCause::TimedOut);
+    });
+    assert!(settled.await_message());
+    settled.exchange(&mut sink).unwrap();
+    stopper.join().expect("the stopping thread must not panic");
+    drop(timeout);
+    assert!(!settled.root.agent.token.terminated());
+    assert!(!settled.root.agent.has_busy_children());
+    assert!(settled.root.inbox().next_item().is_none());
+    assert!(
+        !sink
+            .inner
+            .facts
+            .iter()
+            .any(|fact| matches!(fact, Record::Display(Display::SubagentDone { .. })))
     );
-    let before = format!("{:?}", other.rendered_messages());
-    let mut settled = SettledConversation::new(&root).unwrap();
-    let mut sink = Collecting::default();
-    assert_eq!(
-        settled.exchange(&mut other, "wrong root".into(), &mut sink),
-        Err(format!(
-            "this settled conversation belongs to agent {}, not {}",
-            root.agent.id, other.agent.id
-        ))
-    );
-    assert!(other.inbox().is_empty());
-    assert_eq!(format!("{:?}", other.rendered_messages()), before);
-    assert!(sink.signals.is_empty());
 }
 
 fn parent_script() -> Script {
@@ -625,22 +765,20 @@ fn parent_script() -> Script {
 
 #[test]
 fn helper_ready_precedes_its_parent_result_before_the_next_draw() {
-    let mut root = settled_trunk(
+    let root = settled_trunk(
         "ready-order",
         parent_script(),
         false,
         false,
         crate::agent::fleet::AGENT_LEASE_IDLE,
     );
-    let mut settled = SettledConversation::new(&root).unwrap();
+    let mut settled = SettledConversation::new(root).unwrap();
+    let root = &settled.root;
     let mut child = root.fork_named("helper").unwrap();
     let child_agent = child.agent.clone();
-    let root_emit = settled
-        .bus
-        .emitter(root.agent.id, root.agent.mailbox.clone());
+    let root_emit = settled.bus.emitter(root.agent.id);
     let emit = root_emit.child(
         child_agent.id,
-        child_agent.mailbox.clone(),
         crate::record::Born {
             log_dir: child.log_dir().clone(),
             name: "helper".into(),
@@ -677,10 +815,10 @@ fn helper_ready_precedes_its_parent_result_before_the_next_draw() {
     let timeout = ral_core::process::arm_callback(std::time::Duration::from_secs(5), move || {
         token.cancel(ral_core::process::CancelCause::TimedOut);
     });
-    settled
-        .exchange(&mut root, "help".into(), &mut sink)
-        .unwrap();
+    root.helm().steer("help".into()).unwrap();
+    settled.exchange(&mut sink).unwrap();
     drop(timeout);
+    let root = &settled.root;
     assert!(!root.agent.token.terminated(), "the parent must settle");
     release.send(()).unwrap();
     helper.join().unwrap();
@@ -722,9 +860,7 @@ fn spawn_settled_helper(root: &Avatar, settled: &SettledConversation) -> Arc<cra
             )])),
     ));
     let agent = child.agent.clone();
-    let emit = settled
-        .bus
-        .emitter(root.agent.id, root.agent.mailbox.clone());
+    let emit = settled.bus.emitter(root.agent.id);
     spawn_async(
         child,
         AsyncSpawn {
@@ -749,22 +885,21 @@ impl Drop for CancelOnDrop {
 
 #[test]
 fn settled_conversation_reuses_a_helper_without_a_second_birth() {
-    let mut root = settled_trunk(
+    let root = settled_trunk(
         "reuse-helper",
         parent_script(),
         false,
         false,
         crate::agent::fleet::AGENT_LEASE_IDLE,
     );
-    let mut settled = SettledConversation::new(&root).unwrap();
-    let helper = spawn_settled_helper(&root, &settled);
+    let mut settled = SettledConversation::new(root).unwrap();
+    let helper = spawn_settled_helper(&settled.root, &settled);
     let _cancel = CancelOnDrop(helper.clone());
     let mut first = Collecting::default();
-    settled
-        .exchange(&mut root, "first".into(), &mut first)
-        .unwrap();
+    settled.root.helm().steer("first".into()).unwrap();
+    settled.exchange(&mut first).unwrap();
     assert_eq!(helper.reply(), Some(FOValue::Int { value: 1 }));
-    assert!(root.fleet.resolve("helper").is_some());
+    assert!(settled.root.fleet.resolve("helper").is_some());
     assert_eq!(
         first
             .signals
@@ -774,11 +909,10 @@ fn settled_conversation_reuses_a_helper_without_a_second_birth() {
         1
     );
 
-    root.agent.message(&helper, "follow up".into());
+    settled.root.agent.message(&helper, "follow up".into());
     let mut second = Collecting::default();
-    settled
-        .exchange(&mut root, "second".into(), &mut second)
-        .unwrap();
+    settled.root.helm().steer("second".into()).unwrap();
+    settled.exchange(&mut second).unwrap();
     assert_eq!(helper.reply(), Some(FOValue::Int { value: 2 }));
     assert!(!second.signals.iter().any(|s| matches!(s, Signal::Born(..))));
     for state in [AgentState::AwaitingModel, AgentState::Ready] {
@@ -796,19 +930,18 @@ fn settled_conversation_reuses_a_helper_without_a_second_birth() {
 
 #[test]
 fn settled_conversation_drains_a_lease_death_at_the_next_exchange() {
-    let mut root = settled_trunk(
+    let root = settled_trunk(
         "late-death",
         parent_script(),
         false,
         false,
         std::time::Duration::from_millis(50),
     );
-    let mut settled = SettledConversation::new(&root).unwrap();
+    let mut settled = SettledConversation::new(root).unwrap();
     let mut first = Collecting::default();
-    settled
-        .exchange(&mut root, "first".into(), &mut first)
-        .unwrap();
-    let helper = spawn_settled_helper(&root, &settled);
+    settled.root.helm().steer("first".into()).unwrap();
+    settled.exchange(&mut first).unwrap();
+    let helper = spawn_settled_helper(&settled.root, &settled);
     let weak = Arc::downgrade(&helper);
     let id = helper.id;
     drop(helper);
@@ -824,9 +957,8 @@ fn settled_conversation_drains_a_lease_death_at_the_next_exchange() {
         Signal::Transient(agent, Transient::Died) if *agent == id
     )));
     let mut second = Collecting::default();
-    settled
-        .exchange(&mut root, "second".into(), &mut second)
-        .unwrap();
+    settled.root.helm().steer("second".into()).unwrap();
+    settled.exchange(&mut second).unwrap();
     let died = second
         .signals
         .iter()
@@ -844,7 +976,7 @@ fn settled_conversation_drains_a_lease_death_at_the_next_exchange() {
         "the expired helper must have replied successfully"
     );
     let working = second.signals.iter().position(|s| matches!(s,
-        Signal::Transient(agent, Transient::State(AgentState::AwaitingModel)) if *agent == root.agent.id
+        Signal::Transient(agent, Transient::State(AgentState::AwaitingModel)) if *agent == settled.root.agent.id
     )).expect("the next exchange must run");
     assert!(died < working);
 }

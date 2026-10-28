@@ -1,7 +1,7 @@
 //! Fixtures shared by two or more `mod tests` across the crate; a helper only
 //! one of them needs belongs in that file instead.
 
-use crate::agent::fleet::Fleet;
+use crate::agent::fleet::{Fleet, Membership};
 use crate::agent::{
     Agent, Avatar, Birth, ProviderHandle, Role, RootConfig, RootSeat, SPAWN_FUEL, Trunk,
 };
@@ -165,16 +165,38 @@ impl TestAgentSpec {
     }
 }
 
-/// The `Arc<Agent>` a real fork or root carries, born exactly as one is —
-/// enrolled and adopted — so the caller holds the only strong reference
-/// and dropping it settles the agent.
+/// A synthetic agent whose membership lasts until this fixture is dropped.
+pub(crate) struct TestAgent {
+    agent: Arc<Agent>,
+    _membership: Membership,
+}
+
+impl Drop for TestAgent {
+    fn drop(&mut self) {
+        self.agent.mailbox.admission(|| {
+            self.agent
+                .token
+                .cancel(ral_core::process::CancelCause::Cancelled);
+        });
+    }
+}
+
+impl std::ops::Deref for TestAgent {
+    type Target = Arc<Agent>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.agent
+    }
+}
+
+/// An enrolled synthetic agent, settled when its fixture is dropped.
 ///
 /// # Errors
 /// Whatever [`Fleet::enrol`] refuses.
 pub(crate) fn test_agent(
     fleet: &Arc<Fleet>,
     spec: TestAgentSpec,
-) -> Result<Arc<Agent>, crate::agent::fleet::Unborn> {
+) -> Result<TestAgent, crate::agent::fleet::Unborn> {
     let TestAgentSpec {
         name,
         reach,
@@ -200,8 +222,11 @@ pub(crate) fn test_agent(
         reach,
         mailbox,
     });
-    fleet.enrol(&agent, claim)?;
-    Ok(agent)
+    let membership = fleet.enrol(&agent, claim)?;
+    Ok(TestAgent {
+        agent,
+        _membership: membership,
+    })
 }
 
 /// A boundary read through one of `test_access`'s count probes — unlike
@@ -373,7 +398,7 @@ pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar 
                 .map(Seat::adopted)
                 .expect("the fork this run parked");
             let child = Avatar::child_of(
-                &self.parent,
+                (&self.parent, self.parent.mailbox.stamp()),
                 &self.log.borrow(),
                 &self.fleet,
                 self.fleet.claim(&self.name).expect("a free name"),

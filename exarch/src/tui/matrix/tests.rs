@@ -1,10 +1,9 @@
 use super::*;
 use crate::agent::fleet::Fleet;
-use crate::agent::testkit::{TestAgentSpec, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
 use ratatui::crossterm::event::KeyModifiers;
-use std::sync::Arc;
 
-fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
+fn tree() -> (TestAgent, super::super::tabs::Tabs) {
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("fresh root");
     let mut tabs = super::super::tabs::Tabs::new(

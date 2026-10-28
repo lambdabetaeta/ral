@@ -161,7 +161,7 @@ pub(super) fn input(r: &mut RewindOverlay, input: &Input, app: &mut App) -> bool
     if let Some(anchor) = anchor {
         app.gesture.clear();
         if let Some(agent) = app.tabs.agent(r.tab) {
-            agent.mailbox.push(Post::Rewrite(Rewrite::Rewind(anchor)));
+            agent.post(Post::Rewrite(Rewrite::Rewind(anchor)));
         } else {
             let focused = app.tabs.focused();
             app.push_error(focused, "the agent you were rewinding has ended");

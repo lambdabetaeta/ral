@@ -4,16 +4,14 @@ use ral_core::path::shown;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
-use super::state::{Accounts, Handle, Held, Owner, Review, Running};
+use super::state::{Accounts, Handle, Held, Inlet, Owner, Review, Running};
 use crate::assistant::conversation::Conversation;
 use crate::folder::manifest::Stop;
 use crate::wire::{
-    AgentStateDto, Choice, ConversationEvent, ConversationUpdate, ModelMenu, Opening, PickedFolder,
-    Preparation, SynodEvent, WindowReport,
+    AgentStateDto, Choice, ConversationEvent, ConversationUpdate, ExchangeId, ModelMenu, Opening,
+    PickedFolder, Preparation, SynodEvent, WindowReport,
 };
 use exarch::provider::Holdings;
 use ral_core::sync::LockExt;
@@ -50,7 +48,7 @@ impl Emitter {
     fn emit(&self, update: ConversationUpdate) {
         let held = self.slot.lock_ignore_poison();
         if let Some(handle) = held.owned_by(self.generation) {
-            self.publish(handle, update);
+            publish(&self.app, handle, update);
         }
     }
 
@@ -58,7 +56,13 @@ impl Emitter {
         clippy::significant_drop_tightening,
         reason = "generation lookup, report replacement and publication must be atomic"
     )]
-    fn exchange_done(&self, folder: &Path, report: Option<WindowReport>) {
+    fn exchange_done(
+        &self,
+        exchange: ExchangeId,
+        stopped: bool,
+        folder: &Path,
+        report: Option<WindowReport>,
+    ) {
         let held = self.slot.lock_ignore_poison();
         if let Some(handle) = held.owned_by(self.generation) {
             *self.app.state::<Review>().0.lock_ignore_poison() =
@@ -66,19 +70,78 @@ impl Emitter {
                     folder: folder.to_path_buf(),
                     report: report.clone(),
                 });
-            self.publish(handle, ConversationUpdate::ExchangeDone { report });
+            publish(
+                &self.app,
+                handle,
+                ConversationUpdate::ExchangeDone {
+                    exchange,
+                    stopped,
+                    report,
+                },
+            );
+            publish(
+                &self.app,
+                handle,
+                ConversationUpdate::Queue {
+                    messages: handle.inlet.queued(),
+                },
+            );
         }
     }
 
-    // Handle borrows the owner lock, held throughout publication.
-    fn publish(&self, handle: &Handle, update: ConversationUpdate) {
-        let _ = self.app.emit(
-            crate::seam::ipc::CONVERSATION_EVENT,
-            ConversationEvent {
-                attempt: handle.attempt.clone(),
-                update,
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "reservation and publication must be atomic"
+    )]
+    fn exchange_began(&self) -> Option<(ExchangeId, Arc<super::exchange::Exchanges>)> {
+        let held = self.slot.lock_ignore_poison();
+        let handle = held.owned_by(self.generation)?;
+        let exchange = handle.exchanges.begin();
+        publish(
+            &self.app,
+            handle,
+            ConversationUpdate::ExchangeBegan { exchange },
+        );
+        Some((exchange, handle.exchanges.clone()))
+    }
+
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "queue snapshots and publication must stay ordered"
+    )]
+    fn queue(&self) {
+        let held = self.slot.lock_ignore_poison();
+        if let Some(handle) = held.owned_by(self.generation) {
+            publish(
+                &self.app,
+                handle,
+                ConversationUpdate::Queue {
+                    messages: handle.inlet.queued(),
+                },
+            );
+        }
+    }
+
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "installation and queue publication must be atomic"
+    )]
+    fn install(&self, helm: exarch::agent::Helm) -> bool {
+        let mut held = self.slot.lock_ignore_poison();
+        let Some(handle) = held.owned_by_mut(self.generation) else {
+            return false;
+        };
+        for message in handle.inlet.install(helm.clone()) {
+            let _ = helm.steer(message);
+        }
+        publish(
+            &self.app,
+            handle,
+            ConversationUpdate::Queue {
+                messages: handle.inlet.queued(),
             },
         );
+        true
     }
 
     fn preparing(&self, stage: Preparation) {
@@ -93,10 +156,21 @@ impl Emitter {
     fn ended(&self, explained: bool) {
         let mut held = self.slot.lock_ignore_poison();
         if let Some(handle) = held.owned_by(self.generation) {
-            self.publish(handle, ConversationUpdate::Ended { explained });
+            publish(&self.app, handle, ConversationUpdate::Ended { explained });
             *held = Owner::default();
         }
     }
+}
+
+// Handle borrows the owner lock throughout publication.
+fn publish(app: &AppHandle, handle: &Handle, update: ConversationUpdate) {
+    let _ = app.emit(
+        crate::seam::ipc::CONVERSATION_EVENT,
+        ConversationEvent {
+            attempt: handle.attempt.clone(),
+            update,
+        },
+    );
 }
 
 /// Async keeps the blocking native dialog off the window event loop.
@@ -143,16 +217,93 @@ pub(crate) fn start_conversation(
 #[tauri::command]
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "the lock must stay held across the send, not just the lookup, so a restart cannot swap the handle out from under it"
+    reason = "queue mutation and publication must be atomic"
 )]
 pub(crate) fn send_message(
+    app: AppHandle,
     state: State<'_, Running>,
     attempt: String,
     message: String,
 ) -> Result<(), String> {
+    let mut held = state.0.lock_ignore_poison();
+    let handle = registered(&mut held, &attempt)?;
+    let outcome = handle.inlet.steer(message);
+    publish(
+        &app,
+        handle,
+        ConversationUpdate::Queue {
+            messages: handle.inlet.queued(),
+        },
+    );
+    outcome
+}
+
+#[tauri::command]
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "stop reservation and queue publication require generation ownership"
+)]
+pub(crate) async fn stop_exchange(
+    app: AppHandle,
+    state: State<'_, Running>,
+    attempt: String,
+    exchange: ExchangeId,
+) -> Result<Vec<String>, String> {
+    let (generation, helm, delivery) = {
+        let held = state.0.lock_ignore_poison();
+        let Some(handle) = held.current().filter(|handle| handle.attempt == attempt) else {
+            return Ok(Vec::new());
+        };
+        let Inlet::Live(helm) = &handle.inlet else {
+            return Ok(Vec::new());
+        };
+        let Some(delivery) = handle.exchanges.stop(exchange) else {
+            return Ok(Vec::new());
+        };
+        (handle.generation, helm.clone(), delivery)
+    };
+    let recalled = helm.stop();
+    drop(delivery);
     let held = state.0.lock_ignore_poison();
+    if let Some(handle) = held.owned_by(generation) {
+        publish(
+            &app,
+            handle,
+            ConversationUpdate::Queue {
+                messages: handle.inlet.queued(),
+            },
+        );
+    }
+    Ok(recalled)
+}
+
+#[tauri::command]
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "queue mutation and publication must be atomic"
+)]
+pub(crate) fn recall_queued(
+    app: AppHandle,
+    state: State<'_, Running>,
+    attempt: String,
+) -> Result<Vec<String>, String> {
+    let mut held = state.0.lock_ignore_poison();
+    let handle = registered(&mut held, &attempt)?;
+    let recalled = handle.inlet.recall();
+    publish(
+        &app,
+        handle,
+        ConversationUpdate::Queue {
+            messages: handle.inlet.queued(),
+        },
+    );
+    Ok(recalled)
+}
+
+fn registered<'a>(held: &'a mut Owner, attempt: &str) -> Result<&'a mut Handle, String> {
     let handle = held
-        .current()
+        .open()
+        .and_then(Option::as_mut)
         .ok_or_else(|| "There is no conversation running to send this to.".to_string())?;
     if handle.attempt != attempt {
         return Err(
@@ -161,10 +312,7 @@ pub(crate) fn send_message(
                 .to_string(),
         );
     }
-    handle
-        .sender
-        .send(message)
-        .map_err(|_| "The assistant has already finished; nothing was sent.".to_string())
+    Ok(handle)
 }
 
 /// Register atomically; the new worker joins its predecessor outside the owner lock.
@@ -183,11 +331,10 @@ fn spawn_conversation(
     let registration = held
         .open()
         .ok_or_else(|| "The window is closing; a new conversation cannot start.".to_string())?;
-    let superseded = registration.take().map(Handle::stop);
+    let superseded = registration.take();
     *app.state::<Review>().0.lock_ignore_poison() = None;
 
     let baseline_stop = Stop::default();
-    let (sender, receiver) = mpsc::channel();
     let emitter = Emitter {
         app,
         slot: slot.clone(),
@@ -201,14 +348,14 @@ fn spawn_conversation(
             holdings,
             folder,
             choice,
-            receiver,
             thread_baseline_stop,
         );
     });
     *registration = Some(Handle {
         generation,
         attempt,
-        sender,
+        inlet: Inlet::Booting(Vec::new()),
+        exchanges: Arc::default(),
         join,
         baseline_stop,
     });
@@ -219,16 +366,15 @@ fn spawn_conversation(
 /// Join before the new baseline, then stand down if superseded; narrate a panic as an end.
 fn run_conversation(
     emitter: Emitter,
-    superseded: Option<JoinHandle<()>>,
+    superseded: Option<Handle>,
     holdings: Holdings,
     folder: PathBuf,
     choice: Choice,
-    receiver: mpsc::Receiver<String>,
     baseline_stop: Stop,
 ) {
     if let Some(old) = superseded {
         emitter.preparing(Preparation::FinishingPrevious);
-        let _ = old.join();
+        let _ = old.stop().join();
     }
     if !emitter.current() {
         return;
@@ -236,14 +382,7 @@ fn run_conversation(
     emitter.preparing(Preparation::Starting);
 
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        converse(
-            &emitter,
-            &holdings,
-            &folder,
-            choice,
-            &receiver,
-            &baseline_stop,
-        )
+        drive(&emitter, &holdings, &folder, choice, &baseline_stop)
     }))
     .unwrap_or(Err(false));
 
@@ -253,15 +392,20 @@ fn run_conversation(
     }
 }
 
-fn converse(
+fn drive(
     emitter: &Emitter,
     holdings: &Holdings,
     picked: &Path,
     choice: Choice,
-    receiver: &mpsc::Receiver<String>,
     baseline_stop: &Stop,
 ) -> Result<(), bool> {
-    let mut sink = crate::seam::narration::Narrator::new(|event| emitter.event(event));
+    let mut sink = crate::seam::narration::Narrator::new(|event| {
+        let human = matches!(&event, SynodEvent::Human { .. });
+        emitter.event(event);
+        if human {
+            emitter.queue();
+        }
+    });
 
     let walk_emitter = emitter.clone();
     let report_walk = Box::new(move |files: u64| {
@@ -279,15 +423,45 @@ fn converse(
         };
 
     emitter.opening(opening);
+    if !emitter.install(conversation.helm()) {
+        let _ = conversation.end();
+        return Ok(());
+    }
+    if let Err(e) = conversation.settle_baseline() {
+        if !emitter.current() {
+            let _ = conversation.end();
+            return Ok(());
+        }
+        emitter.event(SynodEvent::Failure { message: e });
+        let _ = conversation.end();
+        return Err(true);
+    }
     emitter.event(SynodEvent::State {
         state: AgentStateDto::Ready,
     });
 
-    while let Ok(message) = receiver.recv() {
-        if let Err(e) = conversation.exchange(message, &mut sink) {
+    while conversation.await_message() {
+        let Some((exchange, exchanges)) = emitter.exchange_began() else {
+            break;
+        };
+        let outcome = conversation.exchange(&mut sink);
+        let stopped = exchanges.finish(exchange);
+        if !emitter.current() {
+            break;
+        }
+        if let Err(e) = outcome {
             emitter.event(SynodEvent::Failure { message: e });
         }
-        emitter.exchange_done(picked, conversation.report().map(WindowReport::of));
+        emitter.exchange_done(
+            exchange,
+            stopped,
+            picked,
+            conversation.report().map(WindowReport::of),
+        );
+        if conversation.lost() {
+            let _ = conversation.end();
+            return Err(true);
+        }
     }
 
     let _ = conversation.end();

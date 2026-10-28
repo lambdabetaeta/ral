@@ -650,8 +650,8 @@ fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
     spec.mailbox = inbox.mailbox();
     let agent = test_agent(&fleet, spec).expect("a fresh trunk");
     let (tx, _rx) = channel();
-    let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
-    let deferred = deferred_sink(&emit);
+    let emit = Emitter::new(tx, agent.id);
+    let deferred = deferred_sink(&emit, inbox.mailbox().stamp());
 
     deferred.deliver(vec![ral_core::data::FOValue::Unit]);
     match inbox.next_item() {
@@ -682,9 +682,9 @@ fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
 #[test]
 fn a_failed_spawn_wakes_the_model_with_its_status() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
-    let inbox = Inbox::new();
+    let inbox = session.inbox();
     let (tx, _rx) = channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, inbox.mailbox());
+    let emit = Emitter::new(tx, session.agent.id);
     let _ = session.ral(
         "let h = spawn \"boom\" { fail [status: 5, message: 'boom'] }",
         10,

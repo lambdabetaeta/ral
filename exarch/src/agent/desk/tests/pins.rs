@@ -45,7 +45,7 @@ fn slot(answer: FOValue) -> Option<FOValue> {
 /// `` `read ``/`` `list `` answer from.
 #[test]
 fn pin_set_and_clear_round_trip_through_the_desk() {
-    let d = desk();
+    let (d, _agent) = desk();
 
     assert!(
         slot(d.ask(pin_read_req("tasks")).expect("a read answers")).is_none(),
@@ -81,7 +81,7 @@ fn pin_set_and_clear_round_trip_through_the_desk() {
 /// `BTreeMap` order, and tracks a set/clear pair.
 #[test]
 fn pin_list_tracks_set_and_clear() {
-    let d = desk();
+    let (d, _agent) = desk();
     let keys = |d: &ExarchDesk| match d
         .ask(Request::Pins(Pins::List))
         .expect("`exarch-pins `list` must answer Ok")
@@ -123,7 +123,7 @@ fn live_surfaces_record_their_seam_twins() {
     use crate::bus::Signal;
     use crate::record::{Display, Forensic, Record, Transient};
 
-    let d = desk();
+    let (d, _agent) = desk();
     let (tx, rx) = channel();
     d.services
         .log

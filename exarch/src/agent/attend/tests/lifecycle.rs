@@ -28,7 +28,7 @@ fn attend_and_deliver(mut child: Avatar) -> std::thread::JoinHandle<AgentOutcome
 /// [`Agent::has_busy_children`] to read true, so `parent` parks
 /// [`crate::bus::ParkMode::HeldByChildren`] instead of quiescing.  The
 /// caller must hold what comes back — that is what keeps it live.
-fn keepalive(fleet: &Arc<Fleet>, parent: &Arc<Agent>) -> Arc<Agent> {
+fn keepalive(fleet: &Arc<Fleet>, parent: &Arc<Agent>) -> TestAgent {
     let mut spec = crate::agent::testkit::TestAgentSpec::new(&format!("keepalive-{}", parent.id));
     spec.role = crate::agent::Role::child(parent);
     crate::agent::testkit::test_agent(fleet, spec).expect("a fresh child of a live parent")

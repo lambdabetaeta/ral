@@ -73,6 +73,8 @@ fn main() {
             conversation::list_models,
             conversation::start_conversation,
             conversation::send_message,
+            conversation::stop_exchange,
+            conversation::recall_queued,
             files::open_file,
             files::open_url,
             highlight::highlight_ral,

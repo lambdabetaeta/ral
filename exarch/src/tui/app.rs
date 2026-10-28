@@ -194,7 +194,7 @@ impl App {
     pub(super) fn focused_waiting(&self) -> bool {
         self.tabs
             .focused_agent()
-            .is_none_or(|agent| agent.mailbox.waiting_for_input())
+            .is_none_or(|agent| agent.waiting_for_input())
     }
 
     /// Whether matrix navigation owns the keyboard.
@@ -453,7 +453,7 @@ impl App {
 
     /// Queue `post` on the focused tab's agent.
     pub(super) fn post(&mut self, post: Post) {
-        self.session(|agent| agent.mailbox.push(post));
+        self.session(|agent| agent.post(post));
     }
 
     /// Route one key press; `true` when the user asked to compose the draft in
@@ -553,10 +553,9 @@ impl App {
             // empty prompt, Up dequeues the whole queued run back for revision.
             KeyCode::Up if can_edit && k.modifiers.is_empty() => {
                 if self.prompt_state.row() == 0 {
-                    let recalled = self
-                        .tabs
-                        .focused_agent()
-                        .is_some_and(|agent| self.prompt_state.edit_queued_prompt(&agent.mailbox));
+                    let recalled = self.tabs.focused_agent().is_some_and(|agent| {
+                        self.prompt_state.edit_queued_prompt(|| agent.recall())
+                    });
                     if !recalled {
                         self.prompt_state.history_prev();
                     }

@@ -1,9 +1,10 @@
-import { $, show } from "./dom.js";
+import { $, show, screens } from "./dom.js";
+import { advance } from "./attempt.js";
+import { withdrawals } from "./withdrawals.js";
 import { state, confirmDialog } from "./core.js";
-import { startConversation, sendMessage, openUrl, onConversationEvent } from "./ipc.js";
+import { startConversation, sendMessage, stopExchange, recallQueued, openUrl, onConversationEvent } from "./ipc.js";
 import { setFacts, setStatus } from "./status.js";
 import {
-  addUserMessage,
   addSystemMessage,
   resetDocument,
   clearOpenDial,
@@ -44,6 +45,8 @@ function resetTranscript(folder) {
   setStatus("");
   resetDocument();
   resetReport();
+  pendingStop = null;
+  renderQueue([]);
   show("conversation");
 }
 
@@ -53,35 +56,23 @@ export function enterConversation(folder, choice) {
   startAssistant(folder, choice);
 }
 
-/** @typedef {{ attempt: string, phase: "starting" } | { attempt: string, phase: "ended" } | { attempt: string, phase: "accepted" | "ready", exchange: "idle" | "busy" }} Attempt */
-/** @typedef {{ attempt: string, type: "accepted" | "opening" | "submit" | "exchange_done" | "send_failed" | "ended" }} Action */
+/** @typedef {import("./attempt.js").Attempt} Attempt */
+/** @typedef {import("./attempt.js").Action} Action */
 /** @type {Attempt} */
 let assistant = { attempt: "", phase: "ended" };
+/** @type {{ exchange: import("./attempt.js").ExchangeId } | null} */
+let pendingStop = null;
+/** @type {string[]} */
+let queued = [];
+let withdraw = withdrawalQueue(assistant.attempt);
 
-// Null means ignored; terminal attempts are absorbing.
-/** @param {Attempt} current @param {Action} action @returns {Attempt | null} */
-function advance(current, action) {
-  if (current.attempt !== action.attempt || current.phase === "ended") return null;
-  const attempt = current.attempt;
-  switch (action.type) {
-    case "accepted":
-      return current.phase === "starting" ? { attempt, phase: "accepted", exchange: "idle" } : null;
-    case "opening":
-      if (current.phase === "ready") return null;
-      return { attempt, phase: "ready", exchange: current.phase === "accepted" ? current.exchange : "idle" };
-    case "submit":
-      return current.phase !== "starting" && current.exchange === "idle" ? { ...current, exchange: "busy" } : null;
-    case "exchange_done":
-    case "send_failed":
-      return current.phase !== "starting" && current.exchange === "busy" ? { ...current, exchange: "idle" } : null;
-    case "ended":
-      return { attempt, phase: "ended" };
-    default: {
-      /** @type {never} */
-      const unhandled = action.type;
-      return unhandled;
-    }
-  }
+/** @param {string} attempt */
+function withdrawalQueue(attempt) {
+  return withdrawals(
+    () => assistant.attempt === attempt,
+    restoreToComposer,
+    (error) => addSystemMessage(String(error)),
+  );
 }
 
 /** @param {Action} action */
@@ -93,13 +84,18 @@ function transition(action) {
   return true;
 }
 
-function canSend() {
-  return advance(assistant, { attempt: assistant.attempt, type: "submit" }) !== null;
+function canCompose() {
+  return assistant.phase === "accepted" || assistant.phase === "ready";
+}
+
+function busy() {
+  return (assistant.phase === "accepted" || assistant.phase === "ready") && assistant.exchange !== null;
 }
 
 async function startAssistant(folder, choice) {
   const attempt = crypto.randomUUID();
   assistant = { attempt, phase: "starting" };
+  withdraw = withdrawalQueue(attempt);
   refreshComposer();
   try {
     await startConversation(folder.path, choice, attempt);
@@ -122,8 +118,11 @@ function settleExchange() {
 
 // Composer enablement must not overwrite the shell's current status narration.
 function refreshComposer() {
-  /** @type {HTMLTextAreaElement} */ ($("message")).disabled = !canSend();
-  /** @type {HTMLButtonElement} */ ($("send")).disabled = !canSend();
+  const field = /** @type {HTMLTextAreaElement} */ ($("message"));
+  field.disabled = !canCompose();
+  field.placeholder = busy() ? "Queue a follow-up…" : "What would you like done?";
+  /** @type {HTMLButtonElement} */ ($("send")).disabled = !canCompose();
+  $("stop").hidden = !busy();
 }
 
 // Send raw links to the shell for scheme checks; never navigate the conversation webview.
@@ -145,15 +144,25 @@ onConversationEvent(({ attempt, update }) => {
     case "event":
       onSynodEvent(update.event);
       break;
+    case "exchange_began":
+      if (transition({ attempt, type: "exchange_began", exchange: update.exchange })) setStatus("Working…");
+      break;
+    case "queue":
+      renderQueue(update.messages);
+      break;
     case "exchange_done":
-      if (transition({ attempt, type: "exchange_done" })) {
+      if (transition({ attempt, type: "exchange_done", exchange: update.exchange })) {
         settleExchange();
+        if (update.stopped) addSystemMessage("Stopped.");
         showReport(update.report);
       }
       break;
     case "ended":
       if (!transition({ attempt, type: "ended" })) return;
       settleExchange();
+      restoreToComposer(queued);
+      renderQueue([]);
+      pendingStop = null;
       if (!update.explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
       break;
     default: {
@@ -164,24 +173,80 @@ onConversationEvent(({ attempt, update }) => {
   }
 });
 
-function submit() {
+async function submit() {
   const field = /** @type {HTMLTextAreaElement} */ ($("message"));
   const text = field.value.trim();
   const attempt = assistant.attempt;
-  if (!text || !transition({ attempt, type: "submit" })) return;
-  addUserMessage(text);
+  if (!text || !canCompose()) return;
   field.value = "";
-  setStatus("Working…");
-  sendMessage(attempt, text).catch((err) => {
-    if (!transition({ attempt, type: "send_failed" })) return;
+  try {
+    await sendMessage(attempt, text);
+  } catch (err) {
+    if (assistant.attempt !== attempt) return;
+    restoreToComposer([text]);
     addSystemMessage(String(err));
-    settleExchange();
-  });
+  }
 }
 
+/** @param {string[]} prompts */
+function restoreToComposer(prompts) {
+  const field = /** @type {HTMLTextAreaElement} */ ($("message"));
+  field.value = [...prompts, field.value].filter(s => s.trim()).join("\n\n");
+  field.focus();
+}
+
+async function stop() {
+  if (assistant.phase !== "accepted" && assistant.phase !== "ready") return;
+  const { attempt, exchange } = assistant;
+  if (exchange === null || pendingStop?.exchange === exchange) return;
+  const request = { exchange };
+  pendingStop = request;
+  try {
+    await withdraw(() => stopExchange(attempt, exchange));
+  } finally {
+    if (pendingStop === request) pendingStop = null;
+  }
+}
+
+function recall() {
+  const attempt = assistant.attempt;
+  return withdraw(() => recallQueued(attempt));
+}
+
+/** @param {string[]} messages */
+function renderQueue(messages) {
+  queued = messages;
+  const strip = $("queued");
+  strip.replaceChildren();
+  strip.hidden = messages.length === 0;
+  for (const message of messages) {
+    const text = document.createElement("div");
+    text.textContent = message;
+    strip.append(text);
+  }
+  if (messages.length) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "btn-quiet";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", recall);
+    strip.append(edit);
+  }
+}
+
+$("stop").addEventListener("click", stop);
 $("send").addEventListener("click", submit);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && screens.conversation.classList.contains("active") && busy()) {
+    e.preventDefault();
+    stop();
+  }
+});
 $("message").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
+  if (e.key === "ArrowUp" && !/** @type {HTMLTextAreaElement} */ ($("message")).value && queued.length) {
+    e.preventDefault();
+    recall();
+  } else if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     submit();
   }

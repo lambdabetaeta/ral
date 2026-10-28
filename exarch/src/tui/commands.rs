@@ -21,7 +21,6 @@ use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::provider::allowance::{Allowance, Consumption, Reading, Scope};
 use crate::record::{Memory, RECORD};
 use jiff::Timestamp;
-use ral_core::process::CancelCause;
 
 /// A command's trailing argument.
 pub(super) enum Arg {
@@ -492,7 +491,7 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
             // focused.
             None => {
                 if let Some(agent) = app.tabs.agent(focused) {
-                    agent.mailbox.steer(text);
+                    agent.steer(text);
                 }
             }
         },
@@ -500,15 +499,15 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
 }
 
 /// Interrupt `agent`'s exchange, then queue `rewrite` behind it.
-fn end(agent: &Agent, rewrite: Rewrite) {
+fn interrupt_then(agent: &Agent, rewrite: Rewrite) {
     agent.interrupt();
-    agent.mailbox.push(Post::Rewrite(rewrite));
+    agent.post(Post::Rewrite(rewrite));
 }
 
 /// A retained parent identity need not have an inbox consumer.
 pub(super) fn quit(fleet: &Fleet) {
     for root in fleet.roots() {
-        root.cancel_tree(CancelCause::Cancelled);
+        root.end();
     }
 }
 
@@ -531,8 +530,8 @@ fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
         Command::Login => login::login(app),
         Command::Providers => providers::providers(app, ctx),
         Command::Limits => cmd_limits(app, ctx),
-        Command::Clear => app.session(|agent| end(agent, Rewrite::Clear)),
-        Command::Close => app.session(|agent| end(agent, Rewrite::Close)),
+        Command::Clear => app.session(|agent| interrupt_then(agent, Rewrite::Clear)),
+        Command::Close => app.session(|agent| interrupt_then(agent, Rewrite::Close)),
         Command::Quit => quit(app.tabs.fleet()),
         Command::Evict => app.post(Post::Rewrite(Rewrite::Evict)),
         Command::Rewind => rewind::rewind(app),

@@ -134,12 +134,30 @@
     }
     textarea#message::placeholder { color: var(--ink-faint); }
     textarea#message:disabled { opacity: 0.6; }
-    .btn-send {
-      background: var(--accent);
-      color: var(--accent-ink);
+    .btn-send, .btn-stop {
       font-size: 15px;
       font-weight: 600;
       padding: 13px 20px;
       flex: none;
     }
+    .btn-send {
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
     .btn-send:not(:disabled):hover { background: var(--accent-hover); }
+    .btn-stop {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--ink);
+      transition: none;
+    }
+    .queued {
+      flex: none;
+      max-height: 20vh;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--ink-soft);
+      padding: 10px clamp(16px, 4vw, 40px);
+      border-top: 1px solid var(--line);
+    }
