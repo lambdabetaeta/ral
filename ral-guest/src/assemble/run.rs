@@ -32,6 +32,7 @@ pub(crate) fn assemble() -> Result<(), String> {
     }
     plan::overlay().apply()?;
     install_engine()?;
+    install_legal_files()?;
     switch_root()
 }
 
@@ -146,6 +147,24 @@ fn install_engine() -> Result<(), String> {
     })?;
     fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))
         .map_err(|err| format!("could not make {dest} executable: {err}"))
+}
+
+fn install_legal_files() -> Result<(), String> {
+    const SOURCE: &str = "/usr/share/doc/exarch";
+    let dest = format!("{}{SOURCE}", plan::NEWROOT);
+    fs::create_dir_all(&dest)
+        .map_err(|err| format!("could not create guest legal-file directory {dest}: {err}"))?;
+    for name in ["LICENSE-APACHE", "LICENSE-MIT", "NOTICE", "LICENSE-EDTUI"] {
+        let source = format!("{SOURCE}/{name}");
+        let target = format!("{dest}/{name}");
+        fs::copy(&source, &target).map_err(|err| {
+            format!(
+                "could not preserve {source} at {target} before switch_root: {err}; \
+                 vm-image/build-boot.sh must include all four exarch legal files in the initramfs"
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn switch_root() -> Result<(), String> {

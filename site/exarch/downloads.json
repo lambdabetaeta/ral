@@ -3,19 +3,19 @@
   "targets": [
     {
       "os": "macOS arm64",
-      "artifact": "exarch-macos-arm64"
+      "artifact": "exarch-macos-arm64.tar.gz"
     },
     {
       "os": "Linux x86_64",
-      "artifact": "exarch-linux-x86_64"
+      "artifact": "exarch-linux-x86_64.tar.gz"
     },
     {
       "os": "Linux arm64",
-      "artifact": "exarch-linux-arm64"
+      "artifact": "exarch-linux-arm64.tar.gz"
     },
     {
       "os": "Windows x86_64",
-      "artifact": "exarch-windows.exe"
+      "artifact": "exarch-windows.zip"
     }
   ]
 }

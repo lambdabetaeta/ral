@@ -47,6 +47,18 @@ pub(super) fn after_lookup() {
     });
 }
 
+thread_local! {
+    pub(super) static SCOPED_MKDIR: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
+}
+
+pub(super) fn after_scoped_mkdir() {
+    let hook = SCOPED_MKDIR.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// What these tests hold: the walk's own handles, which judge nothing, so the
 /// tests retag them with a door only this module has.  The grant's own door,
 /// and what it refuses, are `capability/fs.rs`'s to test.

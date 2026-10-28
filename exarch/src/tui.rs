@@ -29,6 +29,7 @@ mod mirror;
 mod model_picker;
 mod overlay;
 mod palette;
+mod paste_burst;
 mod picker;
 mod prompt;
 mod providers;

@@ -29,8 +29,8 @@ pub(crate) use resolve::walk_dir_made;
 pub use resolve::{LeafMode, exists, is_dir, kind_of, walk, walk_dir, walk_lenient};
 #[cfg(unix)]
 pub(crate) use resolve::{Vetted, walk_with};
-pub use write::Visibility;
 pub(crate) use write::{Access, Streaming};
+pub use write::{ScopedDir, Visibility};
 
 #[cfg(unix)]
 #[path = "unix.rs"]
@@ -261,7 +261,6 @@ impl<A: Authority> Dir<A> {
         self.trace.real()
     }
 
-    #[cfg(any(windows, all(test, target_os = "linux")))]
     pub(crate) fn into_located(self) -> Located<A> {
         Located {
             trace: self.trace,

@@ -88,6 +88,26 @@ pub(crate) fn classify_command(
 
 // ── Runners ─────────────────────────────────────────────────────────────
 
+impl Shell {
+    /// Run an external directly from a native body in the current run.
+    ///
+    /// `program` is a bare name or literal path, never source syntax; env and
+    /// handler lookup are skipped. Pass the body's mooring to retain its audit
+    /// and terminal authority. The current grants, scope and streams apply.
+    ///
+    /// # Errors
+    /// Admission, argument, launch, child failure or cancellation.
+    pub fn run_external_argv(
+        &mut self,
+        program: &str,
+        args: &[Value],
+        mooring: &Mooring,
+    ) -> Settled<Value> {
+        let head = Head::resolve(&CommandName::of(program), &self.context).admit(mooring, self)?;
+        run_external(head, args, &Redirects::default(), None, mooring, self)
+    }
+}
+
 /// Run a base handler frame directly with the argv slice — no adapter, no
 /// masking: a native body never self-forwards.
 ///
@@ -171,4 +191,72 @@ fn finish_command(
         )),
     );
     shell.observe_stamped(Some(mooring), obs);
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use crate::authority::policy::{Capabilities, ExecGrant};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn external() -> (tempfile::TempDir, Shell) {
+        let tmp = tempfile::tempdir().unwrap();
+        let program = tmp.path().join("native-external");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n[ \"$1\" = 'one argument' ] || exit 9\nexit \"$2\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        shell.seed_cwd(crate::path::CwdPath::new(tmp.path().to_path_buf()).unwrap());
+        shell
+            .context
+            .set_env_var("PATH", tmp.path().to_str().unwrap());
+        (tmp, shell)
+    }
+
+    #[test]
+    fn native_external_resolves_bare_and_path_heads_and_preserves_argv() {
+        let (_tmp, mut shell) = external();
+        for program in ["native-external", "./native-external"] {
+            for code in [0, 7] {
+                let result = shell.run_external_argv(
+                    program,
+                    &[
+                        Value::string("one argument"),
+                        Value::string(code.to_string()),
+                    ],
+                    &Mooring::adrift(),
+                );
+                if code == 0 {
+                    assert!(matches!(result, Ok(Value::Unit)), "{result:?}");
+                } else {
+                    assert_eq!(result.unwrap_err().code(), code);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_external_admits_before_running() {
+        let (_tmp, mut shell) = external();
+        shell
+            .context
+            .grants
+            .push(crate::test_helper::layer(Capabilities {
+                exec: Some(ExecGrant::default()),
+                ..Capabilities::default()
+            }));
+        let result = shell.run_external_argv(
+            "native-external",
+            &[Value::string("one argument"), Value::string("0")],
+            &Mooring::adrift(),
+        );
+        assert!(
+            result.is_err(),
+            "an empty exec grant must refuse the program"
+        );
+    }
 }

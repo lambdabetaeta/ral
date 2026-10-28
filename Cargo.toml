@@ -13,6 +13,7 @@ members = [
     "vm-image/build-tools",
     "clipboard",
     "vendor/ripgrep-core",
+    "vendor/edtui",
 ]
 
 # One version for the whole tree.  ral, exarch and synod ship from a single
@@ -63,6 +64,9 @@ cap-fs-ext = { version = "4", default-features = false }
 # emitted TypeScript carries the serde tag and casing the JSON actually has,
 # rather than a second spelling of it.
 ts-rs      = "12"
+
+[patch.crates-io]
+edtui = { path = "vendor/edtui" }
 
 [workspace.lints.clippy]
 complexity = { level = "warn", priority = -1 }

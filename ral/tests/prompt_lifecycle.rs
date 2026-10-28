@@ -250,6 +250,58 @@ fn plugin_reedit_erases_the_old_drawing_but_not_previous_output() {
 }
 
 #[test]
+fn ctrl_j_inserts_a_newline_without_executing_a_complete_command() {
+    let dir = TempDir::new().unwrap();
+    let mut session = session(&dir, 80, "return [prompt: { 'P> ' }]");
+    paste(&mut session, "echo first > executed");
+    session.send_byte(b'\n').unwrap();
+    paste(&mut session, "echo second > second-executed");
+    assert!(
+        session.wait_until(WAIT, |text| {
+            Screen::read(text, 80).lines()
+                == ["P> echo first > executed", "echo second > second-executed"]
+        }),
+        "Ctrl-J did not retain the multiline draft: {:?}",
+        session.text()
+    );
+    assert!(!dir.path().join("executed").exists());
+    assert!(!dir.path().join("second-executed").exists());
+    session.send_byte(b'\r').unwrap();
+    prompt(&mut session, 2);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("executed")).unwrap(),
+        "first\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("second-executed")).unwrap(),
+        "second\n"
+    );
+}
+
+#[test]
+fn enter_continues_incomplete_syntax_before_submitting() {
+    let dir = TempDir::new().unwrap();
+    let mut session = session(&dir, 80, "return [prompt: { 'P> ' }]");
+    paste(&mut session, "echo 'first");
+    session.send_byte(b'\r').unwrap();
+    paste(&mut session, "second' > executed");
+    assert!(
+        session.wait_until(WAIT, |text| {
+            Screen::read(text, 80).lines() == ["P> echo 'first", "second' > executed"]
+        }),
+        "Enter did not retain the incomplete command: {:?}",
+        session.text()
+    );
+    assert!(!dir.path().join("executed").exists());
+    session.send_byte(b'\r').unwrap();
+    prompt(&mut session, 2);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("executed")).unwrap(),
+        "first\nsecond\n"
+    );
+}
+
+#[test]
 fn stock_zoxide_key_accepts_a_crlf_selector_path() {
     for ending in ["\\n", "\\r\\n"] {
         let dir = TempDir::new().unwrap();
@@ -276,7 +328,7 @@ fn stock_zoxide_key_accepts_a_crlf_selector_path() {
             resolved
         );
         paste(&mut session, "to-string !{cwd} > ../actual-directory");
-        session.send_byte(b'\n').unwrap();
+        session.send_byte(b'\r').unwrap();
         prompt(&mut session, 3);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("actual-directory")).unwrap(),

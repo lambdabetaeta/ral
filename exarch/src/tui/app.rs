@@ -71,8 +71,23 @@ pub(super) fn input_of(k: &KeyEvent) -> Input {
 
 /// Whether `k` is `c` pressed with the Control modifier.
 pub fn ctrl_key(k: &KeyEvent, c: char) -> bool {
-    k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
+    matches!(k.code, KeyCode::Char(key) if key.eq_ignore_ascii_case(&c))
+        && k.modifiers.contains(KeyModifiers::CONTROL)
 }
+
+fn copy_key(k: &KeyEvent) -> bool {
+    match k.code {
+        KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c') => {
+            matches!(k.modifiers, KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                || k.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        }
+        KeyCode::Insert => k.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+type CopySink = Box<dyn FnMut(&str) -> std::io::Result<clipboard::Copied>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeyAction {
@@ -95,11 +110,7 @@ pub(super) fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
     if k.code == KeyCode::Esc {
         return KeyAction::Cancel;
     }
-    if enter_submits
-        && k.code == KeyCode::Enter
-        && !k.modifiers.contains(KeyModifiers::SHIFT)
-        && !k.modifiers.contains(KeyModifiers::ALT)
-    {
+    if enter_submits && k.code == KeyCode::Enter && k.modifiers.is_empty() {
         KeyAction::Submit
     } else {
         KeyAction::Edit
@@ -112,6 +123,13 @@ pub(super) enum Overlay {
     Login(LoginOverlay),
     Rewind(RewindOverlay),
     Providers(ProvidersOverlay),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseOwner {
+    Prompt,
+    Transcript,
+    Terminal,
 }
 
 /// The frontend's whole state: every tab, the prompt, gestures and the open overlay.
@@ -132,7 +150,11 @@ pub(crate) struct App {
     /// Where off-thread work sends the [`Job`] that applies its result.
     pub(super) jobs: mpsc::Sender<Job>,
     pub(super) gesture: GestureState,
+    mouse_owner: Option<MouseOwner>,
+    input_focus: AgentId,
     pub(super) clipboard: Clipboard,
+    #[cfg(test)]
+    copy_sink: Option<CopySink>,
     /// The matrix's cursor, deliberately separate from [`Tabs::focus`]: moving
     /// around the matrix must not retarget the prompt until the user presses
     /// Enter.
@@ -169,7 +191,11 @@ impl App {
             overlay_gen: 0,
             jobs,
             gesture: GestureState::new(),
+            mouse_owner: None,
+            input_focus: first,
             clipboard: Clipboard::new(ral_core::host::var("SSH_CONNECTION").is_some()),
+            #[cfg(test)]
+            copy_sink: None,
             matrix: Matrix::Watching,
             cwd_basename,
             last_title: String::new(),
@@ -236,6 +262,10 @@ impl App {
             _ => (self.matrix, None),
         };
         drop(rows);
+        if matches!(self.matrix, Matrix::Navigating(_)) != matches!(next, Matrix::Navigating(_)) {
+            self.cancel_mouse();
+            self.prompt_state.clear_cx_pending();
+        }
         self.matrix = next;
         if let Some(id) = attach {
             self.tabs.set_focus(id);
@@ -244,6 +274,8 @@ impl App {
 
     /// Open `overlay` in place of any other.
     pub(super) fn open(&mut self, overlay: Overlay) {
+        self.cancel_mouse();
+        self.prompt_state.clear_cx_pending();
         self.overlay = Some(overlay);
         self.overlay_gen += 1;
     }
@@ -459,23 +491,64 @@ impl App {
     /// Route one key press; `true` when the user asked to compose the draft in
     /// `$EDITOR`, which only the UI loop, owning the terminal, can do.
     pub fn key(&mut self, k: KeyEvent, ctx: &CommandCtx<'_>) -> bool {
-        if k.kind != KeyEventKind::Press {
+        if k.kind == KeyEventKind::Release {
+            return false;
+        }
+        self.reconcile_input_focus();
+        let cx_pending = self.prompt_state.take_cx_pending();
+        let repeat = k.kind == KeyEventKind::Repeat;
+        // Repeats may edit, but may not commit or launch another program.
+        if repeat
+            && (copy_key(&k)
+                || matches!(k.code, KeyCode::Enter | KeyCode::Esc)
+                || ctrl_key(&k, 'c')
+                || ctrl_key(&k, 'g')
+                || cx_pending)
+        {
             return false;
         }
         if self.overlay.is_some() {
-            self.overlay_input(&input_of(&k), ctx);
+            let input = input_of(&k);
+            if !repeat || matches!(input, Input::Key(_)) {
+                self.overlay_input(&input, ctx);
+            }
             return false;
         }
-        let action = key_action(&k, self.is_steerable());
-        // An open slash-command popup owns its own keys — Enter takes the
-        // highlighted command instead of submitting the line under it, Tab
-        // walks the list instead of the tabs.  The interrupt is the one key no
-        // popup is offered; everything else, Esc included, it may claim — Esc
-        // dismisses it.
+        if copy_key(&k) && self.copy_prompt_selection() {
+            return false;
+        }
+        let can_edit = self.is_steerable();
+        let action = key_action(&k, can_edit);
+        if action != KeyAction::Interrupt && self.matrix_navigating() {
+            self.matrix_key(&k);
+            return false;
+        }
+        // The active editor search owns even application search shortcuts.
+        if can_edit && self.prompt_state.editor_is_searching() {
+            self.prompt_state.edit_input(k);
+            return false;
+        }
+        if can_edit && self.prompt_state.handle_search_key(k) {
+            return false;
+        }
         if action != KeyAction::Interrupt
-            && (self.prompt_state.menu_key(k.code) || self.matrix_key(&k))
+            && (can_edit && self.prompt_state.menu_key(k) || self.matrix_key(&k))
         {
             return false;
+        }
+        if can_edit && action == KeyAction::Edit {
+            if cx_pending {
+                return !repeat && ctrl_key(&k, 'e');
+            }
+            if ctrl_key(&k, 'g') {
+                return !repeat;
+            }
+            if ctrl_key(&k, 'x') {
+                if !repeat {
+                    self.prompt_state.set_cx_pending();
+                }
+                return false;
+            }
         }
         match action {
             // The focused agent cancels its token and its current dispatch
@@ -500,7 +573,7 @@ impl App {
                     commands::route_submit(text, self, ctx);
                 }
             }
-            KeyAction::Edit => return self.edit(k),
+            KeyAction::Edit => self.edit(k),
         }
         false
     }
@@ -526,21 +599,9 @@ impl App {
         true
     }
 
-    /// Edit the draft; `true` when the Ctrl-X prefix's Ctrl-E asks for `$EDITOR`.
-    fn edit(&mut self, k: KeyEvent) -> bool {
+    /// Edit the draft after modal owners and global chords have declined it.
+    fn edit(&mut self, k: KeyEvent) {
         let can_edit = self.is_steerable();
-        // Ctrl-X opens the editor-command prefix (emacs convention): Ctrl-E
-        // composes the prompt in `$EDITOR` and any other key cancels.  The
-        // widget's own Ctrl-X (cut) yields; killing stays on Ctrl-W / Ctrl-K.
-        if self.prompt_state.take_cx_pending() {
-            return can_edit
-                && k.code == KeyCode::Char('e')
-                && k.modifiers.contains(KeyModifiers::CONTROL);
-        }
-        if can_edit && k.code == KeyCode::Char('x') && k.modifiers.contains(KeyModifiers::CONTROL) {
-            self.prompt_state.set_cx_pending();
-            return false;
-        }
         // Every key reaches the textarea only on an editable tab, so a lingering
         // subagent is watch-only and the global prompt stays pristine until
         // the user attaches to a live row.
@@ -552,21 +613,22 @@ impl App {
             // a multi-line draft they fall through and move the cursor. On an
             // empty prompt, Up dequeues the whole queued run back for revision.
             KeyCode::Up if can_edit && k.modifiers.is_empty() => {
-                if self.prompt_state.row() == 0 {
-                    let recalled = self
+                let recalled = k.kind == KeyEventKind::Press
+                    && self.prompt_state.row() == 0
+                    && self
                         .tabs
                         .focused_agent()
                         .is_some_and(|agent| self.prompt_state.edit_queued_prompt(&agent.mailbox));
-                    if !recalled {
+                if !recalled {
+                    if self.prompt_state.history_can_prev() {
                         self.prompt_state.history_prev();
+                    } else {
+                        self.prompt_state.edit_input(k);
                     }
-                } else {
-                    self.prompt_state.edit_input(k);
                 }
             }
             KeyCode::Down if can_edit && k.modifiers.is_empty() => {
-                let last_row = self.prompt_state.row_count().saturating_sub(1);
-                if self.prompt_state.row() == last_row {
+                if self.prompt_state.history_can_next() {
                     self.prompt_state.history_next();
                 } else {
                     self.prompt_state.edit_input(k);
@@ -577,53 +639,160 @@ impl App {
             }
             _ => {}
         }
-        false
     }
 
     /// Pasted text goes to the open overlay, else the draft — never under a
     /// matrix cursor, a modal surface its bytes must not leak past.
     pub fn paste(&mut self, s: &str, ctx: &CommandCtx<'_>) {
+        self.reconcile_input_focus();
+        self.prompt_state.clear_cx_pending();
         if self.overlay.is_some() {
             self.overlay_input(&Input::Paste(s.to_owned()), ctx);
-        } else if !self.matrix_navigating() {
+        } else if self.is_steerable() && !self.matrix_navigating() {
             self.prompt_state.paste(s);
         }
     }
 
-    /// The wheel scrolls, a left-drag selects and copies on release, a click
-    /// that never dragged opens its block. Shift+left falls through to the
-    /// terminal's own selection, so we never see — or fight — it.
+    fn cancel_mouse(&mut self) {
+        self.mouse_owner = None;
+        self.prompt_state.cancel_mouse();
+        self.gesture.clear();
+    }
+
+    pub(super) fn suspend_input(&mut self) {
+        self.prompt_state.clear_cx_pending();
+        self.cancel_mouse();
+    }
+
+    /// Reconcile before drawing or routing, including focus changes from jobs.
+    pub(super) fn reconcile_input_focus(&mut self) {
+        if self.input_focus != self.tabs.focused() {
+            self.input_focus = self.tabs.focused();
+            self.prompt_state.clear_cx_pending();
+            self.cancel_mouse();
+        }
+        if self.overlay.is_some()
+            || (self.mouse_owner == Some(MouseOwner::Prompt)
+                && (!self.is_steerable() || self.matrix_navigating()))
+        {
+            self.cancel_mouse();
+        }
+    }
+
+    /// A left press chooses the owner until release, independent of geometry.
     pub fn mouse(&mut self, me: MouseEvent) {
+        self.reconcile_input_focus();
+        self.prompt_state.clear_cx_pending();
+        if !self.gesture.drawn_for(self.tabs.focused()) {
+            self.cancel_mouse();
+            return;
+        }
         if self.overlay.is_some() {
             return;
         }
-        if !self.gesture.drawn_for(self.tabs.focused()) {
-            self.gesture.clear();
+        let release = me.kind == MouseEventKind::Up(MouseButton::Left);
+        if me.modifiers.contains(KeyModifiers::SHIFT) {
+            self.cancel_mouse();
+            if !release {
+                self.mouse_owner = Some(MouseOwner::Terminal);
+            }
             return;
         }
-        self.prompt_state.clear_cx_pending();
-        // Motion and press alike, so the dial glyph brightens the instant the
-        // pointer crosses a dialable block.
+        if me.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.cancel_mouse();
+            self.mouse_owner = Some(
+                if self.is_steerable() && !self.matrix_navigating() && self.prompt_state.mouse(me) {
+                    MouseOwner::Prompt
+                } else {
+                    self.gesture
+                        .update_hover(me, self.tabs.focused_scrollback());
+                    self.gesture.press(me);
+                    MouseOwner::Transcript
+                },
+            );
+            return;
+        }
+        if matches!(
+            me.kind,
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        ) {
+            let effect = match self.mouse_owner {
+                Some(MouseOwner::Prompt) => {
+                    self.prompt_state.mouse(me);
+                    None
+                }
+                Some(MouseOwner::Transcript) if release => {
+                    self.gesture.release(self.tabs.focused_scrollback())
+                }
+                Some(MouseOwner::Transcript) => self.gesture.drag(me, SCROLL_STEP),
+                Some(MouseOwner::Terminal) | None => None,
+            };
+            if release {
+                self.mouse_owner = None;
+            }
+            if let Some(effect) = effect {
+                self.apply(effect);
+            }
+            return;
+        }
+        if me.kind == MouseEventKind::Down(MouseButton::Right)
+            && self.mouse_owner.is_none()
+            && self.is_steerable()
+            && !self.matrix_navigating()
+            && self.prompt_state.contains_position(me.column, me.row)
+            && self.copy_prompt_selection()
+        {
+            return;
+        }
+        if self.mouse_owner == Some(MouseOwner::Terminal)
+            || (self.mouse_owner != Some(MouseOwner::Transcript)
+                && self.is_steerable()
+                && !self.matrix_navigating()
+                && self.prompt_state.mouse(me))
+        {
+            return;
+        }
         self.gesture
             .update_hover(me, self.tabs.focused_scrollback());
         let effect = match me.kind {
             MouseEventKind::ScrollUp => Some(Effect::Scroll(-SCROLL_STEP)),
             MouseEventKind::ScrollDown => Some(Effect::Scroll(SCROLL_STEP)),
-            MouseEventKind::Down(MouseButton::Left)
-                if !me.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.gesture.press(me);
-                None
-            }
-            MouseEventKind::Drag(MouseButton::Left) => self.gesture.drag(me, SCROLL_STEP),
-            MouseEventKind::Up(MouseButton::Left) => {
-                self.gesture.release(self.tabs.focused_scrollback())
-            }
             _ => None,
         };
         if let Some(effect) = effect {
             self.apply(effect);
         }
+    }
+
+    fn copy_text(&mut self, text: &str) -> std::io::Result<clipboard::Copied> {
+        #[cfg(test)]
+        if let Some(sink) = &mut self.copy_sink {
+            return sink(text);
+        }
+        self.clipboard.copy(text, true)
+    }
+
+    /// A failed write consumes the chord, not the selection.
+    fn copy_prompt_selection(&mut self) -> bool {
+        let Some(text) = self.prompt_state.selection_text() else {
+            return false;
+        };
+        let sent = match self.copy_text(&text) {
+            Ok(sent) => {
+                self.prompt_state.clear_selection();
+                Some(sent)
+            }
+            Err(error) => {
+                self.push_error(
+                    self.tabs.focused(),
+                    &format!("could not copy prompt selection; retry copying: {error}"),
+                );
+                None
+            }
+        };
+        self.gesture
+            .note_copy(sent, Toast::Copied(text.chars().count()));
+        true
     }
 
     /// Run a gesture's requested mutation against the focused scrollback.
@@ -641,7 +810,13 @@ impl App {
                 }
             }
             Effect::Copy(text) => {
-                let sent = self.clipboard.copy(&text, true).ok();
+                let sent = match self.copy_text(&text) {
+                    Ok(sent) => Some(sent),
+                    Err(error) => {
+                        self.push_error(f, &format!("could not copy selection: {error}"));
+                        None
+                    }
+                };
                 self.gesture
                     .note_copy(sent, Toast::Copied(text.chars().count()));
             }

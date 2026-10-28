@@ -204,7 +204,7 @@ impl Shell {
     /// post-startup handoff funnels through here, so a run denied authority
     /// (exarch's tool runs) cannot construct one at all — it has no
     /// `&TerminalLease` to hand
-    /// [`TerminalLoan::try_acquire`](crate::process::TerminalLoan::try_acquire).
+    /// [`TerminalLoan::prepare`](crate::process::TerminalLoan::prepare).
     pub(crate) fn terminal_lease(&self, mooring: &Mooring) -> Option<&TerminalLease> {
         match mooring.terminal_access {
             TerminalAccess::Denied => None,

@@ -110,9 +110,11 @@ pub(crate) mod engine {
     /// plugin load builtins.
     fn repl_surface() -> ral_core::HostSurface {
         let mut surface = batch_surface();
-        surface
-            .statics
-            .extend([crate::repl::ED_BUILTINS, crate::repl::PLUGIN_LOAD_BUILTINS]);
+        surface.statics.extend([
+            crate::repl::ED_BUILTINS,
+            crate::repl::PLUGIN_LOAD_BUILTINS,
+            crate::repl::external_editor::BUILTINS,
+        ]);
         surface
     }
 
@@ -141,6 +143,7 @@ pub(crate) mod engine {
         shell.set_interactive(true);
         let terminal = ral_core::Value::from(&shell.terminal());
         shell.set_var("TERMINAL".into(), terminal);
+        crate::repl::external_editor::register(shell)?;
         boot_builtin::register(shell)
     }
 

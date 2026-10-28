@@ -48,7 +48,7 @@ fn paste_line(session: &mut PtySession, line: &str) {
         "{}",
         session.text()
     );
-    session.send_byte(b'\n').unwrap();
+    session.send_byte(b'\r').unwrap();
 }
 
 fn exit(child: &mut Child) -> ExitStatus {

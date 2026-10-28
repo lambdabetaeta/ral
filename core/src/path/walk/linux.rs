@@ -18,7 +18,8 @@ use std::time::SystemTime;
 
 pub(super) use super::unix::{
     DirInfo, Lister, copy_mode, create, create_sibling, discard, list, may_write, mkdir,
-    open_discard, remove, rename, rename_over, sync_dir,
+    open_discard, remove, remove_empty_dir, rename, rename_over, sync_dir,
+    validate_scoped_directory, validate_scoped_parent,
 };
 
 /// The identity a by-name `stat` reports, for a caller comparing it with

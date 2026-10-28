@@ -41,6 +41,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../LICENSE-APACHE": "licenses/LICENSE-APACHE",
+      "../LICENSE-MIT": "licenses/LICENSE-MIT",
+      "../NOTICE": "licenses/NOTICE",
+      "../vendor/edtui/LICENSE.md": "licenses/LICENSE-EDTUI"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3dbbe8f3
+generated_at_commit: 3b76d0db
 generated_at_date: 2026-10-27
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -271,6 +271,23 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   spellings, `trace.rs` holds evidence, and `exclusion.rs` keeps deny anchors.
   `held.rs` owns private handles and authority conversions; operations in
   `held/`, traversal in `resolve.rs`, and host adapters are its child modules.
+  `held/write.rs::create_scoped_dir` creates a secret directory through a
+  write-judged absent target; `ScopedDir` holds it and permits only empty-root
+  rollback on drop. Recursive cleanup requires a fresh write judgment of
+  `cleanup_target`, the actual held tree, not its original absent name.
+  `create_writable_file` exclusively creates a secret or public regular file
+  without requiring read authority. Scoped creation validates physical Unix
+  ancestors through held `..` handles: current-user/root ownership, no
+  group/other writes unless sticky. Linux POSIX ACL permissions are bounded by
+  the mode's group mask; macOS additionally refuses extended ACL entries.
+  Windows holds
+  parents without delete sharing, proves a safe owner/ACL inheritance chain to
+  a protected boundary, then revalidates top-down. The opened workspace is
+  checked too. Windows secret directories use protected, inheritable owner-only
+  DACLs; replacements and editor backups inherit privacy. This cross-user proof
+  excludes same-user or privileged interference and retained attacker
+  `WRITE_DAC`/`WRITE_OWNER` handles granted by a formerly unsafe Windows ACL:
+  changing a DACL does not revoke existing handles.
   `walk` descends from the root through directory handles with no symlink
   followed by the kernel, splicing each link
   into the name itself (a link's target read through the handle held on it), and

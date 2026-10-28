@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use super::super::error::directory_error;
 use super::{
-    Data, Dir, EntryName, Judged, Kind, Leaf, LeafMode, Located, Node, Sharing, StagedWrite,
-    Streamed, Trace, Writing, host, step_into,
+    Authority, Data, Dir, EntryName, Judged, Kind, Leaf, LeafMode, Located, Node, Sharing,
+    StagedWrite, Streamed, Trace, Writing, host, step_into,
 };
 
 /// What a data open is for: [`Located::open_data`]'s argument, and what each
@@ -26,8 +26,8 @@ pub(crate) enum Access {
 /// `Private` is owner-only (0600/0700), as `mktemp(1)` makes a name the program
 /// invented; Windows inherits the directory's ACL for both.  `Secret` is
 /// owner-only on every host, whatever the directory would hand down: 0600, and
-/// on Windows a protected DACL naming the owner alone.  A directory made on
-/// Windows inherits for all three, and on Unix is 0700 for the last two.
+/// on Windows a protected DACL naming the owner alone, inheritable for
+/// directories. On Unix directories are 0700 for the last two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
     Public,
@@ -42,14 +42,57 @@ pub(crate) enum Streaming {
     Truncate,
 }
 
-impl Dir<Judged<Writing>> {
+/// A private directory whose pathname is protected from other users.
+///
+/// Same-user and privileged interference are outside this guarantee.
+/// On Windows, so are attacker security handles retained from formerly unsafe
+/// ACLs: Windows does not revoke their granted rights when the ACL changes.
+/// Recursive removal requires a fresh judgment of [`Self::cleanup_target`].
+#[must_use]
+pub struct ScopedDir {
+    directory: Dir,
+    _rollback: DirectoryRollback,
+}
+
+impl ScopedDir {
+    /// An unjudged handle for obtaining explicit grants on the directory.
+    pub fn directory(&self) -> Dir {
+        Dir {
+            node: Arc::clone(&self.directory.node),
+            trace: self.directory.trace.clone(),
+            stat: self.directory.stat.clone(),
+            _a: PhantomData,
+        }
+    }
+
+    /// The actual held directory, not a fresh lookup of its creation name.
+    /// Judge this target before removing the tree: creation proves no ownership.
+    pub fn cleanup_target(&self) -> Located {
+        self.directory().into_located()
+    }
+}
+
+/// Owns only the empty-directory rollback, never a tree traversal.
+struct DirectoryRollback(Located<Judged<Writing>>);
+
+impl Drop for DirectoryRollback {
+    fn drop(&mut self) {
+        let _ = host::remove_empty_dir(
+            self.0.dir(),
+            self.0
+                .absent_name()
+                .expect("a directory rollback has an absent target"),
+        );
+    }
+}
+
+impl<A: Authority> Dir<A> {
     /// The absent entry `name` of this directory, as a create target: a
     /// [`Located`] whose leaf is absent, whose trace is this directory's plus
     /// a one-name tail, and whose directory is this one, by the walk's own
-    /// node: no syscall.  It is unjudged: a name under a write-judged
-    /// directory is still a distinct position, and an exclusion can name an
-    /// absent one, so the caller judges it before anything makes it.
-    pub(crate) fn absent(&self, name: EntryName) -> Located {
+    /// node: no syscall. The target is unjudged regardless of the directory's
+    /// authority: exclusions can name absent children.
+    pub fn absent(&self, name: EntryName) -> Located {
         Located {
             trace: self.trace.extended([], vec![name]),
             leaf: Leaf::Absent {
@@ -59,7 +102,9 @@ impl Dir<Judged<Writing>> {
             _a: PhantomData,
         }
     }
+}
 
+impl Dir<Judged<Writing>> {
     /// Remove everything beneath this directory, leaving it empty: each entry
     /// located without following and removed through this handle, so a link
     /// goes as the link and its target is never touched.  An entry gone
@@ -225,6 +270,14 @@ impl Located<Judged<Writing>> {
         host::create(self.dir(), self.absent_name()?, access, visibility)
     }
 
+    /// Create a file exclusively at an absent leaf, retaining its write handle.
+    ///
+    /// # Errors
+    /// [`create_new`](Self::create_new)'s.
+    pub fn create_writable_file(self, visibility: Visibility) -> io::Result<File> {
+        self.create_new(Access::Write, visibility)
+    }
+
     /// An empty file made exclusively at an absent leaf, its handle dropped:
     /// the name is made and nothing is written.  Takes `self`: after this the
     /// object is the file made.
@@ -247,7 +300,7 @@ impl Located<Judged<Writing>> {
     /// `NotFound` for an absent leaf, or one gone before it was removed;
     /// `InvalidInput` for a root; the removal's, a directory that is not
     /// empty by then included.
-    pub(crate) fn remove(self) -> io::Result<()> {
+    pub fn remove(self) -> io::Result<()> {
         let (kind, name) = self.present()?;
         if let Leaf::Dir { node, stat } = &self.leaf {
             Dir::<Judged<Writing>> {
@@ -272,6 +325,56 @@ impl Located<Judged<Writing>> {
     pub(crate) fn rename(self, to: &EntryName) -> io::Result<()> {
         let (_, from) = self.present()?;
         host::rename(self.dir(), self.handle(), from, to)
+    }
+
+    /// Create a private directory at this absent, write-judged target.
+    /// Validate the parent before creation and the held workspace after open.
+    /// Unix ancestors must resist cross-user replacement; Windows holds them
+    /// without delete sharing and proves ACL safety through a protected boundary.
+    /// Drop rolls back only an empty directory; cleanup needs a fresh judgment.
+    ///
+    /// # Errors
+    /// `PermissionDenied` for an unsafe parent, ancestor, or reopened workspace;
+    /// `AlreadyExists` for a present target; the create's or the open's error.
+    pub fn create_scoped_dir(self) -> io::Result<ScopedDir> {
+        let name = self.absent_name()?;
+        let Leaf::Absent { dir } = &self.leaf else {
+            unreachable!("absent_name requires an absent target");
+        };
+        #[cfg(unix)]
+        host::validate_scoped_parent(&dir.held.file)?;
+        #[cfg(windows)]
+        host::validate_scoped_parents(
+            std::iter::successors(Some(dir.as_ref()), |node| node.above.as_deref())
+                .map(|node| node.held.file.as_ref()),
+        )?;
+        host::mkdir(self.dir(), name, Visibility::Secret)?;
+        let rollback = DirectoryRollback(self);
+        #[cfg(test)]
+        super::tests::after_scoped_mkdir();
+        let target = &rollback.0;
+        let Leaf::Absent { dir } = &target.leaf else {
+            unreachable!("only an absent target can create a scoped directory");
+        };
+        let name = target.absent_name()?;
+        let (held, step, stat) = step_into(&dir.held, name, Sharing::Leaf)?.held()?;
+        if step.kind != Kind::Dir {
+            return Err(io::ErrorKind::NotADirectory.into());
+        }
+        host::validate_scoped_directory(&held.file)?;
+        let directory = Dir {
+            node: Arc::new(Node {
+                held,
+                above: Some(Arc::clone(dir)),
+            }),
+            trace: target.trace.extended([step], Vec::new()),
+            stat,
+            _a: PhantomData,
+        };
+        Ok(ScopedDir {
+            directory,
+            _rollback: rollback,
+        })
     }
 
     /// `mkdir` on an absent leaf, then one step onto the name made: the

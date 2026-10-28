@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event as CtEvent, poll as ct_poll, read as ct_read};
+use crossterm::event::{Event as CtEvent, KeyEventKind, poll as ct_poll, read as ct_read};
 
 use crate::{
     SessionInfo,
@@ -21,7 +21,7 @@ use crate::{
     },
     bus::{BusReceiver, FleetBus, Pass, Signal},
     provider::Bureau,
-    record::{RECORD, Resumed},
+    record::{AgentId, RECORD, Resumed, Transient},
 };
 use std::sync::mpsc::TryRecvError;
 
@@ -29,6 +29,7 @@ use super::{
     App,
     app::{CommandCtx, Job, Overlay},
     banner, commands,
+    paste_burst::{Input, PasteBurst},
     render::{draw, emit_tab_title},
     terminal::{TerminalGuard, edit_text_in_editor},
 };
@@ -131,22 +132,22 @@ fn drain_signals(
     rx: &BusReceiver,
     finished: bool,
     max: Option<usize>,
-    mut handle: impl FnMut(Signal),
-) -> Pass {
+    mut handle: impl FnMut(Signal) -> io::Result<()>,
+) -> io::Result<Pass> {
     let mut n = 0usize;
     loop {
         if max.is_some_and(|m| n >= m) {
-            return if finished { Pass::Stop } else { Pass::More };
+            return Ok(if finished { Pass::Stop } else { Pass::More });
         }
         match rx.try_recv() {
             Ok(sig) => {
-                handle(sig);
+                handle(sig)?;
                 n += 1;
             }
             Err(TryRecvError::Empty) => {
-                return if finished { Pass::Stop } else { Pass::Idle };
+                return Ok(if finished { Pass::Stop } else { Pass::Idle });
             }
-            Err(TryRecvError::Disconnected) => return Pass::Stop,
+            Err(TryRecvError::Disconnected) => return Ok(Pass::Stop),
         }
     }
 }
@@ -173,7 +174,9 @@ fn ui_loop(
     // A park or unpark repaints the tab title and prompt chrome with no bus
     // event of its own, so the transition has to be watched for here.
     let mut prev_waiting = tui.app.focused_waiting();
+    let mut paste = PasteBurst::default();
     loop {
+        dirty |= flush_due_input(tui, &mut paste, Instant::now(), ctx)?;
         let prev_focus = tui.app.tabs.focused();
         // The explicit-done contract, shared with the headless `Sink::drive`:
         // stop only when every root is *done*, never when the channel empties,
@@ -182,13 +185,30 @@ fn ui_loop(
         let mut handled_any = false;
         let more = match drain_signals(rx, fleet.is_empty(), Some(BATCH), |sig| {
             handled_any = true;
+            // Facts can retire a subtree; death can change the focused owner.
+            // Streaming transients must not split a concurrent paste.
+            let owner = input_owner(&tui.app);
+            if matches!(
+                &sig,
+                Signal::Fact(..) | Signal::Transient(_, Transient::Died)
+            ) {
+                deliver(tui, paste.flush_pending(), ctx)?;
+            }
             dispatch(tui, rx, sig);
-        }) {
+            if input_owner(&tui.app) != owner {
+                deliver(tui, paste.finish(), ctx)?;
+            }
+            Ok(())
+        })? {
             Pass::Stop => {
                 // The cap binds even a finished drain, so `Stop` can arrive with
                 // events still buffered; nothing drains after this returns, so
                 // empty the channel uncapped before the final frame.
-                drain_signals(rx, true, None, |sig| dispatch(tui, rx, sig));
+                deliver(tui, paste.finish(), ctx)?;
+                drain_signals(rx, true, None, |sig| {
+                    dispatch(tui, rx, sig);
+                    Ok(())
+                })?;
                 tui.app.mark_ready();
                 draw(&mut tui.app, tui.guard.term(), ctx.bureau)?;
                 emit_tab_title(&mut tui.app);
@@ -198,7 +218,12 @@ fn ui_loop(
             Pass::Idle => false,
         };
         for job in inbox.try_iter() {
+            let owner = input_owner(&tui.app);
+            deliver(tui, paste.flush_pending(), ctx)?;
             job(&mut tui.app, ctx);
+            if input_owner(&tui.app) != owner {
+                deliver(tui, paste.finish(), ctx)?;
+            }
             dirty = true;
         }
         if let Some(Overlay::Picker(s, _)) = &mut tui.app.overlay {
@@ -211,7 +236,15 @@ fn ui_loop(
         // `tick` runs on every due frame, painted or not: it ages dying tabs
         // out on its own clock, independent of what gates the redraw.
         if last_draw.elapsed() >= frame {
+            // Only a lingering (non-editable) focused tab can expire in tick.
+            let owner = input_owner(&tui.app);
+            if !tui.app.is_steerable() {
+                dirty |= deliver(tui, paste.flush_pending(), ctx)?;
+            }
             let ticked = tui.app.tabs.tick();
+            if input_owner(&tui.app) != owner {
+                deliver(tui, paste.finish(), ctx)?;
+            }
             let animating = tui.app.animating(frame);
             if dirty || ticked || animating {
                 draw(&mut tui.app, tui.guard.term(), ctx.bureau)?;
@@ -229,27 +262,52 @@ fn ui_loop(
         } else {
             frame.saturating_sub(last_draw.elapsed())
         };
+        let timeout = paste.deadline().map_or(timeout, |at| {
+            timeout.min(at.saturating_duration_since(Instant::now()))
+        });
         if ct_poll(timeout)? {
             match ct_read()? {
                 CtEvent::Key(k) => {
                     dirty = true;
-                    if tui.app.key(k, ctx) {
-                        compose_in_editor(tui)?;
+                    let now = Instant::now();
+                    // Deliver expired keys before retaining anything for the next owner.
+                    flush_due_input(tui, &mut paste, now, ctx)?;
+                    let owner = input_owner(&tui.app);
+                    let owns_text = tui.app.overlay.is_some()
+                        || (tui.app.is_steerable() && !tui.app.matrix_navigating());
+                    if owns_text && !tui.app.prompt_state.cx_pending() {
+                        deliver(tui, paste.key(k, now), ctx)?;
+                    } else {
+                        deliver(tui, paste.finish(), ctx)?;
+                        deliver(tui, vec![Input::Key(k)], ctx)?;
+                    }
+                    if input_owner(&tui.app) != owner {
+                        // A delivered key or paste may itself dismiss an overlay.
+                        paste = PasteBurst::default();
                     }
                 }
                 CtEvent::Paste(s) => {
                     dirty = true;
-                    tui.app.paste(&s, ctx);
+                    deliver(tui, paste.finish(), ctx)?;
+                    deliver(tui, vec![Input::Paste(s)], ctx)?;
                 }
                 CtEvent::Mouse(m) => {
                     dirty = true;
+                    deliver(tui, paste.finish(), ctx)?;
                     tui.app.mouse(m);
                 }
-                CtEvent::Resize(_, _) => {
+                CtEvent::Resize(_, _) | CtEvent::FocusLost => {
+                    deliver(tui, paste.finish(), ctx)?;
+                    tui.app.suspend_input();
                     dirty = true;
                 }
-                _ => {}
+                CtEvent::FocusGained => {}
             }
+        }
+        if let Some(notice) = tui.app.prompt_state.take_notice() {
+            let focused = tui.app.tabs.focused();
+            tui.app.push_error(focused, &notice);
+            dirty = true;
         }
         // A matrix Enter, or a focused agent ending mid-drain, moves focus.
         if tui.app.tabs.focused() != prev_focus {
@@ -258,12 +316,60 @@ fn ui_loop(
     }
 }
 
-/// Drive the `C-x C-e` hatch from the UI loop, which owns the terminal the
+fn input_owner(app: &App) -> (AgentId, u64, bool, bool, bool) {
+    (
+        app.tabs.focused(),
+        app.overlay_gen,
+        app.overlay.is_some(),
+        app.matrix_navigating(),
+        app.is_steerable(),
+    )
+}
+
+fn flush_due_input(
+    tui: &mut Tui,
+    paste: &mut PasteBurst,
+    now: Instant,
+    ctx: &CommandCtx<'_>,
+) -> io::Result<bool> {
+    let owner = input_owner(&tui.app);
+    let changed = deliver(tui, paste.flush_due(now), ctx)?;
+    if input_owner(&tui.app) != owner {
+        *paste = PasteBurst::default();
+    }
+    Ok(changed)
+}
+
+/// Apply detector output through the same paths as terminal input.
+fn deliver(tui: &mut Tui, inputs: Vec<Input>, ctx: &CommandCtx<'_>) -> io::Result<bool> {
+    let changed = !inputs.is_empty();
+    for input in inputs {
+        match input {
+            Input::Key(k) => {
+                if k.kind == KeyEventKind::Release {
+                    continue;
+                }
+                if tui.app.key(k, ctx) {
+                    compose_in_editor(tui)?;
+                }
+            }
+            Input::Paste(s) => tui.app.paste(&s, ctx),
+        }
+    }
+    Ok(changed)
+}
+
+/// Drive the external-editor hatch from the UI loop, which owns the terminal the
 /// editor must borrow.  Repaints over whatever the editor left on the screen.
 fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
+    tui.app.suspend_input();
     let draft = tui.app.prompt_state.prompt_text();
-    if let Some(edited) = edit_text_in_editor(&draft)? {
-        tui.app.prompt_state.adopt_draft(&edited);
+    match edit_text_in_editor(&draft)? {
+        Ok(edited) => tui.app.prompt_state.adopt_draft(&edited),
+        Err(message) => {
+            let focused = tui.app.tabs.focused();
+            tui.app.push_error(focused, &message);
+        }
     }
     tui.guard.term().clear()?;
     Ok(())

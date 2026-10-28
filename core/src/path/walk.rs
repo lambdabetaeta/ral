@@ -26,8 +26,8 @@ pub(crate) use held::{
 };
 pub use held::{
     Authority, Dir, DirEntry, Installing, Judged, LeafMode, Listing, Lists, Located, Op, Peeks,
-    Reading, Reads, Unjudged, Visibility, Writing, exists, is_dir, kind_of, walk, walk_dir,
-    walk_lenient,
+    Reading, Reads, ScopedDir, Unjudged, Visibility, Writing, exists, is_dir, kind_of, walk,
+    walk_dir, walk_lenient,
 };
 #[cfg(unix)]
 pub(crate) use held::{Vetted, walk_with};

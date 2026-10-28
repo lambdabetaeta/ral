@@ -3,18 +3,18 @@
   "targets": [
     {
       "os": "macOS arm64",
-      "primary": "ral-macos-arm64",
-      "allutils": "ral-macos-arm64-allutils"
+      "primary": "ral-macos-arm64.tar.gz",
+      "allutils": "ral-macos-arm64-allutils.tar.gz"
     },
     {
       "os": "Linux x86_64",
-      "primary": "ral-linux-x86_64",
-      "allutils": "ral-linux-x86_64-allutils"
+      "primary": "ral-linux-x86_64.tar.gz",
+      "allutils": "ral-linux-x86_64-allutils.tar.gz"
     },
     {
       "os": "Linux arm64",
-      "primary": "ral-linux-arm64",
-      "allutils": "ral-linux-arm64-allutils"
+      "primary": "ral-linux-arm64.tar.gz",
+      "allutils": "ral-linux-arm64-allutils.tar.gz"
     },
     {
       "os": "Windows",

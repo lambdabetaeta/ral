@@ -84,13 +84,14 @@ pub(crate) fn run(
     // `finish_command` builds the `Command{External}` observation from
     // whatever error reaches it, so a spawn failure needs no emission of
     // its own here.
+    let prepared_loan = fg.prepare(shell, mooring);
     let (child, led, jail) = spawn(&mut command, fg.pgid_policy(), &cmd_name, shell)?;
 
     let child_pid = child.id();
     // Held until `reclaim`: its `Drop` restores ral's pgid on every path out
     // of here, sparing the next REPL tty read an EIO from a background
     // pgroup.
-    let loan = fg.acquire(child_pid, shell, mooring);
+    let loan = prepared_loan.and_then(|loan| loan.lend(child_pid.cast_signed()));
 
     let group = landed_in(led, shell.io.stage.as_ref());
     // Nothing fallible may run between `spawn` and this assembly: until

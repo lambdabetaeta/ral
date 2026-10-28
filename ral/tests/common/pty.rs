@@ -117,7 +117,7 @@ impl PtySession {
 
     pub fn send_line(&mut self, s: &str) -> std::io::Result<()> {
         use std::io::Write;
-        writeln!(self.master, "{s}")
+        write!(self.master, "{s}\r")
     }
 
     pub fn pid(&self) -> i32 {
@@ -174,6 +174,10 @@ impl PtySession {
     /// exits, or `timeout` elapses.  `true` only on the `done` case.
     pub fn wait_until(&mut self, timeout: Duration, done: impl Fn(&str) -> bool) -> bool {
         self.poll_until(timeout, |s| done(&s.text()))
+    }
+
+    pub fn termios(&self) -> rustix::termios::Termios {
+        rustix::termios::tcgetattr(&self.master).expect("read PTY terminal modes")
     }
 
     /// The pty's foreground process group, read from the master this test

@@ -2,7 +2,7 @@
 name = "exarch"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "Apache-2.0"
 
 [lints]
 workspace = true
@@ -51,7 +51,8 @@ syntect      = { version = "5.3", default-features = false, features = ["default
 two-face     = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 os_info    = { version = "3", default-features = false }
 unicode-width = "0.2"
-edtui = { version = "0.11.3", default-features = false }
+unicode-segmentation = "1"
+edtui = { version = "0.11.3", default-features = false, features = ["mouse-support"] }
 edtui-jagged = "0.1"
 textwrap = "0.16"
 grep       = "0.4"
@@ -87,6 +88,7 @@ ral-core = { path = "../core", features = ["coreutils", "coreutils-unix-only"] }
 rustix = { workspace = true, features = ["process", "stdio"] }
 
 [target.'cfg(windows)'.dependencies]
+winsplit = "0.1"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Console",

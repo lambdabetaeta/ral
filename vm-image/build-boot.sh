@@ -579,6 +579,9 @@ echo ">> [container] mke2fs vendored with $(echo "$LIBS" | wc -l) shared librari
 # --- 5. Assemble the cpio tree -----------------------------------------------
 cp "$BIN/ral-guest" /build/cpio/init
 cp "$BIN/exarch" /build/cpio/engine
+install -d /build/cpio/usr/share/doc/exarch
+install -m 0644 /ral/LICENSE-APACHE /ral/LICENSE-MIT /ral/NOTICE /build/cpio/usr/share/doc/exarch/
+install -m 0644 /ral/vendor/edtui/LICENSE.md /build/cpio/usr/share/doc/exarch/LICENSE-EDTUI
 chmod 0755 /build/cpio/init /build/cpio/engine /build/cpio/sbin/mke2fs
 # The node the kernel opens as init's stdio; /init mounts devtmpfs over
 # /dev itself before it needs any device beyond the console.  Rootless
@@ -616,7 +619,9 @@ fakeroot sh -c '
   done
   echo
   echo "== cpio path manifest =="
-  for path in init engine sbin/mke2fs modules.order dev/console; do
+  for path in init engine sbin/mke2fs modules.order dev/console \
+    usr/share/doc/exarch/LICENSE-APACHE usr/share/doc/exarch/LICENSE-MIT \
+    usr/share/doc/exarch/NOTICE usr/share/doc/exarch/LICENSE-EDTUI; do
     [ -e "/build/cpio/$path" ] && echo "OK   /$path" || echo "MISSING /$path"
   done
   [ -d /build/cpio/modules ] && echo "OK   /modules (${#NEEDED_MODULES[@]} driver(s) requested)"

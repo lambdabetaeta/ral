@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_commit: 3b76d0db
 generated_at_date: 2026-10-27
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -45,6 +45,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
 - `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
   that restores the replaced sinks on `Drop`. Audit retains 1 MiB per stream
   as a prefix and a byte total, independently of ordinary capture.
+- `dispatch.rs::Shell::run_external_argv` lets a native hook run a literal
+  program name/path and argv through ordinary admission and execution, skipping
+  environment-head and handler lookup, never evaluating shell source. The
+  caller supplies its mooring; current grants, scope, audit and streams remain
+  in force. The REPL external-editor hook uses this entry.
 - `dispatch.rs` also holds `call_external`, the call of an external: stamp the
   start, tee its streams, name a failure, settle the one `Observed::Command`.
 - `command.rs` — the External arm: vet the admitted head, launch its
@@ -109,6 +114,9 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     holds a `Leased` run and foregrounds its interactive children, while an
     exarch `Denied` tool run cannot construct the handoff at all
     ([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
+    On every platform it prepares the terminal snapshot before spawn and lends
+    it to the resulting group afterwards; both guards restore on failure or
+    unwind. Pipeline preparation likewise precedes anchor spawn.
     There is no parking: a stopped standalone child is answered with
     `SIGCONT` inline, by whoever waits on it, the same rule everywhere
     ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).

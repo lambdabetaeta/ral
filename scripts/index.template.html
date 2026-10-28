@@ -203,12 +203,21 @@
             <code>grep</code>, and <code>ripgrep</code> are bundled too.</p>
             <table class="dl-table">
               <thead>
-                <tr><th>Platform</th><th>Binary</th><th>With utils</th><th>Installer</th></tr>
+                <tr><th>Platform</th><th>Archive</th><th>With utils</th><th>Installer</th></tr>
               </thead>
               <tbody>
 {{DOWNLOAD_GROUPS}}
               </tbody>
             </table>
+            <p>For a manual macOS/Linux install, extract the downloaded archive
+            into a dedicated directory with, for example,
+            <code>tar -xzf ral-linux-x86_64.tar.gz</code>, then run
+            <code>./ral-linux-x86_64</code>. The executable keeps its platform
+            name, including <code>-allutils</code> for with-utils builds.
+            If installing it elsewhere as <code>ral</code>, retain
+            <code>NOTICE</code>, <code>LICENSE-APACHE</code>, and
+            <code>LICENSE-MIT</code> too. On Windows, run the MSI installer;
+            it retains these files for you.</p>
             <div class="dl-src">
               <span>Source:</span>
               <a class="dl-repo" href="https://github.com/lambdabetaeta/ral">

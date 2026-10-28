@@ -1,8 +1,14 @@
 pub(in crate::tui) mod completion;
+mod editing;
+mod geometry;
+mod navigation;
+#[cfg(test)]
+mod navigation_tests;
+#[cfg(test)]
+mod parity_tests;
 
-use crossterm::event::KeyEvent;
-use edtui::actions::{SwitchMode, cpaste::PasteOverSelection};
-use edtui::clipboard::{ClipboardTrait, InternalClipboard};
+#[cfg(test)]
+use edtui::actions::SwitchMode;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Index2, Lines};
 use edtui_jagged::index::RowIndex;
 use ratatui::Frame;
@@ -18,9 +24,13 @@ pub(super) enum EditMode {
 pub(super) struct PromptEditor {
     state: EditorState,
     handler: EditorEventHandler,
+    clipboard: edtui::clipboard::Clipboard,
     edit_mode: EditMode,
     base_style: Style,
     last_area: Rect,
+    kill_buffer: String,
+    preferred_column: Option<usize>,
+    mouse_anchor: Option<Index2>,
 }
 
 impl PromptEditor {
@@ -28,18 +38,30 @@ impl PromptEditor {
         let mut editor = Self {
             state: EditorState::default(),
             handler: EditorEventHandler::default(),
+            clipboard: edtui::clipboard::Clipboard::default(),
             edit_mode,
             base_style: Style::default(),
             last_area: Rect::default(),
+            kill_buffer: String::new(),
+            preferred_column: None,
+            mouse_anchor: None,
         };
         editor.adopt("");
         editor
     }
 
     pub(super) fn text(&self) -> String {
-        self.lines().join("\n")
+        let mut text = String::new();
+        for (row, line) in self.state.lines.iter_row().enumerate() {
+            if row > 0 {
+                text.push('\n');
+            }
+            text.extend(line);
+        }
+        text
     }
 
+    #[cfg(test)]
     fn lines(&self) -> Vec<String> {
         self.state
             .lines
@@ -67,10 +89,22 @@ impl PromptEditor {
         self.state.lines.len()
     }
 
+    pub(super) fn at_start(&self) -> bool {
+        self.state.cursor == Index2::new(0, 0)
+    }
+
+    pub(super) fn at_end(&self) -> bool {
+        let row = self.row_count().saturating_sub(1);
+        self.state.cursor == Index2::new(row, self.state.lines.len_col(row).unwrap_or(0))
+    }
+
     /// A fresh draft: new undo history and handler state, Insert mode, cursor at the end.
     pub(super) fn adopt(&mut self, text: &str) {
+        self.reset_navigation();
+        self.mouse_anchor = None;
         self.state = EditorState::new(Lines::from(text));
-        self.state.execute(SwitchMode(EditorMode::Insert));
+        self.state.set_clipboard(self.clipboard.clone());
+        self.state.mode = EditorMode::Insert;
         let row = self.state.lines.len().saturating_sub(1);
         let col = self.state.lines.len_col(row).unwrap_or(0);
         self.state.cursor = Index2::new(row, col);
@@ -81,8 +115,24 @@ impl PromptEditor {
     }
 
     pub(super) fn insert_str(&mut self, text: &str) {
-        self.handler
-            .on_paste_event(text.to_string(), &mut self.state);
+        if text.is_empty() {
+            return;
+        }
+        if self.is_searching() {
+            for ch in text.chars() {
+                self.state.execute(edtui::actions::AppendCharToSearch(ch));
+            }
+            return;
+        }
+        self.reset_navigation();
+        self.handler.reset_pending();
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let range = self.selection_range().unwrap_or_else(|| {
+            let pos = self.cursor_offset();
+            pos..pos
+        });
+        self.state
+            .transaction(|state| editing::replace_range(state, range, &text));
     }
 
     /// Replace the first row by `replacement` as one undoable edit that keeps the
@@ -96,51 +146,147 @@ impl PromptEditor {
         if line == replacement || replacement.contains(['\n', '\r']) {
             return false;
         }
-        let mode = self.state.mode;
-        let has_next = self.state.lines.len() > 1;
-        let mut clipboard = InternalClipboard::default();
-        // edtui extracts a fully selected row, including its row boundary.
-        clipboard.set_text(if has_next {
-            format!("{replacement}\n")
-        } else {
-            replacement.to_owned()
+        self.reset_navigation();
+        self.handler.reset_pending();
+        self.state.transaction(|state| {
+            editing::replace_range(state, 0..line.len(), replacement);
+            let len = state.lines.len_col(0).unwrap_or(0);
+            let max_col = if state.mode == EditorMode::Normal {
+                len.saturating_sub(1)
+            } else {
+                len
+            };
+            state.cursor = Index2::new(0, replacement.chars().count().min(max_col));
         });
-        self.state.set_clipboard(clipboard);
-        self.state.mode = EditorMode::Insert;
-        let cursor = self.state.cursor;
-        self.state.execute(SwitchMode(EditorMode::Visual));
-        let selection = self
-            .state
-            .selection
-            .as_mut()
-            .expect("Visual selects the cursor");
-        selection.start = Index2::new(0, 0);
-        selection.end = Index2::new(0, line.chars().count() - 1);
-        self.state.cursor = cursor;
-        self.state.mode = EditorMode::Insert;
-        self.state.execute(PasteOverSelection);
-        if !has_next && replacement.is_empty() {
-            self.state.lines.insert(RowIndex::new(0), Vec::new());
-        }
-        self.state.selection = None;
-        self.state.mode = mode;
-        let len = self.state.lines.len_col(0).unwrap_or(0);
-        let max_col = if mode == EditorMode::Normal {
-            len.saturating_sub(1)
-        } else {
-            len
-        };
-        self.state.cursor = Index2::new(0, replacement.chars().count().min(max_col));
         true
     }
 
-    pub(super) fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        if shell_line_edit_edtui(&mut self.state, &key) {
+    pub(super) fn handle_key(&mut self, mut key: crossterm::event::KeyEvent) {
+        if key.modifiers.is_empty()
+            && let crossterm::event::KeyCode::Char(ch) = key.code
+            && matches!(ch, '\u{1}'..='\u{1a}' | '\u{1f}')
+        {
+            let ch = if ch == '\u{1f}' {
+                '_'
+            } else {
+                char::from_u32(u32::from(ch) + u32::from('a') - 1).unwrap_or(ch)
+            };
+            key.code = crossterm::event::KeyCode::Char(ch);
+            key.modifiers = crossterm::event::KeyModifiers::CONTROL;
+        }
+        if key.kind == crossterm::event::KeyEventKind::Release {
             return;
         }
-        if let Some(key) = key_to_edtui(key) {
+        if self.handle_vertical_key(key) {
+            return;
+        }
+        self.reset_navigation();
+        if self.handle_undo(key) {
+            return;
+        }
+        let custom = self.handle_insert_key(key);
+        if !custom && let Some(key) = key_to_edtui(key) {
             self.handler.on_key_event(key, &mut self.state);
         }
+    }
+
+    fn handle_undo(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        // Native vi commands (including pending character arguments) stay native.
+        if self.is_searching() || self.handler.is_pending() {
+            return false;
+        }
+        let ctrl = key.modifiers == KeyModifiers::CONTROL;
+        let undo = ctrl && matches!(key.code, KeyCode::Char('_' | 'z' | '/'));
+        let redo = (key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('z' | 'Z')))
+            || (key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('_'));
+        if undo {
+            self.state.undo();
+        } else if redo {
+            self.state.redo();
+        } else {
+            return false;
+        }
+        self.snap_cursor();
+        true
+    }
+
+    pub(super) fn is_insert_mode(&self) -> bool {
+        self.state.mode == EditorMode::Insert
+    }
+
+    pub(super) fn is_searching(&self) -> bool {
+        self.state.mode == EditorMode::Search
+    }
+
+    pub(super) fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        if event.modifiers.contains(KeyModifiers::SHIFT) {
+            self.cancel_mouse();
+            return false;
+        }
+        let inside = self
+            .last_area
+            .contains(Position::new(event.column, event.row));
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+                if inside => {}
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                if self.mouse_anchor.is_some() => {}
+            _ => return false,
+        }
+        self.reset_navigation();
+        if inside {
+            self.handler.reset_pending();
+            let mode = self.state.mode;
+            let origin = self.state.cursor;
+            self.handler.on_mouse_event(event, &mut self.state);
+            self.state.mode = mode;
+            self.snap_cursor();
+            let target = self.state.cursor;
+            self.state.cursor = origin;
+            // Mouse movement belongs to the current native insert recording.
+            self.state.move_to(target);
+            if event.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.mouse_anchor = Some(self.state.cursor);
+            } else if let Some(selection) = self.state.selection.as_mut()
+                && let Some(anchor) = self.mouse_anchor
+            {
+                selection.start = anchor;
+                selection.end = self.state.cursor;
+            }
+        }
+        if event.kind == MouseEventKind::Up(MouseButton::Left) {
+            self.mouse_anchor = None;
+        }
+        true
+    }
+
+    pub(super) fn cancel_mouse(&mut self) {
+        self.mouse_anchor = None;
+    }
+
+    pub(super) fn selection_text(&self) -> Option<String> {
+        let range = self.selection_range()?;
+        (!range.is_empty()).then(|| self.text()[range].to_owned())
+    }
+
+    pub(super) fn clear_selection(&mut self) {
+        self.state.selection = None;
+    }
+
+    pub(super) fn contains_position(&self, column: u16, row: u16) -> bool {
+        self.last_area.contains(Position::new(column, row))
+    }
+
+    #[cfg(test)]
+    pub(super) fn copy_selection(&mut self) -> Option<String> {
+        let text = self.selection_text()?;
+        self.clear_selection();
+        Some(text)
     }
 
     pub(super) fn set_base_style(&mut self, style: Style) {
@@ -148,12 +294,22 @@ impl PromptEditor {
     }
 
     pub(super) fn render(&mut self, frame: &mut Frame, area: Rect) {
+        if self.last_area.width != area.width {
+            self.reset_navigation();
+        }
         // The host draws chrome and the terminal cursor; edtui stays transparent.
         let theme = EditorTheme::default()
             .base(self.base_style)
             .cursor_style(Style::default())
             .hide_status_line();
-        let view = EditorView::new(&mut self.state).theme(theme).wrap(true);
+        if area.is_empty() {
+            self.last_area = area;
+            return;
+        }
+        let view = EditorView::new(&mut self.state)
+            .theme(theme)
+            .tab_width(2)
+            .wrap(geometry::wraps(area.width));
         frame.render_widget(view, area);
         self.last_area = area;
     }
@@ -164,80 +320,15 @@ impl PromptEditor {
     /// adds it back, so the facade hands back the offset alone (otherwise the
     /// origin is counted twice and the cursor lands off the edit point).
     pub(super) fn cursor_screen_position(&self) -> Option<Position> {
-        self.state.cursor_screen_position().map(|p| {
-            Position::new(
-                p.x.saturating_sub(self.last_area.x),
-                p.y.saturating_sub(self.last_area.y),
-            )
+        self.state.cursor_screen_position().and_then(|p| {
+            self.last_area
+                .contains(p)
+                .then(|| Position::new(p.x - self.last_area.x, p.y - self.last_area.y))
         })
-    }
-
-    /// The box height the exarch prompt needs: the wrapped line count plus the
-    /// two border rows the caller draws, clamped to `[3, max]`.
-    ///
-    /// It counts wrapped rows directly from the text — it must not consult
-    /// `cursor_screen_position`, whose `y` is an absolute screen row set by the
-    /// last render. Feeding that back into the height makes the box grow toward
-    /// the bottom of the screen, which moves it up, which shrinks `y`: a
-    /// per-frame oscillation that reads as flashing.
-    pub(super) fn height_hint(&self, width: u16, max: u16) -> u16 {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "box row count; terminal height is u16"
-        )]
-        let visual = self
-            .lines()
-            .iter()
-            .map(|line| {
-                if line.is_empty() {
-                    1
-                } else {
-                    textwrap::wrap(
-                        line,
-                        textwrap::Options::new(width as usize).break_words(true),
-                    )
-                    .len()
-                    .max(1)
-                }
-            })
-            .sum::<usize>() as u16;
-        let with_border = visual.saturating_add(2);
-        with_border.min(max).max(3)
     }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
-
-fn shell_line_edit_edtui(state: &mut EditorState, key: &KeyEvent) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    if state.mode != EditorMode::Insert {
-        return false;
-    }
-    if !key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
-        return false;
-    }
-    match key.code {
-        KeyCode::Char('u') => {
-            let row = state.cursor.row;
-            let col = state.cursor.col;
-
-            let kept: Vec<char> = state
-                .lines
-                .get(RowIndex::new(row))
-                .map(|r| r.iter().skip(col).copied().collect())
-                .unwrap_or_default();
-
-            if row < state.lines.len() {
-                state.lines.remove(RowIndex::new(row));
-            }
-            state.lines.insert(RowIndex::new(row), kept);
-            state.cursor.col = 0;
-            true
-        }
-        _ => false,
-    }
-}
 
 /// edtui's `From<crossterm::event::KeyCode>` is partial: it `unimplemented!()`s
 /// on any code outside the set below — function keys, `Insert`, `BackTab`, media
@@ -273,6 +364,17 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    fn undo(editor: &mut PromptEditor) {
+        editor.handle_key(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL));
+    }
+
+    fn redo(editor: &mut PromptEditor) {
+        editor.handle_key(KeyEvent::new(
+            KeyCode::Char('Z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+    }
+
     #[test]
     fn completion_preserves_mode_and_other_rows() {
         for normal in [false, true] {
@@ -288,9 +390,9 @@ mod tests {
             assert_eq!(editor.state.mode, mode);
             assert_eq!(editor.state.cursor.col, if normal { 8 } else { 9 });
             assert!(editor.state.selection.is_none());
-            editor.state.undo();
+            undo(&mut editor);
             assert_eq!(editor.text(), "/thi\n界 e\u{301} 👩‍💻\n");
-            editor.state.redo();
+            redo(&mut editor);
             assert_eq!(editor.text(), "/thinking\n界 e\u{301} 👩‍💻\n");
         }
     }
@@ -309,9 +411,9 @@ mod tests {
                 assert_eq!(editor.text(), expected);
                 assert_eq!((editor.row(), editor.state.cursor.col), (0, 0));
                 assert_eq!(editor.state.mode, mode);
-                editor.state.undo();
+                undo(&mut editor);
                 assert_eq!(editor.text(), text);
-                editor.state.redo();
+                redo(&mut editor);
                 assert_eq!(editor.text(), expected);
             }
         }
@@ -331,10 +433,10 @@ mod tests {
             assert_eq!(editor.state.cursor, cursor);
             assert_eq!(editor.state.mode, mode);
         }
-        editor.state.undo();
+        undo(&mut editor);
         assert_eq!(editor.text(), "a界");
         assert!(!editor.replace_first_row("a界"));
-        editor.state.redo();
+        redo(&mut editor);
         assert_eq!(editor.text(), "b界");
         assert!(!PromptEditor::new(EditMode::Vi).replace_first_row("x"));
     }

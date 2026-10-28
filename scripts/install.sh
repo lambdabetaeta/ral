@@ -39,6 +39,7 @@ verify() {
 
 main() {
     command -v curl > /dev/null 2>&1 || die "curl is required"
+    command -v tar > /dev/null 2>&1 || die "tar is required"
 
     os="$(uname -s)"
     arch="$(uname -m)"
@@ -54,17 +55,25 @@ main() {
         *) die "unsupported platform: $os $arch" ;;
     esac
 
-    url="https://github.com/${REPO}/releases/download/${TAG}/${artifact}"
+    archive="${artifact}.tar.gz"
+    url="https://github.com/${REPO}/releases/download/${TAG}/${archive}"
 
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT INT TERM
 
-    echo "Downloading ${artifact} from ${REPO} (${TAG})"
-    curl -fL --proto '=https' --tlsv1.2 --progress-bar "$url" -o "$tmp/ral"
-    curl -fL --proto '=https' --tlsv1.2 --silent "$url.sha256" -o "$tmp/ral.sha256"
+    echo "Downloading ${archive} from ${REPO} (${TAG})"
+    curl -fL --proto '=https' --tlsv1.2 --progress-bar "$url" -o "$tmp/$archive"
+    curl -fL --proto '=https' --tlsv1.2 --silent "$url.sha256" -o "$tmp/$archive.sha256"
 
-    verify "$tmp/ral" "$(cut -d ' ' -f 1 < "$tmp/ral.sha256")"
+    verify "$tmp/$archive" "$(cut -d ' ' -f 1 < "$tmp/$archive.sha256")"
     echo "Checksum OK."
+    tar -xzf "$tmp/$archive" -C "$tmp" "$artifact" LICENSE-APACHE LICENSE-MIT NOTICE
+
+    data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/ral"
+    mkdir -p "$data_dir"
+    for file in LICENSE-APACHE LICENSE-MIT NOTICE; do
+        install -m 644 "$tmp/$file" "$data_dir/$file"
+    done
 
     if [ -w /usr/local/bin ]; then
         dir="/usr/local/bin"
@@ -78,9 +87,9 @@ main() {
     # fail with ETXTBSY when the ral being replaced is currently running: that
     # process keeps the old inode and the next one gets the new.  The staging
     # move may well cross a filesystem and copy; the move that matters cannot.
-    chmod 755 "$tmp/ral"
+    chmod 755 "$tmp/$artifact"
     staged="$dir/.ral.$$"
-    mv "$tmp/ral" "$staged" || die "could not write to $dir"
+    mv "$tmp/$artifact" "$staged" || die "could not write to $dir"
     mv "$staged" "$dir/ral" || { rm -f "$staged"; die "could not install into $dir"; }
     echo "Installed $dir/ral"
     # ral-sh is ral by another name: the POSIX bridge for chsh (SPEC §16.7).

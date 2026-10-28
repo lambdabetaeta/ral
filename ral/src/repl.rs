@@ -33,6 +33,7 @@ mod cursor;
 mod enquiry;
 mod errfmt;
 mod exec;
+pub(crate) mod external_editor;
 mod frontend;
 mod highlight_style;
 mod host;

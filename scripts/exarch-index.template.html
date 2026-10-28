@@ -355,6 +355,18 @@ for !{range 0 !{length $dirs}} { |i|
             </a>
           </div>
         </div>
+        <p>For a manual macOS/Linux install, extract the matching archive
+        into a dedicated directory with, for example,
+        <code>tar -xzf exarch-linux-x86_64.tar.gz</code>, then run
+        <code>./exarch-linux-x86_64</code>. On Windows, use
+        <code>Expand-Archive exarch-windows.zip -DestinationPath exarch-windows</code>
+        in PowerShell, then run
+        <code>.\exarch-windows\exarch-windows.exe</code>.
+        If installing on <code>PATH</code>, rename the executable to
+        <code>exarch</code> (<code>exarch.exe</code> on Windows).
+        Retain <code>NOTICE</code>, <code>LICENSE-APACHE</code>,
+        <code>LICENSE-MIT</code>, and <code>LICENSE-EDTUI</code> with the
+        installation; all four are included in each archive.</p>
         <p>Then set a provider key, go to the project, and run it:</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>

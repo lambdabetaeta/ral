@@ -17,10 +17,10 @@ if (-not $Tag) {
 
 $arch = $env:PROCESSOR_ARCHITECTURE
 switch ($arch) {
-    "AMD64" { $Artifact = "exarch-windows.exe" }
+    "AMD64" { $Artifact = "exarch-windows.zip" }
     "ARM64" {
         Write-Host "No native ARM64 Windows build; using x86_64 (runs under Windows 11's x64 emulation)."
-        $Artifact = "exarch-windows.exe"
+        $Artifact = "exarch-windows.zip"
     }
     default {
         Write-Error "Unsupported Windows architecture: $arch"
@@ -36,8 +36,8 @@ New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     Write-Host "Downloading $Artifact from $Repo ($Tag)"
     try {
-        Invoke-WebRequest -Uri $url          -OutFile (Join-Path $tmp "exarch.exe")
-        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmp "exarch.exe.sha256")
+        Invoke-WebRequest -Uri $url          -OutFile (Join-Path $tmp $Artifact)
+        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmp "$Artifact.sha256")
     }
     catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
@@ -46,18 +46,22 @@ try {
         throw
     }
 
-    $expected = (Get-Content (Join-Path $tmp "exarch.exe.sha256") -Raw).Trim()
-    $actual   = (Get-FileHash (Join-Path $tmp "exarch.exe") -Algorithm SHA256).Hash.ToLower()
+    $expected = ((Get-Content (Join-Path $tmp "$Artifact.sha256") -Raw).Trim() -split '\s+')[0]
+    $actual   = (Get-FileHash (Join-Path $tmp $Artifact) -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $expected) {
         Write-Error "Checksum mismatch!`n  expected: $expected`n  got:      $actual"
     }
     Write-Host "Checksum OK."
+    Expand-Archive -LiteralPath (Join-Path $tmp $Artifact) -DestinationPath $tmp
 
     # ── Install binary ────────────────────────────────────────────────────────
 
     $installDir = Join-Path $env:LOCALAPPDATA "Programs\ral"
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-    Copy-Item (Join-Path $tmp "exarch.exe") (Join-Path $installDir "exarch.exe") -Force
+    foreach ($file in @("LICENSE-APACHE", "LICENSE-MIT", "NOTICE", "LICENSE-EDTUI")) {
+        Copy-Item (Join-Path $tmp $file) (Join-Path $installDir $file) -Force
+    }
+    Copy-Item (Join-Path $tmp "exarch-windows.exe") (Join-Path $installDir "exarch.exe") -Force
     Write-Host "Installed $installDir\exarch.exe"
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

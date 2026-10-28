@@ -33,7 +33,8 @@
 #   ral-linux-x86_64[-allutils]      ral-linux-arm64[-allutils]
 #   ral-macos-{arm64,x86_64}[-allutils]
 #   exarch-linux-{x86_64,arm64}      exarch-macos-{arm64,x86_64}
-#   <name>.sha256 next to each binary
+#   Each name above ships as <name>.tar.gz with legal files.
+#   <name>.tar.gz.sha256 accompanies each archive.
 #
 # exarch is built without the `coreutils,diffutils,ripgrep` features
 # (those belong to ral).  This script only builds the Unix matrix (Linux +
@@ -129,9 +130,10 @@ let host_build = { |target pkg name feats sign|
     within [env: [CARGO_TARGET_DIR: $target]] {
         cargo build --release -p $pkg ...$feats
     }
-    let dst = "$artifact_dir/$name"
+    let dst = "$cache_dir/binaries/$name"
     cp "$target/release/$pkg" $dst
     if $sign { attempt { codesign -s - $dst } }
+    bash "$repo_root/scripts/package-release.sh" $dst "$artifact_dir/$name.tar.gz"
 }
 let host_variants_ral = { |target os arch sign|
     host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch]}             $plain $sign
@@ -170,6 +172,7 @@ let main = {
     mkdir -p $artifact_dir
     mkdir -p "$cache_dir/registry"
     mkdir -p "$cache_dir/rustup"
+    mkdir -p "$cache_dir/binaries"
 
     # --local short-circuits: build for the host with host cargo and exit.
     # No docker, no cross-compilation, no publish — the dev-loop answer to
@@ -220,7 +223,7 @@ let main = {
             echo ''
             echo "!{styled cyan '==>'} !{styled yellow $t[out]} !{styled dim "($t[triple])"}"
             let td  = "$cache_dir/$t[triple]"
-            let out = "$artifact_dir/$t[out]"
+            let out = "$cache_dir/binaries/$t[out]"
             let run_args = [
                 '--rm', '--platform=linux/amd64',
                 '-v', "$repo_root:/work",
@@ -232,6 +235,7 @@ let main = {
             docker run ...$run_args $t[img] cargo build --release -p $t[pkg] --target $t[triple] ...$t[feats]
             cp "$td/$t[triple]/release/$t[bin]" $out
             attempt { chmod +x $out }
+            bash "$repo_root/scripts/package-release.sh" $out "$artifact_dir/$t[out].tar.gz"
         }
     }
 
@@ -255,7 +259,7 @@ let main = {
     echo ''
     echo "!{styled cyan '==>'} sha256 checksums"
     for !{list-dir $artifact_dir} { |e|
-        if $[not !{re-match '\.sha256$' $e[name]}] {
+        if !{re-match '\.tar\.gz$' $e[name]} {
             let path = "$artifact_dir/$e[name]"
             let line =
               try {
@@ -280,7 +284,8 @@ let main = {
         echo ''
         echo "!{styled cyan '==>'} publishing !{styled bold "'latest'"} on lambdabetaeta/ral"
         let notes = "Built locally !{date -u +%Y-%m-%dT%H:%M:%SZ} from !{git rev-parse --short HEAD}"
-        let files = map { |e| return "$artifact_dir/$e[name]" } !{list-dir $artifact_dir}
+        let archives = filter { |e| return !{re-match '\.tar\.gz(\.sha256)?$' $e[name]} } !{list-dir $artifact_dir}
+        let files = map { |e| return "$artifact_dir/$e[name]" } $archives
         # Wipe and recreate.  --cleanup-tag drops the latest tag too,
         # so the new `gh release create` picks up the current HEAD
         # rather than pinning to a stale tag.  This is the offline

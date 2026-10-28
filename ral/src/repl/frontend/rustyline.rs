@@ -3,18 +3,21 @@
 //! on TTYs that support raw mode and ANSI.
 
 use ral_core::carrier::Transport;
+use ral_core::data::FOValue;
 use ral_core::io::terminal;
 use ral_core::io::terminal::TerminalState;
+use ral_core::shell::runtime::HookName;
+use ral_core::sync::LockExt as _;
 use rustyline::config::{BellStyle, Builder, CompletionType};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::{Editor, Event, EventHandler, KeyCode, KeyEvent, Modifiers};
+use rustyline::{Cmd, Editor, Event, EventHandler, KeyCode, KeyEvent, Modifiers};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::super::complete::RalHelper;
 use super::super::cursor::{erase_drawn, partial_line_marker};
-use super::super::host::{Printer, ReplHost};
+use super::super::host::{Outcome, Printer, ReplHost};
 use super::super::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use super::super::plugin::rustyline::{snapshot_history, sync_plugins};
 use super::super::plugin::{Keymap, lock, pop_buffer_stack, reset_editor_hooks};
@@ -82,6 +85,54 @@ impl RustylineFrontend {
     }
 }
 
+fn bind_newlines(rl: &mut Editor<RalHelper, DefaultHistory>) {
+    for key in [
+        KeyEvent::ctrl('j'),
+        KeyEvent(KeyCode::Enter, Modifiers::SHIFT),
+        KeyEvent(KeyCode::Enter, Modifiers::ALT),
+    ] {
+        rl.bind_sequence(key, Cmd::Newline);
+    }
+}
+
+struct ExternalEditorKey(Arc<Mutex<Option<usize>>>);
+
+impl rustyline::ConditionalEventHandler for ExternalEditorKey {
+    fn handle(
+        &self,
+        _event: &Event,
+        _repeat: rustyline::RepeatCount,
+        _positive: bool,
+        ctx: &rustyline::EventContext,
+    ) -> Option<Cmd> {
+        *self.0.lock_ignore_poison() = Some(ctx.pos());
+        Some(Cmd::AcceptLine)
+    }
+}
+
+fn edited_buffer(original: String, cursor_byte: usize, outcome: Outcome) -> EditBuffer {
+    match outcome {
+        Outcome::Settled(FOValue::String { value: text }) => EditBuffer {
+            cursor: text.chars().count(),
+            text,
+        },
+        outcome => {
+            let reason = match outcome {
+                Outcome::Faulted(reason) | Outcome::Walled(reason) | Outcome::Stopped(reason) => {
+                    reason
+                }
+                Outcome::Exited => "the editor hook exited without returning a buffer".into(),
+                Outcome::Settled(_) => "the editor hook did not return text".into(),
+            };
+            terminal::cmd_error("external editor", &reason);
+            EditBuffer {
+                cursor: original[..cursor_byte].chars().count(),
+                text: original,
+            }
+        }
+    }
+}
+
 impl Frontend for RustylineFrontend {
     fn read(
         &mut self,
@@ -102,6 +153,18 @@ impl Frontend for RustylineFrontend {
         }
         let runtime = &self.host.runtime;
         sync_plugins(runtime, &mut self.rl, &mut self.bound);
+        // Reserved editing gestures cannot become plugin submissions.
+        bind_newlines(&mut self.rl);
+        let external_editor = Arc::new(Mutex::new(None));
+        for event in [
+            Event::from(KeyEvent::ctrl('g')),
+            Event::KeySeq(vec![KeyEvent::ctrl('x'), KeyEvent::ctrl('e')]),
+        ] {
+            self.rl.bind_sequence(
+                event,
+                EventHandler::Conditional(Box::new(ExternalEditorKey(external_editor.clone()))),
+            );
+        }
         snapshot_history(&self.rl, runtime);
         reset_editor_hooks(runtime, self.keymap);
 
@@ -150,6 +213,21 @@ impl Frontend for RustylineFrontend {
                 return Read::End(1);
             }
         };
+
+        let editor_cursor = external_editor.lock_ignore_poison().take();
+        if let Some(cursor) = editor_cursor {
+            if self.terminal.ui_controls_ok() {
+                erase_drawn(prompt.raw(), &raw, &self.config);
+            }
+            let result = self.host.run_hook(
+                engine,
+                HookName::session("external-editor"),
+                vec![FOValue::String { value: raw.clone() }],
+                None,
+                None,
+            );
+            return Read::Edit(edited_buffer(raw, cursor, result.outcome));
+        }
 
         // A plugin key submits via `AcceptLine`, so it sees the full buffer.
         // No pending key: the line is ready; Accept likewise; Edit re-queues

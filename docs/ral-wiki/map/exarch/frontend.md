@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 3dbbe8f3
+generated_at_commit: 3b76d0db
 generated_at_date: 2026-10-27
-covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
+covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/]
 ---
 
 # Map: exarch / frontend
@@ -522,7 +522,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   already *spells* the highlighted command, where accepting would be the
   identity: the popup then closes and declines the key, which falls through to
   the submit it looked like all along. Ctrl-C is never
-  offered to it at all: the interrupt outranks it. This is deliberately
+  offered to it at all: selection copy or cancellation outranks it. This is deliberately
   unlike a Tab-only menu that splices
   a lone match without showing one — typing here must never move the buffer on
   its own. Each row also carries the registry's own `Spec::help` line —
@@ -531,13 +531,78 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   the terminal is too narrow to hold it. Names and details are measured and padded
   in display columns, with clipping at grapheme boundaries.
   **Completion is one undoable edit; adopting a draft starts a new buffer.**
-  The private edtui wrapper (`tui/prompt/editor.rs`) replaces the command token
-  by a selection-paste action, preserving Vi mode and every other row. Escape
+  The private editor wrapper (`tui/prompt/editor.rs`) replaces the command token
+  as one recorded edit, preserving Vi mode and every other row. Escape
   then `u` restores the partial command; Ctrl-R restores the accepted spelling.
   Submit clearing, history recall/restoration, queued-prompt recall and external
   editor adoption instead install a fresh Insert-mode state and undo baseline:
   undo never crosses into another draft or a submitted prompt. History browsing
   keeps its stashed draft; external editor adoption ends the browse.
+- **Composer input has one owner at a time.** `App::key` routes overlays,
+  matrix navigation, editor search, reverse-history search, selection copy,
+  command completion, and editing before submission. Releases are ignored;
+  repeats may edit but cannot submit, accept with Enter, cancel, or launch an
+  editor. Only unmodified Enter submits. Watch-only tabs cannot edit, paste,
+  accept completion or launch the editor. `Ctrl-G` and `Ctrl-X Ctrl-E` ask the
+  UI loop to compose externally; focus, modal, paste, mouse, resize and
+  suspension boundaries clear the prefix.
+  `MouseOwner` retains prompt/transcript/terminal ownership from left press
+  through release; crossing the prompt edge never transfers a drag. Shift
+  leaves selection to the terminal. Ctrl-C copies an editor selection before
+  considering exchange cancellation, and copy errors are reported. Selection clears only after a confirmed clipboard
+  write; failure retains it for retry, while success uses the transient copy toast.
+- `prompt/history.rs::Persistence` stores shared history in
+  `$XDG_STATE_HOME/exarch/prompt-history.json`, privately and under a
+  nonblocking file lock. It retains at most 500 entries and 1 MiB of prompt
+  bytes, merges other sessions' entries on save, and reports failures without
+  losing submission; unreadable startup history disables persistence rather
+  than overwriting it. Arrow recall requires Insert mode, an empty draft or
+  unchanged history entry, and the absolute buffer start/end. Queued recall
+  additionally requires an empty draft and no active history browse/search.
+  `Mailbox::pop_back_user_all` extracts all queued `UserSteering` posts under
+  the inbox lock, even across other post classes, leaving those posts in place;
+  it is not a barrier-aware trailing-run recall.
+- `prompt/search.rs` and `PromptState::handle_search_key` own Ctrl-R search:
+  the query and footer preview leave the draft, cursor and undo untouched
+  until acceptance. An empty query previews the newest entry; Ctrl-R/Up and
+  Ctrl-S/Down traverse matches. Enter adopts without submitting; Esc/Ctrl-C
+  cancel without cancelling the exchange. Editor-native Vi search owns its
+  keys separately. Paste goes to the owning search query, not the draft.
+  Paste normalizes CRLF/CR to LF; the large-paste footer is
+  only a byte/line summary, never a placeholder that is expanded at submit.
+- `terminal.rs::edit_text_in_editor` parses quoted argv without invoking a
+  shell (`shlex` on Unix, `winsplit` on Windows), choosing nonblank VISUAL,
+  then EDITOR, then the platform default. Secret drafts live in exarch's cache
+  `editor-drafts` directory, outside its writable scratch subtree. Input and
+  readback are capped at 16 MiB; successful UTF-8 readback preserves trailing
+  newlines. Failure keeps the draft and reports a diagnostic; terminal
+  restoration failure exits the UI loop. The terminal and draft cleanup have
+  unwind guards. `tui_loop::compose_in_editor` adopts successful text into a
+  fresh draft and repaints, never submits it.
+- **Patched native edtui is the sole undo owner.** `editor/editing.rs` uses
+  its transactions and explicit range/movement primitives for Insert-mode
+  grapheme edits, kill/yank and repeat recording. Native history is bounded
+  by steps and snapshot bytes; no facade history or second Vi parser exists.
+  Pending native commands retain their character arguments, including `u`.
+  `vendor/edtui/PATCHES.md` records the local 0.11.7 patch rationale: expose
+  grouping without rebuilding editor state, and share extended-grapheme
+  geometry across drawing, height, cursor placement and mouse hit-testing.
+  Native action execution also snaps cursor boundaries during replay, not
+  just after live dispatch. `editor/geometry.rs` consumes this geometry;
+  `editor/navigation.rs` moves Insert-mode Up/Down and Ctrl-P/N through visual
+  rows, retaining the preferred display column across height-only layout changes.
+  Characterwise selection extraction removes exactly its projected byte range,
+  leaving unselected newlines intact. **This is not full native Vi
+  grapheme-count semantics:** storage and Vi counts remain scalar-indexed.
+  Codex-derived host algorithms and their Apache-only boundary are in `NOTICE`;
+  the separately patched vendor crate remains MIT-licensed.
+- `paste_burst.rs::PasteBurst` buffers rapid unbracketed character runs and
+  guards a following Enter, emitting lossless paste chunks instead of submit
+  gestures. This is a timing heuristic, not proof of paste: sufficiently slow
+  unbracketed input is indistinguishable from typing. Bracketed paste remains
+  explicit; no placeholder text is expanded into instructions at submission.
+  A deterministic integration test routes burst output through `App`, checking
+  that the guarded Enter inserts a newline rather than submitting.
 - `/model`'s model list ranks through `ral_core::text::rank_by` — the same
   `nucleo` matcher the command popup uses, given the `label / model` line each
   row matches by rather than the row itself, so a row and its haystack travel
@@ -606,10 +671,12 @@ shell is ever foregrounded (tool runs are `Run::captured`, the terminal
 OS signal reaches every root.
 The TUI key table keeps UI control separate from cancellation: a modal
 overlay's (`/model`, `/login`, `/providers`, `/rewind`) Ctrl-C/Ctrl-D/Esc close it (`input_of`), only
-`/quit`/`/exit` end the session, and Ctrl-C/Esc otherwise always drive the
-focused tab's non-escalating cancel (`key_action`). Escape also reaches the
+`/quit`/`/exit` end the session. Searches consume their own cancellation keys;
+Ctrl-C copies a prompt selection when present. Otherwise Ctrl-C/Esc drive the
+focused tab's non-escalating cancel (`key_action`) after modal owners decline.
+Escape also reaches the
 editable prompt's Vi mode transition, without reopening the command popup;
-Ctrl-C does not edit the draft. A single press stops the exchange /
+Ctrl-C does not change draft text. A single press stops the exchange /
 in-flight HTTP future and unwinds the in-flight eval at its next poll point;
 because the path never escalates the signal count, repeated presses cannot
 reach ral's third-signal `_exit`
@@ -642,7 +709,7 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (birth facts, `Status`, `Life`), `Tabs` as one id-ordered `Vec` with no root, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management, the parent climb, `tick`'s retirement to `Life::Gone` past `LINGER`
         - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s tail rules (an effect walks back to its call, a change joins the run of changes at the tail, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — the model's stream, cut into records worker-side: `Stream`/`Chopper` into `Display::Answer`/`Thinking` commits
-        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`); `prompt/editor.rs` owns edtui, fresh-draft `adopt` and undoable `replace_first_row`; `prompt/editor/completion.rs` owns the popup and its column geometry
+        - `tui/prompt.rs` — `PromptState`, draft, guarded recall, search and editor requests, live slash-command popup (`refresh_menu`, `menu_key`); `prompt/history.rs` persists bounded history, `prompt/search.rs` traverses matches; `prompt/editor.rs` owns the editor wrapper, with `editor/{editing,navigation,geometry}.rs` for native transactions, visual movement and height, and `editor/completion.rs` for popup geometry
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell, stamped with the tab it drew, so a gesture never outlives its frame's tab), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten; `draw` records the frame's geometry before painting selection or hover
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `rail`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant

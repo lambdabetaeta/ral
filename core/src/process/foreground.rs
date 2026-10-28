@@ -5,9 +5,13 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
+pub(crate) use unix::PreparedTerminalLoan;
+#[cfg(unix)]
 pub use unix::{TerminalLoan, interrupt_foreground_child, termios_snapshot};
 
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub(crate) use windows::PreparedTerminalLoan;
 #[cfg(windows)]
 pub use windows::TerminalLoan;

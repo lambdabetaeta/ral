@@ -1,4 +1,4 @@
-//! The authority to `tcsetpgrp` a child into the foreground, reified as an
+//! The authority to lend terminal state to a child, reified as an
 //! unforgeable value.
 //!
 //! No public constructor, neither `Clone` nor `Copy`, so a host can ask
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// foreground and may hand it to a child.
 ///
 /// Held on `SessionState`; lent as `&TerminalLease` to
-/// [`TerminalLoan::try_acquire`](crate::process::TerminalLoan::try_acquire)
+/// [`TerminalLoan::prepare`](crate::process::TerminalLoan::prepare)
 /// only when the run's access permits
 /// ([`Shell::terminal_lease`](crate::shell::runtime::Shell::terminal_lease)).
 #[derive(Debug, PartialEq, Eq)]
@@ -20,19 +20,10 @@ pub struct TerminalLease {
 }
 
 impl TerminalLease {
-    /// Mint the session's lease iff ral owned the terminal foreground at
-    /// startup — the same `tcgetpgrp(stdin) == getpgrp()` predicate behind
-    /// `TerminalState::startup_foreground`. `None` off Unix: nothing to gate.
+    /// Mint iff ral owned the terminal foreground at startup. On Windows,
+    /// console attachment grants the same authority to preserve console modes.
     pub(crate) fn mint_at_startup(startup_foreground: bool) -> Option<Self> {
-        #[cfg(unix)]
-        {
-            startup_foreground.then_some(Self { _seal: () })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = startup_foreground;
-            None
-        }
+        startup_foreground.then_some(Self { _seal: () })
     }
 }
 
@@ -46,4 +37,15 @@ impl TerminalLease {
 pub enum RequestedTerminalAccess {
     Denied,
     Leased,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalLease;
+
+    #[test]
+    fn only_a_terminal_owner_can_mint_a_lease() {
+        assert!(TerminalLease::mint_at_startup(true).is_some());
+        assert!(TerminalLease::mint_at_startup(false).is_none());
+    }
 }

@@ -1513,6 +1513,220 @@ fn an_absent_entry_is_made_in_the_directory_held() {
     assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 }
 
+fn scoped_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
+#[test]
+fn a_scoped_directory_rejects_a_nonsticky_writable_temp_parent_before_creation() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let path = dir.join("scoped");
+    let error = located(&path).unwrap().create_scoped_dir().err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(!path.exists());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+}
+
+#[test]
+fn a_private_temp_parent_under_an_unsafe_ancestor_is_rejected() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    let private = dir.join("private");
+    std::fs::create_dir(&private).unwrap();
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let path = private.join("scoped");
+    let error = located(&path).unwrap().create_scoped_dir().err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(!path.exists());
+}
+
+#[test]
+fn scoped_creation_checks_the_held_parents_current_ancestors() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    let safe = dir.join("safe");
+    let unsafe_dir = dir.join("unsafe");
+    std::fs::create_dir(&safe).unwrap();
+    std::fs::create_dir(&unsafe_dir).unwrap();
+    std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&unsafe_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    for (from, to, allowed) in [(&safe, &unsafe_dir, false), (&unsafe_dir, &safe, true)] {
+        let parent = from.join("parent");
+        let moved = to.join("moved");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = located(&parent.join("scoped")).unwrap();
+        std::fs::rename(&parent, &moved).unwrap();
+
+        match target.create_scoped_dir() {
+            Ok(scoped) => {
+                assert!(allowed);
+                assert!(moved.join("scoped").is_dir());
+                drop(scoped);
+            }
+            Err(error) => {
+                assert!(!allowed);
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            }
+        }
+        assert!(!moved.join("scoped").exists());
+        std::fs::remove_dir(moved).unwrap();
+    }
+}
+
+#[test]
+fn a_scoped_directory_rejects_a_public_reopened_substitute() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    let path = dir.join("scoped");
+    let displaced = dir.join("displaced");
+    let (to, old) = (path.clone(), displaced.clone());
+    super::SCOPED_MKDIR.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&to, old).unwrap();
+            std::fs::create_dir(&to).unwrap();
+            std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }));
+    });
+    let error = located(&path).unwrap().create_scoped_dir().err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(!path.exists());
+    assert!(displaced.is_dir());
+}
+
+#[test]
+fn a_scoped_directory_is_private_and_judged_cleanup_removes_its_tree() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    let path = dir.join("scoped");
+    let scoped = located(&path).unwrap().create_scoped_dir().unwrap();
+    let held = scoped.directory();
+    assert_eq!(held.real().as_path(), path);
+    assert_eq!(held.trace().tail(), []);
+    assert_eq!(
+        writing(scoped.cleanup_target()).stat().unwrap().kind,
+        Kind::Dir
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+    std::fs::create_dir_all(path.join("sub/deep")).unwrap();
+    std::fs::write(path.join("file"), b"body").unwrap();
+    std::fs::write(path.join("sub/deep/file"), b"body").unwrap();
+
+    writing(scoped.cleanup_target()).remove().unwrap();
+    drop(scoped);
+
+    assert!(!path.exists());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+}
+
+#[test]
+fn a_scoped_directorys_cleanup_does_not_follow_links() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("keep")).unwrap();
+    std::fs::write(dir.join("keep/file"), b"kept").unwrap();
+    let path = dir.join("scoped");
+    let scoped = located(&path).unwrap().create_scoped_dir().unwrap();
+    symlink("../keep", path.join("to_dir")).unwrap();
+    symlink("../keep/file", path.join("to_file")).unwrap();
+    symlink("missing", path.join("dangling")).unwrap();
+    symlink(".", path.join("cycle")).unwrap();
+
+    writing(scoped.cleanup_target()).remove().unwrap();
+    drop(scoped);
+
+    assert!(!path.exists());
+    assert_eq!(std::fs::read(dir.join("keep/file")).unwrap(), b"kept");
+    assert_eq!(std::fs::read_dir(dir.join("keep")).unwrap().count(), 1);
+}
+
+#[test]
+fn a_scoped_directory_drop_rolls_back_only_an_empty_directory() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    let path = dir.join("scoped");
+    drop(located(&path).unwrap().create_scoped_dir().unwrap());
+    assert!(!path.exists());
+
+    let scoped = located(&path).unwrap().create_scoped_dir().unwrap();
+    std::fs::write(path.join("kept"), b"not authorized for removal").unwrap();
+    drop(scoped);
+    assert_eq!(
+        std::fs::read(path.join("kept")).unwrap(),
+        b"not authorized for removal"
+    );
+}
+
+#[test]
+fn scoped_cleanup_empties_the_held_tree_not_a_rewalked_name() {
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    let path = dir.join("scoped");
+    let moved = dir.join("moved");
+    let scoped = located(&path).unwrap().create_scoped_dir().unwrap();
+    std::fs::write(path.join("remove"), b"held tree").unwrap();
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("keep"), b"replacement tree").unwrap();
+
+    assert!(writing(scoped.cleanup_target()).remove().is_err());
+    drop(scoped);
+
+    assert_eq!(std::fs::read_dir(moved).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read(path.join("keep")).unwrap(),
+        b"replacement tree"
+    );
+}
+
+#[test]
+fn a_substituted_scoped_directory_needs_its_own_cleanup_judgment() {
+    use crate::authority::policy::{Capabilities, FsPolicy};
+    use crate::path::FrozenPath;
+
+    let tmp = scoped_tempdir();
+    let dir = root(&tmp);
+    let victim = dir.join("excluded");
+    let path = dir.join("scoped");
+    let displaced = dir.join("displaced");
+    std::fs::create_dir(&victim).unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(victim.join("kept"), b"excluded tree").unwrap();
+    let layer = crate::test_helper::layer(Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![FrozenPath::root()],
+            write_prefixes: vec![FrozenPath::root()],
+            deny_paths: vec![FrozenPath::from_surface(victim.to_str().unwrap())],
+        }),
+        ..Capabilities::default()
+    });
+    let mut shell = crate::test_helper::core_shell();
+    shell.with_layer(layer, |shell| {
+        let target = shell
+            .judge::<Writing>(crate::test_helper::located(&path))
+            .unwrap();
+        let (from, to, old) = (victim.clone(), path.clone(), displaced.clone());
+        super::SCOPED_MKDIR.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&to, old).unwrap();
+                std::fs::rename(from, to).unwrap();
+            }));
+        });
+        let scoped = target.create_scoped_dir().unwrap();
+        assert!(shell.judge::<Writing>(scoped.cleanup_target()).is_err());
+        drop(scoped);
+    });
+    assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"excluded tree");
+    assert_eq!(std::fs::read_dir(displaced).unwrap().count(), 0);
+}
+
 /// What a vet is offered: the root, each directory on entry, each link before
 /// it is spliced, and the leaf.
 #[test]

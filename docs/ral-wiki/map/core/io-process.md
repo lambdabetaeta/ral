@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3dbbe8f3
+generated_at_commit: 3b76d0db
 generated_at_date: 2026-10-27
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -138,10 +138,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   controlling terminal to a child via `tcsetpgrp`. No public constructor,
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at
   most once at session construction iff ral owned the foreground at startup
-  (`None` on a backgrounded or tty-less launch, and always on platforms with no
-  `tcsetpgrp`), then lent per run as `&TerminalLease` to the one chokepoint
-  that foregrounds — `TerminalLoan::try_acquire`, which is *uninvocable*
-  without the borrow. The type lives at [[map/core/shell-state|shell-state]];
+  (`None` on a backgrounded or tty-less Unix launch; Windows mints from
+  console attachment), then lent per run as `&TerminalLease` to the one chokepoint
+  that foregrounds — `TerminalLoan::prepare`, which is *uninvocable*
+  without the borrow. Preparation captures terminal state before spawn;
+  `PreparedTerminalLoan::lend` performs the post-spawn handoff. The type lives at [[map/core/shell-state|shell-state]];
   the rationale at [[decisions/260619_terminal-lease|terminal-lease]].
 - `deadline.rs` — one lazily started, process-global daemon (`ral-deadline`)
   owning a min-ordered heap of `(when, action)` entries, firing each at its
@@ -238,13 +239,18 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `RunningChild::terminate` for `Group::Owns`, the collector's
   `Address::signal` for a group — before escalating to `kill_pipeline_group`;
   a pid gets the kill alone.
-- `foreground.rs` — unix `TerminalLoan` takes the `&TerminalLease` and the
-  run's node (`ScopeNode`), performs the `tcsetpgrp` handoff, snapshots and
-  restores tty foreground / termios, blocks SIGTTOU for the parent-only
-  restore window, hears the tenant's key back (`hear`, `reclaim`; `gesture`
-  reads `GESTURES`) and strikes it on the frame on drop — uninhabited on
-  Windows; `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a
-  foreground external group.
+- `foreground.rs` — `TerminalLoan::prepare` takes the `&TerminalLease` and
+  run's node (`ScopeNode`) before spawn on every platform, returning a
+  `PreparedTerminalLoan`; `lend` follows spawn. Unix preparation snapshots
+  foreground / termios, then lending performs `tcsetpgrp`. The loan blocks
+  SIGTTOU during parent-only restoration and hears the tenant's key back
+  (`hear`, `pressed`, `reclaim`), striking it on the run's node.
+  Windows preparation duplicates console handles and snapshots their modes,
+  restoring the same console objects on reclaim or drop. Prepared and lent
+  guards both restore on failure and unwind. It does not transfer
+  console ownership or isolate a child from the shared console.
+  `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
+  external group.
 - `limits.rs` — what a child spawned under an active grant may consume: no
   core dump, and a process budget (macOS's fork brake,
   `limits/fork_brake.rs`, a Windows Job Object cap). Resource-limit installation
