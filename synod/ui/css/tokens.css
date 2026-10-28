@@ -6,53 +6,81 @@
       color-scheme: light dark;
 
       /* Warm paper (light) / deep ink (dark) */
-      --paper: light-dark(#f4efe6, #1e1b18);
-      --raised: light-dark(#fffdf8, #2a2521);
-      --raised-2: light-dark(#faf5ec, #241f1c);
-      --sunken: light-dark(#f4efe6, #171512);
-      --ink: light-dark(#292420, #efe7db);
-      --ink-soft: light-dark(#6d6459, #aca194);
-      --ink-faint: light-dark(#988d7e, #7e7466);
-      --line: light-dark(#e5ddce, #38322c);
-      --line-strong: light-dark(#d5cab6, #48413a);
+      --paper: #f4efe6;
+      --raised: #fffdf8;
+      --raised-2: #faf5ec;
+      --sunken: #f4efe6;
+      --ink: #292420;
+      --ink-soft: #6d6459;
+      --ink-faint: #988d7e;
+      --line: #e5ddce;
+      --line-strong: #d5cab6;
 
-      --accent: light-dark(#2f6d5c, #74c3aa);
-      --accent-hover: light-dark(#275c4d, #86cfb8);
-      --accent-ink: light-dark(#fbf8f1, #17201c);
+      --accent: #2f6d5c;
+      --accent-hover: #275c4d;
+      --accent-ink: #fbf8f1;
 
-      --discard: light-dark(#9a6a52, #c79a83);
-      --warn: light-dark(#a5641c, #e0a85e);
-      --warn-bg: light-dark(#f7ecd9, #34291a);
-      --warn-line: light-dark(#e6cfa6, #5a4526);
-      --danger: light-dark(#a5401c, #e08a5e);
-      --danger-bg: light-dark(#f7ded9, #34211a);
-      --danger-line: light-dark(#e6b6a6, #5a3526);
+      --discard: #9a6a52;
+      --warn: #a5641c;
+      --warn-bg: #f7ecd9;
+      --warn-line: #e6cfa6;
+      --danger: #a5401c;
+      --danger-bg: #f7ded9;
+      --danger-line: #e6b6a6;
 
-      --diff-add-bg: light-dark(#e9f2ec, #1f2c22);
-      --diff-del-bg: light-dark(#f9e9e2, #2e211b);
-      --diff-add-ink: light-dark(#3f7d52, #8fcf9f);
-      --diff-del-ink: light-dark(#a5401c, #e08a5e);
-      --diff-add-emph: light-dark(#cfe5d5, #2b4a34);
-      --diff-del-emph: light-dark(#f0cfc2, #4d2c22);
+      --diff-add-bg: #e9f2ec;
+      --diff-del-bg: #f9e9e2;
+      --diff-add-ink: #3f7d52;
+      --diff-del-ink: #a5401c;
+      --diff-add-emph: #cfe5d5;
+      --diff-del-emph: #f0cfc2;
 
       /* Syntax highlighting — see code-highlight.js. */
-      --code-keyword: light-dark(#6a4f9c, #b39ddb);
-      --code-string: light-dark(#3f7d52, #8fcf9f);
-      --code-tag: light-dark(#9c4f78, #dba0c0);
-      --code-variable: light-dark(#95601f, #d9a565);
-      --code-punct: light-dark(#6d7686, #9aa4b8);
+      --code-keyword: #6a4f9c;
+      --code-string: #3f7d52;
+      --code-tag: #9c4f78;
+      --code-variable: #95601f;
+      --code-punct: #6d7686;
       --code-comment: var(--ink-faint);
-      --code-number: light-dark(#2f7a80, #7fc4c8);
+      --code-number: #2f7a80;
 
       --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
     }
 
+    /* Literals per scheme, not light-dark(): live pages read tokens from script. */
     @media (prefers-color-scheme: dark) {
       :root {
+        --paper: #1e1b18;
+        --raised: #2a2521;
+        --raised-2: #241f1c;
+        --sunken: #171512;
+        --ink: #efe7db;
+        --ink-soft: #aca194;
+        --ink-faint: #7e7466;
+        --line: #38322c;
+        --line-strong: #48413a;
+        --accent: #74c3aa;
+        --accent-hover: #86cfb8;
+        --accent-ink: #17201c;
+        --discard: #c79a83;
+        --warn: #e0a85e;
+        --warn-bg: #34291a;
+        --warn-line: #5a4526;
+        --danger: #e08a5e;
+        --danger-bg: #34211a;
+        --danger-line: #5a3526;
+        --diff-add-bg: #1f2c22;
+        --diff-del-bg: #2e211b;
+        --diff-add-ink: #8fcf9f;
+        --diff-del-ink: #e08a5e;
+        --diff-add-emph: #2b4a34;
+        --diff-del-emph: #4d2c22;
+        --code-keyword: #b39ddb;
+        --code-string: #8fcf9f;
+        --code-tag: #dba0c0;
+        --code-variable: #d9a565;
+        --code-punct: #9aa4b8;
+        --code-number: #7fc4c8;
         --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25);
       }
     }
-
-    /* The viewer's theme toggle wins in both directions. */
-    :root[data-theme="light"] { color-scheme: light; }
-    :root[data-theme="dark"]  { color-scheme: dark; }

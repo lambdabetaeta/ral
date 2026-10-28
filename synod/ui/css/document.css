@@ -20,6 +20,10 @@
 
     /* Bubble colour and alignment identify the speaker without a name label. */
     .msg { max-width: 74ch; animation: rise 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    /* A live page spans the column; its surrounding prose keeps the measure. */
+    .msg:has(.live-frame, .live-pending) { max-width: none; }
+    .msg:has(.live-frame, .live-pending) .bubble > :not(.live, .live-frame, .live-pending),
+    .msg:has(.live-frame, .live-pending) .bubble > .live > :not(.live-frame, .live-pending) { max-width: 74ch; }
     .msg.user { align-self: flex-end; }
     .msg .bubble {
       padding: 13px 16px;
