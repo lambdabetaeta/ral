@@ -9,10 +9,9 @@ pub(crate) mod ration;
 use crate::agent::Agent;
 use crate::latch::Latch;
 use crate::provider::{Provider, Served, Usage};
-use crate::record::{Forensic, Span};
+use crate::record::{Forensic, Span, Unavailable};
 use crate::site::{Silent, site};
 use ral_core::carrier::Severed;
-use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -184,7 +183,7 @@ pub(crate) fn suffix_keep_budget(history_bytes: usize) -> usize {
 impl Agent {
     /// Record a completion's usage; its input count, where reported, becomes
     /// the measure the gauges weigh.
-    pub(super) fn measure(&mut self, usage: Usage, served: Served) -> io::Result<()> {
+    pub(super) fn measure(&mut self, usage: Usage, served: Served) -> Result<(), Unavailable> {
         let at = {
             let log = self.log.borrow();
             log.record_emitter()

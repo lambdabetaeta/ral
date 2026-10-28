@@ -64,7 +64,7 @@ impl ExarchDesk {
         s.log
             .borrow()
             .record_emitter()
-            .emit_or_report(crate::record::Forensic::HarnessResult {
+            .emit_or_end(crate::record::Forensic::HarnessResult {
                 text: content.clone(),
             });
         match result {
@@ -100,7 +100,7 @@ impl ExarchDesk {
         s.log
             .borrow()
             .record_emitter()
-            .emit_or_report(crate::record::Forensic::HarnessResult { text: content });
+            .emit_or_end(crate::record::Forensic::HarnessResult { text: content });
         Ok(self.schedule_table())
     }
 }

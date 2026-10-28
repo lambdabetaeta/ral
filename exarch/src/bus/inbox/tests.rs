@@ -478,6 +478,16 @@ fn inbox_mid_exchange_drain_takes_reads_in_order_and_holds_at_a_rewrite() {
 }
 
 #[test]
+fn a_held_rewrite_keeps_its_arrival_across_a_clear_boundary() {
+    let inbox = active();
+    inbox.mailbox().post_rewrite(Rewrite::Evict);
+    let boundary = inbox.clear_boundary();
+    assert!(inbox.drain().is_empty());
+    inbox.apply_clear(boundary);
+    assert!(inbox.is_empty());
+}
+
+#[test]
 fn cancelled_exchange_drains_nothing() {
     let inbox = active();
     inbox.mailbox().steer("later".into());
@@ -532,7 +542,7 @@ fn inbox_recall_extracts_all_leaving_non_user_in_order() {
 
 #[test]
 fn abandon_applies_each_queue_policy_and_forgets_its_debts() {
-    for queue in [Queue::Keep, Queue::Recall, Queue::Discard] {
+    for queue in [Queue::Keep, Queue::Recall] {
         let inbox = active();
         let work = inbox.mailbox();
         let life = inbox.life_mailbox();
@@ -572,10 +582,6 @@ fn abandon_applies_each_queue_policy_and_forgets_its_debts() {
                     Some(Next::Item(Item::Surface { .. }))
                 ));
             }
-            Queue::Discard => {
-                assert_eq!(recalled, [] as [String; 0]);
-                assert!(inbox.is_empty());
-            }
         }
         assert!(pop(&inbox).is_none(), "old work wakeup is fenced");
     }
@@ -585,7 +591,7 @@ fn abandon_applies_each_queue_policy_and_forgets_its_debts() {
 fn inbox_surface_drains_at_tool_boundary_and_discarded() {
     let inbox = active();
     inbox.life_mailbox().post(surface());
-    inbox.abandon(Queue::Discard);
+    inbox.apply_clear(inbox.clear_boundary());
     assert!(drained(&inbox).is_empty());
     inbox.mailbox().steer("next".into());
     open_next(&inbox);
@@ -607,11 +613,11 @@ fn inbox_wakeup_leaves_the_queue_once_drained() {
 }
 
 #[test]
-fn discard_leaves_no_wakeup_stranded_as_queued() {
+fn clear_leaves_no_wakeup_stranded_as_queued() {
     let inbox = inbox();
     let mailbox = inbox.mailbox();
     mailbox.post(wakeup(1, "n", "@", "go"));
-    inbox.abandon(Queue::Discard);
+    inbox.apply_clear(inbox.clear_boundary());
     assert!(!mailbox.has_queued_wakeup(ScheduleId::new(1)));
     assert!(inbox.is_empty());
 }

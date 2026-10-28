@@ -215,7 +215,7 @@ fn abandoning_work_cancels_descendants_but_spares_the_owner() {
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
     let grandchild = agent(&fleet, "grandchild", Some(&child));
-    trunk.inbox.abandon(Queue::Discard);
+    trunk.inbox.abandon(Queue::Keep);
     assert!(!child.is_live());
     assert!(!grandchild.is_live());
     assert!(trunk.is_live());
@@ -541,7 +541,7 @@ fn abandoned_work_outranks_the_lease() {
     let child = agent(&fleet, "child", Some(&trunk));
     let life = child.0.mailbox.scope();
     deposit(&child, &fleet, 1);
-    trunk.inbox.abandon(Queue::Discard);
+    trunk.inbox.abandon(Queue::Keep);
     assert_eq!(life.cause(), Some(CancelCause::Cancelled));
     drop(child);
     std::thread::sleep(ttl * 4);

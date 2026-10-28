@@ -1,18 +1,16 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/261006_one-table-two-instances
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
-verified_at_date: 2026-10-27
-anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Withheld, Program, Subject, Head, Missing, Admitted, admit, check_exec, decode_capability_map, RealPath, Excluded, command_name_key]
 ---
 
-> **Mechanics superseded 2026-10-06** by
-> [[decisions/261006_one-table-two-instances|one-table-two-instances]]. The
-> law stands: one function gives the verdict, and guard and kernel read one
-> table. What changed is the table: `ExecRules` is `Table<ExecScope>`, its
-> meet the generic one, its proof and worked cases in
-> [[design/authority-tables|authority-tables]]; the authored `ExecGrant` is
-> two sets of `ExecKey`, allowances and exclusions, and the veto's rank is `Rank::Name`.
+> **Superseded 2026-10-28.** Its table and meet by
+> [[decisions/261006_one-table-two-instances|one-table-two-instances]], its
+> ranks by [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]],
+> its compile by [[decisions/261021_one-path|one-path]]. The law it stated, one
+> judgment that guard and kernel both read, lives in
+> [[design/authority-tables|authority-tables]] (§Two instances, §Exec
+> identities) and [[internals/exec-judgment|exec-judgment]].
 
 # Exec rules: one table, one function
 

@@ -989,7 +989,7 @@ mod tests {
     fn clearing_during_terminal_publication_fences_old_work_and_keeps_the_new_id() {
         let (registry, inbox, now) = terminal(Terminal::After);
         let (producer, release) = paused_fire(&registry, now);
-        inbox.abandon(Queue::Discard);
+        inbox.abandon(Queue::Keep);
         registry.clear();
         registry
             .schedule(

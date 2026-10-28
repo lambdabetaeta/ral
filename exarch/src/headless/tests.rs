@@ -144,10 +144,15 @@ fn settled_conversation_reports_recording_failure_instead_of_quiescent_success()
         conversation.severance().is_none(),
         "recording failed, not the engine"
     );
-    assert!(
+    assert_eq!(
         sink.transients
             .iter()
-            .any(|t| matches!(t, Transient::Fault { .. }))
+            .filter_map(|t| match t {
+                Transient::Fault { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [why.as_str()]
     );
     assert!(
         !sink
@@ -278,8 +283,8 @@ fn a_card_fact_reaches_stderr_through_the_view_fold() {
     );
 }
 
-/// A seam fault reaches stderr from any source agent, root or a child —
-/// it names a plumbing failure, not a fact about one agent's session.
+/// A terminal recording failure announced by its owner, or a channel elision
+/// marker, reaches stderr from any source agent.
 #[test]
 fn a_transient_fault_reaches_stderr_from_any_agent() {
     let root: AgentId = AgentId::new(1);
@@ -1126,7 +1131,7 @@ impl Drop for TeardownGate {
 fn a_stopped_job_waits_for_its_helpers_engine_teardown_even_if_the_fleet_ends() {
     for end_fleet in [false, true] {
         let root = crate::agent::testkit::trunk(false);
-        let child = root.fork_named("helper").unwrap();
+        let mut child = root.fork_named("helper").unwrap();
         let (entered, tearing_down) = std::sync::mpsc::channel();
         let (release, held) = std::sync::mpsc::channel();
         let mut settled = SettledConversation::new(root).unwrap();
@@ -1143,6 +1148,9 @@ fn a_stopped_job_waits_for_its_helpers_engine_teardown_even_if_the_fleet_ends() 
         let job = settled.await_job().unwrap();
         let id = job.id();
         assert!(handle.stop(id).is_some());
+        child
+            .engine
+            .publish_death_on_release(helper_emit.fleet_sink());
         let helper = std::thread::spawn(move || {
             child.settle(AgentOutcome::Cancelled, &helper_emit);
         });

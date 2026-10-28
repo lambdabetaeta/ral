@@ -1,5 +1,5 @@
 ---
-verified_at_commit: fc497f7577bfce957329627870a1f9292520b782
+verified_at_commit: eb4a62f0
 verified_at_date: 2026-10-28
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::interrupt, AgentHandle::stop, Inbox, Mailbox, Posts, Owed, Opening, Census, Claim, Tenancy, Incarnation, JobId, Fleet::wait_settled, dispatch_to_report, Scopes::open]
 ---
@@ -523,6 +523,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Stop / Esc** | synod, active job | `AgentHandle::stop(JobId)` under the root inbox lock | matching job abandons work with `Cancelled`, recalls human text and ends adopted descendants; stale/duplicate Stop does nothing; closing waits for helper teardown |
 | **`reply` / `/clear`** | exarch owner | work abandonment | cancels work and replaces it; reply keeps queued posts, clear discards them; owner clears schedules |
 | **end / `/close` / agent cancel / owner drop** | exarch | life cancellation | ends subtree with `Cancelled`; membership releases after engine/log teardown |
+| **first failed record append** | exarch | life cancellation | the writer's latch ends its bound life with `Cancelled`; the owner announces the failure at its end |
 | **idle lease lapse** | exarch child | life cancellation | `TimedOut` for the same reply timestamp and no newer accepted exchange |
 | **`/quit` / `end_fleet`** | exarch host | fleet-root cancellation | `Cancelled` reaches all lives; shutdown drops the owner before waiting on detached departures |
 | **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to every live root's `AgentHandle::interrupt` |
@@ -574,7 +575,8 @@ incarnation scope under life vouches for worker batches
 
 - Interrupt cancels exchange and pending opening with `Interrupted`.
   Stop, `/clear` and `reply` cancel work with `Cancelled` and replace it.
-  End and owner drop cancel life; lease expiry uses `TimedOut`.
+  End and owner drop cancel life; a recording failure cancels it from the
+  latching thread. Lease expiry uses `TimedOut`.
   `/quit` cancels the fleet root. Ancestry propagates causes without a
   mutable children walk.
 - `Agent` alone owns engine, log, schedules, pins and reply staging.
@@ -610,9 +612,10 @@ incarnation scope under life vouches for worker batches
   external scope. Cancelling threads never write to a transport; a strike
   cannot hit a later dispatch.
 - Loose ral workers belong to the engine, not work. Stop and reply preserve
-  them; their batches carry engine incarnation under both carriers. `/clear`
-  discards the queue and `Incarnation::reboot` cancels and replaces that scope
-  even if boot fails; a successful boot certifies the outgoing engine.
+  them; their batches carry engine incarnation under both carriers. A
+  committed `/clear` applies its queue boundary and replaces the incarnation,
+  certifying the outgoing engine. Failed preparation changes neither; a
+  failed commit ends life and certifies the unused prepared engine.
 - `signals::face` forwards interrupts to root exchanges and shutdown to
   `Fleet::end`. `boot::face_process_signals` installs ral then exarch's
   non-escalating SIGINT disposition once at entry. Raw-mode keys are local;

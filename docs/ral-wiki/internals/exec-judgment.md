@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
-verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
-verified_at_date: 2026-10-27
+generated_at_commit: 21778dc9d2ea3aa347c7ec0d2cb0d902fc37ffde
+verified_at_commit: 21778dc9d2ea3aa347c7ec0d2cb0d902fc37ffde
+verified_at_date: 2026-10-28
 anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, Head::admit, ReadRegion::judge_file, check_exec, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
@@ -9,7 +9,7 @@ anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, 
 
 **ral judges a command by the program it will run, then runs exactly that
 program.** One table decides, `ExecRules`, and both the guard and the kernel
-read it ([[decisions/261004_exec-rules|exec-rules]]). This page is the exec half
+read it ([[design/authority-tables#Two instances|authority-tables]]). This page is the exec half
 of [[internals/capability-enforcement|capability-enforcement]].
 
 ## The head is judged by its program
@@ -22,6 +22,13 @@ classification for a plain call; at launch for a direct pipeline stage and
 `Admitted`, which `vet` plans from and the launcher takes. A head naming no
 file passes unjudged to `vet`.
 
+- **A bundled name is its tool**, found with no walk, so the in-binary
+  implementation wins over a host twin; any other bare name is the effective
+  `PATH`'s hit.
+- **A path head is walked as written**, anchored at the launch cwd: the kernel
+  walks a `..` after the links before it and honours a trailing `/`, so a
+  lexical fold would judge another file than `execve` reaches. Windows folds
+  `..` itself, and is handed an absolute path.
 - **Arguments play no part.** An allowed target runs with any arguments, a
   denied one with none. `Admitted` holds only the judged program and its exec
   table; `Refused` holds the program and its denial. The caller owns argv, and
@@ -37,7 +44,8 @@ file passes unjudged to `vet`.
 - **A bare exclusion** also vetoes the name wherever it resolves. It stops an
   absolute `/bin/bash` and a symlink to it alike.
 - **A head that names no file has no program.** It fails with 127 or 126, never
-  with a denial.
+  with a denial. On Windows a path head written without its extension offers
+  the suffixed file beside it, if one exists.
 
 ## Running reads
 

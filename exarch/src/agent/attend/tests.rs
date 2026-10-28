@@ -24,6 +24,23 @@ fn leave_tool_owed(session: &Agent) {
 }
 
 #[test]
+fn an_ended_life_draws_nothing_and_announces_no_idle_state() {
+    let mut session = Agent::for_test("system").unwrap();
+    session.handle().post_read(crate::bus::Read::Context);
+    session.recorder().fail_after(0);
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    assert!(matches!(session.attend(&emit), AgentOutcome::Cancelled));
+    assert!(!session.handle().is_live());
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok()).any(|signal| matches!(
+            signal,
+            crate::bus::Signal::Transient(_, Transient::State(_))
+        ))
+    );
+}
+
+#[test]
 fn failed_mandatory_repair_ends_only_its_session_and_reports_to_its_parent() {
     let mut parent = Agent::for_test("system").unwrap();
     let mut child = parent.fork().unwrap();
@@ -36,10 +53,11 @@ fn failed_mandatory_repair_ends_only_its_session_and_reports_to_its_parent() {
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     let outcome = child.attend(&emit);
-    assert!(
-        matches!(&outcome, AgentOutcome::Failed(why) if why.contains("required protocol repair")),
-        "{outcome:?}"
-    );
+    let AgentOutcome::Failed(why) = &outcome else {
+        panic!("{outcome:?}");
+    };
+    let why = why.clone();
+    assert!(why.contains("injected record write failure"), "{why}");
     assert!(!child.is_ready());
     assert!(!handle.is_live());
     assert!(!descendant.handle().is_live());
@@ -52,17 +70,18 @@ fn failed_mandatory_repair_ends_only_its_session_and_reports_to_its_parent() {
         Record::Protocol(crate::record::Protocol::ToolResults { .. })
             | Record::Forensic(Forensic::TurnStarted { .. })
     )));
-    assert!(
-        std::iter::from_fn(|| rx.try_recv().ok()).any(|signal| matches!(
-            signal,
-            crate::bus::Signal::Transient(_, Transient::Fault { .. })
-        ))
-    );
     drop(descendant);
     child.settle(outcome, &emit);
+    let faults: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|signal| match signal {
+            crate::bus::Signal::Transient(_, Transient::Fault { text }) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(faults, vec![why.clone()]);
     let report = pop(&parent.inbox).expect("the parent receives failure");
     assert!(
-        matches!(report, Next::Item(Item::Agent(result)) if matches!(&result.outcome, AgentOutcome::Failed(why) if why.contains("required protocol repair")))
+        matches!(report, Next::Item(Item::Agent(result)) if matches!(&result.outcome, AgentOutcome::Failed(error) if *error == why))
     );
     assert!(parent.handle().is_live());
     assert!(parent.check_available().is_ok());

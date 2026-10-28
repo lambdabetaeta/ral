@@ -168,7 +168,7 @@ fn a_childs_clear_pays_a_discarded_follow_up_as_cancelled() {
     let (_fleet, parent, worker) = family();
     replied(&parent, &worker);
     worker.message(&parent, "follow up".into()).unwrap();
-    worker.inbox.abandon(Queue::Discard);
+    worker.inbox.apply_clear(worker.inbox.clear_boundary());
     assert!(matches!(
         pop_outcome(&parent.inbox),
         AgentOutcome::Cancelled

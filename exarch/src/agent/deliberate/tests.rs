@@ -818,7 +818,7 @@ fn work_vouched_deliveries_never_reach_the_model_after_abandonment() {
     for surface in [false, true] {
         let mut session = Agent::for_test("system").unwrap();
         let mailbox = session.inbox.mailbox();
-        session.abandon(Queue::Discard);
+        session.abandon(Queue::Keep);
         mailbox.post(if surface {
             Scoped::Surface {
                 id: session.id(),

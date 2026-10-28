@@ -21,11 +21,56 @@
 use super::{Cursor, Entry, Locus, Publish, RECORD, Record, Recorded, Seq, Transient};
 use crate::app::now_unix_ms;
 use ral_core::own::OwnDir;
+use ral_core::process::{CancelCause, ScopeNode};
 use ral_core::sync::{LockExt as _, Torn};
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+
+/// The first recording failure, latched for good and cheap to clone.
+#[derive(Clone, Debug)]
+pub struct Unavailable(Arc<Failure>);
+
+#[derive(Debug)]
+struct Failure {
+    /// `None` for a fileless test log.
+    record: Option<PathBuf>,
+    cause: io::Error,
+}
+
+impl Unavailable {
+    fn new(record: Option<PathBuf>, cause: io::Error) -> Self {
+        Self(Arc::new(Failure { record, cause }))
+    }
+
+    pub fn kind(&self) -> io::ErrorKind {
+        self.0.cause.kind()
+    }
+}
+
+impl fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0.record {
+            Some(path) => write!(f, "recording to {} failed", ral_core::path::shown(path))?,
+            None => f.write_str("recording failed")?,
+        }
+        write!(
+            f,
+            ": {}; this session has ended, since it can record nothing more. Its record keeps everything before the failure, so the run can be resumed once the cause is fixed.",
+            self.0.cause
+        )
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+impl From<Unavailable> for io::Error {
+    fn from(failure: Unavailable) -> Self {
+        Self::new(failure.kind(), failure)
+    }
+}
 
 /// `inner` takes its lock with poison kept
 /// ([`lock_strict`](ral_core::sync::LockExt::lock_strict)) on purpose: `seq` and `pos` are the file's own position, restated in memory,
@@ -35,8 +80,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// bytes. A poisoned log must stay poisoned.
 pub(crate) struct Log {
     inner: Mutex<Inner>,
-    /// Set only under `inner`; observed without it to avoid inbox lock inversion.
-    failure: OnceLock<Arc<io::Error>>,
+    /// A leaf lock, poison ignored: its updates are total.
+    latch: Mutex<WriteLatch>,
+    /// The record file, as messages name it.
+    record: Option<PathBuf>,
+}
+
+/// The writer's first failure, and the life it ends.
+#[derive(Default)]
+struct WriteLatch {
+    failure: Option<Unavailable>,
+    life: Option<ScopeNode>,
 }
 
 /// The session directory a log is kept in, and the writer on its record file.
@@ -148,13 +202,14 @@ impl Log {
 
     fn over(writer: Option<Writer>, seq: u64, pos: u64) -> Self {
         Self {
+            record: writer.as_ref().map(Writer::name),
             inner: Mutex::new(Inner {
                 writer,
                 sink: None,
                 seq,
                 pos,
             }),
-            failure: OnceLock::new(),
+            latch: Mutex::default(),
         }
     }
 
@@ -195,14 +250,42 @@ impl Log {
         Ok((from, Self::records(source, from.seq, from.end, until)?))
     }
 
-    /// Observation only: append rechecks under the mutex before writing.
-    pub(super) fn check_available(&self) -> io::Result<()> {
-        if self.inner.is_poisoned() {
-            return Err(Torn.into());
+    fn latched(&self) -> Option<Unavailable> {
+        self.latch.lock_ignore_poison().failure.clone()
+    }
+
+    /// Latch `cause` unless a failure stands, ending the bound life.
+    pub(super) fn fail(&self, cause: io::Error) -> Unavailable {
+        let mut latch = self.latch.lock_ignore_poison();
+        let failure = latch
+            .failure
+            .get_or_insert_with(|| Unavailable::new(self.record.clone(), cause))
+            .clone();
+        if let Some(life) = latch.life.take() {
+            // Without the inbox lock or a notify: a parked owner sees it within PARK_POLL.
+            life.cancel(CancelCause::Cancelled);
         }
-        self.failure.get().map_or(Ok(()), |error| {
-            Err(io::Error::new(error.kind(), Arc::clone(error)))
-        })
+        drop(latch);
+        failure
+    }
+
+    /// End `life` when this writer fails, at once if it has.
+    pub(super) fn bind(&self, life: ScopeNode) {
+        let mut latch = self.latch.lock_ignore_poison();
+        debug_assert!(latch.life.is_none(), "one writer, one life");
+        if latch.failure.is_some() {
+            life.cancel(CancelCause::Cancelled);
+        } else {
+            latch.life = Some(life);
+        }
+    }
+
+    /// Observe without the append lock, latching poison when first met.
+    pub(super) fn check_available(&self) -> Result<(), Unavailable> {
+        if self.inner.is_poisoned() {
+            return Err(self.fail(Torn.into()));
+        }
+        self.latched().map_or(Ok(()), Err)
     }
 
     #[cfg(test)]
@@ -231,29 +314,23 @@ impl Log {
     /// than beside it. Written directly per record (never `fsync`): process-crash
     /// durable, which is what lets a killed session resume, but not
     /// power-loss durable.
-    pub(super) fn append(&self, record: &Record) -> io::Result<Locus> {
-        let mut inner = self.inner.lock_strict()?;
-        self.check_available()?;
+    pub(super) fn append(&self, record: &Record) -> Result<Locus, Unavailable> {
+        let mut inner = self
+            .inner
+            .lock_strict()
+            .map_err(|torn| self.fail(torn.into()))?;
+        if let Some(failure) = self.latched() {
+            return Err(failure);
+        }
         let mut line = serde_json::to_vec(&Entry {
             at_unix_ms: now_unix_ms(),
             record,
         })
-        .map_err(io::Error::other)?;
+        .map_err(|error| self.fail(io::Error::other(error)))?;
         line.push(b'\n');
         let start = inner.pos;
-        if let Some(writer) = inner.writer.as_mut()
-            && let Err(error) = writer.append(&line)
-        {
-            let failure = self.failure.get_or_init(|| {
-                Arc::new(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "recording failed for {}: {error}; this writer is unavailable; repair storage and resume the session before recording more work",
-                        ral_core::path::shown(writer.name())
-                    ),
-                ))
-            });
-            return Err(io::Error::new(failure.kind(), Arc::clone(failure)));
+        if let Some(writer) = inner.writer.as_mut() {
+            writer.append(&line).map_err(|error| self.fail(error))?;
         }
         inner.pos = start + line.len() as u64;
         inner.seq += 1;

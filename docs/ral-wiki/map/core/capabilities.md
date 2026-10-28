@@ -81,7 +81,7 @@ Submodules:
   the fold, then the handle `Judged<O>`; `GrantStack::read` is the read
   judgment, `region` then the running region only on a missing allowance;
 - `exec.rs` — the exec instance
-  ([[decisions/261004_exec-rules|exec-rules]]) and its judgment: `Program`
+  ([[design/authority-tables#Two instances|authority-tables]]) and its judgment: `Program`
   (`Tool` or `File { arg0, located }`, one owned `Located`) and the `Subject` it
   is judged as (`Program`, `Dir`, `Tool`, `Any`); `ExecAllow` (`Any`, `Dir`,
   `File`, `Tool`) and `ExecDeny` (`Name`, `Dir`, `File`); `ExecRules =

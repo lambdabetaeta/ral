@@ -74,7 +74,7 @@ fn records(log: &AgentLog) -> Vec<Record> {
 #[test]
 fn turn_partition_joins_steering_and_opens_one_turn_per_id() {
     let mut s = fresh_root();
-    s.record_emitter().emit_or_report(Forensic::Error {
+    s.record_emitter().emit_or_end(Forensic::Error {
         text: "before the first prompt".into(),
     });
     s.import_note(ChatMessage::user("inherited")).unwrap();
@@ -195,7 +195,8 @@ fn evict_refuses_the_unclosed_turn_the_unknown_and_a_run_cutting_a_residue() {
     live.append_user("live".into(), None, Voice::Human).unwrap();
     assert_eq!(
         live.evict(span(1, 1), None, EditAuthority::Model)
-            .unwrap_err(),
+            .unwrap_err()
+            .to_string(),
         "turn 1 is being written now: an eviction keeps the work in hand"
     );
 
@@ -204,7 +205,8 @@ fn evict_refuses_the_unclosed_turn_the_unknown_and_a_run_cutting_a_residue() {
     assert_eq!(
         unknown
             .evict(span(7, 7), None, EditAuthority::Model)
-            .unwrap_err(),
+            .unwrap_err()
+            .to_string(),
         "turn 7 is not recorded: the latest is 2"
     );
 
@@ -215,7 +217,8 @@ fn evict_refuses_the_unclosed_turn_the_unknown_and_a_run_cutting_a_residue() {
     assert_eq!(
         unknown
             .evict(span(1, 1), None, EditAuthority::Model)
-            .unwrap_err(),
+            .unwrap_err()
+            .to_string(),
         "turns 1–2 stand together under one note: name from: 1, to: 2 whole, or leave it"
     );
 }
@@ -228,7 +231,7 @@ fn a_transcript_read_answers_one_element_per_turn() {
     let mut s = fresh_root();
     s.append_user("first prompt".into(), None, Voice::Human)
         .unwrap();
-    s.record_emitter().emit_or_report(Forensic::TurnStarted {
+    s.record_emitter().emit_or_end(Forensic::TurnStarted {
         turn: s.context().next_id(),
         tuning: Tuning::default(),
         via: None,
@@ -266,7 +269,7 @@ fn a_transcript_read_answers_one_element_per_turn() {
 
     complete_round(&mut s, "third prompt", "third answer");
     assert_eq!(
-        s.rewind(9).unwrap_err(),
+        s.rewind(9).unwrap_err().to_string(),
         "turn 9 is not recorded: the latest is 6"
     );
 }
@@ -322,7 +325,7 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
         4
     );
     assert_eq!(
-        s.rewind(5).unwrap_err(),
+        s.rewind(5).unwrap_err().to_string(),
         "turn 5 was already rewound or cleared away; the earliest you can rewind to is turn 1"
     );
 
@@ -333,7 +336,7 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
     assert_eq!(s.context().rendered().len(), 0, "the context may empty");
     assert_eq!(s.context().next_id(), 9);
     assert_eq!(
-        s.rewind(1).unwrap_err(),
+        s.rewind(1).unwrap_err().to_string(),
         "turn 1 was already rewound or cleared away; nothing has been said since the last \
          /clear or /rewind"
     );
@@ -479,7 +482,7 @@ fn a_rewind_waits_for_the_batch_in_flight() {
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     assert_eq!(
-        s.rewind(1).unwrap_err(),
+        s.rewind(1).unwrap_err().to_string(),
         "cannot rewind while the session is waiting for 1 tool result"
     );
 }
@@ -584,17 +587,22 @@ fn evict_refuses_a_run_cutting_a_residue_and_the_unclosed_turn() {
     }
     s.evict(span(1, 4), None, EditAuthority::Harness).unwrap();
     assert_eq!(
-        s.evict(span(2, 2), None, EditAuthority::Model).unwrap_err(),
+        s.evict(span(2, 2), None, EditAuthority::Model)
+            .unwrap_err()
+            .to_string(),
         "turns 1–4 stand together under one note: name from: 1, to: 4 whole, or leave it"
     );
     s.append_user("four".into(), None, Voice::Human).unwrap();
     assert_eq!(
-        s.evict(span(7, 7), None, EditAuthority::Model).unwrap_err(),
+        s.evict(span(7, 7), None, EditAuthority::Model)
+            .unwrap_err()
+            .to_string(),
         "turn 7 is being written now: an eviction keeps the work in hand"
     );
     assert_eq!(
         s.evict(span(99, 99), None, EditAuthority::Model)
-            .unwrap_err(),
+            .unwrap_err()
+            .to_string(),
         "turn 99 is not recorded: the latest is 7"
     );
 }
@@ -930,7 +938,7 @@ fn abandoned_work_keeps_its_tool_turns_in_context() {
 }
 
 #[test]
-fn failed_required_repair_preserves_the_fold_and_resume_refuses_until_repair_commits() {
+fn failed_required_repair_preserves_the_fold_until_resume_commits_it() {
     for bytes in [0, 17] {
         let mut log = fresh_root();
         log.append_user("run".into(), None, Voice::Human).unwrap();
@@ -941,11 +949,11 @@ fn failed_required_repair_preserves_the_fold_and_resume_refuses_until_repair_com
         log.record_emitter().fail_after(bytes);
         let error = log.quiesce(QuiesceReason::Aborted).unwrap_err();
         assert!(
-            error.to_string().contains("required protocol repair"),
+            error.to_string().contains("injected record write failure"),
             "{error}"
         );
         assert!(!log.context().is_ready());
-        assert!(log.check_available().is_err());
+        assert!(log.record_emitter().check_available().is_err());
         assert_eq!(
             serde_json::to_value(log.context().rendered()).unwrap(),
             before
@@ -959,24 +967,9 @@ fn failed_required_repair_preserves_the_fold_and_resume_refuses_until_repair_com
                 .is_err()
         );
 
-        let failed = AgentLog::resume_with(log.sessions_root(), log.id(), |dir| {
-            let seam = crate::record::Emitter::append_to(dir)?;
-            seam.fail_after(bytes);
-            Ok(seam)
-        });
-        let error = failed.err().expect("resume must commit the owed repair");
-        assert!(
-            error.to_string().contains("required protocol repair"),
-            "{error}"
-        );
-        assert_eq!(
-            serde_json::to_value(records(&log)).unwrap(),
-            serde_json::to_value(prefix).unwrap()
-        );
-
         let mut resumed = AgentLog::resume(log.sessions_root(), log.id()).unwrap();
         assert!(resumed.context().is_ready());
-        assert!(resumed.check_available().is_ok());
+        assert!(resumed.record_emitter().check_available().is_ok());
         let results: Vec<_> = records(&resumed)
             .into_iter()
             .filter_map(|record| match record {
@@ -1016,7 +1009,7 @@ fn partial_quiesce_keeps_the_committed_result_without_fabricating_a_capstone() {
         "the first repair really committed"
     );
     assert!(
-        log.check_available().is_err(),
+        log.record_emitter().check_available().is_err(),
         "readiness is not availability"
     );
     assert_eq!(
@@ -1033,26 +1026,12 @@ fn partial_quiesce_keeps_the_committed_result_without_fabricating_a_capstone() {
         Some(Record::Protocol(Protocol::ToolResults { .. }))
     ));
     let resumed = AgentLog::resume(log.sessions_root(), log.id()).unwrap();
-    assert!(resumed.check_available().is_ok());
+    assert!(resumed.record_emitter().check_available().is_ok());
     assert_eq!(
         serde_json::to_value(records(&resumed)).unwrap(),
         serde_json::to_value(committed).unwrap()
     );
     assert_eq!(resumed.context().next_id(), log.context().next_id());
-}
-
-#[test]
-fn mandatory_repair_latch_is_independent_of_physical_writer_availability() {
-    let mut log = fresh_root();
-    log.unavailable = Some(io::Error::other("required protocol repair failed"));
-    assert!(log.record_emitter().check_available().is_ok());
-    assert!(log.check_available().is_err());
-    assert!(log.quiesce(QuiesceReason::Aborted).is_err());
-    assert!(
-        log.append_user("refused".into(), None, Voice::Human)
-            .is_err()
-    );
-    assert!(log.context().rendered().is_empty());
 }
 
 /// Tool calls that never ran are the one thing a quiesce still owes: the
@@ -1179,10 +1158,10 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
 fn diagnostic_records_round_trip_through_record_jsonl() {
     let s = fresh_root();
     let emit = s.record_emitter();
-    emit.emit_or_report(Forensic::Error {
+    emit.emit_or_end(Forensic::Error {
         text: "boom".into(),
     });
-    emit.emit_or_report(Forensic::Nudge {
+    emit.emit_or_end(Forensic::Nudge {
         cause: "stop=length".into(),
         spent: Some(Spent { used: 2, max: 3 }),
     });
@@ -1617,10 +1596,10 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
             }
             7 => {
                 let emit = live.record_emitter();
-                emit.emit_or_report(Forensic::Error {
+                emit.emit_or_end(Forensic::Error {
                     text: "forensics".into(),
                 });
-                emit.emit_or_report(Forensic::Nudge {
+                emit.emit_or_end(Forensic::Nudge {
                     cause: "retry".into(),
                     spent: Some(Spent { used: 1, max: 2 }),
                 });
@@ -2384,10 +2363,9 @@ fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
         None,
     )
     .unwrap();
-    live.record_emitter()
-        .emit_or_report(Forensic::WindowNarrowed {
-            context_window: 250_000,
-        });
+    live.record_emitter().emit_or_end(Forensic::WindowNarrowed {
+        context_window: 250_000,
+    });
     let learned = |sessions: &TestDir| {
         AgentLog::resume(sessions, AgentId::new(0))
             .expect("resume")
@@ -2395,14 +2373,13 @@ fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
             .cloned()
     };
     assert_eq!(learned(&sessions), Some(("m".into(), 250_000)));
-    live.record_emitter()
-        .emit_or_report(Forensic::ModelChanged {
-            model: "m".into(),
-            context_window: None,
-            label: "provider".into(),
-            service: "provider".into(),
-            account: "provider".into(),
-        });
+    live.record_emitter().emit_or_end(Forensic::ModelChanged {
+        model: "m".into(),
+        context_window: None,
+        label: "provider".into(),
+        service: "provider".into(),
+        account: "provider".into(),
+    });
     assert_eq!(learned(&sessions), None);
 }
 

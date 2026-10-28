@@ -211,7 +211,7 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
     let started = Instant::now()
         .checked_sub(idle)
         .expect("test birth fits the clock");
-    let (under, inbox) = fleet.lodge(parent, &name, started)?;
+    let (under, _life, inbox) = fleet.lodge(parent, &name, started)?;
     let handle = AgentHandle(Arc::new(Shared {
         id,
         name,

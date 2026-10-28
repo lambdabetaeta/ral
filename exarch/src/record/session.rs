@@ -11,7 +11,7 @@
 use super::model::{Context, ItemKind, Linked, Model, Residue, Span, validate_result_ids};
 use super::{
     EditAuthority, Fold as _, Forensic, Memory, Protocol, QuiesceReason, RECORD, Record, Recorded,
-    RecordedAccount, RecordedModel, Refusal, Role, ToolResult, Voice,
+    RecordedAccount, RecordedModel, Refusal, Role, ToolResult, Unavailable, Voice,
 };
 use crate::record::AgentId;
 use genai::chat::{ChatMessage, ChatRole};
@@ -19,7 +19,7 @@ use genai::chat::{ChatMessage, ChatRole};
 use ral_core::own::TestDir;
 use ral_core::own::{Entry, OwnDir};
 use ral_core::path::Kind;
-use std::io;
+use std::{fmt, io};
 
 /// One line of one message that matched `` exarch-transcript `grep ``'s pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,8 +121,32 @@ pub struct AgentLog {
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
     /// `Agent::couple` has attached, in that order, under one lock.
     seam: crate::record::Emitter,
-    /// A required repair failed; only explicit resume may reconstruct it.
-    unavailable: Option<io::Error>,
+}
+
+/// Why a protocol mutation did not commit.
+#[derive(Debug)]
+pub enum Uncommitted {
+    /// Refused as written: nothing was recorded and the session is usable.
+    Refused(String),
+    /// The writer failed: the session has ended.
+    Unavailable(Unavailable),
+}
+
+impl fmt::Display for Uncommitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused(why) => why.fmt(f),
+            Self::Unavailable(failure) => failure.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for Uncommitted {}
+
+impl From<Unavailable> for Uncommitted {
+    fn from(failure: Unavailable) -> Self {
+        Self::Unavailable(failure)
+    }
 }
 
 /// What a `mnemon` child is forked with: its parent's turn table and residues.
@@ -203,7 +227,7 @@ impl AgentLog {
         system: &str,
         memory: Memory,
     ) -> io::Result<Self> {
-        self.check_available()?;
+        self.seam.check_available()?;
         let mut log = Self::open_fresh(self.sessions_root.clone(), child_id)?;
         let inherited = (memory == Memory::Mnemon).then(|| self.inherited_context());
         log.open(Some(self.id), name, model, account, system, inherited)?;
@@ -223,14 +247,6 @@ impl AgentLog {
     /// Returns an error when the log is missing, malformed, foreign, or
     /// cannot be reopened after validation.
     pub fn resume(sessions_root: &OwnDir, session_id: AgentId) -> io::Result<Self> {
-        Self::resume_with(sessions_root, session_id, crate::record::Emitter::append_to)
-    }
-
-    fn resume_with(
-        sessions_root: &OwnDir,
-        session_id: AgentId,
-        reopen: impl FnOnce(&OwnDir) -> io::Result<crate::record::Emitter>,
-    ) -> io::Result<Self> {
         let dir = sessions_root.dir(&session_id.to_string())?;
         let record_path = dir.path().join(RECORD);
         if dir.stat(RECORD).is_none() {
@@ -250,7 +266,7 @@ impl AgentLog {
                     ),
                 )
             })?;
-        let seam = reopen(&dir)?;
+        let seam = crate::record::Emitter::append_to(&dir)?;
         let mut resumed = Self {
             id: session_id,
             dir,
@@ -260,7 +276,6 @@ impl AgentLog {
             context,
             seam,
             learned: selection.learned(),
-            unavailable: None,
         };
         if !resumed.context.is_ready() {
             resumed.quiesce(QuiesceReason::Aborted)?;
@@ -293,7 +308,6 @@ impl AgentLog {
         system: &str,
         at_unix_ms: u64,
     ) -> io::Result<()> {
-        self.check_available()?;
         self.seam
             .emit(Forensic::SessionResumed {
                 model: model.name.clone(),
@@ -310,6 +324,7 @@ impl AgentLog {
         self.record_protocol(Protocol::System {
             text: system.to_string(),
         })
+        .map_err(io::Error::from)
     }
 
     /// Advance the model fold for one witnessed record — called immediately
@@ -332,15 +347,6 @@ impl AgentLog {
     /// takes for themselves.
     pub fn record_emitter(&self) -> crate::record::Emitter {
         self.seam.clone()
-    }
-
-    /// # Errors
-    /// The shared writer failed, or a mandatory protocol repair could not commit.
-    pub fn check_available(&self) -> io::Result<()> {
-        if let Some(error) = &self.unavailable {
-            return Err(io::Error::new(error.kind(), error.to_string()));
-        }
-        self.seam.check_available()
     }
 
     pub fn id(&self) -> AgentId {
@@ -414,7 +420,6 @@ impl AgentLog {
     /// # Errors
     /// The session is not awaiting an assistant reply.
     pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
-        self.check_available().map_err(|error| error.to_string())?;
         if !self.context.is_awaiting_assistant() {
             return Err(format!(
                 "cannot render request while the session is {}",
@@ -437,17 +442,17 @@ impl AgentLog {
     /// the resume note, which inherits nothing and links to no one.
     ///
     /// # Errors
-    /// The session is not at a ready boundary, or recording failed.
-    pub fn import_note(&mut self, message: ChatMessage) -> Result<(), String> {
+    /// Refused as not ready (`Refused`), or the writer failed (`Unavailable`).
+    pub fn import_note(&mut self, message: ChatMessage) -> Result<(), Uncommitted> {
         if !self.context.is_ready() {
-            return Err(format!(
+            return Err(Uncommitted::Refused(format!(
                 "cannot import context while the session is {}",
                 self.context.waiting_for()
-            ));
+            )));
         }
         let turn = self.context.next_id();
         self.record_protocol(Protocol::Import { turn, message })
-            .map_err(|e| e.to_string())
+            .map_err(Uncommitted::from)
     }
 
     // ── Protocol mutations ────────────────────────────────────────────────
@@ -457,18 +462,18 @@ impl AgentLog {
     /// live one.
     ///
     /// # Errors
-    /// The session is mid-turn, or recording the prompt failed.
+    /// Refused as mid-turn (`Refused`), or the writer failed (`Unavailable`).
     pub fn append_user(
         &mut self,
         text: String,
         continues: Option<u64>,
         voice: Voice,
-    ) -> Result<(), String> {
+    ) -> Result<(), Uncommitted> {
         if !self.context.is_ready() {
-            return Err(format!(
+            return Err(Uncommitted::Refused(format!(
                 "cannot accept a new user prompt while the session is {}",
                 self.context.waiting_for()
-            ));
+            )));
         }
         // A continuation is honoured only while the turn it names is in the
         // context and is the prompt it answers.
@@ -481,7 +486,7 @@ impl AgentLog {
                 voice,
             }
         };
-        self.record_protocol(record).map_err(|e| e.to_string())
+        self.record_protocol(record).map_err(Uncommitted::from)
     }
 
     /// Append a user message between a complete tool-result batch and the next
@@ -490,44 +495,45 @@ impl AgentLog {
     /// provider reads consecutive user messages as one turn.
     ///
     /// # Errors
-    /// The tool-result batch is incomplete, or recording the prompt failed.
-    pub fn append_steering(&mut self, text: String, voice: Voice) -> Result<(), String> {
+    /// Refused as incomplete or turnless (`Refused`), or the writer failed (`Unavailable`).
+    pub fn append_steering(&mut self, text: String, voice: Voice) -> Result<(), Uncommitted> {
         if !self.context.is_awaiting_assistant() {
-            return Err(format!(
+            return Err(Uncommitted::Refused(format!(
                 "tool results must be complete before accepting a steering prompt; the session is {}",
                 self.context.waiting_for()
-            ));
+            )));
         }
         if self.context.unclosed_turn().is_none() {
-            return Err("cannot accept a steering prompt: no turn is being written".into());
+            return Err(Uncommitted::Refused(
+                "cannot accept a steering prompt: no turn is being written".into(),
+            ));
         }
         self.record_protocol(Protocol::Steering { text, voice })
-            .map_err(|e| e.to_string())
+            .map_err(Uncommitted::from)
     }
 
     /// Commit an assistant reply, moving the turn on to await tool results
     /// or — when no tools were called — back to a ready boundary.
     ///
     /// # Errors
-    /// No assistant message is expected, `message`'s role is not `Assistant`,
-    /// or recording it failed.
+    /// Refused as unexpected or wrong-role (`Refused`), or the writer failed (`Unavailable`).
     pub fn append_assistant(
         &mut self,
         message: ChatMessage,
         pending_tool_ids: Vec<String>,
         stop_reason: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Uncommitted> {
         if !self.context.is_awaiting_assistant() {
-            return Err(format!(
+            return Err(Uncommitted::Refused(format!(
                 "assistant message is not expected while the session is {}",
                 self.context.waiting_for()
-            ));
+            )));
         }
         if message.role != ChatRole::Assistant {
-            return Err(format!(
+            return Err(Uncommitted::Refused(format!(
                 "a {} message arrived where the assistant's reply was expected",
                 role_label(&message.role)
-            ));
+            )));
         }
         let turn = self.context.next_id();
         self.record_protocol(Protocol::AssistantMessage {
@@ -536,24 +542,23 @@ impl AgentLog {
             pending_tool_ids,
             stop_reason,
         })
-        .map_err(|e| e.to_string())
+        .map_err(Uncommitted::from)
     }
 
     /// Commit the tool-result batch answering the pending tool calls.
     ///
     /// # Errors
-    /// No results are expected, they do not match the pending ids (wrong count,
-    /// unknown id, duplicate), or recording the batch failed.
-    pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), String> {
+    /// Refused as unexpected or mismatched (`Refused`), or the writer failed (`Unavailable`).
+    pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), Uncommitted> {
         let Some(pending_ids) = self.context.pending_tool_results() else {
-            return Err(format!(
+            return Err(Uncommitted::Refused(format!(
                 "tool results are not expected while the session is {}",
                 self.context.waiting_for()
-            ));
+            )));
         };
-        validate_result_ids(&pending_ids, &results)?;
+        validate_result_ids(&pending_ids, &results).map_err(Uncommitted::Refused)?;
         self.record_protocol(Protocol::ToolResults { results })
-            .map_err(|e| e.to_string())
+            .map_err(Uncommitted::from)
     }
 
     /// End work that produced no real assistant reply, recording only what
@@ -562,28 +567,17 @@ impl AgentLog {
     /// reply is left as it lies, and the next prompt opens a turn after it.
     ///
     /// # Errors
-    /// A required repair could not commit; the session becomes unavailable.
-    pub fn quiesce(&mut self, reason: QuiesceReason) -> io::Result<()> {
-        self.check_available()?;
+    /// A required record failed: the writer has failed and the session has ended.
+    pub fn quiesce(&mut self, reason: QuiesceReason) -> Result<(), Unavailable> {
         for record in self.context.quiesce_records(reason) {
-            if let Err(error) = self.record_protocol(record) {
-                let error = io::Error::new(
-                    error.kind(),
-                    format!(
-                        "session {} is unavailable: required protocol repair failed: {error}; repair storage and resume the session",
-                        self.id
-                    ),
-                );
-                self.unavailable = Some(io::Error::new(error.kind(), error.to_string()));
-                return Err(error);
-            }
+            self.record_protocol(record)?;
         }
         // Only a cancellation earns its own breadcrumb; an abort's marker is
         // the `ProviderError` already on disk.
         if matches!(reason, QuiesceReason::Cancelled) {
-            self.seam.emit_or_report(Forensic::Cancelled);
+            self.seam.emit_or_end(Forensic::Cancelled);
         }
-        self.check_available()
+        Ok(())
     }
 
     /// The span a forced eviction would take to spend no more
@@ -597,18 +591,20 @@ impl AgentLog {
     /// for it with `note`. Its row on screen is the caller's to author.
     ///
     /// # Errors
-    /// Refuses what [`Context::resolve_cut`] refuses.
+    /// Refused as an invalid cut (`Refused`), or the writer failed (`Unavailable`).
     pub fn evict(
         &mut self,
         span: Span,
         note: Option<String>,
         by: EditAuthority,
-    ) -> Result<(), String> {
-        self.context.resolve_cut(span)?;
+    ) -> Result<(), Uncommitted> {
+        self.context
+            .resolve_cut(span)
+            .map_err(Uncommitted::Refused)?;
         self.record_protocol(Protocol::Evicted {
             residue: Residue { span, note, by },
         })
-        .map_err(|e| e.to_string())
+        .map_err(Uncommitted::from)
     }
 
     /// `/rewind`: turn `anchor` and every turn after it are withdrawn from
@@ -616,23 +612,23 @@ impl AgentLog {
     /// the caller's to author.
     ///
     /// # Errors
-    /// Refuses an anchor not recorded, already withdrawn, or in a batch still
-    /// awaiting tool results.
-    pub fn rewind(&mut self, anchor: u64) -> Result<(), String> {
-        self.context.rewindable(anchor)?;
+    /// Refused as an invalid anchor (`Refused`), or the writer failed (`Unavailable`).
+    pub fn rewind(&mut self, anchor: u64) -> Result<(), Uncommitted> {
+        self.context
+            .rewindable(anchor)
+            .map_err(Uncommitted::Refused)?;
         self.record_protocol(Protocol::Rewound { anchor })
-            .map_err(|e| e.to_string())
+            .map_err(Uncommitted::from)
     }
 
-    /// `/clear`: every turn is withdrawn from the context and stays readable
-    /// in the transcript; the system prompt stays.
+    /// Preflight `/clear` before preparing its replacement engine.
     ///
     /// # Errors
-    /// The session is awaiting tool results, or recording failed.
-    pub(crate) fn prepare_clear(&self) -> io::Result<()> {
-        self.check_available()?;
+    /// Refused as not ready (`Refused`), or the writer failed (`Unavailable`).
+    pub(crate) fn prepare_clear(&self) -> Result<(), Uncommitted> {
+        self.seam.check_available()?;
         if !self.context.is_ready() {
-            return Err(io::Error::other(format!(
+            return Err(Uncommitted::Refused(format!(
                 "cannot clear while the session is {}",
                 self.context.waiting_for()
             )));
@@ -640,9 +636,14 @@ impl AgentLog {
         Ok(())
     }
 
-    pub(crate) fn clear(&mut self) -> io::Result<()> {
+    /// `/clear`: withdraw every turn; the transcript and system prompt stay.
+    ///
+    /// # Errors
+    /// Refused as not ready (`Refused`), or the writer failed (`Unavailable`).
+    pub(crate) fn clear(&mut self) -> Result<(), Uncommitted> {
         self.prepare_clear()?;
         self.record_protocol(Protocol::Cleared)
+            .map_err(Uncommitted::from)
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -661,7 +662,6 @@ impl AgentLog {
             _scratch: None,
             learned: None,
             seam,
-            unavailable: None,
         })
     }
 
@@ -691,23 +691,24 @@ impl AgentLog {
             })
             .map(drop)?;
         if let Some(Inherited { turns, residues }) = inherited {
-            self.record_protocol(Protocol::Inherited { turns, residues })?;
+            // A refused link refuses construction; this log dies with it.
+            let link = self.seam.emit(Protocol::Inherited { turns, residues })?;
+            self.advance(link)?;
         }
         self.record_protocol(Protocol::System {
             text: system.to_string(),
         })
+        .map_err(io::Error::from)
     }
 
-    /// Emit a protocol fact through the seam and advance the model fold on
-    /// the witnessed result — the one funnel every protocol mutation takes.
+    /// Emit a protocol fact and advance the fold on its witnessed result.
     ///
     /// # Errors
-    /// A failed append to the one authoritative log is a session error, and so
-    /// is a link whose ancestor file will not read back.
-    fn record_protocol(&mut self, p: Protocol) -> io::Result<()> {
-        self.check_available()?;
+    /// The writer failed, or the fold refused a durable record, breaking agreement.
+    fn record_protocol(&mut self, p: Protocol) -> Result<(), Unavailable> {
         let recorded = self.seam.emit(p)?;
         self.advance(recorded)
+            .map_err(|error| self.seam.fail(error))
     }
 }
 

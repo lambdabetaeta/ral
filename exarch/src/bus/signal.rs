@@ -14,7 +14,7 @@ pub enum Signal {
     /// An agent's birth: sent by minting its emitter, so ahead of anything
     /// that emitter carries.
     Born(AgentId, Born),
-    /// A live-only delta — a token, a state, the seam's own fault — with no
+    /// A live-only delta — a token, a state, a terminal fault — with no
     /// durable form and no sequence number of its own.
     Transient(AgentId, Transient),
 }

@@ -1,9 +1,9 @@
 ---
 status: active
-generated_at_commit: 2b930e85
-verified_at_commit: 2b930e85
+generated_at_commit: eb4a62f0
+verified_at_commit: eb4a62f0
 verified_at_date: 2026-10-28
-anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Owed, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report]
+anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Owed, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report, Unavailable, Emitter::bind, Agent::conclude, Tenancy::discard]
 ---
 
 # One scope tree, one inbox
@@ -49,6 +49,7 @@ fleet root (DurableRoot)
 | Synod Stop / Esc; committed `/clear`; `reply` | work, replaced by fresh work | `Cancelled` |
 | committed `/clear` | engine incarnation, replaced by its prepared successor | `Cancelled` |
 | `end`; `/close`; agent cancel; owner drop | life | `Cancelled` |
+| first failed record append | life | `Cancelled` |
 | idle reply lease lapse | life | `TimedOut` |
 | `/quit`; `end_fleet`; SIGTERM / SIGHUP | fleet root | `Cancelled` / `Terminated` |
 | process abort | fleet root | `Aborted` |
@@ -133,13 +134,14 @@ and the scope vouching for a post. The inbox belongs in `bus`, below
   survive too. Identity workers retain their birth sink, wire batches use the
   currently installed sink; engine-incarnation provenance gives both the
   same admission. A committed `/clear` cancels and replaces that scope,
-  fencing queued and future batches; failed preparation or commit leaves it
-  untouched. Installation certifies the outgoing transport even if another
-  holder retains it.
+  fencing queued and future batches. Failed preparation leaves it untouched;
+  a failed commit ends life without replacing the incarnation. Installation
+  certifies the outgoing transport even if another holder retains it.
 - Wakeups coalesce by never-reused schedule id, nudges replace queued nudges,
   and adjacent human fragments are observed as one newline-joined prompt.
   Private arrival ordinals let clear preserve a post-boundary suffix through
-  that coalescing; provenance remains exclusively scope-vouched. Source-depth
+  that coalescing. A rewrite held by the mid-exchange drain stays in place
+  with its ordinal; provenance remains exclusively scope-vouched. Source-depth
   probes remain observations, not quotas.
 
 ## Work and exact outstanding replies
@@ -212,10 +214,15 @@ a *job* is Synod's human-opened unit through fleet settlement.
 - A stopped job pops nothing more. Text sent after Stop stays queued and
   opens the next job. Every `run` waits for ended agents' teardown through
   `Fleet::wait_settled`, inside the output pump, before linearising closing
-  against Stop; if Stop wins, it settles again. A late recording fault ends
-  the affected life and requires settlement of helpers thereby ended, still
-  under output pumping, before failed `JobEnd`. The closing folder
-  walk and “Stopped.” cannot overtake helpers' last writes or final output.
+  against Stop; if Stop wins, it settles again. The closing folder walk and
+  “Stopped.” cannot overtake helpers' last writes or final output.
+- Both pumped termini — the headless `run` and `SettledConversation::run` —
+  conclude after their pump. An unavailable writer is announced in a second
+  pump however attendance ended; the settled conversation also settles the
+  helpers it ended there. The failure overrides the attended outcome, as at
+  every terminus. That census report supersedes the first.
+  `JobEnd.outcome` joins failures one per line. A settlement failure severs
+  once, after the pumps.
 
 Synod publishes `JobBegan` / `JobDone` and accepts synchronous `stop_job` and
 `recall_queued`. Send remains available while busy; the queue strip shows
@@ -234,8 +241,11 @@ second backend job arbiter is needed.
   drop in order: the engine's owner is its `Tenancy`, whose drop certifies and
   ends and drops the engine before its `Claim` releases the name and census
   entry. An armed claim publishes final `Died` before that release, outside
-  the census lock. Terminal failure reporting uses the independent fleet sink
-  even if append state is poisoned; parent retirement precedes the cue. The last owner cannot empty the census ahead of its death cue.
+  the census lock. A recording failure ends life when the writer latches it.
+  The owner's terminus (`settle`, the headless run, `SettledConversation::run`)
+  announces it once as `Transient::Fault` on the fleet sink, which the failed
+  writer cannot block, then retires; parent retirement precedes the cue.
+  The last owner cannot empty the census ahead of its death cue.
 - The `Census` holds, under one lock, the name table, the `tenants` map and
   the teardown failures. `Fleet::claim` reserves the name and an unbound
   tenant, so construction counts. `Claim::bind` records the owner's handle;
@@ -247,7 +257,8 @@ second backend job arbiter is needed.
   born cancelled. `wait_empty` waits on the detached `Census` for no tenants.
   `wait_settled(waiter, &Pumping)` is one predicate over `tenants` under that
   lock: every tenant but the waiter's is bound and live. It is polled, since
-  ancestor cancellation does not notify, and returns any recorded failure.
+  ancestor cancellation does not notify, and returns recorded failures joined
+  one per line.
   The attending owner is excluded by its tenant id, independent of racing
   cancellation; ended helpers and unfinished claims still block settlement.
   The `Pumping` witness proves the caller is inside the output pump.
@@ -271,10 +282,11 @@ Protocol version 34 adds the carrier lifecycle exchange `Detach → Ended`.
   dispatch admission, cancels its root, joins its engine thread and verifies
   that every session worker's live-thread ticket has gone before `Ended`.
 - Timeout, severance or an undrained roster produces no acknowledgment.
-  **Every outgoing and final engine is certified**: a `Tenancy` certifies on
-  drop and when `Tenancy::install` replaces its engine, and failures accumulate in the
-  census, so a later clean teardown never absolves an earlier one. Settlement
-  reports them; Synod ends the conversation without
+  **Every outgoing, final and discarded prepared engine is certified**:
+  a `Tenancy` certifies on drop and replacement by `Tenancy::install`;
+  `Tenancy::discard` certifies the unused engine when a `/clear` commit fails.
+  Failures accumulate in the census, so a later clean teardown never absolves
+  an earlier one. Settlement reports them; Synod ends the conversation without
   a closing folder scan. EOF alone never authorises that scan.
 - Output pumping spans this barrier, including helpers' final facts and
   transients. Baseline failure is terminal too, so queued input cannot reopen
@@ -298,8 +310,10 @@ D1–D8 fix the policy as well as the mechanism.
    Engine workers are not cancelled by Stop.
 7. `/clear` preflights recording/readiness and prepares a rebootable engine
    before mutation. Only committed `Cleared` permits applying the captured
-   queue boundary and installing it. Failed preparation or commit preserves
-   live bindings, work, incarnation, queued input and owner registers.
+   queue boundary and installing it. Failed preparation preserves live
+   bindings, work, incarnation, queued input and owner registers. A failed
+   commit is a recording failure: it ends the session and leaves its engine,
+   record and registers as they were.
 8. Stop and recall are synchronous commands; settlement waits on the driver
    thread. `withdrawals.js` remains the ordering boundary for restoration.
 

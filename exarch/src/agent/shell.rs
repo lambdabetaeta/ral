@@ -17,7 +17,6 @@ use ral_core::data::FOValue;
 use ral_core::process::Scope;
 use ral_core::protocol::Report;
 use std::fmt::Write;
-use std::io;
 use std::sync::Arc;
 
 /// State the attend thread shares with the desk handlers that run on its own
@@ -96,41 +95,24 @@ impl Agent {
     /// Evict on an authority no act row speaks for — a forced
     /// eviction — so it draws its own row.
     pub(crate) fn evict_unbidden(&self, span: Span, by: EditAuthority) -> Result<(), String> {
-        self.log.borrow_mut().evict(span, None, by)
+        self.log
+            .borrow_mut()
+            .evict(span, None, by)
+            .map_err(|e| e.to_string())
     }
 
-    /// A log that cannot take the error is the one failure that cannot go
-    /// through the log, so the line rides a fault transient instead — never
-    /// lost silently.
+    /// An error the model never saw, as a [`Forensic::Error`].
     pub(crate) fn note_error(&self, msg: &str) {
-        let recorder = self.recorder();
-        if let Err(error) = recorder.emit(Forensic::Error {
+        self.recorder().emit_or_end(Forensic::Error {
             text: msg.to_string(),
-        }) {
-            recorder.report_fault(&io::Error::new(error.kind(), format!("{msg} ({error})")));
-        }
+        });
     }
 
     /// An operational note: recorded as a [`crate::record::Forensic::SystemNote`], with no
     /// model-view twin, since the model never saw it.
     pub(crate) fn note(&self, text: String) {
         self.recorder()
-            .emit_or_report(crate::record::Forensic::SystemNote { text });
-    }
-
-    pub(crate) fn end_unavailable(&self, error: &io::Error) {
-        self.end_unavailable_with(error, |error| self.recorder().report_fault(error));
-    }
-
-    pub(super) fn end_unavailable_with(&self, error: &io::Error, report: impl Fn(&io::Error)) {
-        report(error);
-        self.handle.end();
-        self.schedules.clear();
-        if let Err(severed) = self.engine.end() {
-            report(&io::Error::other(
-                EngineLost::running(&severed, self.run_dir()).to_string(),
-            ));
-        }
+            .emit_or_end(crate::record::Forensic::SystemNote { text });
     }
 
     /// Plain values captured once per call; desks run only on the owner thread.
@@ -160,12 +142,6 @@ impl Agent {
         emit: &Emitter,
     ) -> Evaluated {
         self.couple(emit);
-        if let Err(error) = self.check_available() {
-            return Evaluated {
-                text: error.to_string(),
-                failed: true,
-            };
-        }
         // The assistant turn is recorded before its results are built, so this
         // is the id of the turn this result closes — and the call's source name.
         let turn = self.log.borrow().context().current_turn();

@@ -57,16 +57,21 @@ fn a_recording_fault_after_attendance_overrides_failed_and_cancelled_jobs() {
             conversation.handle().end();
         }
         let ended = conversation.run(job, &mut sink);
+        assert_eq!(
+            sink.inner
+                .transients
+                .iter()
+                .filter_map(|t| match t {
+                    Transient::Fault { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [sink.why.as_deref().unwrap()]
+        );
         assert_eq!(ended.outcome.unwrap_err(), sink.why.unwrap());
         assert!(conversation.root.check_available().is_err());
         assert!(!conversation.handle().is_live());
         assert!(conversation.handle().steer("no next job".into()).is_err());
-        assert!(
-            sink.inner
-                .transients
-                .iter()
-                .any(|t| matches!(t, Transient::Fault { .. }))
-        );
     }
 }
 
@@ -181,6 +186,17 @@ fn late_recording_failure_pumps_replied_helper_teardown_before_job_end() {
         let (end, sink) = finished.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(end.id, id);
         assert!(!end.stopped);
+        assert_eq!(
+            sink.inner
+                .transients
+                .iter()
+                .filter_map(|t| match t {
+                    Transient::Fault { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [sink.why.as_deref().unwrap()]
+        );
         assert_eq!(end.outcome.unwrap_err(), sink.why.unwrap());
         let output = sink.inner.signals.iter().position(|signal| matches!(signal,
             Signal::Fact(agent, rec) if *agent == helper.id() && matches!(rec.value(),

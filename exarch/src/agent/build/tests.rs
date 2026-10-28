@@ -316,10 +316,17 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
             BOOTS.get() - boots,
             u32::from(matches!(failure, "boot" | "commit"))
         );
-        assert_ne!(why.to_string(), "");
-        assert!(mailbox.is_current(), "{failure}");
-        assert!(!incarnation.is_cancelled(), "{failure}");
-        assert_eq!(incarnation.id(), session.engine.scope().id());
+        assert_ne!(why, "");
+        if matches!(failure, "boot" | "unready") {
+            assert!(mailbox.is_current(), "{failure}");
+            assert!(!incarnation.is_cancelled(), "{failure}");
+            assert_eq!(incarnation.id(), session.engine.scope().id());
+            assert!(child.is_live());
+            assert!(session.handle().has_busy_children());
+            assert_eq!(session.handle().queued(), ["keep queued"]);
+        } else {
+            assert!(!session.handle().is_live(), "{failure}");
+        }
         assert_eq!(old.session_ended().unwrap(), None);
         assert!(
             session
@@ -330,9 +337,6 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
                 .any(|binding| binding.name == "keep" && binding.preview == "1")
         );
         assert!(!workers[0].handle.cancel.is_cancelled());
-        assert!(child.is_live());
-        assert!(session.handle().has_busy_children());
-        assert_eq!(session.handle().queued(), ["keep queued"]);
         assert_eq!(session.schedules.list().len(), 1);
         assert_eq!(session.pins.lock_ignore_poison().len(), 1);
         assert_eq!(
@@ -702,14 +706,11 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
         )
         .unwrap();
     let before = child.rendered_messages();
-    assert!(!child.engine.rebootable());
-    assert!(
-        child
-            .clear()
-            .unwrap_err()
-            .to_string()
-            .contains("new conversation")
+    assert_eq!(
+        child.engine.prepare_rebirth().err().as_deref(),
+        Some(crate::agent::engine::Engine::CANNOT_REBOOT)
     );
+    assert!(child.clear().unwrap_err().contains("new conversation"));
     assert!(mailbox.is_current());
     assert_eq!(child.handle().queued(), ["keep queued"]);
     assert_eq!(child.schedules.list().len(), 1);

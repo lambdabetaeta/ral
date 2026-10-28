@@ -53,7 +53,7 @@ authority ([[decisions/260906_object-not-name|object-not-name]]). The exec
 door judges the object too: a head's program is the file that will execute,
 judged by its real path through the one exec judgment (`GrantStack::admit`), and
 the launcher runs that real path, under the user's spelling as `argv[0]`
-([[decisions/261004_exec-rules|exec-rules]]).
+([[internals/exec-judgment|exec-judgment]]).
 
 **The two enforcers agree on each held object's current position at launch.**
 An exclusion holds the object its spelling reached when the grant was decoded.

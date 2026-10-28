@@ -8,14 +8,15 @@
 //! record at the seam, through [`crate::record`].
 
 use crate::SessionInfo;
+use crate::agent::spawn::announce;
 use crate::agent::{Agent, AgentHandle};
-use crate::bus::{AgentOutcome, Closed, FleetBus, Sink, pump};
+use crate::bus::{AgentOutcome, Closed, FleetBus, Pumping, Sink, pump};
 pub use crate::bus::{Job, JobId};
 use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
 use crate::record::fault::Remedy;
-use crate::record::{self, Blocks, Delta, Record, Recorded, Settlement, Transient};
+use crate::record::{self, Blocks, Delta, Record, Recorded, Settlement, Transient, Unavailable};
 use crate::shell_eval::user_json;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
@@ -192,9 +193,8 @@ impl Sink for Headless<'_> {
     }
 
     fn transient(&mut self, id: AgentId, t: &Transient) {
-        // Every frontend draws a fault whatever its source, since an
-        // unwritable log is a fact about the plumbing, not one agent;
-        // everything else here rides root's own register.
+        // Terminal recording failures and channel elisions draw from any source;
+        // everything else rides root's own register.
         if id != self.root_id && !matches!(t, Transient::Fault { .. }) {
             return;
         }
@@ -203,8 +203,8 @@ impl Sink for Headless<'_> {
                 self.last_stop = Some(raw.clone());
                 let _ = writeln!(self.err, "[stop: {raw}]");
             }
-            // The seam's own diagnostic: drawn by every frontend whatever
-            // else it is doing, since it is a fact about the log itself.
+            // A session's terminal recording failure, announced by its owner,
+            // or a channel elision marker.
             Transient::Fault { text } => {
                 let _ = writeln!(self.err, "{text}");
             }
@@ -418,9 +418,9 @@ impl Headless<'_> {
 /// progress and operational output goes to stderr.
 ///
 /// # Errors
-/// Returns `Err` if no launch prompt was supplied, if the attend worker
-/// panics, if the sink's drive fails, or if the run ends without a `reply`
-/// (stopped, cancelled, or failed).
+/// Returns `Err` if no launch prompt was supplied, if recording fails, if the
+/// attend worker panics, if the sink's drive fails, or if the run ends without
+/// a `reply` (stopped, cancelled, or failed).
 pub fn run(
     session: &mut Agent,
     info: &SessionInfo<'_>,
@@ -454,27 +454,24 @@ pub fn run(
     let recorder = session.recorder();
     // An OS signal must reach the fleet's roots for as long as this one attends.
     let _signals = crate::signals::face(&session.fleet);
-    let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit, _| {
+    let attended = pump(&mut headless, &bus, root_id, &recorder, |emit, _| {
         session.attend(emit)
     });
-    // The attend digest: an outcome driving `is_error`/`error`, and the root's
-    // `reply`, deposited on its agent.  A panic arrives as `Ok(None)`, already
-    // latched by the sink.
+    // The attend digest drives `is_error`/`error`; a panic arrives as `Ok(None)`.
+    // The root's deliberate `reply` stays on its agent.
     headless.reply = session.handle().reply();
-    let mut r: Result<(), String> = match session.check_available() {
-        Ok(()) => match outcome {
-            Ok(Some(agent_outcome)) => match agent_outcome {
-                AgentOutcome::Replied => Ok(()),
-                AgentOutcome::Stopped(s) => Err(s),
-                AgentOutcome::Cancelled => Err("cancelled".to_string()),
-                AgentOutcome::Failed(e) => Err(e),
-            },
-            Ok(None) => Err("worker panicked".to_string()),
-            Err(e) => Err(e.to_string()),
-        },
-        Err(error) => {
-            session.end_unavailable(&error);
-            Err(error.to_string())
+    let mut r = match session.check_available() {
+        Ok(()) => pumped(attended).and_then(|outcome| match outcome {
+            AgentOutcome::Replied => Ok(()),
+            AgentOutcome::Stopped(s) => Err(s),
+            AgentOutcome::Cancelled => Err("cancelled".to_string()),
+            AgentOutcome::Failed(e) => Err(e),
+        }),
+        // The failure overrides the attended outcome, announced after it.
+        Err(failure) => {
+            let reason = failure.to_string();
+            let announcement = announced(&mut headless, &bus, root_id, &recorder, failure, |_| ());
+            failed(std::iter::once(reason).chain(announcement.err()))
         }
     };
     // Summed at the emit seam, so it includes async children muted on this
@@ -514,12 +511,49 @@ pub fn run(
     r
 }
 
-fn job_ending(session: &Agent, outcome: io::Result<Option<AgentOutcome>>) -> Result<(), String> {
-    match outcome {
-        Ok(Some(AgentOutcome::Failed(reason))) if session.severance().is_some() => Err(reason),
-        Ok(Some(_)) => Ok(()),
+/// A pump's worker value, or why it has none.
+fn pumped<T>(ran: io::Result<Option<T>>) -> Result<T, String> {
+    match ran {
+        Ok(Some(value)) => Ok(value),
         Ok(None) => Err("worker panicked".to_string()),
-        Err(e) => Err(e.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Every failure, one per line, or success.
+fn failed(failures: impl IntoIterator<Item = String>) -> Result<(), String> {
+    let failures: Vec<_> = failures.into_iter().collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
+}
+
+/// Announce `failure` in a pump of its own, then `then` under it: the
+/// pumped termini conclude after attendance, however it ended.
+fn announced<S: Sink, R: Send>(
+    sink: &mut S,
+    bus: &FleetBus,
+    root: AgentId,
+    recorder: &record::Emitter,
+    failure: Unavailable,
+    then: impl Send + FnOnce(&Pumping) -> R,
+) -> Result<R, String> {
+    pumped(pump(sink, bus, root, recorder, move |emit, pumping| {
+        announce(&failure, emit);
+        then(pumping)
+    }))
+}
+
+/// A severed engine ends the conversation, not merely the job.
+fn attendance(session: &Agent, outcome: AgentOutcome) -> Result<(), String> {
+    match outcome {
+        AgentOutcome::Failed(reason) if session.severance().is_some() => Err(reason),
+        AgentOutcome::Replied
+        | AgentOutcome::Stopped(_)
+        | AgentOutcome::Cancelled
+        | AgentOutcome::Failed(_) => Ok(()),
     }
 }
 
@@ -592,35 +626,43 @@ impl SettledConversation {
                 // Stop may end helpers after the first census; `_held` closes after the second.
                 Closed::Stopped(_held) => (first.and_then(|()| settle()), true),
             };
-            if let Err(why) = settlement {
-                root.engine
-                    .transport()
-                    .sever(ral_core::carrier::Severed::Faulted(why.clone()));
-                return (AgentOutcome::Failed(why), stopped);
-            }
-            (outcome, stopped)
+            (outcome, stopped, settlement)
         });
-        let stopped = matches!(ended, Ok(Some((_, true))));
-        let outcome = match root.check_available() {
-            Ok(()) => job_ending(root, ended.map(|ran| ran.map(|(outcome, _)| outcome))),
-            Err(error) => {
-                let reason = error.to_string();
-                // Final draining can fault recording after the first settlement.
-                let _ = pump(sink, &self.bus, root.id(), &recorder, move |_, pumping| {
-                    root.end_unavailable(&error);
-                    if let Err(why) = root.fleet.wait_settled(root.tenant(), pumping) {
-                        root.engine
-                            .transport()
-                            .sever(ral_core::carrier::Severed::Faulted(why));
-                    }
-                });
-                Err(reason)
+        let (stopped, attended, settlement) = match pumped(ended) {
+            // Judged before any settlement sever, which would read as engine loss.
+            Ok((outcome, stopped, settlement)) => (stopped, attendance(root, outcome), settlement),
+            Err(why) => (false, Err(why), Ok(())),
+        };
+        // A recording failure overrides the attended outcome, as at every terminus.
+        let (verdict, settlement) = match root.check_available() {
+            Ok(()) => (attended, settlement),
+            // The helpers it ended settle in a second pump, whose census report
+            // supersedes the first.
+            Err(failure) => {
+                let reason = failure.to_string();
+                let (fleet, tenant) = (&root.fleet, root.tenant());
+                match announced(
+                    sink,
+                    &self.bus,
+                    root.id(),
+                    &recorder,
+                    failure,
+                    move |pumping| fleet.wait_settled(tenant, pumping),
+                ) {
+                    Ok(settled) => (Err(reason), settled),
+                    Err(why) => (failed([reason, why]), settlement),
+                }
             }
         };
+        if let Err(why) = &settlement {
+            root.engine
+                .transport()
+                .sever(ral_core::carrier::Severed::Faulted(why.clone()));
+        }
         JobEnd {
             id,
             stopped,
-            outcome,
+            outcome: failed(verdict.err().into_iter().chain(settlement.err())),
         }
     }
 }

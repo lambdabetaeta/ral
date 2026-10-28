@@ -4,8 +4,8 @@
 //! [`Agent::deliberate`]: super::Agent::deliberate
 
 use crate::provider::ProviderError;
+use crate::record::{Unavailable, Uncommitted};
 use ral_core::carrier::Severed;
-use std::io;
 
 /// [`Self::Empty`] and [`Self::Stopped`] become nudges, [`Self::Cancelled`]
 /// does not.
@@ -33,11 +33,10 @@ pub enum Fault {
     /// The engine is gone: no further tool call can dispatch, and the loop
     /// around this one ends too.
     Severed(Severed),
-    /// The session log refused or failed an append; the context is left as
-    /// it lay.
-    Log(String),
-    /// Recording or mandatory repair failed: this session cannot accept work.
-    Unavailable(String),
+    /// The session log refused a mutation as written; the session is usable.
+    Refused(String),
+    /// Recording failed: the session has ended.
+    Unavailable(Unavailable),
     /// A host-side panic: transport, surface decode, render.  An eval-side
     /// panic is caught at `Shell::run`, which rolls the dynamic state back,
     /// so it never unwinds this far.
@@ -56,8 +55,17 @@ impl From<Severed> for Fault {
     }
 }
 
-impl From<io::Error> for Fault {
-    fn from(error: io::Error) -> Self {
-        Self::Log(error.to_string())
+impl From<Unavailable> for Fault {
+    fn from(failure: Unavailable) -> Self {
+        Self::Unavailable(failure)
+    }
+}
+
+impl From<Uncommitted> for Fault {
+    fn from(uncommitted: Uncommitted) -> Self {
+        match uncommitted {
+            Uncommitted::Refused(why) => Self::Refused(why),
+            Uncommitted::Unavailable(failure) => Self::Unavailable(failure),
+        }
     }
 }

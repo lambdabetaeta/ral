@@ -28,9 +28,7 @@ pub(crate) fn dispatch(id: String, input: &Value, session: &Agent, _emit: &Emitt
         Ok(text) => {
             let recorder = session.recorder();
             let text = format!("{}\n", text.trim_end());
-            if let Err(error) = recorder.emit(Display::Thinking { text }) {
-                recorder.report_fault(&error);
-            }
+            recorder.emit_or_end(Display::Thinking { text });
             ACK.to_string()
         }
         Err(reason) => {

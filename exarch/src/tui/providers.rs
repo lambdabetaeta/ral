@@ -671,7 +671,7 @@ fn note_if_running(app: &App, id: &str, text: String) {
         .any(|agent| agent.current_provider().account().id.as_str() == id)
     {
         tabs.focused_recorder()
-            .emit_or_report(crate::record::Forensic::SystemNote { text });
+            .emit_or_end(crate::record::Forensic::SystemNote { text });
     }
 }
 

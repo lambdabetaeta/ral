@@ -221,7 +221,7 @@ fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &
     }
     if let Some(sb) = app.tabs.scrollback(tab) {
         sb.recorder()
-            .emit_or_report(crate::record::Forensic::ModelChanged {
+            .emit_or_end(crate::record::Forensic::ModelChanged {
                 model: pick.choice.model.clone(),
                 context_window,
                 label: identity::label(&pick.choice.account, &available),

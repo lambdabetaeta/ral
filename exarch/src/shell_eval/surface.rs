@@ -105,7 +105,7 @@ fn decode_loudly(recorder: &Emitter, val: &FOValue) -> Option<Surface> {
         Decoded::Surface(surface) => Some(surface),
         Decoded::Landed => None,
         Decoded::Unknown => {
-            recorder.emit_or_report(Forensic::SystemNote {
+            recorder.emit_or_end(Forensic::SystemNote {
                 text: format!(
                     "surface: no rendering for a {} value; it was dropped",
                     val.shape()
@@ -180,42 +180,42 @@ pub(crate) fn replay(recorder: &Emitter, values: &[FOValue]) {
 /// process is holding, which a resume does not restore.
 pub(crate) fn record(recorder: &Emitter, surface: &Surface) {
     match surface {
-        Surface::Observation(event) => recorder.emit_or_report(Display::Observation {
+        Surface::Observation(event) => recorder.emit_or_end(Display::Observation {
             value: (**event).clone().encode(),
         }),
-        Surface::Change(change) => recorder.emit_or_report(Display::Change {
+        Surface::Change(change) => recorder.emit_or_end(Display::Change {
             change: change.clone(),
         }),
-        Surface::Card(card) => recorder.emit_or_report(Display::Card { card: card.clone() }),
+        Surface::Card(card) => recorder.emit_or_end(Display::Card { card: card.clone() }),
         Surface::Done {
             id,
             title,
             elapsed,
             outcome,
-        } => recorder.emit_or_report(Display::Done {
+        } => recorder.emit_or_end(Display::Done {
             id: *id,
             title: title.clone(),
             elapsed_ms: elapsed.map(|e| u64::try_from(e.as_millis()).unwrap_or(u64::MAX)),
             outcome: outcome.clone(),
         }),
-        Surface::Notice(Notice::Reap(reap)) => recorder.emit_or_report(Forensic::Reap {
+        Surface::Notice(Notice::Reap(reap)) => recorder.emit_or_end(Forensic::Reap {
             title: reap.title.clone(),
             cause: <&str>::from(reap.cause).to_string(),
         }),
-        Surface::Notice(Notice::Prune(pruned)) => recorder.emit_or_report(Forensic::Prune {
+        Surface::Notice(Notice::Prune(pruned)) => recorder.emit_or_end(Forensic::Prune {
             names: pruned.iter().map(|p| p.name.clone()).collect(),
             idle_calls: pruned.iter().map(|p| p.idle_calls).collect(),
         }),
         // Register state, not scrollback: the history informs the resume note.
         Surface::Pin { key, card } => {
-            recorder.emit_or_report(Forensic::Pin { key: key.clone() });
+            recorder.emit_or_end(Forensic::Pin { key: key.clone() });
             recorder.transient(Transient::Pin {
                 key: key.clone(),
                 card: card.clone(),
             });
         }
         Surface::Unpin { key } => {
-            recorder.emit_or_report(Forensic::Unpin { key: key.clone() });
+            recorder.emit_or_end(Forensic::Unpin { key: key.clone() });
             recorder.transient(Transient::Unpin { key: key.clone() });
         }
     }

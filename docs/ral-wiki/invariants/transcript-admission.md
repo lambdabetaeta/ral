@@ -42,11 +42,12 @@ dangling `tool_use` must never reach the wire.
 
 **Admission requires an available durable record, not merely a ready
 `Context`.** Quiesce advances that context only after each owed repair record
-commits. If a mandatory repair cannot commit, or any producer faults the
-shared writer, the owner refuses further requests and reports the session as
-unavailable. Explicit resume after storage repair replays what really
-committed and answers only the tool ids still outstanding; it never inserts
-an unrecorded result to make a live session look sendable.
+commits. A mandatory repair that cannot commit, like any failed append,
+latches the writer and ends the session's life, so nothing more is drawn.
+The owner announces the failure once at its end. Explicit resume after
+storage repair replays what really committed and answers only the tool ids
+still outstanding; it never inserts an unrecorded result to make a live
+session look sendable.
 
 Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tags):
 

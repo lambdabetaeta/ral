@@ -204,7 +204,7 @@ impl Nudges {
         if !self.steers {
             return None;
         }
-        log.record_emitter().emit_or_report(Forensic::Nudge {
+        log.record_emitter().emit_or_end(Forensic::Nudge {
             cause: reminder.cause(),
             spent: None,
         });
@@ -249,13 +249,13 @@ impl Nudges {
 
     fn repair(&mut self, cause: String, message: &str, log: &AgentLog) -> Option<String> {
         if self.used >= BUDGET {
-            log.record_emitter().emit_or_report(Forensic::Error {
+            log.record_emitter().emit_or_end(Forensic::Error {
                 text: format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})"),
             });
             return None;
         }
         self.used += 1;
-        log.record_emitter().emit_or_report(Forensic::Nudge {
+        log.record_emitter().emit_or_end(Forensic::Nudge {
             cause,
             spent: Some(self.spent()),
         });
@@ -268,7 +268,7 @@ impl Nudges {
             if self.used >= BUDGET {
                 // The un-replied finish is accepted; `agent_outcome` maps it
                 // to Failed.  Returning here leaves the edges below armed.
-                log.record_emitter().emit_or_report(Forensic::Error {
+                log.record_emitter().emit_or_end(Forensic::Error {
                     text: "agent finished without calling `reply` after the nudge budget; \
                            returning a failure"
                         .into(),
@@ -276,7 +276,7 @@ impl Nudges {
                 return None;
             }
             self.used += 1;
-            log.record_emitter().emit_or_report(Forensic::Nudge {
+            log.record_emitter().emit_or_end(Forensic::Nudge {
                 cause: "no-reply finish (returning agent)".into(),
                 spent: Some(self.spent()),
             });
@@ -288,7 +288,7 @@ impl Nudges {
         match &facts.pinned {
             Some(pinned) if self.pinned_told.as_ref() != Some(pinned) => {
                 self.pinned_told = Some(pinned.clone());
-                log.record_emitter().emit_or_report(Forensic::Nudge {
+                log.record_emitter().emit_or_end(Forensic::Nudge {
                     cause: "pinned-state reminder".into(),
                     spent: None,
                 });

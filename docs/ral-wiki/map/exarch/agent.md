@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2b930e85
+generated_at_commit: eb4a62f0
 generated_at_date: 2026-10-28
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
@@ -81,7 +81,7 @@ The role and snapshot laws are [[design/agents|agents]]'s.
   `Incarnation::install` alone installs the deferred sink. A rejected probe becomes terminal `Severed::Faulted`.
 - `Engine::prepare_rebirth` admits only identity roots with `Rebirth` and
   boots from that same recipe without changing the live engine; wire and
-  adopted engines refuse. `rebootable` is a test-only eligibility probe.
+  adopted engines refuse.
 - `Incarnation` (same file) owns the `Tenancy` and the deferred-batch scope.
   `install_rebirth` fences that scope, then installs an already-booted
   engine through `Tenancy::install` and certifies the outgoing one.
@@ -124,7 +124,8 @@ fleet root, lease policy and `Tenancy`.
   mailbox only after engine and log exist. A dead parent is `SessionDead`;
   abandoned work is `Abandoned`. A root's life is a fleet-root child; a
   child's life is a child of its parent's captured work. Its engine incarnation
-  is a child of life, parallel to work.
+  is a child of life, parallel to work. `Emitter::bind` binds the writer to
+  that life; its first failure cancels it.
 - `Fleet::{resolve, live, roots}` derive live addresses from names, sorted
   by id, with roots filtered by role. There is no separate children or roots
   index. `roster::listing` / `summary` project these live handles.
@@ -154,10 +155,13 @@ lock belongs to the launcher, not an agent.
 
 **One owner loop handles every role.**
 
-- `Agent::attend` (`agent/attend.rs`) publishes idle state before `draw`,
-  outside its lock. The inbox re-evaluates `park_mode` on every wake,
-  refuses dead life or a stopped job, and pops queued live work before
-  honouring `Quiesce`. `PARK_POLL` also bounds ancestor-cancel observation.
+- `Agent::draw` (`agent/attend.rs`) returns nothing and publishes no idle
+  state for an ended life. Otherwise it publishes idle state before
+  `Inbox::draw`, outside the inbox lock. The inbox re-evaluates `park_mode`
+  on every wake, refuses dead life or a stopped job, and pops queued live
+  work before honouring `Quiesce`. `PARK_POLL` also bounds ancestor-cancel
+  observation. On exit, `attend` asserts that a live owner's exchange ends
+  prompt-admissible.
 - Parking is computed: an attended conversing root is `Held`; a replied
   child is `Engaged`; outstanding obligations give `HeldByChildren`; armed
   schedules give `UntilCancelled`; otherwise `Quiesce`. Severance always
@@ -167,15 +171,16 @@ lock belongs to the launcher, not an agent.
   `open`s the `Opening` minted at pop and cancels its predecessor; a nudge
   continues the existing exchange. No cancellation reset occurs.
 - `attempt` snapshots the provider and catches host-side panics around
-  `deliberate(exchange, …)`. Public `deliberate` checks recording availability
-  on entry and reconciles on return; `attempt` also reconciles caught panics.
-  The deliberation appends the prompt before polling
+  `deliberate(exchange, …)`. `deliberate` repairs on every return; `attempt`
+  repairs after an unwind. The deliberation appends the prompt before polling
   cancellation: a drawn human line survives a racing gesture in the record,
   without starting provider work under a cancelled exchange.
 - `deliberate` (`agent/deliberate.rs`) weighs forced eviction before every
   provider round, streams through `commit::Stream`, admits and commits the
   assistant turn, then answers all requested tool ids. `run_batch` and `invoke` in that module
   dispatch the advertised `Toolset` through `agent/tools.rs` in order.
+  A provider request follows its `Forensic::TurnStarted`; a ral call follows
+  its `Display::ToolCall` row. A failed record prevents the effect.
 - Continuing batches call `Inbox::drain` for reads and steering up to the
   first rewrite. A cancelled exchange drains nothing. A staged reply is
   checked after the complete batch and before this drain or reminders.
@@ -183,9 +188,10 @@ lock belongs to the launcher, not an agent.
   with `Keep`, clears schedules and publishes Ready. `deposit_reply`
   stores the value and pays every taken-up debt as
   `Replied`. A child parks; a headless root returns. Consuming `settle`
-  (`agent/spawn.rs`) checks final availability, reports failure through the
-  independent fleet sink, retires the inbox and arms its claim's death cue.
-  Teardown and terminal publication remain inside census-counted completion.
+  (`agent/spawn.rs`) concludes: a recording failure overrides the outcome and
+  is announced once through the independent fleet sink. It then retires the
+  inbox and drops the owner. Teardown and terminal publication remain inside
+  census-counted completion.
 - A severed engine runs no more calls. `EngineLost` words the cause for
   model and log; headless/Synod end the conversation. Fallible quiesce
   leaves a usable session prompt-admissible; failed mandatory repair or
@@ -205,8 +211,9 @@ lock belongs to the launcher, not an agent.
   `fork_engine`, then `Agent::child_of` builds its prompt/log and adopts it.
   Wire construction asks `Factory::engine` for one stream, attaches with
   the parent's `EngineSpec` and seal, and waits before naming the child.
-- `spawn_async` announces birth before launching the detached attend thread;
-  failed thread creation drops the owner and reports failure. Fuel is
+- `spawn_async` announces birth and arms the claim's death cue before
+  launching the detached attend thread, so a failed launch still publishes
+  death before census release. The worker ends with `settle`. Fuel is
   `parent - 1`, so it bounds depth, not fan-out.
 - `AgentLog::fork` imports context for `mnemon`, omitting an unanswered
   tool-call frame. `amnemon` imports none. Both share the shell snapshot
@@ -218,11 +225,15 @@ lock belongs to the launcher, not an agent.
   atomically under the inbox lock. Reading, focus and probes renew nothing;
   roots have no reply lease.
 - `/clear` preflights log readiness/availability and rebootability, captures
-  a non-destructive inbox boundary, then prepares a fresh engine. A refused
-  or failed clear leaves live resources unchanged. After `Cleared` commits,
-  it applies that boundary, cancels old work, clears schedules/pins, rebirths
-  readings and installs the prepared engine. Later human input survives,
-  including a coalesced suffix; the boundary precedes old engine teardown.
+  a non-destructive inbox boundary, then prepares a fresh engine. Refusal or
+  failed preparation leaves live resources unchanged. A failed commit ends
+  the session; `Incarnation::discard` passes the unused prepared engine to
+  `Tenancy::discard`, which consumes and certifies it, leaving the current
+  engine, record and registers unchanged. After `Cleared` commits, it applies
+  that boundary, cancels old work, clears schedules/pins, rebirths readings
+  and installs the prepared engine. Later human input survives, including a
+  coalesced suffix; the boundary precedes old engine teardown. `Agent::clear`
+  and `Agent::rewind` return a reason on failure.
 - `/rewind` withdraws context, closes the exchange to fence continuations,
   and rebirths nudge state; it does not rewind shell effects. `/evict` is an
   unconditional explicit edit. `/close` ends life, records `SessionClosed`

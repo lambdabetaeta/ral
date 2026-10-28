@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2b930e85
+generated_at_commit: eb4a62f0
 generated_at_date: 2026-10-28
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
@@ -73,9 +73,12 @@ mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
   and publishes its witnessed `Recorded<Record>` under the writer's mutex.
   `Protocol`, `Display` and `Forensic` are disjoint durable classes;
   `Transient` has no sequence or durable form. The writer owns a `File`
-  directly; an actual write error latches terminal unavailability across
-  clones. `Emitter::check_available` exposes it without attempting another
-  record. Fault delivery remains transient, with stderr fallback.
+  directly. The first uncommitted append (write, encoding or append-lock
+  poison), or durable record refused by the fold, latches `Unavailable`
+  across clones and ends the life supplied by `Emitter::bind`. `emit` returns
+  that failure; `check_available` observes it; `emit_or_end` leaves it to the
+  owner. Producers never report it. The owner's terminus announces it once
+  as `Transient::Fault` on the independent fleet sink and makes it the outcome.
 - `bus/signal.rs::Signal` is `Fact`, `Born`, or `Transient`, addressed by
   `AgentId`. `Emitter::child` publishes birth before that emitter can send
   any work. `bus/sink.rs::Sink` consumes `fact` / `transient`.
@@ -121,11 +124,14 @@ elapsed time, actual ending and how to use `await` / `workers`.
 - Every job waits through `Fleet::wait_settled` for ended helpers' teardown
   inside the output pump before closing; if Stop wins that race, it settles again.
   Missing remote teardown acknowledgment or unavailable session recording
-  makes the conversation terminal. A fault first observed during final
-  draining cancels the affected life and requires another pumped settlement
-  of newly ended helpers before returning `JobEnd`.
-  The next job, “Stopped.” and Synod's closing folder walk cannot overtake
-  those writes or final output
+  makes the conversation terminal. `SettledConversation::run` concludes after
+  its pump: an unavailable writer is announced in a second pump however
+  attendance ended, and the helpers whose lives it ended settle there.
+  The failure overrides the attended outcome, as at every terminus. That
+  census report supersedes the first. `JobEnd.outcome` and the census
+  join failures one per line. A settlement failure severs once, after the
+  pumps. The next job, “Stopped.” and Synod's closing folder walk cannot
+  overtake those writes or final output
   ([[decisions/260806_exchange-ends-at-fleet-quiescence|job settlement]]).
 - `end_fleet(self)` ends the whole shared fleet, drops the owner, then waits
   on the detached `Census`, retaining no launch or factory. Synod recovers
@@ -315,8 +321,10 @@ elapsed time, actual ending and how to use `await` / `workers`.
 - `AgentHandle::end`, `/close`, lease lapse and owner drop cancel life;
   `/quit` cancels the fleet root. `/clear` prepares a replacement and commits
   `Cleared` before abandoning old work/input or replacing its engine.
-  A failed prepare/commit preserves live resources; a successful clear
-  retains input posted after its captured boundary. No target is republished.
+  Failed preparation preserves live resources. A failed commit ends the
+  session and certifies the unused prepared engine, leaving the current
+  engine, record and registers unchanged. A successful clear retains input
+  posted after its captured boundary. No target is republished.
 - Overlays consume their close gestures without cancelling work; matrix
   Esc leaves navigation. Prompt searches consume their own Esc / Ctrl-C, and
   Ctrl-C copies a prompt selection when present; only after these owners
@@ -330,8 +338,10 @@ elapsed time, actual ending and how to use `await` / `workers`.
 ## One-shot headless
 
 `headless.rs::run` uses a per-exchange bus with muted child presentation,
-not muted recording. It seeds one returning root, projects the deliberate
-reply once to stdout (ral text or faithful JSON), and condenses progress to
+not muted recording. Its pumped closure attends; conclusion follows the
+pump. An unavailable writer is announced once in a second pump however
+attendance ended. It seeds one returning root, projects the deliberate reply
+once to stdout (ral text or faithful JSON), and condenses progress to
 stderr. `Headless` keeps one `Blocks` memo per source; totals come from the
 bus meter, including muted children. A host needing multiple human-opened
 jobs instead supplies its own `Sink` to `SettledConversation`.

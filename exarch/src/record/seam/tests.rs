@@ -1,31 +1,8 @@
 use super::*;
 use crate::bus::{FleetSink, Signal, UsageMeter, channel};
 use crate::record::{AgentId, Display, Forensic, Locus, RECORD, log::Log, model};
+use ral_core::process::DurableRoot;
 use std::fs;
-
-#[test]
-fn a_seam_fault_reaches_the_screen_as_a_transient() {
-    let dir = OwnDir::for_test("seam-fault").expect("a test directory");
-    let emit = Emitter::create(&dir).expect("temp record log");
-    let (tx, rx) = channel();
-    emit.attach(Box::new(FleetSink {
-        id: AgentId::new(7),
-        tx: tx.downgrade(),
-        meter: UsageMeter::default(),
-    }));
-
-    emit.report_fault(&io::Error::other("disk is full"));
-
-    match rx.recv().expect("the fault publishes") {
-        Signal::Transient(id, Transient::Fault { text }) => {
-            assert_eq!(id, AgentId::new(7));
-            assert!(text.contains("disk is full"), "{text}");
-        }
-        Signal::Fact(..) | Signal::Born(..) | Signal::Transient(..) => {
-            panic!("expected a Transient::Fault")
-        }
-    }
-}
 
 fn opening(dir: &OwnDir, id: AgentId) -> Forensic {
     Forensic::SessionStarted {
@@ -124,19 +101,13 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
         assert_eq!(from.next(), 3);
         assert_eq!(records.count(), 0);
 
-        emit.report_fault(&error);
         for expected in [head.locus(), retained.locus()] {
             let Signal::Fact(source, fact) = rx.recv().unwrap() else {
-                panic!("only committed facts precede the fault")
+                panic!("only committed facts are published")
             };
             assert_eq!(source, id);
             assert_eq!(fact.locus(), expected);
         }
-        let Signal::Transient(source, Transient::Fault { text }) = rx.recv().unwrap() else {
-            panic!("a broken writer still delivers its transient fault")
-        };
-        assert_eq!(source, id);
-        assert!(text.contains(&detail), "{text}");
         assert!(rx.try_recv().is_err());
 
         drop((emit, first, second));
@@ -228,7 +199,7 @@ fn availability_observation_does_not_wait_for_publication() {
 
 #[cfg(any(unix, windows))]
 #[test]
-fn a_serialization_failure_leaves_the_writer_available_and_untouched() {
+fn a_serialization_failure_latches_the_writer_without_writing() {
     let dir = OwnDir::for_test("serialization-before-write").unwrap();
     let path = dir.path().join(RECORD);
     let emit = Emitter::create(&dir).unwrap();
@@ -247,23 +218,47 @@ fn a_serialization_failure_leaves_the_writer_available_and_untouched() {
         *log_dir = std::ffi::OsString::from_wide(&[0xd800]).into();
     }
 
-    assert!(emit.emit(record.clone()).is_err());
-    emit.check_available().unwrap();
+    let failure = emit.emit(record).unwrap_err();
+    assert_eq!(
+        emit.check_available().unwrap_err().to_string(),
+        failure.to_string()
+    );
     assert_eq!(fs::read(&path).unwrap(), [] as [u8; 0]);
     let (_, records) = emit.since(None).unwrap();
     assert_eq!(records.count(), 0);
-    let fact = emit.emit(Forensic::Cancelled).unwrap();
-    assert_eq!(fact.locus().seq().get(), 1);
-    let bytes = fs::read(&path).unwrap();
-    assert_eq!(fact.locus().bytes(), 0..bytes.len() as u64);
-    assert_locus(&bytes, fact.locus());
-
-    emit.fail_after(0);
-    let failure = emit.emit(Forensic::Cancelled).unwrap_err();
-    let refused = emit.emit(record).unwrap_err();
+    let refused = emit.emit(Forensic::Cancelled).unwrap_err();
     assert_eq!(refused.kind(), failure.kind());
     assert_eq!(refused.to_string(), failure.to_string());
-    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(fs::read(&path).unwrap(), [] as [u8; 0]);
+}
+
+#[test]
+fn a_failure_ends_the_life_bound_to_its_writer() {
+    let dir = OwnDir::for_test("failure-ends-life").unwrap();
+    let emit = Emitter::create(&dir).unwrap();
+    let node = DurableRoot::default().child();
+    emit.bind(node.clone());
+    emit.fail_after(0);
+    assert!(emit.emit(Forensic::Cancelled).is_err());
+    assert!(node.is_cancelled());
+
+    let dir = OwnDir::for_test("bind-after-failure").unwrap();
+    let failed = Emitter::create(&dir).unwrap();
+    failed.fail_after(0);
+    assert!(failed.emit(Forensic::Cancelled).is_err());
+    let later = DurableRoot::default().child();
+    failed.bind(later.clone());
+    assert!(later.is_cancelled());
+
+    let dir = OwnDir::for_test("poison-ends-life").unwrap();
+    let emit = Emitter::create(&dir).unwrap();
+    let node = DurableRoot::default().child();
+    emit.bind(node.clone());
+    emit.poison_append();
+    assert!(!node.is_cancelled());
+    let failure = emit.check_available().unwrap_err();
+    assert!(failure.to_string().contains("panicked"), "{failure}");
+    assert!(node.is_cancelled());
 }
 
 #[test]

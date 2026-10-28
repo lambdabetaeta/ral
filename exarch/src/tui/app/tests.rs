@@ -175,6 +175,7 @@ fn recording_failure_with_independent_root(poison: bool) {
         mpsc::channel().0,
     );
     app.born(other.id(), &other_born);
+    let mut faults = 0;
     let mut fault = None;
     loop {
         let signal = rx
@@ -188,6 +189,7 @@ fn recording_failure_with_independent_root(poison: bool) {
                 if agent == id {
                     assert!(!matches!(&transient, Transient::State(AgentState::Ready)));
                     if let Transient::Fault { text } = &transient {
+                        faults += 1;
                         fault = Some(text.clone());
                     }
                 }
@@ -200,6 +202,7 @@ fn recording_failure_with_independent_root(poison: bool) {
     }
 
     assert!(born.recorder.check_available().is_err());
+    assert_eq!(faults, 1);
     let fault = fault.expect("the terminal recording fault reaches the screen");
     assert_fault_visible(&mut app, id, &fault);
     assert!(matches!(
@@ -236,7 +239,6 @@ fn recording_failure_with_independent_root(poison: bool) {
 #[test]
 fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
     use crate::agent::outcome::Outcome;
-    use crate::agent::spawn::{AsyncSpawn, spawn_async_with};
     use crate::agent::testkit::{inbox, scripted, set_provider, trunk};
     use crate::bus::{AgentOutcome, FleetBus, Item, Next};
     use crate::provider::ProviderError;
@@ -247,7 +249,7 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
     for poison in [false, true] {
         let mut parent = trunk(true);
         let fleet = parent.fleet.clone();
-        let child = parent.fork_named("failing").unwrap();
+        let mut child = parent.fork_named("failing").unwrap();
         let id = child.id();
         let recorder = child.recorder();
         let handle = child.handle();
@@ -280,20 +282,26 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
         );
         let (arrived, finalizing) = mpsc::channel();
         let (release, wait) = mpsc::channel();
-        spawn_async_with(
-            child,
-            AsyncSpawn {
+        let child_emit = bus.emitter(parent.id()).child(
+            id,
+            Born {
+                log_dir: child.log_dir().clone(),
                 name: "failing".into(),
-                prompt: Some("finish attendance first".into()),
+                parent: Some(parent.id()),
                 resumed: None,
+                recorder: child.recorder(),
             },
-            &bus.emitter(parent.id()),
-            move || {
-                arrived.send(()).unwrap();
-                wait.recv_timeout(Duration::from_secs(5)).unwrap();
-            },
-        )
-        .unwrap();
+        );
+        child.seed("finish attendance first".into());
+        child
+            .engine
+            .publish_death_on_release(child_emit.fleet_sink());
+        let worker = std::thread::spawn(move || {
+            let outcome = child.attend(&child_emit);
+            arrived.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            child.settle(outcome, &child_emit);
+        });
         finalizing
             .recv_timeout(Duration::from_secs(5))
             .expect("attendance reaches the finalization boundary while still usable");
@@ -315,6 +323,7 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
         release.send(()).unwrap();
 
         let rx = bus.rx();
+        let mut faults = 0;
         let mut fault = None;
         loop {
             let signal = rx
@@ -330,6 +339,7 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
                     if agent == id {
                         match &transient {
                             Transient::Fault { text } => {
+                                faults += 1;
                                 assert!(text.contains(&cause), "{text}");
                                 fault = Some(text.clone());
                             }
@@ -354,6 +364,7 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
                 }
             }
         }
+        assert_eq!(faults, 1);
         assert_fault_visible(&mut app, id, fault.as_deref().unwrap());
         assert!(matches!(
             app.tabs.status(id).unwrap().state,
@@ -399,6 +410,7 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
         assert!(format!("{:?}", parent.rendered_messages()).contains("still usable"));
         drop(parent);
         fleet.wait_empty();
+        worker.join().unwrap();
     }
 }
 
@@ -493,6 +505,7 @@ fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
             signals.push(signal);
         }
         let mut deaths = 0;
+        let mut faults = 0;
         let mut fault = None;
         for signal in signals {
             match signal {
@@ -501,7 +514,10 @@ fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
                 Signal::Transient(agent, transient) => {
                     assert_eq!(agent, id);
                     match &transient {
-                        Transient::Fault { text } => fault = Some(text.clone()),
+                        Transient::Fault { text } => {
+                            faults += 1;
+                            fault = Some(text.clone());
+                        }
                         Transient::Died => {
                             deaths += 1;
                             assert_fault_visible(
@@ -517,6 +533,7 @@ fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
             }
         }
         assert_eq!(deaths, 1, "empty census certifies the final cue is queued");
+        assert_eq!(faults, 1);
         assert!(recorder.check_available().is_err());
         assert!(matches!(
             app.tabs.status(id).unwrap().state,

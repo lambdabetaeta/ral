@@ -11,8 +11,6 @@
 //! paragraph.  The reasoning lane flushes where the prose after it begins, so
 //! a `∴` never lands mid-answer.
 
-use std::io;
-
 use crate::provider::Delta;
 use crate::record::{Display, Emitter, Transient};
 
@@ -39,52 +37,35 @@ struct Chopper {
 
 impl Chopper {
     /// Accumulate one delta, recording every whole line it completes.
-    ///
-    /// # Errors
-    /// Propagates a failed record of those lines.
-    fn push(&mut self, emitter: &Emitter, delta: &str) -> io::Result<()> {
+    fn push(&mut self, emitter: &Emitter, delta: &str) {
         self.open.push_str(delta);
-        match self.open[self.committed..].rfind('\n') {
-            Some(nl) => self.commit(emitter, self.committed + nl + 1),
-            None => Ok(()),
+        if let Some(nl) = self.open[self.committed..].rfind('\n') {
+            self.commit(emitter, self.committed + nl + 1);
         }
     }
 
     /// Record whatever tail remains — the lane's end, where the prose after a
     /// reasoning run begins, or the step's boundary.  Idempotent: a flushed
     /// lane has no tail until its next delta.
-    ///
-    /// # Errors
-    /// Propagates a failed record of the tail.
-    fn flush(&mut self, emitter: &Emitter) -> io::Result<()> {
-        self.commit(emitter, self.open.len())
+    fn flush(&mut self, emitter: &Emitter) {
+        self.commit(emitter, self.open.len());
     }
 
     /// Record `open[committed..end]` and advance past it.  Text that is
     /// whitespace alone waits instead: it costs nothing to carry, and it
     /// would otherwise open a block holding no words.
-    ///
-    /// # Errors
-    /// Propagates a failed record.
-    fn commit(&mut self, emitter: &Emitter, end: usize) -> io::Result<()> {
+    fn commit(&mut self, emitter: &Emitter, end: usize) {
         if self.open[self.committed..end].trim().is_empty() {
-            return Ok(());
+            return;
         }
         let text = self.open[self.committed..end].to_string();
         self.committed = end;
-        let (record, what) = match self.lane {
-            Lane::Answer => (Display::Answer { text }, "an answer"),
-            Lane::Thinking => (Display::Thinking { text }, "the step's reasoning"),
+        let record = match self.lane {
+            Lane::Answer => Display::Answer { text },
+            Lane::Thinking => Display::Thinking { text },
         };
-        let _recorded = emitter.emit(record).map_err(|e| unrecorded(what, &e))?;
-        Ok(())
+        emitter.emit_or_end(record);
     }
-}
-
-/// A failed commit, named by what it was: the producers are the only place
-/// that knows, and their caller hands the message straight to the user.
-fn unrecorded(what: &str, error: &io::Error) -> io::Error {
-    io::Error::other(format!("{what} was not recorded in record.jsonl: {error}"))
 }
 
 /// The model's stream, recorded: one [`Chopper`] per lane under one roof,
@@ -96,13 +77,11 @@ fn unrecorded(what: &str, error: &io::Error) -> io::Error {
 /// ahead of the answer it deliberated into, so a `∴` never lands mid-answer.
 /// A run no prose follows flushes at the boundary.
 ///
-/// A streaming callback has no error channel of its own, so the first failed
-/// record is stashed and answered at [`Self::close`]; nothing records after
-/// it, a half-ordered scrollback being worse than a short one.
+/// A failed record fails the writer, so nothing records after it; the
+/// turn's next protocol record answers it.
 pub(crate) struct Stream {
     prose: Chopper,
     trace: Chopper,
-    failed: Option<io::Error>,
 }
 
 impl Default for Stream {
@@ -118,7 +97,6 @@ impl Default for Stream {
                 open: String::new(),
                 committed: 0,
             },
-            failed: None,
         }
     }
 }
@@ -128,18 +106,17 @@ impl Stream {
     /// first, which is where a run ends.  A retry ends the failed attempt's
     /// lanes where they stand; the new attempt opens fresh ones.
     pub(crate) fn push(&mut self, emitter: &Emitter, delta: Delta<'_>) {
-        if self.failed.is_some() {
-            return;
-        }
-        let pushed = match delta {
+        match delta {
             Delta::Think(run) => self.trace.push(emitter, run),
-            Delta::Say(text) => self
-                .trace
-                .flush(emitter)
-                .and_then(|()| self.prose.push(emitter, text)),
-            Delta::Retry { .. } => self.seal(emitter).map(|()| *self = Self::default()),
-        };
-        self.failed = pushed.err();
+            Delta::Say(text) => {
+                self.trace.flush(emitter);
+                self.prose.push(emitter, text);
+            }
+            Delta::Retry { .. } => {
+                self.seal(emitter);
+                *self = Self::default();
+            }
+        }
     }
 
     /// Close the step at whichever boundary ends the stream — completed,
@@ -147,24 +124,16 @@ impl Stream {
     /// retire its live edge.  The boundary follows whether or not the tails
     /// held: a live edge outliving its turn is the one failure a printer
     /// cannot recover from on its own.
-    ///
-    /// # Errors
-    /// The first record that failed anywhere in the step.
-    pub(crate) fn close(mut self, emitter: &Emitter) -> io::Result<()> {
-        let sealed = match self.failed.take() {
-            Some(error) => Err(error),
-            None => self.seal(emitter),
-        };
+    pub(crate) fn close(mut self, emitter: &Emitter) {
+        self.seal(emitter);
         emitter.transient(Transient::Boundary);
-        sealed
     }
 
     /// The reasoning tail no prose followed, then the prose tail — the same
     /// two lanes in the same order a prose delta takes them.
-    fn seal(&mut self, emitter: &Emitter) -> io::Result<()> {
-        self.trace
-            .flush(emitter)
-            .and_then(|()| self.prose.flush(emitter))
+    fn seal(&mut self, emitter: &Emitter) {
+        self.trace.flush(emitter);
+        self.prose.flush(emitter);
     }
 }
 

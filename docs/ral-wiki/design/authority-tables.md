@@ -689,7 +689,7 @@ spelling.
   apart; a bare deny still vetoes by name.
 - **A head that names no file has no program**, so no table judges it: 127, or
   126 when the file is not executable, never a denial
-  ([[decisions/261004_exec-rules|exec-rules]]).
+  ([[internals/exec-judgment|exec-judgment]]).
 
 ### Carriers and the linker
 

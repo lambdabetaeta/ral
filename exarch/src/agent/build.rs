@@ -20,7 +20,7 @@ use ral_core::data::datum::Datum as _;
 use ral_core::engine::EngineInstaller;
 use ral_core::own::OwnDir;
 use ral_core::path::{CwdPath, EnginePath, GuestPath};
-use ral_core::process::Scope;
+use ral_core::process::{Scope, ScopeNode};
 use ral_core::protocol::channel::{Liveness, WireStream};
 use ral_core::protocol::{Attach, EngineSpec, Origin, Root};
 use ral_core::sync::LockExt;
@@ -223,14 +223,15 @@ impl Fleet {
         parent: Option<Mailbox>,
         name: &str,
         born: Instant,
-    ) -> Result<(Scope, Inbox), Unborn> {
-        Ok(match parent {
+    ) -> Result<(Scope, ScopeNode, Inbox), Unborn> {
+        let (under, life, owing) = match parent {
             Some(mailbox) => {
                 let (life, owing) = mailbox.adopt(name.into(), born)?;
-                (mailbox.scope(), Inbox::new(life, Some(owing)))
+                (mailbox.scope(), life, Some(owing))
             }
-            None => ((*self.root).clone(), Inbox::new(self.root.child(), None)),
-        })
+            None => ((*self.root).clone(), self.root.child(), None),
+        };
+        Ok((under, life.clone(), Inbox::new(life, owing)))
     }
 }
 impl Agent {
@@ -247,7 +248,8 @@ impl Agent {
         } = b;
         let id = log.id();
         let started = Instant::now();
-        let (under, inbox) = fleet.lodge(parent, tenancy.claim().name(), started)?;
+        let (under, life, inbox) = fleet.lodge(parent, tenancy.claim().name(), started)?;
+        log.record_emitter().bind(life); // A failed writer ends this life.
         let handle = AgentHandle(Arc::new(Shared {
             id,
             name: tenancy.claim().name().to_string(),
@@ -455,11 +457,19 @@ impl Agent {
         })
         .map_err(|why| why.to_string())
     }
-    pub(crate) fn clear(&mut self) -> io::Result<()> {
-        self.log.borrow().prepare_clear()?;
+    pub(crate) fn clear(&mut self) -> Result<(), String> {
+        self.log
+            .borrow()
+            .prepare_clear()
+            .map_err(|why| why.to_string())?;
         let boundary = self.inbox.clear_boundary();
-        let fresh = self.engine.prepare_rebirth().map_err(io::Error::other)?;
-        self.log.borrow_mut().clear()?;
+        let fresh = self.engine.prepare_rebirth()?;
+        // Bound, so the log's borrow ends before the engine is touched.
+        let committed = self.log.borrow_mut().clear();
+        if let Err(failure) = committed {
+            self.engine.discard(fresh);
+            return Err(failure.to_string());
+        }
 
         self.inbox.apply_clear(boundary);
         self.schedules.clear();
@@ -470,7 +480,10 @@ impl Agent {
     }
     pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {
         self.couple(emit);
-        self.log.borrow_mut().rewind(anchor)?;
+        self.log
+            .borrow_mut()
+            .rewind(anchor)
+            .map_err(|e| e.to_string())?;
         self.inbox.close_exchange();
         self.readings.nudges = self.readings.nudges.reborn();
         Ok(())
@@ -584,7 +597,7 @@ impl Drop for Agent {
         self.schedules.clear();
         if !std::thread::panicking() {
             self.recorder()
-                .emit_or_report(crate::record::Forensic::SessionEnded);
+                .emit_or_end(crate::record::Forensic::SessionEnded);
         }
     }
 }

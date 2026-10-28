@@ -78,7 +78,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     cwd with only `.` folded, so the guard judges the file the kernel will
     reach and the launcher runs that very file, by its real path, under the
     shown spelling as `argv[0]`
-    ([[decisions/261004_exec-rules|exec-rules]]).
+    ([[internals/exec-judgment|exec-judgment]]).
   - **The argv-shape step is one refused set read at two moments.**
     `vet::reject_exec_arg` maps each argument's head (`Value::heads`) through
     `RefusedArg::of_head` (`core/src/ty/exec_arg.rs`) and carries the shape's own `remedy`; the

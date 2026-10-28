@@ -355,7 +355,7 @@ fn fuel_bounds_depth_not_fanout() {
 #[test]
 fn agent_start_refuses_after_clear() {
     let (desk, _fleet, agent) = spawnable_desk(3);
-    agent.inbox.abandon(crate::bus::Queue::Discard);
+    agent.inbox.abandon(crate::bus::Queue::Keep);
     let err = with_parked(&desk, |desk, session| {
         desk.ask(start_req(session, "hi", "helper"))
     })

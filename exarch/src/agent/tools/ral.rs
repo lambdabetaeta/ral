@@ -7,7 +7,7 @@ use crate::agent::Agent;
 use crate::bus::Emitter;
 use crate::provider::tools::{CALL_TIMEOUT_SECS, COMMAND, DESCRIPTION_MAX, RAL};
 use crate::record::ToolResult as SessionToolResult;
-use crate::record::{BlockId, Display, Verdict};
+use crate::record::{BlockId, Display, Unavailable, Verdict};
 use ral_core::process::Scope;
 use serde_json::Value;
 
@@ -65,35 +65,34 @@ pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 
 /// Rail header and error block for a malformed call, and the result to commit.
 fn invalid_input(id: String, reason: &str, session: &Agent) -> SessionToolResult {
-    let call = record_call(session, INVALID_INPUT.to_string(), None);
     let msg = input_error(reason);
-    record_result(session, &msg, true, call);
+    if let Ok(call) = record_call(session, INVALID_INPUT.to_string(), None) {
+        record_result(session, &msg, true, call);
+    }
     SessionToolResult { id, content: msg }
 }
 
-/// Record the call's display commit through the seam, keeping the witnessed
-/// [`BlockId`] so the paired result can address it directly — the mechanism
-/// that retires the view's tail-walk.  A failed append surfaces as an error
-/// row; the paired result is then simply not recorded, having no target.
-fn record_call(session: &Agent, cmd: String, summary: Option<String>) -> Option<BlockId> {
-    match session.recorder().emit(Display::ToolCall {
-        tool: RAL.name.to_string(),
-        cmd,
-        summary,
-    }) {
-        Ok(recorded) => Some(BlockId::new(recorded.locus().seq())),
-        Err(error) => {
-            session.recorder().report_fault(&error);
-            None
-        }
-    }
+/// Record the call's display commit; the witnessed [`BlockId`] addresses its
+/// paired result. A call whose row cannot be recorded is not made.
+fn record_call(
+    session: &Agent,
+    cmd: String,
+    summary: Option<String>,
+) -> Result<BlockId, Unavailable> {
+    session
+        .recorder()
+        .emit(Display::ToolCall {
+            tool: RAL.name.to_string(),
+            cmd,
+            summary,
+        })
+        .map(|recorded| BlockId::new(recorded.locus().seq()))
 }
 
 /// The paired half: what the result told, addressed at the call commit it
 /// answers.
-fn record_result(session: &Agent, content: &str, failed: bool, call: Option<BlockId>) {
-    let Some(call) = call else { return };
-    session.recorder().emit_or_report(Display::Verdict {
+fn record_result(session: &Agent, content: &str, failed: bool, call: BlockId) {
+    session.recorder().emit_or_end(Display::Verdict {
         call,
         verdict: Verdict::of(content, failed),
     });
@@ -116,7 +115,15 @@ pub(crate) fn dispatch(
         Ok(args) => args,
         Err(reason) => return invalid_input(id, &reason, session),
     };
-    let call = record_call(session, command.clone(), Some(description));
+    let call = match record_call(session, command.clone(), Some(description)) {
+        Ok(call) => call,
+        Err(failure) => {
+            return SessionToolResult {
+                id,
+                content: failure.to_string(),
+            };
+        }
+    };
     let crate::agent::Evaluated { text, failed } =
         session.ral(exchange, &command, timeout_secs, emit);
     record_result(session, &text, failed, call);

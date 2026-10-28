@@ -7,7 +7,7 @@ use crate::bus::{
 };
 use crate::clock;
 use crate::provider::{Limit, ProviderError, Recovery};
-use crate::record::{AgentState, Forensic, QuiesceReason, Transient};
+use crate::record::{AgentState, Forensic, QuiesceReason, Transient, Unavailable};
 use crate::schedule::Trigger;
 use ral_core::carrier::Severed;
 use ral_core::process::Scope;
@@ -39,9 +39,6 @@ impl Agent {
         self.couple(emit);
         let mut settled = None;
         let lost = loop {
-            if self.check_available().is_err() {
-                break None;
-            }
             if let Some(s) = self.engine.severed() {
                 break Some(s);
             }
@@ -81,18 +78,15 @@ impl Agent {
                 }
             }),
         };
-        if let Err(error) = self.abort_unready() {
-            self.end_unavailable(&error);
-            return AgentOutcome::Failed(error.to_string());
-        }
         debug_assert!(
-            self.log.borrow().context().is_ready(),
-            "a usable attended session must admit a fresh prompt"
+            !self.handle.is_live() || self.log.borrow().context().is_ready(),
+            "a live owner's exchange ends prompt-admissible"
         );
         settled
     }
     fn draw(&self) -> Option<Drawn> {
-        if self.check_available().is_err() {
+        // An ended life draws nothing and announces no idle state.
+        if !self.handle.is_live() {
             return None;
         }
         if self.inbox.is_empty() {
@@ -104,12 +98,6 @@ impl Agent {
         self.inbox.draw(|state| self.park_mode(state))
     }
     fn take_up(&mut self, drawn: Drawn, emit: &Emitter) -> Result<Step, Severed> {
-        if let Err(error) = self.check_available() {
-            return Ok(Step::settled(
-                AgentOutcome::Failed(error.to_string()),
-                ControlFlow::Break(()),
-            ));
-        }
         let Drawn { next, opening } = drawn;
         let item = match &next {
             Next::Read(cmd) => {
@@ -134,13 +122,13 @@ impl Agent {
                 Err(error)
             }
             Err(Fault::Severed(s)) => return Err(s),
-            Err(Fault::Unavailable(why)) => {
+            Err(Fault::Unavailable(failure)) => {
                 return Ok(Step::settled(
-                    AgentOutcome::Failed(why),
+                    AgentOutcome::Failed(failure.to_string()),
                     ControlFlow::Break(()),
                 ));
             }
-            Err(Fault::Log(why) | Fault::Panicked(why)) => {
+            Err(Fault::Refused(why) | Fault::Panicked(why)) => {
                 self.note_error(&why);
                 return Ok(Step::settled(
                     AgentOutcome::Failed(why),
@@ -148,12 +136,6 @@ impl Agent {
                 ));
             }
         };
-        if self.check_available().is_err() {
-            return Ok(Step::settled(
-                agent_outcome(&outcome),
-                ControlFlow::Break(()),
-            ));
-        }
         self.follow_up(outcome.as_ref())?;
         let flow = if matches!(
             (&self.handle.0.role, &outcome),
@@ -167,7 +149,7 @@ impl Agent {
     }
     fn attempt(&mut self, exchange: &Scope, item: &Item, emit: &Emitter) -> Result<Outcome, Fault> {
         let active = self.handle.current_provider();
-        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.deliberate(
                 exchange,
                 &active,
@@ -175,10 +157,10 @@ impl Agent {
                 item.continues(),
                 emit,
             )
-        }));
-        self.abort_unready()
-            .map_err(|error| Fault::Unavailable(error.to_string()))?;
-        attempt.unwrap_or_else(|payload| {
+        }))
+        .unwrap_or_else(|payload| {
+            // The unwind skipped deliberate's own repair.
+            self.abort_unready()?;
             Err(Fault::Panicked(format!(
                 "{WORKER_PANIC_PREFIX}{}",
                 panic_msg(&payload)
@@ -186,11 +168,10 @@ impl Agent {
         })
     }
     fn record_failure(&self, error: &ProviderError) {
-        self.recorder().emit_or_report(Forensic::ProviderError {
+        self.recorder().emit_or_end(Forensic::ProviderError {
             error: error.clone(),
         });
         if let ProviderError::Refused(refusal) = error
-            && self.check_available().is_ok()
             && self.resumes_at_reset()
             && let Recovery::Deferred(at) = refusal.recovery()
         {
@@ -211,9 +192,6 @@ impl Agent {
         else {
             return Ok(());
         };
-        if self.check_available().is_err() {
-            return Ok(());
-        }
         match self.log.borrow().context().current_prompt() {
             Some(prompt) => self.inbox.nudge(prompt, text),
             None => self.note_error(&format!(
@@ -239,7 +217,7 @@ impl Agent {
         self.residency(state.leased(), state.has_busy_children())
     }
     fn residency(&self, leased: bool, busy: bool) -> ParkMode {
-        if self.engine.severed().is_some() || self.check_available().is_err() {
+        if self.engine.severed().is_some() {
             return ParkMode::Quiesce;
         }
         if matches!(self.handle.0.role, Role::Converses) && self.fleet.launch.trunk.attended() {
@@ -282,9 +260,12 @@ impl Agent {
             )),
         }
     }
-    pub(super) fn abort_unready(&self) -> std::io::Result<()> {
+    /// Quiesce what an exchange left owed.
+    ///
+    /// # Errors
+    /// A required repair failed: the session has ended.
+    pub(super) fn abort_unready(&self) -> Result<(), Unavailable> {
         let mut log = self.log.borrow_mut();
-        log.check_available()?;
         if !log.context().is_ready() {
             log.quiesce(QuiesceReason::Aborted)?;
         }

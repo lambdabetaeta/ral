@@ -327,7 +327,7 @@ impl Agent {
         // The card is a rendering the scrollback fold rebuilds at draw time,
         // never what the log carries.
         self.recorder()
-            .emit_or_report(crate::record::Display::Context { rows: survey.rows });
+            .emit_or_end(crate::record::Display::Context { rows: survey.rows });
     }
 }
 

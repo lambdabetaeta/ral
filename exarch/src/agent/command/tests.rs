@@ -22,7 +22,7 @@ fn commands_after_a_display_first_failure_do_not_open_or_rewrite_sessions() {
     let emit = Emitter::new(tx, session.id());
     assert!(matches!(
         session.attend(&emit),
-        crate::bus::AgentOutcome::Failed(_)
+        crate::bus::AgentOutcome::Cancelled
     ));
     assert!(!session.handle().is_live());
     assert_eq!(session.log_dir().read("record.jsonl").unwrap(), before);

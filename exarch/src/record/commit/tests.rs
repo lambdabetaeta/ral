@@ -40,7 +40,7 @@ fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
     stream.push(&emit, Delta::Think("weighing the cases\n"));
     stream.push(&emit, Delta::Say("First paragraph.\n\n"));
     stream.push(&emit, Delta::Say("Second paragraph.\n\ntail"));
-    stream.close(&emit).unwrap();
+    stream.close(&emit);
 
     let commits = drain_display(&rx);
     match commits.as_slice() {
@@ -72,7 +72,7 @@ fn a_retry_seals_the_failed_attempts_lanes() {
     );
     stream.push(&emit, Delta::Think("second try"));
     stream.push(&emit, Delta::Say("answer"));
-    stream.close(&emit).unwrap();
+    stream.close(&emit);
 
     match drain_display(&rx).as_slice() {
         [
@@ -94,7 +94,7 @@ fn a_wordless_step_seals_its_reasoning_at_the_boundary() {
     let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
     stream.push(&emit, Delta::Think("straight to the shell\n"));
-    stream.close(&emit).unwrap();
+    stream.close(&emit);
 
     match drain_display(&rx).as_slice() {
         [Display::Thinking { text }] => assert_eq!(text, "straight to the shell\n"),
@@ -113,7 +113,7 @@ fn the_records_reassemble_the_whole_stream() {
     for delta in deltas {
         stream.push(&emit, Delta::Say(delta));
     }
-    stream.close(&emit).unwrap();
+    stream.close(&emit);
 
     let recorded: String = drain_display(&rx)
         .into_iter()
@@ -143,7 +143,7 @@ fn a_line_records_where_it_completes_and_the_open_line_waits() {
     }
 
     stream.push(&emit, Delta::Say("\n```\n"));
-    stream.close(&emit).unwrap();
+    stream.close(&emit);
     match drain_display(&rx).as_slice() {
         [Display::Answer { text }] => assert_eq!(text, "let x = 1\n```\n"),
         other => panic!("expected both lines in one record, got {other:?}"),

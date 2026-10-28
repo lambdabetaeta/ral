@@ -7,7 +7,7 @@ generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 **A grant path carries `written`, the author's spelling, and `real`, what its
 walk reached; every authority is judged on `real`.** `fs` authorises the
 objects the kernel touches; `exec` authorises the file a head will execute
-([[decisions/261004_exec-rules|exec-rules]]), which is the object the kernel
+([[internals/exec-judgment|exec-judgment]]), which is the object the kernel
 judges too. The spelling is kept for rendering and display, never a route to
 authority.
 

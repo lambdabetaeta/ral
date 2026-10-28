@@ -519,7 +519,7 @@ fn apply_login(
     let text = format!("[{action} {label}{next}]");
     app.tabs
         .focused_recorder()
-        .emit_or_report(crate::record::Forensic::SystemNote { text });
+        .emit_or_end(crate::record::Forensic::SystemNote { text });
 }
 
 #[cfg(test)]

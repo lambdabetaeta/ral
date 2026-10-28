@@ -47,7 +47,8 @@ impl ExarchDesk {
             .services
             .log
             .borrow_mut()
-            .evict(span, Some(note), EditAuthority::Model);
+            .evict(span, Some(note), EditAuthority::Model)
+            .map_err(|why| why.to_string());
         // The act row is this eviction's only row.
         self.services.commit_act(
             DeskAct::ContextEvict,
@@ -70,7 +71,7 @@ impl ExarchDesk {
             .log
             .borrow()
             .record_emitter()
-            .emit_or_report(crate::record::Forensic::HarnessResult { text });
+            .emit_or_end(crate::record::Forensic::HarnessResult { text });
         survey
             .map(|survey| Survey::from(survey).encode())
             .map_err(Error::new)

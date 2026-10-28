@@ -5,27 +5,38 @@
 
 use crate::agent::Agent;
 use crate::bus::{AgentOutcome, Emitter};
-use crate::record::{AgentLog, Born, Memory, Resumed};
+use crate::record::{AgentLog, Born, Memory, Resumed, Transient, Unavailable};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 impl Agent {
-    pub(crate) fn settle(mut self, outcome: AgentOutcome, emit: &Emitter) {
-        let sink = emit.fleet_sink();
-        let outcome = match self.check_available() {
-            Ok(()) => outcome,
-            Err(error) => {
-                self.end_unavailable_with(&error, |error| {
-                    crate::record::Emitter::report_fault_with(error, |fault| sink.transient(fault));
-                });
-                AgentOutcome::Failed(error.to_string())
-            }
-        };
+    /// Retire with the concluded outcome, then drop: `SessionEnded` and engine
+    /// teardown precede the claim's terminal cue.
+    pub(crate) fn settle(self, outcome: AgentOutcome, emit: &Emitter) {
+        let outcome = self.conclude(outcome, emit);
         self.inbox.retire(outcome);
-        self.engine.publish_death_on_release(sink);
-        // SessionEnded and engine teardown precede the claim's terminal cue.
         drop(self);
     }
+
+    /// `outcome`, unless recording failed: the failure then overrides it,
+    /// announced once.
+    fn conclude(&self, outcome: AgentOutcome, emit: &Emitter) -> AgentOutcome {
+        match self.check_available() {
+            Ok(()) => outcome,
+            Err(failure) => {
+                announce(&failure, emit);
+                AgentOutcome::Failed(failure.to_string())
+            }
+        }
+    }
+}
+
+/// Announce a recording failure at its owner's end, on `emit`'s fleet
+/// channel, which the failed writer cannot block.
+pub(crate) fn announce(failure: &Unavailable, emit: &Emitter) {
+    emit.fleet_sink().transient(Transient::Fault {
+        text: failure.to_string(),
+    });
 }
 
 /// Mints `root-{N}` names for an unnamed root; a name need only be
@@ -81,7 +92,7 @@ pub(crate) fn spawn_root(
     // desk's own HarnessCall commit instead.
     session
         .recorder()
-        .emit_or_report(crate::record::Display::ToolCall {
+        .emit_or_end(crate::record::Display::ToolCall {
             tool: tool.to_string(),
             cmd: "(waiting for you)".to_string(),
             summary: Some(format!("Agent {name} spawned ({tool}).")),
@@ -120,25 +131,9 @@ pub(crate) struct SpawnedChild {
 /// # Errors
 /// Returns `Err(String)` if the worker thread could not be spawned.
 pub(crate) fn spawn_async(
-    child: Agent,
-    spec: AsyncSpawn,
-    emit: &Emitter,
-) -> Result<SpawnedChild, String> {
-    spawn_async_with(
-        child,
-        spec,
-        emit,
-        #[cfg(test)]
-        || {},
-    )
-}
-
-/// Tests can hold the boundary between attendance and finalization.
-pub(crate) fn spawn_async_with(
     mut child: Agent,
     spec: AsyncSpawn,
     emit: &Emitter,
-    #[cfg(test)] before_settle: impl FnOnce() + Send + 'static,
 ) -> Result<SpawnedChild, String> {
     let AsyncSpawn {
         name,
@@ -187,13 +182,11 @@ pub(crate) fn spawn_async_with(
                 child.attend(&child_emit)
             }))
             .unwrap_or_else(|_| {
-                recorder.emit_or_report(crate::record::Forensic::Error {
+                recorder.emit_or_end(crate::record::Forensic::Error {
                     text: "sub-agent panicked".into(),
                 });
                 AgentOutcome::Failed("sub-agent panicked".into())
             });
-            #[cfg(test)]
-            before_settle();
             // A root reports to nobody; `settle` pays only what is still owed.
             child.settle(outcome, &child_emit);
         });

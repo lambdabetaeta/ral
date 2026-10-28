@@ -23,6 +23,7 @@ mod selection;
 mod session;
 mod view;
 
+pub use log::Unavailable;
 pub use model::{ItemKind, Linked, Location, Pointer, Residue, Span, SpanRow, TurnRow};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
@@ -30,7 +31,7 @@ pub use selection::Selection;
 pub(crate) use session::role_label;
 pub use session::{
     AgentLog, GrepAnswer, GrepHit, Inherited, Resumed, TranscriptMessage, TranscriptPart,
-    TranscriptTurn,
+    TranscriptTurn, Uncommitted,
 };
 pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View, context_rows_card};
 
@@ -520,8 +521,9 @@ pub enum Transient {
     Unpin {
         key: String,
     },
-    /// A seam append failure, or a channel elision marker: a fact about the
-    /// plumbing itself, not about the session, so it has no durable form.
+    /// A session's terminal recording failure, announced once by its owner,
+    /// or a channel elision marker: a fact about the plumbing, not about the
+    /// session, so it has no durable form.
     Fault {
         text: String,
     },

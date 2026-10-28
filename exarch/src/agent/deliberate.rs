@@ -16,7 +16,7 @@ use crate::record::ToolResult as SessionToolResult;
 use crate::record::commit::Stream;
 use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient, Voice};
 use ral_core::data::FOValue;
-use ral_core::process::{CancelCause, Scope};
+use ral_core::process::Scope;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -35,8 +35,8 @@ impl Agent {
     /// `/model` swap lands on the next item rather than mid-item.
     ///
     /// # Errors
-    /// A provider round-trip failed, the engine was lost, or a session-log
-    /// mutation failed.
+    /// A provider round-trip failed, the engine was lost, a session-log mutation
+    /// was refused, or recording failed ([`Fault::Unavailable`]), which has ended the session.
     pub fn deliberate(
         &mut self,
         exchange: &Scope,
@@ -46,15 +46,10 @@ impl Agent {
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
         self.couple(emit);
-        let result = self
-            .check_available()
-            .map_err(|error| Fault::Unavailable(error.to_string()))
-            .and_then(|()| self.deliberation(exchange, provider, prompt, continues, emit));
-        if let Err(error) = self.abort_unready() {
-            self.end_unavailable(&error);
-            return Err(Fault::Unavailable(error.to_string()));
-        }
-        result
+        let deliberated = self.deliberation(exchange, provider, prompt, continues, emit);
+        // Every return repairs; an unwind is `attempt`'s.
+        self.abort_unready()?;
+        deliberated
     }
 
     fn deliberation(
@@ -70,15 +65,10 @@ impl Agent {
         // reply staged by a batch a cancel or an error cut short dies here.
         self.reply.borrow_mut().take();
         if let Some((text, voice)) = prompt {
-            self.log
-                .borrow_mut()
-                .append_user(text, continues, voice)
-                .map_err(Fault::Log)?;
+            self.log.borrow_mut().append_user(text, continues, voice)?;
         }
         let mut retried = false;
         loop {
-            self.check_available()
-                .map_err(|error| Fault::Unavailable(error.to_string()))?;
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand.
             if exchange.is_cancelled() {
@@ -111,8 +101,6 @@ impl Agent {
         provider: &Provider,
         retried: bool,
     ) -> Result<Turn, Fault> {
-        self.check_available()
-            .map_err(|error| Fault::Unavailable(error.to_string()))?;
         let recorder = self.recorder();
         let turn = self.log.borrow().context().next_id();
         recorder
@@ -122,11 +110,14 @@ impl Agent {
                 via: provider.via().cloned(),
             })
             .map(drop)?;
-        let messages = self.log.borrow().render_messages().map_err(Fault::Log)?;
+        let messages = self
+            .log
+            .borrow()
+            .render_messages()
+            .map_err(Fault::Refused)?;
         let system = self.log.borrow().context().system().clone();
         recorder.transient(Transient::State(AgentState::AwaitingModel));
         let mut stream = Stream::default();
-        let request = exchange.child();
         let taken = provider.complete(
             crate::provider::Request {
                 system: &system,
@@ -144,40 +135,26 @@ impl Agent {
                 if let Delta::Retry { cause, lost } = delta {
                     recorder.transient(Transient::Boundary);
                     if let Some(usage) = lost {
-                        recorder.emit_or_report(Forensic::UsageDelta {
+                        recorder.emit_or_end(Forensic::UsageDelta {
                             usage,
                             generation: None,
                             provider: None,
                         });
                     }
-                    recorder.emit_or_report(Forensic::Retried {
+                    recorder.emit_or_end(Forensic::Retried {
                         error: cause.clone(),
                     });
                 }
-                if recorder.check_available().is_err() {
-                    request.cancel(CancelCause::Cancelled);
-                }
             },
-            &request,
+            exchange,
         );
         let cancelled =
             exchange.is_cancelled() || matches!(taken, Err(ProviderError::Cancelled(_)));
-        let closed = stream.close(&recorder);
-        self.check_available()
-            .map_err(|error| Fault::Unavailable(error.to_string()))?;
+        stream.close(&recorder);
         match taken {
-            _ if cancelled => {
-                abandoned(&recorder, closed);
-                self.cancelled().map(Turn::Ends)
-            }
-            Ok(step) => {
-                closed?;
-                self.settle_turn(step)
-            }
-            Err(error) => {
-                abandoned(&recorder, closed);
-                self.relieve(exchange, error, provider, retried)
-            }
+            _ if cancelled => self.cancelled().map(Turn::Ends),
+            Ok(step) => self.settle_turn(step),
+            Err(error) => self.relieve(exchange, error, provider, retried),
         }
     }
 
@@ -195,7 +172,7 @@ impl Agent {
         if let Some(window) = provider.context_window()
             && *listed != Some(window)
         {
-            self.recorder().emit_or_report(Forensic::WindowNarrowed {
+            self.recorder().emit_or_end(Forensic::WindowNarrowed {
                 context_window: window,
             });
         }
@@ -239,14 +216,11 @@ impl Agent {
         }
         admit_assistant(&mut assistant_message);
         let tool_ids = tool_calls.iter().map(|tc| tc.call_id.clone()).collect();
-        self.log
-            .borrow_mut()
-            .append_assistant(
-                assistant_message,
-                tool_ids,
-                stop_reason.as_ref().map(|r| r.raw().to_string()),
-            )
-            .map_err(Fault::Log)?;
+        self.log.borrow_mut().append_assistant(
+            assistant_message,
+            tool_ids,
+            stop_reason.as_ref().map(|r| r.raw().to_string()),
+        )?;
         match (cut_short, tool_calls.is_empty()) {
             // The cut rides on whole, cause and all: the caller's own
             // `Forensic::ProviderError` is its one record, and the renderers
@@ -287,11 +261,8 @@ impl Agent {
         provider: &Provider,
         emit: &Emitter,
     ) -> Result<ControlFlow<Outcome>, Fault> {
-        let results = self.run_batch(exchange, calls, emit)?;
-        self.log
-            .borrow_mut()
-            .append_tool_results(results)
-            .map_err(Fault::Log)?;
+        let results = self.run_batch(exchange, calls, emit);
+        self.log.borrow_mut().append_tool_results(results)?;
         self.readings.nudges.reset();
         // A call in the batch may have found the engine gone.
         if let Some(s) = self.engine.severed() {
@@ -316,8 +287,7 @@ impl Agent {
                     if self.arrive(&item)? {
                         self.log
                             .borrow_mut()
-                            .append_steering(item.text(), item.voice())
-                            .map_err(Fault::Log)?;
+                            .append_steering(item.text(), item.voice())?;
                     }
                 }
                 Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
@@ -331,8 +301,7 @@ impl Agent {
         if !steering.is_empty() {
             self.log
                 .borrow_mut()
-                .append_steering(steering.join("\n"), Voice::Harness)
-                .map_err(Fault::Log)?;
+                .append_steering(steering.join("\n"), Voice::Harness)?;
         }
         Ok(ControlFlow::Continue(()))
     }
@@ -382,12 +351,10 @@ impl Agent {
         exchange: &Scope,
         tool_calls: Vec<ToolCall>,
         emit: &Emitter,
-    ) -> Result<Vec<SessionToolResult>, Fault> {
+    ) -> Vec<SessionToolResult> {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
-            self.check_available()
-                .map_err(|error| Fault::Unavailable(error.to_string()))?;
             if exchange.is_cancelled() {
                 results.push(cancelled_result(call.call_id));
                 results.extend(it.map(|r| cancelled_result(r.call_id)));
@@ -404,9 +371,7 @@ impl Agent {
             }
             results.push(self.invoke(exchange, call, emit));
         }
-        self.check_available()
-            .map_err(|error| Fault::Unavailable(error.to_string()))?;
-        Ok(results)
+        results
     }
 
     fn invoke(&self, exchange: &Scope, call: ToolCall, emit: &Emitter) -> SessionToolResult {
@@ -465,15 +430,6 @@ impl Agent {
     fn cancelled(&self) -> Result<Outcome, Fault> {
         self.log.borrow_mut().quiesce(QuiesceReason::Cancelled)?;
         Ok(Outcome::Cancelled)
-    }
-}
-
-/// A turn's close on an exit already cancelling or failing: the streamed
-/// prefix is what the user saw, so it still commits, best-effort, and the
-/// exit in flight stays the one reported.
-fn abandoned(recorder: &crate::record::Emitter, closed: std::io::Result<()>) {
-    if let Err(error) = closed {
-        recorder.report_fault(&error);
     }
 }
 

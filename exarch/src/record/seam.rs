@@ -10,8 +10,9 @@
 //! sequence number.
 
 use super::log::Log;
-use super::{Cursor, Publish, Record, Recorded, Transient};
+use super::{Cursor, Publish, Record, Recorded, Transient, Unavailable};
 use ral_core::own::OwnDir;
+use ral_core::process::ScopeNode;
 use std::fmt;
 use std::io;
 use std::sync::Arc;
@@ -83,13 +84,22 @@ impl Emitter {
         self.log.since(after)
     }
 
-    /// Observe this shared writer's availability without taking the append lock.
-    /// An observation reserves nothing; append checks again under the lock.
+    /// Observe without the append lock; a poisoned lock is latched here.
     ///
     /// # Errors
-    /// Returns the terminal write failure, or a poisoned append-lock error.
-    pub fn check_available(&self) -> io::Result<()> {
+    /// Returns the writer's first failure.
+    pub fn check_available(&self) -> Result<(), Unavailable> {
         self.log.check_available()
+    }
+
+    /// End `life` when this writer fails, at once if it has.
+    pub(crate) fn bind(&self, life: ScopeNode) {
+        self.log.bind(life);
+    }
+
+    /// Latch `cause` unless a failure stands, ending the bound life.
+    pub(super) fn fail(&self, cause: io::Error) -> Unavailable {
+        self.log.fail(cause)
     }
 
     /// Fail after writing `bytes` more bytes to this writer's real file.
@@ -109,40 +119,21 @@ impl Emitter {
     /// # Errors
     /// Propagates a failed append: a write to the one authoritative log is a
     /// session error, never a shrug.
-    pub fn emit(&self, record: impl Into<Record>) -> io::Result<Recorded<Record>> {
+    pub fn emit(&self, record: impl Into<Record>) -> Result<Recorded<Record>, Unavailable> {
         let record = record.into();
         Ok(Recorded::new(self.log.append(&record)?, record))
     }
 
-    /// [`Self::emit`] where a failed append has nowhere to go but
-    /// [`Self::report_fault`].
-    pub fn emit_or_report(&self, record: impl Into<Record>) {
-        if let Err(error) = self.emit(record) {
-            self.report_fault(&error);
-        }
+    /// [`Self::emit`] where a failure needs no answer here: it has latched the
+    /// writer and ended the life bound to it, whose owner announces it once.
+    pub fn emit_or_end(&self, record: impl Into<Record>) {
+        drop(self.emit(record));
     }
 
     /// Publish a transient — a delta, the open thinking line, chrome — with no
     /// durable form and no sequence number of its own.
     pub fn transient(&self, t: Transient) {
         self.log.publish_transient(t);
-    }
-
-    /// Report a record that could not be appended as a [`Transient::Fault`]
-    /// instead of the record it could not become: the log itself is what
-    /// just failed, so the failure cannot go through it.  Also prints to
-    /// stderr — the one last resort in the tree — so an unwritable log never
-    /// loses the diagnostic outright even before a printer draws the chrome
-    /// lane it lands in.
-    pub fn report_fault(&self, error: &io::Error) {
-        Self::report_fault_with(error, |fault| self.transient(fault));
-    }
-
-    /// Terminal owners retain a publisher independent of the append lock.
-    pub(crate) fn report_fault_with(error: &io::Error, publish: impl FnOnce(Transient)) {
-        let text = format!("a record was not appended to record.jsonl: {error}");
-        publish(Transient::Fault { text: text.clone() });
-        ral_core::errln!("exarch: {text}");
     }
 }
 

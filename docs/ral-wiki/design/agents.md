@@ -49,9 +49,10 @@ fleet root
 - *Work* is the current delegation extent. Stop, `/clear` and `reply`
   abandon it with `Cancelled`, replacing it beneath the same life. Children
   adopted in it end structurally, including their descendants.
-- *Life* is the owner's extent. End, `/close`, agent cancel and owner drop
-  end it; idle lease lapse does so with `TimedOut`. Dropping an owner ends
-  its subtree: an address cannot leave live work without its consumer.
+- *Life* is the owner's extent. End, `/close`, agent cancel, owner drop and
+  its writer's failure end it; idle lease lapse does so with `TimedOut`.
+  Dropping an owner ends its subtree: an address cannot leave live work
+  without its consumer.
 - `/quit` and whole-fleet shutdown cancel the fleet root. A new root under
   an ended fleet is born cancelled. Signals supply `Terminated` or `Aborted`
   without a second cancellation path.
@@ -62,9 +63,10 @@ fleet root
 
 The agent's ral `Engine` owns loose shell workers independently of delegated
 work. Stop and `reply` preserve them and their incarnation-vouched completion
-batches. The incarnation is a scope under life, parallel to work; `/clear`
-cancels and replaces it even if reboot fails, fencing old batches. A successful
-reboot terminates the old transport; owner destruction ends the current engine
+batches. The incarnation is a scope under life, parallel to work; a committed
+`/clear` cancels and replaces it, fencing old batches and certifying the old
+engine. Failed preparation preserves it; a failed commit ends life.
+Owner destruction ends the current engine
 ([[internals/cancellation|cancellation]]).
 
 ## One inbox, one provenance rule
@@ -83,7 +85,8 @@ monotone, so stale provenance stays stale.
   must adopt through that original work mailbox, never freshen its authority
   after constructing an engine. A refusal leaves no enrolled child.
 - Stop recalls queued human text oldest first; other deliveries live or die
-  by provenance. Reply keeps queued posts; `/clear` discards all of them.
+  by provenance. Reply keeps queued posts; committed `/clear` discards only
+  posts before its captured boundary, preserving later human input.
 - Opening an exchange cancels its predecessor. Its scope is minted at pop,
   so Stop or Esc racing take-up cannot be erased. Declining an already
   claimed worker completion opens nothing and preserves a queued nudge.
@@ -152,11 +155,12 @@ host that boots no further roots.
 - `--resume` reopens roots with no `SessionClosed`, each with its context
   replayed and shell fresh. Pins, schedules, workers and bindings are not
   restored. Headless resume requires exactly one live root record.
-- `/clear` checks engine rebootability before any mutation, then abandons
-  work/queue, cancels and replaces the engine incarnation, clears pins,
-  reboots, clears the context and rebirths readings.
-  An adopted or wire engine refuses before discarding anything. A failed
-  boot after admission leaves the old engine with its work/queue discarded.
+- `/clear` preflights recording/readiness and prepares a fresh engine before
+  mutation. An adopted or wire engine refuses; failed preparation preserves
+  live resources. Only committed `Cleared` permits applying the inbox
+  boundary, abandoning work, clearing registers and replacing the incarnation.
+  A failed commit ends the session and certifies the unused prepared engine,
+  leaving the current engine, record and registers as they were.
 - Names are fleet-unique reservations claimed before engine/log preparation.
   The owner's `Tenancy` releases them on teardown. Host commands alone open
   roots; a model has no session-opening builtin.

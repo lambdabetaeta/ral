@@ -248,6 +248,14 @@ impl Tenancy {
     pub(crate) fn publish_death_on_release(&mut self, sink: Box<dyn Publish>) {
         self.claim.terminal = Some(sink);
     }
+    /// Certify an engine prepared for this tenancy but never installed.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "consuming the prepared engine: nothing can install it once certified"
+    )]
+    pub(crate) fn discard(&self, prepared: Engine) {
+        self.claim.certify(&prepared);
+    }
     /// Install an already-booted engine and certify the outgoing one.
     pub(crate) fn install(&mut self, fresh: Engine) {
         self.claim.certify(&mem::replace(&mut self.engine, fresh));
@@ -360,7 +368,7 @@ impl Fleet {
         if registry.failures.is_empty() {
             Ok(())
         } else {
-            Err(registry.failures.join("; "))
+            Err(registry.failures.join("\n"))
         }
     }
     pub fn nearest_reap(&self) -> Option<Duration> {

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 2b930e85
+verified_at_commit: eb4a62f0
 verified_at_date: 2026-10-28
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable]
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge]
 ---
 
 # Session record: one seam, one log
@@ -18,8 +18,8 @@ operational path behind the [[map/exarch/frontend|frontend]],
 
 `Emitter::emit` takes `impl Into<Record>`, so a live producer can append only
 a `Protocol`, `Display`, or `Forensic` record, and returns the
-`Recorded<Record>` it minted. It delegates to `record::Log::append`, whose mutex
-protects the whole critical section:
+`Recorded<Record>` it minted or `Unavailable`. It delegates to
+`record::Log::append`, whose mutex protects the whole critical section:
 
 1. Serialize the record under its append timestamp as an `Entry` envelope, from
    a borrow.
@@ -29,20 +29,30 @@ protects the whole critical section:
    through the attached weak fleet sink before releasing the lock; the record
    is cloned only for that channel.
 
-**An actual write failure is terminal for every clone of that writer.** The
-first failure retains its cause in a shared monotone latch; later appends
-refuse before serialization, writing or publication. Availability observation
-reads that latch and mutex poison without taking the append lock, so an inbox
-park decision cannot deadlock with a publisher posting back to the inbox.
-Append itself rechecks availability under its lock. Committed sequence and byte cursors do not advance,
-and the owned `File` has no user-space buffer to flush on drop. Serialization
-failure before I/O does not fault the physical writer. An ordinary write fault
-still permits transient publication. If append state is mutex-poisoned,
-terminal lifecycle delivery uses the owner's independent fleet sink without
-recovering the poisoned state; stderr remains the diagnostic fallback. The
-final failure report precedes the terminal death cue, never a durable retry. Records
-are surrendered to the OS, not `fsync`ed: process-crash durability is not a
-power-loss guarantee.
+**One shared latch holds the writer's first `Unavailable`.** It is a leaf
+beside the append mutex and retains the original `io::Error`; the first
+failure wins. Every uncommitted append latches, including encoding failures;
+append-lock poison is latched when first met. A durable record refused by
+the live fold latches too. Later appends return that same failure before
+serialization, writing or publication. Availability observation takes no
+append lock; append checks the latch under its lock. Failed appends advance
+neither committed sequence nor byte cursor, and the owned `File` has no
+user-space buffer to flush on drop.
+
+The latch ends the life node `Fleet::lodge` mints, handed to the writer by
+`Emitter::bind`, from whichever thread latches it. No producer reports the
+failure. The owner's terminus — `settle`, the headless run or
+`SettledConversation::run` — announces it once as
+`Transient::Fault` on the independent fleet sink, which the failed writer
+cannot block, and makes it the outcome. Announcement precedes the terminal
+death cue. A failure first met by `Agent::drop`'s `SessionEnded`, after its
+owner concluded, latches but is announced by no one; what was recorded
+before it stays resumable. Records are surrendered to the OS, not `fsync`ed:
+process-crash durability is not a power-loss guarantee.
+
+Protocol mutations distinguish `Uncommitted::Refused`, which leaves the
+session usable without recording, from `Uncommitted::Unavailable`, which
+means the writer failed and the session ended.
 
 Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
@@ -87,10 +97,11 @@ class that can say it.**
   `Thinking` land line by line while the model streams, before any
   `AssistantMessage` exists — a cancelled or failed step never commits one, and
   some providers never return reasoning in the message at all, so they are the
-  only durable form of what was shown; `ToolCall` lands when the call *starts
-  executing*, which is what the scrollback groups effects under, where the
-  assistant message lands every call at once; `Verdict` lands per call as it
-  finishes, where `ToolResults` lands only when the batch ends and carries no
+  only durable form of what was shown; a ral call's `ToolCall` lands before
+  the call executes, and a failed row prevents it. The scrollback groups effects
+  under it, where the assistant message lands every call at once; `Verdict`
+  lands per call as it finishes, where `ToolResults` lands only when the batch
+  ends and carries no
   `failed`. A verdict is a line count and a flag; the result text is
   `ToolResults`' alone.
 - `Forensic` is durable evidence that is not model context: the session
@@ -108,11 +119,11 @@ Byte strings use lossless base64 in JSON. Audit observations preserve the
 captured prefix and its retention metadata exactly; replay adds no further
 truncation.
 
-`Transient` is deliberately outside `Record`: token and thinking deltas, state
-changes, boundaries, child lifecycle, stop reasons,
-live pins/resources, and seam faults. These are drawn or routed while the
-process is alive. They are not a hidden fourth record class, and no resume
-attempts to reconstruct them.
+`Transient` is deliberately outside `Record`: token and thinking deltas,
+state changes, boundaries, child lifecycle, stop reasons, live pins/resources,
+and terminal recording failures. These are drawn or routed while the process
+is alive. They are not a hidden fourth record class, and no resume attempts
+to reconstruct them.
 
 ## The two folds
 
@@ -467,10 +478,13 @@ readiness and engine rebirth eligibility, captures a non-destructive inbox
 boundary, and boots a replacement without touching the live engine. Only a
 committed `Protocol::Cleared` permits discarding old-boundary input,
 abandoning work and schedules, replacing the engine and resetting pins and
-readings. Refusal, failed preparation or failed append leaves those live
-resources untouched. Human input arriving after the captured boundary
-survives, including a suffix coalesced with an older prompt; cancelled old
-producer scopes cannot deliver into the new context. The inbox boundary is
+readings. Refusal or failed preparation leaves those live resources
+untouched. A failed commit latches the writer and ends the session;
+`Tenancy::discard` certifies the unused prepared engine. The current engine,
+record and registers stay as they were. Human input arriving after the
+captured boundary survives a successful clear, including a suffix coalesced
+with an older prompt; cancelled old producer scopes cannot deliver into the
+new context. The inbox boundary is
 applied before outgoing engine teardown. No fallible boot remains after the
 commit. The frontend learns of it from the record itself: the mirror steps
 `Delta::Cleared`, retires every block it held, resets its open lines and scroll

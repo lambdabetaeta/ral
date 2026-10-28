@@ -107,16 +107,6 @@ impl Engine {
             ProbeError::Rejected(why) => transport.sever(Severed::Faulted(why)),
         })
     }
-    #[cfg(test)]
-    pub(crate) fn rebootable(&self) -> bool {
-        matches!(
-            self,
-            Self::Identity {
-                rebirth: Some(_),
-                ..
-            }
-        )
-    }
     /// End this engine; `Err` if its teardown is uncertified.
     pub(crate) fn end(&self) -> Result<(), Severed> {
         match self {
@@ -161,6 +151,10 @@ impl Incarnation {
             emit,
             mailbox.vouched_by((*self.scope).clone()),
         ));
+    }
+    /// Certify an engine prepared for this incarnation but never installed.
+    pub(crate) fn discard(&self, prepared: Engine) {
+        self.tenancy.discard(prepared);
     }
     /// Fence the outgoing producers before its certified teardown.
     pub(crate) fn install_rebirth(&mut self, fresh: Engine) {

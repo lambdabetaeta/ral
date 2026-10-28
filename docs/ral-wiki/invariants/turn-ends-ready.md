@@ -35,19 +35,18 @@ The owner boundary has two outcomes: **a fresh prompt is admissible and the
 session is usable, or recording has failed and the session is explicitly
 unavailable.** A clean reply, user cancellation or provider error normally
 leaves the former. A failed mandatory repair cannot: `Context` remains the
-fold of committed records, never an invented ready state. The affected owner
-ends with a recording failure, retires its work and accepts no more requests;
-other sessions remain independent. `Agent::deliberate` commits a prompt (or a tool-result batch) before the
+fold of committed records, never an invented ready state. The writer latches
+that failure and ends the owner's life; the owner's terminus announces it
+once and makes it the outcome. Other sessions remain independent.
+`Agent::deliberate` commits a prompt (or a tool-result batch) before the
 round-trip it drives, so a failure between that commit and the next assistant
 reply leaves the machine in an `AwaitingAssistant*` phase with no reply
-recorded. That phase is now a legal resting place, and costs nothing:
-`replied`/`cancelled` call `AgentLog::quiesce`
-with `QuiesceReason::Replied`/`Cancelled`, `take_up` calls
-`quiesce(QuiesceReason::Aborted)` whenever `is_ready` does not already hold —
-whether `deliberate` returned cleanly or was caught out of a panic — and
-`Agent::attend` repeats reconciliation on exit, returning a recording failure
-if it cannot commit. Its readiness assertion applies only to usable sessions,
-a backstop against a future exit path that bypasses `take_up`.
+recorded. That phase is a legal resting place. `replied`/`cancelled` call
+`AgentLog::quiesce` with `QuiesceReason::Replied`/`Cancelled`.
+`deliberate` repairs on every return with `quiesce(QuiesceReason::Aborted)`
+when needed; `attempt` repairs after an unwind. `attend` only asserts that
+a live owner's exchange ends prompt-admissible. A recording failure ends
+life, so an owner that leaves `attend` unready is never live.
 
 `quiesce` records only what the log still owes, and never a turn the model did
 not take:
@@ -63,8 +62,8 @@ lies — in `record.jsonl` and in the context alike. `Context::rendered` sends
 every resident turn as written; the next prompt, following the interrupted
 exchange's last tool results, is the interruption's own mark. The unrun-call
 answer above is what keeps this legal: a closed exchange can never hold a
-dangling tool-call block, because `take_up` quiesces before any prompt is
-admitted.
+dangling tool-call block, because exchange-boundary repair precedes the next
+prompt.
 
 The content must stay because an exchange in exarch is *all the work since the
 last human prompt*. One recorded session had a single exchange run fifty-seven
@@ -100,10 +99,12 @@ hand, which are readable
 The hard rule: a usable session ends an exchange prompt-admissible. Add a
 new exchange-ending outcome through fallible `quiesce` (extend
 `QuiesceReason`), never by pretending an uncommitted tool result exists.
-Failed writes are terminal for the shared writer, including failures first
-encountered by display or forensic producers. After storage is repaired,
-explicit resume reconstructs the durable prefix and commits any repair still
-owed before admitting work. No automatic retry or alternate in-memory log
+Every append that does not commit — failed write, unencodable record or
+poisoned append lock — and any durable record the fold refuses latches the
+shared writer once, whichever producer meets it first, and ends the life
+bound to it. After storage is repaired, explicit resume reconstructs the
+durable prefix and commits any repair still owed before admitting work.
+No automatic retry or alternate in-memory log
 supplies an unavailable session's authority. Eviction reads `is_ready` too
 ([[map/exarch/agent|agent]] `can_evict`).
 

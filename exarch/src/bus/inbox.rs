@@ -41,8 +41,6 @@ impl From<u64> for JobId {
 pub(crate) enum Queue {
     Keep,
     Recall,
-    #[cfg(test)]
-    Discard,
 }
 
 pub(crate) struct Inbox(Arc<Shared>);
@@ -154,7 +152,13 @@ impl State {
         self.opening.take_if(|node| node.id() == *id)
     }
     fn pop(&mut self) -> Option<Next> {
-        let next = match self.posts.pop()? {
+        self.posts.pop().map(|post| self.admit(post))
+    }
+    fn pop_before_rewrite(&mut self) -> Option<Next> {
+        self.posts.pop_before_rewrite().map(|post| self.admit(post))
+    }
+    fn admit(&mut self, post: Post) -> Next {
+        match post {
             Post::Human(text) => Next::Item(Item::Human(text)),
             Post::Read(read) => Next::Read(read),
             Post::Rewrite(rewrite) => Next::Rewrite(rewrite),
@@ -176,8 +180,7 @@ impl State {
                 } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
                 Scoped::Nudge { prompt, text } => Item::Nudge { prompt, text },
             }),
-        };
-        Some(next)
+        }
     }
     fn abandon(&mut self, life: &Scope, queue: Queue) -> Vec<String> {
         let old = std::mem::replace(&mut self.work, Work::under(life));
@@ -185,11 +188,6 @@ impl State {
         match queue {
             Queue::Keep => Vec::new(),
             Queue::Recall => self.posts.recall(),
-            #[cfg(test)]
-            Queue::Discard => {
-                self.posts.clear();
-                Vec::new()
-            }
         }
     }
 }
@@ -362,12 +360,20 @@ impl Posts {
             self.queue.push_back(stamped);
         }
     }
-    fn push_front(&mut self, post: Post) {
-        let stamped = self.stamp(post);
-        self.queue.push_front(stamped);
-    }
     fn pop(&mut self) -> Option<Post> {
         self.fence();
+        self.take()
+    }
+    /// The next live post, unless it is a rewrite, which waits for the exchange boundary.
+    fn pop_before_rewrite(&mut self) -> Option<Post> {
+        self.fence();
+        if matches!(self.queue.front(), Some((_, Post::Rewrite(_)))) {
+            None
+        } else {
+            self.take()
+        }
+    }
+    fn take(&mut self) -> Option<Post> {
         let (_, mut post) = self.queue.pop_front()?;
         if let Post::Human(text) = &mut post {
             while matches!(self.queue.front(), Some((_, Post::Human(_)))) {
@@ -423,10 +429,6 @@ impl Posts {
             }
         });
         prompts
-    }
-    #[cfg(test)]
-    fn clear(&mut self) {
-        self.queue.clear();
     }
     fn texts(&mut self) -> Vec<String> {
         self.fence();
@@ -724,15 +726,8 @@ impl Inbox {
         if state.exchange.is_cancelled() {
             return arrivals;
         }
-        loop {
-            match state.pop() {
-                Some(Next::Rewrite(rewrite)) => {
-                    state.posts.push_front(Post::Rewrite(rewrite));
-                    break;
-                }
-                Some(next) => arrivals.push(next),
-                None => break,
-            }
+        while let Some(next) = state.pop_before_rewrite() {
+            arrivals.push(next);
         }
         drop(state);
         arrivals

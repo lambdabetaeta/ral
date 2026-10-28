@@ -139,7 +139,7 @@ impl HostServices {
         self.log
             .borrow()
             .record_emitter()
-            .emit_or_report(crate::record::Display::HarnessCall {
+            .emit_or_end(crate::record::Display::HarnessCall {
                 verb: act.verb().to_string(),
                 subject: subject.map(str::to_string),
                 payload,

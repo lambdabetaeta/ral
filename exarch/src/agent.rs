@@ -38,7 +38,7 @@ use crate::agent::engine::Incarnation;
 use crate::agent::fleet::{Fleet, TenantId};
 use crate::bus::{Inbox, Queue};
 use crate::provider::Provider;
-use crate::record::AgentId;
+use crate::record::{AgentId, Unavailable};
 use crate::schedule::ScheduleRegistry;
 use crate::shell_eval::PinDigests;
 use ral_core::own::OwnDir;
@@ -140,17 +140,15 @@ impl Agent {
     /// # Panics
     /// Panics on reentrant log access.
     pub fn is_ready(&self) -> bool {
-        let log = self.log.borrow();
-        log.check_available().is_ok() && log.context().is_ready()
+        self.check_available().is_ok() && self.log.borrow().context().is_ready()
     }
     /// # Errors
-    /// Recording failed or required protocol repair could not commit. Resume
-    /// the durable prefix after repairing storage; this owner cannot accept work.
+    /// Recording failed: this session has ended; resuming the run reconstructs what was recorded.
     ///
     /// # Panics
     /// Panics on reentrant log access.
-    pub fn check_available(&self) -> std::io::Result<()> {
-        self.log.borrow().check_available()
+    pub fn check_available(&self) -> Result<(), Unavailable> {
+        self.log.borrow().record_emitter().check_available()
     }
     /// # Panics
     /// Panics on reentrant log access.

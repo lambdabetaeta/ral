@@ -252,7 +252,7 @@ impl ExarchDesk {
         s.log
             .borrow()
             .record_emitter()
-            .emit_or_report(crate::record::Forensic::HarnessResult { text: text.clone() });
+            .emit_or_end(crate::record::Forensic::HarnessResult { text: text.clone() });
         if refused {
             Err(Error::new(text))
         } else {
@@ -318,7 +318,7 @@ impl ExarchDesk {
         };
         match content {
             Ok(reply) => {
-                s.log.borrow().record_emitter().emit_or_report(
+                s.log.borrow().record_emitter().emit_or_end(
                     crate::record::Forensic::HarnessResult {
                         text: format!("read agent '{name}'s reply"),
                     },
@@ -329,7 +329,7 @@ impl ExarchDesk {
                 s.log
                     .borrow()
                     .record_emitter()
-                    .emit_or_report(crate::record::Forensic::HarnessResult { text: text.clone() });
+                    .emit_or_end(crate::record::Forensic::HarnessResult { text: text.clone() });
                 Err(Error::new(text))
             }
         }

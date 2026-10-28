@@ -179,7 +179,7 @@ fn complete_malformed_lines_are_named_refusals_not_crash_tails() {
 }
 
 #[test]
-fn availability_keeps_append_mutex_poison() {
+fn poison_is_latched_unless_a_failure_came_first() {
     for failed in [false, true] {
         let dir = temp_dir(&format!("poison-{failed}"));
         let path = dir.path().join(RECORD);
@@ -197,8 +197,14 @@ fn availability_keeps_append_mutex_poison() {
             panic!("a torn append critical section")
         }));
         assert!(panic.is_err());
-        let error = log.check_available().unwrap_err().to_string();
-        assert!(error.contains("panicked"), "{error}");
+        let failure = log.check_available().unwrap_err();
+        let error = failure.to_string();
+        if failed {
+            assert_eq!(failure.kind(), io::ErrorKind::StorageFull);
+            assert!(error.contains("injected record write failure"), "{error}");
+        } else {
+            assert!(error.contains("panicked"), "{error}");
+        }
         assert_eq!(
             log.append(&Record::Forensic(Forensic::Cancelled))
                 .unwrap_err()
