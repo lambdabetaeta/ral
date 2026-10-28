@@ -376,6 +376,32 @@ mod durability_tests {
     }
 }
 
+// ── Teardown certification ───────────────────────────────────────
+mod teardown_tests {
+    use super::*;
+    use crate::carrier::testkit::{BARE, boot};
+
+    /// A held live ticket stands for a worker that ignores cancellation past
+    /// the drain grace.
+    #[test]
+    fn identity_end_reports_workers_that_outlive_teardown() {
+        let transport = boot(&BARE);
+        let ticket = {
+            let mut engine = transport.engine.lock();
+            engine.shell.set_worker_drain_grace(std::time::Duration::from_millis(20));
+            engine.shell.local.workers.live_ticket()
+        };
+        for _ in 0..2 {
+            let Err(Severed::Faulted(msg)) = transport.end() else {
+                panic!("a worker outliving teardown must fault the end");
+            };
+            assert!(msg.starts_with("1 ral worker thread(s)"), "{msg}");
+        }
+        drop(ticket);
+        assert_eq!(transport.end(), Ok(()));
+    }
+}
+
 // ── Probe tests ───────────────────────────────────────────────────────
 //
 // Identity-only. Engine-busy serialisation needs a second process racing the

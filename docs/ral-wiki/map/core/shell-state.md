@@ -216,7 +216,10 @@ checkpoint, since a run never writes it.
   outlives its session's store. The
   `Roster::Owned`/`Roster::Shared` split is what keeps that edge honest: a
   `spawn_thread` child holds a `Shared` roster over its *parent's* registry,
-  so its own drop must not reap the parent's.
+  so its own drop must not reap the parent's. A wipe (`cancel_all`) waits
+  for live worker threads until a deadline the first wipe fixes (default
+  5.5 s), so a certifying `IdentityTransport::end` and the later `Drop`
+  share one grace.
 
   The binding-lease ledger (`shell/runtime/state/bindings.rs`,
   [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]) sits

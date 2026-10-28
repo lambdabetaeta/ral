@@ -10,7 +10,7 @@ use crate::agent::Agent;
 use crate::agent::gauge::Warning;
 use crate::agent::outcome::{Fault, Outcome};
 use crate::agent::tools;
-use crate::bus::{AgentOutcome, Emitter, Next, Queue};
+use crate::bus::{Emitter, Next, Queue};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::commit::Stream;
@@ -419,9 +419,9 @@ impl Agent {
         self.abandon(Queue::Keep);
         self.recorder()
             .transient(Transient::State(AgentState::Ready));
-        let since = self.inbox.deposit_reply(payload);
-        self.fleet.lease_reply(&self.handle, since);
-        self.report(AgentOutcome::Replied);
+        if let Some(lease) = self.inbox.deposit_reply(payload) {
+            self.fleet.lease_reply(&self.handle, lease);
+        }
         self.log.borrow_mut().quiesce(QuiesceReason::Replied);
         Outcome::Replied
     }

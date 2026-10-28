@@ -30,13 +30,13 @@ use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use strum::{IntoStaticStr, VariantArray};
 
-/// How long a wipe waits for cancelled workers to end: the cleanup grace a
-/// host grants by default (`Run::foreground`'s five seconds) plus the
-/// teardown grace, so a shielded cleanup's child is not orphaned by the
-/// session's end.  A host granting more accepts that a wipe may cut it.
+/// The default drain grace: the cleanup grace a host grants by default
+/// (`Run::foreground`'s five seconds) plus the teardown grace, so a shielded
+/// cleanup's child is not orphaned by the session's end.  A host granting
+/// more accepts that a wipe may cut it.
 const WORKER_DRAIN_GRACE: Duration = Duration::from_millis(5_500);
 
 impl WorkerId {
@@ -226,6 +226,11 @@ struct RegistryInner {
     /// whole life; the strong count is therefore the session's live-thread
     /// census and the only thing [`WorkerRegistry::drain`] can honestly wait on.
     live: Arc<()>,
+    /// How long wipes wait, in all, for live worker threads to end.
+    grace: Duration,
+    /// Fixed by the first wipe and shared by every later one, so a teardown
+    /// grants one grace, not one per wipe.
+    deadline: Option<Instant>,
 }
 
 impl Default for RegistryInner {
@@ -237,6 +242,8 @@ impl Default for RegistryInner {
             epoch: 0,
             retention: None,
             live: Arc::new(()),
+            grace: WORKER_DRAIN_GRACE,
+            deadline: None,
         }
     }
 }
@@ -405,6 +412,11 @@ impl WorkerRegistry {
         self.0.lock_ignore_poison().retention = Some(retention);
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn set_drain_grace(&self, grace: Duration) {
+        self.0.lock_ignore_poison().grace = grace;
+    }
+
     /// Ticked at the run door's Source arm, beside the binding ledger's tick,
     /// so the two ledgers read one logical clock.
     pub(crate) fn tick_epoch(&self) {
@@ -494,19 +506,21 @@ impl WorkerRegistry {
         self.0.lock_ignore_poison().live.clone()
     }
 
-    pub(crate) fn is_drained(&self) -> bool {
-        Arc::strong_count(&self.0.lock_ignore_poison().live) == 1
+    /// Worker threads still holding a ticket; the registry keeps the one
+    /// baseline strong reference.
+    pub(crate) fn live_workers(&self) -> usize {
+        Arc::strong_count(&self.0.lock_ignore_poison().live) - 1
     }
 
-    /// Wait, up to [`WORKER_DRAIN_GRACE`], for every live worker thread to end.
+    pub(crate) fn is_drained(&self) -> bool {
+        self.live_workers() == 0
+    }
+
+    /// Wait, up to `deadline`, for every live worker thread to end.
     /// A cancel lands at the worker's next observation point, and a host that
     /// exits in the same breath outruns it — orphaning the child under PID 1.
-    fn drain(&self) {
-        let deadline = std::time::Instant::now() + WORKER_DRAIN_GRACE;
-        while std::time::Instant::now() < deadline {
-            if self.is_drained() {
-                return;
-            }
+    fn drain(&self, deadline: Instant) {
+        while !self.is_drained() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -515,18 +529,20 @@ impl WorkerRegistry {
     /// every entry, reset the roster, pending notices included, then wait for
     /// live worker threads to end. The cancels fire only after the guard drops.
     pub(crate) fn cancel_all(&self) -> usize {
-        let entries = {
+        let (entries, deadline) = {
             let mut inner = self.0.lock_ignore_poison();
-            // The armed retention and the epoch clock are configuration, not
+            // Retention, the epoch clock and the drain deadline are not
             // roster, and survive the wipe.
             inner.entries.prune();
             inner.reap_notices.clear();
-            std::mem::take(&mut inner.entries).into_vec()
+            let grace = inner.grace;
+            let deadline = *inner.deadline.get_or_insert_with(|| Instant::now() + grace);
+            (std::mem::take(&mut inner.entries).into_vec(), deadline)
         };
         for entry in &entries {
             entry.handle.claim_and_stop();
         }
-        self.drain();
+        self.drain(deadline);
         entries.len()
     }
 }

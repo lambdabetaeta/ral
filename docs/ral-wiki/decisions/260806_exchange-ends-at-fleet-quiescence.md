@@ -2,7 +2,7 @@
 status: active
 verified_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
 verified_at_date: 2026-10-28
-anchors: [SettledConversation::await_job, SettledConversation::run, Fleet::wait_settled, AgentHandle::stop, JobEnd, Membership, Departures]
+anchors: [SettledConversation::await_job, SettledConversation::run, Fleet::wait_settled, AgentHandle::stop, JobEnd, Census, Tenancy]
 ---
 
 # Synod's job ends at fleet quiescence
@@ -25,8 +25,8 @@ has finished tearing down.
 
 - The trunk is quiescent: nothing remains for it to do in this job.
 - Every child obligation has replied or ended, and its result has been
-  drained and announced. `Work::awaiting` is the exact obligation ledger,
-  including follow-up message sequence numbers.
+  drained and announced. The work's receipt pool is the exact obligation
+  ledger: one `Owed` per adoption and per follow-up.
 - Replied helpers remain parked under their follow-up lease. Their presence
   is not busy work and does not hold the job open
   ([[decisions/260826_reply-parks|reply-parks]]).
@@ -83,10 +83,10 @@ driver indefinitely
 
 - Life cancellation determines whether an agent is live; the work's
   obligation ledger determines whether it is busy.
-- `Fleet::is_empty` counts owner-held `Membership`s released after engine
-  and log teardown, not retained address references.
+- `Fleet::is_empty` is true once every claim and `Tenancy` is released,
+  after engine and log teardown, not retained address references.
 - `SettledConversation::end_fleet` ends every root in the shared launch,
-  drops the driver/root, then waits on detached `Departures`, retaining no
+  drops the driver/root, then waits on the detached `Census`, retaining no
   launch or factory. Synod recovers its machine factory only afterwards.
 - Owner drop ends its subtree, so retaining a parent's address cannot
   leave descendants working without their consumer.
@@ -95,8 +95,8 @@ driver indefinitely
 
 - `exarch/src/headless.rs`: `SettledConversation::{await_job, run, end_fleet}`,
   `JobEnd`.
-- `exarch/src/bus/inbox.rs`: `Job`, `JobId`, work obligations, addressed Stop.
-- `exarch/src/agent/fleet.rs`: `Fleet::wait_settled`, `Membership`, `Departures`.
+- `exarch/src/bus/inbox.rs`: `Job`, `JobId`, work debts, addressed Stop.
+- `exarch/src/agent/fleet.rs`: `Fleet::wait_settled`, `Census`, `Tenancy`.
 - `synod/src/assistant/conversation.rs`: `Conversation::run`, closing walk.
 
 [[design/engine-protocol|engine-protocol]], [[design/agents|agents]],

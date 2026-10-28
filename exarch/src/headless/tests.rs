@@ -1015,7 +1015,7 @@ fn a_stopped_job_waits_for_its_helpers_engine_teardown_even_if_the_fleet_ends() 
         let (release, held) = std::sync::mpsc::channel();
         let mut settled = SettledConversation::new(root).unwrap();
         let helper_id = child.id();
-        child.engine.install_deferred(Arc::new(TeardownGate {
+        child.engine.install_raw(Arc::new(TeardownGate {
             emit: settled.bus.emitter(helper_id),
             entered,
             release: std::sync::Mutex::new(held),
@@ -1170,7 +1170,11 @@ fn settled_conversation_drains_a_lease_death_at_the_next_job() {
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    settled.root.fleet.wait_settled(&settled.handle()).unwrap();
+    settled
+        .root
+        .fleet
+        .wait_settled(settled.root.tenant(), &crate::bus::Pumping::for_test())
+        .unwrap();
     assert!(!first.signals.iter().any(|s| matches!(s,
         Signal::Transient(agent, Transient::Died) if *agent == id
     )));

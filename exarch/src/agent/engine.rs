@@ -1,12 +1,16 @@
 //! An agent's ral engine, in-process or over a wire.
 
+use crate::agent::fleet::{Tenancy, TenantId};
 use crate::app::Scratch;
-use crate::shell_eval::builtins;
+use crate::bus::{Emitter, Mailbox};
+use crate::shell_eval::{builtins, deferred_sink};
 use crate::site::{Silent, site};
 use ral_core::carrier::{IdentityTransport, ProbeError, Severed, Transport};
 use ral_core::engine::EngineInstaller;
 use ral_core::path::EnginePath;
+use ral_core::process::{CancelCause, Scope, ScopeNode};
 use ral_core::protocol::{Attach, EngineSpec, Root};
+use std::ops::Deref;
 use std::sync::Arc;
 
 pub(crate) enum EngineKind {
@@ -86,7 +90,7 @@ impl Engine {
             },
         }
     }
-    pub(crate) fn install_deferred(&self, sink: Arc<dyn ral_core::shell::runtime::DeferredSink>) {
+    fn install_deferred(&self, sink: Arc<dyn ral_core::shell::runtime::DeferredSink>) {
         self.transport().set_deferred_sink(sink);
     }
     pub(crate) fn severed(&self) -> Option<Severed> {
@@ -111,21 +115,72 @@ impl Engine {
             }
         )
     }
-    pub(crate) fn clear(&mut self) -> Result<(), String> {
-        let Self::Identity {
-            transport,
-            rebirth: Some(rebirth),
-        } = self
-        else {
+    /// End this engine; `Err` if its teardown is uncertified.
+    pub(crate) fn end(&self) -> Result<(), Severed> {
+        match self {
+            Self::Identity { transport, .. } => transport.end(),
+            Self::Wire { transport, .. } => transport.end(),
+        }
+    }
+    /// Boot a fresh identity engine, moving the `Rebirth` into it; on failure
+    /// `self` is unchanged.
+    pub(crate) fn reborn(&mut self) -> Result<Self, String> {
+        let Self::Identity { rebirth, .. } = self else {
             return Err(Self::CANNOT_REBOOT.to_string());
         };
-        let fresh = IdentityTransport::boot(rebirth.installers, &rebirth.attach)
-            .map_err(|s| s.to_string())?;
-        transport.control().terminate();
-        *transport = Arc::new(fresh);
-        Ok(())
+        let born = rebirth.as_ref().ok_or(Self::CANNOT_REBOOT)?;
+        let fresh =
+            IdentityTransport::boot(born.installers, &born.attach).map_err(|s| s.to_string())?;
+        Ok(Self::Identity {
+            transport: Arc::new(fresh),
+            rebirth: rebirth.take(),
+        })
     }
     pub(crate) const CANNOT_REBOOT: &str = "/clear cannot start this conversation over: its engine was not booted here; start a new conversation instead";
+}
+/// A tenancy bound to a life; deferred batches are vouched by `scope`.
+pub(crate) struct Incarnation {
+    tenancy: Tenancy,
+    life: Scope,
+    scope: ScopeNode,
+}
+impl Incarnation {
+    pub(crate) fn new(tenancy: Tenancy, life: Scope) -> Self {
+        Self {
+            scope: life.child(),
+            tenancy,
+            life,
+        }
+    }
+    pub(crate) fn install(&self, emit: &Emitter, mailbox: &Mailbox) {
+        self.install_deferred(deferred_sink(
+            emit,
+            mailbox.vouched_by((*self.scope).clone()),
+        ));
+    }
+    /// Fence unconditionally, then boot; on success the old engine is certified and replaced.
+    pub(crate) fn reboot(&mut self) -> Result<(), String> {
+        self.scope.cancel(CancelCause::Cancelled);
+        self.scope = self.life.child();
+        self.tenancy.reboot()
+    }
+    pub(crate) fn tenant(&self) -> TenantId {
+        self.tenancy.claim().id()
+    }
+    #[cfg(test)]
+    pub(crate) fn install_raw(&self, sink: Arc<dyn ral_core::shell::runtime::DeferredSink>) {
+        self.install_deferred(sink);
+    }
+    #[cfg(test)]
+    pub(crate) fn scope(&self) -> Scope {
+        (*self.scope).clone()
+    }
+}
+impl Deref for Incarnation {
+    type Target = Engine;
+    fn deref(&self) -> &Engine {
+        &self.tenancy
+    }
 }
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]

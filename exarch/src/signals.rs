@@ -165,13 +165,8 @@ mod tests {
         let fleet = crate::agent::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
         trunk.steer("open an exchange".into()).unwrap();
-        assert!(
-            trunk
-                .inbox
-                .draw(|_| crate::bus::ParkMode::Quiesce)
-                .is_some()
-        );
-        trunk.inbox.open_exchange();
+        let drawn = trunk.inbox.draw(|_| crate::bus::ParkMode::Quiesce).unwrap();
+        drawn.opening.unwrap().open();
         let exchange = trunk.inbox.exchange();
         let _signals = face(&fleet);
 

@@ -91,13 +91,14 @@ monotone, so stale provenance stays stale.
   gesture cannot lose it or start a provider round under a dead scope.
   Mid-exchange steering drains only while that exchange is live.
 
-**Outstanding children are obligations, not liveness guesses.** Adoption
-records `awaiting[child] = 0`. A follow-up to a direct child records a fresh
-sequence before delivery. Each result carries the latest parent message it
-answers; a reply discharges only a covered obligation, while a terminal
-non-reply discharges it unconditionally. Thus an old queued reply cannot
-make a newer follow-up disappear. A dropped owner still owing its parent a
-report posts failure; abandoned work discards its obligations.
+**Outstanding children are owned debts, not liveness guesses.** Adoption
+mints one `Owed`, and a follow-up to a direct child mints another before
+delivery. Paying consumes a debt: a reply moves its receipt into the
+parent's queue, and the work is busy exactly while receipts are outstanding.
+Dropping a debt pays `Cancelled`, a refused post withdraws its debt silently,
+and a dropped owner still owing its parent a report posts failure. Each
+follow-up is its own receipt, so an old queued reply cannot make a newer
+one disappear; abandoned work starts a fresh pool.
 
 ## Embedded jobs and the host's address
 
@@ -126,15 +127,15 @@ Stop, distinct from exarch's item-level exchange.**
   waits on detached teardown accounting, retaining no launch or factory.
   Synod recovers the machine only after that barrier.
 
-Settlement excludes the attending owner's single retained membership even
-if its life ends; helpers and unfinished claims must still tear down.
+Settlement excludes the attending owner's own tenant even if its life ends;
+helpers and unfinished claims must still tear down.
 
-Live means life is not cancelled; torn down means the final `Membership`
-has been released. Retained addresses are neither consumers nor outstanding
-teardown. Membership starts at name claim, covering construction; the owner's
-engine and log drop before its name releases that membership. A wire engine
-answers `Detach` with `Ended` only after its engine thread and session workers
-have torn down. Missing acknowledgment refuses settlement and the folder scan,
+Live means life is not cancelled; torn down means the `Tenancy` has been
+released. Retained addresses are neither consumers nor outstanding
+teardown. A census entry starts at name claim, covering construction; the
+owner's log drops before its `Tenancy` ends and certifies the engine, then
+releases name and entry. A wire engine answers `Detach` with `Ended` only
+after its engine thread and session workers have torn down. Missing acknowledgment refuses settlement and the folder scan,
 rather than treating socket closure as proof of teardown.
 
 ## Roots are sessions
@@ -157,7 +158,7 @@ host that boots no further roots.
   An adopted or wire engine refuses before discarding anything. A failed
   boot after admission leaves the old engine with its work/queue discarded.
 - Names are fleet-unique reservations claimed before engine/log preparation.
-  Owner-held name guards release them on teardown. Host commands alone open
+  The owner's `Tenancy` releases them on teardown. Host commands alone open
   roots; a model has no session-opening builtin.
 
 ## Uniform spawning and the one snapshot law
@@ -221,7 +222,7 @@ not again interpolated into prose
 - `` exarch-agents `reply `` stages a faithful `FOValue`; after the whole
   tool batch, cancellation/severance are checked before harvesting it.
   Reply abandons delegated work, clears schedules, publishes Ready,
-  deposits the value and notifies the parent with a covered message sequence.
+  deposits the value and pays every debt taken up to the parent.
 - The child parks. Its parent reads the value through
   `` exarch-agents `read <name> ``, checked against the demanded type. A
   headless root instead returns the same value to its harness. Finishing
@@ -229,11 +230,11 @@ not again interpolated into prose
 - Historical reply payload remains readable during new work; only the
   completion timestamp answers whether that work has replied. A readable old
   value never suppresses a new attempt's reply obligation.
-- A child's one-hour follow-up lease starts at reply, not birth. New human
-  or agent input stamps the inbox atomically with enqueue; the old lease
-  cannot race it into reaping the child. A callback checks its exact reply
-  timestamp. Focus, reading replies and probes renew nothing; roots have no
-  reply lease.
+- A child's one-hour follow-up lease starts at reply, not birth. The lease is a
+  `Weak` whose only strong owner is the inbox: new human or agent input
+  breaks it atomically with enqueue, so the old lease cannot race it into
+  reaping the child, and a reply refuses one while input is queued. Focus,
+  reading replies and probes renew nothing; roots have no reply lease.
 - Focus and matrix navigation are presentation only. A cancelled exchange
   is visible as cancelled, not a failed matrix cell.
 - With `--allow-schedule`, every fork inherits scheduling admission. Each

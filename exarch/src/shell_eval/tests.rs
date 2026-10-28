@@ -9,6 +9,7 @@
 
 use super::surface::{Decoded, Surface, decode_surface};
 use super::*;
+use crate::agent::testkit::pop;
 use crate::bus::{Emitter, ParkMode, channel};
 use crate::card::Change;
 use crate::card::Row;
@@ -654,7 +655,7 @@ fn inbox_deferred_survives_abandoned_work_but_not_its_owner() {
     let inbox = &agent.inbox;
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, agent.id());
-    let incarnation = inbox.life_child();
+    let incarnation = inbox.life().child();
     let deferred = deferred_sink(
         &emit,
         inbox.life_mailbox().vouched_by((*incarnation).clone()),
@@ -665,7 +666,7 @@ fn inbox_deferred_survives_abandoned_work_but_not_its_owner() {
             inbox.abandon(crate::bus::Queue::Keep);
         }
         deferred.deliver(vec![ral_core::data::FOValue::Unit]);
-        match inbox.draw(|_| ParkMode::Quiesce) {
+        match pop(inbox) {
             Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
                 assert_eq!(id, agent.id(), "the batch names the root session");
             }
@@ -694,7 +695,7 @@ fn a_failed_spawn_wakes_the_model_with_its_status() {
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let text = loop {
-        match inbox.draw(|_| ParkMode::Quiesce) {
+        match pop(inbox) {
             Some(crate::bus::Next::Item(item @ crate::bus::Item::Surface { .. })) => {
                 break item.text();
             }

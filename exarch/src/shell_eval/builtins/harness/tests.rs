@@ -1,8 +1,9 @@
 use crate::agent::Agent;
 use crate::agent::testkit::{
-    TestAgentSpec, close_exchange, ral_call, scripted, set_provider, test_agent, wait_for_settle,
+    TestAgentSpec, close_exchange, pop, ral_call, scripted, set_provider, test_agent,
+    wait_for_settle,
 };
-use crate::bus::{AgentOutcome, AgentResult, Emitter, Item, Next, ParkMode, channel};
+use crate::bus::{AgentOutcome, AgentResult, Emitter, Item, Next, channel};
 use crate::provider::scripted::{Reply, Script};
 use crate::record::Voice;
 use ral_core::process::DurableRoot;
@@ -325,7 +326,7 @@ fn schedule_full_stack_round_trip_answers_the_table_and_fires_into_inbox() {
     assert!(result.contains("nightly"), "{result}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match crate::agent::testkit::inbox(&session).draw(|_| ParkMode::Quiesce) {
+        match pop(crate::agent::testkit::inbox(&session)) {
             Some(Next::Item(Item::Wakeup(text))) => {
                 assert!(text.contains("wake"), "{text}");
                 break;

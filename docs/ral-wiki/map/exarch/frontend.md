@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+generated_at_commit: fc497f7577bfce957329627870a1f9292520b782
 generated_at_date: 2026-10-28
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -18,21 +18,21 @@ inbound inbox.** The owner is `Agent`; every frontend addresses it through
 mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
 
 - Private `Post` is human text, `Read`, `Rewrite`, or a scoped payload.
-  `State::pop` drops scoped posts whose provenance is cancelled, under the
-  lock. Human text and commands are unfenced. A mailbox carries destination
+  `Posts` drops scoped posts whose provenance is cancelled before every
+  observation, under the lock. Human text and commands are unfenced. A mailbox carries destination
   and vouching `Scope`; it never refreshes provenance at push.
 - Results are vouched by parental work, wakeups by arming work, nudges by
   their exchange, worker batches by engine incarnation, and messages by the
   sender's containing scope. Stop preserves worker batches and messages from
   outside the abandoned tree; `/clear` discards the queue and cancels the old
   incarnation, fencing future batches too.
-- Result hearing and message-answer advancement are atomic with pop. A
-  reply discharges an outstanding child only when its `answers` covers the
-  latest sent sequence; terminal results discharge it regardless.
+- Releasing a result's receipts and taking up a message's `Owed` are atomic
+  with pop. Busy is receipts outstanding for the current work; each reply
+  pays the debts it covers, and a dropped debt pays `Cancelled`.
 - `Inbox::draw` checks life and stopped job, computes the park verdict under
-  the lock, then pops before honouring `Quiesce`. It mints an opening scope
-  at pop. Accepted arrival installs it; a declined claimed-worker completion
-  discards only that opening, preserving the current continuation.
+  the lock, then pops before honouring `Quiesce`. It mints an owned
+  `Opening` at pop. Accepted arrival `open`s it; a declined claimed-worker
+  completion drops it, preserving the current continuation.
 - `Inbox::drain` takes live deliveries and reads at a continuing tool
   boundary, stopping at a rewrite; a cancelled exchange drains nothing.
   Owner-side `Agent::{read, rewrite}` (`agent/command.rs`) run commands in
@@ -118,7 +118,7 @@ elapsed time, actual ending and how to use `await` / `workers`.
   those writes or final output
   ([[decisions/260806_exchange-ends-at-fleet-quiescence|job settlement]]).
 - `end_fleet(self)` ends the whole shared fleet, drops the owner, then waits
-  on detached `Departures`, retaining no launch or factory. Synod recovers
+  on the detached `Census`, retaining no launch or factory. Synod recovers
   its machine only afterwards ([[map/synod|synod]]).
 
 ## The session record and its mirrors
@@ -154,7 +154,7 @@ elapsed time, actual ending and how to use `await` / `workers`.
 
 - `tui/tui_loop.rs` drains the session-lived bus and UI jobs, polls overlays
   and routes input through `App::key` / `paste`. It ends only when every
-  owner's final teardown membership has dropped. `terminal.rs` owns raw
+  tenancy has been released. `terminal.rs` owns raw
   mode, alternate screen, bracketed paste, mouse capture and panic restoration.
 - `tui/tabs.rs::Tabs` is an id-ordered forest of birth facts and
   `Status` / `Life`; there is no special root tab. `Tabs::agent` resolves an

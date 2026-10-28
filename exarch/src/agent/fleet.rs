@@ -1,9 +1,10 @@
-//! Fleet names, launch services, and teardown membership; cancellation is a scope tree.
+//! Fleet names, launch services, and the tenancy census; cancellation is a scope tree.
 
 use crate::agent::engine::Engine;
 use crate::agent::index::{BuiltinIndex, Grants};
 use crate::agent::{AgentHandle, EngineLost, Factory, Role, Trunk};
 use crate::app::Scratch;
+use crate::bus::{Lease, Pumping, Refused};
 use crate::enquiry::check_name;
 use crate::provider::{Bureau, Toolset, roles::Roles};
 use ral_core::authority::policy::GrantStack;
@@ -17,10 +18,11 @@ use ral_core::path::CwdPath;
 use ral_core::process::{self, CancelCause, DurableRoot};
 use ral_core::sync::{CondvarExt, LockExt};
 use std::{
-    collections::HashMap,
-    fmt, io,
-    sync::{Arc, Condvar, Mutex, OnceLock},
-    time::{Duration, Instant},
+    collections::{BTreeMap, HashMap},
+    fmt, io, mem,
+    ops::Deref,
+    sync::{Arc, Condvar, Mutex},
+    time::Duration,
 };
 
 pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
@@ -128,72 +130,144 @@ impl Launch {
         }
     }
 }
-enum Slot {
-    Claimed,
-    Live(AgentHandle),
-}
-#[must_use = "a claim only holds its name until it is dropped"]
-pub(crate) struct Claim(Name);
-impl Claim {
-    pub(crate) fn name(&self) -> &str {
-        &self.0.text
-    }
-    pub(crate) fn bind(self, handle: &AgentHandle) -> Name {
-        self.0
-            .fleet
-            .names
-            .lock_ignore_poison()
-            .insert(self.0.text.clone(), Slot::Live(handle.clone()));
-        self.0
-    }
-}
-pub(crate) struct Name {
-    fleet: Arc<Fleet>,
-    text: String,
-    _membership: Membership,
-}
-impl Drop for Name {
-    fn drop(&mut self) {
-        self.fleet.names.lock_ignore_poison().remove(&self.text);
-    }
-}
-pub(crate) struct Membership(Arc<Departures>);
+/// Detached from Fleet so a waiter retains no launch or factory.
 #[derive(Default)]
-pub(crate) struct Departures {
-    count: Mutex<usize>,
+pub(crate) struct Census {
+    registry: Mutex<Registry>,
     changed: Condvar,
 }
-impl Departures {
-    pub(crate) fn wait_after(&self, waiting: impl FnOnce()) {
-        let count = self.count.lock_ignore_poison();
-        waiting();
-        drop(self.changed.wait_while_ignore_poison(count, |n| *n != 0));
+#[derive(Default)]
+struct Registry {
+    names: HashMap<Arc<str>, TenantId>,
+    /// `None` until bound.
+    tenants: BTreeMap<TenantId, Option<AgentHandle>>,
+    failures: Vec<String>,
+    next: u64,
+}
+impl Registry {
+    fn handles(&self) -> impl Iterator<Item = &AgentHandle> {
+        self.tenants.values().flatten()
     }
 }
-impl Drop for Membership {
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) struct TenantId(u64);
+impl Census {
+    fn claim(self: &Arc<Self>, name: &str) -> Result<Claim, Unborn> {
+        let mut registry = self.registry.lock_ignore_poison();
+        if registry.names.contains_key(name) {
+            return Err(Unborn::NameTaken(name.to_string()));
+        }
+        let id = TenantId(registry.next);
+        registry.next += 1;
+        let name: Arc<str> = name.into();
+        registry.names.insert(name.clone(), id);
+        registry.tenants.insert(id, None);
+        drop(registry);
+        Ok(Claim {
+            census: self.clone(),
+            id,
+            name,
+        })
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.registry.lock_ignore_poison().tenants.is_empty()
+    }
+    pub(crate) fn wait_empty_after(&self, waiting: impl FnOnce()) {
+        let registry = self.registry.lock_ignore_poison();
+        waiting();
+        drop(
+            self.changed
+                .wait_while_ignore_poison(registry, |r| !r.tenants.is_empty()),
+        );
+    }
+}
+/// A name and a census entry; dropping it releases both silently.
+#[must_use = "a claim only holds its name until it is dropped"]
+pub(crate) struct Claim {
+    census: Arc<Census>,
+    id: TenantId,
+    name: Arc<str>,
+}
+impl Claim {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+    pub(crate) fn id(&self) -> TenantId {
+        self.id
+    }
+    pub(crate) fn bind(&self, handle: &AgentHandle) {
+        self.census
+            .registry
+            .lock_ignore_poison()
+            .tenants
+            .insert(self.id, Some(handle.clone()));
+    }
+    pub(crate) fn occupy(self, engine: Engine) -> Tenancy {
+        Tenancy {
+            engine,
+            claim: self,
+        }
+    }
+    // Failures accumulate: a later clean teardown never absolves an earlier one.
+    fn certify(&self, engine: &Engine) {
+        if let Err(cause) = engine.end() {
+            self.census.registry.lock_ignore_poison().failures.push(format!(
+                "agent '{}' ended without certified engine teardown: {cause}; settlement is unsafe",
+                self.name
+            ));
+        }
+    }
+}
+impl Drop for Claim {
     fn drop(&mut self) {
-        let mut count = self.0.count.lock_ignore_poison();
-        *count -= 1;
-        drop(count);
-        self.0.changed.notify_all();
+        let mut registry = self.census.registry.lock_ignore_poison();
+        registry.names.remove(&*self.name);
+        let tenant = registry.tenants.remove(&self.id);
+        drop(registry);
+        drop(tenant);
+        self.census.changed.notify_all();
+    }
+}
+/// An engine and the claim it answers to; Drop ends the engine, then releases.
+pub(crate) struct Tenancy {
+    // Field order: the engine drops before the claim releases.
+    engine: Engine,
+    claim: Claim,
+}
+impl Tenancy {
+    pub(crate) fn claim(&self) -> &Claim {
+        &self.claim
+    }
+    /// Boot a fresh engine; on success certify and replace the old one.
+    pub(crate) fn reboot(&mut self) -> Result<(), String> {
+        let fresh = self.engine.reborn()?;
+        self.claim.certify(&mem::replace(&mut self.engine, fresh));
+        Ok(())
+    }
+}
+impl Deref for Tenancy {
+    type Target = Engine;
+    fn deref(&self) -> &Engine {
+        &self.engine
+    }
+}
+impl Drop for Tenancy {
+    fn drop(&mut self) {
+        self.claim.certify(&self.engine);
     }
 }
 pub struct Fleet {
-    names: Mutex<HashMap<String, Slot>>,
+    census: Arc<Census>,
     pub(crate) root: DurableRoot,
-    departures: Arc<Departures>,
     lease: Duration,
-    teardown_failure: OnceLock<String>,
     pub(crate) launch: Launch,
 }
 impl Fleet {
     pub(crate) fn new(launch: Launch, lease: Duration) -> Arc<Self> {
         Arc::new(Self {
-            names: Mutex::new(HashMap::new()),
+            census: Arc::default(),
             root: DurableRoot::default(),
-            departures: Arc::default(),
             lease,
-            teardown_failure: OnceLock::new(),
             launch,
         })
     }
@@ -205,41 +279,27 @@ impl Fleet {
     pub(crate) fn leased_for_test(lease: Duration) -> Arc<Self> {
         Self::new(Launch::for_test(), lease)
     }
-    pub(crate) fn claim(self: &Arc<Self>, name: &str) -> Result<Claim, Unborn> {
+    pub(crate) fn claim(&self, name: &str) -> Result<Claim, Unborn> {
         check_name(name).map_err(Unborn::NameMalformed)?;
-        // I8: count construction before reserving or publishing its name.
-        let membership = self.member();
-        let mut names = self.names.lock_ignore_poison();
-        if names.contains_key(name) {
-            return Err(Unborn::NameTaken(name.to_string()));
-        }
-        names.insert(name.to_string(), Slot::Claimed);
-        drop(names);
-        Ok(Claim(Name {
-            fleet: self.clone(),
-            text: name.to_string(),
-            _membership: membership,
-        }))
-    }
-    fn member(&self) -> Membership {
-        *self.departures.count.lock_ignore_poison() += 1;
-        Membership(self.departures.clone())
+        self.census.claim(name)
     }
     pub fn resolve(&self, name: &str) -> Option<AgentHandle> {
-        match self.names.lock_ignore_poison().get(name) {
-            Some(Slot::Live(handle)) if handle.is_live() => Some(handle.clone()),
-            _ => None,
-        }
+        let registry = self.census.registry.lock_ignore_poison();
+        let id = registry.names.get(name)?;
+        registry
+            .tenants
+            .get(id)?
+            .clone()
+            .filter(AgentHandle::is_live)
     }
     pub(crate) fn live(&self) -> Vec<AgentHandle> {
         let mut live: Vec<_> = self
-            .names
+            .census
+            .registry
             .lock_ignore_poison()
-            .values()
-            .filter_map(|slot| match slot {
-                Slot::Live(handle) if handle.is_live() => Some(handle.clone()),
-                _ => None,
-            })
+            .handles()
+            .filter(|h| h.is_live())
+            .cloned()
             .collect();
         live.sort_by_key(AgentHandle::id);
         live
@@ -252,52 +312,48 @@ impl Fleet {
     }
     pub fn end(&self, cause: CancelCause) {
         self.root.cancel(cause);
-        // Cancellation hides live slots immediately; notify all owned inboxes.
+        // Cancellation hides live handles immediately; notify all owned inboxes.
         let handles: Vec<_> = self
-            .names
+            .census
+            .registry
             .lock_ignore_poison()
-            .values()
-            .filter_map(|slot| match slot {
-                Slot::Live(handle) => Some(handle.clone()),
-                Slot::Claimed => None,
-            })
+            .handles()
+            .cloned()
             .collect();
         for handle in handles {
             handle.0.mailbox.notify();
         }
-        self.departures.changed.notify_all();
+        self.census.changed.notify_all();
     }
     pub fn is_empty(&self) -> bool {
-        *self.departures.count.lock_ignore_poison() == 0
+        self.census.is_empty()
     }
     pub fn wait_empty(&self) {
-        self.wait_empty_after(|| {});
+        self.census.wait_empty_after(|| {});
     }
-    pub(super) fn wait_empty_after(&self, waiting: impl FnOnce()) {
-        self.departures.wait_after(waiting);
+    pub(crate) fn census(&self) -> Arc<Census> {
+        self.census.clone()
     }
-    pub(crate) fn departures(&self) -> Arc<Departures> {
-        self.departures.clone()
-    }
-    pub(crate) fn teardown_failed(&self, why: String) {
-        let _ = self.teardown_failure.set(why);
-    }
-    pub(crate) fn wait_settled(&self, waiter: &AgentHandle) -> Result<(), String> {
-        let mut count = self.departures.count.lock_ignore_poison();
-        let retained = || {
-            1 + self.names.lock_ignore_poison().values().filter(|slot| {
-                matches!(slot, Slot::Live(handle) if handle.id() != waiter.id() && handle.is_live())
-            }).count()
-        };
-        // Ancestor cancellation need not notify departures; teardown always does.
-        while *count != retained() {
-            (count, _) = self
-                .departures
+    /// Wait until no tenant but `waiter` is unbound or ended, then report any
+    /// uncertified teardown.
+    pub(crate) fn wait_settled(&self, waiter: TenantId, _: &Pumping) -> Result<(), String> {
+        let mut registry = self.census.registry.lock_ignore_poison();
+        // Ancestor cancellation does not notify.
+        while !registry
+            .tenants
+            .iter()
+            .all(|(&id, h)| id == waiter || h.as_ref().is_some_and(AgentHandle::is_live))
+        {
+            (registry, _) = self
+                .census
                 .changed
-                .wait_timeout_ignore_poison(count, Duration::from_millis(100));
+                .wait_timeout_ignore_poison(registry, Duration::from_millis(100));
         }
-        drop(count);
-        self.teardown_failure.get().cloned().map_or(Ok(()), Err)
+        if registry.failures.is_empty() {
+            Ok(())
+        } else {
+            Err(registry.failures.join("; "))
+        }
     }
     pub fn nearest_reap(&self) -> Option<Duration> {
         self.live()
@@ -306,12 +362,12 @@ impl Fleet {
             .map(|since| self.lease.saturating_sub(since.elapsed()))
             .min()
     }
-    pub(crate) fn lease_reply(&self, handle: &AgentHandle, since: Instant) {
+    pub(crate) fn lease_reply(&self, handle: &AgentHandle, lease: Lease) {
         if handle.0.role.parent().is_some() {
             let handle = Arc::downgrade(&handle.0);
             process::arm_callback(self.lease, move || {
                 if let Some(shared) = handle.upgrade() {
-                    AgentHandle(shared).lapse(since);
+                    AgentHandle(shared).lapse(&lease);
                 }
             })
             .keep();
@@ -324,6 +380,14 @@ pub enum Unborn {
     Abandoned,
     NameTaken(String),
     NameMalformed(String),
+}
+impl From<Refused> for Unborn {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::Abandoned => Self::Abandoned,
+            Refused::Dead => Self::SessionDead,
+        }
+    }
 }
 impl fmt::Display for Unborn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

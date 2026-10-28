@@ -1,14 +1,14 @@
 use super::*;
-use crate::agent::build::Build;
+use crate::agent::Agent;
 use crate::agent::engine::EngineKind;
 use crate::agent::fleet::{Fleet, Unborn};
 use crate::agent::outcome::Outcome;
-use crate::agent::testkit::{TestAgent, TestAgentSpec, scripted, test_agent, trunk};
-use crate::agent::{Agent, Role};
-use crate::bus::{AgentOutcome, Emitter, Item, Next, ParkMode, Queue, Scoped, Sink};
+use crate::agent::testkit::{
+    TestAgent, TestAgentSpec, open_next, pop, pop_outcome, test_agent, trunk,
+};
+use crate::bus::{AgentOutcome, Emitter, Item, Next, ParkMode, Queue, Sink};
 use crate::headless::SettledConversation;
-use crate::provider::scripted::Script;
-use crate::record::{AgentLog, Forensic, Protocol, Record, RecordedAccount, RecordedModel, Voice};
+use crate::record::{Forensic, Protocol, Record, Voice};
 use std::sync::Barrier;
 
 fn root(fleet: &Arc<Fleet>, name: &str) -> TestAgent {
@@ -23,25 +23,40 @@ fn child(fleet: &Arc<Fleet>, parent: &TestAgent, name: &str) -> TestAgent {
     .unwrap()
 }
 
-fn pop(agent: &TestAgent) -> Option<Next> {
-    agent.inbox.draw(|_| ParkMode::Quiesce)
+/// A root "parent" and its child "worker".
+fn family() -> (Arc<Fleet>, TestAgent, TestAgent) {
+    let fleet = Fleet::for_test();
+    let parent = root(&fleet, "parent");
+    let worker = child(&fleet, &parent, "worker");
+    (fleet, parent, worker)
+}
+
+fn heard(worker: &TestAgent) -> bool {
+    matches!(pop(&worker.inbox), Some(Next::Item(Item::Message(_))))
+}
+
+/// The worker replies; the parent pops `Replied` and owes nothing more.
+fn replied(parent: &TestAgent, worker: &TestAgent) -> Lease {
+    let lease = worker
+        .inbox
+        .deposit_reply(FOValue::Unit)
+        .expect("no input is queued");
+    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
+    assert!(!parent.has_busy_children());
+    lease
 }
 
 #[test]
 fn a_message_posts_a_marked_note_to_a_descendant() {
-    let fleet = Fleet::for_test();
-    let parent = root(&fleet, "parent");
-    let worker = child(&fleet, &parent, "worker");
+    let (_fleet, parent, worker) = family();
     let to = parent.descendant(&worker).unwrap();
     to.message(&parent, "check the lexer".into()).unwrap();
-    let Some(Next::Item(Item::Message(message))) = pop(&worker) else {
+    let Some(Next::Item(Item::Message(message))) = pop(&worker.inbox) else {
         panic!("expected a peer message");
     };
     assert_eq!(message.from, parent.id());
     assert_eq!(message.from_name, "parent");
     assert_eq!(message.text, "check the lexer");
-    assert!(message.seq > 0);
-    assert_eq!(worker.0.mailbox.answers(), message.seq);
     assert!(parent.has_busy_children());
     assert!(worker.status().last_exchange.is_some());
 }
@@ -77,7 +92,7 @@ fn message_provenance_survives_normal_end_but_not_abandoned_work() {
         } else {
             sender.end();
         }
-        let next = pop(&receiver);
+        let next = pop(&receiver.inbox);
         if abandon {
             assert!(next.is_none());
         } else {
@@ -87,48 +102,107 @@ fn message_provenance_survives_normal_end_but_not_abandoned_work() {
 }
 
 #[test]
-fn reply_queued_before_followup_does_not_discharge_it() {
-    let fleet = Fleet::for_test();
-    let parent = root(&fleet, "parent");
-    let worker = child(&fleet, &parent, "worker");
-    worker
-        .report
-        .as_ref()
-        .unwrap()
-        .post(Scoped::Result(crate::bus::AgentResult {
-            id: worker.id(),
-            name: "worker".into(),
-            outcome: AgentOutcome::Replied,
-            elapsed: Duration::ZERO,
-            answers: 0,
-        }));
+fn an_old_reply_cannot_pay_a_newer_follow_up() {
+    let (_fleet, parent, worker) = family();
+    worker.inbox.deposit_reply(FOValue::Unit);
     worker.message(&parent, "follow up".into()).unwrap();
-    assert!(matches!(pop(&parent), Some(Next::Item(Item::Agent(r))) if r.answers == 0));
+    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
     assert!(parent.has_busy_children());
-    assert!(matches!(pop(&worker), Some(Next::Item(Item::Message(_)))));
-    worker
-        .report
-        .as_ref()
-        .unwrap()
-        .post(Scoped::Result(crate::bus::AgentResult {
-            id: worker.id(),
-            name: "worker".into(),
-            outcome: AgentOutcome::Replied,
-            elapsed: Duration::ZERO,
-            answers: worker.0.mailbox.answers(),
-        }));
-    assert!(matches!(pop(&parent), Some(Next::Item(Item::Agent(_)))));
+    assert!(heard(&worker));
+    worker.inbox.deposit_reply(FOValue::Unit);
+    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
     assert!(!parent.has_busy_children());
 }
 
 #[test]
-fn refused_message_rolls_back_its_expectation() {
-    let fleet = Fleet::for_test();
-    let parent = root(&fleet, "parent");
-    let worker = child(&fleet, &parent, "worker");
+fn a_reply_pays_every_heard_debt_in_one_result() {
+    let (_fleet, parent, worker) = family();
+    for text in ["one", "two"] {
+        worker.message(&parent, text.into()).unwrap();
+        assert!(heard(&worker));
+    }
+    assert!(parent.has_busy_children());
+    worker.inbox.deposit_reply(FOValue::Unit);
+    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
+    assert!(!parent.has_busy_children());
+    assert!(pop(&parent.inbox).is_none());
+}
+
+#[test]
+fn an_accepted_follow_up_is_paid_when_the_child_retires() {
+    let (_fleet, parent, worker) = family();
+    replied(&parent, &worker);
+    worker.message(&parent, "follow up".into()).unwrap();
+    assert!(parent.has_busy_children());
+    worker.inbox.retire(AgentOutcome::Replied);
+    assert!(matches!(
+        pop_outcome(&parent.inbox),
+        AgentOutcome::Cancelled
+    ));
+    assert!(!parent.has_busy_children());
+    assert!(pop(&parent.inbox).is_none());
+}
+
+#[test]
+fn a_refused_message_withdraws_its_debt_silently() {
+    let (_fleet, parent, worker) = family();
+    replied(&parent, &worker);
     worker.end();
     assert_eq!(worker.message(&parent, "too late".into()), Err(Ended));
     assert!(!parent.has_busy_children());
+    assert!(pop(&parent.inbox).is_none());
+}
+
+#[test]
+fn a_debt_paid_into_abandoned_work_posts_nothing() {
+    let (_fleet, parent, worker) = family();
+    parent.inbox.abandon(Queue::Keep);
+    assert!(!worker.is_live());
+    worker.inbox.retire(AgentOutcome::Failed("late".into()));
+    assert!(pop(&parent.inbox).is_none());
+    assert!(!parent.has_busy_children());
+}
+
+#[test]
+fn a_childs_clear_pays_a_discarded_follow_up_as_cancelled() {
+    let (_fleet, parent, worker) = family();
+    replied(&parent, &worker);
+    worker.message(&parent, "follow up".into()).unwrap();
+    worker.inbox.abandon(Queue::Discard);
+    assert!(matches!(
+        pop_outcome(&parent.inbox),
+        AgentOutcome::Cancelled
+    ));
+    assert!(!parent.has_busy_children());
+}
+
+#[test]
+fn a_newer_message_breaks_the_lease() {
+    let (_fleet, parent, worker) = family();
+    let lease = replied(&parent, &worker);
+    worker.message(&parent, "follow up".into()).unwrap();
+    assert!(worker.reply_since().is_none());
+    worker.lapse(&lease);
+    assert!(worker.is_live());
+}
+
+#[test]
+fn an_unbroken_lease_lapses_to_timed_out() {
+    let (_fleet, parent, worker) = family();
+    let lease = replied(&parent, &worker);
+    worker.lapse(&lease);
+    assert!(!worker.is_live());
+    assert_eq!(
+        worker.0.mailbox.scope().cause(),
+        Some(CancelCause::TimedOut)
+    );
+}
+
+#[test]
+fn an_unsolicited_reply_still_notifies_the_parent() {
+    let (_fleet, parent, worker) = family();
+    replied(&parent, &worker);
+    replied(&parent, &worker);
 }
 
 #[test]
@@ -148,7 +222,7 @@ fn ended_handle_refuses_steering_and_exposes_no_queue() {
     owner.post_rewrite(Rewrite::Evict);
     owner.interrupt();
     assert_eq!(owner.inbox.source_depths(), before);
-    assert!(pop(&owner).is_none());
+    assert!(pop(&owner.inbox).is_none());
 }
 
 #[test]
@@ -171,43 +245,27 @@ fn actual_owner_drop_ends_the_tree_and_frees_its_name() {
 }
 
 #[test]
-fn abandoned_mailbox_refuses_construction_without_enrolling() {
+fn a_refused_adoption_certifies_its_occupying_engine() {
     let parent = trunk(false);
     let fleet = parent.fleet.clone();
     let mailbox = parent.inbox.mailbox();
-    let provider = scripted("test-model", Script::new());
+    parent.abandon(Queue::Keep);
     let engine = fleet.launch.engine().unwrap();
     let EngineKind::Identity(transport) = engine.kind() else {
         unreachable!()
     };
     let weak = Arc::downgrade(&transport);
     drop(transport);
-    let claim = fleet.claim("refused").unwrap();
-    let log = AgentLog::root(
-        &fleet.launch.sessions_root,
-        crate::agent::fresh_id(),
-        "refused",
-        &RecordedModel::of(&provider),
-        &RecordedAccount::of(provider.account(), &fleet.launch.bureau.available()),
-        "system",
-        None,
-    )
-    .unwrap();
-    parent.abandon(Queue::Keep);
-    let result = Agent::assemble(Build {
-        claim,
-        engine,
-        log,
-        role: Role::Child {
-            parent: parent.handle(),
-        },
-        fuel: 0,
-        provider: super::ProviderHandle::new(provider),
-        search: false,
-        fleet: fleet.clone(),
-        report: Some(mailbox),
-    });
-    assert_eq!(result.err(), Some(Unborn::Abandoned));
+    let tenancy = fleet.claim("refused").unwrap().occupy(engine);
+    let result = Agent::child_of(
+        (&parent.handle, mailbox),
+        &parent.log.borrow(),
+        &fleet,
+        tenancy,
+        parent.handle.current_provider(),
+        crate::record::Memory::Amnemon,
+    );
+    assert_eq!(result.err(), Some(Unborn::Abandoned.to_string()));
     assert!(
         weak.upgrade().is_none(),
         "refused construction drops its engine"
@@ -215,31 +273,30 @@ fn abandoned_mailbox_refuses_construction_without_enrolling() {
     assert!(fleet.claim("refused").is_ok());
     assert_eq!(fleet.live().len(), 1);
     assert!(!parent.handle().has_busy_children());
+    assert_eq!(
+        fleet.wait_settled(parent.tenant(), &crate::bus::Pumping::for_test()),
+        Ok(())
+    );
     drop(parent);
-    assert!(fleet.is_empty(), "refusal acquired no membership");
+    assert!(fleet.is_empty(), "refusal left no tenant behind");
 }
 
 #[test]
-fn child_dropped_before_reporting_posts_failed_with_its_answer_sequence() {
+fn an_owner_drop_pays_failed() {
     let parent = trunk(false);
     let child = parent.fork_named("worker").unwrap();
-    let id = child.id();
     child
         .handle()
         .message(&parent.handle(), "follow up".into())
         .unwrap();
-    let next = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    let Next::Item(Item::Message(message)) = next else {
-        panic!("expected message")
-    };
+    let next = pop(&child.inbox).unwrap();
+    assert!(matches!(next, Next::Item(Item::Message(_))));
     drop(child);
     assert!(parent.handle().has_busy_children());
-    let Some(Next::Item(Item::Agent(result))) = parent.inbox.draw(|_| ParkMode::Quiesce) else {
+    let Some(Next::Item(Item::Agent(result))) = pop(&parent.inbox) else {
         panic!("drop must report failure");
     };
-    assert_eq!(result.id, id);
     assert_eq!(result.name, "worker");
-    assert_eq!(result.answers, message.seq);
     assert!(matches!(result.outcome, AgentOutcome::Failed(why) if why == "ended before reporting"));
     assert!(!parent.handle().has_busy_children());
 }
@@ -249,12 +306,13 @@ fn human_drawn_before_stop_is_recorded_once_without_a_provider_turn() {
     let mut owner = trunk(false);
     owner.handle().steer("taken up".into()).unwrap();
     let job = owner.await_job().unwrap();
-    let Next::Item(item) = owner.inbox.draw(|_| ParkMode::Quiesce).unwrap() else {
+    let drawn = owner.inbox.draw(|_| ParkMode::Quiesce).unwrap();
+    let Next::Item(item) = &drawn.next else {
         panic!("expected the human item");
     };
     assert_eq!(owner.handle().stop(job.id()), Some(Vec::new()));
-    assert!(owner.arrive(&item).unwrap());
-    owner.inbox.open_exchange();
+    assert!(owner.arrive(item).unwrap());
+    drawn.opening.unwrap().open();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, owner.id());
     let outcome = owner
@@ -267,8 +325,7 @@ fn human_drawn_before_stop_is_recorded_once_without_a_provider_turn() {
         )
         .unwrap();
     assert!(matches!(outcome, Outcome::Cancelled));
-    assert!(!job.close_if_running());
-    drop(job);
+    assert!(matches!(job.close(), crate::bus::Closed::Stopped(_)));
     let records = crate::bus::drain_records(&rx);
     assert_eq!(records.iter().filter(|record| matches!(record,
         Record::Protocol(Protocol::UserPrompt { text, voice: Voice::Human, .. }) if text == "taken up"
@@ -292,8 +349,7 @@ fn claimed_surface_declines_without_closing_the_exchange_or_its_nudge() {
 
     let owner = trunk(false);
     owner.handle().steer("opening".into()).unwrap();
-    owner.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    owner.inbox.open_exchange();
+    open_next(&owner.inbox);
     let exchange = owner.inbox.exchange();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, owner.id());
@@ -309,10 +365,9 @@ fn claimed_surface_declines_without_closing_the_exchange_or_its_nudge() {
     };
     owner.inbox.nudge(1, "continue".into());
     assert!(!owner.arrive(&surface).unwrap());
-    owner.inbox.decline_opening();
     assert_eq!(owner.inbox.exchange().id(), exchange.id());
     assert!(!exchange.is_cancelled());
-    assert!(matches!(owner.inbox.draw(|_| ParkMode::Quiesce),
+    assert!(matches!(pop(&owner.inbox),
         Some(Next::Item(Item::Nudge { text, .. })) if text == "continue"
     ));
 }
@@ -372,17 +427,15 @@ fn dropped_job_closes_without_touching_queued_text() {
 #[test]
 fn lease_lapse_is_atomic_with_a_followup_message() {
     for _ in 0..32 {
-        let fleet = Fleet::for_test();
-        let parent = root(&fleet, "parent");
-        let worker = child(&fleet, &parent, "worker");
-        let since = worker.inbox.deposit_reply(FOValue::Unit);
+        let (_fleet, parent, worker) = family();
+        let lease = replied(&parent, &worker);
         let barrier = Arc::new(Barrier::new(2));
         let lapser = {
             let handle = AgentHandle::clone(&worker);
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                handle.lapse(since);
+                handle.lapse(&lease);
             })
         };
         barrier.wait();
@@ -391,7 +444,7 @@ fn lease_lapse_is_atomic_with_a_followup_message() {
         if sent == Ok(()) {
             assert!(worker.is_live());
             assert!(worker.reply_since().is_none());
-            assert!(matches!(pop(&worker), Some(Next::Item(Item::Message(_)))));
+            assert!(heard(&worker));
             assert!(parent.has_busy_children());
         } else {
             assert!(!worker.is_live());
@@ -400,7 +453,7 @@ fn lease_lapse_is_atomic_with_a_followup_message() {
                 Some(CancelCause::TimedOut)
             );
             assert!(!parent.has_busy_children());
-            assert!(pop(&worker).is_none());
+            assert!(pop(&worker.inbox).is_none());
         }
     }
 }

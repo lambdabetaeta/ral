@@ -34,15 +34,14 @@ pub use factory::Factory;
 pub use handle::{AgentHandle, Ended};
 pub(crate) use shell::{Evaluated, LogCell, ReplyCell, SharedCell};
 
-use crate::agent::engine::Engine;
-use crate::agent::fleet::{Fleet, Name};
-use crate::bus::{AgentOutcome, AgentResult, Inbox, Mailbox, Queue, Scoped};
+use crate::agent::engine::Incarnation;
+use crate::agent::fleet::{Fleet, TenantId};
+use crate::bus::{Inbox, Queue};
 use crate::provider::Provider;
 use crate::record::AgentId;
 use crate::schedule::ScheduleRegistry;
 use crate::shell_eval::PinDigests;
 use ral_core::own::OwnDir;
-use ral_core::process::ScopeNode;
 use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
@@ -50,17 +49,14 @@ use std::sync::{Arc, Mutex};
 pub struct Agent {
     handle: AgentHandle,
     inbox: Inbox,
-    incarnation: ScopeNode,
     log: LogCell,
-    pub(crate) engine: Engine,
     reply: ReplyCell,
     pins: PinDigests,
     schedules: ScheduleRegistry,
     pub(crate) fleet: Arc<Fleet>,
     readings: Readings,
-    report: Option<Mailbox>,
-    // Last: membership release follows engine teardown and SessionEnded.
-    _name: Name,
+    // Last: the tenancy ends the engine, then releases, after SessionEnded and the inbox.
+    pub(crate) engine: Incarnation,
 }
 
 pub(crate) enum Role {
@@ -118,6 +114,9 @@ impl Agent {
     pub fn id(&self) -> AgentId {
         self.handle.id()
     }
+    pub(crate) fn tenant(&self) -> TenantId {
+        self.engine.tenant()
+    }
     pub(crate) fn await_job(&self) -> Option<crate::bus::Job> {
         self.inbox.await_job()
     }
@@ -134,17 +133,6 @@ impl Agent {
         let recalled = self.inbox.abandon(queue);
         self.schedules.clear();
         recalled
-    }
-    pub(crate) fn report(&self, outcome: AgentOutcome) {
-        if let Some(report) = &self.report {
-            report.post(Scoped::Result(AgentResult {
-                id: self.id(),
-                name: self.handle.0.name.clone(),
-                outcome,
-                elapsed: self.handle.elapsed(),
-                answers: self.handle.0.mailbox.answers(),
-            }));
-        }
     }
     pub(crate) fn resumes_at_reset(&self) -> bool {
         self.handle.0.role.parent().is_none() && self.fleet.launch.resume_on_reset

@@ -1,7 +1,8 @@
 use super::super::*;
 use crate::agent::desk::{ExarchDesk, HostServices, RunHost};
 use crate::agent::fleet::Fleet;
-use crate::bus::{Emitter, Inbox, ParkMode};
+use crate::agent::testkit::pop;
+use crate::bus::{Emitter, Inbox};
 use crate::record::{AgentId, AgentLog};
 use crate::shell_eval::surface::SurfaceApplier;
 use crate::test_helper::engine_over_socketpair;
@@ -170,7 +171,7 @@ fn wire_engine_enquiry_is_answered_through_the_drain_loop() {
 #[test]
 fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     let (engine, mut child) = wire_engine(Liveness::default());
-    let inbox = Inbox::new(DurableRoot::default().child());
+    let inbox = Inbox::new(DurableRoot::default().child(), None);
     let (tx, _rx) = crate::bus::channel();
     let fleet = Fleet::for_test();
     let trunk = test_trunk(&fleet);
@@ -213,8 +214,8 @@ fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     // and its batch must still reach `inbox` through the installed sink.
     let deadline = Instant::now() + Duration::from_secs(10);
     let item = loop {
-        if let Some(item) = inbox.draw(|_| ParkMode::Quiesce) {
-            break item;
+        if let Some(next) = pop(&inbox) {
+            break next;
         }
         assert!(
             Instant::now() < deadline,
@@ -368,7 +369,7 @@ fn wire_engine_clear_answers_a_sentence() {
         transport: Box::new(transport),
         engine: crate::boot::test_attach().0,
     };
-    let why = engine.clear().expect_err("a wire engine cannot reboot");
+    let why = engine.reborn().err().expect("a wire engine cannot reboot");
     assert!(why.contains("new conversation"), "{why}");
 }
 

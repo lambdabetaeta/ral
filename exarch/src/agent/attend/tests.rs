@@ -35,14 +35,14 @@ fn stop_after_arrival_acceptance_preserves_stop_and_new_queue_contents() {
     session.couple(&emit);
     session.seed("old".into());
     let job = session.inbox.await_job().unwrap();
-    let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    let Next::Item(item) = &next else {
+    let drawn = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
+    let Next::Item(item) = &drawn.next else {
         panic!("human item")
     };
     assert!(session.arrive(item).unwrap());
     assert_eq!(session.handle().stop(job.id()), Some(vec![]));
     session.handle().steer("fresh".into()).unwrap();
-    let step = session.take_up(&next, &emit).unwrap();
+    let step = session.take_up(drawn, &emit).unwrap();
     assert!(matches!(step.settled, Some(AgentOutcome::Cancelled)));
     assert_refused_human(&session, &crate::bus::drain_records(&rx), "old");
     assert_eq!(session.handle().queued(), vec!["fresh"]);
@@ -59,7 +59,7 @@ fn stop_after_draw_records_the_removed_human_without_running_old_work() {
     let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
     assert_eq!(session.handle().stop(job.id()), Some(vec![]));
     session.handle().steer("fresh".into()).unwrap();
-    let step = session.take_up(&next, &emit).unwrap();
+    let step = session.take_up(next, &emit).unwrap();
     assert!(matches!(step.settled, Some(AgentOutcome::Cancelled)));
     assert_refused_human(&session, &crate::bus::drain_records(&rx), "old");
     assert_eq!(session.handle().queued(), vec!["fresh"]);
@@ -74,7 +74,7 @@ fn interrupt_after_pop_records_the_prompt_without_starting_a_turn() {
     session.seed("interrupted".into());
     let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
     session.handle().interrupt();
-    let step = session.take_up(&next, &emit).unwrap();
+    let step = session.take_up(next, &emit).unwrap();
     assert!(matches!(step.settled, Some(AgentOutcome::Cancelled)));
     assert_refused_human(&session, &crate::bus::drain_records(&rx), "interrupted");
     assert_eq!(
@@ -93,6 +93,13 @@ fn only_a_current_reply_completion_parks_a_child_for_followups() {
     child.handle().steer("hi".into()).unwrap();
     assert_eq!(child.park_snapshot(), ParkMode::Quiesce);
     child.inbox.deposit_reply(FOValue::Int { value: 1 });
+    assert_eq!(
+        child.park_snapshot(),
+        ParkMode::Quiesce,
+        "input outdates the reply"
+    );
+    assert!(pop(&child.inbox).is_some());
+    child.inbox.deposit_reply(FOValue::Int { value: 2 });
     assert_eq!(child.park_snapshot(), ParkMode::Engaged);
     child.inbox.disarm_reply_lease();
     assert!(child.handle().has_reply());
@@ -251,14 +258,15 @@ fn pin_reminder_does_not_relivelock_the_interactive_root() {
     );
     session.seed("go".into());
     let item = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.take_up(&item, &emit).unwrap();
+    session.take_up(item, &emit).unwrap();
     let nudge = session
         .inbox
         .draw(|_| ParkMode::Quiesce)
         .expect("first completion queues one reminder");
     assert!(
-        matches!(&nudge, Next::Item(Item::Nudge { text, .. }) if text.contains("There is pinned state")),
-        "{nudge:?}"
+        matches!(&nudge.next, Next::Item(Item::Nudge { text, .. }) if text.contains("There is pinned state")),
+        "{:?}",
+        nudge.next
     );
     set_provider(
         &session,
@@ -267,7 +275,7 @@ fn pin_reminder_does_not_relivelock_the_interactive_root() {
             Script::new().then(Reply::text("still working")),
         ),
     );
-    session.take_up(&nudge, &emit).unwrap();
+    session.take_up(nudge, &emit).unwrap();
     assert!(session.inbox.draw(|_| ParkMode::Quiesce).is_none());
 }
 
@@ -282,7 +290,7 @@ fn chat_trunk_never_nudges() {
     );
     session.seed("hello".into());
     let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.take_up(&next, &emit).unwrap();
+    session.take_up(next, &emit).unwrap();
     assert!(session.inbox.draw(|_| ParkMode::Quiesce).is_none());
     assert!(
         !crate::bus::drain_records(&rx)
@@ -316,7 +324,7 @@ fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Agent {
     for prompt in ["first", "again"] {
         session.seed(prompt.into());
         let item = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-        session.take_up(&item, &emit).unwrap();
+        session.take_up(item, &emit).unwrap();
     }
     session
 }
@@ -353,8 +361,7 @@ fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
     while session.inbox.draw(|_| ParkMode::Quiesce).is_some() {}
     let _ = crate::bus::drain_records(&rx);
     session.seed("open".into());
-    session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.inbox.open_exchange();
+    open_next(&session.inbox);
     let exchange = session.inbox.exchange();
     let done = DoneEvent {
         id: WorkerId(1),
@@ -373,7 +380,7 @@ fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
         scripted("test-model", Script::new().then(Reply::panicking())),
     );
     let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    let step = session.take_up(&next, &emit).unwrap();
+    let step = session.take_up(next, &emit).unwrap();
     assert!(step.settled.is_none());
     assert!(session.rendered_messages().is_empty());
     assert_eq!(session.inbox.exchange().id(), exchange.id());
@@ -382,7 +389,7 @@ fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
         "a declined surface neither opens nor closes an exchange"
     );
     assert!(
-        matches!(session.inbox.draw(|_| ParkMode::Quiesce), Some(Next::Item(Item::Nudge { text, .. })) if text == "continue exchange")
+        matches!(pop(&session.inbox), Some(Next::Item(Item::Nudge { text, .. })) if text == "continue exchange")
     );
     let records = crate::bus::drain_records(&rx);
     assert!(
@@ -446,7 +453,7 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
                 .then(Reply::text("acknowledged card")),
         ),
     );
-    assert!(session.take_up(&next, &emit).unwrap().settled.is_some());
+    assert!(session.take_up(next, &emit).unwrap().settled.is_some());
     let view = serde_json::to_string(&session.rendered_messages()).unwrap();
     assert!(
         view.contains("If you kept its handle and the result is still unclaimed, `await $h`"),
@@ -457,7 +464,7 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
         values: vec![card_value(vec![])],
     });
     let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    assert!(session.take_up(&next, &emit).unwrap().settled.is_some());
+    assert!(session.take_up(next, &emit).unwrap().settled.is_some());
     let view = serde_json::to_string(&session.rendered_messages()).unwrap();
     assert!(view.contains("errand finished."), "{view}");
     let cause = Severed::Closed("engine lost".into());
@@ -474,7 +481,7 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
         values: vec![done],
     });
     let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    assert!(matches!(session.take_up(&next, &emit), Err(c) if c == cause));
+    assert!(matches!(session.take_up(next, &emit), Err(c) if c == cause));
 }
 
 #[test]
@@ -500,7 +507,7 @@ fn a_nonreply_followup_waits_for_real_schedules_or_busy_descendants() {
         );
         child.seed("initial task".into());
         let first = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-        child.take_up(&first, &emit).unwrap();
+        child.take_up(first, &emit).unwrap();
         assert!(child.handle().reply_since().is_some());
         let descendant = if scheduled {
             child
@@ -539,7 +546,7 @@ fn a_nonreply_followup_waits_for_real_schedules_or_busy_descendants() {
             .message(&parent.handle(), "follow up".into())
             .unwrap();
         let followup = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-        let step = child.take_up(&followup, &emit).unwrap();
+        let step = child.take_up(followup, &emit).unwrap();
         assert!(matches!(step.settled, Some(AgentOutcome::Failed(_))));
         assert!(child.handle().reply_since().is_none());
         assert_eq!(
@@ -555,7 +562,7 @@ fn a_nonreply_followup_waits_for_real_schedules_or_busy_descendants() {
             drop(descendant);
             let result = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
             assert!(matches!(
-                result,
+                result.next,
                 Next::Item(Item::Agent(AgentResult {
                     outcome: AgentOutcome::Failed(_),
                     ..

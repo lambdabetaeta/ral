@@ -3,14 +3,14 @@
 use crate::agent::EngineLost;
 #[cfg(any(test, feature = "test-util"))]
 use crate::agent::SPAWN_FUEL;
-use crate::agent::engine::Engine;
+use crate::agent::engine::{Engine, Incarnation};
 use crate::agent::factory::Factory;
-use crate::agent::fleet::{AGENT_LEASE_IDLE, Claim, Fleet, Genesis, Launch, Unborn};
+use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Genesis, Launch, Tenancy, Unborn};
 use crate::agent::handle::Shared;
 use crate::agent::index::BuiltinIndex;
 use crate::agent::{Agent, AgentHandle, LogCell, ProviderHandle, Readings, ReplyCell, Role};
 use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
-use crate::bus::{AgentOutcome, Emitter, Inbox, Mailbox, Queue};
+use crate::bus::{Emitter, Inbox, Mailbox, Queue};
 use crate::provider::{Provider, Toolset};
 use crate::record::{AgentId, AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
 use crate::shell_eval::builtins;
@@ -20,7 +20,7 @@ use ral_core::data::datum::Datum as _;
 use ral_core::engine::EngineInstaller;
 use ral_core::own::OwnDir;
 use ral_core::path::{CwdPath, EnginePath, GuestPath};
-use ral_core::process::CancelCause;
+use ral_core::process::Scope;
 use ral_core::protocol::channel::{Liveness, WireStream};
 use ral_core::protocol::{Attach, EngineSpec, Origin, Root};
 use ral_core::sync::LockExt;
@@ -50,15 +50,14 @@ const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindin
     and exarch-schedules `list to confirm), and any sub-agents from before have ended.";
 
 pub(crate) struct Build {
-    pub(crate) claim: Claim,
-    pub(crate) engine: Engine,
+    pub(crate) tenancy: Tenancy,
     pub(crate) log: AgentLog,
     pub(crate) role: Role,
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
     pub(crate) search: bool,
     pub(crate) fleet: Arc<Fleet>,
-    pub(crate) report: Option<Mailbox>,
+    pub(crate) parent: Option<Mailbox>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trunk {
@@ -218,42 +217,43 @@ impl Fleet {
         );
         Ok((fleet, engine))
     }
+    /// I1: a life hangs under its parent's work or the fleet root.
+    pub(crate) fn lodge(
+        &self,
+        parent: Option<Mailbox>,
+        name: &str,
+        born: Instant,
+    ) -> Result<(Scope, Inbox), Unborn> {
+        Ok(match parent {
+            Some(mailbox) => {
+                let (life, owing) = mailbox.adopt(name.into(), born)?;
+                (mailbox.scope(), Inbox::new(life, Some(owing)))
+            }
+            None => ((*self.root).clone(), Inbox::new(self.root.child(), None)),
+        })
+    }
 }
 impl Agent {
     pub(crate) fn assemble(b: Build) -> Result<Self, Unborn> {
         let Build {
-            claim,
-            engine,
+            tenancy,
             log,
             role,
             fuel,
             provider,
             search,
             fleet,
-            report,
+            parent,
         } = b;
         let id = log.id();
-        // I1: a life hangs under its parent's work or the fleet root.
-        let (under, life) = match &report {
-            Some(mailbox) => (
-                mailbox.scope(),
-                mailbox.adopt(id).ok_or_else(|| {
-                    if mailbox.is_live() {
-                        Unborn::Abandoned
-                    } else {
-                        Unborn::SessionDead
-                    }
-                })?,
-            ),
-            None => ((*fleet.root).clone(), fleet.root.child()),
-        };
-        let inbox = Inbox::new(life);
+        let started = Instant::now();
+        let (under, inbox) = fleet.lodge(parent, tenancy.claim().name(), started)?;
         let handle = AgentHandle(Arc::new(Shared {
             id,
-            name: claim.name().to_string(),
+            name: tenancy.claim().name().to_string(),
             log_dir: log.dir().clone(),
             run_dir: fleet.launch.run_dir().clone(),
-            started: Instant::now(),
+            started,
             role,
             fuel,
             provider,
@@ -261,21 +261,19 @@ impl Agent {
             under,
             mailbox: inbox.life_mailbox(),
         }));
-        let name = claim.bind(&handle);
+        tenancy.claim().bind(&handle);
         let readings = Readings::new(!fleet.launch.tools.is_empty());
+        let engine = Incarnation::new(tenancy, inbox.life());
         Ok(Self {
             handle,
-            incarnation: inbox.life_child(),
             inbox,
             log: LogCell::new(log),
-            engine,
             reply: ReplyCell::default(),
             pins: Arc::default(),
             schedules: crate::schedule::ScheduleRegistry::new(),
             fleet,
             readings,
-            report,
-            _name: name,
+            engine,
         })
     }
     /// # Errors
@@ -328,24 +326,19 @@ impl Agent {
                     .claim(&name)
                     .map_err(|why| io::Error::other(why.to_string()))?;
                 let engine = founding.take().map_or_else(|| fleet.launch.engine(), Ok)?;
-                Self::reopen(&fleet, claim, engine, id, provider.clone())
+                Self::reopen(&fleet, claim.occupy(engine), id, provider.clone())
             })
             .collect()
     }
     fn reopen(
         fleet: &Arc<Fleet>,
-        claim: Claim,
-        engine: Engine,
+        tenancy: Tenancy,
         id: AgentId,
         provider: Arc<Provider>,
     ) -> io::Result<(Self, Resumed)> {
         let live = provider.clone();
-        let (agent, resumed) = Self::hatch(
-            fleet,
-            claim,
-            engine,
-            provider,
-            |sessions, _, account, system| {
+        let (agent, resumed) =
+            Self::hatch(fleet, tenancy, provider, |sessions, _, account, system| {
                 let mut log = AgentLog::resume(sessions, id)?;
                 let resumed = log.resumed_summary();
                 if let Some((model, window)) = log.learned_window()
@@ -360,8 +353,7 @@ impl Agent {
                     crate::app::now_unix_ms(),
                 )?;
                 Ok((log, resumed))
-            },
-        )?;
+            })?;
         agent
             .log
             .borrow_mut()
@@ -378,13 +370,13 @@ impl Agent {
         lease: Duration,
     ) -> io::Result<Self> {
         let (fleet, engine) = Fleet::found(cfg, engine, installers, lease)?;
-        let claim = fleet
+        let tenancy = fleet
             .claim(TRUNK_NAME)
-            .map_err(|why| io::Error::other(why.to_string()))?;
+            .map_err(|why| io::Error::other(why.to_string()))?
+            .occupy(engine);
         Self::hatch(
             &fleet,
-            claim,
-            engine,
+            tenancy,
             provider,
             |sessions, model, account, system| {
                 AgentLog::root(sessions, id, TRUNK_NAME, model, account, system, None)
@@ -395,15 +387,14 @@ impl Agent {
     }
     pub(crate) fn hatch<T>(
         fleet: &Arc<Fleet>,
-        claim: Claim,
-        engine: Engine,
+        tenancy: Tenancy,
         provider: Arc<Provider>,
         open: impl FnOnce(&OwnDir, &RecordedModel, &RecordedAccount, &str) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
         let role = launch.trunk.role();
         let system = launch
-            .prompt_for(&engine, &role, launch.fuel, claim.name())
+            .prompt_for(&tenancy, &role, launch.fuel, tenancy.claim().name())
             .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let (log, opened) = open(
@@ -413,15 +404,14 @@ impl Agent {
             &system,
         )?;
         let agent = Self::assemble(Build {
-            claim,
-            engine,
+            tenancy,
             log,
             role,
             fuel: launch.fuel,
             provider: ProviderHandle::new(provider),
             search: launch.search,
             fleet: fleet.clone(),
-            report: None,
+            parent: None,
         })
         .map_err(|why| io::Error::other(why.to_string()))?;
         Ok((agent, opened))
@@ -430,8 +420,7 @@ impl Agent {
         (parent, mailbox): (&AgentHandle, Mailbox),
         parent_log: &AgentLog,
         fleet: &Arc<Fleet>,
-        claim: Claim,
-        engine: Engine,
+        tenancy: Tenancy,
         provider: Arc<Provider>,
         memory: Memory,
     ) -> Result<Self, String> {
@@ -441,13 +430,13 @@ impl Agent {
             parent: parent.clone(),
         };
         let system = launch
-            .prompt_for(&engine, &role, fuel, claim.name())
+            .prompt_for(&tenancy, &role, fuel, tenancy.claim().name())
             .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let log = parent_log
             .fork(
                 fresh_id(),
-                claim.name(),
+                tenancy.claim().name(),
                 &RecordedModel::of(&provider),
                 &account,
                 &system,
@@ -455,15 +444,14 @@ impl Agent {
             )
             .map_err(|e| format!("could not fork child session log: {e}"))?;
         Self::assemble(Build {
-            claim,
-            engine,
+            tenancy,
             log,
             role,
             fuel,
             provider: ProviderHandle::new(provider),
             search: parent.0.search,
             fleet: fleet.clone(),
-            report: Some(mailbox),
+            parent: Some(mailbox),
         })
         .map_err(|why| why.to_string())
     }
@@ -472,10 +460,8 @@ impl Agent {
             return Err(io::Error::other(Engine::CANNOT_REBOOT));
         }
         self.abandon(Queue::Discard);
-        self.incarnation.cancel(CancelCause::Cancelled);
-        self.incarnation = self.inbox.life_child();
         self.pins.lock_ignore_poison().clear();
-        self.engine.clear().map_err(io::Error::other)?;
+        self.engine.reboot().map_err(io::Error::other)?;
         self.log.borrow_mut().clear()?;
         self.readings = self.readings.reborn();
         Ok(())
@@ -497,14 +483,13 @@ impl Agent {
     }
     #[cfg(test)]
     pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
-        let engine = self.fleet.launch.engine().map_err(|e| e.to_string())?;
         let claim = self.fleet.claim(name).map_err(|e| e.to_string())?;
+        let tenancy = claim.occupy(self.fleet.launch.engine().map_err(|e| e.to_string())?);
         Self::child_of(
             (&self.handle, self.inbox.mailbox()),
             &self.log.borrow(),
             &self.fleet,
-            claim,
-            engine,
+            tenancy,
             self.handle.current_provider(),
             Memory::Amnemon,
         )
@@ -595,17 +580,6 @@ impl Drop for Agent {
         // I8: end the life before any owner field tears down.
         self.handle.end();
         self.schedules.clear();
-        if let Engine::Wire { transport, .. } = &self.engine
-            && let Err(cause) = transport.end()
-        {
-            self.fleet.teardown_failed(format!(
-                "agent '{}' ended without remote teardown acknowledgment: {cause}; settlement is unsafe",
-                self.handle.0.name
-            ));
-        }
-        if self.report.is_some() {
-            self.report(AgentOutcome::Failed("ended before reporting".into()));
-        }
         if !std::thread::panicking() {
             self.recorder()
                 .emit_or_report(crate::record::Forensic::SessionEnded);

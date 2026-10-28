@@ -93,6 +93,27 @@ impl IdentityTransport {
         Ok(Self::over(Engine::new(shell, self.installer)))
     }
 
+    /// Terminate, wipe the roster under the session lock, and count surviving worker threads; idempotent.
+    ///
+    /// # Errors
+    /// [`Severed::Faulted`] naming how many worker threads outlived the grace
+    /// period.
+    pub fn end(&self) -> Result<(), Severed> {
+        forbid_reentry(self);
+        self.control().terminate();
+        let survivors = {
+            let workers = &self.engine.lock().shell.local.workers;
+            workers.cancel_all();
+            workers.live_workers()
+        };
+        match survivors {
+            0 => Ok(()),
+            n => Err(Severed::Faulted(format!(
+                "{n} ral worker thread(s) outlived teardown's grace period"
+            ))),
+        }
+    }
+
     /// Read the engine's shell under the session lock.
     #[cfg(feature = "test-util")]
     pub(crate) fn inspect<R>(&self, read: impl FnOnce(&crate::shell::runtime::Shell) -> R) -> R {

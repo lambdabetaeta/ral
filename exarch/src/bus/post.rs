@@ -94,11 +94,9 @@ impl AgentOutcome {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct AgentResult {
-    pub id: AgentId,
     pub name: String,
     pub outcome: AgentOutcome,
     pub elapsed: Duration,
-    pub answers: u64,
 }
 impl AgentResult {
     pub(super) fn render(&self) -> String {
@@ -110,7 +108,6 @@ pub(crate) struct AgentMessage {
     pub from: AgentId,
     pub from_name: String,
     pub text: String,
-    pub seq: u64,
 }
 impl AgentMessage {
     pub(super) fn render(&self) -> String {

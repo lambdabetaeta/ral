@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+verified_at_commit: fc497f7577bfce957329627870a1f9292520b782
 verified_at_date: 2026-10-28
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::interrupt, AgentHandle::stop, Inbox, Mailbox, JobId, Fleet::wait_settled, dispatch_to_report, Scopes::open]
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::interrupt, AgentHandle::stop, Inbox, Mailbox, Posts, Owed, Opening, Census, Claim, Tenancy, Incarnation, JobId, Fleet::wait_settled, dispatch_to_report, Scopes::open]
 ---
 
 # Cancellation
@@ -580,15 +580,17 @@ incarnation scope under life vouches for worker batches
 - `Agent` alone owns engine, log, schedules, pins and reply staging.
   `AgentHandle` retains identity and a life mailbox, never an engine.
   Owner drop cancels life first, ending descendants; engine destruction
-  ends its ral workers. Final membership witnesses completed teardown.
+  ends its ral workers. Releasing the engine's `Tenancy` witnesses completed
+  teardown.
 - `Inbox` / `Mailbox` (`bus/inbox.rs`) carry scope provenance, checked once
-  at pop under the inbox lock. Results and wakeups carry work; nudges
+  at pop under the inbox lock; `Posts` fences before every observation.
+  Results and wakeups carry work; nudges
   exchange; worker batches the engine incarnation; messages the sender's
   containing scope.
   Human text and commands are unfenced.
 - Exchange scope is minted at pop under current work. Accepted arrival
-  installs it and cancels its predecessor; a declined worker completion
-  drops only the opening. Esc strikes both opening and exchange: no reset
+  `open`s it, cancelling its predecessor; a declined worker completion
+  drops the `Opening`, and only that. Esc strikes both opening and exchange: no reset
   erases it. `deliberate` appends a drawn prompt before polling cancellation,
   recording human text once without a provider round under a dead scope.
 - Parks read life on every condvar wake or `PARK_POLL` (100 ms); provider
@@ -609,8 +611,8 @@ incarnation scope under life vouches for worker batches
   cannot hit a later dispatch.
 - Loose ral workers belong to the engine, not work. Stop and reply preserve
   them; their batches carry engine incarnation under both carriers. `/clear`
-  discards the queue and cancels and replaces that scope even if boot fails;
-  successful boot terminates the old transport before replacing it.
+  discards the queue and `Incarnation::reboot` cancels and replaces that scope
+  even if boot fails; a successful boot certifies the outgoing engine.
 - `signals::face` forwards interrupts to root exchanges and shutdown to
   `Fleet::end`. `boot::face_process_signals` installs ral then exarch's
   non-escalating SIGINT disposition once at entry. Raw-mode keys are local;
@@ -632,9 +634,9 @@ incarnation scope under life vouches for worker batches
   or die by provenance, including surviving incarnation-vouched worker batches.
 - `SettledConversation::run` waits through `Fleet::wait_settled` inside the
   output pump, linearises closing against Stop, and settles again if Stop
-  wins before returning `JobEnd`. The attending owner counts once, independent of liveness;
-  every other ended owner and unfinished claim must tear down.
-  Wire owners retain membership through `Detach → Ended`, certified only
+  wins before returning `JobEnd`. The attending owner is excluded by tenant id,
+  independent of liveness; every other ended owner and unfinished claim must
+  tear down. Wire owners retain their `Tenancy` through `Detach → Ended`, certified only
   after engine-thread join and a drained session-worker census. Missing
   acknowledgment refuses settlement and Synod's closing folder scan.
   The next job and “Stopped.” cannot overtake those writes or final output.
@@ -642,7 +644,7 @@ incarnation scope under life vouches for worker batches
   restore it ahead of the draft without retargeting a newer job. Backend
   `JobDone.stopped` alone draws “Stopped.” after in-flight output.
 - `end_fleet` cancels the whole fleet, drops its owner, then waits through
-  detached `Departures`. Final memberships drop after engine/log teardown;
+  detached `Census`. Each tenancy releases after engine/log teardown;
   the waiter retains no launch or factory. Synod recovers `MachineFactory`
   only after this barrier.
 

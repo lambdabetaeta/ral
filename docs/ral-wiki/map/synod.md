@@ -345,7 +345,7 @@ is judged; shared machinery stays with exarch and vm-manager.
   secondary.
 - `Guest::end` calls `SettledConversation::end_fleet`, intentionally cancelling
   every root in the shared fleet. The driver/root drops before waiting on the
-  detached `Departures` counter. Membership drops last, after engine/log and
+  detached `Census`. The tenancy releases last, after engine/log and
   fleet references, so this wait retains no launch or factory.
   Only then does `Guest::end` recover the uniquely owned `MachineFactory`
   machine, stop and join netgate, and shut the machine down.

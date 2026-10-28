@@ -1,11 +1,14 @@
 use super::*;
 use crate::agent::testkit::*;
-use crate::bus::{AgentResult, Emitter, Item, Next, ParkMode, Scoped};
+use crate::bus::{Emitter, Item, Next, ParkMode};
 use crate::provider::scripted::Script;
 use crate::record::{Memory, RECORD, Voice};
 use genai::chat::ChatMessage;
 use ral_core::process::DurableRoot;
+use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
+use std::borrow::Cow;
 use std::fs;
+use std::sync::atomic::AtomicBool;
 
 fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
     RootConfig {
@@ -31,20 +34,6 @@ fn identity_engine(tag: &str) -> RootEngine {
         grants: ral_core::authority::policy::GrantStack::default(),
         terminal: ral_core::io::terminal::TerminalState::default(),
     }
-}
-
-fn report(worker: &TestAgent, outcome: crate::bus::AgentOutcome) {
-    worker
-        .report
-        .as_ref()
-        .unwrap()
-        .post(Scoped::Result(AgentResult {
-            id: worker.id(),
-            name: worker.0.name.clone(),
-            outcome,
-            elapsed: worker.elapsed(),
-            answers: worker.0.mailbox.answers(),
-        }));
 }
 
 #[test]
@@ -180,7 +169,7 @@ fn clear_fences_the_old_incarnation_even_if_boot_fails() {
         let crate::agent::engine::EngineKind::Identity(old) = session.engine.kind() else {
             panic!("an identity root");
         };
-        let incarnation = (*session.incarnation).clone();
+        let incarnation = session.engine.scope();
         let (emit, _rx) = crate::bus::dummy_emitter();
         let sink = crate::shell_eval::deferred_sink(
             &emit,
@@ -191,25 +180,47 @@ fn clear_fences_the_old_incarnation_even_if_boot_fails() {
         REFUSE_BOOT.set(fails);
         assert_eq!(session.clear().is_err(), fails);
         assert!(incarnation.is_cancelled());
-        assert_ne!(incarnation.id(), session.incarnation.id());
-        assert!(!session.incarnation.is_cancelled());
+        assert_ne!(incarnation.id(), session.engine.scope().id());
+        assert!(!session.engine.scope().is_cancelled());
         sink.deliver(vec![ral_core::data::FOValue::Unit]);
         assert!(session.inbox.is_empty());
         assert_eq!(old.session_ended().unwrap(), (!fails).then_some(143));
     }
 }
 
+/// A trunk whose `test-held` ignores cancellation until `release`, then
+/// settles on it; teardown waits only briefly for it.
+fn held_trunk(release: &Arc<AtomicBool>) -> Agent {
+    let release = Arc::clone(release);
+    let held: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
+        Cow::Borrowed("test-held"),
+        scheme_test_clear_block_forever,
+        "test-only: ignore cancellation until released, then settle on it.",
+        BuiltinBody::Captured(Arc::new(move |_, _, shell| {
+            loop {
+                if release.load(Ordering::Acquire) {
+                    shell.poll()?;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })),
+    )]);
+    dressed_trunk_over(
+        move |runtime| runtime.install_captured_builtins(&held),
+        |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
+    )
+}
+
 #[test]
 fn clear_cancels_registered_workers_and_drops_their_late_surface() {
-    CLEAR_RELEASE.store(false, std::sync::atomic::Ordering::Release);
-    let mut session =
-        dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+    let release = Arc::new(AtomicBool::new(false));
+    let mut session = held_trunk(&release);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     for _ in 0..2 {
         session.ral(
             &DurableRoot::default().child(),
-            "spawn \"held\" { test-clear-block-until-released }",
+            "spawn \"held\" { test-held }",
             30,
             &emit,
         );
@@ -227,7 +238,7 @@ fn clear_cancels_registered_workers_and_drops_their_late_surface() {
         probe_count(&session, ral_core::test_access::worker_count),
         0
     );
-    CLEAR_RELEASE.store(true, std::sync::atomic::Ordering::Release);
+    release.store(true, Ordering::Release);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     for entry in &entries {
         while !entry.handle.sample().has_ended() {
@@ -257,7 +268,9 @@ fn late_child_result_after_clear_is_refused_at_publication() {
     )
     .unwrap();
     session.clear().unwrap();
-    report(&worker, crate::bus::AgentOutcome::Stopped("late".into()));
+    worker
+        .inbox
+        .retire(crate::bus::AgentOutcome::Stopped("late".into()));
     assert!(
         session.inbox.is_empty(),
         "abandoned work refuses late results"
@@ -275,9 +288,11 @@ fn a_clear_in_one_tab_leaves_another_tabs_late_result_alone() {
     )
     .unwrap();
     branch.clear().unwrap();
-    report(&worker, crate::bus::AgentOutcome::Stopped("done".into()));
+    worker
+        .inbox
+        .retire(crate::bus::AgentOutcome::Stopped("done".into()));
     assert!(matches!(
-        trunk.inbox.draw(|_| ParkMode::Quiesce),
+        pop(&trunk.inbox),
         Some(Next::Item(Item::Agent(_)))
     ));
 }
@@ -298,6 +313,32 @@ fn agent_drop_cancels_its_own_unclosed_workers() {
     assert!(!entries[0].handle.cancel.is_cancelled());
     drop(agent);
     assert!(entries[0].handle.cancel.is_cancelled());
+}
+
+#[test]
+fn a_failed_outgoing_teardown_survives_a_clean_final_one() {
+    let release = Arc::new(AtomicBool::new(false));
+    let mut session = held_trunk(&release);
+    let fleet = session.fleet.clone();
+    let witness = test_agent(&fleet, TestAgentSpec::new("witness")).unwrap();
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    session.ral(
+        &DurableRoot::default().child(),
+        "spawn \"held\" { test-held }",
+        30,
+        &emit,
+    );
+    session.clear().unwrap();
+    drop(session);
+    let why = fleet
+        .wait_settled(witness.tenant(), &crate::bus::Pumping::for_test())
+        .unwrap_err();
+    assert!(
+        why.contains("ended without certified engine teardown"),
+        "{why}"
+    );
+    release.store(true, Ordering::Release);
 }
 
 #[test]
@@ -417,8 +458,7 @@ fn rewind_validates_the_anchor_and_sheds_nudges() {
         "turn 9 is not recorded: the latest is 6"
     );
     session.seed("open".into());
-    session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.inbox.open_exchange();
+    open_next(&session.inbox);
     session.inbox.nudge(5, "stale continuation".into());
     session.rewind(3, &emit).unwrap();
     assert_eq!(
@@ -434,7 +474,7 @@ fn rewind_validates_the_anchor_and_sheds_nudges() {
         vec![1, 2]
     );
     assert!(!matches!(
-        session.inbox.draw(|_| ParkMode::Quiesce),
+        pop(&session.inbox),
         Some(Next::Item(Item::Nudge { .. }))
     ));
     assert!(crate::bus::drain_records(&rx).iter().any(|record| matches!(
@@ -632,7 +672,7 @@ fn a_root_runs_under_its_launch_grants() {
         );
     };
     check(&session);
-    session.engine.clear().unwrap();
+    session.clear().unwrap();
     check(&session);
     let root = crate::agent::spawn::hatch_root(&session, Memory::Amnemon, Some("new-root".into()))
         .unwrap();

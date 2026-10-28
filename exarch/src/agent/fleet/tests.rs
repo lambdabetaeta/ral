@@ -1,10 +1,11 @@
 use super::*;
-use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, open_next, pop, test_agent};
 use crate::agent::{AgentHandle, roster};
-use crate::bus::{AgentOutcome, Item, Next, ParkMode, Queue};
+use crate::bus::{AgentOutcome, Item, Lease, Next, ParkMode, Pumping, Queue};
 use crate::enquiry::Spawner;
 use ral_core::data::FOValue;
 use ral_core::test_helper::eventually;
+use std::time::Instant;
 
 fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&TestAgent>) -> TestAgent {
     let spec = parent.map_or_else(
@@ -14,10 +15,13 @@ fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&TestAgent>) -> TestAgen
     test_agent(fleet, spec).expect("a fresh agent under live work")
 }
 
-fn deposit(agent: &TestAgent, fleet: &Fleet, value: i64) -> Instant {
-    let since = agent.inbox.deposit_reply(FOValue::Int { value });
-    fleet.lease_reply(agent, since);
-    since
+fn deposit(agent: &TestAgent, fleet: &Fleet, value: i64) -> Lease {
+    let lease = agent
+        .inbox
+        .deposit_reply(FOValue::Int { value })
+        .expect("no input is queued");
+    fleet.lease_reply(agent, lease.clone());
+    lease
 }
 
 #[test]
@@ -86,8 +90,7 @@ fn abandoning_work_cancels_descendants_but_spares_the_owner() {
     assert!(!grandchild.is_live());
     assert!(trunk.is_live());
     trunk.steer("fresh work".into()).unwrap();
-    trunk.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    trunk.inbox.open_exchange();
+    open_next(&trunk.inbox);
     assert!(!trunk.inbox.exchange().is_cancelled());
 }
 
@@ -112,8 +115,7 @@ fn interrupt_unwinds_only_the_exchange() {
     let child = agent(&fleet, "child", Some(&trunk));
     let grandchild = agent(&fleet, "grandchild", Some(&child));
     child.steer("work".into()).unwrap();
-    child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    child.inbox.open_exchange();
+    open_next(&child.inbox);
     child.interrupt();
     assert_eq!(
         child.inbox.exchange().cause(),
@@ -138,8 +140,7 @@ fn interrupt_never_poisons_the_next_run() {
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
     child.steer("work".into()).unwrap();
-    child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    child.inbox.open_exchange();
+    open_next(&child.inbox);
     let exchange = child.inbox.exchange();
     let transport = Arc::new(bare_transport());
     let running = {
@@ -177,8 +178,7 @@ fn interrupt_never_poisons_the_next_run() {
         "{first:?}"
     );
     child.steer("next".into()).unwrap();
-    child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    child.inbox.open_exchange();
+    open_next(&child.inbox);
     let next = dispatch_to_report(
         &*transport,
         Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
@@ -339,17 +339,16 @@ fn followups_disarm_the_old_reply_and_the_next_reply_gets_a_new_lease() {
         } else {
             child.steer("follow up".into()).unwrap();
         }
-        child.lapse(first);
+        child.lapse(&first);
         assert!(child.is_live());
         assert!(fleet.nearest_reap().is_none());
         child.inbox.disarm_reply_lease();
         assert!(child.reply_since().is_none());
         child.inbox.draw(|_| ParkMode::Quiesce);
         let second = deposit(&child, &fleet, 2);
-        assert!(second > first);
-        child.lapse(first);
+        child.lapse(&first);
         assert!(child.is_live());
-        child.lapse(second);
+        child.lapse(&second);
         assert!(!child.is_live());
     }
 }
@@ -359,9 +358,9 @@ fn resumed_work_disarms_the_reply_even_without_a_message() {
     let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
-    let since = deposit(&child, &fleet, 1);
+    let lease = deposit(&child, &fleet, 1);
     child.inbox.disarm_reply_lease();
-    child.lapse(since);
+    child.lapse(&lease);
     assert!(child.is_live());
     assert!(fleet.nearest_reap().is_none());
 }
@@ -371,13 +370,13 @@ fn observing_status_does_not_disarm_the_reply_lease() {
     let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
-    let since = deposit(&child, &fleet, 1);
+    let lease = deposit(&child, &fleet, 1);
     child.inbox.set_resting(false);
     child.inbox.set_resting(true);
-    assert_eq!(child.reply_since(), Some(since));
+    assert!(child.reply_since().is_some());
     assert!(child.status().rest.is_some());
     assert!(fleet.nearest_reap().is_some());
-    child.lapse(since);
+    child.lapse(&lease);
     assert!(!child.is_live());
 }
 
@@ -388,7 +387,7 @@ fn settling_before_the_fire_ends_the_chain_silently() {
     let child = agent(&fleet, "child", Some(&trunk));
     let weak = child.0.mailbox.downgrade();
     let life = child.0.mailbox.scope();
-    let since = deposit(&child, &fleet, 1);
+    let lease = deposit(&child, &fleet, 1);
     let retained = AgentHandle::clone(&child);
     assert!(fleet.nearest_reap().is_some());
     assert_eq!(life.cause(), None);
@@ -400,7 +399,7 @@ fn settling_before_the_fire_ends_the_chain_silently() {
     assert!(fleet.resolve("child").is_none());
     assert!(fleet.nearest_reap().is_none());
     assert_eq!(life.cause(), Some(CancelCause::Cancelled));
-    retained.lapse(since);
+    retained.lapse(&lease);
     assert_eq!(life.cause(), Some(CancelCause::Cancelled));
 }
 
@@ -430,9 +429,7 @@ fn steering_stamps_the_exchange_clock_and_resets_idle() {
     root.steer("hi".into()).unwrap();
     assert!(root.status().last_exchange.is_some());
     assert!(root.idle() < Duration::from_secs(1));
-    assert!(
-        matches!(root.inbox.draw(|_| ParkMode::Quiesce), Some(Next::Item(Item::Human(s))) if s == "hi")
-    );
+    assert!(matches!(pop(&root.inbox), Some(Next::Item(Item::Human(s))) if s == "hi"));
 }
 
 #[test]
@@ -443,13 +440,16 @@ fn a_settling_childs_result_outruns_the_quiesce_verdict() {
     assert!(trunk.has_busy_children());
     drop(child);
     assert!(trunk.has_busy_children(), "ended is not heard");
-    let next = trunk.inbox.draw(|state| {
-        if state.has_busy_children() {
-            ParkMode::HeldByChildren
-        } else {
-            ParkMode::Quiesce
-        }
-    });
+    let next = trunk
+        .inbox
+        .draw(|state| {
+            if state.has_busy_children() {
+                ParkMode::HeldByChildren
+            } else {
+                ParkMode::Quiesce
+            }
+        })
+        .map(|drawn| drawn.next);
     assert!(
         matches!(next, Some(Next::Item(Item::Agent(r))) if r.name == "child" && matches!(r.outcome, AgentOutcome::Failed(_)))
     );
@@ -494,7 +494,9 @@ fn wait_empty_counts_child_teardown_after_its_root_retires() {
     let waiter = {
         let fleet = fleet.clone();
         std::thread::spawn(move || {
-            fleet.wait_empty_after(|| waiting.send(()).unwrap());
+            fleet
+                .census()
+                .wait_empty_after(|| waiting.send(()).unwrap());
             done.send(()).unwrap();
         })
     };
@@ -509,28 +511,65 @@ fn wait_empty_counts_child_teardown_after_its_root_retires() {
     assert!(fleet.is_empty());
 }
 
+/// `wait_settled` for `waiter` on another thread; its verdict arrives on the receiver.
+fn settling(fleet: &Arc<Fleet>, waiter: TenantId) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    let (done, verdict) = std::sync::mpsc::channel();
+    let fleet = fleet.clone();
+    std::thread::spawn(move || done.send(fleet.wait_settled(waiter, &Pumping::for_test())));
+    verdict
+}
+
 #[test]
 fn wait_settled_waits_for_ended_members_but_not_live_ones() {
     let fleet = Fleet::for_test();
     let root = agent(&fleet, "root", None);
     let child = agent(&fleet, "child", Some(&root));
     root.inbox.abandon(Queue::Recall);
-    let (done, finished) = std::sync::mpsc::channel();
-    let waiter = {
-        let fleet = fleet.clone();
-        let handle = root.clone();
-        std::thread::spawn(move || {
-            fleet.wait_settled(&handle).unwrap();
-            done.send(()).unwrap();
-        })
-    };
+    let verdict = settling(&fleet, root.tenant());
     assert!(matches!(
-        finished.recv_timeout(Duration::from_millis(20)),
+        verdict.recv_timeout(Duration::from_millis(20)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout)
     ));
     drop(child);
-    finished.recv_timeout(Duration::from_secs(5)).unwrap();
-    waiter.join().unwrap();
+    assert_eq!(
+        verdict.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Ok(())
+    );
     assert!(root.is_live());
     assert!(!fleet.is_empty());
+}
+
+#[test]
+fn the_waiter_is_counted_once_under_racing_cancellation() {
+    let fleet = Fleet::for_test();
+    let root = agent(&fleet, "root", None);
+    let helper = agent(&fleet, "helper", Some(&root));
+    helper.end();
+    let verdict = settling(&fleet, root.tenant());
+    let handle = AgentHandle::clone(&root);
+    std::thread::spawn(move || handle.end()).join().unwrap();
+    assert!(!root.is_live());
+    assert!(matches!(
+        verdict.recv_timeout(Duration::from_millis(350)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(helper);
+    assert_eq!(
+        verdict.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_bare_claim_releases_silently() {
+    let fleet = Fleet::for_test();
+    let root = agent(&fleet, "root", None);
+    let claim = fleet.claim("bare").unwrap();
+    assert!(!fleet.is_empty());
+    drop(claim);
+    assert_eq!(
+        fleet.wait_settled(root.tenant(), &Pumping::for_test()),
+        Ok(())
+    );
+    assert!(fleet.claim("bare").is_ok());
 }

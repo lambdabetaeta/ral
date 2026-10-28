@@ -10,14 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 impl Agent {
-    pub(crate) fn settle(mut self, outcome: AgentOutcome) {
-        let replied = self.handle.0.mailbox.retire();
-        match outcome {
-            AgentOutcome::Replied if replied => {}
-            AgentOutcome::Replied => self.report(AgentOutcome::Cancelled),
-            outcome => self.report(outcome),
-        }
-        self.report.take();
+    pub(crate) fn settle(self, outcome: AgentOutcome) {
+        self.inbox.retire(outcome);
     }
 }
 
@@ -38,12 +32,11 @@ pub(crate) fn hatch_root(
     let name =
         name.unwrap_or_else(|| format!("root-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)));
     let claim = session.fleet.claim(&name).map_err(|e| e.to_string())?;
-    let engine = session.fleet.launch.engine().map_err(|e| e.to_string())?;
+    let tenancy = claim.occupy(session.fleet.launch.engine().map_err(|e| e.to_string())?);
     let inherited = (memory == Memory::Mnemon).then(|| session.log.borrow().inherited_context());
     Agent::hatch(
         &session.fleet,
-        claim,
-        engine,
+        tenancy,
         session.handle.current_provider(),
         |sessions, model, account, system| {
             let id = crate::agent::fresh_id();
@@ -171,11 +164,7 @@ pub(crate) fn spawn_async(
                 AgentOutcome::Failed("sub-agent panicked".into())
             });
             child.recorder().transient(Transient::Died);
-            // A replied child's parent was notified at deposit time; `settle`
-            // skips a second report for it.  A root reports to nobody and
-            // only `/close` or `/quit` on its own tab ever ends it.  Delivery precedes
-            // retirement: a parent that finds this child gone always finds
-            // the result already queued.
+            // A root reports to nobody; `settle` pays only what is still owed.
             child.settle(outcome);
         });
     match worker {

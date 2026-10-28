@@ -1,22 +1,42 @@
 use super::*;
+use crate::agent::testkit::{open_next, pop, pop_outcome};
 use crate::record::Memory;
 use ral_core::process::DurableRoot;
 use ral_core::test_helper::eventually;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 fn inbox() -> Inbox {
-    Inbox::new(DurableRoot::default().child())
+    Inbox::new(DurableRoot::default().child(), None)
 }
 
-fn pop(inbox: &Inbox) -> Option<Next> {
+fn draw(inbox: &Inbox) -> Option<Drawn> {
     inbox.draw(|_| ParkMode::Quiesce)
+}
+
+/// The ticket a stopped job hands back, still holding the job open.
+fn stopped(job: Job) -> StoppedJob {
+    match job.close() {
+        Closed::Stopped(held) => held,
+        Closed::Ran => panic!("the job was stopped, so it cannot close as running"),
+    }
+}
+
+fn job_is_open(inbox: &Inbox) -> bool {
+    inbox.0.lock().job.is_some()
+}
+
+/// An active inbox and the job its "running" prompt opened.
+fn running() -> (Inbox, Job) {
+    let inbox = active();
+    inbox.mailbox().steer("running".into());
+    let job = inbox.await_job().unwrap();
+    (inbox, job)
 }
 
 fn active() -> Inbox {
     let inbox = inbox();
     assert!(inbox.mailbox().steer("start".into()));
-    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(_)))));
-    inbox.open_exchange();
+    assert!(matches!(open_next(&inbox), Next::Item(Item::Human(_))));
     inbox
 }
 
@@ -40,23 +60,30 @@ fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> Scoped {
     }
 }
 
-fn result(outcome: AgentOutcome, answers: u64) -> Scoped {
-    Scoped::Result(AgentResult {
-        id: AgentId::new(7),
-        name: "worker".into(),
-        outcome,
-        elapsed: Duration::ZERO,
-        answers,
-    })
+fn result(outcome: AgentOutcome) -> Scoped {
+    Scoped::Result {
+        result: AgentResult {
+            name: "worker".into(),
+            outcome,
+            elapsed: Duration::ZERO,
+        },
+        paid: Vec::new(),
+    }
+}
+
+fn follow_up(text: &str) -> AgentMessage {
+    AgentMessage {
+        from: AgentId::new(7),
+        from_name: "review".into(),
+        text: text.into(),
+    }
 }
 
 fn message() -> Scoped {
-    Scoped::Message(AgentMessage {
-        from: AgentId::new(7),
-        from_name: "review".into(),
-        text: "please inspect the parser branch".into(),
-        seq: 4,
-    })
+    Scoped::Message {
+        message: follow_up("please inspect the parser branch"),
+        owed: None,
+    }
 }
 
 fn surface() -> Scoped {
@@ -77,7 +104,7 @@ fn surface() -> Scoped {
 fn every_scoped_kind_is_fenced_at_pop() {
     let cases: [(Source, fn() -> Scoped); 5] = [
         (Source::Agent, || {
-            result(AgentOutcome::Stopped("done".into()), 0)
+            result(AgentOutcome::Stopped("done".into()))
         }),
         (Source::Surface, surface),
         (Source::Schedule, || wakeup(1, "nightly", "@", "go")),
@@ -96,7 +123,11 @@ fn every_scoped_kind_is_fenced_at_pop() {
             if cancelled {
                 from.cancel(CancelCause::Cancelled);
             }
-            assert_eq!(depth_of(&inbox, source), 1, "fence is at pop: {source:?}");
+            assert_eq!(
+                depth_of(&inbox, source),
+                u64::from(!cancelled),
+                "observers fence: {source:?}"
+            );
             assert_eq!(pop(&inbox).is_some(), !cancelled, "{source:?}");
             assert!(inbox.is_empty());
             mailbox.steer("human".into());
@@ -128,7 +159,7 @@ fn dead_nudge_remerges_the_human_posts_it_leaves_adjacent() {
 #[test]
 fn dead_provenance_or_life_refuses_publication() {
     let inbox = inbox();
-    let from = inbox.life_child();
+    let from = inbox.life().child();
     let mailbox = inbox.life_mailbox().vouched_by((*from).clone());
     from.cancel(CancelCause::Cancelled);
     assert!(!mailbox.post(surface()));
@@ -157,7 +188,7 @@ fn inbox_waiting_for_input_tracks_human_park() {
     assert!(!mailbox.status().waiting_for_input);
     assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "work"));
     assert!(!mailbox.status().waiting_for_input);
-    let worker = std::thread::spawn(move || inbox.draw(|_| ParkMode::Held));
+    let worker = std::thread::spawn(move || inbox.draw(|_| ParkMode::Held).map(|drawn| drawn.next));
     assert!(
         eventually(Duration::from_secs(1), || mailbox
             .status()
@@ -198,23 +229,27 @@ fn inbox_waiting_for_input_ignores_non_human_parks() {
 fn non_human_park_survives_an_interrupt() {
     let inbox = active();
     let mailbox = inbox.mailbox();
-    let observed = Arc::new(AtomicBool::new(false));
-    let worker_observed = observed.clone();
-    let worker = std::thread::spawn(move || {
-        inbox.draw(|_| {
-            worker_observed.store(true, Ordering::Release);
-            ParkMode::HeldByChildren
-        })
+    let observed = AtomicBool::new(false);
+    let next = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            inbox
+                .draw(|_| {
+                    observed.store(true, Ordering::Release);
+                    ParkMode::HeldByChildren
+                })
+                .map(|drawn| drawn.next)
+        });
+        assert!(
+            eventually(Duration::from_secs(1), || observed
+                .load(Ordering::Acquire)
+                .then_some(()))
+            .is_some()
+        );
+        mailbox.interrupt();
+        mailbox.steer("resume".into());
+        worker.join().unwrap()
     });
-    assert!(
-        eventually(Duration::from_secs(1), || observed
-            .load(Ordering::Acquire)
-            .then_some(()))
-        .is_some()
-    );
-    mailbox.interrupt();
-    mailbox.steer("resume".into());
-    assert!(matches!(worker.join().unwrap(), Some(Next::Item(Item::Human(s))) if s == "resume"));
+    assert!(matches!(next, Some(Next::Item(Item::Human(s))) if s == "resume"));
     assert!(mailbox.is_live());
 }
 
@@ -243,7 +278,7 @@ fn engaged_park_ends_with_its_life() {
 #[test]
 fn parked_owner_polls_ancestor_cancellation() {
     let root = DurableRoot::default();
-    let inbox = Inbox::new(root.child());
+    let inbox = Inbox::new(root.child(), None);
     let observed = Arc::new(AtomicBool::new(false));
     let worker_observed = observed.clone();
     let worker = std::thread::spawn(move || {
@@ -303,7 +338,6 @@ fn inbox_agent_message_drains_marked_at_tool_boundary() {
         if m.from == AgentId::new(7) && m.from_name == "review"
         && m.text == "please inspect the parser branch"
         && m.render() == "[EXARCH AGENT 7 MESSAGE: review]\nplease inspect the parser branch\n[/EXARCH]"));
-    assert_eq!(inbox.mailbox().answers(), 4);
     assert!(inbox.is_empty());
 }
 
@@ -398,12 +432,12 @@ fn inbox_recall_extracts_all_leaving_non_user_in_order() {
 }
 
 #[test]
-fn abandon_applies_each_queue_policy_and_empties_awaiting() {
+fn abandon_applies_each_queue_policy_and_forgets_its_debts() {
     for queue in [Queue::Keep, Queue::Recall, Queue::Discard] {
         let inbox = active();
         let work = inbox.mailbox();
         let life = inbox.life_mailbox();
-        let child = work.adopt(AgentId::new(1)).unwrap();
+        let (child, _owing) = work.adopt("child".into(), Instant::now()).unwrap();
         let exchange = inbox.exchange();
         assert!(work.status().busy);
         work.steer("first".into());
@@ -417,7 +451,7 @@ fn abandon_applies_each_queue_policy_and_empties_awaiting() {
         assert!(!work.is_current());
         assert!(inbox.mailbox().is_current());
         assert!(!life.status().busy);
-        assert!(work.adopt(AgentId::new(2)).is_none());
+        assert!(work.adopt("late".into(), Instant::now()).is_err());
         match queue {
             Queue::Keep => {
                 assert_eq!(recalled, [] as [String; 0]);
@@ -455,8 +489,7 @@ fn inbox_surface_drains_at_tool_boundary_and_discarded() {
     inbox.abandon(Queue::Discard);
     assert!(drained(&inbox).is_empty());
     inbox.mailbox().steer("next".into());
-    pop(&inbox).unwrap();
-    inbox.open_exchange();
+    open_next(&inbox);
     inbox.life_mailbox().post(surface());
     assert!(
         matches!(drained(&inbox).as_slice(), [Item::Surface { id, .. }] if *id == AgentId::new(0))
@@ -569,14 +602,46 @@ fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
 }
 
 #[test]
-fn interrupt_after_pop_cancels_the_opening_without_ending_life() {
+fn esc_between_pop_and_open_cancels_the_opened_exchange() {
     let inbox = inbox();
+    let before = inbox.exchange();
     inbox.mailbox().steer("work".into());
-    pop(&inbox).unwrap();
+    let drawn = draw(&inbox).unwrap();
     inbox.mailbox().interrupt();
-    inbox.open_exchange();
-    assert_eq!(inbox.exchange().cause(), Some(CancelCause::Interrupted));
+    drawn.opening.unwrap().open();
+    let opened = inbox.exchange();
+    assert_ne!(opened.id(), before.id());
+    assert_eq!(opened.cause(), Some(CancelCause::Interrupted));
+    assert_eq!(before.cause(), Some(CancelCause::Cancelled));
     assert!(inbox.mailbox().is_live());
+}
+
+#[test]
+fn an_undrawn_opening_is_declined_on_drop() {
+    let inbox = inbox();
+    let before = inbox.exchange();
+    inbox.mailbox().steer("work".into());
+    let drawn = draw(&inbox).unwrap();
+    assert!(inbox.0.lock().opening.is_some());
+    drop(drawn);
+    assert!(inbox.0.lock().opening.is_none());
+    assert_eq!(inbox.exchange().id(), before.id());
+}
+
+#[test]
+fn a_stale_opening_cannot_install_over_a_newer_one() {
+    let inbox = inbox();
+    let before = inbox.exchange();
+    inbox.mailbox().steer("first".into());
+    let stale = draw(&inbox).unwrap().opening.unwrap();
+    inbox.mailbox().steer("second".into());
+    let newer = draw(&inbox).unwrap().opening.unwrap();
+    let minted = inbox.0.lock().opening.as_ref().unwrap().id();
+    stale.open();
+    assert_eq!(inbox.exchange().id(), before.id());
+    newer.open();
+    assert_eq!(inbox.exchange().id(), minted);
+    assert!(inbox.0.lock().opening.is_none());
 }
 
 #[test]
@@ -590,9 +655,7 @@ fn idle_interrupt_fences_only_the_queued_nudge() {
         pop(&inbox),
         Some(Next::Item(Item::Surface { .. }))
     ));
-    inbox.decline_opening();
-    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "next"));
-    inbox.open_exchange();
+    assert!(matches!(open_next(&inbox), Next::Item(Item::Human(s)) if s == "next"));
     assert!(!inbox.exchange().is_cancelled());
     assert!(pop(&inbox).is_none());
 }
@@ -607,7 +670,6 @@ fn declined_surface_opens_nothing_and_preserves_a_queued_nudge() {
         pop(&inbox),
         Some(Next::Item(Item::Surface { .. }))
     ));
-    inbox.decline_opening();
     assert_eq!(inbox.exchange().id(), exchange.id());
     assert!(!exchange.is_cancelled());
     assert!(matches!(pop(&inbox), Some(Next::Item(Item::Nudge { text, .. })) if text == "retry"));
@@ -622,8 +684,7 @@ fn opening_an_exchange_and_rewind_fence_old_nudges() {
         if rewind {
             inbox.close_exchange();
         } else {
-            pop(&inbox).unwrap();
-            inbox.open_exchange();
+            open_next(&inbox);
         }
         if rewind {
             assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(_)))));
@@ -633,29 +694,20 @@ fn opening_an_exchange_and_rewind_fence_old_nudges() {
 }
 
 #[test]
-fn heard_is_atomic_with_pop_and_old_replies_leave_followups_awaited() {
+fn busy_clears_exactly_when_the_paid_result_is_popped() {
     for drain in [false, true] {
         let inbox = active();
         let work = inbox.mailbox();
-        work.adopt(AgentId::new(7)).unwrap();
-        work.post(result(AgentOutcome::Replied, 0));
-        let seq = work.expect(AgentId::new(7));
-        assert!(seq > 0);
-        let take = || {
-            if drain {
-                inbox.drain().pop()
-            } else {
-                pop(&inbox)
-            }
-        };
-        assert!(matches!(take(), Some(Next::Item(Item::Agent(_)))));
+        let (_, (report, owed)) = work.adopt("worker".into(), Instant::now()).unwrap();
         assert!(work.status().busy);
-        work.post(result(AgentOutcome::Replied, seq));
-        assert!(matches!(take(), Some(Next::Item(Item::Agent(_)))));
-        assert!(!work.status().busy);
-        work.expect(AgentId::new(7));
-        work.post(result(AgentOutcome::Failed("ended".into()), 0));
-        assert!(matches!(take(), Some(Next::Item(Item::Agent(_)))));
+        report.pay(AgentOutcome::Replied, [owed.into_receipt()]);
+        assert!(work.status().busy);
+        let next = if drain {
+            inbox.drain().pop()
+        } else {
+            pop(&inbox)
+        };
+        assert!(matches!(next, Some(Next::Item(Item::Agent(_)))));
         assert!(!work.status().busy);
     }
 }
@@ -665,34 +717,15 @@ fn a_quiesce_verdict_cannot_beat_a_queued_result() {
     let inbox = inbox();
     inbox
         .mailbox()
-        .post(result(AgentOutcome::Stopped("done".into()), 0));
-    assert!(matches!(
-        inbox.draw(|_| ParkMode::Quiesce),
-        Some(Next::Item(Item::Agent(_)))
-    ));
+        .post(result(AgentOutcome::Stopped("done".into())));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Agent(_)))));
     assert!(pop(&inbox).is_none());
 }
 
 #[test]
-fn stale_rollback_cannot_discharge_a_newer_expectation() {
-    let inbox = inbox();
-    let mailbox = inbox.mailbox();
-    let child = AgentId::new(7);
-    let first = mailbox.expect(child);
-    let second = mailbox.expect(child);
-    assert!(second > first);
-    mailbox.unexpect(child, first);
-    assert!(mailbox.status().busy);
-    mailbox.unexpect(child, second);
-    assert!(!mailbox.status().busy);
-}
-
-#[test]
 fn stopped_job_pops_nothing_and_preserves_life_and_peer_deliveries() {
-    let inbox = active();
+    let (inbox, job) = running();
     let mailbox = inbox.mailbox();
-    mailbox.steer("running".into());
-    let job = inbox.await_job().unwrap();
     assert_eq!(mailbox.stop(job.id()), Some(vec!["running".into()]));
     inbox.life_mailbox().post(surface());
     let peer = DurableRoot::default().child();
@@ -703,8 +736,7 @@ fn stopped_job_pops_nothing_and_preserves_life_and_peer_deliveries() {
     mailbox.steer("next".into());
     assert!(pop(&inbox).is_none());
     assert!(!inbox.is_empty());
-    assert!(!job.close_if_running());
-    drop(job);
+    drop(stopped(job));
     let next = inbox.await_job().unwrap();
     assert!(matches!(
         pop(&inbox),
@@ -712,50 +744,104 @@ fn stopped_job_pops_nothing_and_preserves_life_and_peer_deliveries() {
     ));
     assert!(matches!(pop(&inbox), Some(Next::Item(Item::Message(_)))));
     assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(text))) if text == "next"));
-    assert!(next.close_if_running());
+    assert!(matches!(next.close(), Closed::Ran));
 }
 
 #[test]
-fn accepted_input_preceding_an_older_reply_prevents_lease_and_clean_retirement() {
-    let inbox = active();
+fn a_stopped_job_stays_open_until_its_second_settlement() {
+    let (inbox, job) = running();
     let mailbox = inbox.mailbox();
-    mailbox.post(message());
-    let since = inbox.deposit_reply(FOValue::Unit);
-    assert_eq!(mailbox.answers(), 0);
-    assert!(mailbox.status().reply_since.is_none());
-    mailbox.lapse(since);
-    assert!(mailbox.is_live());
-    assert!(!mailbox.retire());
-    assert!(!mailbox.post(message()));
+    assert!(mailbox.stop(job.id()).is_some());
+    mailbox.steer("next".into());
+    let held = stopped(job);
+    assert!(job_is_open(&inbox));
+    assert!(pop(&inbox).is_none(), "a held job blocks draw");
+    drop(held);
+    assert!(!job_is_open(&inbox));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(text))) if text == "next"));
 }
 
 #[test]
-fn queue_observations_fence_cancelled_deliveries() {
-    for observe_wakeup in [false, true] {
-        let inbox = inbox();
-        let from = DurableRoot::default().child();
-        let mailbox = inbox.mailbox().vouched_by((*from).clone());
-        mailbox.post(wakeup(1, "tick", "@", "go"));
-        from.cancel(CancelCause::Cancelled);
-        if observe_wakeup {
-            assert!(!mailbox.has_queued_wakeup(ScheduleId::new(1)));
-        } else {
-            assert!(inbox.is_empty());
-        }
+fn stop_racing_close_closes_the_ticket_exactly_once() {
+    for _ in 0..64 {
+        let (inbox, job) = running();
+        let mailbox = inbox.mailbox();
+        let id = job.id();
+        let (recalled, closed) = std::thread::scope(|scope| {
+            let stop = scope.spawn(|| mailbox.stop(id));
+            let closed = job.close();
+            (stop.join().unwrap(), closed)
+        });
+        assert_eq!(recalled.is_some(), matches!(closed, Closed::Stopped(_)));
+        assert_eq!(job_is_open(&inbox), matches!(closed, Closed::Stopped(_)));
+        drop(closed);
+        assert!(!job_is_open(&inbox));
+        mailbox.steer("again".into());
+        assert_ne!(inbox.await_job().unwrap().id(), id, "ids are never reused");
     }
 }
 
 #[test]
-fn message_answer_sequence_never_moves_backwards() {
+fn a_panic_in_the_second_settlement_still_closes_the_ticket() {
+    let (inbox, job) = running();
+    assert!(inbox.mailbox().stop(job.id()).is_some());
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = stopped(job);
+        panic!("second settlement failed");
+    }));
+    assert!(unwound.is_err());
+    assert!(!job_is_open(&inbox));
+}
+
+#[test]
+fn accepted_input_preceding_an_older_reply_prevents_lease_and_clean_retirement() {
+    let parent = active();
+    let (life, owing) = parent
+        .mailbox()
+        .adopt("worker".into(), Instant::now())
+        .unwrap();
+    let child = Inbox::new(life, Some(owing));
+    let mailbox = child.mailbox();
+    let owed = mailbox.report().and_then(|report| report.owe());
+    assert!(mailbox.post(Scoped::Message {
+        message: follow_up("follow up"),
+        owed,
+    }));
+    assert!(child.deposit_reply(FOValue::Unit).is_none());
+    assert!(mailbox.status().reply_since.is_none());
+    assert!(mailbox.is_live());
+    child.retire(AgentOutcome::Replied);
+    assert!(!mailbox.is_live());
+    assert!(!mailbox.post(message()));
+    let busy = || parent.mailbox().status().busy;
+    assert!(matches!(pop_outcome(&parent), AgentOutcome::Replied));
+    assert!(busy(), "the accepted follow-up is still owed");
+    assert!(matches!(pop_outcome(&parent), AgentOutcome::Cancelled));
+    assert!(!busy());
+}
+
+#[test]
+fn queued_human_input_blocks_the_lease() {
+    let inbox = inbox();
+    assert!(inbox.mailbox().steer("hi".into()));
+    assert!(inbox.deposit_reply(FOValue::Unit).is_none());
+    assert!(inbox.mailbox().status().reply_since.is_none());
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(_)))));
+    assert!(inbox.deposit_reply(FOValue::Unit).is_some());
+}
+
+#[test]
+fn observers_never_see_a_dead_post() {
     let inbox = active();
-    inbox.mailbox().post(message());
-    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Message(_)))));
-    assert_eq!(inbox.mailbox().answers(), 4);
-    let Scoped::Message(mut old) = message() else {
-        unreachable!()
-    };
-    old.seq = 2;
-    inbox.mailbox().post(Scoped::Message(old));
-    inbox.drain();
-    assert_eq!(inbox.mailbox().answers(), 4);
+    let from = DurableRoot::default().child();
+    let vouched = inbox.mailbox().vouched_by((*from).clone());
+    vouched.post(surface());
+    vouched.post(wakeup(1, "tick", "@", "go"));
+    assert_eq!(depth_of(&inbox, Source::Surface), 1);
+    assert!(vouched.has_queued_wakeup(ScheduleId::new(1)));
+    from.cancel(CancelCause::Cancelled);
+    assert!(!vouched.has_queued_wakeup(ScheduleId::new(1)));
+    assert_eq!(depth_of(&inbox, Source::Surface), 0);
+    assert_eq!(depth_of(&inbox, Source::Schedule), 0);
+    assert!(inbox.is_empty());
 }

@@ -89,7 +89,7 @@ impl PinDigest {
 /// and by the boundary nudge.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// Deferred worker batches are vouched by the engine incarnation, on either carrier.
+/// Deferred worker batches are vouched by the engine's `Incarnation` scope, on either carrier.
 struct InboxDeferred {
     mailbox: Mailbox,
     /// The **root** session's id: a spawn worker registers no tab of its own,

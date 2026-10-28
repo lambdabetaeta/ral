@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+generated_at_commit: fc497f7577bfce957329627870a1f9292520b782
 generated_at_date: 2026-10-28
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
@@ -15,9 +15,10 @@ The role and snapshot laws are [[design/agents|agents]]'s.
 
 `exarch/src/agent.rs` owns the node; `agent/handle.rs` owns its address.
 
-- `Agent` owns `Inbox`, engine-incarnation scope, `LogCell`, the ral `Engine`,
-  `ReplyCell`, pins, schedules, `Readings`, fleet, optional parent-report
-  mailbox and final `Name` carrying its `Membership`. Runtime methods act on this owner, not a shared agent.
+- `Agent` owns `Inbox`, `LogCell`, `ReplyCell`, pins, schedules, `Readings`,
+  the fleet and, last, its `Incarnation`: the ral `Engine` with its
+  `Tenancy` and engine-incarnation scope. Runtime methods act on this owner,
+  not a shared agent.
 - `AgentHandle(Arc<Shared>)` holds identity, name, held log/run directories,
   start time, fixed `Role`, fuel, search, `ProviderHandle`, containing scope
   `under`, and a life-scoped `Mailbox`. It retains no owner or engine.
@@ -38,23 +39,26 @@ The role and snapshot laws are [[design/agents|agents]]'s.
 
 - `Inbox` is the non-cloneable consumer; `Mailbox` pairs destination with
   a vouching `Scope`. `WeakMailbox` lets timers retain no inbox owner.
-- `State` holds posts, current `Work`, exchange and pending opening, open
-  job and counters, answered-message sequence, rest/reply clocks and
-  waiting-for-input. `Status` is a snapshot, not a second state register.
+- `State` holds `Posts`, current `Work` (scope and receipt pool), exchange
+  and pending opening, open job and counter, debts taken up, the parent
+  `Report`, the reply `Lease`, rest/reply clocks and waiting-for-input.
+  `Status` is a snapshot, not a second state register.
 - The scope tree is fleet root → life → work → exchange and adopted child
   lives. Scopes never reset. `AgentHandle::interrupt` cancels exchange and
   opening; `stop(JobId)` abandons matching job work; `end` cancels life.
 - Private `Post` distinguishes human text, reads, rewrites and scoped
-  deliveries. `State::pop` drops a scoped delivery iff its provenance is
-  cancelled, then hears results and advances message answers atomically.
+  deliveries. `Posts` is the only way to observe them, and every observation
+  first drops a scoped delivery whose provenance is cancelled. `State::pop`
+  then releases a result's receipts and takes up a message's debt atomically.
   [[map/exarch/frontend|Frontend]] maps ordering and coalescing.
 - `Inbox::mailbox` captures current work. `Mailbox::adopt` accepts only
-  that live work, records the child and returns its life node. A delayed
-  construction cannot adopt into replacement work.
-- `Work::awaiting[c] = n` records the latest message owed by child `c`.
-  Adoption starts at zero. A reply removes the obligation only when its
-  `answers >= n`; any terminal non-reply removes it. Busy is exactly a
-  nonempty map, never a live-child intersection.
+  that live work and returns the child's life node, `Report` and first
+  `Owed`. A delayed construction cannot adopt into replacement work.
+- An `Owed` is one answer promised to a parent, minted at adoption and at
+  each follow-up (`Report::owe`, under the adopting parent's lock). Paying
+  consumes it into a `Result` carrying its `Receipt`; dropping it pays `Cancelled`; a refused post
+  withdraws it silently in `deliver`. Busy is exactly receipts outstanding
+  for the current work, never a live-child intersection.
 - `Agent::abandon` applies `Queue::{Keep, Recall, Discard}` under the inbox
   lock and clears schedules after unlocking. Reply keeps queued posts, Stop
   recalls human text, and `/clear` discards everything. Stop itself runs
@@ -72,11 +76,14 @@ The role and snapshot laws are [[design/agents|agents]]'s.
   fork has no reboot recipe.
 - `Engine::Wire` holds `WireTransport` and `EngineSpec`, not a parent
   bequest. `Engine::wire` attaches and waits for `Attached` before returning.
-- `transport`, `kind`, `install_deferred`, `read` and `severed` are the
-  local facade. A rejected probe becomes terminal `Severed::Faulted`.
+- `transport`, `kind`, `read` and `severed` are the local facade;
+  `Incarnation::install` alone installs the deferred sink. A rejected probe becomes terminal `Severed::Faulted`.
 - `Engine::rebootable` admits only identity roots with `Rebirth`.
-  `clear` boots from that same recipe and terminates the old transport before
-  replacing it; wire and adopted engines refuse.
+  `Engine::reborn` boots from that same recipe, moving it into the fresh
+  engine; wire and adopted engines refuse.
+- `Incarnation` (same file) owns the `Tenancy` and the deferred-batch scope.
+  `reboot` fences that scope first, then replaces the engine and certifies
+  the outgoing one. `Engine::end` is `Err` when teardown is uncertified.
 - `RootEngine::{Identity, Wire}` (`agent/build.rs`) chooses construction;
   `RootEngine::guest` adopts the guest control stream with guest cwd/home
   and an unresolved ceiling. `app::SCRATCH_VAR` names `EXARCH_SCRATCH` in
@@ -95,7 +102,8 @@ and reply; dropping the engine ends them
 ## Construction and the fleet
 
 **Names, liveness and teardown have separate witnesses.**
-`agent/fleet.rs` holds names, scopes, departures, lease policy and teardown failure.
+`agent/fleet.rs` holds the `Census` (names, tenants, teardown failures), the
+fleet root, lease policy and `Tenancy`.
 
 - `Launch` holds the fixed trunk policy, schedules/reset-resume admission,
   tools, disk ceiling, factory, bureau, roles, unresolved prompt/index,
@@ -104,11 +112,11 @@ and reply; dropping the engine ends them
   terminal state and run scratch. `Launch::engine` refuses a host with no
   genesis. `Launch::prompt_for` resolves each node's actual engine grants,
   role, fuel and name into the stored prompt base.
-- `Fleet::claim` checks and reserves the name before logs or engine
-  construction, taking membership first. `Claim::bind` installs
-  `Slot::Live(AgentHandle)` and moves the membership into the owner-held
-  `Name`; its drop removes the slot before releasing membership. Unconsumed
-  claims do the same.
+- `Fleet::claim` checks and reserves the name and an unbound tenant before
+  logs or engine construction. `Claim::occupy(engine)` makes a `Tenancy`;
+  `Claim::bind` records the owner's handle. A `Claim`'s drop removes name
+  and tenant silently; a `Tenancy`'s drop certifies its engine first, so a
+  bare claim certifies nothing.
 - `Agent::assemble` (`agent/build.rs`) adopts through the call's captured
   mailbox only after engine and log exist. A dead parent is `SessionDead`;
   abandoned work is `Abandoned`. A root's life is a fleet-root child; a
@@ -120,17 +128,16 @@ and reply; dropping the engine ends them
 - `Fleet::end` cancels its `DurableRoot`, notifies inboxes, and leaves any
   later root born cancelled. `signals::face` forwards ambient SIGINT to
   roots' exchanges and shutdown to the fleet root.
-- `Fleet::member` returns `Membership` over detached `Departures`.
-  `is_empty` / `wait_empty` count completed owner teardown;
-  `wait_settled(waiter)` counts the owner once plus live handles excluding
-  its identity, and refuses settlement after a remote teardown failure.
-  Departures may read the names leaf; nothing takes departures under names.
-- `Agent::drop` ends life first, clears schedules, awaits a wire engine's
-  `Detach → Ended`, reports an owed failure and records `SessionEnded`
-  unless panicking. A missing acknowledgment records a fleet teardown failure.
-  Engine/log teardown precedes
-  name release and final membership release. Owner drop ends descendants;
-  retained addresses never prolong teardown.
+- `Fleet::census` returns the detached `Census`. `is_empty` / `wait_empty`
+  wait for no tenants; `wait_settled(waiter, &Pumping)` waits until every
+  tenant but the waiter's is bound and live, then reports accumulated
+  teardown failures. The census takes no inbox lock under its own.
+- `Agent::drop` ends life first, clears schedules and records `SessionEnded`
+  unless panicking; the inbox then reports any owed failure, and the
+  `Incarnation` drops last: its `Tenancy` awaits a wire engine's
+  `Detach → Ended`, records a missing acknowledgment as a census failure,
+  then releases name and tenant. Owner drop ends descendants; retained
+  addresses never prolong teardown.
 
 `Agent::{root, resume, hatch}` build roots; `/new` and `/branch`
 (`spawn::spawn_root`, `hatch_root`) claim then boot fresh engines. Branch
@@ -152,8 +159,8 @@ lock belongs to the launcher, not an agent.
   schedules give `UntilCancelled`; otherwise `Quiesce`. Severance always
   quiesces, while life cancellation is checked by the inbox itself.
 - `take_up` runs reads/rewrites or calls `arrive`. A declined claimed-worker
-  completion drops only `opening`. An accepted exchange-opening item
-  installs the scope minted at pop and cancels its predecessor; a nudge
+  completion drops its `Opening`. An accepted exchange-opening item
+  `open`s the `Opening` minted at pop and cancels its predecessor; a nudge
   continues the existing exchange. No cancellation reset occurs.
 - `attempt` snapshots the provider and catches host-side panics around
   `deliberate(exchange, …)`. The latter appends the prompt before polling
@@ -167,9 +174,9 @@ lock belongs to the launcher, not an agent.
   first rewrite. A cancelled exchange drains nothing. A staged reply is
   checked after the complete batch and before this drain or reminders.
 - `replied` abandons work with `Keep`, clears schedules, publishes Ready,
-  deposits the value on the inbox, then reports with its answered sequence.
-  A child parks; a headless root returns. `settle` (`agent/spawn.rs`) posts
-  other outcomes once, taking the report mailbox.
+  then `deposit_reply` stores the value and pays every taken-up debt as
+  `Replied`. A child parks; a headless root returns. `settle`
+  (`agent/spawn.rs`) retires the inbox, paying what is still owed.
 - A severed engine runs no more calls. `EngineLost` words the cause for
   model and log; headless/Synod end the conversation. Every exit quiesces
   the log so another human prompt is admissible
@@ -194,13 +201,16 @@ lock belongs to the launcher, not an agent.
   tool-call frame. `amnemon` imports none. Both share the shell snapshot
   law; neither flows shell mutations back to the parent.
 - Reply lease starts only on a child's deposit, for `AGENT_LEASE_IDLE`
-  (one hour). `Fleet::lease_reply` holds the address weakly; `lapse(since)`
-  compares reply and accepted-message clocks atomically under the inbox
-  lock. Reading, focus and probes renew nothing; roots have no reply lease.
+  (one hour), and only if no input is queued. `Fleet::lease_reply` holds the
+  address and the `Lease` weakly; accepted input breaks the lease, and
+  `lapse` cancels life only while life is live and the lease still holds,
+  atomically under the inbox lock. Reading, focus and probes renew nothing;
+  roots have no reply lease.
 - `/clear` checks rebootability **before any change**, then discards work
-  and queue, cancels and replaces the engine incarnation, clears pins, boots
-  the new engine, clears the log and rebirths readings. A boot failure leaves
-  the old engine with work/queue discarded, but its old batches stay fenced.
+  and queue, clears pins, calls `Incarnation::reboot` (fence first, then
+  boot and certify the outgoing engine), clears the log and rebirths
+  readings. A boot failure leaves the old engine with work/queue discarded,
+  but its old batches stay fenced.
 - `/rewind` withdraws context, closes the exchange to fence continuations,
   and rebirths nudge state; it does not rewind shell effects. `/evict` is an
   unconditional explicit edit. `/close` ends life, records `SessionClosed`

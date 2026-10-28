@@ -558,6 +558,7 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::testkit::pop;
     use crate::bus::{Inbox, Item, Next, ParkMode, Queue};
     use jiff::civil::date;
     use ral_core::process::{CancelCause, DurableRoot};
@@ -684,7 +685,7 @@ mod tests {
     #[test]
     fn registry_schedules_lists_and_unschedules() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         let receipt = reg
             .schedule(
                 Trigger::Cron {
@@ -712,7 +713,7 @@ mod tests {
     #[test]
     fn schedule_rejects_a_label_already_borne_by_a_live_schedule() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
@@ -746,7 +747,7 @@ mod tests {
     #[test]
     fn unschedule_by_label_removes_the_match_and_is_a_noop_otherwise() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
@@ -769,7 +770,7 @@ mod tests {
     #[test]
     fn after_fires_once_then_is_removed() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         reg.schedule(
             Trigger::After(Duration::from_millis(40)),
             "ping".into(),
@@ -780,9 +781,9 @@ mod tests {
         let mut fired = None;
         for _ in 0..200 {
             if !reg.armed()
-                && let Some(item) = inbox.draw(|_| ParkMode::Quiesce)
+                && let Some(next) = pop(&inbox)
             {
-                fired = Some(item);
+                fired = Some(next);
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -802,7 +803,7 @@ mod tests {
     #[test]
     fn a_fire_before_its_instant_rearms_and_posts_nothing() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         let at = Timestamp::now()
             .checked_add(Duration::from_hours(1))
             .unwrap();
@@ -826,7 +827,7 @@ mod tests {
     #[test]
     fn list_reports_the_time_remaining() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         reg.schedule(
             Trigger::After(Duration::from_hours(2)),
             "x".into(),
@@ -844,7 +845,7 @@ mod tests {
     #[test]
     fn clear_drops_every_schedule() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         reg.schedule(
             Trigger::Cron {
                 schedule: sched("0 3 * * *"),
@@ -871,7 +872,7 @@ mod tests {
 
     fn terminal(family: Terminal) -> (ScheduleRegistry, Inbox, Timestamp) {
         let registry = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child());
+        let inbox = Inbox::new(DurableRoot::default().child(), None);
         let future = Timestamp::now()
             .checked_add(Duration::from_hours(2))
             .unwrap();
@@ -959,7 +960,7 @@ mod tests {
                         let _ = park_tx.try_send(mode);
                         mode
                     });
-                    assert!(done_tx.send((inbox, next)).is_ok());
+                    assert!(done_tx.send((inbox, next.map(|drawn| drawn.next))).is_ok());
                 })
             };
             assert_eq!(
@@ -1017,10 +1018,7 @@ mod tests {
         assert!(!registry.armed());
         release.send(()).unwrap();
         producer.join().unwrap();
-        assert!(matches!(
-            inbox.draw(|_| ParkMode::Quiesce),
-            Some(Next::Item(Item::Wakeup(_)))
-        ));
+        assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
         assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
         assert!(!registry.armed());
     }
@@ -1038,7 +1036,7 @@ mod tests {
             registry.fire_at(ScheduleId::new(0), now);
             assert!(!registry.armed());
             assert!(
-                matches!(inbox.draw(|_| ParkMode::Quiesce), Some(Next::Item(Item::Wakeup(t))) if t.contains("already queued"))
+                matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(t))) if t.contains("already queued"))
             );
             assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
         }
@@ -1062,10 +1060,7 @@ mod tests {
         let next = registry.lock().entries[&ScheduleId::new(0)].next;
         registry.fire_at(ScheduleId::new(0), next);
         assert_eq!(registry.list()[0].fires, 1);
-        assert!(matches!(
-            inbox.draw(|_| ParkMode::Quiesce),
-            Some(Next::Item(Item::Wakeup(_)))
-        ));
+        assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
         assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
         assert!(registry.armed());
     }

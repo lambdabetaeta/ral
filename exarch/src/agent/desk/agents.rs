@@ -51,13 +51,12 @@ impl ExarchDesk {
         // refusal unwinds nothing: no adopted shell, no forked log, no helper engine.
         let provider = self.child_provider(&spec.model)?;
 
-        let engine = self.fork_engine(fork)?;
+        let tenancy = claim.occupy(self.fork_engine(fork)?);
         let child = Agent::child_of(
             (&s.handle, s.mailbox.clone()),
             &s.log.borrow(),
             &s.fleet,
-            claim,
-            engine,
+            tenancy,
             provider,
             spec.memory,
         )

@@ -155,12 +155,7 @@ impl Agent {
             },
             apply: shell_eval::surface::SurfaceApplier::new(self.recorder()),
         });
-        self.engine.install_deferred(shell_eval::deferred_sink(
-            emit,
-            self.inbox
-                .life_mailbox()
-                .vouched_by((*self.incarnation).clone()),
-        ));
+        self.engine.install(emit, &self.inbox.life_mailbox());
         self.recorder()
             .transient(crate::record::Transient::State(AgentState::Evaluating));
         let report = shell_eval::run_shell(

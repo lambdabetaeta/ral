@@ -4,7 +4,7 @@ use crate::agent::testkit::{
 };
 use crate::bus::{AgentOutcome, Emitter};
 use crate::card::testkit::card_value;
-use crate::record::{AgentId, Display, Record};
+use crate::record::{Display, Record};
 use ral_core::carrier::Severed;
 use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{
@@ -88,11 +88,9 @@ fn arrival_records_display_facts() {
     assert_eq!(session.arrive(&Item::Human("hello".into())), Ok(true));
     assert_eq!(
         session.arrive(&Item::Agent(AgentResult {
-            id: AgentId::new(7),
             name: "helper".into(),
             outcome: AgentOutcome::Failed("boom".into()),
             elapsed: Duration::from_millis(1500),
-            answers: 0,
         })),
         Ok(true)
     );
@@ -185,11 +183,12 @@ fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
 fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     ARRIVAL_STOP_ENTERED.store(false, Ordering::Release);
     ARRIVAL_STOP_RELEASE.store(false, Ordering::Release);
-    let _release = ReleaseGuard(&ARRIVAL_STOP_RELEASE);
     let session = dressed_trunk(|runtime| {
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         runtime.install_builtins(&ARRIVAL_TEST_BUILTINS);
     });
+    // Declared after the session, so the hold ends before its teardown.
+    let _release = ReleaseGuard(&ARRIVAL_STOP_RELEASE);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     session.couple(&emit);

@@ -24,8 +24,6 @@ pub(crate) struct Conversation {
     baseline: Baseline,
     /// Cumulative against the opening baseline, remade after each job.
     report: Option<JobReport>,
-    /// A terminal failure ends the conversation loop.
-    lost: bool,
 }
 
 impl Conversation {
@@ -135,7 +133,6 @@ impl Conversation {
                 _run_lock: run_lock,
                 baseline,
                 report: None,
-                lost: false,
             },
             Opening {
                 label,
@@ -150,11 +147,7 @@ impl Conversation {
     }
 
     pub(crate) fn await_job(&self) -> Option<Job> {
-        if self.lost {
-            None
-        } else {
-            self.guest.await_job()
-        }
+        self.guest.await_job()
     }
 
     pub(crate) fn settle_baseline(&mut self) -> Result<(), String> {
@@ -164,7 +157,6 @@ impl Conversation {
     /// Walk only after baseline admission and certified job settlement.
     pub(crate) fn run<S: exarch::bus::Sink>(&mut self, job: Job, sink: &mut S) -> JobEnd {
         if let Err(why) = self.baseline.manifest() {
-            self.lost = true;
             self.report = None;
             self.handle().end();
             let id = job.id();
@@ -178,8 +170,8 @@ impl Conversation {
         let mut end = self.guest.run(job, sink);
         if end.outcome.is_err() {
             end.outcome = self.capture_a_dead_engine().and(end.outcome);
-            self.lost = true;
             self.report = None;
+            self.handle().end();
             return end;
         }
         let after = Manifest::of_folder(self.grant.root());
@@ -200,16 +192,17 @@ impl Conversation {
         self.report.as_ref()
     }
 
-    fn capture_a_dead_engine(&mut self) -> Result<(), String> {
+    fn capture_a_dead_engine(&self) -> Result<(), String> {
         let Some(sentence) = self.guest.severance() else {
             return Ok(());
         };
-        self.lost = true;
+        self.handle().end();
         Err(sentence)
     }
 
+    /// A terminal failure or host `end` closes the root's inbox life.
     pub(crate) fn lost(&self) -> bool {
-        self.lost
+        !self.handle().is_live()
     }
 
     pub(crate) fn end(self) -> Result<(), String> {

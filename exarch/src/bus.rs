@@ -21,12 +21,15 @@ pub use sink::Sink;
 
 pub(crate) use channel::MERGE_TEXT_CAP;
 pub(crate) use emitter::{FleetBus, UsageMeter};
-pub(crate) use inbox::{Inbox, Mailbox, ParkMode, Queue, Scoped, State, Status, WeakMailbox};
+pub(crate) use inbox::{
+    Closed, Drawn, Inbox, Lease, Mailbox, ParkMode, Queue, Refused, Scoped, State, Status,
+    WeakMailbox,
+};
 pub(crate) use post::{AgentMessage, AgentResult, Item, Next, Read, Rewrite};
 pub(crate) use signal::WORKER_PANIC_PREFIX;
 #[cfg(test)]
 pub(crate) use sink::drain_records;
-pub(crate) use sink::{Pass, panic_msg, pump};
+pub(crate) use sink::{Pass, Pumping, panic_msg, pump};
 
 #[cfg(test)]
 pub(crate) use emitter::{FleetSink, dummy_emitter};

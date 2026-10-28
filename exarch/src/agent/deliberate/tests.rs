@@ -3,7 +3,7 @@ use crate::agent::gauge::{EVICT_THRESHOLD, Measure};
 use crate::agent::testkit::*;
 use crate::bus::{AgentOutcome, AgentResult, Item, ParkMode, Scoped};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{AgentId, Display, Protocol, Publish, Record, Recorded};
+use crate::record::{Display, Protocol, Publish, Record, Recorded};
 use genai::chat::ChatRole;
 use ral_core::process::{CancelCause, DurableRoot, ScopeNode};
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 
 fn open_for_drain(session: &Agent) {
     session.seed("open".into());
-    session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.inbox.open_exchange();
+    open_next(&session.inbox);
 }
 
 fn attend_until_reply(child: &mut Agent, expected: &str, emit: &Emitter) -> AgentOutcome {
@@ -162,8 +161,7 @@ fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_reque
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     session.seed("go".into());
     let job = session.inbox.await_job().unwrap();
-    session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.inbox.open_exchange();
+    open_next(&session.inbox);
     let exchange = DurableRoot::default().child();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
@@ -284,18 +282,10 @@ fn reply_cancels_live_descendants() {
     assert!(!grandchild.is_live());
     assert!(sibling.is_live());
     sibling
-        .report
-        .as_ref()
-        .unwrap()
-        .post(Scoped::Result(AgentResult {
-            id: sibling.id(),
-            name: sibling.0.name.clone(),
-            outcome: AgentOutcome::Stopped("still delivers".into()),
-            elapsed: sibling.elapsed(),
-            answers: sibling.0.mailbox.answers(),
-        }));
+        .inbox
+        .retire(AgentOutcome::Stopped("still delivers".into()));
     assert!(matches!(
-        parent.inbox.draw(|_| ParkMode::Quiesce),
+        pop(&parent.inbox),
         Some(Next::Item(Item::Agent(_)))
     ));
     drop(grandchild);
@@ -752,13 +742,14 @@ fn work_vouched_deliveries_never_reach_the_model_after_abandonment() {
                 values: Vec::new(),
             }
         } else {
-            Scoped::Result(AgentResult {
-                id: AgentId::new(7),
-                name: "late".into(),
-                outcome: AgentOutcome::Stopped("done".into()),
-                elapsed: Duration::ZERO,
-                answers: 0,
-            })
+            Scoped::Result {
+                result: AgentResult {
+                    name: "late".into(),
+                    outcome: AgentOutcome::Stopped("done".into()),
+                    elapsed: Duration::ZERO,
+                },
+                paid: Vec::new(),
+            }
         });
         set_provider(
             &session,
@@ -787,13 +778,14 @@ fn live_work_vouched_deliveries_reach_the_model() {
                 values: Vec::new(),
             }
         } else {
-            Scoped::Result(AgentResult {
-                id: AgentId::new(7),
-                name: "worker".into(),
-                outcome: AgentOutcome::Stopped("found it".into()),
-                elapsed: Duration::ZERO,
-                answers: 0,
-            })
+            Scoped::Result {
+                result: AgentResult {
+                    name: "worker".into(),
+                    outcome: AgentOutcome::Stopped("found it".into()),
+                    elapsed: Duration::ZERO,
+                },
+                paid: Vec::new(),
+            }
         });
         set_provider(
             &session,
@@ -877,8 +869,9 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
     use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
     DELIBERATE_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
     DELIBERATE_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
-    let _release = DeliberateReleaseGuard(&DELIBERATE_STOP_RELEASE);
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(&DELIBERATE_HOLD_BUILTINS));
+    // Declared after the session, so the hold ends before its teardown.
+    let _release = DeliberateReleaseGuard(&DELIBERATE_STOP_RELEASE);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     session.ral(
@@ -1156,13 +1149,11 @@ fn reply_boundary_preserves_live_deliveries_and_fences_abandoned_work() {
             )
             .unwrap();
         assert!(child.schedules.armed());
-        let report = grandchild.report.clone().unwrap();
+        let report = mailbox.clone();
         let result = AgentResult {
-            id: grandchild.id(),
             name: grandchild.0.name.clone(),
             outcome: AgentOutcome::Stopped("boundary delivery".into()),
             elapsed: Duration::ZERO,
-            answers: 0,
         };
         let owner = parent.handle();
         let recipient = child.handle();
@@ -1180,7 +1171,10 @@ fn reply_boundary_preserves_live_deliveries_and_fences_abandoned_work() {
                 });
             }
             Delivery::AgentResult => {
-                report.post(Scoped::Result(result));
+                report.post(Scoped::Result {
+                    result,
+                    paid: Vec::new(),
+                });
             }
         })));
         let provider = scripted(
@@ -1348,9 +1342,7 @@ fn a_headless_reply_leaves_arrivals_queued_without_an_extra_request() {
     let emit = Emitter::new(tx, root.id());
     assert!(matches!(root.attend(&emit), AgentOutcome::Replied));
     assert!(root.is_ready());
-    assert!(
-        matches!(root.inbox.draw(|_| ParkMode::Quiesce), Some(Next::Item(Item::Human(t))) if t == "later task")
-    );
+    assert!(matches!(pop(&root.inbox), Some(Next::Item(Item::Human(t))) if t == "later task"));
     assert_eq!(
         crate::bus::drain_records(&rx)
             .iter()

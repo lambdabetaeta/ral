@@ -4,7 +4,7 @@
 mod tests;
 
 use super::{ProviderHandle, Role};
-use crate::bus::{AgentMessage, JobId, Mailbox, Read, Rewrite, Scoped, Status};
+use crate::bus::{AgentMessage, JobId, Lease, Mailbox, Read, Rewrite, Scoped, Status};
 use crate::record::AgentId;
 use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
@@ -73,37 +73,30 @@ impl AgentHandle {
         self.0.mailbox.post_rewrite(rewrite);
     }
     pub(crate) fn message(&self, from: &Self, text: String) -> Result<(), Ended> {
-        let child = self
+        // Owe before delivery; never hold both inboxes.
+        let owed = self
             .0
             .role
             .parent()
-            .is_some_and(|parent| parent.id() == from.id());
-        // I9: enrol the expectation before delivery; never hold both inboxes.
-        let seq = if child {
-            from.0.mailbox.expect(self.id())
-        } else {
-            0
-        };
-        let delivered = self
-            .0
+            .filter(|parent| parent.id() == from.id())
+            .and_then(|_| self.0.mailbox.report())
+            .and_then(|report| report.owe());
+        self.0
             .mailbox
             .vouched_by(from.0.under.clone())
-            .post(Scoped::Message(AgentMessage {
-                from: from.id(),
-                from_name: from.0.name.clone(),
-                text,
-                seq,
-            }));
-        if !delivered {
-            if child {
-                from.0.mailbox.unexpect(self.id(), seq);
-            }
-            return Err(Ended);
-        }
-        Ok(())
+            .post(Scoped::Message {
+                message: AgentMessage {
+                    from: from.id(),
+                    from_name: from.0.name.clone(),
+                    text,
+                },
+                owed,
+            })
+            .then_some(())
+            .ok_or(Ended)
     }
-    pub(crate) fn lapse(&self, since: Instant) {
-        self.0.mailbox.lapse(since);
+    pub(crate) fn lapse(&self, lease: &Lease) {
+        self.0.mailbox.lapse(lease);
     }
     pub(crate) fn status(&self) -> Status {
         self.0.mailbox.status()
@@ -128,7 +121,7 @@ impl AgentHandle {
         }
         here
     }
-    pub(crate) fn is_live(&self) -> bool {
+    pub fn is_live(&self) -> bool {
         self.0.mailbox.is_live()
     }
     pub(crate) fn current_provider(&self) -> Arc<crate::provider::Provider> {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, pop, test_agent};
 use crate::card::Mark;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
@@ -87,7 +87,8 @@ fn live_vi_completion_escape_undo_and_redo_restore_the_partial_command() {
 
 #[test]
 fn escape_and_ctrl_c_interrupt_only_the_focused_exchange() {
-    use crate::bus::{Item, Next, ParkMode};
+    use crate::agent::testkit::open_next;
+    use crate::bus::{Item, Next};
     use ral_core::process::CancelCause;
 
     for key in [
@@ -112,10 +113,9 @@ fn escape_and_ctrl_c_interrupt_only_the_focused_exchange() {
         .expect("a child in the root's work");
         root.steer("first".into()).unwrap();
         assert!(matches!(
-            root.inbox.draw(|_| ParkMode::Quiesce),
-            Some(Next::Item(Item::Human(text))) if text == "first"
+            open_next(&root.inbox),
+            Next::Item(Item::Human(text)) if text == "first"
         ));
-        root.inbox.open_exchange();
         let exchange = root.inbox.exchange();
 
         app.key(key, &ctx());
@@ -124,10 +124,9 @@ fn escape_and_ctrl_c_interrupt_only_the_focused_exchange() {
         assert!(root.is_live() && child.is_live());
         root.steer("next".into()).unwrap();
         assert!(matches!(
-            root.inbox.draw(|_| ParkMode::Quiesce),
-            Some(Next::Item(Item::Human(text))) if text == "next"
+            open_next(&root.inbox),
+            Next::Item(Item::Human(text)) if text == "next"
         ));
-        root.inbox.open_exchange();
         assert!(!root.inbox.exchange().is_cancelled());
         assert!(child.is_live());
     }
@@ -418,7 +417,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
 /// tab has focus by then.
 #[test]
 fn rewind_acts_on_the_tab_it_was_opened_on() {
-    use crate::bus::{Next, ParkMode, Rewrite};
+    use crate::bus::{Next, Rewrite};
     use crate::record::{Locus, Protocol, Seq, Voice};
 
     let fleet = Fleet::for_test();
@@ -452,10 +451,7 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
 
     assert!(app.overlay.is_none(), "Enter closes the overlay");
     assert!(
-        matches!(
-            root.inbox.draw(|_| ParkMode::Quiesce),
-            Some(Next::Rewrite(Rewrite::Rewind(1)))
-        ),
+        matches!(pop(&root.inbox), Some(Next::Rewrite(Rewrite::Rewind(1)))),
         "the rewind went to the tab it was opened on"
     );
 }

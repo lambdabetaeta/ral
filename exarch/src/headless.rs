@@ -9,7 +9,7 @@
 
 use crate::SessionInfo;
 use crate::agent::{Agent, AgentHandle};
-use crate::bus::{AgentOutcome, FleetBus, Sink, pump};
+use crate::bus::{AgentOutcome, Closed, FleetBus, Sink, pump};
 pub use crate::bus::{Job, JobId};
 use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::provider::{Provider, Usage};
@@ -454,7 +454,7 @@ pub fn run(
     let recorder = session.recorder();
     // An OS signal must reach the fleet's roots for as long as this one attends.
     let _signals = crate::signals::face(&session.fleet);
-    let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit| {
+    let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit, _| {
         session.attend(emit)
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
@@ -558,12 +558,12 @@ impl SettledConversation {
         self.end_fleet_after(|| {});
     }
     fn end_fleet_after(self, waiting: impl FnOnce()) {
-        let departures = self.root.fleet.departures();
+        let census = self.root.fleet.census();
         self.root
             .fleet
             .end(ral_core::process::CancelCause::Cancelled);
         drop(self);
-        departures.wait_after(waiting);
+        census.wait_empty_after(waiting);
     }
     /// Attend once; pump through ended helpers' certified teardown.
     ///
@@ -578,32 +578,27 @@ impl SettledConversation {
         let root = &mut self.root;
         let recorder = root.recorder();
         let _signals = crate::signals::face(&root.fleet);
-        let mut stopped = false;
-        let outcome = pump(sink, &self.bus, root.id(), &recorder, |emit| {
+        let ended = pump(sink, &self.bus, root.id(), &recorder, |emit, pumping| {
             let outcome = root.attend(emit);
-            let settlement = root.fleet.wait_settled(&root.handle());
-            stopped = !job.close_if_running();
-            // Stop may end helpers after the first census.
-            let settlement = settlement.and_then(|()| {
-                if stopped {
-                    root.fleet.wait_settled(&root.handle())
-                } else {
-                    Ok(())
-                }
-            });
+            let settle = || root.fleet.wait_settled(root.tenant(), pumping);
+            let first = settle();
+            let (settlement, stopped) = match job.close() {
+                Closed::Ran => (first, false),
+                // Stop may end helpers after the first census; `_held` closes after the second.
+                Closed::Stopped(_held) => (first.and_then(|()| settle()), true),
+            };
             if let Err(why) = settlement {
                 root.engine
                     .transport()
                     .sever(ral_core::carrier::Severed::Faulted(why.clone()));
-                return AgentOutcome::Failed(why);
+                return (AgentOutcome::Failed(why), stopped);
             }
-            outcome
+            (outcome, stopped)
         });
-        drop(job);
         JobEnd {
             id,
-            stopped,
-            outcome: job_ending(root, outcome),
+            stopped: matches!(ended, Ok(Some((_, true)))),
+            outcome: job_ending(root, ended.map(|ran| ran.map(|(outcome, _)| outcome))),
         }
     }
 }

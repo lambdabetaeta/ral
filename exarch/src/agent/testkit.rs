@@ -1,13 +1,13 @@
 //! Fixtures shared by two or more `mod tests` across the crate; a helper only
 //! one of them needs belongs in that file instead.
 
-use crate::agent::fleet::{Fleet, Name, Unborn};
+use crate::agent::fleet::{Claim, Fleet, TenantId, Unborn};
 use crate::agent::handle::Shared;
 use crate::agent::{
     Agent, AgentHandle, ProviderHandle, Role, RootConfig, RootEngine, SPAWN_FUEL, Trunk,
 };
 use crate::app::Scratch;
-use crate::bus::{AgentOutcome, AgentResult, Emitter, Inbox, Mailbox, ParkMode, Scoped};
+use crate::bus::{AgentOutcome, Emitter, Inbox, Mailbox, ParkMode};
 use crate::provider::Toolset;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
@@ -140,7 +140,7 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
 pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
     pub(crate) role: Role,
-    pub(crate) report: Option<Mailbox>,
+    pub(crate) parent: Option<Mailbox>,
     pub(crate) idle: Duration,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
@@ -151,7 +151,7 @@ impl TestAgentSpec {
         Self {
             name: name.to_string(),
             role: Role::Converses,
-            report: None,
+            parent: None,
             idle: Duration::ZERO,
             fuel: 0,
             search: false,
@@ -163,32 +163,28 @@ impl TestAgentSpec {
             role: Role::Child {
                 parent: parent.clone(),
             },
-            report: Some(mailbox),
+            parent: Some(mailbox),
             ..Self::new(name)
         }
     }
 }
 
-/// Retaining its handle never retains this owner or its membership.
+/// Retaining its handle never retains this owner or its census entry.
 pub(crate) struct TestAgent {
     handle: AgentHandle,
     pub(crate) inbox: Inbox,
-    pub(crate) report: Option<Mailbox>,
-    _name: Name,
+    claim: Claim,
+}
+
+impl TestAgent {
+    pub(crate) fn tenant(&self) -> TenantId {
+        self.claim.id()
+    }
 }
 
 impl Drop for TestAgent {
     fn drop(&mut self) {
         self.handle.end();
-        if let Some(report) = &self.report {
-            report.post(Scoped::Result(AgentResult {
-                id: self.id(),
-                name: self.0.name.clone(),
-                outcome: AgentOutcome::Failed("ended before reporting".into()),
-                elapsed: self.elapsed(),
-                answers: self.0.mailbox.answers(),
-            }));
-        }
     }
 }
 
@@ -200,40 +196,28 @@ impl std::ops::Deref for TestAgent {
     }
 }
 
-/// A synthetic owner using production adoption, names and membership.
+/// A synthetic owner using production adoption, names and census entries.
 pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<TestAgent, Unborn> {
     let TestAgentSpec {
         name,
         role,
-        report,
+        parent,
         idle,
         fuel,
         search,
     } = spec;
     let claim = fleet.claim(&name)?;
     let id = crate::agent::fresh_id();
-    let (under, life) = match &report {
-        Some(mailbox) => (
-            mailbox.scope(),
-            mailbox.adopt(id).ok_or_else(|| {
-                if mailbox.is_live() {
-                    Unborn::Abandoned
-                } else {
-                    Unborn::SessionDead
-                }
-            })?,
-        ),
-        None => ((*fleet.root).clone(), fleet.root.child()),
-    };
-    let inbox = Inbox::new(life);
+    let started = Instant::now()
+        .checked_sub(idle)
+        .expect("test birth fits the clock");
+    let (under, inbox) = fleet.lodge(parent, &name, started)?;
     let handle = AgentHandle(Arc::new(Shared {
         id,
         name,
         log_dir: fleet.launch.run_dir().clone(),
         run_dir: fleet.launch.run_dir().clone(),
-        started: Instant::now()
-            .checked_sub(idle)
-            .expect("test birth fits the clock"),
+        started,
         role,
         fuel,
         search,
@@ -241,12 +225,11 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         under,
         mailbox: inbox.life_mailbox(),
     }));
-    let name = claim.bind(&handle);
+    claim.bind(&handle);
     Ok(TestAgent {
         handle,
         inbox,
-        report,
-        _name: name,
+        claim,
     })
 }
 
@@ -419,17 +402,18 @@ pub(crate) fn started_child(parent: &Agent, name: &str, grant: &str) -> Agent {
             else {
                 panic!("an identity run parks its bequest")
             };
-            let engine = self
-                .transport
-                .adopt_parked(id)
-                .map(Engine::adopted)
-                .expect("the fork this run parked");
+            let claim = self.fleet.claim(&self.name).expect("a free name");
+            let tenancy = claim.occupy(
+                self.transport
+                    .adopt_parked(id)
+                    .map(Engine::adopted)
+                    .expect("the fork this run parked"),
+            );
             let child = Agent::child_of(
                 (&self.parent, self.mailbox.clone()),
                 &self.log.borrow(),
                 &self.fleet,
-                self.fleet.claim(&self.name).expect("a free name"),
-                engine,
+                tenancy,
                 self.parent.current_provider(),
                 spec.memory,
             )
@@ -520,53 +504,49 @@ pub(crate) fn scheme_test_clear_block_forever(_u: &mut Unifier) -> Scheme {
     mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
 }
 
-/// Gates `test-clear-block-until-released`: while false it cannot settle inside
-/// the window where `/clear` has cancelled workers but not yet dropped the inbox.
-pub(crate) static CLEAR_RELEASE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn builtin_test_clear_block_until_released(
-    _args: &[Value],
-    _mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    loop {
-        if CLEAR_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
-            shell.poll()?;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-}
-
-static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 2] = [
-    BuiltinEntry::new(
-        Cow::Borrowed("test-clear-block-forever"),
-        scheme_test_clear_block_forever,
-        "test-only: block until cancelled.",
-        BuiltinBody::Static(builtin_test_clear_block_forever),
-    ),
-    BuiltinEntry::new(
-        Cow::Borrowed("test-clear-block-until-released"),
-        scheme_test_clear_block_forever,
-        "test-only: ignore cancellation until released, then settle on it.",
-        BuiltinBody::Static(builtin_test_clear_block_until_released),
-    ),
-];
+static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("test-clear-block-forever"),
+    scheme_test_clear_block_forever,
+    "test-only: block until cancelled.",
+    BuiltinBody::Static(builtin_test_clear_block_forever),
+)];
 pub(crate) static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] =
     &WORKER_REGISTRY_TEST_BUILTINS_ARR;
 
 /// Poll `inbox` for the next exchange-boundary item — a spawned child's
-/// settled [`crate::bus::AgentResult`] lands here.
+/// settled [`crate::bus::AgentResult`] lands here; any opening is declined.
 pub(crate) fn wait_for_settle(inbox: &crate::bus::Inbox) -> crate::bus::Next {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if let Some(item) = inbox.draw(|_| ParkMode::Quiesce) {
-            return item;
+        if let Some(drawn) = inbox.draw(|_| ParkMode::Quiesce) {
+            return drawn.next;
         }
         assert!(
             std::time::Instant::now() < deadline,
             "child did not settle within the timeout"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Draw the next item and open its exchange, as `attend` does.
+pub(crate) fn open_next(inbox: &crate::bus::Inbox) -> crate::bus::Next {
+    let crate::bus::Drawn { next, opening } = inbox
+        .draw(|_| ParkMode::Quiesce)
+        .expect("an item is queued");
+    opening.expect("the item opens an exchange").open();
+    next
+}
+
+/// Draw the next item, declining any opening.
+pub(crate) fn pop(inbox: &Inbox) -> Option<crate::bus::Next> {
+    inbox.draw(|_| ParkMode::Quiesce).map(|drawn| drawn.next)
+}
+
+/// Draw the next item, which must be a child's result, and return its outcome.
+pub(crate) fn pop_outcome(inbox: &Inbox) -> AgentOutcome {
+    match pop(inbox) {
+        Some(crate::bus::Next::Item(crate::bus::Item::Agent(result))) => result.outcome,
+        other => panic!("expected a child's result, got {other:?}"),
     }
 }

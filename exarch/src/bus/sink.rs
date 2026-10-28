@@ -9,6 +9,7 @@
 use super::{BusReceiver, Emitter, FleetBus, Signal, WORKER_PANIC_PREFIX};
 use crate::record::{AgentId, Born, Forensic, Record, Recorded, Transient};
 use std::io;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::time::Duration;
@@ -117,6 +118,15 @@ pub trait Sink {
     }
 }
 
+/// Witness that output is being pumped on this thread; only `pump` makes one.
+pub(crate) struct Pumping(PhantomData<*const ()>);
+#[cfg(test)]
+impl Pumping {
+    pub(crate) fn for_test() -> Self {
+        Self(PhantomData)
+    }
+}
+
 /// Run `work` on a scoped thread over `bus`'s channel, drive `sink`, join.
 ///
 /// A worker panic rides out through `recorder` as a [`Forensic::Error`] and
@@ -131,7 +141,7 @@ pub(crate) fn pump<S, R>(
     bus: &FleetBus,
     root_id: AgentId,
     recorder: &crate::record::Emitter,
-    work: impl Send + FnOnce(&Emitter) -> R,
+    work: impl Send + FnOnce(&Emitter, &Pumping) -> R,
 ) -> io::Result<Option<R>>
 where
     S: Sink,
@@ -144,7 +154,9 @@ where
     let emit = bus.emitter(root_id);
     std::thread::scope(|s| -> io::Result<Option<R>> {
         let h = s.spawn(move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));
+            let pumping = Pumping(PhantomData);
+            let r =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit, &pumping)));
             if let Err(p) = &r {
                 let msg = panic_msg(p);
                 let text = format!("{WORKER_PANIC_PREFIX}{msg}");

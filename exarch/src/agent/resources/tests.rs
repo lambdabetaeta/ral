@@ -114,11 +114,12 @@ static RESOURCES_TEST_BUILTINS: [ral_core::shell::runtime::BuiltinEntry; 1] =
 fn resource_rows_survey_the_agents_accumulators() {
     RESOURCES_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
     RESOURCES_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
-    let _release = ResourcesReleaseGuard(&RESOURCES_STOP_RELEASE);
     let session = dressed_trunk(|runtime| {
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         runtime.install_builtins(&RESOURCES_TEST_BUILTINS);
     });
+    // Declared after the session, so the hold ends before its teardown.
+    let _release = ResourcesReleaseGuard(&RESOURCES_STOP_RELEASE);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
 
@@ -233,13 +234,7 @@ fn resource_rows_survey_the_agents_accumulators() {
     // a legitimate arrival, not the probe's doing — so stability
     // compares snapshots rather than pinning the whole vector.
     session.handle().steer("open".into()).unwrap();
-    assert!(
-        session
-            .inbox
-            .draw(|_| crate::bus::ParkMode::Quiesce)
-            .is_some()
-    );
-    session.inbox.open_exchange();
+    open_next(&session.inbox);
     session.handle().steer("hold".into()).unwrap();
     session.inbox.nudge(1, "go on".into());
     let depths_before = session.inbox.source_depths();

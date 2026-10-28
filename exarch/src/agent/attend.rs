@@ -3,7 +3,7 @@
 use crate::agent::outcome::{Fault, Outcome};
 use crate::agent::{Agent, EngineLost, Role, nudge};
 use crate::bus::{
-    AgentOutcome, Emitter, Item, Next, ParkMode, State, WORKER_PANIC_PREFIX, panic_msg,
+    AgentOutcome, Drawn, Emitter, Item, Next, ParkMode, State, WORKER_PANIC_PREFIX, panic_msg,
 };
 use crate::clock;
 use crate::provider::{Limit, ProviderError, Recovery};
@@ -42,11 +42,11 @@ impl Agent {
             if let Some(s) = self.engine.severed() {
                 break Some(s);
             }
-            let Some(next) = self.draw() else {
+            let Some(drawn) = self.draw() else {
                 break None;
             };
             self.inbox.set_resting(false);
-            match self.take_up(&next, emit) {
+            match self.take_up(drawn, emit) {
                 Ok(step) => {
                     if let Some(outcome) = step.settled {
                         settled = Some(outcome);
@@ -58,8 +58,11 @@ impl Agent {
                 Err(s) => break Some(s),
             }
         };
+        // Only a child's reply is leased, so only a child's can be superseded.
         let settled = settled.filter(|outcome| {
-            !matches!(outcome, AgentOutcome::Replied) || self.handle.reply_since().is_some()
+            !matches!(self.handle.0.role, Role::Child { .. })
+                || !matches!(outcome, AgentOutcome::Replied)
+                || self.handle.reply_since().is_some()
         });
         let settled = match lost.or_else(|| self.engine.severed()) {
             Some(s) => {
@@ -82,7 +85,7 @@ impl Agent {
         );
         settled
     }
-    fn draw(&self) -> Option<Next> {
+    fn draw(&self) -> Option<Drawn> {
         if self.inbox.is_empty() {
             let mode = self.park_snapshot();
             self.inbox.set_resting(mode == ParkMode::Engaged);
@@ -91,8 +94,9 @@ impl Agent {
         }
         self.inbox.draw(|state| self.park_mode(state))
     }
-    fn take_up(&mut self, next: &Next, emit: &Emitter) -> Result<Step, Severed> {
-        let item = match next {
+    fn take_up(&mut self, drawn: Drawn, emit: &Emitter) -> Result<Step, Severed> {
+        let Drawn { next, opening } = drawn;
+        let item = match &next {
             Next::Read(cmd) => {
                 self.read(cmd, emit);
                 return Ok(Step::command(ControlFlow::Continue(())));
@@ -101,11 +105,10 @@ impl Agent {
             Next::Item(item) => item,
         };
         if !self.arrive(item)? {
-            self.inbox.decline_opening();
             return Ok(Step::command(ControlFlow::Continue(())));
         }
-        if item.opens_exchange() {
-            self.inbox.open_exchange();
+        if let Some(opening) = opening {
+            opening.open();
             self.readings.nudges.reset();
         }
         let exchange = self.inbox.exchange();
@@ -201,16 +204,16 @@ impl Agent {
         self.residency(status.reply_since.is_some(), status.busy)
     }
     fn park_mode(&self, state: &State) -> ParkMode {
-        self.residency(state.replied_at().is_some(), state.has_busy_children())
+        self.residency(state.leased(), state.has_busy_children())
     }
-    fn residency(&self, replied: bool, busy: bool) -> ParkMode {
+    fn residency(&self, leased: bool, busy: bool) -> ParkMode {
         if self.engine.severed().is_some() {
             return ParkMode::Quiesce;
         }
         if matches!(self.handle.0.role, Role::Converses) && self.fleet.launch.trunk.attended() {
             return ParkMode::Held;
         }
-        if matches!(self.handle.0.role, Role::Child { .. }) && replied {
+        if matches!(self.handle.0.role, Role::Child { .. }) && leased {
             return ParkMode::Engaged;
         }
         if busy {

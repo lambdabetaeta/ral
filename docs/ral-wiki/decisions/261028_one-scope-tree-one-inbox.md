@@ -1,9 +1,9 @@
 ---
 status: active
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
-verified_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+generated_at_commit: fc497f7577bfce957329627870a1f9292520b782
+verified_at_commit: fc497f7577bfce957329627870a1f9292520b782
 verified_at_date: 2026-10-28
-anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Membership, Departures, RootEngine, Pool, dispatch_to_report]
+anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Owed, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report]
 ---
 
 # One scope tree, one inbox
@@ -53,6 +53,9 @@ fleet root (DurableRoot)
 | `/quit`; `end_fleet`; SIGTERM / SIGHUP | fleet root | `Cancelled` / `Terminated` |
 | process abort | fleet root | `Aborted` |
 
+- An engine incarnation is owned by `Incarnation`, which owns the tenancy
+  and so the engine; `reboot` fences its scope first, even if boot then fails,
+  and certifies the outgoing engine once its replacement boots.
 - An interrupt preserves helpers. Abandoning work ends every adopted
   descendant and its current exchange, but preserves the agent.
 - Ending life ends its subtree. Dropping the owner also ends life; there
@@ -111,6 +114,17 @@ and the scope vouching for a post. The inbox belongs in `bus`, below
   is live at pop, under the inbox lock.** Cancellation is monotone, so one
   fence suffices. Removing dead posts re-coalesces adjacent human text;
   publication also refuses a dead target life or vouching scope.
+- **Queued posts are observed only through `Posts`, and every observation
+  fences first.** Pop, emptiness, recall, depths, texts and the wakeup,
+  human and input probes all drop dead provenance before answering, so no
+  predicate mixes live and dead posts. `Posts::push` alone never fences.
+- Lock order: descendant inbox, then ancestor inbox; inbox, then the
+  schedule registry's leaf. There are no reverse edges. An `Owed` dropped
+  under its child's lock (by a fence or `Queue::Discard`) pays into its
+  parent through `deliver` and `push`, which never fences, so a payment drops
+  no further `Owed` and acquisitions strictly climb the tree. A `Result`
+  carries receipts, which take no lock when dropped. Scope cancellation and
+  polling take no inbox lock.
 - A normally ended sender's message still arrives: its containing scope
   vouches for what it said. A message from a stopped subtree dies with the
   abandoned work.
@@ -127,8 +141,8 @@ and the scope vouching for a post. The inbox belongs in `bus`, below
 ## Work and exact outstanding replies
 
 **Abandonment replaces work, not the agent.** Under the inbox lock it replaces
-`Work`, cancels the old scope, drops its outstanding-child map, applies the
-queue policy, and notifies.
+`Work`, cancels the old scope, starts a fresh receipt pool so the old work's
+debts no longer count, applies the queue policy, and notifies.
 
 - `Keep` leaves posts queued for `reply`; `Recall` withdraws human text
   oldest first for Stop; `Discard` drops everything for `/clear`.
@@ -136,23 +150,34 @@ queue policy, and notifies.
 - Owner-side abandonment clears schedules after unlocking. Stop clears no
   owner register; schedule callbacks retire entries whose weak mailbox has
   died or whose work is cancelled. Schedule ids never reset.
-- `Mailbox::adopt` accepts only the current live work, atomically records
-  the child and mints its life beneath that work. Engine/log construction
+- `Mailbox::adopt` accepts only the current live work, atomically mints the
+  child's life beneath that work and its first debt. Engine/log construction
   precedes adoption outside locks; refusal drops that construction and
   reports `Unborn::Abandoned` while the target life is live, otherwise
   `Unborn::SessionDead`.
-- `awaiting[c] = n` means child `c` owes a result answering message `n`, or
-  a terminal result, unless this work is abandoned. Adoption starts at zero;
-  messaging a direct child publishes a fresh sequence before delivering it.
-- Every result carries `answers`. At pop, a reply discharges the child only
-  if `answers >= awaiting[c]`; any non-reply outcome discharges it.
-  An old queued reply cannot discharge a newer follow-up. Accepted and
-  taken-up message sequences are distinct: a reply deposited before taking
-  up an accepted follow-up does not answer it or arm its lease. Retirement
-  closes admission under that same lock and reports a terminal result if
-  input remains unanswered. A dropped child still owing a report posts
-  `Failed("ended before reporting")`.
-- Busy means exactly `!awaiting.is_empty()`, with no liveness filter.
+- **Every promised answer is an owned `Owed`.** Adoption mints one debt, and
+  so does each follow-up from a parent to its direct child, before delivery
+  and never under both inboxes. A debt holds the child's shared `Report`
+  (destination, name, birth) and a receipt of the parent's current work. The
+  follow-up's debt travels with its message and is taken up with it.
+- Paying consumes the debt: a reply moves every debt the child has taken up
+  into one `Result` whose receipts enter the parent's queue, and they are
+  released when that result is popped. A refused post of any kind withdraws
+  its debt silently inside `deliver`; a debt owes only to a live work.
+- **Busy means receipts are outstanding for the current work**, with no
+  liveness filter and no per-child map. An old queued reply therefore cannot
+  discharge a newer follow-up: each debt is its own receipt.
+- The default payment is `Cancelled`, made by dropping an `Owed`. An owner's
+  end pays `Failed("ended before reporting")`, a dirty retirement pays
+  `Cancelled`, and any other outcome pays as given. Retirement closes
+  admission under the inbox lock and collects debts still held or queued.
+- A reply deposited before taking up an accepted follow-up neither answers it
+  nor arms a lease. The lease is a `Weak` whose only strong owner is the
+  inbox: newer accepted input breaks it, and a deposit refuses it while such
+  input is queued. Lapse cancels life only if life is still live and the
+  lease still upgrades, so it cannot outlive a follow-up. Only a child's
+  reply is leased; a headless root's reply settles its job however much
+  input is queued behind it.
 
 ## Exchanges and jobs
 
@@ -161,17 +186,19 @@ a *job* is Synod's human-opened unit through fleet settlement.
 
 - `draw` tests life and a stopped job, evaluates the park verdict, then pops
   live posts before honouring `Quiesce`. An exchange-opening item mints its
-  `opening` under the work in force at pop.
-- Accepted arrival cancels the preceding exchange and installs that opening.
-  A declined worker completion discards only its opening, preserving the
-  current exchange and queued continuation. `/rewind` closes the exchange.
+  `opening` under the work in force at pop, as an owned `Opening`.
+- Accepted arrival consumes the `Opening` with `open`, cancelling the preceding
+  exchange and installing it. A declined worker completion drops it, which
+  discards only that opening and preserves the current exchange and queued
+  continuation. `/rewind` closes the exchange.
 - `deliberate(exchange, …)` appends the prompt before checking cancellation.
   Text drawn just before Stop or Esc is recorded once, quiesced cancelled,
   and starts no provider round. A mid-exchange drain returns nothing under
   cancellation, otherwise hears live deliveries up to the first rewrite.
 - `SettledConversation::await_job` opens a `Job` under the root inbox lock
-  only when human text is queued. `run(job, sink)` attends it at most once;
-  dropping an unattended job closes it. `JobEnd` carries id, stopped verdict
+  only when human text is queued. The job holds a `Ticket`, its claim on the
+  inbox; `run(job, sink)` attends it at most once, and dropping an unattended
+  job closes it. A stopped job stays open, held by its ticket, until dropped. `JobEnd` carries id, stopped verdict
   and outcome; the bus lives across jobs.
 - `AgentHandle::stop(id)` acts only on the matching running, unstopped job,
   atomically marks it stopped and abandons with `Recall`. A stale or duplicate
@@ -193,43 +220,51 @@ second backend job arbiter is needed.
 
 ## Liveness, teardown and lock order
 
-**Live means life is not cancelled; torn down means membership is released.**
+**Live means life is not cancelled; torn down means the tenancy is released.**
 
-- Owner drop cancels life first, clears schedules, reports any owed failure,
-  and records `SessionEnded` unless panicking. Engine destruction ends its
-  ral workers; `Name` then removes its slot and releases `Membership`.
-- Fleet names hold `Claimed` or `Live(AgentHandle)` slots. `claim` takes
-  membership before reserving the name, so construction counts too; `bind`
-  transfers it to the owner-held `Name`, whose drop removes the slot before
-  releasing membership. Live lookups filter life and sort by id; no pruning or
+- Owner drop cancels life first, clears schedules and records `SessionEnded`
+  unless panicking; the inbox's own drop reports any owed failure. Fields then
+  drop in order: the engine's owner is its `Tenancy`, whose drop certifies and
+  ends the engine before its `Claim` releases the name and census entry.
+- The `Census` holds, under one lock, the name table, the `tenants` map and
+  the teardown failures. `Fleet::claim` reserves the name and an unbound
+  tenant, so construction counts. `Claim::bind` records the owner's handle;
+  `occupy` pairs the claim with an engine as a `Tenancy`. A bare claim, dropped
+  before it is occupied or bound, releases silently: nothing was booted that
+  needs certifying. Live lookups filter life and sort by id; no pruning or
   separate roots index is needed.
 - `Fleet::end` cancels the fleet root and notifies inboxes. A later root is
-  born cancelled. `wait_empty` observes detached `Departures`; `wait_settled`
-  waits until membership count equals one for its attending owner plus
-  live handles excluding that owner's identity. The owner is counted exactly
-  once, independent of racing cancellation; ended helpers and unfinished
-  claims still block settlement. A failed remote teardown refuses settlement.
-- `end_fleet` ends the whole launch, drops its owner, then waits through
-  detached `Departures`, retaining no launch or factory. Synod recovers the
+  born cancelled. `wait_empty` waits on the detached `Census` for no tenants.
+  `wait_settled(waiter, &Pumping)` is one predicate over `tenants` under that
+  lock: every tenant but the waiter's is bound and live. It is polled, since
+  ancestor cancellation does not notify, and returns any recorded failure.
+  The attending owner is excluded by its tenant id, independent of racing
+  cancellation; ended helpers and unfinished claims still block settlement.
+  The `Pumping` witness proves the caller is inside the output pump.
+- `end_fleet` ends the whole launch, drops its owner, then waits on the
+  detached `Census`, retaining no launch or factory. Synod recovers the
   machine only after that barrier.
 - Lease lapse is atomic with message acceptance under the inbox lock: it
-  cancels life only for the same reply timestamp with no newer accepted
-  exchange. Read-only observations renew nothing.
-- Never hold two inboxes. Inbox may read the schedule registry's leaf lock;
-  timer publication releases it before posting. Departures may read the
-  fleet names leaf; nothing acquires departures beneath names. Scope polling
-  takes no lock.
+  cancels life only while the lease is unbroken by newer accepted input.
+  Read-only observations renew nothing.
+- Never hold two inboxes except descendant before ancestor, as above. Inbox
+  may read the schedule registry's leaf lock; timer publication releases it
+  before posting. The census takes no inbox lock under its own: handles are
+  cloned out before notifying, and a released tenant drops after unlocking.
 
 ## Teardown certification
 
 **Socket closure is not proof that a remote engine has stopped writing.**
 Protocol version 34 adds the carrier lifecycle exchange `Detach → Ended`.
 
-- Owner teardown sends `Detach` while retaining membership. The guest closes
+- Owner teardown sends `Detach` while retaining its tenancy. The guest closes
   dispatch admission, cancels its root, joins its engine thread and verifies
   that every session worker's live-thread ticket has gone before `Ended`.
 - Timeout, severance or an undrained roster produces no acknowledgment.
-  Fleet settlement records the failure; Synod ends the conversation without
+  **Every outgoing and final engine is certified**: a `Tenancy` certifies on
+  drop and when `reboot` replaces its engine, and failures accumulate in the
+  census, so a later clean teardown never absolves an earlier one. Settlement
+  reports them; Synod ends the conversation without
   a closing folder scan. EOF alone never authorises that scan.
 - Output pumping spans this barrier, including helpers' final facts and
   transients. Baseline failure is terminal too, so queued input cannot reopen
@@ -259,7 +294,7 @@ D1–D8 fix the policy as well as the mechanism.
 ## Where
 
 - `exarch/src/agent.rs`, `agent/{handle,build,engine,fleet}.rs`: owner,
-  address, ancestry, construction, destruction and membership.
+  address, ancestry, construction, destruction and the tenancy census.
 - `exarch/src/bus/inbox.rs`: provenance, fence, work, adoption, exchanges,
   job opening/closing and addressed Stop; `bus/post.rs`: delivery payloads.
 - `exarch/src/agent/{attend,deliberate,shell,desk}.rs`, `schedule.rs`:

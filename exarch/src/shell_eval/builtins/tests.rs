@@ -250,7 +250,7 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
     )
     .expect("the recipe boots");
 
-    engine.clear().expect("an identity root reboots");
+    let engine = engine.reborn().expect("an identity root reboots");
     let names = engine
         .read(|t| t.builtin_names())
         .expect("an identity engine never severs");

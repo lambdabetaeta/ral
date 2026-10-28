@@ -168,6 +168,12 @@ impl Shell {
         self.local.workers.arm_retention(retention);
     }
 
+    /// Shorten teardown's wait for workers that ignore cancellation.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_worker_drain_grace(&mut self, grace: std::time::Duration) {
+        self.local.workers.set_drain_grace(grace);
+    }
+
     /// Distinct lexical names visible in scope, a shadowed one counted once —
     /// what `crate::carrier::Transport::binding_count` serves exarch's `/resources` fold.
     /// Names only, never the values, and renewing nothing.

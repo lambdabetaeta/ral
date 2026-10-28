@@ -27,7 +27,7 @@ fn pump_returns_on_worker_done_not_sender_disconnect() {
     recorder.attach(bus.emitter(AgentId::new(0)).fleet_sink());
 
     let t0 = Instant::now();
-    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |emit| {
+    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |emit, _| {
         *holder.lock().unwrap() = Some(emit.clone());
         recorder.transient(Transient::Boundary);
         "done"
@@ -62,7 +62,7 @@ fn recovered_panic_records_a_forensic_error() {
     let recorder = crate::record::Emitter::none();
     recorder.attach(bus.emitter(AgentId::new(0)).fleet_sink());
 
-    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |_emit| {
+    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |_emit, _| {
         panic!("boom")
     })
     .expect("pump returns Ok even when the worker panics");

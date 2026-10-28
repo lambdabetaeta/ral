@@ -6,8 +6,7 @@
 use super::super::*;
 use super::{message_req, spec, start};
 use crate::agent::roster::summary;
-use crate::agent::testkit::TestAgent;
-use crate::bus::ParkMode;
+use crate::agent::testkit::{TestAgent, pop};
 use crate::enquiry::ForkClaim;
 use crate::record::AgentId;
 use crate::record::AgentLog;
@@ -273,13 +272,13 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     desk.ask(message_req("wire-peer", "note for wire"))
         .expect("the parent may message its wire-reach descendant");
 
-    match identity_peer.inbox.draw(|_| ParkMode::Quiesce) {
+    match pop(&identity_peer.inbox) {
         Some(crate::bus::Next::Item(crate::bus::Item::Message(m))) => {
             assert_eq!(m.text, "note for identity");
         }
         other => panic!("expected an AgentMessage item, got {other:?}"),
     }
-    match wire_peer.inbox.draw(|_| ParkMode::Quiesce) {
+    match pop(&wire_peer.inbox) {
         Some(crate::bus::Next::Item(crate::bus::Item::Message(m))) => {
             assert_eq!(m.text, "note for wire");
         }

@@ -372,7 +372,6 @@ fn retirement_reports_input_accepted_before_an_older_reply_was_deposited() {
         .message(&parent.handle(), "follow up".into())
         .unwrap();
     child.inbox.deposit_reply(FOValue::Unit);
-    child.report(AgentOutcome::Replied);
     assert!(
         matches!(wait_for_settle(&parent.inbox), Next::Item(Item::Agent(r))
         if matches!(r.outcome, AgentOutcome::Replied))
@@ -398,7 +397,7 @@ fn cancellation_before_followup_pop_reports_new_work_once() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     let first = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    child.take_up(&first, &emit).unwrap();
+    child.take_up(first, &emit).unwrap();
     consume_reply(&parent);
     child
         .handle()
