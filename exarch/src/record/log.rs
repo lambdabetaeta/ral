@@ -134,7 +134,7 @@ impl Log {
 
     /// Point this log's publisher at a fleet channel.  Called wherever a
     /// session's seam meets a run's bus (attend, deliberate, a direct
-    /// `Avatar::ral`); re-attaching over a dead per-exchange channel is the
+    /// `Agent::ral`); re-attaching over a dead per-exchange channel is the
     /// ordinary way a headless session's next exchange comes back on air.
     pub(super) fn attach(&self, sink: Box<dyn Publish>) {
         if let Ok(mut inner) = self.inner.lock_strict() {

@@ -2,7 +2,7 @@ import { $, show, screens } from "./dom.js";
 import { advance } from "./attempt.js";
 import { withdrawals } from "./withdrawals.js";
 import { state, confirmDialog } from "./core.js";
-import { startConversation, sendMessage, stopExchange, recallQueued, openUrl, onConversationEvent } from "./ipc.js";
+import { startConversation, sendMessage, stopJob, recallQueued, openUrl, onConversationEvent } from "./ipc.js";
 import { setFacts, setStatus } from "./status.js";
 import {
   addSystemMessage,
@@ -45,7 +45,6 @@ function resetTranscript(folder) {
   setStatus("");
   resetDocument();
   resetReport();
-  pendingStop = null;
   renderQueue([]);
   show("conversation");
 }
@@ -60,8 +59,6 @@ export function enterConversation(folder, choice) {
 /** @typedef {import("./attempt.js").Action} Action */
 /** @type {Attempt} */
 let assistant = { attempt: "", phase: "ended" };
-/** @type {{ exchange: import("./attempt.js").ExchangeId } | null} */
-let pendingStop = null;
 /** @type {string[]} */
 let queued = [];
 let withdraw = withdrawalQueue(assistant.attempt);
@@ -89,7 +86,7 @@ function canCompose() {
 }
 
 function busy() {
-  return (assistant.phase === "accepted" || assistant.phase === "ready") && assistant.exchange !== null;
+  return (assistant.phase === "accepted" || assistant.phase === "ready") && assistant.job !== null;
 }
 
 async function startAssistant(folder, choice) {
@@ -103,13 +100,13 @@ async function startAssistant(folder, choice) {
     transition({ attempt, type: "accepted" });
   } catch (err) {
     if (transition({ attempt, type: "ended" })) {
-      settleExchange();
+      settleJob();
       addSystemMessage(String(err));
     }
   }
 }
 
-function settleExchange() {
+function settleJob() {
   closeStreamingProse();
   clearOpenDial();
   setThinking(false);
@@ -144,25 +141,24 @@ onConversationEvent(({ attempt, update }) => {
     case "event":
       onSynodEvent(update.event);
       break;
-    case "exchange_began":
-      if (transition({ attempt, type: "exchange_began", exchange: update.exchange })) setStatus("Working…");
+    case "job_began":
+      if (transition({ attempt, type: "job_began", job: update.job })) setStatus("Working…");
       break;
     case "queue":
       renderQueue(update.messages);
       break;
-    case "exchange_done":
-      if (transition({ attempt, type: "exchange_done", exchange: update.exchange })) {
-        settleExchange();
+    case "job_done":
+      if (transition({ attempt, type: "job_done", job: update.job })) {
+        settleJob();
         if (update.stopped) addSystemMessage("Stopped.");
         showReport(update.report);
       }
       break;
     case "ended":
       if (!transition({ attempt, type: "ended" })) return;
-      settleExchange();
+      settleJob();
       restoreToComposer(queued);
       renderQueue([]);
-      pendingStop = null;
       if (!update.explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
       break;
     default: {
@@ -195,17 +191,11 @@ function restoreToComposer(prompts) {
   field.focus();
 }
 
-async function stop() {
+function stop() {
   if (assistant.phase !== "accepted" && assistant.phase !== "ready") return;
-  const { attempt, exchange } = assistant;
-  if (exchange === null || pendingStop?.exchange === exchange) return;
-  const request = { exchange };
-  pendingStop = request;
-  try {
-    await withdraw(() => stopExchange(attempt, exchange));
-  } finally {
-    if (pendingStop === request) pendingStop = null;
-  }
+  const { attempt, job } = assistant;
+  if (job === null) return;
+  return withdraw(() => stopJob(attempt, job));
 }
 
 function recall() {

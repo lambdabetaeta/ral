@@ -1,12 +1,12 @@
 //! One owner for provider construction.
 //!
-//! [`Provider::build`] needs a backend over an [`Engine`] and a credential, and
+//! [`Provider::build`] needs a backend over a [`Pool`] and a credential, and
 //! a [`Provider`] retains neither, so every front-end wanting a second
 //! selection has had to hold the engine and the [`Holdings`] as unrelated
 //! locals. The bureau is those named once, and the only place a live
 //! [`Provider`] is minted.
 //!
-//! Two arms, mirroring [`Provider`]'s own backends: [`Engine::new`] primes the
+//! Two arms, mirroring [`Provider`]'s own backends: [`Pool::new`] primes the
 //! pricing catalog over the network, so a unit test holds
 //! [`Bureau::Scripted`], which mints nothing and says so.
 
@@ -17,7 +17,7 @@ use ral_core::sync::LockExt;
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
 use super::models::{Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
-use super::{Account, Backend, Engine, Provider, Rations, Selection, Tuning, Via, oauth, pricing};
+use super::{Account, Backend, Pool, Provider, Rations, Selection, Tuning, Via, oauth, pricing};
 use crate::app::App;
 
 /// The credentials, model catalog, and allowance record an application shares.
@@ -116,7 +116,7 @@ pub enum Bureau {
     /// A live session: the engine its requests run on, over the application's
     /// shared holdings.
     Live {
-        engine: Arc<Engine>,
+        engine: Arc<Pool>,
         holdings: Holdings,
     },
     /// A scripted session mints nothing.

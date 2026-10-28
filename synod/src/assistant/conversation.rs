@@ -1,4 +1,4 @@
-//! One folder and one guest; queued human messages open settled exchanges.
+//! One folder and one guest; queued human messages open settled jobs.
 
 use super::accounts::{Selected, select_account};
 use super::baseline::Baseline;
@@ -10,7 +10,8 @@ use crate::folder::{
 };
 use crate::wire::{Choice, Opening};
 use exarch::app::SYNOD;
-use exarch::provider::{self, Bureau, Engine, Holdings};
+use exarch::headless::{Job, JobEnd};
+use exarch::provider::{self, Bureau, Holdings, Pool};
 use ral_core::path::{XdgKind, shown};
 use std::path::Path;
 use std::sync::Arc;
@@ -21,9 +22,9 @@ pub(crate) struct Conversation {
     guest: Guest,
     _run_lock: exarch::app::RunLock,
     baseline: Baseline,
-    /// Cumulative against the opening baseline, remade after each exchange.
+    /// Cumulative against the opening baseline, remade after each job.
     report: Option<JobReport>,
-    /// A lost engine ends the conversation loop.
+    /// A terminal failure ends the conversation loop.
     lost: bool,
 }
 
@@ -82,9 +83,9 @@ impl Conversation {
         let system =
             crate::assistant::prompt::assemble(guest_abi::layout::WORK.as_ref(), &grant.name())?;
 
-        // The engine is per-conversation; credentials, catalog and allowance are shared.
+        // The provider pool is per-conversation; holdings are shared.
         let bureau = Arc::new(Bureau::Live {
-            engine: Engine::new(),
+            engine: Pool::new(),
             holdings: holdings.clone(),
         });
         let provider = bureau.build(
@@ -102,20 +103,20 @@ impl Conversation {
             run_dir,
             // Only user messages may start work.
             allow_schedule: false,
-            // A refusal ends the exchange; Law B leaves nothing to wake.
+            // A refusal ends the job; Law B leaves nothing to wake.
             resume_on_reset: false,
-            // Only busy descendants hold an exchange open.
+            // Only busy descendants hold a job open.
             trunk: exarch::agent::Trunk::Embedded,
             tools: exarch::provider::Toolset::offered(false),
             disk_warn_bytes,
             fuel: exarch::agent::SPAWN_FUEL,
             search: policy.search,
-            // Guest::seat installs the factory once its machine exists.
+            // Guest::start installs the factory once its machine exists.
             factory: None,
             bureau,
             roles: exarch::provider::roles::Roles::default(),
         };
-        let guest = Guest::seat(
+        let guest = Guest::start(
             booted,
             config,
             caps,
@@ -144,30 +145,54 @@ impl Conversation {
         ))
     }
 
-    pub(crate) fn helm(&self) -> exarch::agent::Helm {
-        self.guest.helm()
+    pub(crate) fn handle(&self) -> exarch::agent::AgentHandle {
+        self.guest.handle()
     }
 
-    pub(crate) fn await_message(&self) -> bool {
-        self.guest.await_message()
+    pub(crate) fn await_job(&self) -> Option<Job> {
+        if self.lost {
+            None
+        } else {
+            self.guest.await_job()
+        }
     }
 
     pub(crate) fn settle_baseline(&mut self) -> Result<(), String> {
         self.baseline.manifest().map(drop)
     }
 
-    /// Guard guest writes with the baseline; walk after quiescence, even on failure.
-    pub(crate) fn exchange<S: exarch::bus::Sink>(&mut self, sink: &mut S) -> Result<(), String> {
-        self.baseline.manifest()?;
-        let outcome = self.guest.exchange(sink);
+    /// Walk only after baseline admission and certified job settlement.
+    pub(crate) fn run<S: exarch::bus::Sink>(&mut self, job: Job, sink: &mut S) -> JobEnd {
+        if let Err(why) = self.baseline.manifest() {
+            self.lost = true;
+            self.report = None;
+            self.handle().end();
+            let id = job.id();
+            drop(job);
+            return JobEnd {
+                id,
+                stopped: false,
+                outcome: Err(why),
+            };
+        }
+        let mut end = self.guest.run(job, sink);
+        if end.outcome.is_err() {
+            end.outcome = self.capture_a_dead_engine().and(end.outcome);
+            self.lost = true;
+            self.report = None;
+            return end;
+        }
         let after = Manifest::of_folder(self.grant.root());
         self.report = match (self.baseline.manifest(), &after) {
             (Ok(before), Ok(after)) => Some(job_report(before, after)),
             _ => None,
         };
         // Capture engine loss while the machine still exists, after the closing walk.
-        self.capture_a_dead_engine()?;
-        outcome.and_then(|()| after.map(drop))
+        end.outcome = self
+            .capture_a_dead_engine()
+            .and(end.outcome)
+            .and_then(|()| after.map(drop));
+        end
     }
 
     #[must_use]

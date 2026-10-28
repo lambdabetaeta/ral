@@ -4,12 +4,11 @@
 
 use std::ops::ControlFlow;
 
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::bus::{Emitter, Read, Rewrite};
 use crate::record::Forensic;
-use ral_core::process::CancelCause;
 
-impl Avatar {
+impl Agent {
     /// Survey the context or open a session from it; it is left as it was.
     pub(crate) fn read(&self, cmd: &Read, emit: &Emitter) {
         match cmd {
@@ -47,7 +46,7 @@ impl Avatar {
                 }
             }
             Rewrite::Close => {
-                self.agent.cancel_descendants(CancelCause::Cancelled);
+                self.handle.end();
                 self.recorder().emit_or_report(Forensic::SessionClosed);
                 return ControlFlow::Break(());
             }

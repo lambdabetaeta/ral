@@ -63,6 +63,7 @@ pub(crate) fn eval(transport: &IdentityTransport, src: &str) -> Report {
         transport,
         Run::captured(src, SourceOrigin::named("<test>")),
         std::sync::Arc::new(()),
+        None,
     )
     .expect("an identity transport answers synchronously")
 }

@@ -325,9 +325,9 @@ pub(crate) enum SynodEvent {
         message: String,
     },
     ProviderError(ReadoutDto),
-    /// Always Warn: the exchange survived and its partial reply stands.
+    /// Always Warn: the job survived and its partial reply stands.
     Stalled(ReadoutDto),
-    /// Emitted by the window, never the bus; opening failure ends, exchange failure permits retry.
+    /// Emitted by the window, never the bus; opening failure ends, job failure permits retry.
     Failure {
         message: String,
     },
@@ -342,7 +342,19 @@ pub(crate) struct ConversationEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, TS)]
 #[ts(export, export_to = "../ui/js/bindings/")]
-pub(crate) struct ExchangeId(pub(crate) u32);
+pub(crate) struct JobId(#[ts(type = "number")] u64);
+
+impl From<exarch::headless::JobId> for JobId {
+    fn from(id: exarch::headless::JobId) -> Self {
+        Self(id.get())
+    }
+}
+
+impl From<JobId> for exarch::headless::JobId {
+    fn from(id: JobId) -> Self {
+        Self::from(id.0)
+    }
+}
 
 #[derive(Clone, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -354,15 +366,15 @@ pub(crate) enum ConversationUpdate {
     Event {
         event: SynodEvent,
     },
-    ExchangeBegan {
-        exchange: ExchangeId,
+    JobBegan {
+        job: JobId,
     },
     /// The prompts still waiting, oldest first; replaces the previous snapshot.
     Queue {
         messages: Vec<String>,
     },
-    ExchangeDone {
-        exchange: ExchangeId,
+    JobDone {
+        job: JobId,
         stopped: bool,
         /// None means the walk failed, never an empty report.
         report: Option<WindowReport>,
@@ -538,22 +550,40 @@ mod tests {
     }
 
     #[test]
+    fn a_job_begins_with_its_id() {
+        let update = ConversationUpdate::JobBegan { job: JobId(1) };
+        assert_eq!(
+            serde_json::to_string(&update).expect("serializable update"),
+            r#"{"type":"job_began","job":1}"#,
+        );
+    }
+
+    #[test]
+    fn a_job_id_round_trips_as_a_number_without_narrowing() {
+        let id = exarch::headless::JobId::from(1_u64 << 40);
+        let json = serde_json::to_string(&JobId::from(id)).expect("serializable job id");
+        assert_eq!(json, "1099511627776");
+        let decoded: JobId = serde_json::from_str(&json).expect("deserializable job id");
+        assert_eq!(exarch::headless::JobId::from(decoded), id);
+    }
+
+    #[test]
     fn an_unavailable_report_is_null() {
-        let update = ConversationUpdate::ExchangeDone {
-            exchange: ExchangeId(1),
+        let update = ConversationUpdate::JobDone {
+            job: JobId(1),
             stopped: false,
             report: None,
         };
         assert_eq!(
             serde_json::to_string(&update).expect("serializable update"),
-            r#"{"type":"exchange_done","exchange":1,"stopped":false,"report":null}"#,
+            r#"{"type":"job_done","job":1,"stopped":false,"report":null}"#,
         );
     }
 
     #[test]
     fn an_available_report_is_an_object() {
-        let update = ConversationUpdate::ExchangeDone {
-            exchange: ExchangeId(2),
+        let update = ConversationUpdate::JobDone {
+            job: JobId(2),
             stopped: true,
             report: Some(WindowReport {
                 files: vec![ChangeFile {
@@ -568,8 +598,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&update).expect("serializable update"),
             serde_json::json!({
-                "type": "exchange_done",
-                "exchange": 2,
+                "type": "job_done",
+                "job": 2,
                 "stopped": true,
                 "report": {
                     "files": [{

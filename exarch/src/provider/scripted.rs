@@ -131,7 +131,7 @@ impl Reply {
     }
 
     /// A turn that unwinds host-side as it is consumed, standing in for a
-    /// transport or decode crash — the arm `Avatar::attend`'s `catch_unwind`
+    /// transport or decode crash — the arm `Agent::attend`'s `catch_unwind`
     /// exists for, which no eval-side panic can reach.
     pub fn panicking() -> Self {
         Self {
@@ -178,7 +178,7 @@ impl Script {
         self
     }
 
-    /// The scripted counterpart to `Engine::complete`: no stream, so the
+    /// The scripted counterpart to `Pool::complete`: no stream, so the
     /// reply's reasoning fires as one [`Delta::Think`] and its text as one
     /// [`Delta::Say`], in that order — the order a thinking model sends. Panics
     /// once the queue runs dry — a test drove more turns than it scripted —

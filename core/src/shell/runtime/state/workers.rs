@@ -494,13 +494,17 @@ impl WorkerRegistry {
         self.0.lock_ignore_poison().live.clone()
     }
 
+    pub(crate) fn is_drained(&self) -> bool {
+        Arc::strong_count(&self.0.lock_ignore_poison().live) == 1
+    }
+
     /// Wait, up to [`WORKER_DRAIN_GRACE`], for every live worker thread to end.
     /// A cancel lands at the worker's next observation point, and a host that
     /// exits in the same breath outruns it — orphaning the child under PID 1.
     fn drain(&self) {
         let deadline = std::time::Instant::now() + WORKER_DRAIN_GRACE;
         while std::time::Instant::now() < deadline {
-            if Arc::strong_count(&self.0.lock_ignore_poison().live) == 1 {
+            if self.is_drained() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));

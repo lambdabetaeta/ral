@@ -1,7 +1,8 @@
 use super::*;
 use crate::agent::testkit::*;
-use crate::bus::{Emitter, Post};
+use crate::bus::Emitter;
 use crate::record::Voice;
+use ral_core::process::DurableRoot;
 
 /// The card is a heading plus one matrix, one field per row, the cap
 /// rendered into the figure only when armed.
@@ -39,7 +40,7 @@ fn row<'a>(rows: &'a [ProbeRow], name: &str) -> &'a ProbeRow {
 fn context_survey_records_a_display_commit() {
     use crate::record::{Display, Record};
 
-    let session = Avatar::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     {
         let mut log = session.log.borrow_mut();
         log.append_user("one".into(), None, Voice::Human).unwrap();
@@ -48,7 +49,7 @@ fn context_survey_records_a_display_commit() {
     }
     let (tx, rx) = crate::bus::channel();
     session.recorder().attach(Box::new(crate::bus::FleetSink {
-        id: session.agent.id,
+        id: session.id(),
         tx: tx.downgrade(),
         meter: crate::bus::UsageMeter::default(),
     }));
@@ -119,10 +120,16 @@ fn resource_rows_survey_the_agents_accumulators() {
         runtime.install_builtins(&RESOURCES_TEST_BUILTINS);
     });
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
 
-    session.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
     session.ral(
+        &DurableRoot::default().child(),
+        "spawn \"blocker\" { test-clear-block-forever }",
+        30,
+        &emit,
+    );
+    session.ral(
+        &DurableRoot::default().child(),
         "let h_stop = spawn \"stopping\" { test-resources-hold }",
         30,
         &emit,
@@ -130,14 +137,19 @@ fn resource_rows_survey_the_agents_accumulators() {
     while !RESOURCES_STOP_ENTERED.load(std::sync::atomic::Ordering::Acquire) {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    session.ral("cancel $h_stop", 30, &emit);
-    session.ral("spawn \"seven\" { return 7 }", 30, &emit);
+    session.ral(&DurableRoot::default().child(), "cancel $h_stop", 30, &emit);
+    session.ral(
+        &DurableRoot::default().child(),
+        "spawn \"seven\" { return 7 }",
+        30,
+        &emit,
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !{
         let ws = session
-            .seat
+            .engine
             .read(|t| t.workers())
-            .expect("an identity seat never severs");
+            .expect("an identity engine never severs");
         ws.iter().any(|w| matches!(w.state, WorkerState::Running))
             && ws.iter().any(|w| matches!(w.state, WorkerState::Stopping))
             && ws.iter().any(|w| matches!(w.state, WorkerState::Ready(_)))
@@ -152,14 +164,19 @@ fn resource_rows_survey_the_agents_accumulators() {
     let before = row(
         &session
             .resource_rows()
-            .expect("an identity seat never severs"),
+            .expect("an identity engine never severs"),
         "bindings.count",
     )
     .current;
-    session.ral("let probe_marker = 1", 30, &emit);
+    session.ral(
+        &DurableRoot::default().child(),
+        "let probe_marker = 1",
+        30,
+        &emit,
+    );
     let rows = session
         .resource_rows()
-        .expect("an identity seat never severs");
+        .expect("an identity engine never severs");
     assert_eq!(
         row(&rows, "bindings.count").current,
         before + 1,
@@ -215,15 +232,20 @@ fn resource_rows_survey_the_agents_accumulators() {
     // The settled spawn's deferred `Surface` batch may also sit queued —
     // a legitimate arrival, not the probe's doing — so stability
     // compares snapshots rather than pinning the whole vector.
-    session.inbox.push(Post::UserSteering("hold".into()));
-    session.inbox.push(Post::Nudge {
-        prompt: 1,
-        text: "go on".into(),
-    });
+    session.handle().steer("open".into()).unwrap();
+    assert!(
+        session
+            .inbox
+            .draw(|_| crate::bus::ParkMode::Quiesce)
+            .is_some()
+    );
+    session.inbox.open_exchange();
+    session.handle().steer("hold".into()).unwrap();
+    session.inbox.nudge(1, "go on".into());
     let depths_before = session.inbox.source_depths();
     let rows = session
         .resource_rows()
-        .expect("an identity seat never severs");
+        .expect("an identity engine never severs");
     assert_eq!(row(&rows, "inbox[user]").current, 1);
     assert_eq!(row(&rows, "inbox[nudge]").current, 1);
     assert_eq!(
@@ -253,10 +275,10 @@ fn resource_rows_survey_the_agents_accumulators() {
 /// alone carries the cap, and no `context.tokens` row appears.
 #[test]
 fn resource_rows_unknown_window_falls_back_to_capped_log_bytes() {
-    let session = Avatar::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let rows = session
         .resource_rows()
-        .expect("an identity seat never severs");
+        .expect("an identity engine never severs");
     let bytes = row(&rows, "log.bytes");
     assert_eq!(
         bytes.cap,
@@ -270,7 +292,7 @@ fn resource_rows_unknown_window_falls_back_to_capped_log_bytes() {
     );
 }
 
-/// A known window is the pressure `Avatar::evict` actually fires on, so
+/// A known window is the pressure `Agent::evict` actually fires on, so
 /// that is what the fold must show: `context.tokens` capped at
 /// `eviction_trigger(w)`, and `log.bytes` demoted to an uncapped
 /// fallback gauge rather than faking a second, unenforced ceiling.
@@ -282,7 +304,7 @@ fn known_window_reports_context_tokens_not_bytes() {
     assert_eq!(
         tokens.cap,
         Some(eviction_trigger(200_000)),
-        "the same trigger `Avatar::evict` forces an eviction on"
+        "the same trigger `Agent::evict` forces an eviction on"
     );
     assert_eq!(tokens.policy, Policy::Evict);
     assert!(

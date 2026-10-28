@@ -1,13 +1,25 @@
 //! The detach spine behind every attended root and the desk's `` exarch-agents `start ``.
-//! Every spawn is launch-only: the node runs the same [`Avatar::attend`] loop
+//! Every spawn is launch-only: the node runs the same [`Agent::attend`] loop
 //! on a detached thread; a reply notice reaches the parent's inbox when a
 //! child replies, a non-reply end when it quiesces.
 
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::bus::{AgentOutcome, Emitter};
 use crate::record::{AgentLog, Born, Memory, Resumed, Transient};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+
+impl Agent {
+    pub(crate) fn settle(mut self, outcome: AgentOutcome) {
+        let replied = self.handle.0.mailbox.retire();
+        match outcome {
+            AgentOutcome::Replied if replied => {}
+            AgentOutcome::Replied => self.report(AgentOutcome::Cancelled),
+            outcome => self.report(outcome),
+        }
+        self.report.take();
+    }
+}
 
 /// Mints `root-{N}` names for an unnamed root; a name need only be
 /// distinguishable from the live ones on screen, so a process-lifetime counter
@@ -19,20 +31,20 @@ static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 /// for `Amnemon`, or importing `session`'s model-visible context for
 /// `Mnemon`.
 pub(crate) fn hatch_root(
-    session: &Avatar,
+    session: &Agent,
     memory: Memory,
     name: Option<String>,
-) -> Result<Avatar, String> {
+) -> Result<Agent, String> {
     let name =
         name.unwrap_or_else(|| format!("root-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)));
     let claim = session.fleet.claim(&name).map_err(|e| e.to_string())?;
-    let seat = session.fleet.launch.seat().map_err(|e| e.to_string())?;
+    let engine = session.fleet.launch.engine().map_err(|e| e.to_string())?;
     let inherited = (memory == Memory::Mnemon).then(|| session.log.borrow().inherited_context());
-    Avatar::hatch(
+    Agent::hatch(
         &session.fleet,
         claim,
-        seat,
-        session.agent.current_provider(),
+        engine,
+        session.handle.current_provider(),
         |sessions, model, account, system| {
             let id = crate::agent::fresh_id();
             AgentLog::root(sessions, id, &name, model, account, system, inherited)
@@ -47,13 +59,13 @@ pub(crate) fn hatch_root(
 /// parks for the human rather than seeding a first exchange: what to say next
 /// is said to the new tab.
 pub(crate) fn spawn_root(
-    session: &Avatar,
+    session: &Agent,
     memory: Memory,
     name: Option<String>,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
     let root = hatch_root(session, memory, name)?;
-    let name = root.agent.name.clone();
+    let name = root.handle.0.name.clone();
     let tool = match memory {
         Memory::Amnemon => "/new",
         Memory::Mnemon => "/branch",
@@ -97,14 +109,12 @@ pub(crate) struct SpawnedChild {
 /// attends it off the parent's critical path, and return its identity at once.
 /// Callers differ only in how they built `child` and `spec`.
 ///
-/// `child` is already in its parent's subtree and holds its name — that is
-/// what construction did — so there is no window here in which an unenrolled
-/// child could be attended, and nothing to unwind if the thread fails.
+/// Construction already adopted the child; a failed thread start drops it.
 ///
 /// # Errors
 /// Returns `Err(String)` if the worker thread could not be spawned.
 pub(crate) fn spawn_async(
-    mut child: Avatar,
+    mut child: Agent,
     spec: AsyncSpawn,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
@@ -113,7 +123,7 @@ pub(crate) fn spawn_async(
         prompt,
         resumed,
     } = spec;
-    let agent_id = child.agent.id;
+    let agent_id = child.id();
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
     // way its own record seam is recorded through whether or not anyone
@@ -122,7 +132,12 @@ pub(crate) fn spawn_async(
         let born = Born {
             log_dir: child.log_dir().clone(),
             name: name.clone(),
-            parent: child.agent.role.parent().map(|p| p.id),
+            parent: child
+                .handle
+                .0
+                .role
+                .parent()
+                .map(crate::agent::AgentHandle::id),
             resumed,
             recorder: child.recorder(),
         };

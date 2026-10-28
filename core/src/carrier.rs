@@ -16,7 +16,7 @@ use crate::authority::policy::GrantSummary;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::engine::Scopes;
-use crate::process::{Ambient, interrupt_epoch};
+use crate::process::{Ambient, CancelCause, POLL_SLICE, Scope, interrupt_epoch};
 use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, PathEntry, Probe, WorkerRow};
 use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
@@ -186,8 +186,9 @@ pub trait Transport: Send + Sync {
     /// Run a dispatch synchronously. The `Report` arrives as the final `Event`,
     /// after any `Surface` events, which may be drained concurrently. `host`
     /// is the host's side of this run; see [`dispatch_to_report`] for how each
-    /// transport uses it.
-    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>);
+    /// transport uses it. `within` parents the identity run's scope; the wire
+    /// dispatch loop carries its cancellation as controls.
+    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>, within: Option<&Scope>);
 
     /// Read session state at a run boundary, synchronously. The typed methods
     /// below are the way to ask.
@@ -418,7 +419,8 @@ impl Drop for Dispatching {
 /// rides straight onto the dispatch as the run's desk (`IdentityDesk`), so an
 /// enquiry never appears on this loop at all; under the wire, where an
 /// enquiry crosses as a frame on `events()`, this loop is what answers it,
-/// through [`Transport::answer`].
+/// through [`Transport::answer`]. With `within`, the run belongs to that scope;
+/// cancellation is polled and struck by this dispatch's id.
 ///
 /// The `did != id` filter rejects a cancelled predecessor's late run frames,
 /// and nothing else: every `Event` belongs to some dispatch, and this is the
@@ -441,6 +443,7 @@ pub fn dispatch_to_report(
     transport: &dyn Transport,
     run: Run,
     host: Arc<dyn Host>,
+    within: Option<&Scope>,
 ) -> Result<Report, Severed> {
     let _dispatching = Dispatching::enter(transport);
     if let Some(cause) = transport.severed() {
@@ -449,27 +452,52 @@ pub fn dispatch_to_report(
     let id = mint_dispatch_id();
     let _aimed = transport.control().aim(id);
 
-    transport.dispatch(id, run, &host);
-
-    while let Some((did, event)) = transport.events().recv() {
-        if did != id {
-            continue;
+    let mut struck = None;
+    let mut strike = || {
+        if let Some(cause) = within.and_then(Scope::cause)
+            && Some(cause) > struck
+        {
+            transport.control().strike(id, cause);
+            struck = Some(cause);
         }
-        match event {
-            Event::Surface(val) => host.surface(&val),
-            Event::Enquiry(eid, req) => {
+    };
+    // A strike can precede its dispatch: the engine opens it born cancelled.
+    strike();
+    transport.dispatch(id, run, &host, within);
+
+    loop {
+        let received = match within {
+            None => transport
+                .events()
+                .recv()
+                .ok_or(mpsc::RecvTimeoutError::Disconnected),
+            Some(_) => transport.events().recv_timeout(POLL_SLICE),
+        };
+        let outcome = match received {
+            Ok((did, _)) if did != id => None,
+            Ok((_, Event::Surface(val))) => {
+                host.surface(&val);
+                None
+            }
+            Ok((_, Event::Enquiry(eid, req))) => {
                 let answer = host.enquire(req);
                 transport.answer(eid, answer);
+                None
             }
-            Event::Reading(_) => {
-                return Err(transport.sever(Severed::Faulted(
-                    "it answered a dispatch with a probe's reading".into(),
-                )));
+            Ok((_, Event::Reading(_))) => Some(Err(transport.sever(Severed::Faulted(
+                "it answered a dispatch with a probe's reading".into(),
+            )))),
+            Ok((_, Event::Report(report))) => Some(Ok(report)),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Some(Err(transport.severed().expect(READER_SEVERS_FIRST)))
             }
-            Event::Report(report) => return Ok(report),
+        };
+        if let Some(outcome) = outcome {
+            return outcome;
         }
+        strike();
     }
-    Err(transport.severed().expect(READER_SEVERS_FIRST))
 }
 
 /// A closed event stream always has a cause: every reader exit path severs
@@ -546,13 +574,17 @@ impl ControlSender {
     /// nothing happens.
     pub fn interrupt(&self) {
         if let Some((id, _)) = self.in_flight() {
-            self.send(Control::Interrupt(id));
+            self.strike(id, CancelCause::Interrupted);
         }
     }
 
     /// Unwind dispatch `id`, even one the engine has not yet seen.
     pub fn cancel(&self, id: DispatchId) {
-        self.send(Control::Cancel(id));
+        self.strike(id, CancelCause::Cancelled);
+    }
+
+    fn strike(&self, id: DispatchId, cause: CancelCause) {
+        self.send(Control::Strike(id, cause));
     }
 
     /// End every run and every worker of the session, for good.
@@ -569,7 +601,7 @@ impl ControlSender {
                 if let Some((id, sent)) = self.in_flight()
                     && interrupt_epoch() > sent
                 {
-                    self.send(Control::Interrupt(id));
+                    self.strike(id, CancelCause::Interrupted);
                 }
             }
             Ambient::Root(cause) => self.send(Control::ending(cause)),
@@ -655,6 +687,21 @@ impl EventReceiver {
             return Some(item);
         }
         self.rx.lock_ignore_poison().recv().ok()
+    }
+
+    /// The stash first, then a timed receive from the channel.
+    ///
+    /// # Errors
+    /// The channel timed out or disconnected.
+    pub fn recv_timeout(
+        &self,
+        duration: Duration,
+    ) -> Result<(DispatchId, Event), mpsc::RecvTimeoutError> {
+        let stashed = self.stash.lock_ignore_poison().pop_front();
+        if let Some(item) = stashed {
+            return Ok(item);
+        }
+        self.rx.lock_ignore_poison().recv_timeout(duration)
     }
 
     /// Non-blocking on the channel: the stash first, then one

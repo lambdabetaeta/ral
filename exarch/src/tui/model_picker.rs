@@ -196,7 +196,7 @@ fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &
         app.push_error(focused, "the agent you picked a model for has ended");
         return;
     };
-    let provider = agent.provider.clone();
+    let provider = agent.0.provider.clone();
     // The token override is no part of the selection, so it rides across by hand.
     let built = match ctx.bureau.build(
         pick.choice.clone(),

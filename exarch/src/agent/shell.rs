@@ -1,10 +1,10 @@
-//! One `ral` call — [`Avatar::ral`] — and the [`SharedCell`]s a desk handler
+//! One `ral` call — [`Agent::ral`] — and the [`SharedCell`]s a desk handler
 //! writes the agent through: a handler answers mid-dispatch, on the attend
 //! thread's own stack inside [`shell_eval::run_shell`], so it can never take
-//! `&mut Avatar` and reaches them through the [`desk::HostServices`] capture
+//! `&mut Agent` and reaches them through the [`desk::HostServices`] capture
 //! instead.
 
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::agent::EngineLost;
 use crate::agent::desk;
 use crate::agent::digest::render;
@@ -14,6 +14,7 @@ use crate::record::{AgentState, Forensic};
 use crate::shell_eval;
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 use ral_core::data::FOValue;
+use ral_core::process::Scope;
 use ral_core::protocol::Report;
 use std::fmt::Write;
 use std::io;
@@ -28,7 +29,7 @@ pub(crate) struct SharedCell<T>(Arc<AtomicRefCell<T>>);
 pub(crate) type LogCell = SharedCell<AgentLog>;
 
 /// The desk's `reply` slot: within one batch the last write wins, and
-/// [`Avatar::deliberate`] takes it once the batch drains.
+/// [`Agent::deliberate`] takes it once the batch drains.
 pub(crate) type ReplyCell = SharedCell<Option<FOValue>>;
 
 impl<T> SharedCell<T> {
@@ -75,7 +76,7 @@ pub(crate) struct Evaluated {
     pub failed: bool,
 }
 
-impl Avatar {
+impl Agent {
     /// Point this session's recorder at the bus `emit` rides, so every fact
     /// the log authors is published live as it lands on disk.  Called at each
     /// entry where a session meets a bus — `attend`, `deliberate`,
@@ -117,18 +118,18 @@ impl Avatar {
             .emit_or_report(crate::record::Forensic::SystemNote { text });
     }
 
-    /// Everything a desk handler may read off `&Avatar`, since the reentrancy
-    /// law bars it from reaching back through `&mut Avatar`/`&mut Shell`.
-    /// Built per call, preserving the invocation's work generation.
+    /// Plain values captured once per call; desks run only on the owner thread.
     pub(crate) fn host_services(&self, emit: &Emitter) -> desk::HostServices {
         desk::HostServices {
             fleet: self.fleet.clone(),
-            kind: self.seat.kind(),
-            agent: self.agent.clone(),
+            kind: self.engine.kind(),
+            handle: self.handle.clone(),
+            schedules: self.schedules.clone(),
+            pins: self.pins.clone(),
             emit: emit.clone(),
             reply: self.reply.clone(),
             log: self.log.clone(),
-            stamp: self.agent.mailbox.admission(|| self.work.clone()),
+            mailbox: self.inbox.mailbox(),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
@@ -136,7 +137,13 @@ impl Avatar {
     }
 
     /// Evaluate one `ral` call.
-    pub(crate) fn ral(&self, cmd: &str, timeout_secs: u64, emit: &Emitter) -> Evaluated {
+    pub(crate) fn ral(
+        &self,
+        exchange: &Scope,
+        cmd: &str,
+        timeout_secs: u64,
+        emit: &Emitter,
+    ) -> Evaluated {
         self.couple(emit);
         // The assistant turn is recorded before its results are built, so this
         // is the id of the turn this result closes — and the call's source name.
@@ -148,27 +155,29 @@ impl Avatar {
             },
             apply: shell_eval::surface::SurfaceApplier::new(self.recorder()),
         });
-        // Preserve the invocation's generation, including for deferred batches.
-        self.seat.install_deferred(shell_eval::deferred_sink(
+        self.engine.install_deferred(shell_eval::deferred_sink(
             emit,
-            host.desk.services.stamp.clone(),
+            self.inbox
+                .life_mailbox()
+                .vouched_by((*self.incarnation).clone()),
         ));
         self.recorder()
             .transient(crate::record::Transient::State(AgentState::Evaluating));
         let report = shell_eval::run_shell(
-            self.seat.transport(),
+            self.engine.transport(),
             &source,
             cmd,
             timeout_secs,
             host.clone() as Arc<dyn ral_core::carrier::Host>,
+            Some(exchange),
         );
-        let lost = |s| EngineLost::running(&s, self.agent.run_dir()).to_string();
+        let lost = |s| EngineLost::running(&s, self.run_dir()).to_string();
         // Only now, with the dispatch returned: the worker probe below is
         // legal at a run boundary and nowhere else.
         let (mut text, failed) = match report {
             Ok(Report::Ran {
                 ending, captured, ..
-            }) => match self.seat.read(|t| t.workers()) {
+            }) => match self.engine.read(|t| t.workers()) {
                 Ok(workers) => {
                     let result = shell_eval::report::tool_result(
                         &ending,

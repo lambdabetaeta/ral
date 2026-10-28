@@ -32,7 +32,7 @@ fn parse(input: &str) -> Option<Command> {
 fn submitted(line: &str) -> String {
     let (mut app, _rx, root) = app();
     route_submit(line.into(), &mut app, &ctx());
-    text(&mut app, root.id)
+    text(&mut app, root.id())
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn argless_command_matches_alone_but_not_with_trailing_text() {
 }
 
 #[test]
-fn quit_terminates_every_root_and_descendant_without_queuing() {
+fn quit_ends_every_root_and_descendant_without_queuing() {
     use crate::agent::spawn::hatch_root;
     use crate::agent::testkit::trunk;
     use crate::record::AgentLog;
@@ -61,19 +61,24 @@ fn quit_terminates_every_root_and_descendant_without_queuing() {
 
     super::quit(&main.fleet);
 
-    for avatar in [&main, &other, &child, &grandchild, &peer] {
+    for agent in [&main, &other, &child, &grandchild, &peer] {
+        let handle = agent.handle();
         assert!(
-            avatar.agent.token.terminated(),
-            "quit must terminate {} without an attend loop",
-            avatar.agent.name
+            !handle.is_live(),
+            "quit must end {} without an attend loop",
+            handle.0.name
+        );
+        assert_eq!(
+            handle.0.mailbox.scope().cause(),
+            Some(ral_core::process::CancelCause::Cancelled)
         );
         assert!(
-            avatar.seat.read(|t| t.session_ended()).unwrap().is_some(),
-            "quit must also terminate {}'s engine",
-            avatar.agent.name
+            agent.engine.read(|t| t.session_ended()).unwrap().is_none(),
+            "quit cancels scopes; the owner's drop tears down {}'s engine",
+            handle.0.name
         );
         assert!(
-            avatar.agent.queued().is_empty(),
+            handle.queued().is_empty(),
             "quit is a shutdown, not a queued command"
         );
     }
@@ -87,22 +92,41 @@ fn quit_terminates_every_root_and_descendant_without_queuing() {
 }
 
 #[test]
-fn quit_finishes_a_parked_child_after_its_parent_loop_has_ended() {
+fn quit_finishes_a_parked_child_without_a_parent_attend_loop() {
+    use crate::agent::outcome::Outcome;
     use crate::agent::spawn::{AsyncSpawn, spawn_async};
-    use crate::agent::testkit::trunk;
+    use crate::agent::testkit::{ral_call, scripted, trunk};
     use crate::bus::{FleetBus, Signal};
-    use crate::record::{AgentState, Transient};
-    use ral_core::data::FOValue;
+    use crate::provider::scripted::{Reply, Script};
+    use crate::record::{AgentState, Transient, Voice};
+    use ral_core::process::DurableRoot;
     use ral_core::test_helper::eventually;
     use std::sync::Arc;
 
     let main = trunk(true);
     let fleet = Arc::clone(&main.fleet);
-    let child = main.fork_named("child").expect("a child");
+    let mut child = main.fork_named("child").expect("a child");
     let id = child.id();
-    child.agent.deposit_reply(&fleet, FOValue::Unit);
+    let handle = child.handle();
     let bus = FleetBus::session();
-    let emit = bus.emitter(main.id());
+    let emit = bus.emitter(id);
+    let provider = scripted(
+        "test-model",
+        Script::new().then(Reply::tool_calls(vec![ral_call(
+            "reply",
+            "exarch-agents `reply ()",
+        )])),
+    );
+    assert!(matches!(
+        child.deliberate(
+            &DurableRoot::default().child(),
+            &provider,
+            Some(("work".into(), Voice::Human)),
+            None,
+            &emit,
+        ),
+        Ok(Outcome::Replied)
+    ));
     spawn_async(
         child,
         AsyncSpawn {
@@ -115,26 +139,21 @@ fn quit_finishes_a_parked_child_after_its_parent_loop_has_ended() {
     .expect("the child starts");
     assert!(
         eventually(Duration::from_secs(5), || {
-            std::iter::from_fn(|| bus.rx().try_recv().ok())
-                .any(|signal| {
-                    matches!(signal, Signal::Transient(agent, Transient::State(AgentState::Ready)) if agent == id)
-                })
-                .then_some(())
+            handle.waiting_for_input().then_some(())
         })
         .is_some(),
         "the replied child must park for a follow-up"
     );
-    drop(main);
-    assert!(!fleet.is_empty(), "the child retains its parent's identity");
-
+    assert!(
+        std::iter::from_fn(|| bus.rx().try_recv().ok()).any(|signal| {
+            matches!(signal, Signal::Transient(agent, Transient::State(AgentState::Ready)) if agent == id)
+        }),
+        "the parked child must announce readiness"
+    );
     super::quit(&fleet);
+    drop(main);
 
     let finished = eventually(Duration::from_secs(5), || fleet.is_empty().then_some(()));
-    if finished.is_none() {
-        for root in fleet.roots() {
-            root.end();
-        }
-    }
     assert!(
         finished.is_some(),
         "quit must finish the fleet even when the parent has no command consumer"
@@ -351,7 +370,7 @@ fn export_refuses_to_overwrite() {
     cmd_export(&mut app, &ral_core::path::shown(&dest), ctx().info);
     assert_eq!(std::fs::read_to_string(&dest).expect("it reads"), "keep me");
     // The card wraps at the window's width, and the path it names is long.
-    let all = text(&mut app, root.id)
+    let all = text(&mut app, root.id())
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");

@@ -1,7 +1,7 @@
-//! How one deliberation ends: the vocabulary [`Avatar::deliberate`] answers
+//! How one deliberation ends: the vocabulary [`Agent::deliberate`] answers
 //! in, and [`attend`](super::attend) and [`nudge`](super::nudge) read.
 //!
-//! [`Avatar::deliberate`]: super::Avatar::deliberate
+//! [`Agent::deliberate`]: super::Agent::deliberate
 
 use crate::provider::ProviderError;
 use ral_core::carrier::Severed;

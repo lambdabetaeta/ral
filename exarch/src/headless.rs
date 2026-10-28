@@ -8,8 +8,9 @@
 //! record at the seam, through [`crate::record`].
 
 use crate::SessionInfo;
-use crate::agent::Avatar;
+use crate::agent::{Agent, AgentHandle};
 use crate::bus::{AgentOutcome, FleetBus, Sink, pump};
+pub use crate::bus::{Job, JobId};
 use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
@@ -421,7 +422,7 @@ impl Headless<'_> {
 /// panics, if the sink's drive fails, or if the run ends without a `reply`
 /// (stopped, cancelled, or failed).
 pub fn run(
-    session: &mut Avatar,
+    session: &mut Agent,
     info: &SessionInfo<'_>,
     p: &Provider,
     seed: Option<String>,
@@ -441,7 +442,7 @@ pub fn run(
         p.model(),
         info.base
     );
-    let mut headless = Headless::new(session.agent.id, &mut stdout, &mut stderr);
+    let mut headless = Headless::new(session.id(), &mut stdout, &mut stderr);
     // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
     // any in-exchange producer share one queue.  It closes when the worker
     // finishes, muting async children on the display — never in the trace.
@@ -449,7 +450,7 @@ pub fn run(
     // A headless trunk is a returning agent that does not park, so `attend`
     // runs this seeded work and returns once idle.
     session.seed(prompt);
-    let root_id = session.agent.id;
+    let root_id = session.id();
     let recorder = session.recorder();
     // An OS signal must reach the fleet's roots for as long as this one attends.
     let _signals = crate::signals::face(&session.fleet);
@@ -459,7 +460,7 @@ pub fn run(
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
     // `reply`, deposited on its agent.  A panic arrives as `Ok(None)`, already
     // latched by the sink.
-    headless.reply = session.agent.reply();
+    headless.reply = session.handle().reply();
     let mut r: Result<(), String> = match outcome {
         Ok(Some(agent_outcome)) => match agent_outcome {
             AgentOutcome::Replied => Ok(()),
@@ -507,12 +508,8 @@ pub fn run(
     r
 }
 
-/// A converse exchange's verdict. A severed session is over, not an exchange
-/// that went badly: its `Err` is the sentence `EngineLost` settled it with.
-fn exchange_ending(
-    session: &Avatar,
-    outcome: io::Result<Option<AgentOutcome>>,
-) -> Result<(), String> {
+/// A severed session is over, not merely a job that went badly.
+fn job_ending(session: &Agent, outcome: io::Result<Option<AgentOutcome>>) -> Result<(), String> {
     match outcome {
         Ok(Some(AgentOutcome::Failed(lost))) if session.severance().is_some() => Err(lost),
         Ok(Some(_)) => Ok(()),
@@ -521,69 +518,93 @@ fn exchange_ending(
     }
 }
 
-/// A root-bound conversation whose exchanges end at fleet quiescence.
-/// Helper signals between exchanges remain queued for the next exchange.
-pub struct SettledConversation {
-    bus: FleetBus,
-    root: Avatar,
+/// The host-level unit has closed, either at fleet quiescence or after Stop.
+pub struct JobEnd {
+    pub id: JobId,
+    pub stopped: bool,
+    pub outcome: Result<(), String>,
 }
 
+/// A root-bound conversation whose jobs end at fleet quiescence.
+pub struct SettledConversation {
+    bus: FleetBus,
+    root: Agent,
+}
 impl SettledConversation {
-    /// Bind a conversation-lived bus to `root` before its first exchange.
-    ///
     /// # Errors
-    /// Refuses roots that allow self-scheduling or reset-resume wakeups.
-    pub fn new(root: Avatar) -> Result<Self, String> {
+    /// Refuses self-scheduling and reset-resume wakeups.
+    pub fn new(root: Agent) -> Result<Self, String> {
         if root.fleet.launch.allow_schedule || root.fleet.launch.resume_on_reset {
-            return Err(
-                "A settled conversation ends each exchange only once the fleet quiesces, and an armed \
-                 self-schedule or reset-resume wakeup may fire again with nothing to wait it out: \
-                 refused rather than parked past quiescence"
-                    .to_string(),
-            );
+            return Err("A settled conversation ends each job only once the fleet quiesces, and an armed self-schedule or reset-resume wakeup may fire again with nothing to wait it out: refused rather than parked past quiescence".into());
         }
         Ok(Self {
             bus: FleetBus::session(),
             root,
         })
     }
-
-    pub fn root(&self) -> &Avatar {
-        &self.root
+    pub fn handle(&self) -> AgentHandle {
+        self.root.handle()
     }
-
-    /// Wait for a queued human message; false once the root has ended.
-    pub fn await_message(&self) -> bool {
-        self.root.await_human()
+    pub fn severance(&self) -> Option<ral_core::carrier::Severed> {
+        self.root.severance()
     }
-
-    /// End every root in the fleet and wait for all avatars to finish teardown.
-    /// This shuts down the whole shared launch, not just this conversation's tree.
+    pub fn run_dir(&self) -> &ral_core::own::OwnDir {
+        self.root.run_dir()
+    }
+    pub fn await_job(&self) -> Option<Job> {
+        self.root.await_job()
+    }
     pub fn end_fleet(self) {
         self.end_fleet_after(|| {});
     }
-
     fn end_fleet_after(self, waiting: impl FnOnce()) {
         let departures = self.root.fleet.departures();
-        for root in self.root.fleet.roots() {
-            root.end();
-        }
+        self.root
+            .fleet
+            .end(ral_core::process::CancelCause::Cancelled);
         drop(self);
         departures.wait_after(waiting);
     }
-
-    /// Attend the queue until the root and its busy descendants settle.
+    /// Attend once; pump through ended helpers' certified teardown.
     ///
-    /// # Errors
-    /// Propagates engine loss, worker panic or sink failure.
-    pub fn exchange<S: Sink>(&mut self, sink: &mut S) -> Result<(), String> {
+    /// # Panics
+    /// If the job belongs to another conversation.
+    pub fn run<S: Sink>(&mut self, job: Job, sink: &mut S) -> JobEnd {
+        let id = job.id();
+        assert!(
+            job.belongs_to(&self.root.handle().0.mailbox),
+            "this job belongs to another conversation; run it on the conversation that opened it"
+        );
         let root = &mut self.root;
         let recorder = root.recorder();
         let _signals = crate::signals::face(&root.fleet);
-        let outcome = pump(sink, &self.bus, root.agent.id, &recorder, |emit| {
-            root.attend(emit)
+        let mut stopped = false;
+        let outcome = pump(sink, &self.bus, root.id(), &recorder, |emit| {
+            let outcome = root.attend(emit);
+            let settlement = root.fleet.wait_settled(&root.handle());
+            stopped = !job.close_if_running();
+            // Stop may end helpers after the first census.
+            let settlement = settlement.and_then(|()| {
+                if stopped {
+                    root.fleet.wait_settled(&root.handle())
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(why) = settlement {
+                root.engine
+                    .transport()
+                    .sever(ral_core::carrier::Severed::Faulted(why.clone()));
+                return AgentOutcome::Failed(why);
+            }
+            outcome
         });
-        exchange_ending(root, outcome)
+        drop(job);
+        JobEnd {
+            id,
+            stopped,
+            outcome: job_ending(root, outcome),
+        }
     }
 }
 

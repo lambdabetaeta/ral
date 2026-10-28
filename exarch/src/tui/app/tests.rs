@@ -17,7 +17,7 @@ pub(in crate::tui) fn app_born(born: &Born) -> (App, BusReceiver, TestAgent) {
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     let app = App::new(
-        root.id,
+        root.id(),
         born,
         fleet,
         UsageMeter::default(),
@@ -86,17 +86,65 @@ fn live_vi_completion_escape_undo_and_redo_restore_the_partial_command() {
 }
 
 #[test]
+fn escape_and_ctrl_c_interrupt_only_the_focused_exchange() {
+    use crate::bus::{Item, Next, ParkMode};
+    use ral_core::process::CancelCause;
+
+    for key in [
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        let fleet = Fleet::for_test();
+        let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
+        let mut app = App::new(
+            root.id(),
+            &Born::for_test("main", None),
+            fleet.clone(),
+            UsageMeter::default(),
+            false,
+            Card(Vec::new()),
+            mpsc::channel().0,
+        );
+        let child = test_agent(
+            &fleet,
+            TestAgentSpec::child("child", &root, root.inbox.mailbox()),
+        )
+        .expect("a child in the root's work");
+        root.steer("first".into()).unwrap();
+        assert!(matches!(
+            root.inbox.draw(|_| ParkMode::Quiesce),
+            Some(Next::Item(Item::Human(text))) if text == "first"
+        ));
+        root.inbox.open_exchange();
+        let exchange = root.inbox.exchange();
+
+        app.key(key, &ctx());
+
+        assert_eq!(exchange.cause(), Some(CancelCause::Interrupted));
+        assert!(root.is_live() && child.is_live());
+        root.steer("next".into()).unwrap();
+        assert!(matches!(
+            root.inbox.draw(|_| ParkMode::Quiesce),
+            Some(Next::Item(Item::Human(text))) if text == "next"
+        ));
+        root.inbox.open_exchange();
+        assert!(!root.inbox.exchange().is_cancelled());
+        assert!(child.is_live());
+    }
+}
+
+#[test]
 fn matrix_cursor_does_not_change_focus_until_enter() {
     let (mut app, _, root) = app();
-    let child = AgentId::new(root.id.get() + 1);
-    born(&mut app, child, "child", root.id);
+    let child = AgentId::new(root.id().get() + 1);
+    born(&mut app, child, "child", root.id());
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.key(key(KeyCode::Tab), &ctx());
     assert!(app.matrix_navigating(), "Tab enters the matrix");
     assert_eq!(
         app.matrix_cursor(&app.tabs.rows()),
-        Some(root.id),
+        Some(root.id()),
         "the cursor starts on the attached agent"
     );
 
@@ -108,7 +156,7 @@ fn matrix_cursor_does_not_change_focus_until_enter() {
     );
     assert_eq!(
         app.tabs.focused(),
-        root.id,
+        root.id(),
         "moving the cursor does not retarget the prompt"
     );
 
@@ -120,7 +168,12 @@ fn matrix_cursor_does_not_change_focus_until_enter() {
 #[test]
 fn esc_leaves_the_matrix_without_moving_focus() {
     let (mut app, _, root) = app();
-    born(&mut app, AgentId::new(root.id.get() + 1), "child", root.id);
+    born(
+        &mut app,
+        AgentId::new(root.id().get() + 1),
+        "child",
+        root.id(),
+    );
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.key(key(KeyCode::Tab), &ctx());
@@ -130,7 +183,7 @@ fn esc_leaves_the_matrix_without_moving_focus() {
     assert!(!app.matrix_navigating(), "Esc leaves the surface");
     assert_eq!(
         app.tabs.focused(),
-        root.id,
+        root.id(),
         "an abandoned cursor attaches to nothing"
     );
 }
@@ -138,7 +191,12 @@ fn esc_leaves_the_matrix_without_moving_focus() {
 #[test]
 fn matrix_mode_swallows_prompt_editing() {
     let (mut app, _, root) = app();
-    born(&mut app, AgentId::new(root.id.get() + 1), "child", root.id);
+    born(
+        &mut app,
+        AgentId::new(root.id().get() + 1),
+        "child",
+        root.id(),
+    );
     app.prompt_state.set_prompt("draft");
     app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &ctx());
     app.key(
@@ -165,7 +223,7 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
     let (mut app, rx, root) = app();
     let opening = app
         .tabs
-        .scrollback(root.id)
+        .scrollback(root.id())
         .expect("root has a scrollback")
         .probe_figures()
         .0;
@@ -173,7 +231,7 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
     let mut fact = |app: &mut App, display| {
         seq += 1;
         app.fact(
-            root.id,
+            root.id(),
             &Recorded::new(Locus::placeholder(Seq::new(seq)), Record::Display(display)),
         );
     };
@@ -196,7 +254,7 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
         },
     );
     app.transient(
-        root.id,
+        root.id(),
         Transient::Pin {
             key: "tasks".into(),
             card: Card(vec![Mark::Raw {
@@ -212,7 +270,10 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
         },
     );
 
-    let sb = app.tabs.scrollback(root.id).expect("root has a scrollback");
+    let sb = app
+        .tabs
+        .scrollback(root.id())
+        .expect("root has a scrollback");
     assert_eq!(
         sb.probe_figures().0 - opening,
         1,
@@ -220,7 +281,7 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
     );
     assert_eq!(
         app.tabs
-            .status(root.id)
+            .status(root.id())
             .expect("root has a status")
             .pins()
             .iter()
@@ -229,7 +290,7 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
         ["tasks"],
         "the pin lands in the register, never in scrollback"
     );
-    let all = text(&mut app, root.id);
+    let all = text(&mut app, root.id());
     assert!(
         all.contains("a.rs") && all.contains("b.rs"),
         "both reads render in the one block: {all:?}"
@@ -243,8 +304,8 @@ fn a_dying_tab_admits_no_straggler() {
     use crate::record::{Display, Locus, Record, Recorded, Seq};
 
     let (mut app, rx, root) = app();
-    let helper = AgentId::new(root.id.get() + 1);
-    born(&mut app, helper, "helper", root.id);
+    let helper = AgentId::new(root.id().get() + 1);
+    born(&mut app, helper, "helper", root.id());
     let locus = Locus::placeholder(Seq::new(1));
     app.fact(
         helper,
@@ -309,7 +370,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
         ..Born::for_test("main", None)
     };
     let mut app = App::new(
-        root.id,
+        root.id(),
         &born,
         fleet,
         UsageMeter::default(),
@@ -319,7 +380,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
     );
     let hear = |app: &mut App| {
         while let Ok(Signal::Fact(_, rec)) = rx.try_recv() {
-            app.fact(root.id, &rec);
+            app.fact(root.id(), &rec);
         }
     };
 
@@ -331,22 +392,22 @@ fn a_clear_wipes_the_pins_and_the_state() {
         })
         .expect("the log appends");
     hear(&mut app);
-    app.transient(root.id, Transient::State(AgentState::Evaluating), &rx);
+    app.transient(root.id(), Transient::State(AgentState::Evaluating), &rx);
     app.transient(
-        root.id,
+        root.id(),
         Transient::Pin {
             key: "tasks".into(),
             card: Card(Vec::new()),
         },
         &rx,
     );
-    let status = app.tabs.status(root.id).expect("root has a status");
+    let status = app.tabs.status(root.id()).expect("root has a status");
     assert!(status.state.state == AgentState::Evaluating && !status.pins().is_empty());
 
     let _recorded = recorder.emit(Protocol::Cleared).expect("the log appends");
     hear(&mut app);
 
-    let status = app.tabs.status(root.id).expect("root has a status");
+    let status = app.tabs.status(root.id()).expect("root has a status");
     assert!(
         status.state.state == AgentState::Ready && status.pins().is_empty(),
         "the clear wiped both"
@@ -357,21 +418,13 @@ fn a_clear_wipes_the_pins_and_the_state() {
 /// tab has focus by then.
 #[test]
 fn rewind_acts_on_the_tab_it_was_opened_on() {
-    use crate::bus::{Inbox, Next, Rewrite};
+    use crate::bus::{Next, ParkMode, Rewrite};
     use crate::record::{Locus, Protocol, Seq, Voice};
 
     let fleet = Fleet::for_test();
-    let inbox = Inbox::new();
-    let root = test_agent(
-        &fleet,
-        TestAgentSpec {
-            mailbox: inbox.mailbox(),
-            ..TestAgentSpec::new("main")
-        },
-    )
-    .expect("a fresh root");
+    let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     let mut app = App::new(
-        root.id,
+        root.id(),
         &Born::for_test("main", None),
         fleet,
         UsageMeter::default(),
@@ -379,10 +432,10 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
         Card(Vec::new()),
         mpsc::channel().0,
     );
-    let child = AgentId::new(root.id.get() + 1);
-    born(&mut app, child, "child", root.id);
+    let child = AgentId::new(root.id().get() + 1);
+    born(&mut app, child, "child", root.id());
     app.fact(
-        root.id,
+        root.id(),
         &Recorded::new(
             Locus::placeholder(Seq::new(1)),
             Record::Protocol(Protocol::UserPrompt {
@@ -399,7 +452,10 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
 
     assert!(app.overlay.is_none(), "Enter closes the overlay");
     assert!(
-        matches!(inbox.next_item(), Some(Next::Rewrite(Rewrite::Rewind(1)))),
+        matches!(
+            root.inbox.draw(|_| ParkMode::Quiesce),
+            Some(Next::Rewrite(Rewrite::Rewind(1)))
+        ),
         "the rewind went to the tab it was opened on"
     );
 }

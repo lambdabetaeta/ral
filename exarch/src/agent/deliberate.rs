@@ -1,22 +1,22 @@
 //! One prompt run to quiescence against the provider.
 //!
-//! [`Avatar::deliberate`] drives one round-trip at a time until the model
+//! [`Agent::deliberate`] drives one round-trip at a time until the model
 //! stops calling tools.  A forced eviction is weighed at every turn boundary,
 //! against the thresholds in [`gauge`](super::gauge); the standing-condition
 //! warnings ride the steering channel at a tool boundary.
-//! [`Avatar::attend`] is the loop around this, one call per inbox item.
+//! [`Agent::attend`] is the loop around this, one call per inbox item.
 
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::agent::gauge::Warning;
 use crate::agent::outcome::{Fault, Outcome};
 use crate::agent::tools;
-use crate::bus::{Emitter, Next};
+use crate::bus::{AgentOutcome, Emitter, Next, Queue};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::commit::Stream;
 use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient, Voice};
 use ral_core::data::FOValue;
-use ral_core::process::CancelCause;
+use ral_core::process::Scope;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ enum Turn {
     Retry,
 }
 
-impl Avatar {
+impl Agent {
     /// Run one deliberation: optionally commit `prompt` and its voice, then drive
     /// round-trips to quiescence over `provider`, read once by the caller so a
     /// `/model` swap lands on the next item rather than mid-item.
@@ -39,13 +39,14 @@ impl Avatar {
     /// mutation failed.
     pub fn deliberate(
         &mut self,
+        exchange: &Scope,
         provider: &Arc<Provider>,
         prompt: Option<(String, Voice)>,
         continues: Option<u64>,
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
         self.couple(emit);
-        self.agent.disarm_reply_lease();
+        self.inbox.disarm_reply_lease();
         // Entry is the one point every route into a deliberation crosses, so a
         // reply staged by a batch a cancel or an error cut short dies here.
         self.reply.borrow_mut().take();
@@ -59,15 +60,20 @@ impl Avatar {
         loop {
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand.
+            if exchange.is_cancelled() {
+                return Ok(self.cancelled());
+            }
             if self.must_force_evict(provider) {
                 self.force_eviction();
             }
-            match self.round_trip(provider, retried)? {
+            match self.round_trip(exchange, provider, retried)? {
                 Turn::Ends(outcome) => return Ok(outcome),
                 Turn::Retry => retried = true,
                 Turn::Calls(calls) => {
                     retried = false;
-                    if let ControlFlow::Break(outcome) = self.answer(calls, provider, emit)? {
+                    if let ControlFlow::Break(outcome) =
+                        self.answer(exchange, calls, provider, emit)?
+                    {
                         return Ok(outcome);
                     }
                 }
@@ -78,7 +84,12 @@ impl Avatar {
     /// One request to the provider, streamed onto the record as it arrives.
     /// `retried` is whether this round-trip already follows an overflow's
     /// eviction, which is never taken twice running.
-    fn round_trip(&mut self, provider: &Provider, retried: bool) -> Result<Turn, Fault> {
+    fn round_trip(
+        &mut self,
+        exchange: &Scope,
+        provider: &Provider,
+        retried: bool,
+    ) -> Result<Turn, Fault> {
         let recorder = self.recorder();
         let turn = self.log.borrow().context().next_id();
         recorder
@@ -92,13 +103,12 @@ impl Avatar {
         let system = self.log.borrow().context().system().clone();
         recorder.transient(Transient::State(AgentState::AwaitingModel));
         let mut stream = Stream::default();
-        let token = &self.agent.token;
         let taken = provider.complete(
             crate::provider::Request {
                 system: &system,
                 transcript: &messages,
                 tools: self.fleet.launch.tools,
-                search: self.agent.search,
+                search: self.handle.0.search,
             },
             &mut |delta: Delta<'_>| {
                 match delta {
@@ -121,9 +131,10 @@ impl Avatar {
                     });
                 }
             },
-            token,
+            exchange,
         );
-        let cancelled = token.is_cancelled() || matches!(taken, Err(ProviderError::Cancelled(_)));
+        let cancelled =
+            exchange.is_cancelled() || matches!(taken, Err(ProviderError::Cancelled(_)));
         let closed = stream.close(&recorder);
         match taken {
             _ if cancelled => {
@@ -136,7 +147,7 @@ impl Avatar {
             }
             Err(error) => {
                 abandoned(&recorder, closed);
-                self.relieve(error, provider, retried)
+                self.relieve(exchange, error, provider, retried)
             }
         }
     }
@@ -144,6 +155,7 @@ impl Avatar {
     /// A provider failure, unless it is an overflow an eviction relieves.
     fn relieve(
         &self,
+        exchange: &Scope,
         error: ProviderError,
         provider: &Provider,
         retried: bool,
@@ -158,7 +170,7 @@ impl Avatar {
                 context_window: window,
             });
         }
-        if retried || !self.force_eviction() {
+        if retried || exchange.is_cancelled() || !self.force_eviction() {
             return Err(error.into());
         }
         self.note(format!(
@@ -241,45 +253,35 @@ impl Avatar {
     /// what has newly climbed.  `Break` ends the deliberation.
     fn answer(
         &mut self,
+        exchange: &Scope,
         calls: Vec<ToolCall>,
         provider: &Provider,
         emit: &Emitter,
     ) -> Result<ControlFlow<Outcome>, Fault> {
-        let results = self.run_batch(calls, emit);
+        let results = self.run_batch(exchange, calls, emit);
         self.log
             .borrow_mut()
             .append_tool_results(results)
             .map_err(Fault::Log)?;
         self.readings.nudges.reset();
         // A call in the batch may have found the engine gone.
-        if let Some(s) = self.seat.severed() {
+        if let Some(s) = self.engine.severed() {
             return Err(s.into());
         }
         // A cancelled batch admits nothing: a read run or a steer recorded
         // here would belong to the exchange being dropped.
-        if self.agent.token.is_cancelled() {
+        if exchange.is_cancelled() {
             return Ok(ControlFlow::Break(self.cancelled()));
         }
-        // Reply closes admission; arrivals stay queued for the next draw.
+        // Reply abandons work; arrivals stay queued for the next draw.
         if let Some(payload) = self.reply.borrow_mut().take() {
             return Ok(ControlFlow::Break(self.replied(payload)));
         }
         // Arrivals are taken in the order typed: a read runs against the
         // context as it stands at its place in the queue, a delivery lands as
         // a steering line of its own.  The warnings trail them.
-        for drawn in self.inbox.drain_drawn(&self.work, &self.agent.token) {
-            #[cfg(test)]
-            tests::after_drain_draw(self);
-            if drawn.stamp.admit(&self.agent.token, || ()).is_none() {
-                if let Next::Item(crate::bus::Item::Human(text)) = drawn.next {
-                    self.log
-                        .borrow_mut()
-                        .append_steering(text, Voice::Human)
-                        .map_err(Fault::Log)?;
-                }
-                continue;
-            }
-            match drawn.next {
+        for next in self.inbox.drain() {
+            match next {
                 Next::Read(read) => self.read(&read, emit),
                 Next::Item(item) => {
                     if self.arrive(&item)? {
@@ -292,7 +294,7 @@ impl Avatar {
                 Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
             }
         }
-        if self.agent.token.is_cancelled() || !self.work.current(&self.agent.token) {
+        if exchange.is_cancelled() {
             return Ok(ControlFlow::Break(self.cancelled()));
         }
         let climbed = self.climbed(provider)?;
@@ -330,11 +332,6 @@ impl Avatar {
         if !self.log.borrow().context().can_evict() {
             return false;
         }
-        // A boundary Esc leaves the context as it lies; the next boundary
-        // weighs it again.
-        if self.agent.token.is_cancelled() {
-            return false;
-        }
         // No turn old enough to shed is a no-op, not an event.
         let Some(span) = self.planned_forced_eviction() else {
             return false;
@@ -349,32 +346,37 @@ impl Avatar {
     }
 
     /// Run a batch of tool calls in order, short-circuiting the rest to
-    /// cancelled results the instant the token trips.  Every call answers
+    /// cancelled results the instant the exchange is cancelled.  Every call answers
     /// synchronously — a `spawn` returns a start receipt, not a join handle.
-    fn run_batch(&self, tool_calls: Vec<ToolCall>, emit: &Emitter) -> Vec<SessionToolResult> {
+    fn run_batch(
+        &self,
+        exchange: &Scope,
+        tool_calls: Vec<ToolCall>,
+        emit: &Emitter,
+    ) -> Vec<SessionToolResult> {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
-            if self.agent.token.is_cancelled() {
+            if exchange.is_cancelled() {
                 results.push(cancelled_result(call.call_id));
                 results.extend(it.map(|r| cancelled_result(r.call_id)));
                 break;
             }
-            // A severed seat runs nothing more, so the rest answer its loss.
-            if let Some(s) = self.seat.severed() {
-                let lost = crate::agent::EngineLost::running(&s, self.agent.run_dir()).to_string();
+            // A severed engine runs nothing more, so the rest answer its loss.
+            if let Some(s) = self.engine.severed() {
+                let lost = crate::agent::EngineLost::running(&s, self.run_dir()).to_string();
                 results.extend(std::iter::once(call).chain(it).map(|r| SessionToolResult {
                     id: r.call_id,
                     content: lost.clone(),
                 }));
                 break;
             }
-            results.push(self.invoke(call, emit));
+            results.push(self.invoke(exchange, call, emit));
         }
         results
     }
 
-    fn invoke(&self, call: ToolCall, emit: &Emitter) -> SessionToolResult {
+    fn invoke(&self, exchange: &Scope, call: ToolCall, emit: &Emitter) -> SessionToolResult {
         // The names this agent recognises are exactly the ones its request
         // advertised.  Every harness verb (`agent`, `reply`, `schedule`, …)
         // is a builtin *inside* `ral`, not a tool of its own.
@@ -386,7 +388,16 @@ impl Avatar {
         } = call;
         let offered = self.fleet.launch.tools.contains(&fn_name);
         let answered = offered
-            .then(|| tools::dispatch(&fn_name, call_id.clone(), &fn_arguments, self, emit))
+            .then(|| {
+                tools::dispatch(
+                    &fn_name,
+                    call_id.clone(),
+                    &fn_arguments,
+                    self,
+                    exchange,
+                    emit,
+                )
+            })
             .flatten();
         answered.unwrap_or_else(|| {
             let msg = format!("unknown tool `{fn_name}`");
@@ -405,10 +416,12 @@ impl Avatar {
     /// with its own breadcrumb.  A child then parks, deposit and all; only a
     /// parentless agent's `attend` loop stops here.
     fn replied(&self, payload: FOValue) -> Outcome {
-        self.agent.cancel_descendants(CancelCause::Cancelled);
+        self.abandon(Queue::Keep);
         self.recorder()
             .transient(Transient::State(AgentState::Ready));
-        self.agent.deposit_reply(&self.fleet, payload);
+        let since = self.inbox.deposit_reply(payload);
+        self.fleet.lease_reply(&self.handle, since);
+        self.report(AgentOutcome::Replied);
         self.log.borrow_mut().quiesce(QuiesceReason::Replied);
         Outcome::Replied
     }

@@ -1,16 +1,16 @@
-use crate::agent::Avatar;
-use crate::bus::{Emitter, Post, Read, Rewrite};
+use crate::agent::Agent;
+use crate::bus::{Emitter, Read, Rewrite};
 use crate::record::{Forensic, Record};
 
 /// `/resources` rides the inbox to the attend loop and folds into exactly
 /// one event with no provider round-trip.
 #[test]
 fn resources_command_routes_through_attend_and_emits_once() {
-    let mut session = Avatar::for_test("system").unwrap();
-    session.agent.mailbox.push(Post::Read(Read::Resources));
+    let mut session = Agent::for_test("system").unwrap();
+    session.handle().post_read(Read::Resources);
 
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
     let _ = session.attend(&emit);
 
     // The fold is a transient; the session's own head bookend rides the
@@ -54,14 +54,11 @@ fn resources_command_routes_through_attend_and_emits_once() {
 
 #[test]
 fn rewind_past_the_last_turn_reports_the_bad_anchor() {
-    let mut session = Avatar::for_test("system").unwrap();
-    session
-        .agent
-        .mailbox
-        .push(Post::Rewrite(Rewrite::Rewind(7)));
+    let mut session = Agent::for_test("system").unwrap();
+    session.handle().post_rewrite(Rewrite::Rewind(7));
 
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
     let _ = session.attend(&emit);
 
     assert!(

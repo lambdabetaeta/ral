@@ -159,6 +159,7 @@ fn moved_exclusions_reach_children_through_the_identity_transport() {
             &transport,
             Run::captured(body, SourceOrigin::named("<moved exclusion>")),
             Arc::new(()),
+            None,
         )
         .unwrap();
         let Report::Ran {

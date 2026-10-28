@@ -7,15 +7,13 @@
 //! Esc and Ctrl-C are the other way round: a per-tab exchange interrupt on the
 //! one focused agent, never a cascade, never an agent's death, and they never
 //! tick ral's escalation ladder.  They route through
-//! [`crate::agent::Agent::interrupt`], which cancels that agent's own token
-//! and, through `Control`, its dispatch in flight, never its durable root.
+//! [`crate::agent::AgentHandle::interrupt`], which cancels only its exchange.
 //!
 //! On Unix [`install`] points SIGINT at ral's *non-escalating*
 //! `interrupt_handler`, never the `term_handler` whose third delivery
 //! `_exit`s: a stray SIGINT reaching the supervising TUI must cancel the
 //! exchange, not kill exarch.  SIGTERM and SIGHUP keep `term_handler`, and
-//! reach every root as `Terminate`, so a park reading the token agrees with the
-//! engine's root about why the agent is ending.
+//! cancel the fleet root, so every owner and dispatch observes the same cause.
 //!
 //! Windows has no single disposition to replace — `SetConsoleCtrlHandler` keeps
 //! a list, run last-registered-first until one returns `TRUE` — so there
@@ -40,13 +38,13 @@ use std::sync::Arc;
 /// as the guard lives: an interrupt unwinds each exchange, a shutdown ends it.
 pub(crate) fn face(fleet: &Arc<Fleet>) -> AmbientForward {
     let fleet = Arc::clone(fleet);
-    ral_core::process::forward_ambient(move |ambient| {
-        for root in fleet.roots() {
-            match ambient {
-                Ambient::Interrupt => root.interrupt(),
-                Ambient::Root(cause) => root.cancel(cause),
+    ral_core::process::forward_ambient(move |ambient| match ambient {
+        Ambient::Interrupt => {
+            for root in fleet.roots() {
+                root.interrupt();
             }
         }
+        Ambient::Root(cause) => fleet.end(cause),
     })
 }
 
@@ -166,20 +164,28 @@ mod tests {
         crate::boot::face_process_signals(&ral_core::io::terminal::TerminalState::default());
         let fleet = crate::agent::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
+        trunk.steer("open an exchange".into()).unwrap();
+        assert!(
+            trunk
+                .inbox
+                .draw(|_| crate::bus::ParkMode::Quiesce)
+                .is_some()
+        );
+        trunk.inbox.open_exchange();
+        let exchange = trunk.inbox.exchange();
         let _signals = face(&fleet);
 
         assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "raise SIGINT");
         assert!(
             // A forwarded signal lands on the forwarder's own thread.
-            eventually(Duration::from_secs(10), || trunk
-                .token
+            eventually(Duration::from_secs(10), || exchange
                 .is_cancelled()
                 .then_some(()))
             .is_some(),
             "a delivered SIGINT must reach the faced trunk"
         );
         assert!(
-            !trunk.token.terminated(),
+            trunk.is_live(),
             "a SIGINT interrupts the trunk, never ends it"
         );
         assert!(
@@ -189,11 +195,7 @@ mod tests {
 
         assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0, "raise SIGTERM");
         assert!(
-            eventually(Duration::from_secs(10), || trunk
-                .token
-                .terminated()
-                .then_some(()))
-            .is_some(),
+            eventually(Duration::from_secs(10), || (!trunk.is_live()).then_some(())).is_some(),
             "a delivered SIGTERM must end the faced trunk"
         );
         ral_core::process::clear();

@@ -3,9 +3,9 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use exarch::agent::{Avatar, Factory, Helm, RootConfig, RootSeat};
+use exarch::agent::{Agent, AgentHandle, Factory, RootConfig, RootEngine};
 use exarch::bus::Sink;
-use exarch::headless::SettledConversation;
+use exarch::headless::{Job, JobEnd, SettledConversation};
 use exarch::provider::Provider;
 use ral_core::authority::policy::Capabilities;
 use ral_core::own::OwnDir;
@@ -40,7 +40,7 @@ pub(crate) struct Guest {
 }
 
 impl Guest {
-    pub(crate) fn seat(
+    pub(crate) fn start(
         booted: Booted,
         mut config: RootConfig,
         ceiling: Capabilities,
@@ -48,7 +48,7 @@ impl Guest {
         net: netgate::Config,
     ) -> Result<Self, String> {
         let Booted { machine, wires } = booted;
-        let root_seat = RootSeat::guest(
+        let root_engine = RootEngine::guest(
             wires.control.into(),
             GuestPath::from_static(guest_abi::layout::WORK),
             GuestPath::from_static(guest_abi::layout::SCRATCH),
@@ -56,7 +56,7 @@ impl Guest {
         )?;
         let factory = Arc::new(MachineFactory(Mutex::new(machine)));
         config.factory = Some(factory.clone());
-        let agent = Avatar::root(config, root_seat, provider)
+        let agent = Agent::root(config, root_engine, provider)
             .map_err(|why| start_failed(&factory, &why))?;
         let settled = SettledConversation::new(agent)?;
         let net = netgate::run(wires.net.into(), net)
@@ -68,21 +68,21 @@ impl Guest {
         })
     }
 
-    pub(crate) fn helm(&self) -> Helm {
-        self.settled.root().helm()
+    pub(crate) fn handle(&self) -> AgentHandle {
+        self.settled.handle()
     }
 
-    pub(crate) fn await_message(&self) -> bool {
-        self.settled.await_message()
+    pub(crate) fn await_job(&self) -> Option<Job> {
+        self.settled.await_job()
     }
 
-    pub(crate) fn exchange<S: Sink>(&mut self, sink: &mut S) -> Result<(), String> {
-        self.settled.exchange(sink)
+    pub(crate) fn run<S: Sink>(&mut self, job: Job, sink: &mut S) -> JobEnd {
+        self.settled.run(job, sink)
     }
 
     pub(crate) fn severance(&self) -> Option<String> {
-        let cause = self.settled.root().severance()?;
-        let run_dir = self.settled.root().run_dir();
+        let cause = self.settled.severance()?;
+        let run_dir = self.settled.run_dir();
         let lost = exarch::agent::EngineLost::running(&cause, run_dir);
         capture(run_dir, &lost.logged(), &self.console());
         Some(lost.to_string())

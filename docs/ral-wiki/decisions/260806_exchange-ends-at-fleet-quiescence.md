@@ -1,110 +1,103 @@
 ---
 status: active
+verified_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
+verified_at_date: 2026-10-28
+anchors: [SettledConversation::await_job, SettledConversation::run, Fleet::wait_settled, AgentHandle::stop, JobEnd, Membership, Departures]
 ---
 
-# Synod's exchange ends at fleet quiescence
+# Synod's job ends at fleet quiescence
 
-**Synod's after-checkpoint and report refresh happen only when the trunk is
-parked, no live children remain, and their results are drained — never at the
-first moment the trunk itself falls quiet.** This is a deliberate departure
-from exarch's chat-while-they-work model: exarch's trunk may converse with a
-human while a helper is still running, because nothing there promises the
-transcript is the whole story. Synod's product promise — "a checkpoint before,
-a report after, anything can be put back" — is not compatible with a report
-written while a helper is still writing to the folder it describes.
+**Synod's closing folder account follows fleet settlement, never merely the
+trunk's first quiet moment.** A *job* opens on human input and ends when the
+trunk has no more work and its outstanding child results have been heard, or
+when Stop has ended the delegated work and its helpers have torn down.
 
-This supersedes the "never a fleet" half of the old `fuel: 0` comment at
-`synod/src/session.rs`: synod's trunk no longer refuses every `agent-start`.
-The [[design/engine-protocol|engine protocol]] left the shape
-of a wire-side spawn fixed but deliberately unbuilt "until it has a caller" —
-synod is now that caller, delegating to helpers that run concurrently inside
-the same guest, against the same folder, under the same safety net. Synod's
-trunk carries `SPAWN_FUEL` (3) in place of `fuel: 0`, the same depth budget
-exarch's own trunks carry — spawning is universal, bounded by depth and not by
-fan-out, exactly the law [[design/agents|agents]] states with no seat-type
-asterisk.
+The original decision made Synod a caller of the wire-side spawn protocol,
+with `SPAWN_FUEL` (3) rather than a depth-zero trunk. Delegation is universal,
+bounded by depth rather than fan-out, with no engine-carrier exception
+([[design/agents|agents]]). Exarch's TUI may converse while helpers work;
+Synod must not report a stopped helper's folder writes before that helper
+has finished tearing down.
 
 ## The law
 
-The after-checkpoint and the report refresh happen only when:
+**Ordinary completion measures outstanding work, not resident agents.**
 
-1. the trunk is parked (nothing left for it to do this exchange), **and**
-2. no live children remain, **and**
-3. their results are drained and announced.
+- The trunk is quiescent: nothing remains for it to do in this job.
+- Every child obligation has replied or ended, and its result has been
+  drained and announced. `Work::awaiting` is the exact obligation ledger,
+  including follow-up message sequence numbers.
+- Replied helpers remain parked under their follow-up lease. Their presence
+  is not busy work and does not hold the job open
+  ([[decisions/260826_reply-parks|reply-parks]]).
 
-`exarch::headless::SettledConversation::{await_message, exchange}` is the
-driver this law is built into: it waits for a human message, then runs the
-ordinary `attend` loop under a park policy that
-answers `HeldByChildren` — not `Held` — while children are live, and only
-treats the trunk as settled once the fleet is childless and empty. The
-`park_mode` semantics that decide focus and cancellation for exarch's own TUI
-do not move; the driver is an addition beside them, not a change to them.
-`dev/docs/VM/EXARCH-VM-v2.md` states the same law at the workspace-export
-grain ("at a turn boundary the engine stops admitting work and obtains a
-workspace barrier"); this is that law at the exchange grain.
+`SettledConversation` owns one root and a conversation-lived bus.
+`await_job` opens on queued human text only; `run(job, sink)` drives the
+ordinary attend loop until the root's outstanding work settles. A worker
+surface batch alone cannot open a job; signals between jobs wait for the
+next drain. The constructor refuses self-scheduling and reset-resume, so a
+future wakeup cannot silently extend this boundary.
 
-Every wait this law imposes ends on its own: `MAX_STEPS` bounds a runaway
-turn, a returning child that finishes without `reply` is re-nudged then fails
-honestly, and a child parked `HeldByChildren` terminates by induction on its
-own subtree. The two `ParkMode` variants that do *not* end by themselves —
-`Engaged` (child-only, waiting for follow-up work) and
-`UntilCancelled` (needs an armed self-schedule) — cannot hold synod's trunk.
-Synod steers only its root; `SettledConversation::new` refuses
-self-scheduling and reset-resume, the same class of
-refusal a fuelled wire trunk without a hatchery gets. So the fleet the driver
-waits on always quiesces; the one case the wait rule does not catch is two
-helpers `message`-ing each other in a loop, each turn real work and fuel
-bounding depth, not turn count — recorded as an open risk, not solved by this
-law, and the persona's to discourage.
+The park verdict is `HeldByChildren` while obligations remain, not the
+TUI's human-attached `Held`. `WaitingOnAgents` names that wait honestly.
+A child with a reply parks `Engaged`; Synod's conversing trunk does not.
+Returning children must reply or fail after bounded repair nudges. Fuel
+bounds depth, not round-trips: mutually sustaining helper messages remain
+an open nontermination risk, not a claim this law resolves.
 
-## Consequences
+## Stop amendment, 2026-10-28
 
-- Synod's `fuel: 0` becomes `SPAWN_FUEL`, and the comment at
-  `synod/src/session.rs` that justified id-blind sink routing by "no
-  sub-agents exist" is retired along with the fuel figure that made it true.
-- `Conversation::exchange` drives `SettledConversation::exchange` after
-  `await_message` admits a human message; the closing account belongs after
-  fleet settlement, never merely after the trunk's first quiet moment.
-- The status bar gains a `WaitingOnAgents` state, read off the same
-  `HeldByChildren` park verdict the driver computes — a synod window that
-  never had a fleet before now has something honest to say while one runs.
-- Synod's Stop and Esc abandon the exchange through `Helm::stop`: queued
-  prompts return to the composer, remaining inbox posts are drained and
-  fenced, descendants are cancelled, and the trunk's turn unwinds. The
-  exchange still ends by fleet settlement before its report is written.
-  Stop is addressed to the active `ExchangeId`; a stale request leaves the
-  queue untouched. Accepted delivery must finish before backend completion,
-  whose `stopped` verdict alone draws “Stopped.”
-  ([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
+**A stopped job closes only after ended helpers have torn down.**
+[[261028_one-scope-tree-one-inbox]] names the mechanism and retains the
+host control ladder, **interrupt < stop < end**.
 
-## Amendment — "live" reads "busy"
+- Synod's Stop and Esc call `AgentHandle::stop(JobId)`. Under the root inbox
+  lock, a matching running job is marked stopped and its work is abandoned.
+  Queued human text returns oldest first; other posts live or die by scope
+  provenance. The root survives; its loose ral workers remain engine-owned.
+- A stopped job takes up nothing new. Text sent afterwards stays queued for
+  the next job. A stale or duplicate Stop changes neither queue nor work.
+- `SettledConversation::run` waits through `Fleet::wait_settled` before
+  closing a stopped job: membership count equals live-agent count, so no
+  ended helper is still tearing down. Only then may the closing walk run.
+- `JobEnd.stopped` is the backend verdict; Synod's `JobDone` carries it to
+  the window, which alone draws “Stopped.” after in-flight output.
+- Factory, attach, probe and protocol-write waits remain bounded by their
+  own deadlines. A stopped job waits for such a helper's teardown rather
+  than claiming an instantaneous barrier.
 
-Since [[decisions/260826_reply-parks|reply-parks]] a child that has replied
-stays registered, parked under its idle lease. Clause 2 therefore reads "no
-*busy* children remain": the exchange ends once every child has replied or
-died, and the repliers linger, fetchable by `` agents `reply ``. This is not
-`Fleet::is_empty`: process shutdown waits for every Avatar-owned teardown
-membership to leave, after seat/log and fleet/identity references drop.
-Retained ancestor identity is neither a busy consumer nor an outstanding
-teardown membership. Explicit `SettledConversation::end_fleet` cancels every
-root in the shared fleet, drops the driver/root and waits on detached
-`Departures`, retaining no launch or factory; Synod does this before recovering
-its machine factory. This whole-launch boundary is stronger than Stop.
+`Conversation::run` guards guest work with the settled opening baseline,
+then takes the closing walk even after failure. Reports are cumulative
+metadata accounts against that baseline; a failed walk is unavailable data,
+not an empty change set. The account promises no restoration operation.
 
-> **Amended 2026-10-27.** `exarch::headless::SettledConversation::new`
-> owns a root and its conversation-lived bus; `await_message` opens on human
-> steering only, and `exchange` attends the queue to fleet quiescence.
-> Synod's `Guest` holds this owning driver in `assistant/guest.rs`.
-> The constructor refuses self-scheduling and reset-resume; ready resident
-> helpers do not hold an exchange open. Stop answers the user-side brake
-> question without weakening the settlement law.
+The count-equals-live predicate has an unresolved boundary: if the attending
+root ends during this wait, it retains the very membership settlement waits
+to release. Stop followed by shutdown or restart can therefore block the
+driver indefinitely
+([[261028_one-scope-tree-one-inbox#Unresolved boundaries|unresolved boundaries]]).
 
-## See also
+## Settlement is not shutdown
 
-[[design/engine-protocol|engine-protocol]] (the rendezvous
-shape this law's callers use, and the paragraph this ADR's caller now names),
-[[design/agents|agents]] (spawning is universal, bounded by fuel — the law
-synod's `SPAWN_FUEL` now carries with no seat-type exception),
-[[map/synod|synod]] (the helper surface, the hatchery, the sink routing this
-law drives), [[map/exarch/agent|agent]] (`ParkMode` and the `attend` loop this
-driver reuses).
+**Live, busy and torn down answer different questions.**
+
+- Life cancellation determines whether an agent is live; the work's
+  obligation ledger determines whether it is busy.
+- `Fleet::is_empty` counts owner-held `Membership`s released after engine
+  and log teardown, not retained address references.
+- `SettledConversation::end_fleet` ends every root in the shared launch,
+  drops the driver/root, then waits on detached `Departures`, retaining no
+  launch or factory. Synod recovers its machine factory only afterwards.
+- Owner drop ends its subtree, so retaining a parent's address cannot
+  leave descendants working without their consumer.
+
+## Where
+
+- `exarch/src/headless.rs`: `SettledConversation::{await_job, run, end_fleet}`,
+  `JobEnd`.
+- `exarch/src/bus/inbox.rs`: `Job`, `JobId`, work obligations, addressed Stop.
+- `exarch/src/agent/fleet.rs`: `Fleet::wait_settled`, `Membership`, `Departures`.
+- `synod/src/assistant/conversation.rs`: `Conversation::run`, closing walk.
+
+[[design/engine-protocol|engine-protocol]], [[design/agents|agents]],
+[[map/synod|synod]], [[map/exarch/agent|agent]].

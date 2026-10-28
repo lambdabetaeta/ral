@@ -80,7 +80,7 @@ fn a_stuck_write_still_declares_death() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam(), None);
     });
 
     let started = Instant::now();
@@ -115,7 +115,7 @@ fn a_write_stalled_cancel_returns_and_declares_death() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam(), None);
     });
     // Park the cancel behind the dispatch, not ahead of it: a cancel that won
     // the lock first would write its frame into an empty buffer and return.
@@ -167,7 +167,7 @@ fn liveness_refresh_cannot_mask_a_write_stall() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam(), None);
     });
 
     assert!(
@@ -188,7 +188,7 @@ fn no_well_formed_frame_follows_a_severed_write() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam(), None);
     });
 
     assert!(

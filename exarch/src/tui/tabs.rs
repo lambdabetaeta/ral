@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::palette::{AGENT_HUES, AgentSlot};
 use super::resources::ViewFigures;
-use crate::agent::Agent;
+use crate::agent::AgentHandle;
 use crate::agent::fleet::Fleet;
 use crate::card::Card;
 use crate::record::{AgentId, AgentState, Born, Emitter as Recorder};
@@ -163,11 +163,11 @@ impl Tab {
     }
 
     /// Resolved afresh each time and never stored: the frontend must not hold
-    /// an agent past its avatar.  The id test rules out a namesake born later.
-    fn live(&self, fleet: &Fleet) -> Option<Arc<Agent>> {
+    /// an ended agent. The id test rules out a namesake born later.
+    fn live(&self, fleet: &Fleet) -> Option<AgentHandle> {
         fleet
             .resolve(&self.name)
-            .filter(|agent| agent.id == self.id)
+            .filter(|agent| agent.id() == self.id)
     }
 
     /// Idle span if this tab is parked past the compact-row threshold. The
@@ -274,11 +274,11 @@ impl Tabs {
 
     /// The live agent behind `id`, for one handler's duration — the frontend's
     /// one way onto an agent, and never held past the statement that opens it.
-    pub(super) fn agent(&self, id: AgentId) -> Option<Arc<Agent>> {
+    pub(super) fn agent(&self, id: AgentId) -> Option<AgentHandle> {
         self.tab(id)?.live(&self.fleet)
     }
 
-    pub(super) fn focused_agent(&self) -> Option<Arc<Agent>> {
+    pub(super) fn focused_agent(&self) -> Option<AgentHandle> {
         self.agent(self.focused())
     }
 

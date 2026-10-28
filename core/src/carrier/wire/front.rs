@@ -12,6 +12,7 @@ use crate::carrier::{
     Ends, Host, Line, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id, sever,
 };
 use crate::data::FOValue;
+use crate::process::Scope;
 use crate::protocol::channel::{Liveness, WireChannel, WireStream, WriteError, ticks};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
@@ -46,12 +47,17 @@ pub struct WireTransport {
     /// The heartbeat still owed, parked by [`WireTransport::adopt`] and taken
     /// by the first [`WireTransport::attach`].
     pending_heartbeat: Mutex<Option<Liveness>>,
-    /// Set true by the reader on `SessionEvent::Attached`; awaited by
-    /// [`WireTransport::await_attached`].
-    attached: Arc<(Mutex<bool>, Condvar)>,
+    session: Arc<(Mutex<SessionState>, Condvar)>,
     /// How long [`WireTransport::await_attached`] waits for the verdict before
     /// declaring the engine [`Severed::Silent`].
     patience: Duration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    Opening,
+    Attached,
+    Ended,
 }
 
 /// The transport's reader loop. *Every* frame read clears
@@ -72,7 +78,7 @@ fn spawn_wire_reader(
     deferred_sink: Arc<Mutex<Option<Arc<dyn DeferredSink>>>>,
     severance: Arc<OnceLock<Severed>>,
     unanswered: Arc<AtomicU32>,
-    attached: Arc<(Mutex<bool>, Condvar)>,
+    session: Arc<(Mutex<SessionState>, Condvar)>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // Severs on every exit, panics included (e.g. from `DeferredSink::deliver`),
@@ -80,7 +86,7 @@ fn spawn_wire_reader(
         // it drops after the loop's own locals but before the captured `event_tx`.
         struct SeverOnExit<'a> {
             severance: &'a OnceLock<Severed>,
-            attached: &'a (Mutex<bool>, Condvar),
+            session: &'a (Mutex<SessionState>, Condvar),
         }
         impl Drop for SeverOnExit<'_> {
             fn drop(&mut self) {
@@ -88,12 +94,12 @@ fn spawn_wire_reader(
                     self.severance,
                     Severed::Closed("the reader thread ended".into()),
                 );
-                self.attached.1.notify_all();
+                self.session.1.notify_all();
             }
         }
         let _sever_on_exit = SeverOnExit {
             severance: &severance,
-            attached: &attached,
+            session: &session,
         };
 
         loop {
@@ -117,8 +123,13 @@ fn spawn_wire_reader(
                             }
                         }
                         Frame::Session(SessionEvent::Attached) => {
-                            *attached.0.lock_ignore_poison() = true;
-                            attached.1.notify_all();
+                            *session.0.lock_ignore_poison() = SessionState::Attached;
+                            session.1.notify_all();
+                        }
+                        Frame::Session(SessionEvent::Ended) => {
+                            *session.0.lock_ignore_poison() = SessionState::Ended;
+                            session.1.notify_all();
+                            break;
                         }
                         Frame::Session(SessionEvent::Refused(msg)) => {
                             sever(&severance, Severed::Refused(msg));
@@ -221,7 +232,7 @@ impl WireTransport {
         let severance = Arc::new(OnceLock::new());
         let unanswered = Arc::new(AtomicU32::new(0));
         let (event_tx, event_rx) = mpsc::channel();
-        let attached = Arc::new((Mutex::new(false), Condvar::new()));
+        let session = Arc::new((Mutex::new(SessionState::Opening), Condvar::new()));
         let line = Arc::new(Line {
             channel: Mutex::new(writer),
             shutdown,
@@ -240,7 +251,7 @@ impl WireTransport {
             ends.deferred_sink.clone(),
             ends.severance.clone(),
             unanswered.clone(),
-            attached.clone(),
+            session.clone(),
         );
 
         Ok(Self {
@@ -249,7 +260,7 @@ impl WireTransport {
             _reader: Mutex::new(Some(reader)),
             unanswered,
             pending_heartbeat: Mutex::new(Some(liveness)),
-            attached,
+            session,
             patience: liveness.deadline,
         })
     }
@@ -289,27 +300,51 @@ impl WireTransport {
     /// # Errors
     /// The transport's severance — a refused `Attach`, a closed connection, or
     /// [`Severed::Silent`] once no verdict arrives within `self.patience`.
+    pub fn await_attached(&self) -> Result<(), Severed> {
+        self.await_state(SessionState::Attached)
+    }
+
+    /// End the remote session and await proof that its workers have torn down.
+    ///
+    /// # Errors
+    /// A severed connection or missing teardown acknowledgment.
+    pub fn end(&self) -> Result<(), Severed> {
+        forbid_reentry(self);
+        if *self.session.0.lock_ignore_poison() == SessionState::Ended {
+            return Ok(());
+        }
+        if let Some(cause) = self.severed() {
+            return Err(cause);
+        }
+        if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Detach) {
+            return Err(self.sever(Severed::Faulted(format!("detach: {e}"))));
+        }
+        self.await_state(SessionState::Ended)
+    }
+
     #[allow(
         clippy::significant_drop_tightening,
         reason = "the guard is the loop's own state, retaken by every wait"
     )]
-    pub fn await_attached(&self) -> Result<(), Severed> {
+    fn await_state(&self, wanted: SessionState) -> Result<(), Severed> {
         const TICK: Duration = Duration::from_millis(100);
         let mut left = ticks(self.patience, TICK);
-        let mut guard = self.attached.0.lock_ignore_poison();
+        let mut guard = self.session.0.lock_ignore_poison();
         loop {
-            // Severance first: an `Attached` that raced a death must not grant
-            // a seat on a transport already known dead.
+            // Acknowledged teardown survives EOF; attachment does not.
+            if wanted == SessionState::Ended && *guard == wanted {
+                return Ok(());
+            }
             if let Some(cause) = self.severed() {
                 return Err(cause);
             }
-            if *guard {
+            if *guard == wanted {
                 return Ok(());
             }
             if left == 0 {
                 return Err(self.line.sever(Severed::Silent(self.patience)).clone());
             }
-            let (next, timed_out) = self.attached.1.wait_timeout_ignore_poison(guard, TICK);
+            let (next, timed_out) = self.session.1.wait_timeout_ignore_poison(guard, TICK);
             guard = next;
             if timed_out.timed_out() {
                 left -= 1;
@@ -341,7 +376,7 @@ impl Transport for WireTransport {
         &self.ends
     }
 
-    fn dispatch(&self, id: DispatchId, run: Run, _host: &Arc<dyn Host>) {
+    fn dispatch(&self, id: DispatchId, run: Run, _host: &Arc<dyn Host>, _within: Option<&Scope>) {
         // The host is consulted by the drain loop, not here: an enquiry
         // crossing a wire is a frame on `events()`, answered by whoever drains
         // it — `dispatch_to_report`.

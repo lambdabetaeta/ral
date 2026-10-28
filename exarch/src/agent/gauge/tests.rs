@@ -76,13 +76,13 @@ fn disk_tells_the_user_alone() {
 /// warning, no cost.
 #[test]
 fn disk_warning_unconfigured_never_walks_or_warns() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     assert!(session.fleet.launch.disk_warn_bytes.is_none());
 
     assert!(
         session
             .disk_warning()
-            .expect("an identity seat never severs")
+            .expect("an identity engine never severs")
             .is_none(),
         "unconfigured: never warns, ever"
     );
@@ -96,7 +96,7 @@ fn disk_warning_unconfigured_never_walks_or_warns() {
 /// and the file alone crosses it.
 #[test]
 fn disk_warning_walks_the_log_dir() {
-    let mut session = Avatar::for_test_with(TestTrunk {
+    let mut session = Agent::for_test_with(TestTrunk {
         disk_warn_bytes: Some(64 * 1024),
         ..TestTrunk::new("system")
     })
@@ -109,7 +109,7 @@ fn disk_warning_walks_the_log_dir() {
     assert!(
         session
             .disk_warning()
-            .expect("an identity seat never severs")
+            .expect("an identity engine never severs")
             .is_some()
     );
 }

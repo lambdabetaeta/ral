@@ -199,7 +199,7 @@ fn prove_the_host_can_dial_in(
     println!("\nputting a vsock listener in the guest and dialling it from here...");
     // `dyn Machine` is Send but not Sync, so it stays here while the listener runs on another thread.
     std::thread::scope(|scope| {
-        let listening = scope.spawn(|| dispatch_to_report(&transport, run, Arc::new(())));
+        let listening = scope.spawn(|| dispatch_to_report(&transport, run, Arc::new(()), None));
 
         // The guest's accept window exceeds this delay for Python to bind.
         std::thread::sleep(Duration::from_secs(3));

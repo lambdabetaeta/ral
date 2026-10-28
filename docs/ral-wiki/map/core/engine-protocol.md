@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2854657c78ba3e2eec72563cf6a2e5f4492c3d2a
-generated_at_date: 2026-10-27
+generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+generated_at_date: 2026-10-28
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -55,16 +55,17 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   carries `Control`: the dispatch scope root, the durable root, and a slot
   holding the current dispatch and a foretold strike with its cause. `open`
   mints a dispatch's scope ahead of its frame (struck already if a strike
-  foretold it); `apply` is `Control`'s one meaning — `Interrupt(id)` and
-  `Cancel(id)` strike the current dispatch if it bears `id` and foretell it
-  otherwise, as `Interrupted` and `Cancelled`, and `Terminate` cancels the
-  durable root.
+  foretold it). `open(id, within)` parents beneath the host scope when supplied,
+  otherwise beneath the dispatch root. `apply` gives `Strike(id, cause)` its
+  one meaning: strike only that dispatch with the exact cause, or foretell it.
+  `Terminate` and `Abort` cancel the durable root and current dispatch,
+  including one beneath a foreign host scope.
 
 ## `core/src/protocol.rs`
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 33): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 34): checked at `Attach`; a mismatch refuses.
   `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
   sequences; guest media must be rebuilt with `just guest-boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
@@ -109,9 +110,9 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `no_desk()` is the fixed wording for a host with nothing to answer, and
   `From<EnquiryError> for Error` the one way a refusal becomes the error
   both carriers' desks raise.
-- `Control` — `Interrupt(DispatchId)`, `Cancel(DispatchId)`, `Terminate`, `Abort` (a
-  `Terminate` whose cause is `RootAbort`); applied by `Scopes::apply` under
-  both carriers.
+- `Control` — `Strike(DispatchId, CancelCause)`, `Terminate`, `Abort` (a
+  `Terminate` whose cause is `Aborted`); applied by `Scopes::apply` under
+  both carriers. Even a terminal dispatch-local cause never ends the engine.
 - `Report` / `Ending` / `FailureStatus` — the terminal frame:
   `Static { rendered, status }` (a refusal: the run never reached evaluation, so
   no command ran and nothing was bound), `Ran { ending, captured, trail }`, or
@@ -220,7 +221,7 @@ The two interpretations of the algebra, and what they share.
   `workers`, `session_ended`, `completion_names`, `bindings`,
   `path_entries`, each decoding through `Datum` and severing the transport
   `Faulted` on an answer outside its shape (`read`). It has no explicit
-  session-ending verb: a session ends when its transport drops.
+  session-ending verb; acknowledged detach belongs to `WireTransport::end`.
 - `forbid_reentry` / `Dispatching` — the carrier-uniform reentrancy law: a
   thread-local registry of the transports this thread is dispatching on,
   entered by `dispatch_to_report` and checked by every typed reading and the
@@ -228,6 +229,8 @@ The two interpretations of the algebra, and what they share.
 - `dispatch_to_report` — mint a `DispatchId`, aim the control door at it,
   call `transport.dispatch`, drain `events()` to that dispatch's own `Report`,
   forwarding `Surface`/`Enquiry` to `host`; `Result<Report, Severed>`.
+  With `within`, it polls every `POLL_SLICE` and sends an addressed strike
+  before dispatch and whenever the observed cause rises.
 - `ControlSender` — `interrupt()`, `cancel(id)`, `terminate()` over one of two
   routes: `ControlRoute::Identity` applies the verb straight onto the engine's
   `Scopes`; `ControlRoute::Wire` holds its transport's `Line` weakly and writes
@@ -273,8 +276,9 @@ The two interpretations of the algebra, and what they share.
   stands: a `Dispatch` by a `Report::refused` stashed on its own event
   stream, a `Probe` by `ProbeError::Rejected`, an `Answer` by an `Err` answer;
   an `Attach`, with no session yet to refuse into, severs `Refused`. It owns
-  its `Line` alone, and its `Drop` severs and shuts the socket: that is how a
-  front-end ends the session.
+  its `Line` alone. `end()` sends `Detach` and waits for `Ended`, proof of
+  engine and session-worker teardown. `Drop` severs and shuts the socket,
+  ending an unattended connection without certifying remote teardown.
 - `spawn_wire_reader` / `spawn_heartbeat` — the reader severs *before*
   dropping `event_tx`, on every exit path, and severs `Faulted` on a frame
   only a front-end sends; the heartbeat pings on `Liveness::interval`,
@@ -292,11 +296,10 @@ The wire carrier's engine half: a connection-lived engine process.
   process-level half of an attach, which only a carrier owning its process
   performs: a root's cwd, every engine's `HOME`, each read `EnginePath::native`; a child restores no cwd), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
   onto a worker thread, then runs the reader loop; returns the process exit
-  code. The loop breaks on a `SessionEnd` — `Requested` (the front-end's
-  EOF) or `Corrupt` (a read error, a dead worker, silence past the
-  deadline, or a frame only an engine sends) — so corruption cannot be
-  reported as an end the front-end asked for; a wire fault demotes even a
-  `Requested` end to `1`.
+  code. The loop distinguishes `Detached` (`Detach`, requiring an `Ended`
+  acknowledgment), `Closed` (EOF, requiring no reply), and `Corrupt` (a read
+  error, dead worker, silence past the deadline, or frame only an engine sends).
+  A wire fault demotes either clean end to `1`.
 - `engine_write` / `engine_send` — every engine-side write. A `Report` or
   `Reading` the fuse refuses is replaced by a `fault`; any other refusal
   goes back to its writer, `engine_send` diagnosing and dropping a frame with
@@ -313,15 +316,16 @@ The wire carrier's engine half: a connection-lived engine process.
   `Event::Enquiry` (a refused or severed write is its own `Err`), then parks on a oneshot registered under its `EnquiryId`
   until `Frame::Answer` fills it or the run's own cancel scope fires. A park
   that gave up has deregistered its sender, so a late answer is dropped.
-- `Dispatch` / `Writing` — the one-run-or-probe rendezvous and the guard
-  spanning an item's report write; claiming is the only way to mint a
-  `Dispatch`, so "engine busy" is never raised without work in flight.
+- `Dispatch` — the one-run-or-probe rendezvous; claiming is the only way to
+  mint one, so "engine busy" is never raised without work in flight.
 - `Patience` — the engine's own read-silence and write-stall deadlines, armed
   once the first `Ping` arrives (both `HOST_SILENCE_DEADLINE` in production,
   a test gets a brisker pair).
-- The teardown settle — on any loop exit: `Scopes::end`, then poll the busy and writing flags under
-  `SETTLE_TIMEOUT`/`SETTLE_POLL` before exiting, so no run is abandoned
-  mid-report.
+- The teardown settle — on any loop exit: `Scopes::end`, close the work
+  channel, then wait for the engine thread under `SETTLE_TIMEOUT`/`SETTLE_POLL`.
+  Join includes engine destruction and its roster drain. Only a successful
+  join with `WorkerRegistry::is_drained()` may send `Ended`; timeout, panic
+  or a surviving worker exits without acknowledging teardown.
 
 ### `carrier/testkit.rs`
 

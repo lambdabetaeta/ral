@@ -2,7 +2,7 @@
 //! user-chosen grant policy.
 //!
 //! The whole agent is here: the CLI, capability composition, the
-//! [`agent::Avatar`] exchange driver, the [`provider::Provider`] transport, and
+//! [`agent::Agent`] exchange driver, the [`provider::Provider`] transport, and
 //! the two frontends ([`tui::run`] / [`headless::run`]).  The `exarch` binary is
 //! a thin shell over [`run`]; integration tests link this library directly.
 #![cfg_attr(
@@ -16,7 +16,6 @@ pub mod agent;
 pub mod app;
 pub mod boot;
 pub mod bus;
-pub mod cancel;
 pub mod card;
 pub mod cli;
 pub mod clock;
@@ -42,15 +41,15 @@ pub mod tui;
 pub mod wallet;
 
 use crate::site::{Silent, site};
-use agent::Avatar;
+use agent::Agent;
 use clap::Parser;
 use provider::state::{Opening, opening};
-use provider::{Bureau, Choice, Engine, Holdings};
+use provider::{Bureau, Choice, Holdings, Pool};
 use ral_core::own::{self, OwnDir};
 use ral_core::path::{Kind, XdgKind};
 use std::sync::Arc;
 
-/// The one boot recipe table, for the identity seat and the `--engine` child
+/// The one boot recipe table, for the identity engine and the `--engine` child
 /// alike.
 pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
     [ral_core::engine::EngineInstaller {
@@ -119,7 +118,7 @@ pub struct SessionInfo<'a> {
 /// The binary's entry point, lifted into the library so integration tests can
 /// link the whole crate.
 ///
-/// It parses the CLI, composes the capability lattice, builds an [`Avatar`] +
+/// It parses the CLI, composes the capability lattice, builds an [`Agent`] +
 /// [`provider::Provider`], and hands off to a frontend.
 ///
 /// # Errors
@@ -263,7 +262,7 @@ pub fn run() -> Result<(), String> {
     let system_size = system.len();
 
     // One runtime for the whole fleet; per-credential transports warm lazily.
-    let engine = Engine::new();
+    let engine = Pool::new();
     let bureau = Arc::new(Bureau::Live { engine, holdings });
     let roles = provider::roles::Roles::mint(roles, &bureau, &tuning, c.max_tokens)?;
     let (provider, screen) = open(
@@ -302,21 +301,21 @@ pub fn run() -> Result<(), String> {
         bureau: Arc::clone(&bureau),
         roles,
     };
-    let seat = agent::RootSeat::Identity {
+    let engine = agent::RootEngine::Identity {
         scratch,
         cwd: launch_cwd.clone(),
         grants: invocation.stack,
         terminal,
     };
     let roots: Vec<_> = if resumes {
-        Avatar::resume(config, seat, &provider).map(|roots| {
+        Agent::resume(config, engine, &provider).map(|roots| {
             roots
                 .into_iter()
                 .map(|(root, resumed)| (root, Some(resumed)))
                 .collect()
         })
     } else {
-        Avatar::root(config, seat, Arc::clone(&provider)).map(|root| vec![(root, None)])
+        Agent::root(config, engine, Arc::clone(&provider)).map(|root| vec![(root, None)])
     }
     .map_err(|e| format!("session init: {e}"))?;
 

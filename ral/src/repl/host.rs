@@ -100,7 +100,7 @@ impl ReplHost {
         ctx: Option<PluginContext>,
     ) -> (Result<Report, Severed>, Option<PluginContext>) {
         *self.editor.lock_ignore_poison() = ctx;
-        let report = dispatch_to_report(t, run, self.clone());
+        let report = dispatch_to_report(t, run, self.clone(), None);
         (report, self.editor.lock_ignore_poison().take())
     }
 

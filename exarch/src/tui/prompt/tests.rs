@@ -1,5 +1,6 @@
 use super::*;
-use crate::bus::Inbox;
+use crate::agent::fleet::Fleet;
+use crate::agent::testkit::{TestAgentSpec, test_agent};
 use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
 
 fn key(prompt: &mut PromptState, code: KeyCode, modifiers: KeyModifiers) {
@@ -126,21 +127,21 @@ fn external_editor_adoption_ends_browsing_and_discards_old_undo() {
 #[test]
 fn queued_recall_is_fresh_and_keeps_history_bookkeeping() {
     let mut prompt = PromptState::new(true);
-    let inbox = Inbox::new();
-    let mailbox = inbox.mailbox();
+    let fleet = Fleet::for_test();
+    let agent = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     prompt.paste("submitted");
     prompt.submit();
-    inbox.push_user("one".into());
-    inbox.push_user("two".into());
-    assert!(prompt.edit_queued_prompt(|| mailbox.recall()));
-    assert_eq!(mailbox.queued_human_messages(), Vec::<String>::new());
+    agent.steer("one".into()).unwrap();
+    agent.steer("two".into()).unwrap();
+    assert!(prompt.edit_queued_prompt(|| agent.recall()));
+    assert_eq!(agent.queued(), Vec::<String>::new());
     undo(&mut prompt);
     assert_eq!(prompt.prompt_text(), "one\ntwo");
     assert_eq!(prompt.hist_pos, None);
     assert_eq!(prompt.history, ["submitted"]);
-    inbox.push_user("waiting".into());
+    agent.steer("waiting".into()).unwrap();
     assert!(!prompt.edit_queued_prompt(|| panic!("a draft must guard recall")));
-    assert_eq!(mailbox.queued_human_messages(), ["waiting"]);
+    assert_eq!(agent.queued(), ["waiting"]);
     prompt.history_prev();
     assert!(!prompt.edit_queued_prompt(|| panic!("history must guard recall")));
     prompt.history_next();

@@ -44,24 +44,24 @@ Deno.test("overlapping recalls restore A then B without losing the live draft", 
   equal(f.draft(), "A\n\nB\n\ntyped while waiting");
 });
 
-Deno.test("stop and recall share ordering and stop retains its gesture's exchange", async () => {
+Deno.test("stop and recall share ordering and stop retains its gesture's job", async () => {
   for (const stopFirst of [false, true]) {
     const f = fixture();
     const barrier = Promise.withResolvers<string[]>();
-    let exchange = 1;
-    const target = exchange;
+    let job = 1;
+    const target = job;
     const stopped: number[] = [];
     const stop = () => { stopped.push(target); return Promise.resolve(["stop"]); };
     const recall = () => barrier.promise;
     const first = f.enqueue(stopFirst ? stop : recall);
     const second = f.enqueue(stopFirst ? recall : stop);
-    exchange = 2;
+    job = 2;
     f.type("draft");
     barrier.resolve(["recall"]);
     await first;
     await second;
     equal(stopped, [1]);
-    equal(exchange, 2);
+    equal(job, 2);
     equal(f.draft(), stopFirst ? "stop\n\nrecall\n\ndraft" : "recall\n\nstop\n\ndraft");
   }
 });

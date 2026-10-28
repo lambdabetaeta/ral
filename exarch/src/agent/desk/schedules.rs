@@ -37,14 +37,18 @@ impl ExarchDesk {
     ) -> Result<FOValue, Error> {
         self.require_schedule_grant("exarch-schedules `add")?;
         let s = &self.services;
+        if !s.mailbox.is_current() {
+            return Err(Error::new(
+                crate::agent::fleet::Unborn::Abandoned.to_string(),
+            ));
+        }
 
         // The row goes up after the registry call, so a refusal tiers instead
         // of reading as one that landed.
         let described = trigger.describe();
         let result = s
-            .agent
             .schedules
-            .schedule(trigger, prompt, label.clone(), &s.agent.mailbox);
+            .schedule(trigger, prompt, label.clone(), &s.mailbox);
         let (payload, content) = match &result {
             Ok(receipt) => (
                 described,
@@ -72,7 +76,7 @@ impl ExarchDesk {
     /// A snapshot of this agent's live wakeups — every `` `exarch-schedules ``
     /// tag's answer.
     pub(super) fn schedule_table(&self) -> FOValue {
-        self.services.agent.schedules.list().encode()
+        self.services.schedules.list().encode()
     }
 
     /// `` `remove `` — take one scheduled wakeup off the table by label. Only
@@ -83,7 +87,7 @@ impl ExarchDesk {
         let s = &self.services;
         // The rail's payload column spells out the miss the table only implies,
         // since the verb has no argument of its own to show there.
-        let removed = s.agent.schedules.unschedule(label);
+        let removed = s.schedules.unschedule(label);
         let (payload, content) = if removed {
             (String::new(), format!("unscheduled '{label}'"))
         } else {

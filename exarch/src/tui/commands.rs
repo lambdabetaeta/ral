@@ -14,9 +14,9 @@ use super::prompt::editor::completion::Candidate;
 use super::providers;
 use super::rewind;
 use crate::SessionInfo;
-use crate::agent::Agent;
+use crate::agent::AgentHandle;
 use crate::agent::fleet::Fleet;
-use crate::bus::{Post, Read, Rewrite};
+use crate::bus::{Read, Rewrite};
 use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::provider::allowance::{Allowance, Consumption, Reading, Scope};
 use crate::record::{Memory, RECORD};
@@ -491,7 +491,7 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
             // focused.
             None => {
                 if let Some(agent) = app.tabs.agent(focused) {
-                    agent.steer(text);
+                    let _ = agent.steer(text);
                 }
             }
         },
@@ -499,16 +499,14 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
 }
 
 /// Interrupt `agent`'s exchange, then queue `rewrite` behind it.
-fn interrupt_then(agent: &Agent, rewrite: Rewrite) {
+fn interrupt_then(agent: &AgentHandle, rewrite: Rewrite) {
     agent.interrupt();
-    agent.post(Post::Rewrite(rewrite));
+    agent.post_rewrite(rewrite);
 }
 
 /// A retained parent identity need not have an inbox consumer.
 pub(super) fn quit(fleet: &Fleet) {
-    for root in fleet.roots() {
-        root.end();
-    }
+    fleet.end(ral_core::process::CancelCause::Cancelled);
 }
 
 /// Act on a well-formed command.  A view command (`/help`, `/legend`, `/copy`,
@@ -533,11 +531,11 @@ fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
         Command::Clear => app.session(|agent| interrupt_then(agent, Rewrite::Clear)),
         Command::Close => app.session(|agent| interrupt_then(agent, Rewrite::Close)),
         Command::Quit => quit(app.tabs.fleet()),
-        Command::Evict => app.post(Post::Rewrite(Rewrite::Evict)),
+        Command::Evict => app.post_rewrite(Rewrite::Evict),
         Command::Rewind => rewind::rewind(app),
-        Command::Hatch(memory, name) => app.post(Post::Read(Read::Hatch { memory, name })),
-        Command::Context => app.post(Post::Read(Read::Context)),
-        Command::Resources => app.post(Post::Read(Read::Resources)),
+        Command::Hatch(memory, name) => app.post_read(Read::Hatch { memory, name }),
+        Command::Context => app.post_read(Read::Context),
+        Command::Resources => app.post_read(Read::Resources),
     }
 }
 

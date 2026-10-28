@@ -6,7 +6,7 @@
 //! opened for it, beneath which `run_under` seats the run's frame. The wall
 //! clock is the discriminating half: the child would sleep far longer than
 //! the ceiling asserted here.  A SIGINT reaches the engine the same way,
-//! forwarded by its host as this very `Control::Interrupt`.
+//! forwarded by its host as `Control::Strike(_, Interrupted)`.
 
 #![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
@@ -57,6 +57,7 @@ fn an_interrupt_through_the_control_sender_stops_an_in_flight_run() {
             ..Run::captured("/bin/sleep 30", SourceOrigin::named("<test>"))
         },
         Arc::new(()),
+        None,
     )
     .expect("the identity transport sends the Report synchronously");
     let elapsed = started.elapsed();

@@ -1,13 +1,13 @@
 //! Fixtures shared by two or more `mod tests` across the crate; a helper only
 //! one of them needs belongs in that file instead.
 
-use crate::agent::fleet::{Fleet, Membership};
+use crate::agent::fleet::{Fleet, Name, Unborn};
+use crate::agent::handle::Shared;
 use crate::agent::{
-    Agent, Avatar, Birth, ProviderHandle, Role, RootConfig, RootSeat, SPAWN_FUEL, Trunk,
+    Agent, AgentHandle, ProviderHandle, Role, RootConfig, RootEngine, SPAWN_FUEL, Trunk,
 };
 use crate::app::Scratch;
-use crate::bus::{AgentOutcome, Emitter, Mailbox};
-use crate::cancel::InterruptTarget;
+use crate::bus::{AgentOutcome, AgentResult, Emitter, Inbox, Mailbox, ParkMode, Scoped};
 use crate::provider::Toolset;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
@@ -19,6 +19,7 @@ use ral_core::Value;
 use ral_core::engine::EngineInstaller;
 use ral_core::io::terminal::TerminalState;
 use ral_core::own::{OwnDir, TestDir};
+use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::{Scheme, Ty};
 use ral_core::typecheck::Unifier;
@@ -26,6 +27,10 @@ use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+pub(crate) fn inbox(agent: &Agent) -> &Inbox {
+    &agent.inbox
+}
 
 type Dress = Box<dyn FnOnce(&mut Shell)>;
 type RuntimeDress = Box<dyn FnOnce(&mut Runtime)>;
@@ -79,8 +84,8 @@ pub(crate) fn dressed_over(
     &DRESSED
 }
 
-/// A [`Avatar::for_test`] trunk whose runtime `runtime` fits out at boot.
-pub(crate) fn dressed_trunk(runtime: impl FnOnce(&mut Runtime) + 'static) -> Avatar {
+/// An [`Agent::for_test`] trunk whose runtime `runtime` fits out at boot.
+pub(crate) fn dressed_trunk(runtime: impl FnOnce(&mut Runtime) + 'static) -> Agent {
     dressed_trunk_over(runtime, |_| {})
 }
 
@@ -88,8 +93,8 @@ pub(crate) fn dressed_trunk(runtime: impl FnOnce(&mut Runtime) + 'static) -> Ava
 pub(crate) fn dressed_trunk_over(
     runtime: impl FnOnce(&mut Runtime) + 'static,
     shell: impl FnOnce(&mut Shell) + 'static,
-) -> Avatar {
-    Avatar::for_test_with(crate::agent::TestTrunk {
+) -> Agent {
+    Agent::for_test_with(crate::agent::TestTrunk {
         installers: dressed_over(runtime, shell),
         ..crate::agent::TestTrunk::new("system")
     })
@@ -120,9 +125,9 @@ pub(crate) fn bare_transport() -> ral_core::carrier::IdentityTransport {
 
 /// Every worker `session`'s engine holds, handles included, so a test can
 /// watch one outlive the engine.
-pub(crate) fn workers(session: &Avatar) -> Vec<ral_core::shell::runtime::WorkerEntry> {
-    let crate::agent::seat::SeatKind::Identity(transport) = session.seat.kind() else {
-        panic!("a test trunk sits on an identity seat");
+pub(crate) fn workers(session: &Agent) -> Vec<ral_core::shell::runtime::WorkerEntry> {
+    let crate::agent::engine::EngineKind::Identity(transport) = session.engine.kind() else {
+        panic!("a test trunk runs an identity engine");
     };
     ral_core::test_access::workers(&transport)
 }
@@ -131,123 +136,146 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
 }
 
-/// What a fleet-focused test varies about a synthetic agent — no seat, no
-/// shell, nothing an attend loop would touch.  Every other field is the inert
-/// placeholder [`test_agent`] fills in; what the run shares is the fleet's
-/// own [`Launch`](crate::agent::fleet::Launch).
+/// A synthetic owner without an engine or log.
 pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
-    pub(crate) reach: InterruptTarget,
-    pub(crate) mailbox: Mailbox,
     pub(crate) role: Role,
-    /// How long this agent has already been idle at birth: `started` is
-    /// backdated by it, so a test can stand past an idle threshold without
-    /// waiting the threshold out.
+    pub(crate) report: Option<Mailbox>,
     pub(crate) idle: Duration,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
 }
 
 impl TestAgentSpec {
-    /// A root under `name`, with handles no assertion inspects.
     pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            reach: InterruptTarget::new(
-                ral_core::carrier::Transport::control(&bare_transport()).clone(),
-            ),
-            mailbox: crate::bus::Inbox::new().mailbox(),
             role: Role::Converses,
+            report: None,
             idle: Duration::ZERO,
             fuel: 0,
             search: false,
         }
     }
+
+    pub(crate) fn child(name: &str, parent: &AgentHandle, mailbox: Mailbox) -> Self {
+        Self {
+            role: Role::Child {
+                parent: parent.clone(),
+            },
+            report: Some(mailbox),
+            ..Self::new(name)
+        }
+    }
 }
 
-/// A synthetic agent whose membership lasts until this fixture is dropped.
+/// Retaining its handle never retains this owner or its membership.
 pub(crate) struct TestAgent {
-    agent: Arc<Agent>,
-    _membership: Membership,
+    handle: AgentHandle,
+    pub(crate) inbox: Inbox,
+    pub(crate) report: Option<Mailbox>,
+    _name: Name,
 }
 
 impl Drop for TestAgent {
     fn drop(&mut self) {
-        self.agent.mailbox.admission(|| {
-            self.agent
-                .token
-                .cancel(ral_core::process::CancelCause::Cancelled);
-        });
+        self.handle.end();
+        if let Some(report) = &self.report {
+            report.post(Scoped::Result(AgentResult {
+                id: self.id(),
+                name: self.0.name.clone(),
+                outcome: AgentOutcome::Failed("ended before reporting".into()),
+                elapsed: self.elapsed(),
+                answers: self.0.mailbox.answers(),
+            }));
+        }
     }
 }
 
 impl std::ops::Deref for TestAgent {
-    type Target = Arc<Agent>;
+    type Target = AgentHandle;
 
     fn deref(&self) -> &Self::Target {
-        &self.agent
+        &self.handle
     }
 }
 
-/// An enrolled synthetic agent, settled when its fixture is dropped.
-///
-/// # Errors
-/// Whatever [`Fleet::enrol`] refuses.
-pub(crate) fn test_agent(
-    fleet: &Arc<Fleet>,
-    spec: TestAgentSpec,
-) -> Result<TestAgent, crate::agent::fleet::Unborn> {
+/// A synthetic owner using production adoption, names and membership.
+pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<TestAgent, Unborn> {
     let TestAgentSpec {
         name,
-        reach,
-        mailbox,
         role,
+        report,
         idle,
         fuel,
         search,
     } = spec;
     let claim = fleet.claim(&name)?;
-    let agent = Agent::new(Birth {
-        id: crate::agent::fresh_id(),
+    let id = crate::agent::fresh_id();
+    let (under, life) = match &report {
+        Some(mailbox) => (
+            mailbox.scope(),
+            mailbox.adopt(id).ok_or_else(|| {
+                if mailbox.is_live() {
+                    Unborn::Abandoned
+                } else {
+                    Unborn::SessionDead
+                }
+            })?,
+        ),
+        None => ((*fleet.root).clone(), fleet.root.child()),
+    };
+    let inbox = Inbox::new(life);
+    let handle = AgentHandle(Arc::new(Shared {
+        id,
         name,
         log_dir: fleet.launch.run_dir().clone(),
         run_dir: fleet.launch.run_dir().clone(),
         started: Instant::now()
             .checked_sub(idle)
-            .expect("a test's backdated birth stays inside the monotonic clock"),
+            .expect("test birth fits the clock"),
         role,
         fuel,
-        provider: ProviderHandle::new(scripted("test-model", Script::new())),
         search,
-        reach,
-        mailbox,
-    });
-    let membership = fleet.enrol(&agent, claim)?;
+        provider: ProviderHandle::new(scripted("test-model", Script::new())),
+        under,
+        mailbox: inbox.life_mailbox(),
+    }));
+    let name = claim.bind(&handle);
     Ok(TestAgent {
-        agent,
-        _membership: membership,
+        handle,
+        inbox,
+        report,
+        _name: name,
     })
 }
 
 /// A boundary read through one of `test_access`'s count probes — unlike
 /// `scope_has` it ticks no epoch and no ledger.
 pub(crate) fn probe_count(
-    session: &Avatar,
+    session: &Agent,
     probe: impl FnOnce(&dyn ral_core::carrier::Transport) -> Result<u64, ral_core::carrier::ProbeError>,
 ) -> u64 {
     session
-        .seat
+        .engine
         .read(probe)
-        .expect("an identity seat never severs")
+        .expect("an identity engine never severs")
 }
 
 /// Whether `name` resolves, asked through a real eval — which ticks the ral
 /// epoch and the binding-lease ledger, so an idle-arithmetic test must count it.
-pub(crate) fn scope_has(session: &Avatar, name: &str) -> bool {
+pub(crate) fn scope_has(session: &Agent, name: &str) -> bool {
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
     // Discarded, so a block- or handle-valued binding still settles on data.
-    let text = session.ral(&format!("let _ = ${name}"), 5, &emit).text;
+    let text = session
+        .ral(
+            &DurableRoot::default().child(),
+            &format!("let _ = ${name}"),
+            5,
+            &emit,
+        )
+        .text;
     if text.lines().any(|line| line == "EXIT: 0") {
         return true;
     }
@@ -261,7 +289,7 @@ pub(crate) fn scope_has(session: &Avatar, name: &str) -> bool {
 /// Close one exchange on `session`'s own log — the closed span every context
 /// test needs before it has anything addressable to name. The log is private
 /// to this module, so a test outside it reaches an exchange through here.
-pub(crate) fn close_exchange(session: &Avatar, prompt: &str, answer: &str) {
+pub(crate) fn close_exchange(session: &Agent, prompt: &str, answer: &str) {
     let mut log = session.log.borrow_mut();
     log.append_user(prompt.to_string(), None, Voice::Human)
         .expect("a test prompt");
@@ -283,8 +311,8 @@ pub(crate) fn tmp(tag: &str) -> TestDir {
 /// Swap `session`'s live provider — what `/model` mutates in production — so
 /// a forked child can run its own independent script rather than share its
 /// spawner's, the way a real `` exarch-agents `start `` does.
-pub(crate) fn set_provider(session: &Avatar, provider: Arc<Provider>) {
-    session.agent.provider.swap(provider);
+pub(crate) fn set_provider(session: &Agent, provider: Arc<Provider>) {
+    session.handle.0.provider.swap(provider);
 }
 
 pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
@@ -299,9 +327,8 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
     }
 }
 
-/// A trunk through the real `Avatar::root` path: attended when `attended`,
-/// else the embedded conversing trunk synod drives.
-pub(crate) fn trunk(attended: bool) -> Avatar {
+/// An attended or embedded trunk through the real root path.
+pub(crate) fn trunk(attended: bool) -> Agent {
     root(
         if attended {
             Trunk::Attended
@@ -314,26 +341,26 @@ pub(crate) fn trunk(attended: bool) -> Avatar {
 
 /// The toolless `--chat` trunk, conversing by construction: the flag is
 /// interactive-only.
-pub(crate) fn chat_trunk() -> Avatar {
+pub(crate) fn chat_trunk() -> Agent {
     root(Trunk::Attended, Toolset::default())
 }
 
 /// A trunk whose network policy denies hosted search — the ceiling a fork inherits,
 /// in the direction the ordinary fixture does not cover.
-pub(crate) fn searchless_trunk() -> Avatar {
-    Avatar::for_test_with(crate::agent::TestTrunk {
+pub(crate) fn searchless_trunk() -> Agent {
+    Agent::for_test_with(crate::agent::TestTrunk {
         search: false,
         ..crate::agent::TestTrunk::new("system")
     })
     .expect("searchless test trunk")
 }
 
-fn root(trunk: Trunk, tools: Toolset) -> Avatar {
-    // The run dir sits beside the scratch, which the seat below owns, so the
+fn root(trunk: Trunk, tools: Toolset) -> Agent {
+    // The run dir sits beside the scratch, which the engine owns, so the
     // trunk's whole footprint goes when the trunk does.
     let scratch = Scratch::for_test(crate::app::EXARCH, "trunk").expect("scratch dir");
     let run_dir = scratch.test_sibling("run").expect("run dir");
-    Avatar::root(
+    Agent::root(
         RootConfig {
             system: "system".into(),
             run_dir,
@@ -348,7 +375,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
             bureau: Arc::new(crate::provider::Bureau::Scripted),
             roles: crate::provider::roles::Roles::default(),
         },
-        RootSeat::Identity {
+        RootEngine::Identity {
             scratch: Arc::new(scratch),
             cwd: ral_core::host::cwd().expect("test process has a cwd"),
             grants: ral_core::authority::policy::GrantStack::default(),
@@ -361,10 +388,9 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
 
 /// A child of `parent` made the production way: `` exarch-agents `start `` forks
 /// the parent's shell and parks it, and the host adopts it, so the child
-/// carries the parent's whole scope and builtins — what a genesis-seated
-/// [`Avatar::fork_named`] does not.
-pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar {
-    use crate::agent::seat::{Seat, SeatKind};
+/// carries the parent's whole scope and builtins, unlike [`Agent::fork_named`].
+pub(crate) fn started_child(parent: &Agent, name: &str, grant: &str) -> Agent {
+    use crate::agent::engine::{Engine, EngineKind};
     use crate::enquiry::{Agents, ForkClaim, Request, Start};
     use ral_core::carrier::Host;
     use ral_core::data::FOValue;
@@ -373,12 +399,13 @@ pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar 
     use ral_core::source::SourceOrigin;
 
     struct Adopt {
-        parent: Arc<Agent>,
+        parent: AgentHandle,
+        mailbox: Mailbox,
         log: crate::agent::LogCell,
         fleet: Arc<Fleet>,
         transport: Arc<ral_core::carrier::IdentityTransport>,
         name: String,
-        child: std::sync::Mutex<Option<Avatar>>,
+        child: std::sync::Mutex<Option<Agent>>,
     }
 
     impl Host for Adopt {
@@ -392,17 +419,17 @@ pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar 
             else {
                 panic!("an identity run parks its bequest")
             };
-            let seat = self
+            let engine = self
                 .transport
                 .adopt_parked(id)
-                .map(Seat::adopted)
+                .map(Engine::adopted)
                 .expect("the fork this run parked");
-            let child = Avatar::child_of(
-                (&self.parent, self.parent.mailbox.stamp()),
+            let child = Agent::child_of(
+                (&self.parent, self.mailbox.clone()),
                 &self.log.borrow(),
                 &self.fleet,
                 self.fleet.claim(&self.name).expect("a free name"),
-                seat,
+                engine,
                 self.parent.current_provider(),
                 spec.memory,
             )
@@ -412,11 +439,12 @@ pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar 
         }
     }
 
-    let SeatKind::Identity(transport) = parent.seat.kind() else {
-        panic!("a test parent sits on an identity seat")
+    let EngineKind::Identity(transport) = parent.engine.kind() else {
+        panic!("a test parent runs an identity engine")
     };
     let host = Arc::new(Adopt {
-        parent: parent.agent.clone(),
+        parent: parent.handle(),
+        mailbox: parent.inbox.mailbox(),
         log: parent.log.clone(),
         fleet: parent.fleet.clone(),
         transport: transport.clone(),
@@ -431,6 +459,7 @@ pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar 
         &*transport,
         Run::captured(script.as_str(), SourceOrigin::named("<test>")),
         host.clone(),
+        None,
     )
     .expect("an identity engine never severs");
     host.child
@@ -444,22 +473,22 @@ pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar 
 ///
 /// A peer that replies parks for a follow-up rather than ending, exactly as a
 /// spawned child does, so this stands in for the parent that would end that
-/// park: a terminate once the reply stands.  A peer that never replies
+/// park: end its life once the reply stands. A peer that never replies
 /// quiesces on its own and the watcher simply retires with it.
-pub(crate) fn drive_peer(child: &mut Avatar, provider: Arc<Provider>) -> AgentOutcome {
+pub(crate) fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> AgentOutcome {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, child.agent.id);
-    child.agent.provider.swap(provider);
+    let emit = Emitter::new(tx, child.id());
+    set_provider(child, provider);
     let attending = Arc::new(AtomicBool::new(true));
     let watcher = {
-        let agent = child.agent.clone();
+        let agent = child.handle();
         let attending = attending.clone();
         std::thread::spawn(move || {
             while attending.load(Ordering::Acquire) {
                 if agent.has_reply() {
-                    agent.cancel(ral_core::process::CancelCause::Cancelled);
+                    agent.end();
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(2));
@@ -531,7 +560,7 @@ pub(crate) static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] =
 pub(crate) fn wait_for_settle(inbox: &crate::bus::Inbox) -> crate::bus::Next {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if let Some(item) = inbox.next_item() {
+        if let Some(item) = inbox.draw(|_| ParkMode::Quiesce) {
             return item;
         }
         assert!(

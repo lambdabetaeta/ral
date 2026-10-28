@@ -15,7 +15,7 @@ impl ExarchDesk {
     /// `()`.
     pub(super) fn apply_pin(&self, key: String, card: Option<Card>) -> FOValue {
         {
-            let mut m = self.services.agent.pins.lock_ignore_poison();
+            let mut m = self.services.pins.lock_ignore_poison();
             match &card {
                 Some(card) => {
                     m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
@@ -39,7 +39,7 @@ impl ExarchDesk {
     /// Read-after-write within one run is sound: `` `set ``/`` `clear ``
     /// write the mirror synchronously, on this same enquiry desk.
     pub(super) fn pin_read(&self, key: &str) -> FOValue {
-        let m = self.services.agent.pins.lock_ignore_poison();
+        let m = self.services.pins.lock_ignore_poison();
         match m.get(key) {
             Some(digest) => FOValue::Variant {
                 label: "some".into(),
@@ -55,7 +55,7 @@ impl ExarchDesk {
     /// `` `list `` — the keys currently occupied on this agent's own
     /// register, in `BTreeMap` order.
     pub(super) fn pin_list(&self) -> FOValue {
-        let pins = self.services.agent.pins.lock_ignore_poison();
+        let pins = self.services.pins.lock_ignore_poison();
         Vec::from_iter(pins.keys().cloned()).encode()
     }
 }

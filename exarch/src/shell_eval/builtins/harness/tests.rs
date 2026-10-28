@@ -1,516 +1,336 @@
-use crate::agent::testkit::ral_call;
+use crate::agent::Agent;
+use crate::agent::testkit::{
+    TestAgentSpec, close_exchange, ral_call, scripted, set_provider, test_agent, wait_for_settle,
+};
+use crate::bus::{AgentOutcome, AgentResult, Emitter, Item, Next, ParkMode, channel};
+use crate::provider::scripted::{Reply, Script};
 use crate::record::Voice;
+use ral_core::process::DurableRoot;
 
-/// Every bare tag the door admits: the bases, plus `` `inherit ``, which
-/// names none and so is the one admitted tag policy has nothing to resolve.
+fn run(session: &Agent, source: &str, budget: u64) -> String {
+    let (tx, _rx) = channel();
+    session
+        .ral(
+            &DurableRoot::default().child(),
+            source,
+            budget,
+            &Emitter::new(tx, session.id()),
+        )
+        .text
+}
+
+fn eval(session: &Agent, source: &str) -> String {
+    run(session, source, 5)
+}
+
+fn trunk() -> Agent {
+    Agent::for_test("system").unwrap()
+}
+
+fn schedules(session: &Agent) -> crate::schedule::ScheduleRegistry {
+    session
+        .host_services(&crate::bus::dummy_emitter().0)
+        .schedules
+}
+
+fn no_children(session: &Agent) {
+    assert_eq!(
+        crate::agent::roster::summary(&session.handle(), &session.fleet).live,
+        0,
+    );
+}
+
 fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
     std::iter::once("inherit").chain(crate::policy::SPAWN_BASES)
 }
 
-/// The door validates `name`, `type`, and `grant` before
-/// `bequeath`/`enquire` ever run, so no child is registered.
 #[test]
 fn unknown_grant_label_errors_before_any_enquiry_crosses() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, model: `inherit]",
-        5,
-        &emit,
-    ).text;
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, model: `inherit]",
+    );
     for label in bare_grant_tags() {
         assert!(result.contains(label), "must name `{label}`, got: {result}");
     }
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "an unknown grant label must never register a child"
-    );
+    no_children(&session);
 }
 
-/// `` `dangerous `` has left the spawn surface: there it resolved to ⊤, a
-/// layer saying nothing, which is what `` `inherit `` now says outright —
-/// so the refusal must send a model there rather than leave it guessing.
 #[test]
 fn dangerous_is_no_longer_a_spawn_grant_and_the_refusal_points_at_inherit() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, model: `inherit]",
-        5,
-        &emit,
-    ).text;
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, model: `inherit]",
+    );
     assert!(
         result.contains("inherit is how you decline to narrow"),
-        "the refusal must point at `inherit, got: {result}"
+        "{result}"
     );
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "`dangerous must never register a child"
-    );
+    no_children(&session);
 }
 
-/// `` `restrict `` is the one grant tag that takes a payload, so bare it is
-/// a shape error, and the refusal must say what it was missing.
 #[test]
 fn a_bare_restrict_errors_before_any_enquiry_crosses() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("capability record"),
-        "the refusal must name the record `restrict carries, got: {result}"
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, model: `inherit]",
     );
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "a bare `restrict must never register a child"
-    );
+    assert!(result.contains("capability record"), "{result}");
+    no_children(&session);
 }
 
-/// Both new spellings pass the grant door — the open `grant` row carries a
-/// payload-bearing tag too — so what comes back is the *next* door's
-/// refusal, naming `model`, and still no child.
 #[test]
 fn inherit_and_restrict_pass_the_grant_door() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
+    let session = trunk();
     for grant in ["`inherit", "`restrict [net: `offline]"] {
-        let result = session.ral(&format!(
+        let result = eval(
+            &session,
+            &format!(
                 r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: {grant}, model: `guess]"
             ),
-            5,
-            &emit,
-        ).text;
+        );
         assert!(
             result.contains("`model") && !result.contains("`grant"),
-            "{grant} must pass the grant door and be refused at `model`, got: {result}"
+            "{grant}: {result}"
         );
-        assert!(
-            crate::agent::roster::summary(&session.agent).live == 0,
-            "a later door's refusal must never leave a child registered"
-        );
+        no_children(&session);
     }
 }
 
 #[test]
 fn unknown_type_tag_errors_before_any_enquiry_crosses() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(result.contains("amnemon"), "got: {result}");
-    assert!(result.contains("mnemon"), "got: {result}");
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "an unknown type tag must never register a child"
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, model: `inherit]",
     );
+    assert!(result.contains("amnemon"), "{result}");
+    assert!(result.contains("mnemon"), "{result}");
+    no_children(&session);
 }
 
-/// The `model` row is open too, so an unrecognised arm must reach the door
-/// and be told the two that exist.
 #[test]
 fn unknown_selection_tag_errors_naming_both_arms() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `guess]",
-        5,
-        &emit,
-    ).text;
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `guess]",
+    );
     for arm in ["inherit", "role"] {
         assert!(result.contains(arm), "must name `{arm}, got: {result}");
     }
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "an unknown selection tag must never register a child"
-    );
+    no_children(&session);
 }
 
-/// An empty role name is a mistake, not a way of spelling `` `inherit ``.
 #[test]
 fn an_empty_role_name_is_refused() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `role '']",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("non-empty"),
-        "the refusal must say the name may not be empty, got: {result}"
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `role '']",
     );
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "an empty selection name must never register a child"
-    );
+    assert!(result.contains("non-empty"), "{result}");
+    no_children(&session);
 }
 
 #[test]
 fn invalid_name_errors_before_any_enquiry_crosses() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, model: `inherit]"#,
-        5,
-        &emit,
-    ).text;
-    assert!(result.contains("name"), "got: {result}");
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "an invalid name must never register a child"
+    let session = trunk();
+    let result = eval(
+        &session,
+        r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, model: `inherit]"#,
     );
+    assert!(result.contains("name"), "{result}");
+    no_children(&session);
 }
 
-/// `scheme_agents`'s outer tag row (`ρ4`) is open, so an unrecognised tag
-/// must reach `builtin_agents`'s door rather than die as a row mismatch.
 #[test]
 fn unknown_outer_tag_reaches_the_door_naming_every_legal_label() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral("exarch-agents `stop 'x'", 5, &emit).text;
+    let result = eval(&trunk(), "exarch-agents `stop 'x'");
     for tag in ["list", "start", "message", "cancel", "reply", "read"] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
 }
 
-/// Static, not a door error: `scheme_agents`'s closed `` `start `` record
-/// row reports which label is absent.
 #[test]
 fn missing_agent_field_errors_statically_naming_the_field() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session
-        .ral(
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, model: `inherit]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("field named 'grant'"),
-        "the diagnostic must name the missing field, got: {result}"
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, model: `inherit]",
     );
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "a missing spec field must never register a child"
-    );
+    assert!(result.contains("field named 'grant'"), "{result}");
+    no_children(&session);
 }
 
-/// A misspelled field (`grnat` for `grant`) is not the same fault as an
-/// absent one: the closed `` `start `` row rejects it statically too, and
-/// must still name a field rather than shrug at the whole record.
 #[test]
 fn misspelled_start_field_errors_statically_naming_the_field() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("no field named 'grnat'"),
-        "the diagnostic must name the offending field, got: {result}"
+    let session = trunk();
+    let result = eval(
+        &session,
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, model: `inherit]",
     );
-    assert!(
-        crate::agent::roster::summary(&session.agent).live == 0,
-        "a misspelled spec field must never register a child"
-    );
+    assert!(result.contains("no field named 'grnat'"), "{result}");
+    no_children(&session);
 }
 
-/// Drives `Avatar::ral` rather than `Avatar::deliberate`'s provider loop:
-/// the spawn seeds the child's handle from the parent's *own*
-/// `Arc<Provider>`, so one script consumed by both a driven parent
-/// exchange and its child races over which gets which stage.
+fn start_child(session: &Agent, name: &str, prompt: &str, command: &str) -> AgentResult {
+    set_provider(
+        session,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call("reply-1", command)])),
+        ),
+    );
+    let result = eval(
+        session,
+        &format!(
+            "exarch-agents `start [prompt: #'{prompt}'#, name: '{name}', type: `amnemon, grant: `read-only, model: `inherit]"
+        ),
+    );
+    assert!(
+        result.contains("live: 1"),
+        "the summary must count the child: {result}"
+    );
+    match wait_for_settle(crate::agent::testkit::inbox(session)) {
+        Next::Item(Item::Agent(result)) => result,
+        other => panic!("expected an Agent result item, got: {other:?}"),
+    }
+}
+
 #[test]
 fn agent_full_stack_round_trip_answers_the_summary_and_parks_a_reply() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-        "test-model",
-        crate::provider::scripted::Script::new().then(
-            crate::provider::scripted::Reply::tool_calls(vec![ral_call(
-                "reply-1",
-                r"exarch-agents `reply 'say hi'",
-            )]),
-        ),
-    ));
-    session.agent.provider.swap(provider);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session.ral(r"exarch-agents `start [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("live: 1"),
-        "the summary answered afterwards must count the child, got: {result}"
+    let session = trunk();
+    let result = start_child(
+        &session,
+        "helper",
+        "say hi",
+        "exarch-agents `reply 'say hi'",
     );
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match session.next_item_for_test() {
-            Some(crate::bus::Next::Item(crate::bus::Item::Agent(r))) => {
-                let notice = r.outcome.marked_item(&r.name, r.elapsed);
-                assert!(
-                    notice.contains("exarch-agents `read 'helper'"),
-                    "the reply notice must name the fetch command, got: {notice}"
-                );
-                break;
-            }
-            Some(_other) => panic!("expected an Agent result item"),
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "child did not settle within the timeout"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-    }
-
-    let read = session.ral(r"exarch-agents `read 'helper'", 5, &emit).text;
-    assert!(
-        read.contains("say hi"),
-        "exarch-agents `read` must answer the child's deposited reply, got: {read}"
-    );
-    let roster = session.ral(r"exarch-agents `list", 5, &emit).text;
-    assert!(
-        roster.contains("replied"),
-        "the replied child must stay on the roster as `replied, got: {roster}"
-    );
+    let notice = result.outcome.marked_item(&result.name, result.elapsed);
+    assert!(notice.contains("exarch-agents `read 'helper'"), "{notice}");
+    let read = eval(&session, "exarch-agents `read 'helper'");
+    assert!(read.contains("say hi"), "{read}");
+    let roster = eval(&session, "exarch-agents `list");
+    assert!(roster.contains("replied"), "{roster}");
 }
 
-/// A cancel is a request, not a transaction: it only stamps the cancel
-/// layers, and the cancelled agent's own loop is what retires it — so the
-/// row must still be listed the instant this answers.
-///
-/// Pinned with a bare agent rather than a real spawned child: a scripted
-/// child runs to completion and settles on the same synchronous thread
-/// that starts it, so a second `Avatar::ral` racing a real
-/// `` `start ``/`` `cancel `` pair would be racing CPU-bound work with no
-/// reliable window in between.
 #[test]
-fn agents_cancel_answer_still_counts_the_cancelled_agent() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let mut doomed = crate::agent::testkit::TestAgentSpec::new("doomed");
-    doomed.role = crate::agent::Role::child(&session.agent);
-    let _doomed = crate::agent::testkit::test_agent(&session.fleet, doomed)
-        .expect("a fresh child of a live parent");
-
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral("exarch-agents `cancel 'doomed'", 5, &emit).text;
+fn agents_cancel_answer_excludes_the_ended_agent_before_teardown() {
+    let session = trunk();
+    let mailbox = session
+        .host_services(&crate::bus::dummy_emitter().0)
+        .mailbox;
+    let doomed = TestAgentSpec::child("doomed", &session.handle(), mailbox);
+    let _doomed = test_agent(&session.fleet, doomed).expect("a fresh child of a live parent");
+    let result = eval(&session, "exarch-agents `cancel 'doomed'");
+    assert!(result.contains("EXIT: 0"), "{result}");
     assert!(
-        result.contains("EXIT: 0"),
-        "a valid exarch-agents `cancel call must succeed, got: {result}"
-    );
-    assert!(
-        result.contains("live: 1"),
-        "a cancel is a request, not a transaction: the target is still \
-         counted by the summary answered afterwards, got: {result}"
+        result.contains("live: 0"),
+        "cancelled life is no longer live: {result}"
     );
 }
-
-// ── schedule family door tests ───────────────────────────────────────
-//
-// Tag payloads are greedy, but `at_tag_payload_end` in
-// `core/src/syntax/parser.rs` stops one at a comma — so inside a record
-// literal a nullary tag cannot swallow its neighbour. That is why
-// `` exarch-schedules `add `` takes one spec record, not three positional
-// arguments.
 
 #[test]
 fn bad_cron_expr_errors_before_any_enquiry_crosses() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session
-        .ral(
-            "exarch-schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("five fields"),
-        "must carry the parser's own message, got: {result}"
+    let session = trunk();
+    let result = eval(
+        &session,
+        "exarch-schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
     );
-    assert!(
-        session.agent.schedules.list().is_empty(),
-        "a bad cron expression must never register a schedule"
-    );
+    assert!(result.contains("five fields"), "{result}");
+    assert!(schedules(&session).list().is_empty());
 }
 
 #[test]
 fn bad_duration_errors_before_any_enquiry_crosses() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session
-        .ral(
-            "exarch-schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("duration"),
-        "must carry the parser's own message, got: {result}"
+    let session = trunk();
+    let result = eval(
+        &session,
+        "exarch-schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
     );
-    assert!(
-        session.agent.schedules.list().is_empty(),
-        "a bad duration must never register a schedule"
-    );
+    assert!(result.contains("duration"), "{result}");
+    assert!(schedules(&session).list().is_empty());
 }
 
 #[test]
 fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session
-        .ral(
-            "exarch-schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(result.contains("cron"), "got: {result}");
-    assert!(result.contains("after"), "got: {result}");
-    assert!(
-        session.agent.schedules.list().is_empty(),
-        "an unrecognised trigger tag must never register a schedule"
+    let session = trunk();
+    let result = eval(
+        &session,
+        "exarch-schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
     );
+    assert!(result.contains("cron"), "{result}");
+    assert!(result.contains("after"), "{result}");
+    assert!(schedules(&session).list().is_empty());
 }
 
-/// Static, not a door error: `scheme_schedules`'s closed `` `add ``
-/// record row reports which label is absent.
 #[test]
 fn missing_spec_field_errors_statically_naming_the_field() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session
-        .ral(
-            "exarch-schedules `add [trigger: `after '1s', label: 'nightly']",
-            5,
-            &emit,
-        )
-        .text;
+    let session = trunk();
+    let result = eval(
+        &session,
+        "exarch-schedules `add [trigger: `after '1s', label: 'nightly']",
+    );
     assert!(
         result.contains("missing a field named 'prompt'"),
-        "the diagnostic must name the missing field, got: {result}"
+        "{result}"
     );
-    assert!(
-        session.agent.schedules.list().is_empty(),
-        "a missing spec field must never register a schedule"
-    );
+    assert!(schedules(&session).list().is_empty());
 }
 
-/// The same closed row in the other direction: it admits exactly
-/// trigger/label/prompt.
 #[test]
 fn unknown_extra_spec_field_errors_statically_naming_the_field() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral("exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("no field named 'extra'"),
-        "the diagnostic must name the surplus field, got: {result}"
+    let session = trunk();
+    let result = eval(
+        &session,
+        "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
     );
-    assert!(
-        session.agent.schedules.list().is_empty(),
-        "an unknown extra spec field must never register a schedule"
-    );
+    assert!(result.contains("no field named 'extra'"), "{result}");
+    assert!(schedules(&session).list().is_empty());
 }
 
-/// A trunk holding the self-wakeup grant, which `for_test` withholds.
-fn granted_trunk() -> crate::agent::Avatar {
-    crate::agent::Avatar::for_test_with(crate::agent::TestTrunk {
+fn granted_trunk() -> Agent {
+    Agent::for_test_with(crate::agent::TestTrunk {
         allow_schedule: true,
         ..crate::agent::TestTrunk::new("system")
     })
     .expect("a granted test trunk")
 }
 
+const NIGHTLY: &str =
+    "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]";
+
 #[test]
 fn schedule_add_answer_carries_the_new_row() {
-    let session = granted_trunk();
-
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("nightly"),
-        "the table answered afterwards must carry the row just armed, got: {result}"
-    );
+    let result = eval(&granted_trunk(), NIGHTLY);
+    assert!(result.contains("nightly"), "{result}");
 }
 
-/// The wait is generous because the fire really is a wall-clock second
-/// away: `parse_duration`'s smallest unit is whole seconds.
 #[test]
 fn schedule_full_stack_round_trip_answers_the_table_and_fires_into_inbox() {
     let session = granted_trunk();
-
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("EXIT: 0"),
-        "a valid exarch-schedules `add call must succeed, got: {result}"
+    let result = eval(
+        &session,
+        "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#]",
     );
-    assert!(
-        result.contains("next-s"),
-        "the table answered afterwards must carry the new row, got: {result}"
-    );
-    let live = session.agent.schedules.list();
-    assert_eq!(live.len(), 1, "the schedule must be registered");
-    assert_eq!(live[0].label, "nightly", "must take the given label");
-    assert!(
-        result.contains("nightly"),
-        "the table must carry the given label, got: {result}"
-    );
-
+    assert!(result.contains("EXIT: 0"), "{result}");
+    assert!(result.contains("next-s"), "{result}");
+    let live = schedules(&session).list();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].label, "nightly");
+    assert!(result.contains("nightly"), "{result}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match session.next_item_for_test() {
-            Some(crate::bus::Next::Item(crate::bus::Item::Wakeup(text))) => {
-                assert!(
-                    text.contains("wake"),
-                    "the wakeup must carry the prompt, got: {text}"
-                );
+        match crate::agent::testkit::inbox(&session).draw(|_| ParkMode::Quiesce) {
+            Some(Next::Item(Item::Wakeup(text))) => {
+                assert!(text.contains("wake"), "{text}");
                 break;
             }
-            Some(_other) => panic!("expected a Wakeup item"),
+            Some(other) => panic!("expected a Wakeup item, got: {other:?}"),
             None => {
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -522,639 +342,280 @@ fn schedule_full_stack_round_trip_answers_the_table_and_fires_into_inbox() {
     }
 }
 
-/// `` `removed ``/`` `no-such-label `` are retired: `` exarch-schedules `remove ``
-/// now answers the table afterwards either way, so the row's absence is
-/// the only evidence — a miss on an already-gone label answers the same
-/// way as a hit, and that is not itself proof of a mistake.
 #[test]
 fn schedule_remove_full_stack_disarms_by_label() {
     let session = granted_trunk();
-
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("EXIT: 0"),
-        "a valid exarch-schedules `add call must succeed, got: {result}"
-    );
-    assert_eq!(
-        session.agent.schedules.list().len(),
-        1,
-        "the schedule must be registered"
-    );
-
-    let result = session
-        .ral("exarch-schedules `remove 'nightly'", 5, &emit)
-        .text;
-    assert!(
-        result.contains("EXIT: 0"),
-        "a valid exarch-schedules `remove call must succeed, got: {result}"
-    );
-    assert!(
-        !result.contains("nightly"),
-        "the removed row must be gone from the table answered afterwards, got: {result}"
-    );
-    assert!(
-        session.agent.schedules.list().is_empty(),
-        "exarch-schedules `remove by label must remove the schedule"
-    );
-
-    let miss = session
-        .ral("exarch-schedules `remove 'nightly'", 5, &emit)
-        .text;
-    assert!(
-        miss.contains("EXIT: 0"),
-        "removing an already-absent label answers the same empty table, not an error, got: {miss}"
-    );
+    let result = eval(&session, NIGHTLY);
+    assert!(result.contains("EXIT: 0"), "{result}");
+    assert_eq!(schedules(&session).list().len(), 1);
+    let result = eval(&session, "exarch-schedules `remove 'nightly'");
+    assert!(result.contains("EXIT: 0"), "{result}");
+    assert!(!result.contains("nightly"), "{result}");
+    assert!(schedules(&session).list().is_empty());
+    let miss = eval(&session, "exarch-schedules `remove 'nightly'");
+    assert!(miss.contains("EXIT: 0"), "{miss}");
 }
 
-/// A single armed schedule cannot tell "the removed row is gone" apart
-/// from "the table is empty": two distinguishable labels can.
 #[test]
 fn schedule_remove_answer_omits_the_removed_row_but_keeps_the_other() {
     let session = granted_trunk();
-
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    session.ral(
-        "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
-        5,
-        &emit,
-    );
-    session.ral(
+    eval(&session, NIGHTLY);
+    eval(
+        &session,
         "exarch-schedules `add [trigger: `after '10m', label: 'daily', prompt: #'wake'#]",
-        5,
-        &emit,
     );
-
-    let result = session
-        .ral("exarch-schedules `remove 'nightly'", 5, &emit)
-        .text;
-    assert!(
-        !result.contains("nightly"),
-        "the removed row must be gone from the table answered afterwards, got: {result}"
-    );
-    assert!(
-        result.contains("daily"),
-        "the untouched row must still be in the table answered afterwards, got: {result}"
-    );
+    let result = eval(&session, "exarch-schedules `remove 'nightly'");
+    assert!(!result.contains("nightly"), "{result}");
+    assert!(result.contains("daily"), "{result}");
 }
 
-// ── `reply` ───────────────────────────────────────────────────────────
-
-/// The record must reach the parent's inbox structured, not flattened
-/// to a string. The child's script does the replying, for the
-/// undriven-parent reason
-/// `agent_full_stack_round_trip_answers_the_roster_and_settles_into_inbox`
-/// gives.
 #[test]
 fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-        "test-model",
-        crate::provider::scripted::Script::new().then(
-            crate::provider::scripted::Reply::tool_calls(vec![ral_call(
-                "c1",
-                r#"let found = ["a.rs", "b.rs"]; exarch-agents `reply [files: $found]"#,
-            )]),
-        ),
-    ));
-    session.agent.provider.swap(provider);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session.ral(r"exarch-agents `start [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("live: 1"),
-        "the summary must be the run's value and must count the child, got: {result}"
+    let session = trunk();
+    start_child(
+        &session,
+        "finder",
+        "find files",
+        r#"let found = ["a.rs", "b.rs"]; exarch-agents `reply [files: $found]"#,
     );
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match session.next_item_for_test() {
-            Some(crate::bus::Next::Item(crate::bus::Item::Agent(_))) => break,
-            Some(_other) => panic!("expected an Agent result item"),
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "child did not settle within the timeout"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-    }
-
-    let read = session.ral(r"exarch-agents `read 'finder'", 5, &emit).text;
+    let read = eval(&session, "exarch-agents `read 'finder'");
     assert!(
         read.contains("files:") && read.contains("a.rs") && read.contains("b.rs"),
-        "the structured record must reach the parent through `exarch-agents `read`, got: {read}"
+        "{read}"
     );
 }
 
-/// A block in the argument is refused statically (`data`, T0074), and the
-/// refusal is an ordinary error, not a termination: a later, well-formed
-/// `` exarch-agents `reply `` still succeeds.  The door's own `first_order`
-/// check stays as the conversion it is — `FOValue::try_from` is fallible —
-/// but no ral program reaches it with a block.
 #[test]
 fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(r"exarch-agents `reply { echo hi }", 5, &emit)
-        .text;
+    let session = trunk();
+    let result = eval(&session, "exarch-agents `reply { echo hi }");
     assert!(
         result.contains("T0074") && result.contains("data"),
-        "must be refused statically as non-data, got: {result}"
+        "{result}"
     );
-
-    let ok = session.ral(r"exarch-agents `reply 42", 5, &emit).text;
-    assert!(
-        ok.contains("EXIT: 0"),
-        "the session must still be usable after a refused reply, got: {ok}"
-    );
+    let ok = eval(&session, "exarch-agents `reply 42");
+    assert!(ok.contains("EXIT: 0"), "{ok}");
 }
 
 #[test]
 fn double_reply_in_one_exchange_is_last_wins() {
-    let mut session = crate::agent::Avatar::for_test("system").unwrap();
-    let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-        "test-model",
-        crate::provider::scripted::Script::new().then(
-            crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+    let mut session = trunk();
+    set_provider(
+        &session,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
                 "c1",
                 r#"exarch-agents `reply "first"; exarch-agents `reply "second""#,
-            )]),
+            )])),
         ),
-    ));
-    session.agent.provider.swap(provider);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let provider_handle = session.agent.current_provider();
+    );
+    let (tx, _rx) = channel();
+    let emit = Emitter::new(tx, session.id());
+    let provider = session.handle().current_provider();
     let outcome = session.deliberate(
-        &provider_handle,
+        &DurableRoot::default().child(),
+        &provider,
         Some(("go".into(), Voice::Human)),
         None,
         &emit,
     );
     match outcome {
         Ok(crate::agent::outcome::Outcome::Replied) => {
-            let v = session.agent.reply().expect("the reply is deposited");
             assert_eq!(
-                v,
-                ral_core::data::FOValue::String {
+                session.handle().reply(),
+                Some(ral_core::data::FOValue::String {
                     value: "second".into()
-                },
-                "the last reply in the exchange must win"
+                }),
             );
         }
         other => panic!("expected Replied, got {other:?}"),
     }
 }
 
-// ── `exarch-pins` ────────────────────────────────────────────────────
-
-/// The scripted-provider round-trip pattern of
-/// `reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox`,
-/// crossed with the desk's `` `exarch-pins `read `` arm: the child pins
-/// with `` `set ``, reads its own pin back in the same run, and hands the
-/// canonical card to its parent.
 #[test]
 fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-        "test-model",
-        crate::provider::scripted::Script::new().then(
-            crate::provider::scripted::Reply::tool_calls(vec![ral_call(
-                "c1",
-                r#"exarch-pins `set [key: "note", body: `card ["hi there"]]; exarch-agents `reply !{exarch-pins `read "note"}"#,
-            )]),
-        ),
-    ));
-    session.agent.provider.swap(provider);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session.ral(r"exarch-agents `start [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("live: 1"),
-        "the summary must be the run's value and must count the child, got: {result}"
+    let session = trunk();
+    let result = start_child(
+        &session,
+        "pinner",
+        "pin and read back",
+        r#"exarch-pins `set [key: "note", body: `card ["hi there"]]; exarch-agents `reply !{exarch-pins `read "note"}"#,
     );
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match session.next_item_for_test() {
-            Some(crate::bus::Next::Item(crate::bus::Item::Agent(r))) => {
-                assert!(
-                    matches!(r.outcome, crate::bus::AgentOutcome::Replied),
-                    "the child must have replied, got: {:?}",
-                    r.outcome
-                );
-                break;
-            }
-            Some(_other) => panic!("expected an Agent result item"),
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "child did not settle within the timeout"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-    }
-
-    // The pretty-printer elides past its depth cap, so the span text
-    // itself does not survive to this rendering; what proves the round
-    // trip *canonical* — a lifted `` `text `` mark, not the bare-string
-    // sugar it was authored with — does.
-    let read = session.ral(r"exarch-agents `read 'pinner'", 5, &emit).text;
+    assert!(
+        matches!(result.outcome, AgentOutcome::Replied),
+        "{:?}",
+        result.outcome
+    );
+    let read = eval(&session, "exarch-agents `read 'pinner'");
     assert!(
         read.contains("`card") && read.contains("`text [spans:"),
-        "the canonical card must reach the parent, got: {read}"
+        "{read}"
     );
 }
 
-/// A child's reply is checked where the parent reads it: a field the
-/// script projects and the reply lacks fails at the `` `read ``, naming
-/// the pointer, and not at a later step that would use it.
 #[test]
 fn a_reply_missing_a_projected_field_is_refused_at_the_read() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-        "test-model",
-        crate::provider::scripted::Script::new().then(
-            crate::provider::scripted::Reply::tool_calls(vec![ral_call(
-                "c1",
-                r"exarch-agents `reply [note: 'all fine']",
-            )]),
-        ),
-    ));
-    session.agent.provider.swap(provider);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    session.ral(r"exarch-agents `start [prompt: #'reply without a verdict'#, name: 'lazy', type: `amnemon, grant: `read-only, model: `inherit]",
-        5,
-        &emit,
+    let session = trunk();
+    start_child(
+        &session,
+        "lazy",
+        "reply without a verdict",
+        "exarch-agents `reply [note: 'all fine']",
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !matches!(
-        session.next_item_for_test(),
-        Some(crate::bus::Next::Item(crate::bus::Item::Agent(_)))
-    ) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "child did not settle within the timeout"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-
-    let result = session
-        .ral(
-            "let r = exarch-agents `read 'lazy'\necho $r[reply][verdict]",
-            5,
-            &emit,
-        )
-        .text;
+    let result = eval(
+        &session,
+        "let r = exarch-agents `read 'lazy'\necho $r[reply][verdict]",
+    );
     assert!(
         result.contains("exarch-agents: the value at `/reply` has no field `verdict`"),
-        "the read must refuse a reply missing what the script projects, got: {result}"
+        "{result}"
     );
 }
 
-/// An absent key answers `` `none ``, which crosses to the parent as the
-/// reply.
 #[test]
 fn pin_read_full_stack_absent_key_replies_none() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-        "test-model",
-        crate::provider::scripted::Script::new().then(
-            crate::provider::scripted::Reply::tool_calls(vec![ral_call(
-                "c1",
-                r#"exarch-agents `reply !{exarch-pins `read "nope"}"#,
-            )]),
-        ),
-    ));
-    session.agent.provider.swap(provider);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session.ral(r"exarch-agents `start [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("live: 1"),
-        "the summary must be the run's value and must count the child, got: {result}"
+    let session = trunk();
+    let result = start_child(
+        &session,
+        "reader",
+        "read an absent key",
+        r#"exarch-agents `reply !{exarch-pins `read "nope"}"#,
     );
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match session.next_item_for_test() {
-            Some(crate::bus::Next::Item(crate::bus::Item::Agent(r))) => {
-                assert!(
-                    matches!(r.outcome, crate::bus::AgentOutcome::Replied),
-                    "the child must have replied, got: {:?}",
-                    r.outcome
-                );
-                break;
-            }
-            Some(_other) => panic!("expected an Agent result item"),
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "child did not settle within the timeout"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-    }
-
-    let read = session.ral(r"exarch-agents `read 'reader'", 5, &emit).text;
     assert!(
-        read.contains("reply: `none"),
-        "an absent key must reply `none, got: {read}"
+        matches!(result.outcome, AgentOutcome::Replied),
+        "{:?}",
+        result.outcome
     );
+    let read = eval(&session, "exarch-agents `read 'reader'");
+    assert!(read.contains("reply: `none"), "{read}");
 }
 
-// ── the task kit as a pure prelude over the pin family ─────────────────
-
-/// Every mutating tag reads and writes the "tasks" pin through `tasks-sync`,
-/// so `` exarch-tasks `list `` and a direct
-/// `` tasks-decode !{exarch-pins `read "tasks"} `` must agree on every
-/// field, tags and notes included.
 #[test]
 fn kit_round_trip_holds_every_field_including_tags_and_notes() {
-    // Seven evals deep where this file's other tests run one or two, so a
-    // debug build sharing the box with the rest of the suite needs more
-    // room than the usual 5s: a call that times out here reads as a lost
-    // field, not as a slow machine.
     const BUDGET: u64 = 60;
-
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    session.ral(r#"exarch-tasks `add "fix the parser""#, BUDGET, &emit);
-    session.ral(r#"exarch-tasks `add "write docs""#, BUDGET, &emit);
-    session.ral(
+    let session = trunk();
+    for source in [
+        r#"exarch-tasks `add "fix the parser""#,
+        r#"exarch-tasks `add "write docs""#,
         "exarch-tasks `status [id: 1, status: `doing]",
-        BUDGET,
-        &emit,
-    );
-    session.ral(r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#, BUDGET, &emit);
-    session.ral(
+        r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#,
         r#"exarch-tasks `note [id: 1, note: "blocked on review"]"#,
-        BUDGET,
-        &emit,
-    );
-
-    let listed = session.ral("exarch-tasks `list", BUDGET, &emit).text;
-    for field in ["fix the parser", "`doing", "urgent", "blocked on review"] {
-        assert!(
-            listed.contains(field),
-            "exarch-tasks `list must show the tagged, noted task's {field}, got: {listed}"
-        );
+    ] {
+        run(&session, source, BUDGET);
     }
-    assert!(
-        listed.contains("write docs"),
-        "exarch-tasks `list must show the untouched second task, got: {listed}"
-    );
-
-    let read = session
-        .ral(
-            r#"let [decoded-task, _] = !{tasks-decode !{exarch-pins `read "tasks"}}
+    let listed = run(&session, "exarch-tasks `list", BUDGET);
+    for field in [
+        "fix the parser",
+        "`doing",
+        "urgent",
+        "blocked on review",
+        "write docs",
+    ] {
+        assert!(listed.contains(field), "missing {field}: {listed}");
+    }
+    let read = run(
+        &session,
+        r#"let [decoded-task, _] = !{tasks-decode !{exarch-pins `read "tasks"}}
            echo $decoded-task[desc]
            echo $decoded-task[status]
            echo !{intercalate "," $decoded-task[tags]}
            echo $decoded-task[notes]"#,
-            BUDGET,
-            &emit,
-        )
-        .text;
-    assert!(
-        read.contains("fix the parser"),
-        "the decoded desc must survive, got: {read}"
+        BUDGET,
     );
-    assert!(
-        read.contains("doing"),
-        "the decoded status must survive, got: {read}"
-    );
-    assert!(
-        read.contains("urgent"),
-        "the decoded tags must survive, got: {read}"
-    );
-    assert!(
-        read.contains("blocked on review"),
-        "the decoded notes must survive, got: {read}"
-    );
+    for field in ["fix the parser", "doing", "urgent", "blocked on review"] {
+        assert!(read.contains(field), "missing {field}: {read}");
+    }
 }
 
-/// `` exarch-tasks `add `` inside a function body pins to the register, which SPEC
-/// §10's block-discard rule never touches — a later, separate top-level
-/// run still sees it.
 #[test]
 fn add_task_inside_a_function_body_survives_the_block_and_the_call() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    session.ral(
+    let session = trunk();
+    eval(
+        &session,
         r#"let f = { exarch-tasks `add "inside a block" }; !{f}"#,
-        5,
-        &emit,
     );
-
-    let listed = session.ral("exarch-tasks `list", 5, &emit).text;
-    assert!(
-        listed.contains("inside a block"),
-        "a task added inside a function body must survive to the next top-level run, got: {listed}"
-    );
+    let listed = eval(&session, "exarch-tasks `list");
+    assert!(listed.contains("inside a block"), "{listed}");
 }
 
-/// A sub-agent's register is its own: a child's `` exarch-tasks `add `` must never
-/// reach the parent's "tasks" pin.
 #[test]
 fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    session.ral(r#"exarch-tasks `add "parent task""#, 5, &emit);
-
-    let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-        "test-model",
-        crate::provider::scripted::Script::new().then(
-            crate::provider::scripted::Reply::tool_calls(vec![ral_call(
-                "c1",
-                r#"exarch-tasks `add "child task"; exarch-agents `reply "done""#,
-            )]),
-        ),
-    ));
-    session.agent.provider.swap(provider);
-
-    let result = session.ral(r"exarch-agents `start [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, model: `inherit]",
-        5,
-        &emit,
-    ).text;
-    assert!(
-        result.contains("live: 1"),
-        "the summary must be the run's value and must count the child, got: {result}"
+    let session = trunk();
+    eval(&session, r#"exarch-tasks `add "parent task""#);
+    start_child(
+        &session,
+        "tasker",
+        "add a task",
+        r#"exarch-tasks `add "child task"; exarch-agents `reply "done""#,
     );
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match session.next_item_for_test() {
-            Some(crate::bus::Next::Item(crate::bus::Item::Agent(_))) => break,
-            Some(_other) => panic!("expected an Agent result item"),
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "child did not settle within the timeout"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-    }
-
-    let listed = session.ral("exarch-tasks `list", 5, &emit).text;
-    assert!(
-        listed.contains("parent task"),
-        "the parent's own task must survive, got: {listed}"
-    );
-    assert!(
-        !listed.contains("child task"),
-        "the child's pin must never reach the parent's register, got: {listed}"
-    );
+    let listed = eval(&session, "exarch-tasks `list");
+    assert!(listed.contains("parent task"), "{listed}");
+    assert!(!listed.contains("child task"), "{listed}");
 }
 
-/// Finishing every task keeps the board: only `` `clear `` empties the pin,
-/// after which `` exarch-tasks `add `` restarts id allocation at 1.
 #[test]
 fn an_all_done_list_stays_pinned_until_cleared() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    session.ral(r#"exarch-tasks `add "only task""#, 5, &emit);
-    session.ral("exarch-tasks `status [id: 1, status: `done]", 5, &emit);
-    let listed = session.ral("exarch-tasks `list", 5, &emit).text;
+    let session = trunk();
+    eval(&session, r#"exarch-tasks `add "only task""#);
+    eval(&session, "exarch-tasks `status [id: 1, status: `done]");
+    let listed = eval(&session, "exarch-tasks `list");
     for field in ["only task", "`done"] {
-        assert!(
-            listed.contains(field),
-            "an all-done list must stay listed, missing {field} in: {listed}"
-        );
+        assert!(listed.contains(field), "missing {field}: {listed}");
     }
-
-    session.ral("exarch-tasks `clear", 5, &emit);
-    let read = session.ral(r#"exarch-pins `read "tasks""#, 5, &emit).text;
-    assert!(
-        read.contains("`none") && !read.contains("`some"),
-        "`clear must empty the pin, got: {read}"
-    );
-
-    session.ral(r#"exarch-tasks `add "fresh""#, 5, &emit);
-    let listed = session.ral("exarch-tasks `list", 5, &emit).text;
+    eval(&session, "exarch-tasks `clear");
+    let read = eval(&session, r#"exarch-pins `read "tasks""#);
+    assert!(read.contains("`none") && !read.contains("`some"), "{read}");
+    eval(&session, r#"exarch-tasks `add "fresh""#);
+    let listed = eval(&session, "exarch-tasks `list");
     for field in ["id: 1", "fresh", "`open"] {
-        assert!(
-            listed.contains(field),
-            "id allocation must restart at 1 once the register is empty, missing {field} in: {listed}"
-        );
+        assert!(listed.contains(field), "missing {field}: {listed}");
     }
 }
 
-/// A card under "tasks" that `tasks-decode` does not recognise: the
-/// model scribbled on the shared key — fails the next kit call with the
-/// didactic message naming the expected shape, rather than corrupting or
-/// silently discarding it.
 #[test]
 fn a_foreign_card_under_tasks_fails_the_kit_didactically() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    session.ral(r#"exarch-pins `set [key: "tasks", body: `card [`text [spans: [[text: "not task shaped"]]]]]"#,
-        5,
-        &emit,
+    let session = trunk();
+    eval(
+        &session,
+        r#"exarch-pins `set [key: "tasks", body: `card [`text [spans: [[text: "not task shaped"]]]]]"#,
     );
-
-    let result = session.ral(r#"exarch-tasks `add "x""#, 5, &emit).text;
+    let result = eval(&session, r#"exarch-tasks `add "x""#);
     assert!(
         result.contains("tasks: the card under the 'tasks' pin is not task-shaped"),
-        "the didactic fail must name the expected shape, got: {result}"
+        "{result}"
     );
 }
 
-// ── context family door tests ────────────────────────────────────────
-
-/// A trunk holding one answered prompt, which every context test needs
-/// before it has anything addressable to name.
-fn trunk_with_an_answered_prompt() -> crate::agent::Avatar {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    crate::agent::testkit::close_exchange(&session, "first prompt", "first answer");
+fn trunk_with_an_answered_prompt() -> Agent {
+    let session = trunk();
+    close_exchange(&session, "first prompt", "first answer");
     session
 }
 
-/// `scheme_context`'s outer tag row is open, so `` exarch-context `rewind `` — the
-/// tag a model most plausibly invents — reaches the door naming the two
-/// legal ones rather than dying as a row-unification mismatch.
 #[test]
 fn unknown_context_tag_reaches_the_door_naming_every_legal_tag() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral("exarch-context `rewind [3]", 5, &emit).text;
+    let result = eval(&trunk(), "exarch-context `rewind [3]");
     for tag in ["survey", "evict"] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
 }
 
-/// `` `evict ``'s record row is closed, so `from` is static: a misspelling
-/// reaches the type error, not the door.
 #[test]
 fn misspelled_evict_field_errors_statically_naming_the_field() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session
-        .ral(
-            "exarch-context `evict [form: 1, to: 1, note: 'x']",
-            5,
-            &emit,
-        )
-        .text;
+    let result = eval(
+        &trunk(),
+        "exarch-context `evict [form: 1, to: 1, note: 'x']",
+    );
     assert!(
         !result.contains("EXIT: 0") && result.contains("from"),
-        "the diagnostic must name the field the row demands, got: {result}"
+        "{result}"
     );
 }
 
-/// A residue stands on its note, so an eviction leaving it out is a type
-/// error naming it, as is one still addressed by `turns`; `grep`'s absence is
-/// a variant, so leaving `turns` out or passing a bare list in its place is
-/// one too.
 #[test]
 fn a_missing_or_foreign_key_is_a_type_error_naming_it() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
+    let session = trunk();
     for (call, key) in [
         ("exarch-context `evict [from: 1, to: 1]", "note"),
         ("exarch-context `evict [turns: [1], note: 'x']", "from"),
@@ -1164,58 +625,33 @@ fn a_missing_or_foreign_key_is_a_type_error_naming_it() {
             "turns",
         ),
     ] {
-        let result = session.ral(call, 5, &emit).text;
+        let result = eval(&session, call);
         assert!(
             !result.contains("EXIT: 0") && result.contains(key),
-            "`{call}` must be refused naming `{key}`, got: {result}"
+            "`{call}` must name `{key}`: {result}"
         );
     }
 }
 
-/// The whole family through the real shell: an edit answers the survey
-/// the transition leaves behind, so the count of what left is there to
-/// read without a second call. The run names turns: 1 and 2 are the first
-/// prompt and its reply.
 #[test]
 fn an_eviction_answers_the_survey_it_leaves_behind() {
     let session = trunk_with_an_answered_prompt();
-    crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            "exarch-context `evict [from: 1, to: 2, note: 'the old work is done']",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("EXIT: 0"),
-        "a valid eviction must succeed, got: {result}"
+    close_exchange(&session, "second prompt", "second answer");
+    let result = eval(
+        &session,
+        "exarch-context `evict [from: 1, to: 2, note: 'the old work is done']",
     );
-    assert!(
-        result.contains("total-bytes"),
-        "the answer must be the survey afterwards, got: {result}"
-    );
-    assert!(
-        !result.contains("bytes-delta"),
-        "the edit answers the state, never a receipt for the transition, got: {result}"
-    );
+    assert!(result.contains("EXIT: 0"), "{result}");
+    assert!(result.contains("total-bytes"), "{result}");
+    assert!(!result.contains("bytes-delta"), "{result}");
 }
 
-/// `` `read ``'s answer is a list, so a slice is `$read[0]`, naming its
-/// own `turn` and the `role` it bears, and its messages are ral
-/// records with variant parts rather than a rendered string.
 #[test]
 fn transcript_answers_turn_records_with_variant_parts() {
     let session = trunk_with_an_answered_prompt();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            r#"let material = exarch-transcript `read [turns: [1, 2]]
+    let result = eval(
+        &session,
+        r#"let material = exarch-transcript `read [turns: [1, 2]]
            echo !{length $material}
            echo $material[0][turn] $material[0][role]
            let msgs = $material[0][messages]
@@ -1238,96 +674,51 @@ fn transcript_answers_turn_records_with_variant_parts() {
            let reply = $material[1][messages]
            say-role $reply[0][role]
            say-part $reply[0][parts][0]"#,
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("\n2\n"),
-        "two named turns, one record each, got: {result}"
     );
-    assert!(
-        result.contains("1 user"),
-        "the first record names its own turn and its role, got: {result}"
-    );
+    assert!(result.contains("\n2\n"), "{result}");
+    assert!(result.contains("1 user"), "{result}");
     assert!(
         result.contains("role=user") && result.contains("text=first prompt"),
-        "the user turn must be a `text part of a `user message, got: {result}"
+        "{result}"
     );
     assert!(
         result.contains("role=assistant") && result.contains("text=first answer"),
-        "the assistant turn must be a `text part of an `assistant message, got: {result}"
+        "{result}"
     );
 }
 
-/// The door speaks turn ids, so an address built with `range` and one
-/// written out read the same turns, each record naming the role it bears
-/// — a set that spans a prompt boundary answers one record per turn.
 #[test]
 fn transcript_read_addresses_turns_wherever_they_lie() {
     let session = trunk_with_an_answered_prompt();
-    crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            r"let spanning = exarch-transcript `read [turns: [2, 3]]
+    close_exchange(&session, "second prompt", "second answer");
+    let result = eval(
+        &session,
+        r"let spanning = exarch-transcript `read [turns: [2, 3]]
            echo !{length $spanning}
            echo $spanning[0][turn] $spanning[0][role] !{length $spanning[0][messages]}
            echo $spanning[1][turn] $spanning[1][role]
            let built = exarch-transcript `read [turns: !{range 3 5}]
            echo !{length $built} $built[1][turn]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("\n2\n"),
-        "two named turns answer one record each, got: {result}"
     );
-    assert!(
-        result.contains("2 assistant 1"),
-        "turn 2 is an assistant turn holding one message, got: {result}"
-    );
-    assert!(
-        result.contains("3 user"),
-        "turn 3 is the prompt after it, got: {result}"
-    );
-    assert!(
-        result.contains("2 4"),
-        "`range 3 5` is turns 3 and 4, the second of them turn 4, got: {result}"
-    );
+    for text in ["\n2\n", "2 assistant 1", "3 user", "2 4"] {
+        assert!(result.contains(text), "missing {text:?}: {result}");
+    }
 }
 
-/// `scheme_transcript`'s outer tag row is open, so `` exarch-transcript `search ``
-/// — the tag a model most plausibly invents — reaches the door naming the
-/// three legal ones.
 #[test]
 fn unknown_transcript_tag_reaches_the_door_naming_every_legal_tag() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral("exarch-transcript `search 'x'", 5, &emit).text;
+    let result = eval(&trunk(), "exarch-transcript `search 'x'");
     for tag in ["index", "read", "grep"] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
 }
 
-/// The answer type is free, so each tag's own shape has to type-check
-/// against the use the program makes of it: an index row carries its span
-/// and a `location` variant, and a grep answer projects `hits` and `total` as a
-/// record, each hit naming the item it lies in. `turns` is `` `all `` or
-/// `` `only ``.
 #[test]
 fn index_and_grep_answer_their_own_shapes() {
     let session = trunk_with_an_answered_prompt();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            r"let listed = exarch-transcript `index
+    let result = eval(
+        &session,
+        r"let listed = exarch-transcript `index
            echo $listed[0][from] $listed[0][to] $listed[0][role] $listed[0][kind]
            case $listed[0][location] [
              `resident: { |_| echo location=resident },
@@ -1341,34 +732,16 @@ fn index_and_grep_answer_their_own_shapes() {
            echo $narrowed[total]
            let missed = exarch-transcript `grep [pattern: 'nothing here', turns: `only [1, 2]]
            echo $missed[total]",
-            5,
-            &emit,
-        )
-        .text;
+    );
     assert!(
         result.contains("1 1 user own") && result.contains("location=resident"),
-        "the first turn is listed and still in the context, got: {result}"
+        "{result}"
     );
-    assert!(
-        result.contains("2 2"),
-        "both of its turns match, and `total` counts them all, got: {result}"
-    );
-    assert!(
-        result.contains("hits 1 2 own"),
-        "the hits name the items they lie in, got: {result}"
-    );
-    assert!(
-        result.contains("\n1\n"),
-        "an address narrows the search to the assistant turn alone, got: {result}"
-    );
-    assert!(
-        result.contains("\n0\n"),
-        "a pattern that matches nothing answers no hits, got: {result}"
-    );
+    for text in ["2 2", "hits 1 2 own", "\n1\n", "\n0\n"] {
+        assert!(result.contains(text), "missing {text:?}: {result}");
+    }
 }
 
-/// A run whose host lends no fork door refuses a spawn in its own words,
-/// before any enquiry crosses.
 #[test]
 fn a_run_with_no_fork_door_refuses_in_its_own_words() {
     use ral_core::protocol::Run;

@@ -104,7 +104,7 @@ tokio = { version = "1", features = ["test-util", "net", "io-util", "sync"] }
 ctor = "1"
 tempfile = "3.27"
 # cargo's idiom for "this feature is on whenever my own tests build": the test
-# doubles (`Scratch::for_test`, `Avatar::for_test`, ...)
+# doubles (`Scratch::for_test`, `Agent::for_test`, ...)
 # are test-only, and the integration tests are targets of this package, so
 # they cannot select it through a dependency line of their own.
 exarch = { path = ".", features = ["test-util"] }

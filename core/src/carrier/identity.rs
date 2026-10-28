@@ -10,6 +10,7 @@ use super::{
 };
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
+use crate::process::Scope;
 use crate::protocol::channel::WriteError;
 use crate::protocol::probe::Probe;
 use crate::protocol::{Attach, DispatchId, Event, Run};
@@ -141,11 +142,11 @@ impl Transport for IdentityTransport {
         &self.ends
     }
 
-    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>) {
+    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>, within: Option<&Scope>) {
         if self.severed().is_some() {
             return;
         }
-        let scope = self.scopes.open(id);
+        let scope = self.scopes.open(id, within);
         let events = self.event_tx.clone();
         let rails = Rails {
             outlet: Arc::new(move |id, event| {

@@ -1,11 +1,12 @@
 use super::super::*;
 use crate::agent::desk::{ExarchDesk, HostServices, RunHost};
 use crate::agent::fleet::Fleet;
-use crate::bus::{Emitter, Inbox};
+use crate::bus::{Emitter, Inbox, ParkMode};
 use crate::record::{AgentId, AgentLog};
 use crate::shell_eval::surface::SurfaceApplier;
 use crate::test_helper::engine_over_socketpair;
 use ral_core::carrier::{Host, WireTransport};
+use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{EnquiryError, Report};
 use std::os::unix::net::UnixStream;
@@ -33,26 +34,30 @@ fn test_trunk(fleet: &Arc<Fleet>) -> crate::agent::testkit::TestAgent {
     crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
 }
 
-fn wire_seat(liveness: Liveness) -> (Seat, std::process::Child) {
+fn wire_engine(liveness: Liveness) -> (Engine, std::process::Child) {
     let (transport, child) = engine_over_socketpair(liveness);
     let (spec, root) = crate::boot::test_attach();
     (
-        Seat::wire(transport, ral_core::protocol::Attach::root(spec, root))
+        Engine::wire(transport, ral_core::protocol::Attach::root(spec, root))
             .expect("a freshly spawned engine attaches"),
         child,
     )
 }
 
-/// The wire seat's own shape as `Avatar::host_services` builds it: a fresh
-/// fleet and its one trunk, no scratch.
-fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> HostServices {
+fn wire_host_services(
+    emit: &Emitter,
+    parent: &crate::agent::testkit::TestAgent,
+    fleet: &Arc<Fleet>,
+) -> HostServices {
     HostServices {
-        fleet: Fleet::for_test(),
-        kind: SeatKind::Wire {
+        fleet: fleet.clone(),
+        kind: EngineKind::Wire {
             engine: crate::boot::test_attach().0,
         },
-        stamp: parent.mailbox.stamp(),
-        agent: parent.clone(),
+        mailbox: parent.inbox.mailbox(),
+        handle: (**parent).clone(),
+        schedules: crate::schedule::ScheduleRegistry::default(),
+        pins: crate::shell_eval::PinDigests::default(),
         emit: emit.clone(),
         reply: crate::agent::ReplyCell::default(),
         log: crate::agent::LogCell::new(test_log()),
@@ -77,17 +82,18 @@ impl Host for SurfaceCollector {
 }
 
 #[test]
-fn wire_seat_run_round_trips_and_surfaces_a_value() {
-    let (seat, mut child) = wire_seat(Liveness::default());
+fn wire_engine_run_round_trips_and_surfaces_a_value() {
+    let (engine, mut child) = wire_engine(Liveness::default());
 
     let host = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
     let report = ral_core::carrier::dispatch_to_report(
-        seat.transport(),
+        engine.transport(),
         ral_core::protocol::Run::captured(
             "exarch-surface `ping",
             ral_core::source::SourceOrigin::named("<test>"),
         ),
         host.clone() as Arc<dyn Host>,
+        None,
     )
     .expect("the engine must answer the dispatch with a Report");
 
@@ -116,28 +122,29 @@ fn wire_seat_run_round_trips_and_surfaces_a_value() {
     let _ = child.wait();
 }
 
-/// The binding is production's exactly: `Avatar::ral` hands its
-/// desk straight to `shell_eval::run_shell`'s closure, not to the seat.
+/// The binding is production's exactly: `Agent::ral` hands its
+/// desk straight to `shell_eval::run_shell`'s closure, not to the engine.
 #[test]
-fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
-    let (seat, mut child) = wire_seat(Liveness::default());
+fn wire_engine_enquiry_is_answered_through_the_drain_loop() {
+    let (engine, mut child) = wire_engine(Liveness::default());
     let (emit, _rx) = crate::bus::dummy_emitter();
     let fleet = Fleet::for_test();
     let trunk = test_trunk(&fleet);
     let host: Arc<dyn Host> = Arc::new(RunHost {
         desk: ExarchDesk {
-            services: wire_host_services(&emit, &trunk),
+            services: wire_host_services(&emit, &trunk, &fleet),
         },
         apply: SurfaceApplier::new(crate::record::Emitter::none()),
     });
 
     let report = ral_core::carrier::dispatch_to_report(
-        seat.transport(),
+        engine.transport(),
         ral_core::protocol::Run::captured(
             "exarch-agents `list",
             ral_core::source::SourceOrigin::named("<test>"),
         ),
         host,
+        None,
     )
     .expect("the engine must answer the dispatch with a Report");
 
@@ -157,37 +164,38 @@ fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
 
 /// A `spawn` worker settles after its spawning dispatch has
 /// already reported, so its batch has no dispatch to ride: it crosses on
-/// `Frame::Session` and reaches the `InboxDeferred` this seat installs,
+/// `Frame::Session` and reaches the `InboxDeferred` this engine installs,
 /// landing in `inbox` as a `Post::Surface`. Polled with no dispatch in
 /// flight, the shape a real front-end sees between tool calls.
 #[test]
-fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
-    let (seat, mut child) = wire_seat(Liveness::default());
-    let inbox = Inbox::new();
+fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
+    let (engine, mut child) = wire_engine(Liveness::default());
+    let inbox = Inbox::new(DurableRoot::default().child());
     let (tx, _rx) = crate::bus::channel();
     let fleet = Fleet::for_test();
     let trunk = test_trunk(&fleet);
-    let root_id = trunk.id;
+    let root_id = trunk.id();
     let emit = Emitter::new(tx, root_id);
 
-    seat.install_deferred(crate::shell_eval::deferred_sink(
+    engine.install_deferred(crate::shell_eval::deferred_sink(
         &emit,
-        inbox.mailbox().stamp(),
+        inbox.life_mailbox(),
     ));
     let host: Arc<dyn Host> = Arc::new(RunHost {
         desk: ExarchDesk {
-            services: wire_host_services(&emit, &trunk),
+            services: wire_host_services(&emit, &trunk, &fleet),
         },
         apply: SurfaceApplier::new(crate::record::Emitter::none()),
     });
 
     let report = ral_core::carrier::dispatch_to_report(
-        seat.transport(),
+        engine.transport(),
         ral_core::protocol::Run::captured(
             "let h = spawn { /bin/sleep 1 }",
             ral_core::source::SourceOrigin::named("<test>"),
         ),
         host,
+        None,
     )
     .expect("the engine must answer the dispatch with a Report");
     assert!(
@@ -205,7 +213,7 @@ fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     // and its batch must still reach `inbox` through the installed sink.
     let deadline = Instant::now() + Duration::from_secs(10);
     let item = loop {
-        if let Some(item) = inbox.next_item() {
+        if let Some(item) = inbox.draw(|_| ParkMode::Quiesce) {
             break item;
         }
         assert!(
@@ -236,35 +244,60 @@ fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     let _ = child.wait();
 }
 
-/// `reach().interrupt()` is the per-tab interrupt path.
-/// Generous timing throughout: the dev fleet includes a jittery VM.
 #[test]
-fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
+fn cancelled_within_settles_an_in_flight_wire_run_promptly() {
     const WAIT: Duration = Duration::from_secs(20);
-    let (seat, mut child) = wire_seat(Liveness::default());
-    let reach = seat.reach();
+    let (engine, mut child) = wire_engine(Liveness::default());
+    let within = DurableRoot::default().child();
+    let host = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
 
     let settled = std::thread::scope(|s| {
         let dispatch = s.spawn(|| {
             ral_core::carrier::dispatch_to_report(
-                seat.transport(),
+                engine.transport(),
                 ral_core::protocol::Run::captured(
-                    "/bin/sleep 30",
+                    "exarch-surface `running\n/bin/sleep 30",
                     ral_core::source::SourceOrigin::named("<test>"),
                 ),
-                Arc::new(()) as Arc<dyn Host>,
+                host.clone(),
+                Some(&within),
             )
         });
-        // Interrupt only once the engine is genuinely inside the sleep.
-        std::thread::sleep(Duration::from_secs(1));
+        let deadline = Instant::now() + WAIT;
+        let running = ral_core::data::FOValue::Variant {
+            label: "running".into(),
+            payload: None,
+        };
+        while !host.0.lock().unwrap().contains(&running) {
+            assert!(Instant::now() < deadline, "the wire dispatch never started");
+            assert!(
+                !dispatch.is_finished(),
+                "the run settled before its start marker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!dispatch.is_finished(), "the run must still be in flight");
         let started = Instant::now();
-        reach.interrupt();
+        within.cancel(CancelCause::Cancelled);
         let report = dispatch.join().expect("dispatch thread");
         (report, started.elapsed())
     });
     let (report, elapsed) = settled;
 
     assert!(report.is_ok(), "the engine must still answer with a Report");
+    assert!(
+        matches!(
+            report,
+            Ok(Report::Ran {
+                ending: ral_core::protocol::Ending::Stopped {
+                    cause: CancelCause::Cancelled,
+                    ..
+                },
+                ..
+            })
+        ),
+        "the in-flight dispatch must report cancellation: {report:?}"
+    );
     assert!(
         elapsed < WAIT,
         "cancel must settle the run well inside {WAIT:?} rather than run `/bin/sleep 30` to \
@@ -277,7 +310,7 @@ fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
 
 #[test]
 fn a_wire_root_refuses_resolved_grants_at_founding() {
-    use crate::agent::{Avatar, RootConfig, RootSeat, Trunk};
+    use crate::agent::{Agent, RootConfig, RootEngine, Trunk};
     use crate::provider::{Bureau, Provider, Toolset};
     use ral_core::authority::policy::{Capabilities, Net};
 
@@ -288,7 +321,7 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
         ..Capabilities::default()
     })]);
     let run_dir = crate::agent::testkit::tmp("wire-root-grants");
-    let result = Avatar::root(
+    let result = Agent::root(
         RootConfig {
             system: "system".into(),
             run_dir: (*run_dir).clone(),
@@ -303,7 +336,7 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
             bureau: Arc::new(Bureau::Scripted),
             roles: crate::provider::roles::Roles::default(),
         },
-        RootSeat::Wire {
+        RootEngine::Wire {
             transport: Box::new(transport),
             attach: ral_core::protocol::Attach::root(spec, root.with_grants(grants)),
         },
@@ -325,22 +358,21 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
     );
 }
 
-/// A wire seat has no recipe to reboot in place, so `/clear` answers in
+/// A wire engine has no recipe to reboot in place, so `/clear` answers in
 /// words rather than panicking. No engine child needed: nothing crosses.
 #[test]
-fn wire_seat_clear_answers_a_sentence() {
+fn wire_engine_clear_answers_a_sentence() {
     let (host, _guest) = UnixStream::pair().expect("socketpair");
     let transport = WireTransport::adopt(host, Liveness::default()).expect("adopt");
-    let mut seat = Seat::Wire {
-        target: InterruptTarget::new(transport.control().clone()),
+    let mut engine = Engine::Wire {
         transport: Box::new(transport),
         engine: crate::boot::test_attach().0,
     };
-    let why = seat.clear().expect_err("a wire seat cannot reboot");
+    let why = engine.clear().expect_err("a wire engine cannot reboot");
     assert!(why.contains("new conversation"), "{why}");
 }
 
-/// The seat a parent's seal attaches is a child of that parent: its shell
+/// The engine a parent's seal attaches is a child of that parent: its shell
 /// holds what the parent set.
 #[test]
 fn a_sealed_attach_is_a_child_of_its_parent() {
@@ -349,13 +381,14 @@ fn a_sealed_attach_is_a_child_of_its_parent() {
     let seal = ral_core::seed::seal(&parent.bequeath(ral_core::SpawnGrant::Inherit))
         .expect("a bequest seals");
     let (transport, mut child) = engine_over_socketpair(Liveness::default());
-    let seat = Seat::wire(
+    let engine = Engine::wire(
         transport,
         ral_core::protocol::Attach::child(crate::boot::test_attach().0, seal),
     )
     .expect("an engine attaches with its parent's seal");
     assert_eq!(
-        seat.read(|t| t.env_var("PARENT_MARK"))
+        engine
+            .read(|t| t.env_var("PARENT_MARK"))
             .expect("the child answers"),
         Some("1".to_string())
     );

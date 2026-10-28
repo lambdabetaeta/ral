@@ -82,7 +82,7 @@ impl Transport {
 
     pub(super) async fn prepare(
         &self,
-        cancel: &crate::cancel::Token,
+        cancel: &ral_core::process::Scope,
     ) -> Result<(), super::ProviderError> {
         use super::error::CancelSite;
         let cancelled = || super::ProviderError::Cancelled(CancelSite::BeforeRequest);
@@ -119,7 +119,7 @@ impl Transport {
 }
 
 /// The shared async runtime and credential-keyed transport cache.
-pub struct Engine {
+pub struct Pool {
     runtime: tokio::runtime::Runtime,
     /// Sent as the provider's prompt-cache key on every request, so this run's
     /// requests share one cache lineage instead of colliding with another
@@ -128,7 +128,7 @@ pub struct Engine {
     transports: Mutex<HashMap<TransportKey, Arc<Transport>>>,
 }
 
-impl Engine {
+impl Pool {
     /// Build the process engine and prime pricing.
     pub fn new() -> Arc<Self> {
         let runtime = make_runtime();
@@ -365,8 +365,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_does_not_wait_for_the_store_lease() {
         use super::super::error::CancelSite;
-        use crate::cancel;
-        use ral_core::process::CancelCause;
+        use ral_core::process::{CancelCause, DurableRoot};
         use std::time::Duration;
         let state = ral_core::own::OwnDir::for_test("cancel-prepare").unwrap();
         let store = (*state).clone();
@@ -382,7 +381,7 @@ mod tests {
         );
         let lock = state.open_write("oauth.lock").unwrap();
         lock.try_lock().unwrap();
-        let cancel = cancel::Token::new();
+        let cancel = DurableRoot::default().child();
         let preparation = transport.prepare(&cancel);
         tokio::pin!(preparation);
         assert!(futures_util::poll!(&mut preparation).is_pending());

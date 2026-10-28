@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e6941768
+generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
 generated_at_date: 2026-10-28
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
@@ -7,7 +7,7 @@ covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-brok
 # Map: synod
 
 **Synod grants one folder to an office assistant inside a hardware VM and
-accounts for its changes after each exchange.** It embeds
+accounts for its changes after each job.** It embeds
 [[map/exarch|exarch]] as a library, supplying its own persona, grant and
 window. The folder is worked in place; the account reads metadata, not file
 contents, and offers no restoration operation.
@@ -22,7 +22,7 @@ One runtime agreement connects the host, guest, engine and image tools
 - `ral-core` — the engine, wire transport, path judgments and pure egress
   policy data; it depends on `guest-abi`.
 - `exarch` — provider machinery, agents, the conversation driver, policy
-  loading and guest-seat construction; it depends on core.
+  loading and guest-engine construction; it depends on core.
 - `netgate` — host CONNECT gate, TCP/IP stack and audit ledger; it depends
   on core and `guest-abi`.
 - `vm-manager` — machine construction, lifecycle, media and broker client;
@@ -305,7 +305,9 @@ is judged; shared machinery stays with exarch and vm-manager.
   matching the guest's clock.
 - `assistant/conversation.rs::Conversation::begin` opens the grant, selects
   a machine and account, opens the network ledger and run log under
-  `RunLock`, starts `Baseline`, boots, then seats `Guest`. The ledger opens
+  `RunLock`, starts `Baseline`, boots, then starts `Guest`. Provider requests
+  share a `provider::Pool` for the conversation, separate from the guest's
+  ral engines. The ledger opens
   over `SYNOD.own(XdgKind::State)` as `netgate::LEDGER` and passes beside
   policy in `netgate::Config`. Networking must
   start successfully; the root cannot schedule itself or resume on reset,
@@ -314,36 +316,41 @@ is judged; shared machinery stays with exarch and vm-manager.
   settled outcome. The walk starts alongside boot and is joined before the
   first guest act. `Drop` stops and joins only an abandoned walk; it cannot
   turn a settled baseline into a stopped one.
-- `assistant/guest.rs::Guest::seat` consumes `Booted { machine, wires }`.
-  `RootSeat::guest` adopts control at `guest_abi::layout::{WORK, SCRATCH}`;
+- `assistant/guest.rs::Guest::start` consumes `Booted { machine, wires }`.
+  `RootEngine::guest` adopts control at `guest_abi::layout::{WORK, SCRATCH}`;
   `netgate::run` adopts net. `MachineFactory(Mutex<Box<dyn Machine>>)`
   implements exarch's `Factory` through `Machine::dial_engine`; the mutex
   supplies `Sync`. `exarch::app::SCRATCH_VAR` names the guest scratch variable.
-- `Guest` holds one `SettledConversation`, which owns its root avatar and
-  bus. `helm`, `await_message` and `exchange(sink)` forward to that driver;
-  severance reads `settled.root()`. The bus lives across exchanges, including
-  late helper edges; an exchange waits for the trunk and busy descendants
-  with their results drained
-  ([[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]).
-  A resident helper that is ready no longer holds the exchange open.
+- `Guest` holds `factory`, `settled` and `net`. Its `SettledConversation`
+  owns the root `Agent` and a bus spanning jobs; `handle`, `await_job` and
+  `run(job, sink)` forward to that driver. `severance` reads the driver's
+  `severance()` / `run_dir()`, never borrows the root.
+- A *job* opens on human text through `await_job`, then runs through fleet
+  quiescence. Replied resident helpers do not hold it open. A stopped job
+  takes up nothing new. Every job waits for ended helpers' acknowledged
+  teardown inside the output pump before returning `JobEnd`
+  ([[decisions/260806_exchange-ends-at-fleet-quiescence|job settlement]]).
+  The attending owner's membership is counted exactly once even if it ends.
 - `Conversation::settle_baseline` joins the opening walk before the message
-  loop and before publishing Ready. `exchange(sink)` retains the cached
-  baseline guard as its first operation, attends queued work, then takes a
-  closing walk even after failure. Reports are cumulative against the opening
-  baseline; a failed walk clears the report, and a later success restores it.
-- `Conversation::{helm, await_message}` expose steering and the human-only
-  wait. `lost()` records engine loss; the loop ends without another exchange.
+  loop and Ready. `run(job, sink) -> JobEnd` retains the cached baseline
+  guard: failure ends the conversation and closes the unattended job.
+  After guest attendance it takes the closing walk unless the driver failed
+  or remote teardown could not be certified. Reports are cumulative
+  against the opening baseline; a failed walk clears the report, and a later
+  success restores it.
+- `Conversation::{handle, await_job}` expose the `AgentHandle` and human-only
+  job wait. `lost()` records terminal failure; the loop ends without another job.
   Engine diagnostics are captured into `engine.log` while the machine is up.
   Capture repeats the failure so the file stands alone; capture failure is
   secondary.
 - `Guest::end` calls `SettledConversation::end_fleet`, intentionally cancelling
   every root in the shared fleet. The driver/root drops before waiting on the
-  detached `Departures` counter. Membership drops last, after seat/log and
-  fleet/identity references, so this wait retains no launch or factory.
+  detached `Departures` counter. Membership drops last, after engine/log and
+  fleet references, so this wait retains no launch or factory.
   Only then does `Guest::end` recover the uniquely owned `MachineFactory`
   machine, stop and join netgate, and shut the machine down.
   `Conversation::end` drops its baseline after guest teardown. The guest's
-  control EOF initiates shutdown from inside.
+  `Detach → Ended` certifies engine and worker teardown; EOF alone does not.
 
 ### Narration and window
 
@@ -355,9 +362,9 @@ Publication and ownership agree at one generation boundary.
   and plumbing faults remain visible. `SubagentDone` becomes `HelperDone`.
   A trunk `UserPrompt` or `Steering` with `Voice::Human` projects as
   `SynodEvent::Human { text }`; helper prompts project nothing. Transcript
-  position is uptake, not submission. Already-drawn human text refused by
-  admission is also recorded and projected exactly once; it starts no provider
-  work and is never silently lost.
+  position is uptake, not submission. A human item drawn just before
+  cancellation is appended before the exchange scope is polled; it is recorded
+  and projected once without starting a provider round.
 - `Router::busy` is a `BTreeSet<AgentId>`: birth or a pending state inserts;
   ready or death removes. `SynodEvent::Helpers { busy }` is emitted only on
   a change. `Narrator<F>` implements `Sink` using a callback, independent
@@ -372,33 +379,35 @@ Publication and ownership agree at one generation boundary.
 - `window/state.rs` owns `Accounts`, `Running`, `Owner`, `Handle`, `Close`,
   `Review` and `SignIn`. `Owner::{Open, Closing}` admits one close owner;
   its five-second grace bounds the wait for teardown. `Handle` holds an
-  `Inlet`: `Booting(Vec<String>)` buffers human messages, then `Live(Helm)`
-  steers them. Queue observation and recall work in both states; exchange Stop
-  requires a live helm and a matching active exchange.
+  `Inlet`: `Booting(Vec<String>)` buffers human messages, then `Live(AgentHandle)`
+  steers them. Queue observation and recall work in both states; Stop names
+  the live root's matching running `JobId`.
   Supersession ends the old inlet and stops its baseline, then joins outside
   the owner lock before opening the next conversation.
 - `window/conversation.rs::Emitter` publishes only while its generation owns
-  the slot. `install` transfers buffered messages to the root's weak helm
+  the slot. `install` transfers buffered messages to the root's address
   under the slot lock. Every update carries the window's attempt.
   `registered` checks that attempt for `send_message` and `recall_queued`.
-  `stop_exchange(attempt, exchange)` reserves only a matching running exchange;
-  stale or duplicate requests return no prompts and leave the queue untouched.
-  Stop and recall return withdrawn prompts oldest first.
-- `window/exchange.rs::Exchanges` assigns per-attempt monotonic `ExchangeId`s
-  and arbitrates idle/running/stopping under one mutex. A scoped `Delivery`
-  reserves Stop while `Helm::stop` runs outside the slot lock; `finish` waits
-  on its condvar until delivery ends, before completion or another exchange.
+  `stop_job(attempt, job)` is synchronous: under the slot lock it calls
+  `AgentHandle::stop`, then publishes the queue. A missing/different attempt,
+  booting inlet, stale id or duplicate Stop returns no prompts. Stop and recall
+  withdraw human text oldest first. Job identity and Stop/close arbitration
+  belong to exarch's root inbox, not a second window state machine.
 - **Queue snapshots are read and published under the same slot lock.**
   `ConversationUpdate::Queue { messages }` replaces the strip, oldest first.
-  Commands, installation, human uptake and exchange completion refresh it;
+  Commands, installation, human uptake and job completion refresh it;
   an older snapshot cannot publish after a newer one.
-- `converse` installs the helm, settles the baseline, publishes Ready, then
-  loops over `await_message` and `exchange`. `ExchangeBegan { exchange }`
-  announces each admitted exchange before attendance. A superseded worker ends quietly;
-  baseline failure or engine loss ends the current attempt.
-- `ExchangeDone { exchange, stopped, report: Option<WindowReport> }` carries
-  the account and backend Stop verdict with addressed completion. `None` means the folder could not be walked, never no changes.
-  `Emitter::exchange_done` replaces `Review` and publishes under the same
+- `converse` installs the address, settles the baseline, publishes Ready,
+  then loops over `await_job` and `run(job, sink)`. `JobBegan { job }`
+  announces before attendance; supersession drops the unattended job,
+  closing it. A superseded worker ends quietly; baseline failure or
+  engine loss ends the current attempt.
+- `wire::JobId` converts to/from exarch's `JobId`; `ConversationUpdate`
+  carries `JobBegan`, `Queue` and `JobDone` with snake-case tags.
+- `JobDone { job, stopped, report: Option<WindowReport> }` carries
+  the account and backend Stop verdict with addressed completion. `None` means
+  the folder could not be walked, never no changes.
+  `Emitter::job_done` replaces `Review` and publishes under the same
   generation lock, taking Running before Review, then refreshes the queue.
   Registration clears Review
   inside its own critical section; a superseded worker cannot replace it.
@@ -452,7 +461,7 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   `chat-document.js::onChange` registers the projector's render callback,
   removing its import back into the projector.
 - `conversation.js` filters attempts before projection. Only backend
-  `exchange_began` and `exchange_done` move exchange activity; accepted and
+  `job_began` and `job_done` move job activity; accepted and
   ready attempts admit composition even while busy. Terminal attempts cannot
   revive. Sending queues text without drawing a transcript prompt.
 - `Queue` replaces the dimmed, text-only queue strip; Edit or Up in an empty
@@ -461,14 +470,15 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   `withdrawals.js` serializes Stop and recall requests per attempt, accumulating
   overlapping withdrawals in gesture order before one restoration ahead of
   the current draft. Superseded attempts cannot restore or report into a new one.
-- Stop and Esc capture the attempt and exchange ID **at gesture time**, then
-  enqueue `stop_exchange(attempt, exchange)` with those captured values;
-  waiting behind recall never retargets Stop to a newer exchange. A pending ID suppresses
-  duplicate clicks, not completion. Only matching backend
-  `ExchangeDone { stopped: true, .. }` draws “Stopped.” after in-flight output,
-  even if completion precedes command acknowledgement. Nothing starts automatically after a stop. Ending
-  an attempt restores the last queue snapshot and clears the strip
-  ([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
+- Stop and Esc capture the attempt and job ID **at gesture time**, then
+  enqueue `stopJob(attempt, job)` through `withdrawals.js`; waiting behind
+  recall never retargets Stop. Idempotence is decided at the root inbox, not
+  by a frontend pending-Stop register. Only matching backend
+  `JobDone { stopped: true, .. }` draws “Stopped.” after in-flight output,
+  even if completion precedes command acknowledgement. Recalled text stays
+  in the composer; text sent after Stop stays queued and opens the next job.
+  Ending an attempt restores the last queue snapshot and clears the strip
+  ([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]).
 - `change-report.js::showReport` consumes the completion's report without
   another command. `null` displays the unavailable-account sentence and no
   cards; an empty report displays “Nothing has changed…”. Reset reuses a
@@ -557,7 +567,7 @@ machine boot.
   build instructions.
 - [[map/exarch/agent|exarch / agent]], [[map/exarch/frontend|exarch / frontend]]
   and [[design/engine-protocol|engine-protocol]] locate the reusable guest
-  seat, conversation bus and wire semantics.
+  engine, conversation bus and wire semantics.
 - [[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]],
   [[decisions/260730_session-disk-outlives-its-machine|session-disk-outlives-its-machine]]
   and [[decisions/260730_guest-console-outlives-stdout|guest-console-outlives-stdout]]

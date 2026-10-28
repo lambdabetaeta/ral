@@ -4,7 +4,7 @@
 
 The layers, leaves first (see [[design/exarch-architecture|exarch-architecture]] and [[map/exarch|exarch]]):
 
-- `clock`, `latch`, `cancel`, `card`, `app`, `skill`, `library`
+- `clock`, `latch`, `card`, `app`, `skill`, `library`
 - `provider`
 - `record`
 - `bus`
@@ -20,7 +20,9 @@ Each boundary says what the lower layer is spared:
 
 - `provider` knows no `record`: a provider speaks the wire and nothing of the session's durable log.
 - `record` knows no `bus`: it publishes through its `Publish` trait, never to a concrete bus.
-- `bus` knows no `agent`: the inbox's `Stamp` and `cancel::Token` suffice.
+- `bus` knows no `agent`: it owns `Inbox` / `Mailbox` and uses ral's
+  `Scope` / `ScopeNode` for provenance and cancellation. `schedule` and
+  `shell_eval` reach that inbox without depending on its agent owner.
 - `shell_eval` knows no `agent`: the desk is reached through `ral_core::carrier::Host`.
 - `prompt` and `enquiry` know no `agent`: both are read by the agent, never the converse.
 

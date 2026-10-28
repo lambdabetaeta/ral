@@ -12,7 +12,7 @@ pub(crate) mod clip;
 pub(crate) mod report;
 pub mod surface;
 
-use crate::bus::{Emitter, Stamp, Stamped};
+use crate::bus::{Emitter, Mailbox, Scoped};
 use crate::record::AgentId;
 use base64::Engine;
 use ral_core::Shell;
@@ -23,20 +23,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Admission cap on concurrently *running* workers per agent, enforced by core
-/// at the spawn.  A settled entry lingering under retention holds no
-/// seat.
+/// at the spawn. A settled entry lingering under retention holds no slot.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
 /// Birth budget on `detach` per session shell.
 ///
-/// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no seat, so a cap
+/// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no slot, so a cap
 /// counting live work cannot bound it, and it needs a bound of its own
 /// precisely because nothing later reclaims it.  Reset by `/clear`, which
 /// reboots the shell.
 pub const DETACH_BIRTH_BUDGET: u64 = 16;
 
 /// Retention bound, in ral calls, on a settled worker's unclaimed result,
-/// counted from the per-call epoch sweep in `Avatar::ral` that first
+/// counted from the per-call sweep in `Agent::ral` that first
 /// observes it settled.
 pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 
@@ -90,17 +89,9 @@ impl PinDigest {
 /// and by the boundary nudge.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// The deferred half of `surface`: the session-lived [`DeferredSink`] a
-/// `spawn` worker flushes its buffered batch to at completion.  Not a
-/// second channel — the live sink's own vocabulary, posted through the
-/// session's envelope as a [`Stamped::Surface`] to render at the next boundary.
-///
-/// A worker settling mid-`/clear` cannot decide its own staleness, since
-/// composing the batch and pushing it are two steps a `/clear` can fall
-/// between; so the sink holds a [`Stamp`] minted at construction and always
-/// posts, leaving the pop to reject a stale one at the consuming edge.
+/// Deferred worker batches are vouched by the engine incarnation, on either carrier.
 struct InboxDeferred {
-    stamp: Stamp,
+    mailbox: Mailbox,
     /// The **root** session's id: a spawn worker registers no tab of its own,
     /// so its cards must land in the root scrollback.
     root: AgentId,
@@ -108,7 +99,7 @@ struct InboxDeferred {
 
 impl DeferredSink for InboxDeferred {
     fn deliver(&self, values: Vec<FOValue>) {
-        self.stamp.post(Stamped::Surface {
+        self.mailbox.post(Scoped::Surface {
             id: self.root,
             values,
         });
@@ -118,9 +109,9 @@ impl DeferredSink for InboxDeferred {
 /// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
 /// Core clones it into each worker's run state, so a nested `spawn` inherits it
 /// and flushes at its own completion.
-pub(crate) fn deferred_sink(emit: &Emitter, stamp: Stamp) -> Arc<dyn DeferredSink> {
+pub(crate) fn deferred_sink(emit: &Emitter, mailbox: Mailbox) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
-        stamp,
+        mailbox,
         root: emit.id(),
     })
 }
@@ -140,6 +131,7 @@ pub(crate) fn run_shell(
     cmd: &str,
     timeout_secs: u64,
     host: Arc<dyn ral_core::carrier::Host>,
+    within: Option<&ral_core::process::Scope>,
 ) -> Result<ral_core::protocol::Report, ral_core::carrier::Severed> {
     // Trace-only timing.
     #[cfg(debug_assertions)]
@@ -156,7 +148,7 @@ pub(crate) fn run_shell(
         ..Run::captured(cmd, SourceOrigin::named(source))
     };
 
-    let report = ral_core::carrier::dispatch_to_report(transport, run, host);
+    let report = ral_core::carrier::dispatch_to_report(transport, run, host, within);
     ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
     report
 }

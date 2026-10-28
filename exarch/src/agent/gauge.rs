@@ -6,7 +6,7 @@
 
 pub(crate) mod ration;
 
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::latch::Latch;
 use crate::provider::{Provider, Served, Usage};
 use crate::record::{Forensic, Span};
@@ -138,7 +138,7 @@ impl Gauges {
 const DISK_WALK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Fallback eviction trigger, in serialised model-view bytes, for
-/// [`Avatar::must_force_evict`] — used only when the model's context window is unknown
+/// [`Agent::must_force_evict`] — used only when the model's context window is unknown
 /// (no source reports it).  A known window goes
 /// through [`forced_eviction_due`] instead.
 pub(crate) const EVICT_THRESHOLD: usize = 500 * 1024;
@@ -181,7 +181,7 @@ pub(crate) fn suffix_keep_budget(history_bytes: usize) -> usize {
     history_bytes / 2
 }
 
-impl Avatar {
+impl Agent {
     /// Record a completion's usage; its input count, where reported, becomes
     /// the measure the gauges weigh.
     pub(super) fn measure(&mut self, usage: Usage, served: Served) -> io::Result<()> {
@@ -240,11 +240,11 @@ impl Avatar {
     /// # Errors
     /// The engine's severance.
     pub(super) fn scratch_bytes(&self) -> Result<Option<(String, u64)>, Severed> {
-        let Some(scratch) = self.seat.read(|t| t.env_var(crate::app::SCRATCH_VAR))? else {
+        let Some(scratch) = self.engine.read(|t| t.env_var(crate::app::SCRATCH_VAR))? else {
             return Ok(None);
         };
         let bytes = self
-            .seat
+            .engine
             .read(|t| t.path_bytes(site!(Silent::ScratchPath, Path::new(&scratch))))?;
         Ok(Some((scratch, bytes)))
     }
@@ -281,7 +281,7 @@ impl Avatar {
     /// [`pressure_due`], one reserve ahead of a forced eviction; an unknown window
     /// falls back to the byte heuristic against
     /// [`PRESSURE_THRESHOLD_FALLBACK`].  Either way the reading carries the
-    /// cut [`Avatar::planned_forced_eviction`] would make, so the reminder can name it.
+    /// cut [`Agent::planned_forced_eviction`] would make, so the reminder can name it.
     fn pressure(&self, provider: &Provider) -> Pressure {
         let (used, total, trigger, unit) = match provider.context_window() {
             Some(window) if window > 0 => {

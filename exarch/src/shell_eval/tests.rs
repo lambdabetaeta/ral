@@ -9,7 +9,7 @@
 
 use super::surface::{Decoded, Surface, decode_surface};
 use super::*;
-use crate::bus::{Emitter, Inbox, channel};
+use crate::bus::{Emitter, ParkMode, channel};
 use crate::card::Change;
 use crate::card::Row;
 use ral_core::authority::policy::Capabilities;
@@ -17,6 +17,7 @@ use ral_core::carrier::IdentityTransport;
 use ral_core::data::datum::Datum as _;
 use ral_core::fact::Read;
 use ral_core::path::shown;
+use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::WriteOutcome;
 use ral_core::shell::runtime::{
     CallSite, Done, DoneEvent, Notice, Observation, Observed, Pruned, ReapCause, ReapNotice,
@@ -52,7 +53,14 @@ fn run_shell_direct(
     recorder: &crate::record::Emitter,
 ) -> ToolResult {
     let applier = Arc::new(super::surface::SurfaceApplier::new(recorder.clone()));
-    let outcome = run_shell(transport, "turn 1", cmd, timeout_secs, applier.clone());
+    let outcome = run_shell(
+        transport,
+        "turn 1",
+        cmd,
+        timeout_secs,
+        applier.clone(),
+        Some(&DurableRoot::default().child()),
+    );
     match outcome {
         Ok(ral_core::protocol::Report::Ran {
             ending, captured, ..
@@ -70,7 +78,7 @@ fn run_shell_direct(
         Ok(ral_core::protocol::Report::Faulted { rendered, .. }) => {
             panic!("engine fault: {rendered}")
         }
-        Err(s) => panic!("an identity seat never severs: {s}"),
+        Err(s) => panic!("an identity engine never severs: {s}"),
     }
 }
 
@@ -636,63 +644,57 @@ fn decode_surface_round_trips_each_class() {
     assert!(matches!(decode_surface(&s("nope")), Decoded::Unknown));
 }
 
-/// The sink always posts, stamped with the root id and its birth
-/// epoch — even after a `/clear` advanced the inbox past it.  Staleness
-/// is the inbox's own pop that rejects it; the sink itself neither
-/// checks nor withholds.
+/// Worker batches belong to the engine incarnation, not originating work.
 #[test]
-fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
+fn inbox_deferred_survives_abandoned_work_but_not_its_owner() {
     use crate::agent::testkit::{TestAgentSpec, test_agent};
 
     let fleet = crate::agent::fleet::Fleet::for_test();
-    let inbox = Inbox::new();
-    let mut spec = TestAgentSpec::new("root");
-    spec.mailbox = inbox.mailbox();
-    let agent = test_agent(&fleet, spec).expect("a fresh trunk");
+    let agent = test_agent(&fleet, TestAgentSpec::new("root")).expect("a fresh trunk");
+    let inbox = &agent.inbox;
     let (tx, _rx) = channel();
-    let emit = Emitter::new(tx, agent.id);
-    let deferred = deferred_sink(&emit, inbox.mailbox().stamp());
+    let emit = Emitter::new(tx, agent.id());
+    let incarnation = inbox.life_child();
+    let deferred = deferred_sink(
+        &emit,
+        inbox.life_mailbox().vouched_by((*incarnation).clone()),
+    );
 
-    deferred.deliver(vec![ral_core::data::FOValue::Unit]);
-    match inbox.next_item() {
-        Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
-            assert_eq!(
-                id, agent.id,
-                "the batch is stamped with the root session id"
-            );
+    for abandoned in [false, true] {
+        if abandoned {
+            inbox.abandon(crate::bus::Queue::Keep);
         }
-        other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
+        deferred.deliver(vec![ral_core::data::FOValue::Unit]);
+        match inbox.draw(|_| ParkMode::Quiesce) {
+            Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
+                assert_eq!(id, agent.id(), "the batch names the root session");
+            }
+            other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
+        }
     }
 
-    // A `/clear` bumps this inbox past the sink's captured epoch.
-    inbox.clear();
+    agent.end();
     deferred.deliver(vec![ral_core::data::FOValue::Unit]);
-    assert!(
-        !inbox.is_empty(),
-        "the post-clear flush still posts: the sink neither checks nor withholds"
-    );
-    assert!(
-        inbox.next_item().is_none(),
-        "its stale birth epoch is refused at the pop"
-    );
+    assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
 }
 
 /// A failed worker wakes the model with how it really ended, never `exit 0`,
 /// and with the call that gets its result back.
 #[test]
 fn a_failed_spawn_wakes_the_model_with_its_status() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let inbox = session.inbox();
+    let session = crate::agent::Agent::for_test("system").unwrap();
+    let inbox = crate::agent::testkit::inbox(&session);
     let (tx, _rx) = channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
     let _ = session.ral(
+        &DurableRoot::default().child(),
         "let h = spawn \"boom\" { fail [status: 5, message: 'boom'] }",
         10,
         &emit,
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let text = loop {
-        match inbox.next_item() {
+        match inbox.draw(|_| ParkMode::Quiesce) {
             Some(crate::bus::Next::Item(item @ crate::bus::Item::Surface { .. })) => {
                 break item.text();
             }

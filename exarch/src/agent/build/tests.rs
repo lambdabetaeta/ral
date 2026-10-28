@@ -1,15 +1,16 @@
 use super::*;
 use crate::agent::testkit::*;
-use crate::bus::{Emitter, Item, Next, Post};
+use crate::bus::{AgentResult, Emitter, Item, Next, ParkMode, Scoped};
 use crate::provider::scripted::Script;
 use crate::record::{Memory, RECORD, Voice};
 use genai::chat::ChatMessage;
+use ral_core::process::DurableRoot;
 use std::fs;
 
 fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
     RootConfig {
         system: "system".into(),
-        run_dir: OwnDir::clone(run_dir),
+        run_dir: run_dir.clone(),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),
         allow_schedule: false,
@@ -23,8 +24,8 @@ fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
     }
 }
 
-fn identity_seat(tag: &str) -> RootSeat {
-    RootSeat::Identity {
+fn identity_engine(tag: &str) -> RootEngine {
+    RootEngine::Identity {
         scratch: Arc::new(Scratch::for_test(crate::app::EXARCH, tag).expect("scratch")),
         cwd: ral_core::host::cwd().expect("test process has a cwd"),
         grants: ral_core::authority::policy::GrantStack::default(),
@@ -32,318 +33,277 @@ fn identity_seat(tag: &str) -> RootSeat {
     }
 }
 
-/// A forked child inherits the parent's installed builtin surface, not
-/// just the core set a bare `HostSurface::default().shell(..)` seeds.
+fn report(worker: &TestAgent, outcome: crate::bus::AgentOutcome) {
+    worker
+        .report
+        .as_ref()
+        .unwrap()
+        .post(Scoped::Result(AgentResult {
+            id: worker.id(),
+            name: worker.0.name.clone(),
+            outcome,
+            elapsed: worker.elapsed(),
+            answers: worker.0.mailbox.answers(),
+        }));
+}
+
 #[test]
 fn fork_inherits_host_builtins() {
-    let names = |session: &Avatar| {
-        session
-            .seat
-            .read(|t| t.builtin_names())
-            .expect("an identity seat never severs")
-    };
-    let session = Avatar::for_test("system").unwrap();
-    assert!(
-        names(&session).iter().any(|n| n == "view-text"),
-        "the parent boot shell must carry the exarch host builtins"
-    );
-    let child = names(&session.fork().expect("fork child session"));
+    let names = |session: &Agent| session.engine.read(|t| t.builtin_names()).unwrap();
+    let session = Agent::for_test("system").unwrap();
+    assert!(names(&session).iter().any(|n| n == "view-text"));
+    let child = names(&session.fork().expect("fork child"));
     for name in ["view-text", "grep-files", "edit-hash", "explore-dir"] {
         assert!(
             child.iter().any(|n| n == name),
-            "the forked child must inherit the host builtin `{name}`"
+            "the child inherits `{name}`"
         );
     }
 }
 
-/// Fuel bounds depth, not fan-out: siblings cost the parent nothing, and
-/// a chain walked all the way down bottoms out at zero rather than
-/// wrapping.
 #[test]
 fn fork_fans_out_without_spending_the_parents_fuel() {
-    let parent = Avatar::for_test("system").unwrap();
-    assert_eq!(parent.agent.fuel, SPAWN_FUEL);
+    let parent = Agent::for_test("system").unwrap();
+    assert_eq!(parent.handle.0.fuel, SPAWN_FUEL);
     for _ in 0..3 {
-        let child = parent.fork().expect("fork child");
-        assert_eq!(
-            child.agent.fuel,
-            SPAWN_FUEL - 1,
-            "each child starts one below the parent, regardless of how many siblings it has"
-        );
+        let child = parent.fork().unwrap();
+        assert_eq!(child.handle.0.fuel, SPAWN_FUEL - 1);
     }
-    assert_eq!(
-        parent.agent.fuel, SPAWN_FUEL,
-        "fork never touches the parent's own fuel: fan-out is unbounded"
-    );
-
-    let mut chain = parent;
+    assert_eq!(parent.handle.0.fuel, SPAWN_FUEL);
+    let mut chain = vec![parent];
     for expected in (0..SPAWN_FUEL).rev() {
-        chain = chain.fork().expect("fork child");
-        assert_eq!(chain.agent.fuel, expected);
+        let child = chain.last().unwrap().fork().unwrap();
+        assert_eq!(child.handle.0.fuel, expected);
+        chain.push(child);
     }
-    assert_eq!(
-        chain.agent.fuel, 0,
-        "the chain must bottom out at zero, not wrap"
-    );
+    assert_eq!(chain.last().unwrap().handle.0.fuel, 0);
 }
 
-/// A fork carries its parent's search reach verbatim, in both directions
-/// — the ceiling the desk's own clamp narrows a spawn against.
 #[test]
 fn fork_inherits_its_parents_search_reach() {
-    let parent = Avatar::for_test("system").unwrap();
-    assert!(parent.fork().unwrap().agent.search);
+    let parent = Agent::for_test("system").unwrap();
+    assert!(parent.fork().unwrap().handle.0.search);
     let searchless = searchless_trunk();
-    assert!(
-        !searchless.fork().unwrap().agent.search,
-        "a searchless parent can hand out no search of its own"
-    );
+    assert!(!searchless.fork().unwrap().handle.0.search);
 }
 
-/// The provider is per-agent: a later swap on either side never disturbs
-/// the other — what `/model` on the focused agent relies on.
 #[test]
 fn fork_seeds_its_own_provider_handle() {
-    let parent = Avatar::for_test("system").unwrap();
-    parent.agent.provider.swap(scripted("p-a", Script::new()));
-    let child = parent.fork().expect("fork child");
-    assert_eq!(
-        child.agent.provider.current().model(),
-        "p-a",
-        "the child seeds its handle from the parent's current provider"
-    );
-    parent.agent.provider.swap(scripted("p-b", Script::new()));
-    assert_eq!(parent.agent.provider.current().model(), "p-b");
-    assert_eq!(
-        child.agent.provider.current().model(),
-        "p-a",
-        "a swap on the parent never disturbs an already-forked child"
-    );
+    let parent = Agent::for_test("system").unwrap();
+    set_provider(&parent, scripted("p-a", Script::new()));
+    let child = parent.fork().unwrap();
+    assert_eq!(child.handle.current_provider().model(), "p-a");
+    set_provider(&parent, scripted("p-b", Script::new()));
+    assert_eq!(parent.handle.current_provider().model(), "p-b");
+    assert_eq!(child.handle.current_provider().model(), "p-a");
 }
 
-/// A `mnemon` root imports the creator's context and withholds `reply`;
-/// like every root it runs under the launch's caps and fuel, and its record
-/// folds back through a resume.
 #[test]
 fn mnemon_root_imports_context_withholds_reply_and_resumes() {
     let parent = trunk(true);
-    parent
-        .log
-        .borrow_mut()
-        .append_user("what did we learn?".into(), None, Voice::Human)
-        .unwrap();
-    parent
-        .log
-        .borrow_mut()
-        .append_assistant(
-            genai::chat::ChatMessage::assistant("the invariant matters"),
+    {
+        let mut log = parent.log.borrow_mut();
+        log.append_user("what did we learn?".into(), None, Voice::Human)
+            .unwrap();
+        log.append_assistant(
+            ChatMessage::assistant("the invariant matters"),
             vec![],
             None,
         )
         .unwrap();
-
-    let child = crate::agent::spawn::hatch_root(&parent, Memory::Mnemon, Some("fork".into()))
-        .expect("mnemon root");
-
+    }
+    let child =
+        crate::agent::spawn::hatch_root(&parent, Memory::Mnemon, Some("fork".into())).unwrap();
     let view = serde_json::to_string(&child.rendered_messages()).unwrap();
     assert!(view.contains("what did we learn?"));
     assert!(view.contains("the invariant matters"));
-    assert!(
-        view.rfind("the invariant matters") > view.rfind("what did we learn?"),
-        "the creator's context is imported in mnemon order: {view}"
-    );
-
-    assert!(
-        !child.agent.role.returns(),
-        "a root withholds `reply` and never returns"
-    );
-    assert!(child.agent.role.parent().is_none(), "a root has no parent");
+    assert!(view.rfind("the invariant matters") > view.rfind("what did we learn?"));
+    assert!(!child.handle.0.role.returns());
+    assert!(child.handle.0.role.parent().is_none());
     assert_eq!(
-        child.seat.read(|t| t.grants()).expect("child grants"),
-        parent.seat.read(|t| t.grants()).expect("parent grants")
+        child.engine.read(|t| t.grants()).unwrap(),
+        parent.engine.read(|t| t.grants()).unwrap()
     );
-    assert_eq!(child.agent.fuel, parent.agent.fuel, "a root is depth 0");
-
+    assert_eq!(child.handle.0.fuel, parent.handle.0.fuel);
     let sessions = parent.fleet.launch.sessions_root.clone();
-    let live = AgentLog::live_roots(&sessions).expect("live roots");
+    let live = AgentLog::live_roots(&sessions).unwrap();
     let names: Vec<_> = live.iter().map(|(_, name)| name.as_str()).collect();
     assert_eq!(names, ["main", "fork"]);
-
-    let id = child.agent.id;
+    let id = child.id();
     let before = child.rendered_messages();
     drop(child);
-    let resumed =
-        AgentLog::resume(&sessions, id).expect("a mnemon root's record folds back through resume");
+    let resumed = AgentLog::resume(&sessions, id).unwrap();
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered()).unwrap(),
-        serde_json::to_vec(&before).unwrap(),
-        "the imported context survives the resume"
+        serde_json::to_vec(&before).unwrap()
     );
 }
 
-/// `/close` is durable: a closed root is no longer a live one.
 #[test]
 fn a_closed_root_is_not_resumable() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let sessions = session.fleet.launch.sessions_root.clone();
     assert_eq!(AgentLog::live_roots(&sessions).unwrap().len(), 1);
     let (emit, _rx) = crate::bus::dummy_emitter();
-    let flow = session.rewrite(&crate::bus::Rewrite::Close, &emit);
-    assert!(flow.is_break());
+    assert!(
+        session
+            .rewrite(&crate::bus::Rewrite::Close, &emit)
+            .is_break()
+    );
     assert_eq!(AgentLog::live_roots(&sessions).unwrap(), vec![]);
 }
 
-/// `/clear` cancels every registered worker, and the rebuilt shell starts
-/// empty.  A worker settling *after* the
-/// clear still flushes its batch to the inbox, stamped with its birth
-/// epoch, and the inbox's own pop is the edge that rejects it.  The
-/// workers stay deaf until `CLEAR_RELEASE` so they settle past the inbox
-/// drop; settling inside the clear would have `Inbox::clear` eat the
-/// batch instead, leaving this straggler path unexercised.
+#[test]
+fn clear_fences_the_old_incarnation_even_if_boot_fails() {
+    use ral_core::carrier::Transport as _;
+    thread_local! {
+        static REFUSE_BOOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    static INSTALLERS: [EngineInstaller; 1] = [EngineInstaller {
+        tag: crate::shell_eval::builtins::INSTALLER_TAG,
+        runtime: |spec| {
+            if REFUSE_BOOT.replace(false) {
+                Err("test boot refusal".into())
+            } else {
+                crate::boot::engine_runtime(spec)
+            }
+        },
+        root: crate::boot::engine_root,
+        narrow: crate::policy::base_layer,
+    }];
+    for fails in [false, true] {
+        let mut session = Agent::for_test_with(TestTrunk {
+            installers: &INSTALLERS,
+            ..TestTrunk::new("system")
+        })
+        .unwrap();
+        let crate::agent::engine::EngineKind::Identity(old) = session.engine.kind() else {
+            panic!("an identity root");
+        };
+        let incarnation = (*session.incarnation).clone();
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        let sink = crate::shell_eval::deferred_sink(
+            &emit,
+            session.inbox.life_mailbox().vouched_by(incarnation.clone()),
+        );
+        sink.deliver(vec![ral_core::data::FOValue::Unit]);
+        assert!(!session.inbox.is_empty());
+        REFUSE_BOOT.set(fails);
+        assert_eq!(session.clear().is_err(), fails);
+        assert!(incarnation.is_cancelled());
+        assert_ne!(incarnation.id(), session.incarnation.id());
+        assert!(!session.incarnation.is_cancelled());
+        sink.deliver(vec![ral_core::data::FOValue::Unit]);
+        assert!(session.inbox.is_empty());
+        assert_eq!(old.session_ended().unwrap(), (!fails).then_some(143));
+    }
+}
+
 #[test]
 fn clear_cancels_registered_workers_and_drops_their_late_surface() {
+    CLEAR_RELEASE.store(false, std::sync::atomic::Ordering::Release);
     let mut session =
         dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
-
-    // The deferred sink `Avatar::ral` wires captures `emit`'s mailbox, which
-    // must be this session's own inbox for the late-surface assertion
-    // below to mean anything.
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
     for _ in 0..2 {
-        let _ = session.ral(
+        session.ral(
+            &DurableRoot::default().child(),
             "spawn \"held\" { test-clear-block-until-released }",
             30,
             &emit,
         );
     }
-
     let entries = workers(&session);
-    assert_eq!(entries.len(), 2, "two plain workers");
+    assert_eq!(entries.len(), 2);
     for entry in &entries {
-        assert!(
-            !entry.handle.cancel.is_cancelled(),
-            "freshly spawned, not yet touched by /clear"
-        );
+        assert!(!entry.handle.cancel.is_cancelled());
     }
-
-    session.clear().expect("clear must succeed");
-
+    session.clear().unwrap();
     for entry in &entries {
-        assert!(
-            entry.handle.cancel.is_cancelled(),
-            "/clear must cancel every registered worker ({})",
-            entry.handle.title
-        );
+        assert!(entry.handle.cancel.is_cancelled(), "{}", entry.handle.title);
     }
     assert_eq!(
         probe_count(&session, ral_core::test_access::worker_count),
-        0,
-        "the rebuilt shell's registry must start empty"
+        0
     );
-
-    // The clear has fully returned — its inbox drop is behind us — so the
-    // workers may now observe cancellation and flush.  Generous budget:
-    // the suite runs oversubscribed in a VM.
     CLEAR_RELEASE.store(true, std::sync::atomic::Ordering::Release);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     for entry in &entries {
-        loop {
-            if entry.handle.sample().has_ended() {
-                break;
-            }
+        while !entry.handle.sample().has_ended() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the cancelled worker must settle within the budget"
+                "cancelled worker did not settle"
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
     assert!(
-        !session.inbox.is_empty(),
-        "the settling worker still posts its late batch: the sink never withholds"
+        session.inbox.is_empty(),
+        "old incarnation batches are refused"
     );
     assert!(
-        session.inbox.next_item().is_none(),
-        "the late batch's birth epoch must be rejected at the inbox's own pop"
+        session.inbox.draw(|_| ParkMode::Quiesce).is_none(),
+        "a reboot's late batches must not enter the rebuilt context"
     );
 }
 
-/// The `/clear` gesture end to end for an agent child: a worker born
-/// under the old context reports after the clear, its result reaches the
-/// inbox stamped with the consumer epoch of that old context, and the
-/// inbox's own pop refuses it.
 #[test]
-fn late_child_result_after_clear_is_refused_at_the_pop() {
-    let mut session = Avatar::for_test("system").unwrap();
-    let mut spec = TestAgentSpec::new("worker");
-    spec.role = crate::agent::Role::child(&session.agent);
-    let worker = test_agent(&session.fleet, spec).expect("a fresh child of a live session");
-
-    session.clear().expect("clear must succeed");
-    worker.report(crate::bus::AgentOutcome::Stopped("late".into()));
-
+fn late_child_result_after_clear_is_refused_at_publication() {
+    let mut session = Agent::for_test("system").unwrap();
+    let worker = test_agent(
+        &session.fleet,
+        TestAgentSpec::child("worker", &session.handle(), session.inbox.mailbox()),
+    )
+    .unwrap();
+    session.clear().unwrap();
+    report(&worker, crate::bus::AgentOutcome::Stopped("late".into()));
     assert!(
-        !session.inbox.is_empty(),
-        "the late result is posted, never withheld: deliver-then-retire is structural"
+        session.inbox.is_empty(),
+        "abandoned work refuses late results"
     );
-    assert!(
-        session.inbox.next_item().is_none(),
-        "and refused at the inbox's own pop"
-    );
+    assert!(session.inbox.draw(|_| ParkMode::Quiesce).is_none());
 }
 
-/// The fence is addressed, not global: a `/clear` in one tab must leave
-/// a result another tab is still waiting on untouched.
 #[test]
 fn a_clear_in_one_tab_leaves_another_tabs_late_result_alone() {
-    let trunk = Avatar::for_test("system").unwrap();
-    let mut branch = Avatar::for_test("system").unwrap();
-    let mut spec = TestAgentSpec::new("worker");
-    spec.role = crate::agent::Role::child(&trunk.agent);
-    let worker = test_agent(&trunk.fleet, spec).expect("a fresh child of the trunk");
-
-    branch.clear().expect("clear must succeed");
-    worker.report(crate::bus::AgentOutcome::Stopped("done".into()));
-
-    assert!(
-        matches!(trunk.inbox.next_item(), Some(Next::Item(Item::Agent(_)))),
-        "the branch's /clear must not poison the trunk's delivery"
-    );
+    let trunk = Agent::for_test("system").unwrap();
+    let mut branch = Agent::for_test("system").unwrap();
+    let worker = test_agent(
+        &trunk.fleet,
+        TestAgentSpec::child("worker", &trunk.handle(), trunk.inbox.mailbox()),
+    )
+    .unwrap();
+    branch.clear().unwrap();
+    report(&worker, crate::bus::AgentOutcome::Stopped("done".into()));
+    assert!(matches!(
+        trunk.inbox.draw(|_| ParkMode::Quiesce),
+        Some(Next::Item(Item::Agent(_)))
+    ));
 }
 
-/// An agent that ends without ever being cancelled — the ordinary settle
-/// at the end of its `attend` — has no cascade edge pointed at it, so
-/// `Drop` is the only thing that reaches its workers.
 #[test]
 fn agent_drop_cancels_its_own_unclosed_workers() {
-    let avatar = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
-
+    let agent = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, avatar.agent.id);
-    let _ = avatar.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
-
-    let entries = workers(&avatar);
-    assert_eq!(entries.len(), 1, "the agent's own spawn must register");
-    assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
-
-    drop(avatar);
-
-    assert!(
-        entries[0].handle.cancel.is_cancelled(),
-        "dropping the agent (settle or cancel: however its life ended) \
-         must cancel its own still-running workers"
+    let emit = Emitter::new(tx, agent.id());
+    agent.ral(
+        &DurableRoot::default().child(),
+        "spawn \"blocker\" { test-clear-block-forever }",
+        30,
+        &emit,
     );
+    let entries = workers(&agent);
+    assert_eq!(entries.len(), 1);
+    assert!(!entries[0].handle.cancel.is_cancelled());
+    drop(agent);
+    assert!(entries[0].handle.cancel.is_cancelled());
 }
 
-/// A self-armed wakeup re-arms on the shared reaper for as long as its
-/// guard lives, and the registry is `Arc`-shared with the reaper's
-/// closure, so it outlives a bare drop of the `Agent`: without `Drop`'s
-/// clear, a settled agent's cron fires into an inbox nobody drains.
 #[test]
 fn agent_drop_clears_its_own_armed_schedules() {
-    let agent = Avatar::for_test("system").unwrap();
-    let schedules = agent.agent.schedules.clone();
+    let agent = Agent::for_test("system").unwrap();
+    let schedules = agent.schedules.clone();
     schedules
         .schedule(
             crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
@@ -351,39 +311,93 @@ fn agent_drop_clears_its_own_armed_schedules() {
             "ping".into(),
             &agent.inbox.mailbox(),
         )
-        .expect("a one-hour `after` trigger must arm");
-    assert_eq!(schedules.list().len(), 1, "the schedule is armed");
-
+        .unwrap();
+    assert_eq!(schedules.list().len(), 1);
     drop(agent);
-
-    assert!(
-        schedules.list().is_empty(),
-        "dropping the agent must clear its own armed schedules, the same \
-         law /clear already applies explicitly"
-    );
+    assert!(schedules.list().is_empty());
 }
 
-/// `/clear` re-arms over a freshly booted shell, so the fresh boot's scope
-/// is the new baseline and the pre-clear binding is gone with the whole
-/// old `Shell`, ledger included.
 #[test]
 fn clear_reseals_baseline_and_forgets_ledger() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
-    session.ral("let pre_clear_x = 1", 5, &emit);
+    let emit = Emitter::new(tx, session.id());
+    session.ral(
+        &DurableRoot::default().child(),
+        "let pre_clear_x = 1",
+        5,
+        &emit,
+    );
+    session.clear().unwrap();
+    assert!(!scope_has(&session, "pre_clear_x"));
+}
 
-    session.clear().expect("clear must succeed");
+#[test]
+fn clear_rebinds_service_captures_to_fresh_work() {
+    let mut root = trunk(false);
+    let (emit, _rx) = crate::bus::dummy_emitter();
+    let before = root.host_services(&emit).mailbox;
+    assert!(before.is_current());
+    root.clear().unwrap();
+    assert!(!before.is_current());
+    assert!(root.host_services(&emit).mailbox.is_current());
+}
 
+#[test]
+fn clear_refuses_an_adopted_engine_before_abandoning_work() {
+    let parent = Agent::for_test("system").unwrap();
+    let mut child = started_child(&parent, "adopted", "`inherit");
+    let (emit, _rx) = crate::bus::dummy_emitter();
+    let result = child.ral(
+        &DurableRoot::default().child(),
+        r#"let keep = 1
+exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#,
+        5,
+        &emit,
+    );
+    assert!(!result.failed, "{}", result.text);
+    assert_eq!(child.pins.lock_ignore_poison().len(), 1);
+    let mailbox = child.inbox.mailbox();
+    let grandchild = test_agent(
+        &child.fleet,
+        TestAgentSpec::child("grandchild", &child.handle(), mailbox.clone()),
+    )
+    .unwrap();
+    child.seed("keep queued".into());
+    child
+        .schedules
+        .schedule(
+            crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
+            "ping".into(),
+            "ping".into(),
+            &mailbox,
+        )
+        .unwrap();
+    let before = child.rendered_messages();
+    assert!(!child.engine.rebootable());
     assert!(
-        !scope_has(&session, "pre_clear_x"),
-        "the pre-clear binding must not survive the rebuild"
+        child
+            .clear()
+            .unwrap_err()
+            .to_string()
+            .contains("new conversation")
+    );
+    assert!(mailbox.is_current());
+    assert_eq!(child.handle().queued(), ["keep queued"]);
+    assert_eq!(child.schedules.list().len(), 1);
+    assert_eq!(child.pins.lock_ignore_poison().len(), 1);
+    assert!(grandchild.is_live());
+    assert!(child.handle().has_busy_children());
+    assert!(scope_has(&child, "keep"));
+    assert_eq!(
+        serde_json::to_vec(&child.rendered_messages()).unwrap(),
+        serde_json::to_vec(&before).unwrap()
     );
 }
 
 #[test]
 fn rewind_validates_the_anchor_and_sheds_nudges() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     {
         let mut log = session.log.borrow_mut();
         for (prompt, answer) in [
@@ -397,78 +411,62 @@ fn rewind_validates_the_anchor_and_sheds_nudges() {
         }
     }
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
-
+    let emit = Emitter::new(tx, session.id());
     assert_eq!(
         session.rewind(9, &emit).unwrap_err(),
         "turn 9 is not recorded: the latest is 6"
     );
-
-    session.inbox.push(Post::Nudge {
-        prompt: 5,
-        text: "stale continuation".into(),
-    });
-    session
-        .rewind(3, &emit)
-        .expect("an anchor still in context is legal");
+    session.seed("open".into());
+    session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
+    session.inbox.open_exchange();
+    session.inbox.nudge(5, "stale continuation".into());
+    session.rewind(3, &emit).unwrap();
     assert_eq!(
         session
             .log
-            .borrow_mut()
+            .borrow()
             .context()
             .context_survey()
             .rows
             .iter()
             .map(|row| row.span.from())
             .collect::<Vec<_>>(),
-        vec![1, 2],
-        "the rewind removes the anchor and everything after it"
+        vec![1, 2]
     );
-    assert!(
-        !matches!(
-            session.inbox.next_item(),
-            Some(Next::Item(Item::Nudge { .. }))
-        ),
-        "a queued nudge for a rewound prompt must not commit"
-    );
-    let records = crate::bus::drain_records(&rx);
-    assert!(
-        records.iter().any(|record| matches!(
-            record,
-            crate::record::Record::Protocol(crate::record::Protocol::Rewound { anchor: 3 })
-        )),
-        "rewind must be durable on the trace"
-    );
+    assert!(!matches!(
+        session.inbox.draw(|_| ParkMode::Quiesce),
+        Some(Next::Item(Item::Nudge { .. }))
+    ));
+    assert!(crate::bus::drain_records(&rx).iter().any(|record| matches!(
+        record,
+        crate::record::Record::Protocol(crate::record::Protocol::Rewound { anchor: 3 })
+    )));
 }
 
-/// A fork is armed over the whole scope it snapshotted, sealing parent
-/// scratch included as its baseline: a name
-/// the parent leased is never a lease candidate in the child, however
-/// many idle calls it runs.
 #[test]
 fn fork_child_inherited_scratch_is_baseline() {
-    let session = Avatar::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
-    session.ral("let parent_scratch = 1", 5, &emit);
-
+    let emit = Emitter::new(tx, session.id());
+    session.ral(
+        &DurableRoot::default().child(),
+        "let parent_scratch = 1",
+        5,
+        &emit,
+    );
     let child = started_child(&session, "child", "`inherit");
-    assert!(
-        scope_has(&child, "parent_scratch"),
-        "a fork snapshots the parent's whole scope"
-    );
-
-    // Against the production bound the fork was armed with.
-    let (child_tx, _child_rx) = crate::bus::channel();
-    let child_emit = Emitter::new(child_tx, child.agent.id);
+    assert!(scope_has(&child, "parent_scratch"));
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, child.id());
     for _ in 0..(crate::shell_eval::BINDING_IDLE_CALLS + 5) {
-        child.ral("let _child_spin = 0", 5, &child_emit);
+        child.ral(
+            &DurableRoot::default().child(),
+            "let _child_spin = 0",
+            5,
+            &emit,
+        );
     }
-    assert!(
-        scope_has(&child, "parent_scratch"),
-        "inherited parent scratch is baseline in the child: never pruned, however \
-         many boundary prunes the idle calls above ran"
-    );
+    assert!(scope_has(&child, "parent_scratch"));
 }
 
 #[test]
@@ -491,18 +489,16 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
         .unwrap();
     let before = log.context().rendered();
     drop(log);
-
     let [(agent, resumed)] = <[_; 1]>::try_from(
-        Avatar::resume(
+        Agent::resume(
             root_config(&dir, 0),
-            identity_seat("resume-agent"),
+            identity_engine("resume-agent"),
             &scripted("new-model", Script::new()),
         )
-        .expect("resumed agent"),
+        .unwrap(),
     )
     .unwrap_or_else(|roots| panic!("one open session, got {}", roots.len()));
-
-    assert_eq!(resumed.turn, 2, "the summary is taken before the note");
+    assert_eq!(resumed.turn, 2);
     assert!(agent.is_ready());
     let messages = agent.rendered_messages();
     assert_eq!(
@@ -510,9 +506,9 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
         serde_json::to_vec(&before).unwrap()
     );
     assert_eq!(messages.len(), before.len() + 1);
-    let note = messages.last().expect("fresh-shell note");
+    let note = messages.last().unwrap();
     assert_eq!(note.role, genai::chat::ChatRole::User);
-    let text = note.content.first_text().expect("note text");
+    let text = note.content.first_text().unwrap();
     for loss in [
         "shell is fresh",
         "bindings",
@@ -532,43 +528,36 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
     )));
 }
 
-/// `/clear` appends to the one `record.jsonl`: a recorder handed out before
-/// it, and the bus coupled before it, both keep publishing afterwards.
 #[test]
 fn clear_appends_to_the_one_record_and_shared_emitters_keep_publishing() {
     use crate::record::{Forensic, Protocol, Record};
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let record = session.log_dir().path().join(RECORD);
     let (tx, rx) = crate::bus::channel();
-    session.couple(&Emitter::new(tx, session.agent.id));
+    session.couple(&Emitter::new(tx, session.id()));
     let recorder = session.recorder();
-
-    session.clear().expect("clear");
-
+    session.clear().unwrap();
     assert!(!record.with_file_name("record.jsonl.0").exists());
     let _recorded = recorder
         .emit(Forensic::SystemNote {
             text: "after the clear".into(),
         })
-        .expect("the pre-clear recorder still appends");
-
+        .unwrap();
     let after = |r: &Record| matches!(r, Record::Forensic(Forensic::SystemNote { text }) if text == "after the clear");
     let records = crate::record::read_records(&record).unwrap();
     assert!(
         records
             .iter()
-            .any(|r| matches!(r, Record::Protocol(Protocol::Cleared))),
-        "the clear is a record of the same file"
+            .any(|r| matches!(r, Record::Protocol(Protocol::Cleared)))
     );
-    assert!(records.iter().any(after), "and the file goes on after it");
+    assert!(records.iter().any(after));
     let published = crate::bus::drain_records(&rx);
     assert!(
         published
             .iter()
-            .any(|r| matches!(r, Record::Protocol(Protocol::Cleared))),
-        "the bus coupled before the clear sees it"
+            .any(|r| matches!(r, Record::Protocol(Protocol::Cleared)))
     );
-    assert!(published.iter().any(after), "and what follows");
+    assert!(published.iter().any(after));
 }
 
 #[test]
@@ -589,16 +578,15 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
     fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
     fs::write(&sentinel, b"keep").unwrap();
     drop(log);
-
-    let (root, _) = Avatar::resume(
+    let (root, _) = Agent::resume(
         root_config(&dir, 1),
-        identity_seat("resume-id-seed"),
+        identity_engine("resume-id-seed"),
         &scripted("new-model", Script::new()),
     )
-    .expect("resumed root")
+    .unwrap()
     .remove(0);
-    let child = root.fork().expect("post-resume child");
-    assert!(child.agent.id.get() >= 2);
+    let child = root.fork().unwrap();
+    assert!(child.id().get() >= 2);
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }
 
@@ -606,43 +594,37 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
 fn a_root_runs_under_its_launch_grants() {
     use ral_core::authority::policy::{Capabilities, FsPolicy};
     use ral_core::path::FrozenPath;
-
-    let cwd = ral_core::host::cwd().expect("test process has a cwd");
+    let cwd = ral_core::host::cwd().unwrap();
     let grants = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
         shell: Some(std::collections::BTreeSet::new()),
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::freeze(cwd.as_path()).expect("cwd freezes")],
+            read_prefixes: vec![FrozenPath::freeze(cwd.as_path()).unwrap()],
             ..FsPolicy::default()
         }),
         ..Capabilities::default()
     })]);
-    let mut session = Avatar::for_test_with(TestTrunk {
+    let mut session = Agent::for_test_with(TestTrunk {
         grants,
         ..TestTrunk::new("system")
     })
-    .expect("a restricted root boots");
-    let tmp = tempfile::tempdir().expect("probe directory");
-    fs::write(tmp.path().join("file"), "hidden").expect("probe file");
-
-    let check = |session: &Avatar| {
-        assert!(
-            session
-                .seat
-                .read(|t| t.path_entries(tmp.path()))
-                .expect("path entries")
-                .is_empty(),
-            "a probe before any call must obey the launch grants"
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("file"), "hidden").unwrap();
+    let check = |session: &Agent| {
+        assert_eq!(
+            session.engine.read(|t| t.path_entries(tmp.path())).unwrap(),
+            [] as [ral_core::protocol::probe::PathEntry; 0]
         );
         let (emit, _rx) = crate::bus::dummy_emitter();
         for _ in 0..2 {
-            let result = session.ral("cd .", 5, &emit);
+            let result = session.ral(&DurableRoot::default().child(), "cd .", 5, &emit);
             assert!(
                 result.failed && result.text.contains("denied"),
                 "{}",
                 result.text
             );
         }
-        let result = session.ral("$[1 + 1]", 5, &emit);
+        let result = session.ral(&DurableRoot::default().child(), "$[1 + 1]", 5, &emit);
         assert!(
             !result.failed && result.text.contains("VALUE:\n2"),
             "{}",
@@ -650,10 +632,10 @@ fn a_root_runs_under_its_launch_grants() {
         );
     };
     check(&session);
-    session.seat.clear().expect("the root reboots");
+    session.engine.clear().unwrap();
     check(&session);
     let root = crate::agent::spawn::hatch_root(&session, Memory::Amnemon, Some("new-root".into()))
-        .expect("the launch seats another root");
+        .unwrap();
     check(&root);
 }
 
@@ -661,19 +643,18 @@ fn a_root_runs_under_its_launch_grants() {
 fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
     use ral_core::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
     use ral_core::path::{FrozenPath, shown};
-
-    let tmp = tempfile::tempdir().expect("program directory");
+    let tmp = tempfile::tempdir().unwrap();
     let a = tmp.path().join("a");
     let b = tmp.path().join("b");
-    fs::write(&a, "a").expect("program a");
-    fs::write(&b, "child-readable-b").expect("program b");
-    let cwd = ral_core::host::cwd().expect("test process has a cwd");
-    let here = FrozenPath::freeze(cwd.as_path()).expect("cwd freezes");
-    let a_path = FrozenPath::freeze(&a).expect("a freezes");
-    let b_path = FrozenPath::freeze(&b).expect("b freezes");
+    fs::write(&a, "a").unwrap();
+    fs::write(&b, "child-readable-b").unwrap();
+    let cwd = ral_core::host::cwd().unwrap();
+    let here = FrozenPath::freeze(cwd.as_path()).unwrap();
+    let a_path = FrozenPath::freeze(&a).unwrap();
+    let b_path = FrozenPath::freeze(&b).unwrap();
     let runtime = crate::shell_eval::builtins::host_surface()
         .runtime(ral_core::io::terminal::TerminalState::default())
-        .expect("the engine's baseline resolves");
+        .unwrap();
     let explicit_reads =
         ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
             fs: Some(FsPolicy {
@@ -687,9 +668,9 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
             !explicit_reads.admits_fs(
                 runtime.baseline(),
                 &ral_core::authority::policy::FsOp::Read,
-                &ral_core::test_helper::trace(path),
+                &ral_core::test_helper::trace(path)
             ),
-            "the fixture must be outside cwd and the engine's baseline reads: {}",
+            "{}",
             shown(path)
         );
     }
@@ -704,16 +685,15 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         }),
         ..Capabilities::default()
     })]);
-    let parent = Avatar::for_test_with(TestTrunk {
+    let parent = Agent::for_test_with(TestTrunk {
         grants: grants.clone(),
         ..TestTrunk::new("system")
     })
-    .expect("the parent boots under P");
+    .unwrap();
     assert_eq!(
-        parent.seat.read(|t| t.grants()).expect("parent grants"),
+        parent.engine.read(|t| t.grants()).unwrap(),
         grants.summary()
     );
-
     let c = format!(
         "`restrict [exec: [allow: [`absolute '{}']], fs: [read: [`cwd ., `absolute '{}']]]",
         shown(&a),
@@ -728,29 +708,26 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         }),
         ..Capabilities::default()
     }));
-    assert_eq!(
-        child.seat.read(|t| t.grants()).expect("child grants"),
-        grants.summary()
-    );
+    assert_eq!(child.engine.read(|t| t.grants()).unwrap(), grants.summary());
     let (emit, _rx) = crate::bus::dummy_emitter();
-    let result = child.ral(&format!("view-text '{}' 1 2", shown(&b)), 5, &emit);
+    let result = child.ral(
+        &DurableRoot::default().child(),
+        &format!("view-text '{}' 1 2", shown(&b)),
+        5,
+        &emit,
+    );
     assert!(
         !result.failed && result.text.contains("child-readable-b"),
         "{}",
         result.text
     );
-
     let grandchild = started_child(&child, "grandchild", "`restrict [shell: []]");
     grants.push(ral_core::test_helper::layer(Capabilities {
         shell: Some(std::collections::BTreeSet::new()),
         ..Capabilities::default()
     }));
     assert_eq!(
-        grandchild
-            .seat
-            .read(|t| t.grants())
-            .expect("grandchild grants"),
-        grants.summary(),
-        "the grandchild holds exactly [P, C, C2]"
+        grandchild.engine.read(|t| t.grants()).unwrap(),
+        grants.summary()
     );
 }

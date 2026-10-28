@@ -1,21 +1,22 @@
 //! The exarch enquiry desk: the host half of `shell.enquire(class)`.
 //!
-//! [`HostServices`] is all `&Avatar` can lend a handler without lending
-//! `&mut Avatar`/`&mut Shell`, since the reentrancy law bars a handler from
+//! [`HostServices`] captures plain values from the owner, since reentrancy bars a handler from
 //! taking the session lock. [`ExarchDesk`] answers one enquiry against that
 //! capture, paired with its [`SurfaceApplier`] in one [`RunHost`], which
 //! implements [`ral_core::carrier::Host`] — the object every dispatch
 //! rides, so a handler's chrome can never outrun the run's earlier surface
 //! output.
 
+use crate::agent::engine::EngineKind;
 use crate::agent::fleet::Fleet;
 use crate::agent::roster::listing;
-use crate::agent::seat::SeatKind;
-use crate::agent::{Agent, LogCell, ReplyCell, SharedCell};
-use crate::bus::{Emitter, Stamp};
+use crate::agent::{AgentHandle, LogCell, ReplyCell, SharedCell};
+use crate::bus::{Emitter, Mailbox};
 use crate::enquiry::{
     Agents, Context, Hits, Indexed, Material, Pins, Request, Schedules, Survey, Transcript,
 };
+use crate::schedule::ScheduleRegistry;
+use crate::shell_eval::PinDigests;
 use crate::shell_eval::surface::SurfaceApplier;
 use ral_core::carrier::Host;
 use ral_core::data::FOValue;
@@ -104,24 +105,26 @@ impl ActFragment {
     }
 }
 
-/// A call's local services, retaining its originating work generation.
+/// A call's local services, retaining its originating work scope.
 pub(crate) struct HostServices {
     /// This run's own agent: parent of what it spawns, root of the descendant
     /// check `` `message ``/`` `cancel `` enforce, and the source every
     /// immutable-config read (`fuel`, `role`, …) is taken from.
-    pub agent: Arc<Agent>,
+    pub handle: AgentHandle,
+    pub schedules: ScheduleRegistry,
+    pub pins: PinDigests,
     pub fleet: Arc<Fleet>,
     /// How this call's forks reach the desk: `` `start `` chooses its arm on
     /// this fact.
-    pub kind: SeatKind,
+    pub kind: EngineKind,
     pub emit: Emitter,
-    /// Where the `reply` handler stages its value, holding no `&mut Avatar` to
+    /// Where the `reply` handler stages its value, holding no `&mut Agent` to
     /// write it any other way.
     pub reply: ReplyCell,
     /// A `mnemon` spawn forks its inherited context off this.
     pub log: LogCell,
     /// The originating work's envelope; never refreshed at installation.
-    pub stamp: Stamp,
+    pub mailbox: Mailbox,
     /// What this call has committed so far: minted per `ral` call, and read
     /// back by [`crate::shell_eval::report::tool_result`] when a raise discards
     /// the bindings but not the acts.
@@ -165,7 +168,9 @@ impl ExarchDesk {
     /// The decoder's refusal, or the addressed handler's.
     pub(crate) fn handle(&self, req: &FOValue) -> Result<FOValue, Error> {
         match Request::decode(req).map_err(Error::new)? {
-            Request::Agents(Agents::List) => Ok(listing(&self.services.agent).encode()),
+            Request::Agents(Agents::List) => {
+                Ok(listing(&self.services.handle, &self.services.fleet).encode())
+            }
             Request::Agents(Agents::Start(start)) => self.launch(start),
             Request::Agents(Agents::Message(message)) => self.message(message),
             Request::Agents(Agents::Cancel(name)) => self.agent_cancel(&name),

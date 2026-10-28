@@ -4,7 +4,7 @@
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
 use exarch::agent::outcome::Outcome;
-use exarch::agent::{Avatar, RootConfig, RootSeat, Trunk};
+use exarch::agent::{Agent, RootConfig, RootEngine, Trunk};
 use exarch::app::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
@@ -13,6 +13,7 @@ use exarch::provider::scripted::{Reply, Script};
 use exarch::record::{self, Blocks, RECORD, Refusal, View, Voice};
 use ral_core::own::OwnDir;
 use ral_core::path::XdgKind;
+use ral_core::process::DurableRoot;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::Arc;
@@ -49,10 +50,11 @@ fn kind_contains(blocks: &Blocks, needle: &str) -> bool {
     })
 }
 
-fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
+fn drive(session: &mut Agent, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
     let outcome = session.deliberate(
+        &DurableRoot::default().child(),
         provider,
         Some((prompt.to_string(), Voice::Human)),
         None,
@@ -78,8 +80,8 @@ fn root_config(run_dir: &OwnDir) -> RootConfig {
     }
 }
 
-fn identity_seat(tag: &str) -> RootSeat {
-    RootSeat::Identity {
+fn identity_engine(tag: &str) -> RootEngine {
+    RootEngine::Identity {
         scratch: Arc::new(Scratch::for_test(EXARCH, tag).expect("scratch dir")),
         cwd: ral_core::host::cwd().expect("test process has a cwd"),
         grants: ral_core::authority::policy::GrantStack::default(),
@@ -124,9 +126,9 @@ fn scripted_run_kill_resume_and_continue() {
     let _ = child.wait();
 
     let [(mut resumed, _)] = <[_; 1]>::try_from(
-        Avatar::resume(
+        Agent::resume(
             root_config(&child_dir),
-            identity_seat("resume-parent"),
+            identity_engine("resume-parent"),
             &scripted("test-model", Script::new()),
         )
         .expect("resume child ledger"),
@@ -238,9 +240,9 @@ fn resume_child() {
         .own(XdgKind::State)
         .and_then(|app| app.dir(CHILD_RUN))
         .expect("the run dir the parent made");
-    let mut session = Avatar::root(
+    let mut session = Agent::root(
         root_config(&dir),
-        identity_seat("resume-child"),
+        identity_engine("resume-child"),
         scripted("test-model", Script::new()),
     )
     .expect("child agent");

@@ -3,11 +3,12 @@
 //! that does not parse never reaches the session; it becomes an error block.
 
 use super::{input_error, required_str};
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::bus::Emitter;
 use crate::provider::tools::{CALL_TIMEOUT_SECS, COMMAND, DESCRIPTION_MAX, RAL};
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::{BlockId, Display, Verdict};
+use ral_core::process::Scope;
 use serde_json::Value;
 
 #[cfg_attr(test, derive(Debug))]
@@ -63,7 +64,7 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
 pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 
 /// Rail header and error block for a malformed call, and the result to commit.
-fn invalid_input(id: String, reason: &str, session: &Avatar) -> SessionToolResult {
+fn invalid_input(id: String, reason: &str, session: &Agent) -> SessionToolResult {
     let call = record_call(session, INVALID_INPUT.to_string(), None);
     let msg = input_error(reason);
     record_result(session, &msg, true, call);
@@ -74,7 +75,7 @@ fn invalid_input(id: String, reason: &str, session: &Avatar) -> SessionToolResul
 /// [`BlockId`] so the paired result can address it directly — the mechanism
 /// that retires the view's tail-walk.  A failed append surfaces as an error
 /// row; the paired result is then simply not recorded, having no target.
-fn record_call(session: &Avatar, cmd: String, summary: Option<String>) -> Option<BlockId> {
+fn record_call(session: &Agent, cmd: String, summary: Option<String>) -> Option<BlockId> {
     match session.recorder().emit(Display::ToolCall {
         tool: RAL.name.to_string(),
         cmd,
@@ -90,7 +91,7 @@ fn record_call(session: &Avatar, cmd: String, summary: Option<String>) -> Option
 
 /// The paired half: what the result told, addressed at the call commit it
 /// answers.
-fn record_result(session: &Avatar, content: &str, failed: bool, call: Option<BlockId>) {
+fn record_result(session: &Agent, content: &str, failed: bool, call: Option<BlockId>) {
     let Some(call) = call else { return };
     session.recorder().emit_or_report(Display::Verdict {
         call,
@@ -103,7 +104,8 @@ fn record_result(session: &Avatar, content: &str, failed: bool, call: Option<Blo
 pub(crate) fn dispatch(
     id: String,
     input: &Value,
-    session: &Avatar,
+    session: &Agent,
+    exchange: &Scope,
     emit: &Emitter,
 ) -> SessionToolResult {
     let RalArgs {
@@ -115,7 +117,8 @@ pub(crate) fn dispatch(
         Err(reason) => return invalid_input(id, &reason, session),
     };
     let call = record_call(session, command.clone(), Some(description));
-    let crate::agent::Evaluated { text, failed } = session.ral(&command, timeout_secs, emit);
+    let crate::agent::Evaluated { text, failed } =
+        session.ral(exchange, &command, timeout_secs, emit);
     record_result(session, &text, failed, call);
     SessionToolResult { id, content: text }
 }

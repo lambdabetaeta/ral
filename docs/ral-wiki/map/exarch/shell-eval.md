@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-generated_at_date: 2026-10-27
+generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
+generated_at_date: 2026-10-28
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -9,7 +9,7 @@ covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarc
 `shell_eval.rs` runs one tool call as a ral top-level run against the
 persistent [[map/core/shell-state|`Shell`]]. **`run_shell` is a pure *request
 supplier*: it builds a transport-level `Source` `Run`, dispatches it through
-`ral_core::carrier::dispatch_to_report` against the agent's seat transport —
+`ral_core::carrier::dispatch_to_report` against the agent's engine transport —
 the in-process `IdentityTransport`, or a wire engine's `WireTransport`
 ([[map/exarch/agent|agent]]) — and returns the terminal `Report` that comes
 back, or the `Severed` when the engine is gone before one arrives** — the
@@ -20,7 +20,12 @@ transport is the canonical run vocabulary
 be entered *only* through a framed run door — the reduction primitive behind it
 is crate-private ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]) —
 so core owns all the run machinery (compile, frame install, capture, the wall),
-and `run_shell` owns only the run it builds. Formatting is `Avatar::ral`'s,
+and `run_shell` owns only the run it builds and its `within: Option<&Scope>`.
+The agent passes `Some(exchange)`: identity dispatches mint their node beneath
+that exchange; the wire event loop polls it every `POLL_SLICE`, striking only
+its own dispatch id when the cause rises. It also checks before dispatch, so
+a cancelled exchange starts no effect. Cancellation threads flip scope flags
+and never write to a transport ([[internals/cancellation|cancellation]]). Formatting is `Agent::ral`'s,
 through `report::tool_result`, which also reports whether the run failed.
 
 **The session's host-installed layers are the sandbox.** The root's attach
@@ -72,7 +77,7 @@ The request supplies:
 - **`worker_cap`** — `LIVE_WORKER_CAP` (64), the admission bound core
   enforces at the spawn door: the 65th spawn is refused (the error names
   `await`/`cancel`) while 64 workers are active (`running`, `stopping`, or reserved births); `ready`
-  entries lingering under retention hold no seat. Its sibling
+  entries lingering under retention hold no live-worker admission slot. Its sibling
   constant `SETTLED_WORKER_RETENTION` (256 ral calls, matching the binding
   lease's scratch expiry) is not on the request at all — it is armed once
   through `Shell::arm_worker_retention`, and the sweep it parameterises is
@@ -107,7 +112,7 @@ independently of idle age or baseline status.
 
 Completion is `dispatch_to_report` returning `Ok(Report)`; an `Err(Severed)`
 is folded by every attend-loop caller into
-`agent::seat::EngineLost` ([[map/exarch/agent|agent]]). A `spawn`ed
+`agent::EngineLost` ([[map/exarch/agent|agent]]). A `spawn`ed
 worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone
 of the bus [[map/exarch/frontend|`Emitter`]], so it cannot keep the tool run
@@ -117,7 +122,7 @@ on loan from the shell, self-healing on a caught worker panic as well as on the
 normal return ([[decisions/260612_exarch-panic-recovery|panic-recovery]]), while
 the run's invariant half — surface, deferred sink, desk, fork arm, cancel, the
 worker cap — threads as an immutable `&Mooring` the stack itself restores. Exarch
-needs no bracket of its own: its `RunHost` is a plain `Arc` `Avatar::ral`
+needs no bracket of its own: its `RunHost` is a plain `Arc` `Agent::ral`
 builds and passes to the dispatch, never installed as shared state, so an
 unwind drops it with the rest of that call's stack. The
 dynamic-context half of the contract lives in [[map/exarch/agent|agent]].
@@ -157,12 +162,12 @@ order, and exits 124:
    This
    is the one exception to core's own trail: the desk authors the shared
    `Observation` vocabulary from the *host* side, into a per-call fragment
-   joined at render — never into the engine's trail, because a wire seat's
+   joined at render — never into the engine's trail, because a wire engine's
    cancel can land while the engine sits parked in `enquire`, mid-unwind of a
    builtin whose act the desk already committed, and engine-side recording
    alone would then report a standing act as failed. `HostServices::commit_act`
    is the one door every acting handler funnels through — minted in
-   `Avatar::host_services`, the one place a call's whole desk capture is
+   `Agent::host_services`, the one place a call's whole desk capture is
    assembled, so the fragment's extent *is* the call's — and it builds one
    `Observed::Act` per attempt, at the arm where the outcome is known, and fans
    it out itself: the rail's `Display::HarnessCall` row *always*, off the very
@@ -195,8 +200,8 @@ order, and exits 124:
    `Observed::Worker` on the surface, ordered before the `Report`, and the
    call's `SurfaceApplier` keeps those ids; `shell_eval/report.rs`'s `render`
    joins them against the `` `workers `` probe, decoded into core's
-   `WorkerRow` by `Transport::workers` at the run boundary — legal there on a wire seat
-   exactly as on the identity seat, since the registry never crosses. A birth
+   `WorkerRow` by `Transport::workers` at the run boundary — legal there on a wire engine
+   exactly as on the identity engine, since the registry never crosses. A birth
    still present in the registry — `running`, `stopping`, or `ready` — is named
    ([[map/core/shell-state|shell-state]]); one already claimed has left the
    registry and is nobody's orphan. The sentence names each survivor as
@@ -214,8 +219,13 @@ becomes in the record. `decode_surface` is the single decoder both delivery
 regimes share: the live path — `dispatch_to_report`'s drain loop calling
 `host.surface(val)` for every `Event::Surface`, which `SurfaceApplier`
 decodes and records — and the deferred sink (`deferred_sink`, installed on
-the transport before each dispatch), whose batch is posted to the inbox when
-a worker flushes and recorded by `surface::replay` as the item arrives; both
+the transport before each dispatch), whose batch is posted through a
+`Mailbox` vouched by the engine incarnation when a worker flushes and recorded
+by `surface::replay` as the item arrives. This provenance preserves engine-owned
+batches across Stop and `reply`; `/clear` discards the queue and cancels and
+replaces the incarnation even if boot fails, fencing old workers' late batches.
+Identity workers retain their birth sink, while wire batches use the sink
+installed when they arrive. Both obey the same pop-time scope fence; both
 go through one private `decode_loudly` and one `surface::record`, with no
 guard layered over them. The
 codomain is `Surface`, the shell's own closed vocabulary, wrapped in

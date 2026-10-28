@@ -1,14 +1,13 @@
 //! The desk's wire arm: `` `start `` making an engine through a fake factory
 //! and a re-exec'd `--engine` child standing in for the guest daemon's
-//! spawn, the same vehicle the wire seat's own tests use, since a genuine
+//! spawn, the same vehicle the wire engine's own tests use, since a genuine
 //! vsock factory only means anything inside a real guest.
 
 use super::super::*;
 use super::{message_req, spec, start};
 use crate::agent::roster::summary;
 use crate::agent::testkit::TestAgent;
-use crate::bus::Inbox;
-use crate::cancel::InterruptTarget;
+use crate::bus::ParkMode;
 use crate::enquiry::ForkClaim;
 use crate::record::AgentId;
 use crate::record::AgentLog;
@@ -87,33 +86,11 @@ impl crate::agent::Factory for FakeFactory {
     }
 }
 
-/// A wire reach with a genuine `ControlSender` behind it — a disposable
-/// `--engine` child adopted and killed at once, since these fixtures need
-/// a real reach value's *shape* but never actually cancel or interrupt
-/// through it.
-fn fake_wire_reach() -> InterruptTarget {
-    let (host, guest) = UnixStream::pair().expect("socketpair standing in for the factory");
-    let mut child = spawn_engine_on(&guest);
-    drop(guest);
-    let transport = ral_core::carrier::WireTransport::adopt(
-        host,
-        ral_core::protocol::channel::Liveness::default(),
-    )
-    .expect("adopt host stream");
-    let control = ral_core::carrier::Transport::control(&transport).clone();
-    let _ = child.kill();
-    let _ = child.wait();
-    InterruptTarget::new(control)
-}
-
-/// A wire-seat desk fixture whose parent holds the very inbox this
-/// returns, exactly [`super::spawnable_desk`]'s identity shape with
-/// `kind: SeatKind::Wire` and a factory installed.
+/// A wire desk, its fleet and its owner, with a factory installed.
 fn wire_spawnable_desk(
     fuel: u32,
     factory: Arc<FakeFactory>,
-) -> (ExarchDesk, Arc<Fleet>, Inbox, TestAgent) {
-    let parent_inbox = Inbox::new();
+) -> (ExarchDesk, Arc<Fleet>, TestAgent) {
     let fleet = Fleet::new(
         crate::agent::fleet::Launch {
             factory: Some(factory),
@@ -122,8 +99,6 @@ fn wire_spawnable_desk(
         crate::agent::fleet::AGENT_LEASE_IDLE,
     );
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
-    spec.reach = fake_wire_reach();
-    spec.mailbox = parent_inbox.mailbox();
     spec.fuel = fuel;
     spec.role = crate::agent::Role::Headless;
     let agent =
@@ -132,18 +107,20 @@ fn wire_spawnable_desk(
     let desk = ExarchDesk {
         services: HostServices {
             fleet: fleet.clone(),
-            kind: SeatKind::Wire {
+            kind: EngineKind::Wire {
                 engine: crate::boot::test_attach().0,
             },
-            stamp: agent.mailbox.stamp(),
-            agent: agent.clone(),
+            mailbox: agent.inbox.mailbox(),
+            handle: (*agent).clone(),
+            pins: PinDigests::default(),
+            schedules: ScheduleRegistry::new(),
             emit,
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),
             acts: ActFragment::default(),
         },
     };
-    (desk, fleet, parent_inbox, agent)
+    (desk, fleet, agent)
 }
 
 /// The parent's bequest as a wire engine seals it, carrying `PARENT_MARK=1`.
@@ -163,7 +140,7 @@ fn wire_start_req(name: &str, seed: Sealed) -> Request {
 #[test]
 fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
     let factory = FakeFactory::new(Guest::Closes);
-    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory);
+    let (desk, _fleet, _agent) = wire_spawnable_desk(3, factory);
 
     let err = desk
         .ask(wire_start_req("unattached", parent_seal()))
@@ -174,7 +151,7 @@ fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
         err.message
     );
     assert_eq!(
-        summary(&desk.services.agent).live,
+        summary(&desk.services.handle, &desk.services.fleet).live,
         0,
         "an engine that never attached names no child on the roster"
     );
@@ -185,7 +162,7 @@ fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
 #[test]
 fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
     let factory = FakeFactory::new(Guest::Refuses("connection reset by peer".to_string()));
-    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory);
+    let (desk, _fleet, _agent) = wire_spawnable_desk(3, factory);
 
     let err = desk
         .ask(wire_start_req("never-made", parent_seal()))
@@ -203,7 +180,7 @@ fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
 #[test]
 fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
     let factory = FakeFactory::new(Guest::Spawns);
-    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory.clone());
+    let (desk, _fleet, _agent) = wire_spawnable_desk(3, factory.clone());
 
     let err = desk
         .ask(super::start_req(NurseryId(0), "go", "in-process"))
@@ -221,13 +198,13 @@ fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
 }
 
 /// The seal crosses the host untouched: the engine the factory made is a
-/// child of the sealing parent, attached before the desk answers.  The seat is
+/// child of the sealing parent, attached before the desk answers. The engine is
 /// taken straight off the desk, where it can be probed.
 #[test]
 fn a_sealed_bequest_reaches_the_child_engine() {
     let factory = FakeFactory::new(Guest::Spawns);
-    let (desk, _fleet, _parent_inbox, _agent) = wire_spawnable_desk(3, factory.clone());
-    let SeatKind::Wire { engine } = &desk.services.kind else {
+    let (desk, _fleet, _agent) = wire_spawnable_desk(3, factory.clone());
+    let EngineKind::Wire { engine } = &desk.services.kind else {
         panic!("a wire desk makes its children over a wire")
     };
     let child = desk
@@ -248,10 +225,7 @@ fn a_sealed_bequest_reaches_the_child_engine() {
     factory.reap();
 }
 
-/// The peer-messaging pin: one identity-reach and one wire-reach child of
-/// the same parent exchange marked notes through the desk's `message`
-/// handler, which touches only the tree and a mailbox — never a seat — so
-/// sender and recipient never learn each other's transport.
+/// Peer messaging depends only on handles and inboxes, never transports.
 #[test]
 fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     let fleet = Fleet::for_test();
@@ -261,19 +235,17 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     let parent =
         crate::agent::testkit::test_agent(&fleet, parent_spec).expect("a fresh fleet's trunk");
 
-    let identity_inbox = Inbox::new();
-    let mut identity = crate::agent::testkit::TestAgentSpec::new("identity-peer");
-    identity.role = crate::agent::Role::child(&parent);
-    identity.mailbox = identity_inbox.mailbox();
-    let _identity_peer = crate::agent::testkit::test_agent(&fleet, identity)
+    let identity = crate::agent::testkit::TestAgentSpec::child(
+        "identity-peer",
+        &parent,
+        parent.inbox.mailbox(),
+    );
+    let identity_peer = crate::agent::testkit::test_agent(&fleet, identity)
         .expect("a fresh child of a live parent");
 
-    let wire_inbox = Inbox::new();
-    let mut wire = crate::agent::testkit::TestAgentSpec::new("wire-peer");
-    wire.role = crate::agent::Role::child(&parent);
-    wire.reach = fake_wire_reach();
-    wire.mailbox = wire_inbox.mailbox();
-    let _wire_peer =
+    let wire =
+        crate::agent::testkit::TestAgentSpec::child("wire-peer", &parent, parent.inbox.mailbox());
+    let wire_peer =
         crate::agent::testkit::test_agent(&fleet, wire).expect("a fresh child of a live parent");
 
     let (emit, _rx) = crate::bus::dummy_emitter();
@@ -282,11 +254,13 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
             fleet,
             // Neither peer's transport matters to `message`, which
             // touches only the tree and a mailbox.
-            kind: SeatKind::Wire {
+            kind: EngineKind::Wire {
                 engine: crate::boot::test_attach().0,
             },
-            stamp: parent.mailbox.stamp(),
-            agent: parent.clone(),
+            mailbox: parent.inbox.mailbox(),
+            handle: (*parent).clone(),
+            pins: PinDigests::default(),
+            schedules: ScheduleRegistry::new(),
             emit,
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),
@@ -299,13 +273,13 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     desk.ask(message_req("wire-peer", "note for wire"))
         .expect("the parent may message its wire-reach descendant");
 
-    match identity_inbox.next_item() {
+    match identity_peer.inbox.draw(|_| ParkMode::Quiesce) {
         Some(crate::bus::Next::Item(crate::bus::Item::Message(m))) => {
             assert_eq!(m.text, "note for identity");
         }
         other => panic!("expected an AgentMessage item, got {other:?}"),
     }
-    match wire_inbox.next_item() {
+    match wire_peer.inbox.draw(|_| ParkMode::Quiesce) {
         Some(crate::bus::Next::Item(crate::bus::Item::Message(m))) => {
             assert_eq!(m.text, "note for wire");
         }

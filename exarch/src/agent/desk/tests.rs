@@ -4,7 +4,7 @@ use super::*;
 use crate::agent::roster::summary;
 use crate::agent::testkit::{TestAgent, ral_call, wait_for_settle};
 use crate::bus::FleetSink;
-use crate::bus::{Inbox, Signal, channel};
+use crate::bus::{Signal, channel};
 use crate::card::Card;
 use crate::enquiry::AgentInfo;
 use crate::enquiry::{
@@ -34,37 +34,36 @@ fn fresh_log() -> AgentLog {
 }
 
 /// A fresh fleet's trunk and the [`HostServices`] a desk running as it
-/// captures.  Returns the fleet and the trunk's own inbox too, since a spawn test
-/// needs both to drive `` `start `` end to end.
+/// captures, alongside the fleet and its owner.
 fn services_with(
     fuel: u32,
     launch: crate::agent::fleet::Launch,
-) -> (HostServices, Arc<Fleet>, Inbox, TestAgent) {
-    let parent_inbox = Inbox::new();
+) -> (HostServices, Arc<Fleet>, TestAgent) {
     let fleet = Fleet::new(launch, crate::agent::fleet::AGENT_LEASE_IDLE);
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
-    spec.mailbox = parent_inbox.mailbox();
     spec.fuel = fuel;
     spec.role = crate::agent::Role::Headless;
     let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
     let (emit, _rx) = crate::bus::dummy_emitter();
     let services = HostServices {
         fleet: fleet.clone(),
-        kind: SeatKind::Identity(Arc::new(crate::boot::test_transport())),
-        stamp: agent.mailbox.stamp(),
-        agent: agent.clone(),
+        kind: EngineKind::Identity(Arc::new(crate::boot::test_transport())),
+        mailbox: agent.inbox.mailbox(),
+        handle: (*agent).clone(),
+        pins: PinDigests::default(),
+        schedules: ScheduleRegistry::new(),
         emit,
         reply: ReplyCell::default(),
         log: LogCell::new(fresh_log()),
         acts: ActFragment::default(),
     };
-    (services, fleet, parent_inbox, agent)
+    (services, fleet, agent)
 }
 
 /// The base capture every desk below builds on, so growing [`HostServices`]
 /// means touching one literal, not three.
 fn desk() -> (ExarchDesk, TestAgent) {
-    let (services, _, _, agent) = services_with(3, crate::agent::fleet::Launch::for_test());
+    let (services, _, agent) = services_with(3, crate::agent::fleet::Launch::for_test());
     (ExarchDesk { services }, agent)
 }
 
@@ -159,7 +158,7 @@ fn table(answer: FOValue) -> Vec<FOValue> {
 
 /// [`desk`] holding the self-wakeup grant, so a schedule test reaches past it.
 fn granted_desk() -> (ExarchDesk, TestAgent) {
-    let (services, _, _, agent) = services_with(
+    let (services, _, agent) = services_with(
         3,
         crate::agent::fleet::Launch {
             allow_schedule: true,
@@ -169,18 +168,10 @@ fn granted_desk() -> (ExarchDesk, TestAgent) {
     (ExarchDesk { services }, agent)
 }
 
-/// A desk whose parent holds the very inbox this returns, so
-/// `` `start ``/`` `cancel ``/`` `message `` run end to end and a child's
-/// result is observable — unlike [`desk`].
-fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, Inbox, TestAgent) {
-    let (services, fleet, parent_inbox, agent) =
-        services_with(fuel, crate::agent::fleet::Launch::for_test());
-    (
-        Arc::new(ExarchDesk { services }),
-        fleet,
-        parent_inbox,
-        agent,
-    )
+/// A shared desk whose owner keeps child results observable.
+fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, TestAgent) {
+    let (services, fleet, agent) = services_with(fuel, crate::agent::fleet::Launch::for_test());
+    (Arc::new(ExarchDesk { services }), fleet, agent)
 }
 
 type Parked<R> = Box<dyn FnOnce(&ExarchDesk, NurseryId) -> R + Send>;
@@ -230,7 +221,7 @@ fn parked_by<R: Send + 'static>(
     source: &str,
     f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
 ) -> R {
-    let SeatKind::Identity(parent) = &desk.services.kind else {
+    let EngineKind::Identity(parent) = &desk.services.kind else {
         panic!("an identity desk parks in process")
     };
     let host = Arc::new(Parking {
@@ -242,6 +233,7 @@ fn parked_by<R: Send + 'static>(
         &**parent,
         ral_core::protocol::Run::captured(source, ral_core::source::SourceOrigin::named("<test>")),
         host.clone(),
+        None,
     )
     .expect("an identity engine never severs");
     host.out
@@ -253,7 +245,7 @@ fn parked_by<R: Send + 'static>(
 
 /// Whether the fork `id` still waits in the desk's parent's pen.
 fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
-    let SeatKind::Identity(parent) = &desk.services.kind else {
+    let EngineKind::Identity(parent) = &desk.services.kind else {
         panic!("an identity desk parks in process")
     };
     parent.adopt_parked(id).is_ok()

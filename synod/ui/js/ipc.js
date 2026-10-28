@@ -25,9 +25,9 @@ export function sendMessage(attempt, message) {
   return invoke("send_message", { attempt, message });
 }
 
-/** @param {string} attempt @param {import("./bindings/ExchangeId.ts").ExchangeId} exchange @returns {Promise<string[]>} */
-export function stopExchange(attempt, exchange) {
-  return invoke("stop_exchange", { attempt, exchange });
+/** @param {string} attempt @param {import("./bindings/JobId.ts").JobId} job @returns {Promise<string[]>} */
+export function stopJob(attempt, job) {
+  return invoke("stop_job", { attempt, job });
 }
 
 /** @param {string} attempt @returns {Promise<string[]>} */

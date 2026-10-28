@@ -241,7 +241,7 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
         crate::app::Scratch::for_test(crate::app::EXARCH, "detach-clear").expect("scratch dir"),
     );
     let cwd = ral_core::host::cwd().expect("test process has a cwd");
-    let mut seat = crate::agent::seat::Seat::root(
+    let mut engine = crate::agent::engine::Engine::root(
         &crate::INSTALLERS,
         cwd,
         ral_core::authority::policy::GrantStack::default(),
@@ -250,10 +250,10 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
     )
     .expect("the recipe boots");
 
-    seat.clear().expect("an identity root reboots");
-    let names = seat
+    engine.clear().expect("an identity root reboots");
+    let names = engine
         .read(|t| t.builtin_names())
-        .expect("an identity seat never severs");
+        .expect("an identity engine never severs");
     assert!(
         names.iter().any(|n| n == "detach"),
         "the shell `/clear` boots must carry the verb its predecessor had"

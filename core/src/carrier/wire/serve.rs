@@ -251,26 +251,6 @@ impl Drop for Dispatch {
     }
 }
 
-/// Raised while the worker holds an item, lowered once that item's Report is
-/// on the wire. Admission ([`Dispatch`]) and this are different questions: a
-/// claim is released *before* its own report write, so only this answers the
-/// teardown's — is the worker still producing frames? A guard, like the claim,
-/// so an unwind cannot leave it raised.
-struct Writing(Arc<AtomicBool>);
-
-impl Writing {
-    fn raise(flag: &Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::Release);
-        Self(flag.clone())
-    }
-}
-
-impl Drop for Writing {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
 /// Adopt the socket the front-end left on fd 3 and run the engine on it.
 ///
 /// Only the adoption and the final `exit` live here; the protocol itself is
@@ -405,9 +385,7 @@ fn engine_session(
     // writes its Report, so a probe or dispatch the front-end sends the
     // instant it has the Report in hand is never refused as busy.
     let busy = Arc::new(AtomicBool::new(false));
-    // The other half of the teardown's span: raised from the moment the worker
-    // takes an item until its Report is written.
-    let writing = Arc::new(AtomicBool::new(false));
+    let workers = engine.shell.local.workers.clone();
     let (run_tx, run_rx) = mpsc::channel::<(Dispatch, WorkItem)>();
     let parks = Arc::new(Parks::default());
     let outlet: Outlet = {
@@ -416,8 +394,8 @@ fn engine_session(
     };
 
     // ── Worker thread: owns the engine ─────────────────────────────
-    {
-        let (outlet, parks, writing) = (outlet.clone(), parks.clone(), writing.clone());
+    let worker = {
+        let (outlet, parks) = (outlet.clone(), parks.clone());
         let deferred: Arc<dyn DeferredSink> = Arc::new(ChannelDeferredSink {
             writer: writer.clone(),
             fault: wire_fault.clone(),
@@ -425,7 +403,6 @@ fn engine_session(
         std::thread::spawn(move || {
             let mut engine = engine;
             while let Ok((claim, item)) = run_rx.recv() {
-                let _writing = Writing::raise(&writing);
                 let id = claim.id;
                 // `Shell::run` already catches, rolls back, and reports a panic
                 // in the run itself; this outer catch is for one escaping the
@@ -459,8 +436,8 @@ fn engine_session(
                 drop(claim);
                 let _ = outlet(id, event);
             }
-        });
-    }
+        })
+    };
 
     // Only the frame that wins the `false → true` flip may hand the worker
     // work; the rest are refused here, leaving the in-flight run's scope
@@ -474,12 +451,9 @@ fn engine_session(
     };
 
     // ── Reader loop (this thread) ──────────────────────────────────
-    /// How the reader loop ended — the distinction the parent needs, named
-    /// rather than spelled as an exit code, so no break site can report a
-    /// corrupted session as one that ended on request.
     enum SessionEnd {
-        /// The front-end's EOF.
-        Requested,
+        Detached,
+        Closed,
         Corrupt,
     }
 
@@ -514,7 +488,7 @@ fn engine_session(
 
         let frame = match read {
             Ok(Some(frame)) => frame,
-            Ok(None) => break SessionEnd::Requested, // EOF: gone, but cleanly
+            Ok(None) => break SessionEnd::Closed,
             Err(e) => {
                 crate::errln!("engine: read error: {e}");
                 break SessionEnd::Corrupt;
@@ -530,7 +504,7 @@ fn engine_session(
             Frame::Dispatch(id, run) => {
                 if let Some(claim) = admit(id, false)
                     && run_tx
-                        .send((claim, WorkItem::Run(run, scopes.open(id))))
+                        .send((claim, WorkItem::Run(run, scopes.open(id, None))))
                         .is_err()
                 {
                     break SessionEnd::Corrupt;
@@ -545,6 +519,7 @@ fn engine_session(
             }
             Frame::Answer(eid, answer) => parks.fill(eid, answer),
             Frame::Control(control) => scopes.apply(control),
+            Frame::Detach => break SessionEnd::Detached,
             Frame::Ping(seq) => {
                 armed = true;
                 engine_send(&writer, &wire_fault, &Frame::Pong(seq));
@@ -567,21 +542,27 @@ fn engine_session(
     // The loop may have exited with a run in flight: cancel it and every
     // worker under the durable root, then wait.
     scopes.end(CancelCause::Cancelled);
-    // Claimed *or* still writing: a claim is released ahead of its own report
-    // write, so neither flag alone spans the work a settle must wait out.
-    let settling = || writing.load(Ordering::Acquire) || busy.load(Ordering::Acquire);
+    drop(run_tx);
     let settle_by = Instant::now() + SETTLE_TIMEOUT;
-    while settling() && Instant::now() < settle_by {
+    while !worker.is_finished() && Instant::now() < settle_by {
         std::thread::sleep(SETTLE_POLL);
     }
-    // A severed wire is never the requested end it may look like: a front-end
-    // that stopped reading loses its in-flight run exactly as one that fell
-    // silent does, and the exit code must say so.
+    if !worker.is_finished() || worker.join().is_err() || !workers.is_drained() {
+        return 1;
+    }
     match end {
-        SessionEnd::Requested if !wire_fault.load(Ordering::SeqCst) => 0,
+        SessionEnd::Detached if !wire_fault.load(Ordering::SeqCst) => {
+            engine_send(&writer, &wire_fault, &Frame::Session(SessionEvent::Ended));
+            i32::from(wire_fault.load(Ordering::SeqCst))
+        }
+        SessionEnd::Closed if !wire_fault.load(Ordering::SeqCst) => 0,
         _ => 1,
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod within_tests;
 
 // ── Wire desk tests ───────────────────────────────────────────────────
 //
@@ -905,7 +886,10 @@ mod engine_session_tests {
         }
 
         fn cancel(&mut self, id: u64) {
-            self.send(&Frame::Control(Control::Cancel(DispatchId(id))));
+            self.send(&Frame::Control(Control::Strike(
+                DispatchId(id),
+                CancelCause::Cancelled,
+            )));
         }
 
         fn hang_up_and_join(self) -> i32 {
@@ -942,6 +926,16 @@ mod engine_session_tests {
         assert_eq!(host.hang_up_and_join(), 0);
     }
 
+    #[test]
+    fn detach_acknowledges_engine_and_loose_worker_teardown() {
+        let _g = REQUEST_SERIAL.lock();
+        let mut host = start();
+        host.run(1, "let h = spawn { /bin/sleep 30 }");
+        host.send(&Frame::Detach);
+        host.await_frame(|f| matches!(f, Frame::Session(SessionEvent::Ended)));
+        assert_eq!(host.engine.join().unwrap(), 0);
+    }
+
     /// One rendezvous, so one refusal arm for both riders.
     #[test]
     fn busy_refuses_a_second_dispatch_and_a_probe() {
@@ -973,7 +967,10 @@ mod engine_session_tests {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.dispatch(1, "/bin/sleep 30");
-        host.send(&Frame::Control(Control::Interrupt(DispatchId(1))));
+        host.send(&Frame::Control(Control::Strike(
+            DispatchId(1),
+            CancelCause::Interrupted,
+        )));
         let report = host.report(1);
         assert!(
             matches!(&report, Report::Ran { ending, .. } if ending.status() == 130),

@@ -80,7 +80,7 @@ pub enum ProviderError {
         body: Option<Body>,
     },
     /// The request outgrew the window the serving endpoint enforces, whatever it
-    /// lists.  Never retried by `retry.rs`; `Avatar::deliberate` recovers once.
+    /// lists.  Never retried by `retry.rs`; `Agent::deliberate` recovers once.
     Overflow {
         model: String,
         /// The serving provider, when a gateway named it.
@@ -93,7 +93,7 @@ pub enum ProviderError {
         body: Option<Body>,
     },
     /// The turn was cut off short of the model finishing.  Raised by
-    /// `Avatar::deliberate` *after* it appends the partial
+    /// `Agent::deliberate` *after* it appends the partial
     /// assistant message, so a re-prompt keeps that work as context.  Boxed:
     /// a stall's cause is a `ProviderError` in turn.
     Truncated { cause: Box<CutShort> },

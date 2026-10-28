@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods, reason = "test code")]
 
-//! End-to-end tests for [`exarch::agent::Avatar::deliberate`] driven through
+//! End-to-end tests for [`exarch::agent::Agent::deliberate`] driven through
 //! a scripted provider backend (`exarch::provider::Provider::scripted`).
 //! This is the composition the protocol machine (`event.rs`) is exercised
 //! under in production: `deliberate` renders the transcript, calls the
@@ -13,7 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::Avatar;
+use exarch::agent::Agent;
 use exarch::agent::outcome::{Fault, Outcome};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
@@ -22,6 +22,7 @@ use exarch::record::{AgentId, AgentState};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient, Voice};
 use exarch::record::{EditAuthority, Residue};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
+use ral_core::process::DurableRoot;
 use std::sync::Arc;
 
 /// A scripted provider behind the `Arc` the attend loop threads — the same
@@ -46,11 +47,12 @@ struct Drive {
 
 /// Run one `deliberate` against a fresh `Emitter`/collector pair, draining
 /// the bus into its facts and transients.
-fn drive_deliberate(session: &mut Avatar, provider: &Arc<Provider>, prompt: Option<&str>) -> Drive {
+fn drive_deliberate(session: &mut Agent, provider: &Arc<Provider>, prompt: Option<&str>) -> Drive {
     let id: AgentId = session.id();
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
     let outcome = session.deliberate(
+        &DurableRoot::default().child(),
         provider,
         prompt.map(|p| (p.to_string(), Voice::Human)),
         None,
@@ -89,7 +91,7 @@ fn ral_call(id: &str, cmd: &str) -> ToolCall {
 /// Assert every committed model-view message serialises (the proxy for
 /// "every provider accepts the request") and that no assistant message
 /// is empty.
-fn assert_admissible(session: &Avatar) {
+fn assert_admissible(session: &Agent) {
     for m in session.rendered_messages() {
         let json = serde_json::to_string(&m).expect("committed message must serialise");
         if m.role == ChatRole::Assistant {
@@ -103,7 +105,7 @@ fn assert_admissible(session: &Avatar) {
 
 #[test]
 fn plain_text_reaches_quiescence() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
 
     let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("hi"));
@@ -123,7 +125,7 @@ fn plain_text_reaches_quiescence() {
 /// what the reader sees as thinking arriving mid-answer.
 #[test]
 fn reasoning_commits_ahead_of_every_paragraph_of_the_answer() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new().then(
@@ -163,7 +165,7 @@ fn reasoning_commits_ahead_of_every_paragraph_of_the_answer() {
 /// next tool call — the persistent-shell contract `deliberate` relies on.
 #[test]
 fn bindings_persist_across_tool_calls() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -204,7 +206,7 @@ fn bindings_persist_across_tool_calls() {
 /// reply reaches quiescence.
 #[test]
 fn truncated_with_tool_calls_runs_and_continues() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -240,7 +242,7 @@ fn truncated_with_tool_calls_runs_and_continues() {
 /// `stall_cause` that tells every renderer the exchange survived it.
 #[test]
 fn stalled_stream_commits_partial_and_truncates() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new().then(Reply::stalled("partial answer before the stall")),
@@ -310,7 +312,7 @@ fn stalled_stream_commits_partial_and_truncates() {
 /// admissible — while the outcome still surfaces as `Empty` for the nudge.
 #[test]
 fn empty_reply_commits_a_stub_not_empty_content() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::empty()));
 
     let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("say nothing"));
@@ -341,7 +343,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
 /// whole.
 #[test]
 fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -439,7 +441,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
 /// tool (which reports the missing fields), and it reaches quiescence.
 #[test]
 fn malformed_tool_arguments_are_normalised_to_object() {
-    let mut session = Avatar::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let bad_call = ToolCall {
         call_id: "c1".into(),
         fn_name: "ral".into(),

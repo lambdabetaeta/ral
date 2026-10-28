@@ -1,38 +1,11 @@
-//! The fleet: what every node of one run shares — the [`Launch`] fixed once
-//! for the whole run, the by-name index a spawn claims its identity at, and
-//! the idle lease every reporting child is bounded by.
-//!
-//! It is not the tree.  The tree is [`Role::Child`](crate::agent::Role)
-//! and [`Agent::children`](crate::agent::Agent), and every walk over it — the
-//! roster, the cancel cascade, the scope check — runs there.  What lives here
-//! is what no single node owns: the run's settings, and whether a name is
-//! free.
-//!
-//! A [`Fleet`] is shared behind one `Arc`, held by every agent it enrolled:
-//! every root and fork reaches the same one, so no node can disagree about
-//! what is live or what the run was launched with.  `names` is a lookup index;
-//! `roots` holds every session — a root reports to nobody, so a walk over it
-//! is how `nearest_reap` reaches every live agent in the run.  Both hold
-//! [`Weak`], preserving identity walks independently of avatar membership.
-//! Each avatar owns a membership until its teardown finishes.
-//!
-//! There is one late-settle fence, and it lives on the inbox, not the agent:
-//! each session's own `crate::bus::inbox` counts its clears as a
-//! clear-epoch, and
-//! a `Post` that cannot judge its own staleness — an async agent's result, a
-//! worker's deferred batch (`InboxDeferred`) — is stamped with that
-//! epoch at composition and refused at the inbox's own pop if it has since
-//! moved on.  Per inbox, not per fleet — a `/clear` in one tab must not drop
-//! work another tab is still waiting on.
+//! Fleet names, launch services, and teardown membership; cancellation is a scope tree.
 
+use crate::agent::engine::Engine;
 use crate::agent::index::{BuiltinIndex, Grants};
-use crate::agent::seat::Seat;
-use crate::agent::{Agent, EngineLost, Factory, Role, Trunk};
+use crate::agent::{AgentHandle, EngineLost, Factory, Role, Trunk};
 use crate::app::Scratch;
 use crate::enquiry::check_name;
-use crate::provider::Bureau;
-use crate::provider::Toolset;
-use crate::provider::roles::Roles;
+use crate::provider::{Bureau, Toolset, roles::Roles};
 use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
@@ -41,78 +14,45 @@ use ral_core::own::OwnDir;
 #[cfg(test)]
 use ral_core::own::TestDir;
 use ral_core::path::CwdPath;
-use ral_core::process::{self, CancelCause};
+use ral_core::process::{self, CancelCause, DurableRoot};
 use ral_core::sync::{CondvarExt, LockExt};
-use std::collections::HashMap;
-use std::fmt;
-use std::io;
-use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    fmt, io,
+    sync::{Arc, Condvar, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
-/// How long a replied child waits for a follow-up.
 pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
-
-/// What every node of one run shares, fixed at launch: the recipe for a root,
-/// and the services the host opened, held once here rather than copied into
-/// each [`Agent`].
 pub(crate) struct Launch {
-    /// How every root is driven.  Attended, a conversing root is typed into
-    /// by a human and parks between messages; otherwise it is driven one
-    /// exchange at a time and waits on nothing but its fleet.
     pub trunk: Trunk,
-    /// Whether the nodes hold the self-wakeup family.
     pub allow_schedule: bool,
-    /// Whether a root, refused until a reset past the in-place wait, arms a
-    /// wakeup to resume there: exarch's terminal roots alone.
     pub resume_on_reset: bool,
-    /// What a request advertises and dispatch recognises; empty for `--chat`,
-    /// which is then never steered.
     pub tools: Toolset,
-    /// The operator's disk ceiling; `None` never walks the dirs at all.
     pub disk_warn_bytes: Option<u64>,
-    /// Where a wire root gets its helper engines; `None` on an identity root.
     pub factory: Option<Arc<dyn Factory>>,
-    /// The one owner of provider construction.
     pub bureau: Arc<Bureau>,
-    /// The models the human bound to names at launch.
     pub roles: Roles,
-    /// The prompt template, still carrying the builtin-index placeholder, and
-    /// the index each node resolves it against for its own grants.
     pub system: Arc<str>,
     pub index: Arc<BuiltinIndex>,
-    /// Every root's fuel: fuel is depth, and a root is depth 0.
     pub fuel: u32,
-    /// The egress verdict on hosted web search.
     pub search: bool,
-    /// The run's directory: exarch's own, where the engine's captured output
-    /// and the lock live.
     pub run_dir: OwnDir,
-    /// Where `sessions/<id>/` hang: under `run_dir`.
     pub sessions_root: OwnDir,
     pub genesis: Option<Genesis>,
-    /// The directory a test launch's run has to itself, dropped with the
-    /// launch.
     #[cfg(test)]
     pub(crate) _scratch: Option<TestDir>,
 }
-
-/// What a fresh root's engine boots from; `None` on a wire host, which boots none.
 pub(crate) struct Genesis {
     pub(crate) installers: &'static [EngineInstaller],
     pub(crate) cwd: CwdPath,
     pub(crate) grants: GrantStack,
     pub(crate) terminal: TerminalState,
-    /// The run's, and outliving every `/clear` and every root.
     pub(crate) scratch: Arc<Scratch>,
 }
-
 impl Genesis {
-    /// A fresh identity engine for a root.
-    ///
-    /// # Errors
-    /// The recipe's refusal.
-    pub(crate) fn seat(&self) -> Result<Seat, Severed> {
-        Seat::root(
+    pub(crate) fn engine(&self) -> Result<Engine, Severed> {
+        Engine::root(
             self.installers,
             self.cwd.clone(),
             self.grants.clone(),
@@ -121,43 +61,28 @@ impl Genesis {
         )
     }
 }
-
 impl Launch {
-    /// The run's directory, which `sessions_root` hangs in: exarch's own.
     pub(crate) fn run_dir(&self) -> &OwnDir {
         &self.run_dir
     }
-
-    /// A fresh root's seat.
-    ///
-    /// # Errors
-    /// A host that boots no further engines, or the recipe's refusal.
-    pub(crate) fn seat(&self) -> io::Result<Seat> {
+    pub(crate) fn engine(&self) -> io::Result<Engine> {
         let genesis = self.genesis.as_ref().ok_or_else(|| {
             io::Error::other(
                 "this host boots no further engines, so it cannot open another session",
             )
         })?;
         genesis
-            .seat()
+            .engine()
             .map_err(|lost| io::Error::other(EngineLost::starting(&lost, self.run_dir())))
     }
-
-    /// The system prompt a node on `seat` reads, resolved against its own
-    /// grants.  A chat launch advertises no tool, so its prompt takes no
-    /// builtin surface at all: no index, no taught section, the bare stand-in
-    /// verbatim.
-    ///
-    /// # Errors
-    /// The seat's engine is severed.
     pub(crate) fn prompt_for(
         &self,
-        seat: &Seat,
+        engine: &Engine,
         role: &Role,
         fuel: u32,
         name: &str,
     ) -> Result<String, Severed> {
-        let own = crate::prompt::with_grant(&self.system, &seat.read(|t| t.grants())?);
+        let own = crate::prompt::with_grant(&self.system, &engine.read(|t| t.grants())?);
         Ok(if self.tools.is_empty() {
             own
         } else {
@@ -174,11 +99,8 @@ impl Launch {
         })
     }
 }
-
 #[cfg(test)]
 impl Launch {
-    /// A launch with nothing granted and nothing to reach: what a fleet-level
-    /// test's synthetic agents share.
     pub(crate) fn for_test() -> Self {
         let scratch = OwnDir::for_test("launch").expect("a test run directory");
         Self {
@@ -206,62 +128,41 @@ impl Launch {
         }
     }
 }
-
-/// A name's standing in [`Fleet::names`]: spoken for by a [`Claim`] whose
-/// agent is still being built, or borne by one that is born.
 enum Slot {
     Claimed,
-    Live(Weak<Agent>),
+    Live(AgentHandle),
 }
-
-impl Slot {
-    fn agent(&self) -> Option<Arc<Agent>> {
-        match self {
-            Self::Claimed => None,
-            Self::Live(weak) => weak.upgrade(),
-        }
-    }
-
-    /// Whether the name is free: only a settled bearer frees it.
-    fn vacated(&self) -> bool {
-        matches!(self, Self::Live(weak) if weak.strong_count() == 0)
-    }
-}
-
-/// A name held for an agent not yet built, so the name rules are settled
-/// before any log exists for it.  [`Fleet::enrol`] consumes it; one dropped
-/// unconsumed gives its name back.
 #[must_use = "a claim only holds its name until it is dropped"]
-pub(crate) struct Claim {
-    fleet: Arc<Fleet>,
-    name: String,
-}
-
+pub(crate) struct Claim(Name);
 impl Claim {
     pub(crate) fn name(&self) -> &str {
-        &self.name
+        &self.0.text
+    }
+    pub(crate) fn bind(self, handle: &AgentHandle) -> Name {
+        self.0
+            .fleet
+            .names
+            .lock_ignore_poison()
+            .insert(self.0.text.clone(), Slot::Live(handle.clone()));
+        self.0
     }
 }
-
-impl Drop for Claim {
+pub(crate) struct Name {
+    fleet: Arc<Fleet>,
+    text: String,
+    _membership: Membership,
+}
+impl Drop for Name {
     fn drop(&mut self) {
-        let mut names = self.fleet.names.lock_ignore_poison();
-        if matches!(names.get(&self.name), Some(Slot::Claimed)) {
-            names.remove(&self.name);
-        }
+        self.fleet.names.lock_ignore_poison().remove(&self.text);
     }
 }
-
-/// An avatar's membership, released only after its resources have dropped.
 pub(crate) struct Membership(Arc<Departures>);
-
-/// Independent of the launch, so the final decrement follows its release.
 #[derive(Default)]
 pub(crate) struct Departures {
     count: Mutex<usize>,
     changed: Condvar,
 }
-
 impl Departures {
     pub(crate) fn wait_after(&self, waiting: impl FnOnce()) {
         let count = self.count.lock_ignore_poison();
@@ -269,216 +170,170 @@ impl Departures {
         drop(self.changed.wait_while_ignore_poison(count, |n| *n != 0));
     }
 }
-
 impl Drop for Membership {
     fn drop(&mut self) {
         let mut count = self.0.count.lock_ignore_poison();
         *count -= 1;
-        if *count == 0 {
-            self.0.changed.notify_all();
-        }
+        drop(count);
+        self.0.changed.notify_all();
     }
 }
-
-/// The fleet's two indices, each independently locked, plus the launch and
-/// the idle bound every node shares.
-///
-/// [`Self::names`] is touched by every spawn and every name lookup;
-/// [`Self::roots`] only by a root's birth and a walk from the top.
 pub struct Fleet {
-    /// Each name's [`Slot`], retaining no identity.
     names: Mutex<HashMap<String, Slot>>,
-    /// Every root: one reports to nobody, so this is where a walk over the
-    /// whole run starts.
-    roots: Mutex<Vec<Weak<Agent>>>,
-    /// Avatar memberships, independent of retained identities.
+    pub(crate) root: DurableRoot,
     departures: Arc<Departures>,
-    /// [`AGENT_LEASE_IDLE`] outside tests.
     lease: Duration,
+    teardown_failure: OnceLock<String>,
     pub(crate) launch: Launch,
 }
-
 impl Fleet {
-    /// A fleet whose children wait `lease` after each reply.
     pub(crate) fn new(launch: Launch, lease: Duration) -> Arc<Self> {
         Arc::new(Self {
             names: Mutex::new(HashMap::new()),
-            roots: Mutex::new(Vec::new()),
+            root: DurableRoot::default(),
             departures: Arc::default(),
             lease,
+            teardown_failure: OnceLock::new(),
             launch,
         })
     }
-
     #[cfg(test)]
     pub(crate) fn for_test() -> Arc<Self> {
         Self::new(Launch::for_test(), AGENT_LEASE_IDLE)
     }
-
-    /// A test fleet whose idle bound is `lease`, so a test can watch a reap
-    /// instead of waiting out [`AGENT_LEASE_IDLE`].
     #[cfg(test)]
     pub(crate) fn leased_for_test(lease: Duration) -> Arc<Self> {
         Self::new(Launch::for_test(), lease)
     }
-
-    /// Drop what has settled from `names`, so a name is free the moment its
-    /// bearer's avatar goes.
-    fn prune_names(names: &mut HashMap<String, Slot>) {
-        names.retain(|_, slot| !slot.vacated());
-    }
-
-    /// Speak for `name` ahead of the agent that will bear it, so a refused
-    /// name leaves no session directory behind and two same-name spawns racing
-    /// within one turn cannot both succeed.
-    ///
-    /// # Errors
-    /// [`Unborn::NameMalformed`] when the name breaks [`check_name`].
-    ///
-    /// [`Unborn::NameTaken`] when a live agent, or another claim, holds it.
     pub(crate) fn claim(self: &Arc<Self>, name: &str) -> Result<Claim, Unborn> {
         check_name(name).map_err(Unborn::NameMalformed)?;
+        // I8: count construction before reserving or publishing its name.
+        let membership = self.member();
         let mut names = self.names.lock_ignore_poison();
-        Self::prune_names(&mut names);
         if names.contains_key(name) {
             return Err(Unborn::NameTaken(name.to_string()));
         }
         names.insert(name.to_string(), Slot::Claimed);
         drop(names);
-        Ok(Claim {
-            fleet: Arc::clone(self),
-            name: name.to_string(),
-        })
+        Ok(Claim(Name {
+            fleet: self.clone(),
+            text: name.to_string(),
+            _membership: membership,
+        }))
     }
-
-    /// Bring a newborn `agent` into the fleet under the name `claim` holds:
-    /// hang it under its parent or push it onto [`Self::roots`]. Construction
-    /// is the only way to join, and every name requires a claim.
-    ///
-    /// # Errors
-    /// [`Unborn::SessionDead`] when the parent is already terminated — a spawn
-    /// racing a cancel on its own parent.  The claim is then given back.
-    pub(crate) fn enrol(
-        self: &Arc<Self>,
-        agent: &Arc<Agent>,
-        claim: Claim,
-    ) -> Result<Membership, Unborn> {
-        let enrol = || {
-            *self.departures.count.lock_ignore_poison() += 1;
-            let membership = Membership(self.departures.clone());
-            self.names
-                .lock_ignore_poison()
-                .insert(claim.name.clone(), Slot::Live(Arc::downgrade(agent)));
-            match agent.role.parent() {
-                Some(parent) => parent.adopt(agent),
-                None => self.roots.lock_ignore_poison().push(Arc::downgrade(agent)),
-            }
-            membership
-        };
-        let accepted = match &agent.role {
-            super::Role::Child { parent, consumer } => consumer.admit(&parent.token, enrol),
-            super::Role::Converses | super::Role::Headless => Some(enrol()),
-        };
-        // Claim and rejected-engine destruction must occur outside admission.
-        drop(claim);
-        accepted.ok_or(Unborn::SessionDead)
+    fn member(&self) -> Membership {
+        *self.departures.count.lock_ignore_poison() += 1;
+        Membership(self.departures.clone())
     }
-
-    /// This fleet's live roots, pruning the settled ones as it snapshots —
-    /// the tree-walk twin of [`Agent::children`].
-    pub(crate) fn roots(&self) -> Vec<Arc<Agent>> {
-        let mut roots = self.roots.lock_ignore_poison();
-        let live: Vec<Arc<Agent>> = roots.iter().filter_map(Weak::upgrade).collect();
-        if live.len() != roots.len() {
-            *roots = live.iter().map(Arc::downgrade).collect();
+    pub fn resolve(&self, name: &str) -> Option<AgentHandle> {
+        match self.names.lock_ignore_poison().get(name) {
+            Some(Slot::Live(handle)) if handle.is_live() => Some(handle.clone()),
+            _ => None,
         }
+    }
+    pub(crate) fn live(&self) -> Vec<AgentHandle> {
+        let mut live: Vec<_> = self
+            .names
+            .lock_ignore_poison()
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Live(handle) if handle.is_live() => Some(handle.clone()),
+                _ => None,
+            })
+            .collect();
+        live.sort_by_key(AgentHandle::id);
         live
     }
-
-    /// At most one agent can match, since [`Self::claim`] keeps names unique
-    /// among the live.  The `` `cancel ``, `` `message ``, and `` `read `` tags
-    /// all come through here before the scope climb.
-    pub fn resolve(&self, name: &str) -> Option<Arc<Agent>> {
-        let mut names = self.names.lock_ignore_poison();
-        Self::prune_names(&mut names);
-        names.get(name).and_then(Slot::agent)
+    pub(crate) fn roots(&self) -> Vec<AgentHandle> {
+        self.live()
+            .into_iter()
+            .filter(|h| h.0.role.parent().is_none())
+            .collect()
     }
-
-    /// Whether every avatar has finished teardown.
+    pub fn end(&self, cause: CancelCause) {
+        self.root.cancel(cause);
+        // Cancellation hides live slots immediately; notify all owned inboxes.
+        let handles: Vec<_> = self
+            .names
+            .lock_ignore_poison()
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Live(handle) => Some(handle.clone()),
+                Slot::Claimed => None,
+            })
+            .collect();
+        for handle in handles {
+            handle.0.mailbox.notify();
+        }
+        self.departures.changed.notify_all();
+    }
     pub fn is_empty(&self) -> bool {
         *self.departures.count.lock_ignore_poison() == 0
     }
-
-    /// Block until every avatar has finished teardown.
     pub fn wait_empty(&self) {
         self.wait_empty_after(|| {});
     }
-
-    // The callback lets tests observe the boundary without timing assumptions.
     pub(super) fn wait_empty_after(&self, waiting: impl FnOnce()) {
         self.departures.wait_after(waiting);
     }
-
     pub(crate) fn departures(&self) -> Arc<Departures> {
         self.departures.clone()
     }
-
-    /// The nearest time-to-reap across the leased agents, `None` when none is
-    /// leased.  A pure survey for `/resources`: it renews nothing.
+    pub(crate) fn teardown_failed(&self, why: String) {
+        let _ = self.teardown_failure.set(why);
+    }
+    pub(crate) fn wait_settled(&self, waiter: &AgentHandle) -> Result<(), String> {
+        let mut count = self.departures.count.lock_ignore_poison();
+        let retained = || {
+            1 + self.names.lock_ignore_poison().values().filter(|slot| {
+                matches!(slot, Slot::Live(handle) if handle.id() != waiter.id() && handle.is_live())
+            }).count()
+        };
+        // Ancestor cancellation need not notify departures; teardown always does.
+        while *count != retained() {
+            (count, _) = self
+                .departures
+                .changed
+                .wait_timeout_ignore_poison(count, Duration::from_millis(100));
+        }
+        drop(count);
+        self.teardown_failure.get().cloned().map_or(Ok(()), Err)
+    }
     pub fn nearest_reap(&self) -> Option<Duration> {
-        let lease = self.lease;
-        self.roots()
+        self.live()
             .iter()
-            .flat_map(|root| root.walk())
-            .filter_map(|live| live.reply_since())
-            .map(|since| lease.saturating_sub(since.elapsed()))
+            .filter_map(AgentHandle::reply_since)
+            .map(|since| self.lease.saturating_sub(since.elapsed()))
             .min()
     }
-
-    pub(crate) fn lease_reply(&self, agent: &Arc<Agent>, since: Instant) {
-        if agent.role.parent().is_some() {
-            let agent = Arc::downgrade(agent);
-            process::arm_callback(self.lease, move || lease_fire(&agent, since)).keep();
+    pub(crate) fn lease_reply(&self, handle: &AgentHandle, since: Instant) {
+        if handle.0.role.parent().is_some() {
+            let handle = Arc::downgrade(&handle.0);
+            process::arm_callback(self.lease, move || {
+                if let Some(shared) = handle.upgrade() {
+                    AgentHandle(shared).lapse(since);
+                }
+            })
+            .keep();
         }
     }
 }
-
-/// Why an agent could not be born.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unborn {
-    /// The parent was terminated out from under a racing spawn.
     SessionDead,
-    /// Carries the offending name, so the caller can refuse didactically.
+    Abandoned,
     NameTaken(String),
-    /// Carries [`check_name`]'s own sentence, so every caller refuses in the
-    /// same words.
     NameMalformed(String),
 }
-
 impl fmt::Display for Unborn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SessionDead => write!(f, "this session is no longer live"),
-            Self::NameTaken(name) => write!(
-                f,
-                "a live agent already bears the name '{name}': pick another, or wait for it \
-                 to settle. Names identify live agents; agents lists yours."
-            ),
-            Self::NameMalformed(why) => write!(f, "{why}"),
+            Self::SessionDead => f.write_str("this session is no longer live"),
+            Self::Abandoned => f.write_str("the work this call belonged to was stopped or cleared, so nothing was started; issue it again on your next turn"),
+            Self::NameTaken(name) => write!(f, "a live agent already bears the name '{name}': pick another, or wait for it to settle. Names identify live agents; agents lists yours."),
+            Self::NameMalformed(why) => f.write_str(why),
         }
     }
 }
-
-/// A stale deadline cannot cancel work or a later reply's waiting period.
-fn lease_fire(agent: &Weak<Agent>, since: Instant) {
-    if let Some(agent) = agent.upgrade()
-        && agent.reply_since() == Some(since)
-    {
-        agent.cancel_tree(CancelCause::TimedOut);
-    }
-}
-
-#[cfg(test)]
-mod admission_tests;
 #[cfg(test)]
 mod tests;

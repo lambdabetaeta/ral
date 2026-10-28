@@ -187,7 +187,8 @@ pub(crate) fn run_source(
         capabilities,
     };
     let booted = run(boot.program(), None);
-    if let Err(status) = boot_builtin::settle(dispatch_to_report(&transport, booted, Arc::new(())))
+    if let Err(status) =
+        boot_builtin::settle(dispatch_to_report(&transport, booted, Arc::new(()), None))
     {
         return ExitCode::from(exit_byte(status));
     }
@@ -206,7 +207,7 @@ pub(crate) fn run_source(
 /// `--audit` (`Some(pretty)`), its report envelope instead of a runtime error.
 /// The run's status.
 fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32 {
-    let report = match dispatch_to_report(transport, run, Arc::new(())) {
+    let report = match dispatch_to_report(transport, run, Arc::new(()), None) {
         Ok(report) => report,
         Err(severed) => {
             errln!("ral: {severed}");

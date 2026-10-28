@@ -1,8 +1,8 @@
 //! The engine protocol's algebra: the frames between a front-end and the ral
 //! engine, and nothing that carries them.
 //!
-//! Attach/Ping/Pong open and keep alive one connection, whose EOF ends it
-//! (the connection *is* the session); Dispatch carries one whole run, Event flows
+//! Attach/Ping/Pong open and keep alive one connection; Detach/Ended certify
+//! teardown, while EOF initiates it. Dispatch carries one whole run, Event flows
 //! engine to front-end, and Control flows front-end to engine. The carriers
 //! that interpret the algebra are [`crate::carrier`]'s.
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 34;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -43,6 +43,8 @@ pub enum Frame {
     /// The only legal first frame: an engine speaks no shell until told a
     /// version and an installer.
     Attach(Attach),
+    /// Front-end → engine: close the session after teardown; answered by `Ended`.
+    Detach,
     /// One whole run.  Boxed so no other variant is sized to `Run`.
     Dispatch(DispatchId, Box<Run>),
     /// A pure, boundary-time read of session state — no wall, no sinks, no
@@ -54,10 +56,8 @@ pub enum Frame {
     /// Engine → front-end, inside a dispatch's claim-to-Report window. May
     /// arrive while that Dispatch is outstanding.
     Event(DispatchId, Event),
-    /// Engine → front-end, outside any dispatch's window: emitted by a
-    /// worker that settles between runs, so it has no dispatch to
-    /// ride and reaches the front-end through the transport's session sink
-    /// instead of the per-run event stream.
+    /// Engine → front-end lifecycle verdicts and deferred worker batches,
+    /// outside any dispatch's window.
     Session(SessionEvent),
     /// Front-end → engine. Out-of-band: deliverable while a Dispatch is
     /// outstanding.
@@ -83,6 +83,7 @@ impl Frame {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Attach(_) => "Attach",
+            Self::Detach => "Detach",
             Self::Dispatch(..) => "Dispatch",
             Self::Probe(..) => "Probe",
             Self::Event(..) => "Event",
@@ -324,13 +325,15 @@ pub enum Event {
 }
 
 /// Engine → front-end traffic with no dispatch to ride: the attach verdict,
-/// and a worker's batch.
+/// teardown acknowledgment, and a worker's batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// The engine booted the installer `Attach` named and takes dispatches.
     Attached,
     /// The engine refuses to attach, in its own words, and exits.
     Refused(String),
+    /// The engine and every session worker have torn down.
+    Ended,
     /// A deferred worker's surface batch, delivered when it settles and
     /// rendered by the host at the next run boundary.
     DeferredSurface(Vec<FOValue>),
@@ -369,12 +372,9 @@ impl From<EnquiryError> for Error {
 /// carrier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {
-    /// Unwind this dispatch as a Ctrl-C would, even one not yet arrived; a
-    /// stale id strikes nothing.
-    Interrupt(DispatchId),
-    /// Unwind this dispatch, even one not yet arrived; a stale id strikes
-    /// nothing.
-    Cancel(DispatchId),
+    /// Strike only this dispatch with its cause, even one not yet arrived;
+    /// a stale id strikes nothing.
+    Strike(DispatchId, CancelCause),
     /// Cancel the session's durable root: every run and every
     /// worker, for good.
     Terminate,

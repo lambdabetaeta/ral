@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: "superseded in mechanism by [[261028_one-scope-tree-one-inbox]]"
 ---
 
 # An agent is the `Arc`
@@ -10,33 +10,18 @@ touch what.** [`Agent`] holds the public half — identity, the two cancel
 doors, mailbox, provider, immutable config, and a small single-writer
 `Status` — behind an `Arc` the fleet shares. [`Avatar`] holds the private
 half — the log, the seat, the inbox, everything only the attend thread
-touches — plus the `Arc<Agent>` it embodies. **An identity may outlive its
-consumer:** the lifetime amendment below distinguishes retirement from identity
-retention and teardown completion.
+touches — plus the `Arc<Agent>` it embodies. The current public/private line is between the owner (`Agent`) and its
+address (`AgentHandle`); [[261028_one-scope-tree-one-inbox]] names its
+scope-based liveness and teardown law.
 
-## Consumer lifetime amendment, 2026-10-28
+## Lifetime and ownership amendment, 2026-10-28
 
-[[261027_a-host-holds-a-helm]] refines the original lifetime criterion without
-changing the public/private split:
-
-- Children retain strong upward identity; parents and fleet indices retain
-  only weak downward edges. A terminated ancestor remains traversable while
-  descendants exist, so shutdown walks must not filter it by token state.
-- Avatar drop retires its token under local admission before resource teardown,
-  including unwind. Final enrollment shares that boundary; a weak Helm rejects
-  the retired consumer even when its identity upgrades. Drop does not itself
-  cancel the subtree.
-- Fleet emptiness counts Avatar-owned `Membership` guards released last, after
-  seat/log teardown and fleet/identity references. Detached `Departures` owns
-  the count and condvar, retaining no launch or factory. Neither retained
-  identity Arcs nor temporary Helm upgrades count as outstanding teardown.
-  `SettledConversation::end_fleet` cancels every shared-fleet root, drops its
-  driver/root, then waits on that detached counter before Synod recovers its
-  machine factory.
-
-The diagnosis and original decision below record the split's motivation;
-current admission and teardown details are in that amendment and
-[[map/exarch/agent|agent]].
+[[261028_one-scope-tree-one-inbox]] supersedes the lifetime mechanism:
+`Agent` is the single-thread owner, `AgentHandle` its shared address. Life
+cancellation determines liveness; owner drop ends the subtree, and the final
+`Membership` determines completed teardown. The diagnosis and original
+decision below retain the motivation for separating owner state from shared
+identity; current operations are mapped in [[map/exarch/agent|agent]].
 
 ## The diagnosis
 

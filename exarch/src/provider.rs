@@ -43,14 +43,14 @@ pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, 
 pub use retry::Recovery;
 pub use stream::{Delta, Served, StepOut};
 pub use tools::Toolset;
-pub use transport::Engine;
+pub use transport::Pool;
 pub use usage::{Usage, UsageParts, humanize_tokens};
 pub use via::Via;
 
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
-use crate::cancel;
 use allowance::{Allowance, LiveMeters};
+use ral_core::process::Scope;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use transport::Transport;
@@ -95,11 +95,11 @@ pub struct Provider {
     context_window: AtomicU64,
 }
 
-/// A live transport over the shared [`Engine`], or a scripted replay so
+/// A live transport over the shared [`Pool`], or a scripted replay so
 /// agent-loop tests never touch the network.
 pub(in crate::provider) enum Backend {
     Live {
-        engine: Arc<Engine>,
+        engine: Arc<Pool>,
         transport: Arc<Transport>,
         /// This selection's meter, over the roster it was minted from: as
         /// fresh as its transport and no fresher — a rotated key reaches both
@@ -219,7 +219,7 @@ impl Provider {
         &self,
         request: Request<'_>,
         on_delta: &mut F,
-        cancel: &cancel::Token,
+        cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
         let outcome = match &self.backend {
             Backend::Live {

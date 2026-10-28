@@ -638,7 +638,7 @@ impl RecordedAccount {
     /// A snapshot for tests that only care that *something* is recorded.
     /// Not `#[cfg(test)]`: integration test binaries link the library built
     /// without it, so a fixture they share with the unit tests must be an
-    /// ordinary function, as `Avatar::for_test` already is.
+    /// ordinary function, as `Agent::for_test` already is.
     #[doc(hidden)]
     pub fn for_test(name: &str) -> Self {
         Self {

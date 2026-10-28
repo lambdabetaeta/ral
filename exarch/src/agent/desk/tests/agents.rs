@@ -6,7 +6,8 @@ use super::*;
 /// `` `read `` answers the very value it deposited.
 #[test]
 fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
-    let (desk, _fleet, parent_inbox, _agent) = spawnable_desk(3);
+    let (desk, _fleet, agent) = spawnable_desk(3);
+    let parent_inbox = &agent.inbox;
     let provider = Arc::new(Provider::scripted(
         "test-model",
         Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -14,7 +15,7 @@ fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
             "exarch-agents `reply 'hi from child'",
         )])),
     ));
-    desk.services.agent.provider.swap(provider);
+    desk.services.handle.0.provider.swap(provider);
 
     let answer = with_parked(&desk, |desk, session| {
         desk.ask(start_req(session, "say hi", "helper"))
@@ -24,7 +25,7 @@ fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
     let (live, _) = summary_counts(&answer);
     assert_eq!(live, 1, "the child is the one other agent alive");
 
-    match wait_for_settle(&parent_inbox) {
+    match wait_for_settle(parent_inbox) {
         crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
             assert!(
                 matches!(result.outcome, crate::bus::AgentOutcome::Replied),
@@ -46,9 +47,11 @@ fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
 /// touched, so nothing has to ask again to see what the fleet now is.
 #[test]
 fn start_answers_the_fleets_state_not_a_receipt() {
-    let (desk, fleet, parent_inbox, _agent) = spawnable_desk(3);
+    let (desk, fleet, agent) = spawnable_desk(3);
+    let parent_inbox = &agent.inbox;
     desk.services
-        .agent
+        .handle
+        .0
         .provider
         .swap(Arc::new(Provider::scripted(
             "test-model",
@@ -59,8 +62,11 @@ fn start_answers_the_fleets_state_not_a_receipt() {
         )));
     // Held for the whole test, and with no worker behind it, so it never
     // settles out from under the assertion below.
-    let mut sibling = crate::agent::testkit::TestAgentSpec::new("already-there");
-    sibling.role = crate::agent::Role::child(&desk.services.agent);
+    let sibling = crate::agent::testkit::TestAgentSpec::child(
+        "already-there",
+        &desk.services.handle,
+        agent.inbox.mailbox(),
+    );
     let _already_there =
         crate::agent::testkit::test_agent(&fleet, sibling).expect("a fresh child of a live parent");
 
@@ -83,7 +89,7 @@ fn start_answers_the_fleets_state_not_a_receipt() {
         "and `list names them, the reader among them"
     );
 
-    let _ = wait_for_settle(&parent_inbox);
+    let _ = wait_for_settle(parent_inbox);
 }
 
 /// `Inherit` is the parent's own `Arc<Provider>`, and a configured role the
@@ -99,9 +105,9 @@ fn inherit_is_the_parents_provider_and_a_role_the_bound_one() {
         roles,
         ..crate::agent::fleet::Launch::for_test()
     };
-    let (services, _, _, _agent) = services_with(3, launch);
+    let (services, _, _agent) = services_with(3, launch);
     let desk = ExarchDesk { services };
-    let parent = desk.services.agent.current_provider();
+    let parent = desk.services.handle.current_provider();
     let inherited = desk.child_provider(&Selection::Inherit).unwrap();
     assert!(Arc::ptr_eq(&parent, &inherited));
     let child = desk
@@ -132,7 +138,7 @@ fn a_refused_role_never_registers_a_child() {
             "no role 'other': the configured roles are cheap; or pass model: `inherit",
         ),
     ] {
-        let (services, _, _, _agent) = services_with(3, launch);
+        let (services, _, _agent) = services_with(3, launch);
         let desk = ExarchDesk { services };
         // Refused before any fork is taken up, so none need be parked.
         let err = desk
@@ -151,7 +157,7 @@ fn a_refused_role_never_registers_a_child() {
             err.message
         );
         assert_eq!(
-            summary(&desk.services.agent).live,
+            summary(&desk.services.handle, &desk.services.fleet).live,
             0,
             "a refused role must never register a child"
         );
@@ -204,7 +210,7 @@ fn start_refuses_a_misspelt_spec_field() {
 
 #[test]
 fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
-    let (desk, _fleet, _parent_inbox, _agent) = spawnable_desk(0);
+    let (desk, _fleet, _agent) = spawnable_desk(0);
     let (err, left_parked) = with_parked(&desk, |desk, session| {
         let answer = desk.ask(start_req(session, "hi", "helper"));
         (answer, still_parked(desk, session))
@@ -231,7 +237,7 @@ fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
 /// adopted, so the refused spawn registers no child.
 #[test]
 fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
-    let (desk, _fleet, _parent_inbox, _agent) = spawnable_desk(3);
+    let (desk, _fleet, _agent) = spawnable_desk(3);
     let provider = Arc::new(Provider::scripted(
         "test-model",
         Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -239,7 +245,7 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
             "exarch-agents `reply 'a'",
         )])),
     ));
-    desk.services.agent.provider.swap(provider);
+    desk.services.handle.0.provider.swap(provider);
 
     let answer = with_parked(&desk, |desk, session| {
         desk.ask(start_req(session, "go", "helper"))
@@ -263,7 +269,7 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
          refused call"
     );
     assert_eq!(
-        summary(&desk.services.agent).live,
+        summary(&desk.services.handle, &desk.services.fleet).live,
         1,
         "the second, refused spawn must leave no child behind"
     );
@@ -274,7 +280,7 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
 /// or a listener dialled, rather than leaving it all to the enrolment.
 #[test]
 fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
-    let (desk, _fleet, _parent_inbox, _agent) = spawnable_desk(3);
+    let (desk, _fleet, _agent) = spawnable_desk(3);
 
     let (err, left_parked) = with_parked(&desk, |desk, session| {
         let answer = desk.ask(start_req(session, "go", "help/er"));
@@ -292,7 +298,7 @@ fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
          for the run guard to reap"
     );
     assert_eq!(
-        summary(&desk.services.agent).live,
+        summary(&desk.services.handle, &desk.services.fleet).live,
         0,
         "a refused spawn leaves no child behind"
     );
@@ -302,7 +308,8 @@ fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
 /// parent's own is never debited.
 #[test]
 fn fuel_bounds_depth_not_fanout() {
-    let (desk, _fleet, parent_inbox, _agent) = spawnable_desk(1);
+    let (desk, _fleet, agent) = spawnable_desk(1);
+    let parent_inbox = &agent.inbox;
     let provider = Arc::new(Provider::scripted(
         "test-model",
         Script::new()
@@ -319,7 +326,7 @@ fn fuel_bounds_depth_not_fanout() {
                 "exarch-agents `reply 'c'",
             )])),
     ));
-    desk.services.agent.provider.swap(provider);
+    desk.services.handle.0.provider.swap(provider);
 
     for i in 0..3 {
         let answer = with_parked(&desk, move |desk, session| {
@@ -333,7 +340,7 @@ fn fuel_bounds_depth_not_fanout() {
     }
 
     for _ in 0..3 {
-        match wait_for_settle(&parent_inbox) {
+        match wait_for_settle(parent_inbox) {
             crate::bus::Next::Item(crate::bus::Item::Agent(result)) => assert!(
                 matches!(result.outcome, crate::bus::AgentOutcome::Replied),
                 "every sibling must settle by replying, got: {:?}",
@@ -344,16 +351,15 @@ fn fuel_bounds_depth_not_fanout() {
     }
 }
 
-/// The capture went stale the instant the *calling* session's inbox
-/// epoch moved past what was snapshotted at install.
+/// A call retains the work it captured, even after `/clear` abandons it.
 #[test]
 fn agent_start_refuses_after_clear() {
-    let (desk, _fleet, parent_inbox, _agent) = spawnable_desk(3);
-    parent_inbox.clear(); // the /clear gesture, on this caller
+    let (desk, _fleet, agent) = spawnable_desk(3);
+    agent.inbox.abandon(crate::bus::Queue::Discard);
     let err = with_parked(&desk, |desk, session| {
         desk.ask(start_req(session, "hi", "helper"))
     })
-    .expect_err("a stale epoch must refuse");
+    .expect_err("abandoned work must refuse");
     assert!(
         err.message.contains("cleared"),
         "must name the /clear cause, got: {}",
@@ -367,7 +373,7 @@ fn agent_start_refuses_after_clear() {
 /// rides the bequest the run parked; the desk reads none of its own.
 #[test]
 fn refused_enquiry_leaves_the_nursery_empty() {
-    let (desk, _fleet, _parent_inbox, _agent) = spawnable_desk(3);
+    let (desk, _fleet, _agent) = spawnable_desk(3);
     let (answer, left_parked) = parked_by(
         &desk,
         r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `restrict [net: 'yes'], model: `inherit]",
@@ -393,22 +399,21 @@ fn refused_enquiry_leaves_the_nursery_empty() {
 /// reaches any live agent but this one.
 #[test]
 fn cancel_scopes_to_descendants_and_message_does_not() {
-    let (services, fleet, _root_inbox, _agent) =
-        services_with(3, crate::agent::fleet::Launch::for_test());
+    let (services, fleet, root_agent) = services_with(3, crate::agent::fleet::Launch::for_test());
     let desk_root = ExarchDesk { services };
     // root -> mid -> grandchild, and root -> sibling (mid's sibling).
-    let under = |name: &str, parent: &Arc<Agent>| {
-        let mut spec = crate::agent::testkit::TestAgentSpec::new(name);
-        spec.role = crate::agent::Role::child(parent);
+    let under = |name: &str, parent: &TestAgent| {
+        let spec =
+            crate::agent::testkit::TestAgentSpec::child(name, parent, parent.inbox.mailbox());
         crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh child of a live parent")
     };
-    let root = desk_root.services.agent.clone();
-    let mid = under("mid", &root);
-    let _sibling = under("sibling", &root);
+    let mid = under("mid", &root_agent);
+    let _sibling = under("sibling", &root_agent);
     let _grandchild = under("grandchild", &mid);
 
     let mut desk1 = desk_root;
-    desk1.services.agent = mid.clone();
+    desk1.services.handle = (*mid).clone();
+    desk1.services.mailbox = mid.inbox.mailbox();
 
     for who in ["sibling", "parent", "grandchild"] {
         assert!(
@@ -445,10 +450,12 @@ fn cancel_scopes_to_descendants_and_message_does_not() {
 /// value must render before an enquiry raised after it in the same run.
 #[test]
 fn surface_then_spawn_observes_the_surface_first() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
+    let session = crate::agent::Agent::for_test("system").unwrap();
     let (tx, rx) = channel();
-    let emit = Emitter::new(tx, session.agent.id);
-    let _ = session.ral(r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, model: `inherit]"#,
+    let emit = Emitter::new(tx, session.id());
+    let _ = session.ral(
+        &ral_core::process::DurableRoot::default().child(),
+        r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, model: `inherit]"#,
         5,
         &emit,
     );

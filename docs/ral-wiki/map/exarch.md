@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3dbbe8f3
-generated_at_date: 2026-10-27
+generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
+generated_at_date: 2026-10-28
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -36,7 +36,7 @@ exit code.
   exarch's `INSTALLERS` (whose `narrow` is `policy::base_layer`, since core
   carries no base-tag lexicon of its own and a wire-seeded child resolves its own
   layer while booting). A confined child is served before any pin, the anchor
-  unpinned; every other role — the `--engine` seat child
+  unpinned; every other role — the `--engine` engine child
   included — is pinned by [[map/core/capabilities|`authority::sandbox::boot`]] before it runs.
   `main` and **every test `#[ctor]` (`pre_main_ctor!`) share this dispatch and
   its exit** — they differ only in where argv comes from: a constructor calls
@@ -78,11 +78,10 @@ exit code.
   (`policy::for_invocation`, passing `sandbox::pinned_arg0()` for its self layer;
   → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the first root
-  [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`
+  [[map/exarch/agent|`Agent`]] via `Agent::root(RootConfig, RootEngine, provider)`
   — or, for the TUI under `--resume`, every live root of the run via
-  `Avatar::resume` — the ral binary seats it on `RootSeat::Identity`; a wire
-  seat drives a remote engine instead, and synod reuses the same
-  construction — and hands off to one frontend — the inline TUI or the
+  `Agent::resume` — the exarch binary uses `RootEngine::Identity`; a wire
+  engine runs remotely, and synod reuses the same construction — and hands off to one frontend — the inline TUI or the
   pipe-friendly headless runner, selected explicitly by `--headless` or
   implicitly by `--prompt` (which refuses to resume a run with more than one
   open session) — which shares the roots' one [[map/exarch/agent|`Fleet`]].
@@ -154,10 +153,10 @@ can inherit a live key.**
 Two modules hold the once-per-process pieces; nothing here is per-run.
 `app.rs` is the apps and their directories (`App`, `EXARCH`, `SYNOD`, the XDG
 and project dirs, `Scratch`, `RunLock`, the resume list, the time and slug helpers); `boot.rs` is
-the shell every seat starts from.
+the shell every engine starts from.
 
 - **`engine_runtime` and `engine_root`** (`boot.rs`) — the installer's two
-  halves for both seats, run engine-side at Attach: `engine_runtime` is core's
+  halves for both carriers, run engine-side at Attach: `engine_runtime` is core's
   [[map/repl/startup|`ral_core::shell::boot::boot_runtime`]] with exarch's host surface
   (`builtins::host_surface()`) so the host builtins ride construction, and a
   child engine runs it too; `engine_root` is the root-only recipe over a root
@@ -188,7 +187,7 @@ the shell every seat starts from.
   (`join_slash`), and `guest_scratch_env`, a function of the app and a
   `GuestPath` alone, which synod's guest needs, joins with `/` on every host
   (`GuestPath::join`), since a guest path lifted into a host `PathBuf` would
-  join `/tmp\pip` on Windows. `Seat::root` attaches its identity engine at
+  join `/tmp\pip` on Windows. `Engine::root` attaches its identity engine at
   `EnginePath::Host` paths, the launching user's cwd and `HOME`, with the
   launch's grants in `Root::grants`. The five restrictive profiles write no user caches, so
   a write lands in the scratch rather than in a denied real one. The
@@ -348,8 +347,7 @@ agent, so a root, identity fork, and wire child each receive their own surface.
 The assembled prompt is a fact of the session: every opening of a log (a root,
 a fork, a `/new` or `/branch` root) records it as `Protocol::System`, and a
 resume records the freshly built prompt only if it differs from the one in
-force. A round-trip reads it off the model fold, so `Agent` and `Birth` hold no
-copy.
+force. A round-trip reads it off the model fold, so the owner and its address hold no prompt copy.
 
 `--system FILE...` replaces *only* the persona slot with the user-supplied files;
 the per-agent index and optional sections still resolve from the stored base.
@@ -359,7 +357,7 @@ the per-agent index and optional sections still resolve from the stored base.
 - [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the attend loop
   (provider round-trips, tool-call batches with prompt-queue steering, context eviction,
   the nudge-retry policy, sub-agent fork), the `Role` each node is born with, the owned
-  hot-swappable provider, dynamic focus, and the subtree cancel cascade.
+  hot-swappable provider, dynamic focus, and the life/work/exchange scope tree.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry
   driver, prompt caching, usage and dollar accounting.
 - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level
@@ -405,8 +403,11 @@ and [[map/exarch/policy|policy]].
 With `--allow-schedule`, the agent may schedule its own wakeups (`schedules`)
 — a cron expression or a one-shot `after <dur>`. A wakeup schedules the
 *agent*, not a worker: at its time a synthetic user item is posted to the
-agent's own inbox and delivered at the exchange boundary, re-engaging the
-loop with no human present. It is off by default — waking yourself
+agent's own inbox and delivered at a tool or exchange boundary, re-engaging
+its loop with no human present. Each schedule holds a weak mailbox for the
+work in which it was armed: abandoning that work makes its wakeup stale;
+`reply` and `/clear` also clear the registry. Stop leaves retirement to the
+callback, and Synod refuses scheduling outright. It is off by default — waking yourself
 indefinitely is real authority. The inbox/reaper mechanics live on the
 [[map/exarch/frontend|frontend]] and [[map/exarch/agent|agent]] pages; see
 [[decisions/260617_scheduled-wakeups|scheduled-wakeups]].

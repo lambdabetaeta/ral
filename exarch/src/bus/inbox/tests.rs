@@ -1,17 +1,28 @@
-use super::{Inbox, Item, Minted, Next, ParkMode, Post, Source, Stamped};
-use crate::bus::{AgentMessage, AgentOutcome, AgentResult, ScheduleId};
-use crate::bus::{Read, Rewrite};
-use crate::cancel;
-use crate::record::{AgentId, Memory};
+use super::*;
+use crate::record::Memory;
+use ral_core::process::DurableRoot;
 use ral_core::test_helper::eventually;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
-/// The deliveries of one mid-exchange drain, for tests that queue no reads.
+fn inbox() -> Inbox {
+    Inbox::new(DurableRoot::default().child())
+}
+
+fn pop(inbox: &Inbox) -> Option<Next> {
+    inbox.draw(|_| ParkMode::Quiesce)
+}
+
+fn active() -> Inbox {
+    let inbox = inbox();
+    assert!(inbox.mailbox().steer("start".into()));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(_)))));
+    inbox.open_exchange();
+    inbox
+}
+
 fn drained(inbox: &Inbox) -> Vec<Item> {
     inbox
-        .drain_mid_exchange()
+        .drain()
         .into_iter()
         .map(|next| match next {
             Next::Item(item) => item,
@@ -20,644 +31,494 @@ fn drained(inbox: &Inbox) -> Vec<Item> {
         .collect()
 }
 
-/// Epoch 0 is a fresh [`Inbox`]'s own; `id` matters only to the dedupe tests.
-fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> Post {
-    wakeup_at(id, label, trigger, prompt, 0)
+fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> Scoped {
+    Scoped::Wakeup {
+        id: ScheduleId::new(id),
+        label: label.into(),
+        trigger: trigger.into(),
+        prompt: prompt.into(),
+    }
 }
 
-/// [`wakeup`] with an explicit epoch, for the stale-admission tests.
-/// Forging a [`Minted`] is possible only here inside `bus`; everyone
-/// else sends through a [`Stamp`].
-fn wakeup_at(id: u64, label: &str, trigger: &str, prompt: &str, epoch: u64) -> Post {
-    Post::Stamped {
-        epoch: Minted(epoch),
-        kind: Stamped::Wakeup {
-            id: ScheduleId::new(id),
-            label: label.into(),
-            trigger: trigger.into(),
-            prompt: prompt.into(),
-        },
+fn result(outcome: AgentOutcome, answers: u64) -> Scoped {
+    Scoped::Result(AgentResult {
+        id: AgentId::new(7),
+        name: "worker".into(),
+        outcome,
+        elapsed: Duration::ZERO,
+        answers,
+    })
+}
+
+fn message() -> Scoped {
+    Scoped::Message(AgentMessage {
+        from: AgentId::new(7),
+        from_name: "review".into(),
+        text: "please inspect the parser branch".into(),
+        seq: 4,
+    })
+}
+
+fn surface() -> Scoped {
+    use crate::card::testkit::{map_value, s, variant};
+    Scoped::Surface {
+        id: AgentId::new(0),
+        values: vec![variant(
+            "done",
+            map_value(vec![
+                ("cmd", s("<block>")),
+                ("outcome", variant("ok", FOValue::Unit)),
+            ]),
+        )],
     }
 }
 
 #[test]
+fn every_scoped_kind_is_fenced_at_pop() {
+    let cases: [(Source, fn() -> Scoped); 5] = [
+        (Source::Agent, || {
+            result(AgentOutcome::Stopped("done".into()), 0)
+        }),
+        (Source::Surface, surface),
+        (Source::Schedule, || wakeup(1, "nightly", "@", "go")),
+        (Source::Message, message),
+        (Source::Nudge, || Scoped::Nudge {
+            prompt: 1,
+            text: "continue".into(),
+        }),
+    ];
+    for (source, kind) in cases {
+        for cancelled in [false, true] {
+            let inbox = inbox();
+            let from = DurableRoot::default().child();
+            let mailbox = inbox.mailbox().vouched_by((*from).clone());
+            mailbox.post(kind());
+            if cancelled {
+                from.cancel(CancelCause::Cancelled);
+            }
+            assert_eq!(depth_of(&inbox, source), 1, "fence is at pop: {source:?}");
+            assert_eq!(pop(&inbox).is_some(), !cancelled, "{source:?}");
+            assert!(inbox.is_empty());
+            mailbox.steer("human".into());
+            assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "human"));
+        }
+    }
+}
+
+#[test]
+fn dead_nudge_remerges_the_human_posts_it_leaves_adjacent() {
+    for recall in [false, true] {
+        let inbox = active();
+        let mailbox = inbox.life_mailbox();
+        mailbox.steer("first".into());
+        inbox.nudge(1, "continue".into());
+        mailbox.steer("second".into());
+        inbox.close_exchange();
+        if recall {
+            assert_eq!(mailbox.recall(), ["first\nsecond"]);
+        } else {
+            assert!(
+                matches!(pop(&inbox), Some(Next::Item(Item::Human(text))) if text == "first\nsecond")
+            );
+        }
+        assert!(inbox.is_empty());
+    }
+}
+
+#[test]
+fn dead_provenance_or_life_refuses_publication() {
+    let inbox = inbox();
+    let from = inbox.life_child();
+    let mailbox = inbox.life_mailbox().vouched_by((*from).clone());
+    from.cancel(CancelCause::Cancelled);
+    assert!(!mailbox.post(surface()));
+    inbox.life_mailbox().end(CancelCause::Cancelled);
+    assert!(!inbox.life_mailbox().post(message()));
+    assert!(inbox.is_empty());
+}
+
+#[test]
+fn commands_are_not_fenced_by_abandoned_work() {
+    let inbox = inbox();
+    let mailbox = inbox.mailbox();
+    mailbox.post_read(Read::Resources);
+    mailbox.post_rewrite(Rewrite::Evict);
+    inbox.abandon(Queue::Keep);
+    assert!(matches!(pop(&inbox), Some(Next::Read(Read::Resources))));
+    assert!(matches!(pop(&inbox), Some(Next::Rewrite(Rewrite::Evict))));
+}
+
+#[test]
 fn inbox_waiting_for_input_tracks_human_park() {
-    let inbox = Inbox::new();
+    let inbox = inbox();
+    let mailbox = inbox.mailbox();
+    assert!(mailbox.status().waiting_for_input);
+    mailbox.steer("work".into());
+    assert!(!mailbox.status().waiting_for_input);
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "work"));
+    assert!(!mailbox.status().waiting_for_input);
+    let worker = std::thread::spawn(move || inbox.draw(|_| ParkMode::Held));
     assert!(
-        inbox.mailbox().waiting_for_input(),
-        "a fresh interactive inbox starts at the human boundary"
-    );
-
-    inbox.push_user("work".into());
-    assert!(
-        !inbox.mailbox().waiting_for_input(),
-        "posting input wakes the consumer out of the yielded state"
-    );
-    assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "work"));
-    assert!(
-        !inbox.mailbox().waiting_for_input(),
-        "draining an item means work has started; yield resumes only at park"
-    );
-
-    let worker_inbox = inbox.clone();
-    let token = cancel::Token::new();
-    let worker_token = token;
-    let handle =
-        std::thread::spawn(move || worker_inbox.next_or_idle(|| ParkMode::Held, &worker_token));
-
-    assert!(
-        eventually(Duration::from_secs(1), || inbox
-            .mailbox()
-            .waiting_for_input()
+        eventually(Duration::from_secs(1), || mailbox
+            .status()
+            .waiting_for_input
             .then_some(()))
-        .is_some(),
-        "a Held empty-inbox park is the human-input yield point"
+        .is_some()
     );
-
-    inbox.mailbox().push(Post::UserSteering("next".into()));
-    assert!(
-        !inbox.mailbox().waiting_for_input(),
-        "a submitted prompt clears the yielded bit before waking the worker"
-    );
-    assert!(
-        matches!(handle.join().expect("parked worker joins"), Some(Next::Item(Item::Human(s))) if s == "next"),
-        "the wakeup delivered the submitted prompt"
-    );
-    assert!(
-        !inbox.mailbox().waiting_for_input(),
-        "taking the item leaves the root working until it parks again"
-    );
+    mailbox.steer("next".into());
+    assert!(!mailbox.status().waiting_for_input);
+    assert!(matches!(worker.join().unwrap(), Some(Next::Item(Item::Human(s))) if s == "next"));
+    assert!(!mailbox.status().waiting_for_input);
 }
 
 #[test]
 fn inbox_waiting_for_input_ignores_non_human_parks() {
-    let inbox = Inbox::new();
-    inbox.push_user("work".into());
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Human(_)))
-    ));
-    assert!(!inbox.mailbox().waiting_for_input());
-
+    let inbox = active();
+    let mailbox = inbox.mailbox();
     let observed = Arc::new(AtomicBool::new(false));
     let worker_observed = observed.clone();
-    let worker_inbox = inbox.clone();
-    let token = cancel::Token::new();
-    let worker_token = token.clone();
-    let handle = std::thread::spawn(move || {
-        worker_inbox.next_or_idle(
-            || {
-                worker_observed.store(true, Ordering::Release);
-                ParkMode::HeldByChildren
-            },
-            &worker_token,
-        )
+    let worker = std::thread::spawn(move || {
+        inbox.draw(|_| {
+            worker_observed.store(true, Ordering::Release);
+            ParkMode::HeldByChildren
+        })
     });
-
     assert!(
         eventually(Duration::from_secs(1), || observed
             .load(Ordering::Acquire)
             .then_some(()))
-        .is_some(),
-        "the worker reached the park predicate"
+        .is_some()
     );
-    std::thread::sleep(Duration::from_millis(150));
-    assert!(
-        !inbox.mailbox().waiting_for_input(),
-        "waiting on children is still work, not a human-input yield"
-    );
-
-    token.cancel(ral_core::process::CancelCause::Cancelled);
-    assert!(
-        handle.join().expect("cancelled worker joins").is_none(),
-        "non-human parks terminate on cancellation"
-    );
+    assert!(!mailbox.status().waiting_for_input);
+    mailbox.end(CancelCause::Cancelled);
+    assert!(worker.join().unwrap().is_none());
 }
 
-/// The complement of the test above: an *interrupt* drops the in-flight
-/// exchange rather than ending the agent.  Proved without a timing race —
-/// after the interrupt the only exit left is a pushed item, so getting it
-/// back through the join is the evidence a terminate would have destroyed.
 #[test]
 fn non_human_park_survives_an_interrupt() {
-    let inbox = Inbox::new();
-    inbox.push_user("work".into());
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Human(_)))
-    ));
-
+    let inbox = active();
+    let mailbox = inbox.mailbox();
     let observed = Arc::new(AtomicBool::new(false));
     let worker_observed = observed.clone();
-    let worker_inbox = inbox.clone();
-    let token = cancel::Token::new();
-    let worker_token = token.clone();
-    let handle = std::thread::spawn(move || {
-        worker_inbox.next_or_idle(
-            || {
-                worker_observed.store(true, Ordering::Release);
-                ParkMode::HeldByChildren
-            },
-            &worker_token,
-        )
+    let worker = std::thread::spawn(move || {
+        inbox.draw(|_| {
+            worker_observed.store(true, Ordering::Release);
+            ParkMode::HeldByChildren
+        })
     });
-
     assert!(
         eventually(Duration::from_secs(1), || observed
             .load(Ordering::Acquire)
             .then_some(()))
-        .is_some(),
-        "the worker reached the park predicate"
+        .is_some()
     );
-
-    token.cancel(ral_core::process::CancelCause::Interrupted);
-
-    inbox.mailbox().push(Post::UserSteering("resume".into()));
-    assert!(
-        matches!(
-            handle.join().expect("parked worker joins"),
-            Some(Next::Item(Item::Human(s))) if s == "resume"
-        ),
-        "the interrupt was ignored; the pushed item released the park"
-    );
+    mailbox.interrupt();
+    mailbox.steer("resume".into());
+    assert!(matches!(worker.join().unwrap(), Some(Next::Item(Item::Human(s))) if s == "resume"));
+    assert!(mailbox.is_live());
 }
 
-/// [`ParkMode::Engaged`] grants no immunity: were it to, its
-/// `HeldByChildren` parent would wait forever on a cancelled result.
 #[test]
-fn engaged_park_dies_on_a_terminate_cause_despite_the_exchange() {
-    let inbox = Inbox::new();
+fn engaged_park_ends_with_its_life() {
+    let inbox = inbox();
+    let mailbox = inbox.mailbox();
     let observed = Arc::new(AtomicBool::new(false));
     let worker_observed = observed.clone();
-    let token = cancel::Token::new();
-    let worker_token = token.clone();
-    let handle = std::thread::spawn(move || {
-        inbox.next_or_idle(
-            || {
-                worker_observed.store(true, Ordering::Release);
-                ParkMode::Engaged
-            },
-            &worker_token,
-        )
+    let worker = std::thread::spawn(move || {
+        inbox.draw(|_| {
+            worker_observed.store(true, Ordering::Release);
+            ParkMode::Engaged
+        })
     });
-
     assert!(
         eventually(Duration::from_secs(1), || observed
             .load(Ordering::Acquire)
             .then_some(()))
-        .is_some(),
-        "the worker reached the park predicate"
+        .is_some()
     );
-
-    token.cancel(ral_core::process::CancelCause::Cancelled);
-    assert!(
-        handle.join().expect("cancelled worker joins").is_none(),
-        "a terminate cause ends an Engaged park despite the exchange"
-    );
+    mailbox.end(CancelCause::Cancelled);
+    assert!(worker.join().unwrap().is_none());
 }
 
 #[test]
-fn held_park_ends_on_a_terminate_cause() {
-    let inbox = Inbox::new();
-    let token = cancel::Token::new();
-    token.cancel(ral_core::process::CancelCause::Cancelled);
-    inbox.push_user("resume".into());
-    assert!(inbox.next_or_idle(|| ParkMode::Held, &token).is_none());
+fn parked_owner_polls_ancestor_cancellation() {
+    let root = DurableRoot::default();
+    let inbox = Inbox::new(root.child());
+    let observed = Arc::new(AtomicBool::new(false));
+    let worker_observed = observed.clone();
+    let worker = std::thread::spawn(move || {
+        inbox.draw(|_| {
+            worker_observed.store(true, Ordering::Release);
+            ParkMode::UntilCancelled
+        })
+    });
+    assert!(
+        eventually(Duration::from_secs(1), || observed
+            .load(Ordering::Acquire)
+            .then_some(()))
+        .is_some()
+    );
+    root.cancel(CancelCause::Cancelled);
+    assert!(
+        eventually(Duration::from_secs(1), || worker
+            .is_finished()
+            .then_some(()))
+        .is_some()
+    );
+    assert!(worker.join().unwrap().is_none());
 }
 
-/// A wakeup reaches the model as soon as the tool batch settles.
 #[test]
 fn inbox_wakeup_drains_at_tool_boundary_marked() {
-    let inbox = Inbox::new();
-    inbox.push_user("steer".into());
-    inbox.push(wakeup(1, "nightly", "0 3 * * *", "run the tests"));
-
+    let inbox = active();
+    inbox.mailbox().steer("steer".into());
+    inbox
+        .mailbox()
+        .post(wakeup(1, "nightly", "0 3 * * *", "run the tests"));
     assert!(
-        matches!(
-            drained(&inbox).as_slice(),
-            [Item::Human(h), Item::Wakeup(w)]
-                if h == "steer"
-                    && w == "[scheduled 'nightly' · 0 3 * * *] run the tests",
-        ),
-        "the wakeup drains mid-exchange, marked, after the steering",
+        matches!(drained(&inbox).as_slice(), [Item::Human(h), Item::Wakeup(w)]
+        if h == "steer" && w == "[scheduled 'nightly' · 0 3 * * *] run the tests")
     );
     assert!(inbox.is_empty());
 }
 
-/// Async deliveries drain in queue order too, so a result settling during a
-/// long tool-call loop need not wait for the exchange to end.
 #[test]
 fn inbox_tool_drain_takes_async_deliveries() {
-    let inbox = Inbox::new();
-    inbox.push(wakeup(1, "nightly", "@", "go"));
-    inbox.push_user("redirect now".into());
-    inbox.push_user("and also this".into());
-
+    let inbox = active();
+    inbox.mailbox().post(wakeup(1, "nightly", "@", "go"));
+    inbox.mailbox().steer("redirect now".into());
+    inbox.mailbox().steer("and also this".into());
     assert!(
-        matches!(
-            drained(&inbox).as_slice(),
-            [Item::Wakeup(_), Item::Human(s)] if s == "redirect now\nand also this",
-        ),
-        "the async wakeup and the coalesced steering both drain, in order",
+        matches!(drained(&inbox).as_slice(), [Item::Wakeup(_), Item::Human(s)]
+        if s == "redirect now\nand also this")
     );
     assert!(inbox.is_empty());
 }
 
 #[test]
 fn inbox_agent_message_drains_marked_at_tool_boundary() {
-    let inbox = Inbox::new();
-    inbox.push(Post::AgentMessage(AgentMessage {
-        from: AgentId::new(7),
-        from_name: "review".into(),
-        text: "please inspect the parser branch".into(),
-    }));
-
-    assert!(matches!(
-        drained(&inbox).as_slice(),
-        [Item::Message(m)]
-            if m.from == AgentId::new(7)
-                && m.from_name == "review"
-                && m.text == "please inspect the parser branch"
-                && m.render()
-                    == "[EXARCH AGENT 7 MESSAGE: review]\nplease inspect the parser branch\n[/EXARCH]"
-    ));
+    let inbox = active();
+    inbox.mailbox().post(message());
+    assert!(matches!(drained(&inbox).as_slice(), [Item::Message(m)]
+        if m.from == AgentId::new(7) && m.from_name == "review"
+        && m.text == "please inspect the parser branch"
+        && m.render() == "[EXARCH AGENT 7 MESSAGE: review]\nplease inspect the parser branch\n[/EXARCH]"));
+    assert_eq!(inbox.mailbox().answers(), 4);
     assert!(inbox.is_empty());
 }
 
-/// A `/rewind` is a barrier: it drops the very context a prompt typed after
-/// it would land in, so nothing queued behind it drains until it has run.
-/// Deliveries ahead of it still drain.
 #[test]
 fn inbox_tool_drain_stops_at_a_barrier() {
-    let inbox = Inbox::new();
-    inbox.push_user("before".into());
-    inbox.push(wakeup(1, "x", "@", "p"));
-    inbox.push(Post::Rewrite(Rewrite::Rewind(7)));
-    inbox.push_user("after the rewind".into());
-
-    assert!(matches!(
-        drained(&inbox).as_slice(),
-        [Item::Human(b), Item::Wakeup(_)] if b == "before"
-    ));
+    let inbox = active();
+    let mailbox = inbox.mailbox();
+    mailbox.steer("before".into());
+    mailbox.post(wakeup(1, "x", "@", "p"));
+    mailbox.post_rewrite(Rewrite::Rewind(7));
+    mailbox.steer("after the rewind".into());
+    assert!(
+        matches!(drained(&inbox).as_slice(), [Item::Human(s), Item::Wakeup(_)] if s == "before")
+    );
     assert!(drained(&inbox).is_empty());
     assert!(matches!(
-        inbox.next_item(),
+        pop(&inbox),
         Some(Next::Rewrite(Rewrite::Rewind(7)))
     ));
-    assert!(
-        matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "after the rewind")
-    );
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "after the rewind"));
     assert!(inbox.is_empty());
 }
 
-/// A read drains mid-exchange in the order typed, beside the prompts; a
-/// rewrite holds the scan, and everything behind it waits for the exchange
-/// boundary.
 #[test]
 fn inbox_mid_exchange_drain_takes_reads_in_order_and_holds_at_a_rewrite() {
-    let inbox = Inbox::new();
-    inbox.push(Post::Read(Read::Resources));
-    inbox.push_user("a".into());
-    inbox.push(Post::Rewrite(Rewrite::Evict));
-    inbox.push_user("b".into());
-
-    assert!(matches!(
-        inbox.drain_mid_exchange().as_slice(),
-        [Next::Read(Read::Resources), Next::Item(Item::Human(s))] if s == "a"
-    ));
-    assert!(inbox.drain_mid_exchange().is_empty(), "the rewrite holds");
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Rewrite(Rewrite::Evict))
-    ));
-    assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "b"));
+    let inbox = active();
+    let mailbox = inbox.mailbox();
+    mailbox.post_read(Read::Resources);
+    mailbox.steer("a".into());
+    mailbox.post_rewrite(Rewrite::Evict);
+    mailbox.steer("b".into());
+    assert!(
+        matches!(inbox.drain().as_slice(), [Next::Read(Read::Resources), Next::Item(Item::Human(s))] if s == "a")
+    );
+    assert!(inbox.drain().is_empty());
+    assert!(matches!(pop(&inbox), Some(Next::Rewrite(Rewrite::Evict))));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "b"));
     assert!(inbox.is_empty());
 }
 
-/// The queue strip is a projection of what the human typed, not an inbox
-/// debugger: prompts and commands alike, in the order they were typed, and
-/// a wakeup — which nobody typed — stays out.
 #[test]
-fn inbox_queued_human_messages_shows_typed_text_in_order() {
-    let inbox = Inbox::new();
-    inbox.push(wakeup(1, "morning", "@daily", "check"));
-    inbox.push_user("first".into());
-    inbox.push(Post::Read(Read::Hatch {
+fn cancelled_exchange_drains_nothing() {
+    let inbox = active();
+    inbox.mailbox().steer("later".into());
+    inbox.mailbox().interrupt();
+    assert!(inbox.drain().is_empty());
+    assert_eq!(inbox.mailbox().queued(), ["later"]);
+}
+
+#[test]
+fn inbox_queued_shows_typed_text_in_order() {
+    let inbox = inbox();
+    let mailbox = inbox.mailbox();
+    mailbox.post(wakeup(1, "morning", "@daily", "check"));
+    mailbox.steer("first".into());
+    mailbox.post_read(Read::Hatch {
         memory: Memory::Mnemon,
         name: Some("scout".into()),
-    }));
-    inbox.push_user("second".into());
-
-    assert_eq!(
-        inbox.mailbox().queued_human_messages(),
-        vec![
-            "first".to_string(),
-            "/branch scout".to_string(),
-            "second".to_string()
-        ]
+    });
+    mailbox.steer("second".into());
+    assert_eq!(mailbox.queued(), ["first", "/branch scout", "second"]);
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "first"));
+    assert!(
+        matches!(pop(&inbox), Some(Next::Read(Read::Hatch { name: Some(s), .. })) if s == "scout")
     );
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Wakeup(_)))
-    ));
-    assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "first"));
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Read(Read::Hatch { name: Some(s), .. })) if s == "scout"
-    ));
-    assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "second"));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "second"));
 }
 
-/// A sole wakeup is not the user's draft, so nothing comes back.
 #[test]
 fn inbox_recall_no_user_prompts() {
-    let inbox = Inbox::new();
-    inbox.push(wakeup(1, "x", "@", "p"));
-    assert_eq!(
-        inbox.mailbox().recall(),
-        Vec::<String>::new(),
-        "no user prompts to recall"
-    );
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Wakeup(_)))
-    ));
+    let inbox = inbox();
+    inbox.mailbox().post(wakeup(1, "x", "@", "p"));
+    assert_eq!(inbox.mailbox().recall(), [] as [String; 0]);
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
 }
 
-/// Even prompts sandwiched between non-user deliveries, which keep their
-/// order.  "second" and "third" arrive back-to-back, so the push-time merge
-/// already folded them into one entry.
 #[test]
 fn inbox_recall_extracts_all_leaving_non_user_in_order() {
-    let inbox = Inbox::new();
-    inbox.push_user("first".into());
-    inbox.push(wakeup(1, "x", "@", "p"));
-    inbox.push_user("second".into());
-    inbox.push_user("third".into());
-    inbox.push(Post::Read(Read::Resources));
-    inbox.push_user("fourth".into());
-    assert_eq!(
-        inbox.mailbox().recall(),
-        vec![
-            "first".to_string(),
-            "second\nthird".to_string(),
-            "fourth".to_string(),
-        ],
-        "all user prompts come back oldest-first, past interspersed deliveries",
-    );
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Wakeup(_)))
-    ));
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Read(Read::Resources))
-    ));
+    let inbox = inbox();
+    let mailbox = inbox.mailbox();
+    mailbox.steer("first".into());
+    mailbox.post(wakeup(1, "x", "@", "p"));
+    mailbox.steer("second".into());
+    mailbox.steer("third".into());
+    mailbox.post_read(Read::Resources);
+    mailbox.steer("fourth".into());
+    assert_eq!(mailbox.recall(), ["first", "second\nthird", "fourth"]);
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
+    assert!(matches!(pop(&inbox), Some(Next::Read(Read::Resources))));
     assert!(inbox.is_empty());
 }
 
-/// A `spawn` worker's batch, terminated by the `` `done `` event core
-/// appends, stamped with `epoch` — a live one for the ordinary path, a
-/// stale one to exercise the pop-time fence.
-fn surface(epoch: u64) -> Post {
-    use crate::card::testkit::{map_value, s, variant};
-    let done = variant(
-        "done",
-        map_value(vec![
-            ("cmd", s("<block>")),
-            ("outcome", variant("ok", ral_core::data::FOValue::Unit)),
-        ]),
-    );
-    Post::Stamped {
-        epoch: Minted(epoch),
-        kind: Stamped::Surface {
-            id: AgentId::new(0),
-            values: vec![done],
-        },
+#[test]
+fn abandon_applies_each_queue_policy_and_empties_awaiting() {
+    for queue in [Queue::Keep, Queue::Recall, Queue::Discard] {
+        let inbox = active();
+        let work = inbox.mailbox();
+        let life = inbox.life_mailbox();
+        let child = work.adopt(AgentId::new(1)).unwrap();
+        let exchange = inbox.exchange();
+        assert!(work.status().busy);
+        work.steer("first".into());
+        life.post(surface());
+        work.steer("second".into());
+        work.steer("third".into());
+        work.post(wakeup(1, "x", "@", "p"));
+        let recalled = inbox.abandon(queue);
+        assert!(child.is_cancelled());
+        assert!(exchange.is_cancelled());
+        assert!(!work.is_current());
+        assert!(inbox.mailbox().is_current());
+        assert!(!life.status().busy);
+        assert!(work.adopt(AgentId::new(2)).is_none());
+        match queue {
+            Queue::Keep => {
+                assert_eq!(recalled, [] as [String; 0]);
+                assert_eq!(life.queued(), ["first", "second\nthird"]);
+                assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "first"));
+                assert!(matches!(
+                    pop(&inbox),
+                    Some(Next::Item(Item::Surface { .. }))
+                ));
+                assert!(
+                    matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "second\nthird")
+                );
+            }
+            Queue::Recall => {
+                assert_eq!(recalled, ["first", "second\nthird"]);
+                assert_eq!(life.queued(), [] as [String; 0]);
+                assert!(matches!(
+                    pop(&inbox),
+                    Some(Next::Item(Item::Surface { .. }))
+                ));
+            }
+            Queue::Discard => {
+                assert_eq!(recalled, [] as [String; 0]);
+                assert!(inbox.is_empty());
+            }
+        }
+        assert!(pop(&inbox).is_none(), "old work wakeup is fenced");
     }
 }
 
-/// A `/clear` landing between delivery and drain empties the deque.
 #[test]
-fn inbox_surface_drains_at_tool_boundary_and_cleared() {
-    let inbox = Inbox::new();
-    inbox.push(surface(inbox.mailbox().epoch()));
-    inbox.clear();
+fn inbox_surface_drains_at_tool_boundary_and_discarded() {
+    let inbox = active();
+    inbox.life_mailbox().post(surface());
+    inbox.abandon(Queue::Discard);
+    assert!(drained(&inbox).is_empty());
+    inbox.mailbox().steer("next".into());
+    pop(&inbox).unwrap();
+    inbox.open_exchange();
+    inbox.life_mailbox().post(surface());
     assert!(
-        drained(&inbox).is_empty(),
-        "a /clear drops the queued batch"
+        matches!(drained(&inbox).as_slice(), [Item::Surface { id, .. }] if *id == AgentId::new(0))
     );
-
-    inbox.push(surface(inbox.mailbox().epoch()));
-    assert!(matches!(
-        drained(&inbox).as_slice(),
-        [Item::Surface { id, .. }] if *id == AgentId::new(0)
-    ));
 }
 
-/// Draining a wakeup re-opens its schedule for the next occurrence: the
-/// queue itself is the overlap-check's source of truth, so popping the
-/// item is all `has_queued_wakeup` needs to flip.
 #[test]
 fn inbox_wakeup_leaves_the_queue_once_drained() {
-    let inbox = Inbox::new();
+    let inbox = inbox();
     let mailbox = inbox.mailbox();
-    mailbox.stamp().post(Stamped::Wakeup {
-        id: ScheduleId::new(1),
-        label: "n".into(),
-        trigger: "* * * * *".into(),
-        prompt: "go".into(),
-    });
+    mailbox.post(wakeup(1, "n", "* * * * *", "go"));
     assert!(mailbox.has_queued_wakeup(ScheduleId::new(1)));
-    let _ = inbox.next_item();
-    assert!(
-        !mailbox.has_queued_wakeup(ScheduleId::new(1)),
-        "draining the wakeup re-opens its schedule"
-    );
+    assert!(!mailbox.has_queued_wakeup(ScheduleId::new(2)));
+    pop(&inbox).unwrap();
+    assert!(!mailbox.has_queued_wakeup(ScheduleId::new(1)));
 }
 
-/// `clear` drops the queue outright, so an unconsumed wakeup is not
-/// stranded as "still queued" forever.  `Avatar::clear` disarms the
-/// schedule registry alongside, but the TUI's `App::clear` reaches only
-/// the inbox, so this must hold on its own.
 #[test]
-fn inbox_clear_leaves_no_wakeup_stranded_as_queued() {
-    let inbox = Inbox::new();
+fn discard_leaves_no_wakeup_stranded_as_queued() {
+    let inbox = inbox();
     let mailbox = inbox.mailbox();
-    mailbox.stamp().post(Stamped::Wakeup {
-        id: ScheduleId::new(1),
-        label: "n".into(),
-        trigger: "* * * * *".into(),
-        prompt: "go".into(),
-    });
-    inbox.clear();
-    assert!(
-        !mailbox.has_queued_wakeup(ScheduleId::new(1)),
-        "clear must not strand a wakeup as still queued"
-    );
+    mailbox.post(wakeup(1, "n", "@", "go"));
+    inbox.abandon(Queue::Discard);
+    assert!(!mailbox.has_queued_wakeup(ScheduleId::new(1)));
     assert!(inbox.is_empty());
 }
 
-/// The reaper's compose-then-push race (`ScheduleRegistry::fire`): a wakeup
-/// composed under an epoch an intervening `/clear` has since bumped never
-/// surfaces into the rebuilt context.
 #[test]
-fn stale_epoch_wakeup_is_refused_at_pop() {
-    let inbox = Inbox::new();
-    let stale = inbox.mailbox().epoch();
-    inbox.clear();
-    inbox.push(wakeup_at(1, "n", "@", "go", stale));
-    assert!(
-        inbox.next_item().is_none(),
-        "a wakeup stamped with an epoch older than the inbox's own is dropped"
-    );
-}
-
-/// The positive half: the live epoch is delivered like any other message.
-#[test]
-fn current_epoch_wakeup_is_delivered() {
-    let inbox = Inbox::new();
-    let live = inbox.mailbox().epoch();
-    inbox.push(wakeup_at(1, "n", "@", "go", live));
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Wakeup(_)))
-    ));
-}
-
-/// The same one-rule fence, over an `AgentResult` instead of a wakeup.
-#[test]
-fn stale_epoch_agent_result_is_refused_at_pop() {
-    let inbox = Inbox::new();
-    let stamp = inbox.mailbox().stamp();
-    inbox.clear();
-    stamp.post(Stamped::AgentResult(AgentResult {
-        id: AgentId::new(1),
-        name: "worker".into(),
-        outcome: AgentOutcome::Stopped("done".into()),
-        elapsed: Duration::ZERO,
-    }));
-    assert!(
-        inbox.next_item().is_none(),
-        "an agent result stamped with an epoch older than the inbox's own is dropped"
-    );
-}
-
-/// The positive half: a live-epoch `AgentResult` is delivered.
-#[test]
-fn current_epoch_agent_result_is_delivered() {
-    let inbox = Inbox::new();
-    inbox
-        .mailbox()
-        .stamp()
-        .post(Stamped::AgentResult(AgentResult {
-            id: AgentId::new(1),
-            name: "worker".into(),
-            outcome: AgentOutcome::Stopped("done".into()),
-            elapsed: Duration::ZERO,
-        }));
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Agent(_)))
-    ));
-}
-
-/// The same one-rule fence, over a `Surface` batch instead of a wakeup.
-#[test]
-fn stale_epoch_surface_batch_is_refused_at_pop() {
-    let inbox = Inbox::new();
-    let stale = inbox.mailbox().epoch();
-    inbox.clear();
-    inbox.push(surface(stale));
-    assert!(
-        inbox.next_item().is_none(),
-        "a surface batch stamped with an epoch older than the inbox's own is dropped"
-    );
-}
-
-/// The positive half: a live-epoch `Surface` batch is delivered.
-#[test]
-fn current_epoch_surface_batch_is_delivered() {
-    let inbox = Inbox::new();
-    let live = inbox.mailbox().epoch();
-    inbox.push(surface(live));
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Surface { .. }))
-    ));
-}
-
-// ── inbox quotas without silent loss ───────────────────────────────────
-
-#[test]
-fn abandon_returns_the_prompts_drops_the_rest_and_fences_older_stamps() {
-    let inbox = Inbox::new();
-    let mailbox = inbox.mailbox();
-    let stamp = mailbox.stamp();
-    mailbox.steer("first".into());
-    mailbox.push(Post::Nudge {
-        prompt: 1,
-        text: "continue".into(),
-    });
-    stamp.post(Stamped::Surface {
-        id: AgentId::new(1),
-        values: vec![],
-    });
-    mailbox.steer("second".into());
-    assert_eq!(mailbox.abandon(), ["first", "second"]);
-    assert!(inbox.is_empty());
-    stamp.post(Stamped::Surface {
-        id: AgentId::new(2),
-        values: vec![],
-    });
-    assert!(inbox.next_item().is_none());
+fn await_job_opens_for_a_prompt_even_behind_other_posts() {
+    let inbox = active();
+    inbox.nudge(1, "continue".into());
+    inbox.mailbox().steer("hello".into());
+    let job = inbox.await_job().unwrap();
+    assert_eq!(job.id().get(), 1);
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Nudge { .. }))));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "hello"));
 }
 
 #[test]
-fn await_human_returns_at_once_for_a_queued_prompt_even_behind_other_posts() {
-    let inbox = Inbox::new();
-    inbox.push(Post::Nudge {
-        prompt: 1,
-        text: "continue".into(),
-    });
-    inbox.push_user("hello".into());
-    assert!(inbox.await_human(&cancel::Token::new()));
-    assert!(matches!(
-        inbox.next_item(),
-        Some(Next::Item(Item::Nudge { .. }))
-    ));
-    assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(text))) if text == "hello"));
-}
-
-#[test]
-fn await_human_is_false_once_terminated_even_with_a_prompt_queued() {
-    let inbox = Inbox::new();
-    let token = cancel::Token::new();
-    inbox.push_user("hello".into());
-    token.cancel(ral_core::process::CancelCause::Cancelled);
-    assert!(!inbox.await_human(&token));
+fn await_job_returns_none_once_ended_even_with_a_prompt_queued() {
+    let inbox = inbox();
+    inbox.mailbox().steer("hello".into());
+    inbox.mailbox().end(CancelCause::Cancelled);
+    assert!(inbox.await_job().is_none());
     assert!(!inbox.is_empty());
 }
 
 #[test]
-fn await_human_wakes_when_a_prompt_is_steered() {
-    let inbox = Inbox::new();
+fn await_job_wakes_when_a_prompt_is_steered() {
+    let inbox = inbox();
     let mailbox = inbox.mailbox();
     let (done, result) = std::sync::mpsc::channel();
-    let token = cancel::Token::new();
-    let waiter_token = token.clone();
-    let waiter = std::thread::spawn(move || {
-        done.send(inbox.await_human(&waiter_token)).unwrap();
-    });
+    let waiter = std::thread::spawn(move || done.send(inbox.await_job()).unwrap());
     assert!(matches!(
         result.recv_timeout(Duration::from_millis(20)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout)
     ));
     mailbox.steer("hello".into());
     let outcome = result.recv_timeout(Duration::from_secs(5));
-    token.cancel(ral_core::process::CancelCause::Cancelled);
-    waiter.join().expect("the waiter must not panic");
-    assert_eq!(outcome, Ok(true));
+    mailbox.end(CancelCause::Cancelled);
+    waiter.join().unwrap();
+    assert!(outcome.unwrap().is_some());
 }
 
 fn depth_of(inbox: &Inbox, source: Source) -> u64 {
@@ -668,97 +529,233 @@ fn depth_of(inbox: &Inbox, source: Source) -> u64 {
         .map_or(0, |(_, n)| n)
 }
 
-/// One entry, not two, and a different schedule's is untouched and keeps
-/// its arrival order.
 #[test]
 fn inbox_scheduled_wakeup_dedupes_by_schedule_id_newest_wins() {
-    let inbox = Inbox::new();
-    inbox.push(wakeup(1, "nightly", "@daily", "first"));
-    inbox.push(wakeup(1, "nightly", "@daily", "second"));
-    inbox.push(wakeup(2, "morning", "@daily", "other schedule"));
-    assert_eq!(
-        depth_of(&inbox, Source::Schedule),
-        2,
-        "schedule 1 replaced in place; schedule 2 is its own entry"
+    let inbox = inbox();
+    let mailbox = inbox.mailbox();
+    mailbox.post(wakeup(1, "nightly", "@daily", "first"));
+    mailbox.post(wakeup(2, "morning", "@daily", "other schedule"));
+    mailbox.post(wakeup(1, "nightly", "@daily", "second"));
+    assert_eq!(depth_of(&inbox, Source::Schedule), 2);
+    assert!(
+        matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(s))) if s.contains("second") && !s.contains("first"))
     );
-    match inbox.next_item() {
-        Some(Next::Item(Item::Wakeup(text))) => assert!(
-            text.contains("second") && !text.contains("first"),
-            "the newest wakeup for schedule 1 wins: {text}"
-        ),
-        _ => panic!("expected schedule 1's (replaced) wakeup first"),
-    }
-    match inbox.next_item() {
-        Some(Next::Item(Item::Wakeup(text))) => assert!(text.contains("other schedule")),
-        _ => panic!("expected schedule 2's wakeup, arrival order preserved"),
-    }
+    assert!(
+        matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(s))) if s.contains("other schedule"))
+    );
 }
 
-/// Otherwise a fast typist grows the queue one entry per line.
 #[test]
 fn inbox_user_steering_merges_pre_boundary_preserving_order() {
-    let inbox = Inbox::new();
-    inbox.push_user("first line".into());
-    inbox.push_user("second line".into());
-    assert_eq!(
-        depth_of(&inbox, Source::User),
-        1,
-        "consecutive steering merges into one entry at push time"
+    let inbox = inbox();
+    inbox.mailbox().steer("first line".into());
+    inbox.mailbox().steer("second line".into());
+    assert_eq!(depth_of(&inbox, Source::User), 1);
+    assert!(
+        matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "first line\nsecond line")
     );
-    match inbox.next_item() {
-        Some(Next::Item(Item::Human(text))) => {
-            assert_eq!(
-                text, "first line\nsecond line",
-                "both texts survive in order"
-            );
+}
+
+#[test]
+fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
+    let inbox = active();
+    inbox.nudge(1, "retry".into());
+    inbox.nudge(1, "retry".into());
+    inbox.nudge(2, "different".into());
+    assert_eq!(depth_of(&inbox, Source::Nudge), 1);
+    assert!(
+        matches!(pop(&inbox), Some(Next::Item(Item::Nudge { prompt: 2, text })) if text == "different")
+    );
+}
+
+#[test]
+fn interrupt_after_pop_cancels_the_opening_without_ending_life() {
+    let inbox = inbox();
+    inbox.mailbox().steer("work".into());
+    pop(&inbox).unwrap();
+    inbox.mailbox().interrupt();
+    inbox.open_exchange();
+    assert_eq!(inbox.exchange().cause(), Some(CancelCause::Interrupted));
+    assert!(inbox.mailbox().is_live());
+}
+
+#[test]
+fn idle_interrupt_fences_only_the_queued_nudge() {
+    let inbox = active();
+    inbox.nudge(1, "retry".into());
+    inbox.life_mailbox().post(surface());
+    inbox.mailbox().steer("next".into());
+    inbox.mailbox().interrupt();
+    assert!(matches!(
+        pop(&inbox),
+        Some(Next::Item(Item::Surface { .. }))
+    ));
+    inbox.decline_opening();
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(s))) if s == "next"));
+    inbox.open_exchange();
+    assert!(!inbox.exchange().is_cancelled());
+    assert!(pop(&inbox).is_none());
+}
+
+#[test]
+fn declined_surface_opens_nothing_and_preserves_a_queued_nudge() {
+    let inbox = active();
+    let exchange = inbox.exchange();
+    inbox.life_mailbox().post(surface());
+    inbox.nudge(1, "retry".into());
+    assert!(matches!(
+        pop(&inbox),
+        Some(Next::Item(Item::Surface { .. }))
+    ));
+    inbox.decline_opening();
+    assert_eq!(inbox.exchange().id(), exchange.id());
+    assert!(!exchange.is_cancelled());
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Nudge { text, .. })) if text == "retry"));
+}
+
+#[test]
+fn opening_an_exchange_and_rewind_fence_old_nudges() {
+    for rewind in [false, true] {
+        let inbox = active();
+        inbox.mailbox().steer("next".into());
+        inbox.nudge(1, "retry".into());
+        if rewind {
+            inbox.close_exchange();
+        } else {
+            pop(&inbox).unwrap();
+            inbox.open_exchange();
         }
-        _ => panic!("expected a merged Human item"),
+        if rewind {
+            assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(_)))));
+        }
+        assert!(pop(&inbox).is_none());
     }
 }
 
-/// The agent self-pushes a nudge per deliberation, so a second one means a
-/// fresher continuation superseded the first, not that both are owed.
 #[test]
-fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
-    let inbox = Inbox::new();
-    inbox.push(Post::Nudge {
-        prompt: 1,
-        text: "retry".into(),
-    });
-    inbox.push(Post::Nudge {
-        prompt: 1,
-        text: "retry".into(),
-    });
-    inbox.push(Post::Nudge {
-        prompt: 2,
-        text: "different".into(),
-    });
-    assert_eq!(
-        depth_of(&inbox, Source::Nudge),
-        1,
-        "a nudge never grows past one outstanding entry"
-    );
-    assert!(
-        matches!(inbox.next_item(), Some(Next::Item(Item::Nudge { text, .. })) if text == "different"),
-        "the newest nudge is the one delivered"
-    );
+fn heard_is_atomic_with_pop_and_old_replies_leave_followups_awaited() {
+    for drain in [false, true] {
+        let inbox = active();
+        let work = inbox.mailbox();
+        work.adopt(AgentId::new(7)).unwrap();
+        work.post(result(AgentOutcome::Replied, 0));
+        let seq = work.expect(AgentId::new(7));
+        assert!(seq > 0);
+        let take = || {
+            if drain {
+                inbox.drain().pop()
+            } else {
+                pop(&inbox)
+            }
+        };
+        assert!(matches!(take(), Some(Next::Item(Item::Agent(_)))));
+        assert!(work.status().busy);
+        work.post(result(AgentOutcome::Replied, seq));
+        assert!(matches!(take(), Some(Next::Item(Item::Agent(_)))));
+        assert!(!work.status().busy);
+        work.expect(AgentId::new(7));
+        work.post(result(AgentOutcome::Failed("ended".into()), 0));
+        assert!(matches!(take(), Some(Next::Item(Item::Agent(_)))));
+        assert!(!work.status().busy);
+    }
 }
 
-/// Dropping the nudge between two steering lines leaves them adjacent, and
-/// the inbox restores the push-time merge rather than deliver them apart.
 #[test]
-fn inbox_drop_nudges_remerges_the_steering_it_leaves_adjacent() {
-    let inbox = Inbox::new();
-    inbox.push_user("first".into());
-    inbox.push(Post::Nudge {
-        prompt: 1,
-        text: "retry".into(),
-    });
-    inbox.push_user("second".into());
-    inbox.drop_nudges();
-    assert_eq!(depth_of(&inbox, Source::User), 1);
-    assert!(
-        matches!(inbox.next_item(), Some(Next::Item(Item::Human(text))) if text == "first\nsecond")
-    );
-    assert!(inbox.is_empty());
+fn a_quiesce_verdict_cannot_beat_a_queued_result() {
+    let inbox = inbox();
+    inbox
+        .mailbox()
+        .post(result(AgentOutcome::Stopped("done".into()), 0));
+    assert!(matches!(
+        inbox.draw(|_| ParkMode::Quiesce),
+        Some(Next::Item(Item::Agent(_)))
+    ));
+    assert!(pop(&inbox).is_none());
+}
+
+#[test]
+fn stale_rollback_cannot_discharge_a_newer_expectation() {
+    let inbox = inbox();
+    let mailbox = inbox.mailbox();
+    let child = AgentId::new(7);
+    let first = mailbox.expect(child);
+    let second = mailbox.expect(child);
+    assert!(second > first);
+    mailbox.unexpect(child, first);
+    assert!(mailbox.status().busy);
+    mailbox.unexpect(child, second);
+    assert!(!mailbox.status().busy);
+}
+
+#[test]
+fn stopped_job_pops_nothing_and_preserves_life_and_peer_deliveries() {
+    let inbox = active();
+    let mailbox = inbox.mailbox();
+    mailbox.steer("running".into());
+    let job = inbox.await_job().unwrap();
+    assert_eq!(mailbox.stop(job.id()), Some(vec!["running".into()]));
+    inbox.life_mailbox().post(surface());
+    let peer = DurableRoot::default().child();
+    inbox
+        .life_mailbox()
+        .vouched_by((*peer).clone())
+        .post(message());
+    mailbox.steer("next".into());
+    assert!(pop(&inbox).is_none());
+    assert!(!inbox.is_empty());
+    assert!(!job.close_if_running());
+    drop(job);
+    let next = inbox.await_job().unwrap();
+    assert!(matches!(
+        pop(&inbox),
+        Some(Next::Item(Item::Surface { .. }))
+    ));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Message(_)))));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Human(text))) if text == "next"));
+    assert!(next.close_if_running());
+}
+
+#[test]
+fn accepted_input_preceding_an_older_reply_prevents_lease_and_clean_retirement() {
+    let inbox = active();
+    let mailbox = inbox.mailbox();
+    mailbox.post(message());
+    let since = inbox.deposit_reply(FOValue::Unit);
+    assert_eq!(mailbox.answers(), 0);
+    assert!(mailbox.status().reply_since.is_none());
+    mailbox.lapse(since);
+    assert!(mailbox.is_live());
+    assert!(!mailbox.retire());
+    assert!(!mailbox.post(message()));
+}
+
+#[test]
+fn queue_observations_fence_cancelled_deliveries() {
+    for observe_wakeup in [false, true] {
+        let inbox = inbox();
+        let from = DurableRoot::default().child();
+        let mailbox = inbox.mailbox().vouched_by((*from).clone());
+        mailbox.post(wakeup(1, "tick", "@", "go"));
+        from.cancel(CancelCause::Cancelled);
+        if observe_wakeup {
+            assert!(!mailbox.has_queued_wakeup(ScheduleId::new(1)));
+        } else {
+            assert!(inbox.is_empty());
+        }
+    }
+}
+
+#[test]
+fn message_answer_sequence_never_moves_backwards() {
+    let inbox = active();
+    inbox.mailbox().post(message());
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Message(_)))));
+    assert_eq!(inbox.mailbox().answers(), 4);
+    let Scoped::Message(mut old) = message() else {
+        unreachable!()
+    };
+    old.seq = 2;
+    inbox.mailbox().post(Scoped::Message(old));
+    inbox.drain();
+    assert_eq!(inbox.mailbox().answers(), 4);
 }

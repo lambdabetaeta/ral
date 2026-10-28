@@ -1,4 +1,4 @@
-//! Session boot: the shell every exarch seat starts from.
+//! Session boot: the shell every exarch engine starts from.
 //! Nothing here runs per exchange — per-session disk state is
 //! [`crate::record::AgentLog`].
 

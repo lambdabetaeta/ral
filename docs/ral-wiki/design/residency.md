@@ -111,18 +111,12 @@ against it:
   teardown reaches its own workers through its shell's durable root (a
   worker's cancel scope is a child of that root, so cancelling it walks the
   ancestor chain with no extra edge), and reaches its schedules and
-  children through the tree itself (`Role::Child`/`Agent::children`).
-- **clear-epoch** — every session's inbox counts its own clears, bumped
-  under the same lock the drain runs, and `/clear` bumps only that inbox's
-  count. Anything settling across it is rejected at the inbox's own pop —
-  whether by arriving through a `bus::Stamp` (an async agent's result, a
-  worker's deferred surface batch, a scheduled wakeup) or by the stronger
-  route of unconditional removal (a schedule, disarmed and dropped rather
-  than tagged). The stamp is the addressed envelope `Mailbox::stamp` mints
-  — destination and epoch captured as one value at composition — so what a
-  worker carries is structurally the envelope of the inbox that will *read*
-  it, and the rejection is addressed, not global: one tab's `/clear` leaves
-  another tab's outstanding work alone.
+  children through scope ancestry (`Role::Child`).
+- **provenance** — a `Mailbox` captures its destination and a vouching
+  scope. The inbox fences scoped posts under its lock before uptake:
+  child results and schedules carry work, worker batches carry engine
+  incarnation, and `/clear` cancels both. Cancellation is addressed, not
+  global: one tab's `/clear` leaves another tab's outstanding work alone.
 - **probe** — the `/resources` projection, over residents and accumulators
   alike.
 

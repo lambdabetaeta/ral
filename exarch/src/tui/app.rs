@@ -16,9 +16,9 @@ use super::rewind::{self, RewindOverlay};
 use super::scrollback::Scrollback;
 use super::tabs::{Status, TabRow, Tabs};
 use crate::SessionInfo;
-use crate::agent::Agent;
+use crate::agent::AgentHandle;
 use crate::agent::fleet::Fleet;
-use crate::bus::{BusReceiver, Post, UsageMeter};
+use crate::bus::{BusReceiver, Read, Rewrite, UsageMeter};
 use crate::card::Card;
 use crate::provider::{Bureau, Usage};
 use crate::record::{AgentId, AgentState, Born, Record, Recorded, Resumed, Transient};
@@ -435,14 +435,14 @@ impl App {
         self.push_chrome(id, Chrome::Note(text.to_owned()));
     }
 
-    /// The UI-thread twin of `Avatar::note_error`, for view commands that
+    /// The UI-thread twin of `Agent::note_error`, for view commands that
     /// surface their own failures. Drawn, not recorded.
     pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
         self.push_chrome(id, Chrome::Error(message.to_owned()));
     }
 
     /// Run `f` on the focused tab's agent, or say it has ended.
-    pub(super) fn session(&mut self, f: impl FnOnce(&Agent)) {
+    pub(super) fn session(&mut self, f: impl FnOnce(&AgentHandle)) {
         if let Some(agent) = self.tabs.focused_agent() {
             f(&agent);
         } else {
@@ -451,9 +451,12 @@ impl App {
         }
     }
 
-    /// Queue `post` on the focused tab's agent.
-    pub(super) fn post(&mut self, post: Post) {
-        self.session(|agent| agent.post(post));
+    pub(super) fn post_read(&mut self, read: Read) {
+        self.session(|agent| agent.post_read(read));
+    }
+
+    pub(super) fn post_rewrite(&mut self, rewrite: Rewrite) {
+        self.session(|agent| agent.post_rewrite(rewrite));
     }
 
     /// Route one key press; `true` when the user asked to compose the draft in
@@ -478,11 +481,7 @@ impl App {
             return false;
         }
         match action {
-            // The focused agent cancels its token and its current dispatch
-            // scope by handle — published ahead of the engine lock, so the
-            // keypress cannot land on a run that just ended — and never its
-            // durable root: the exchange dies, its descendants do not, and the
-            // agent lives to take a next run.
+            // Interrupt only the exchange; helpers remain under the work.
             KeyAction::Interrupt | KeyAction::Cancel => {
                 if let Some(agent) = self.tabs.focused_agent() {
                     agent.interrupt();

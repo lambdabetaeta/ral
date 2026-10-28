@@ -15,7 +15,7 @@ use crossterm::event::{Event as CtEvent, poll as ct_poll, read as ct_read};
 use crate::{
     SessionInfo,
     agent::{
-        Avatar,
+        Agent,
         fleet::Fleet,
         spawn::{AsyncSpawn, spawn_async},
     },
@@ -51,7 +51,7 @@ struct Tui {
 /// hits a fatal terminal error.
 pub fn run(
     screen: TerminalGuard,
-    roots: Vec<(Avatar, Option<Resumed>)>,
+    roots: Vec<(Agent, Option<Resumed>)>,
     info: &SessionInfo<'_>,
     bureau: &Bureau,
     mut seed: Option<String>,
@@ -65,7 +65,7 @@ pub fn run(
     for (root, resumed) in roots {
         let emit = bus.emitter(root.id());
         let spec = AsyncSpawn {
-            name: root.agent.name.clone(),
+            name: root.handle().0.name.clone(),
             prompt: seed.take(),
             resumed,
         };

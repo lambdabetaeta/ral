@@ -26,18 +26,18 @@ fn born(tabs: &mut Tabs, id: AgentId, name: &str, parent: Option<AgentId>) {
 #[test]
 fn parent_focus_climbs_past_a_lingering_ancestor() {
     let (fleet, root) = root(Duration::ZERO);
-    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet, None);
+    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
     let (child, grandchild) = (
-        AgentId::new(root.id.get() + 1),
-        AgentId::new(root.id.get() + 2),
+        AgentId::new(root.id().get() + 1),
+        AgentId::new(root.id().get() + 2),
     );
-    born(&mut tabs, child, "child", Some(root.id));
+    born(&mut tabs, child, "child", Some(root.id()));
     born(&mut tabs, grandchild, "grandchild", Some(child));
     tabs.died(child);
 
     assert_eq!(
         tabs.parent_focus(grandchild),
-        root.id,
+        root.id(),
         "focus climbs past the lingering parent to the nearest attended ancestor"
     );
 }
@@ -47,10 +47,10 @@ fn parent_focus_climbs_past_a_lingering_ancestor() {
 #[test]
 fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
     let (fleet, root) = root(Duration::ZERO);
-    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet, None);
-    let child = AgentId::new(root.id.get() + 1);
-    born(&mut tabs, child, "child", Some(root.id));
-    for (id, text) in [(child, "child says hi"), (root.id, "root says hi")] {
+    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
+    let child = AgentId::new(root.id().get() + 1);
+    born(&mut tabs, child, "child", Some(root.id()));
+    for (id, text) in [(child, "child says hi"), (root.id(), "root says hi")] {
         tabs.scrollback_mut(id)
             .expect("both tabs have a scrollback")
             .push_chrome(Chrome::Note(text.into()));
@@ -72,7 +72,7 @@ fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
         "the dead child is gone once past LINGER, its scrollback with it"
     );
     assert_eq!(
-        tabs.scrollback(root.id).unwrap().probe_figures().0,
+        tabs.scrollback(root.id()).unwrap().probe_figures().0,
         1,
         "the live root's own block survives the sibling's expiry untouched"
     );
@@ -84,10 +84,10 @@ fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
 #[test]
 fn the_first_retirement_stamp_wins() {
     let (fleet, root) = root(Duration::ZERO);
-    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet, None);
-    let child = AgentId::new(root.id.get() + 1);
-    born(&mut tabs, child, "child", Some(root.id));
-    tabs.retire_subtree(root.id);
+    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
+    let child = AgentId::new(root.id().get() + 1);
+    born(&mut tabs, child, "child", Some(root.id()));
+    tabs.retire_subtree(root.id());
     let stamp = |tabs: &Tabs| match tabs.tab(child).map(|t| &t.life) {
         Some(Life::Lingering(_, at)) => *at,
         _ => panic!("the child lingers"),

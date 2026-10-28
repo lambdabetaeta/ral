@@ -1,42 +1,29 @@
-//! The inbox's vocabulary: a [`Post`] is what a producer queues; a pull at a
-//! boundary yields a [`Next`] — an [`Item`] for the model, or a command for
-//! the attend loop.  The queue itself is `bus::inbox`.
-
-use ral_core::data::FOValue;
-use std::fmt;
-use std::time::Duration;
+//! Deliveries and commands yielded by the inbox.
 
 use crate::card::elapsed_phrase;
 use crate::record::{AgentId, Memory, Settlement, Voice};
+use ral_core::data::FOValue;
+use std::{fmt, time::Duration};
 
-/// A schedule's id: monotonic, and never reused, not even across `/clear`.
+/// Monotonic and never reused, including across `/clear`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ScheduleId(u64);
-
 impl ScheduleId {
     pub(crate) const fn new(id: u64) -> Self {
         Self(id)
     }
-
     #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }
 }
-
 impl fmt::Display for ScheduleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
     }
 }
-
-/// A session command that reads the context or opens another session from
-/// it, never changing it.  Drains at the next boundary of any kind — a tool
-/// batch settling or the exchange ending — in the order typed, alongside every
-/// delivery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Read {
-    /// Open a root session, blank or carrying this context.
     Hatch {
         memory: Memory,
         name: Option<String>,
@@ -44,22 +31,15 @@ pub enum Read {
     Context,
     Resources,
 }
-
-/// A session command that rewrites or ends the context.  Drains only at the
-/// exchange boundary, and holds everything typed after it: a `/rewind` then a
-/// prompt must not answer the prompt in the context the rewind is about to
-/// drop, so here the order typed is part of what was said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rewrite {
     Clear,
     Evict,
     Rewind(u64),
-    /// End this session for good: a resume will not reopen it.
     Close,
 }
-
-impl std::fmt::Display for Read {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Read {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Hatch { memory, name } => {
                 f.write_str(match memory {
@@ -73,9 +53,8 @@ impl std::fmt::Display for Read {
         }
     }
 }
-
-impl std::fmt::Display for Rewrite {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Rewrite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Clear => f.write_str("/clear"),
             Self::Evict => f.write_str("/evict"),
@@ -84,27 +63,14 @@ impl std::fmt::Display for Rewrite {
         }
     }
 }
-
-/// How an async agent ended the exchange, as the one line the parent reads.
-///
-/// No payload rides here: a reply is deposited on the child's own agent
-/// and fetched from there, and provider detail stays in the child's own log.
 #[derive(Clone, Debug)]
 pub enum AgentOutcome {
-    /// Called `reply`: the value stands on the child's own agent, and the
-    /// child is parked waiting to be messaged.  Not a settlement.
     Replied,
-    /// Stopped for a non-routine reason (content filter, step cap, …).
     Stopped(String),
-    /// By `` exarch-agents `cancel ``, `/clear`, or the worker ceiling.
     Cancelled,
-    /// A provider error or a panic.
     Failed(String),
 }
-
 impl AgentOutcome {
-    /// The `↘` breadcrumb's reduction, so that every consumer of
-    /// `record::Display::SubagentDone` renders alike.
     pub(crate) fn settlement(&self) -> Settlement {
         match self {
             Self::Replied => Settlement::Finished,
@@ -114,12 +80,6 @@ impl AgentOutcome {
             },
         }
     }
-
-    /// The marked text the model sees when a child's line drains.  The reply
-    /// notice quotes the very command that fetches the value, with the child's
-    /// own name already in it, so the model has nothing left to assemble; the
-    /// elapsed time rides along because how long a child ran is part of how
-    /// much to trust what it says.
     pub(crate) fn marked_item(&self, name: &str, elapsed: Duration) -> String {
         let took = elapsed_phrase(elapsed);
         match self {
@@ -132,31 +92,26 @@ impl AgentOutcome {
         }
     }
 }
-
-/// The one line a child posts to its parent's inbox — a reply notice, or a
-/// non-reply finish — turned to prose only at the model boundary.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentResult {
     pub id: AgentId,
     pub name: String,
     pub outcome: AgentOutcome,
     pub elapsed: Duration,
+    pub answers: u64,
 }
-
 impl AgentResult {
     pub(super) fn render(&self) -> String {
         self.outcome.marked_item(&self.name, self.elapsed)
     }
 }
-
-/// A live agent sent a peer message to another live agent.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentMessage {
     pub from: AgentId,
     pub from_name: String,
     pub text: String,
+    pub seq: u64,
 }
-
 impl AgentMessage {
     pub(super) fn render(&self) -> String {
         format!(
@@ -165,94 +120,6 @@ impl AgentMessage {
         )
     }
 }
-
-/// One typed message waiting in a session's inbox, the inbound twin of the
-/// outbound [`crate::bus::Signal`] stream.  Cancellation is deliberately not a
-/// variant: control plane and data plane ride separate rails, so a cancellation
-/// is unconstructable here by type.
-#[derive(Clone, Debug)]
-pub(crate) enum Post {
-    /// The user typed a prompt mid-exchange.  Prompt text, verbatim: a
-    /// slash-shaped line that named no command is prompt text too.
-    UserSteering(String),
-    /// A message whose producer cannot judge its own staleness — composing
-    /// and pushing are two steps a `/clear` can fall between.  Only
-    /// [`Stamp::post`](super::Stamp) constructs this ([`Minted`] is
-    /// unforgeable outside `bus`), so the destination's clear-epoch is
-    /// captured together with its mailbox at composition and judged at that
-    /// same inbox's own pop.
-    Stamped {
-        epoch: Minted,
-        kind: Stamped,
-    },
-    AgentMessage(AgentMessage),
-    /// The synthetic continuation the agent posts to *itself* when the nudge
-    /// registry turns an attempt back — the same exchange continuing, pushed
-    /// through the agent's own `Inbox` and never across agents.
-    Nudge {
-        prompt: u64,
-        text: String,
-    },
-    /// View-only commands (`/help`, `/copy`, …) are served frontend-side and
-    /// never reach here; these two are the session's own, parsed at submit.
-    Read(Read),
-    Rewrite(Rewrite),
-}
-
-/// Proof an epoch was minted by the destination ([`super::Mailbox::stamp`]):
-/// the field is `bus`-private, so a [`Post::Stamped`] can be built nowhere
-/// else — no fresh read at push time, no epoch from a different inbox.
-#[derive(Clone, Debug)]
-pub(crate) struct Minted(pub(super) u64);
-
-/// The messages that cannot judge their own staleness, each sent only
-/// through a [`Stamp`](super::Stamp) and fenced at the destination's pop.
-/// All drain at the next boundary.
-#[derive(Clone, Debug)]
-pub(crate) enum Stamped {
-    /// A cron or `after` wakeup fired, delivered as a marked injection.
-    Wakeup {
-        /// The firing schedule's id, and the inbox's dedupe key: a newer wakeup
-        /// replaces a still-queued one for the same schedule.  It also answers
-        /// the reaper's overlap check (`Mailbox::has_queued_wakeup`) — the
-        /// queue is the single source of truth for "a fire for this schedule
-        /// is still owed."
-        id: ScheduleId,
-        /// The schedule's own label, always caller-named.
-        label: String,
-        /// The trigger as text — a cron expression or `after <dur>`.
-        trigger: String,
-        prompt: String,
-    },
-    /// The one line a child posts to its parent, through the envelope minted
-    /// at the child's birth.
-    AgentResult(AgentResult),
-    /// A deferred `spawn` worker's `surface` batch, delivered at settlement —
-    /// the un-awaited path.  Carries the *root* session id, since a spawn
-    /// worker registers no tab of its own.  Already once-only when posted:
-    /// core's completion path wins the worker's deliver-once latch first.
-    Surface { id: AgentId, values: Vec<FOValue> },
-}
-
-impl Stamped {
-    pub(super) fn source(&self) -> Source {
-        match self {
-            Self::Wakeup { .. } => Source::Schedule,
-            Self::AgentResult(_) => Source::Agent,
-            Self::Surface { .. } => Source::Surface,
-        }
-    }
-}
-
-impl Post {
-    /// Whether a stamped post's minted epoch has fallen behind the inbox's —
-    /// composed before a `/clear`, pushed after it.
-    pub(super) fn stale(&self, epoch: u64) -> bool {
-        matches!(self, Self::Stamped { epoch: Minted(minted), .. } if *minted != epoch)
-    }
-}
-
-/// Which producer a post came from — the axis `Inbox::source_depths` folds on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Source {
     User,
@@ -264,7 +131,6 @@ pub(crate) enum Source {
     Rewrite,
     Surface,
 }
-
 impl Source {
     pub(crate) const ALL: [Self; 8] = [
         Self::User,
@@ -276,15 +142,12 @@ impl Source {
         Self::Rewrite,
         Self::Surface,
     ];
-
-    /// Whether pushes from this source coalesce in the inbox rather than queue.
     pub(crate) fn coalesces(self) -> bool {
         matches!(self, Self::User | Self::Schedule | Self::Nudge)
     }
 }
-
-impl std::fmt::Display for Source {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::User => "user",
             Self::Schedule => "schedule",
@@ -297,22 +160,6 @@ impl std::fmt::Display for Source {
         })
     }
 }
-
-impl Post {
-    pub(super) fn source(&self) -> Source {
-        match self {
-            Self::UserSteering(_) => Source::User,
-            Self::Stamped { kind, .. } => kind.source(),
-            Self::AgentMessage(_) => Source::Message,
-            Self::Nudge { .. } => Source::Nudge,
-            Self::Read(_) => Source::Read,
-            Self::Rewrite(_) => Source::Rewrite,
-        }
-    }
-}
-
-/// The notice [`Item::Surface`] wakes the model with.  The cards already reached
-/// the rail through `Avatar::arrive`, so this only names the outcome.
 fn surface_notice(values: &[FOValue]) -> String {
     values
         .iter()
@@ -330,47 +177,22 @@ fn surface_notice(values: &[FOValue]) -> String {
             },
         )
 }
-
-/// What a pull from the inbox yields at a boundary.
 #[derive(Clone, Debug)]
 pub(crate) enum Next {
     Item(Item),
     Read(Read),
     Rewrite(Rewrite),
 }
-
-/// A delivery to the model: its text *and* its source, so the attend loop can
-/// render it in its honest medium — a prompt as the user's turn, a wakeup as
-/// marked chrome — while the model receives [`Self::text`] unchanged.
 #[derive(Clone, Debug)]
 pub(crate) enum Item {
-    /// A coalesced run of human prompts, verbatim.
     Human(String),
-    /// A scheduled wakeup, rendered as marked chrome rather than a prompt-echo.
-    /// Its text is never read as a command, even when it starts with `/`.
     Wakeup(String),
-    /// An async agent settled — a dialable `↘` subagent block.
     Agent(AgentResult),
-    /// A marked message from a peer agent.
     Message(AgentMessage),
-    /// The agent's continuation of the prompt in hand: no human chrome, and it
-    /// opens no new exchange.
     Nudge { prompt: u64, text: String },
-    /// A `spawn` worker's deferred `surface` batch.  Staleness is
-    /// already settled at the pop; `Avatar::arrive` decodes `values`
-    /// into the *root* scrollback exactly as a live tool run would, and
-    /// [`Self::text`] wakes the model.
-    Surface {
-        /// The stamped session id.  `Avatar::arrive`'s debug assertion checks
-        /// it matches the draining session's, so a misrouted batch trips
-        /// there rather than rendering silently into the wrong scrollback.
-        id: AgentId,
-        values: Vec<FOValue>,
-    },
+    Surface { id: AgentId, values: Vec<FOValue> },
 }
-
 impl Item {
-    /// The text the model sees when this item drains into context.
     pub(crate) fn text(&self) -> String {
         match self {
             Self::Human(s) | Self::Wakeup(s) => s.clone(),
@@ -380,8 +202,6 @@ impl Item {
             Self::Surface { values, .. } => surface_notice(values),
         }
     }
-
-    /// Who the record credits with this item.
     pub(crate) fn voice(&self) -> Voice {
         match self {
             Self::Human(_) => Voice::Human,
@@ -390,14 +210,9 @@ impl Item {
             Self::Agent(_) | Self::Nudge { .. } | Self::Surface { .. } => Voice::Harness,
         }
     }
-
-    /// Whether draining this item opens a new exchange, clearing the nudge
-    /// latches and a prior exchange's bare interrupt.  A self-nudge is the same
-    /// exchange continuing, so it alone does not.
     pub(crate) fn opens_exchange(&self) -> bool {
         !matches!(self, Self::Nudge { .. })
     }
-
     pub(crate) fn continues(&self) -> Option<u64> {
         match self {
             Self::Nudge { prompt, .. } => Some(*prompt),

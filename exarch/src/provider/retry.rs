@@ -2,9 +2,9 @@
 //! on the variant `error.rs` classified.
 
 use super::{CancelSite, ProviderError, Refusal};
-use crate::cancel;
 use crate::clock;
 use jiff::Timestamp;
+use ral_core::process::Scope;
 use std::time::Duration;
 
 /// Retry budget for transient stream and network failures.
@@ -104,7 +104,7 @@ impl ProviderError {
 /// out. `one` sees `None` on the first attempt, then the failure it replaces.
 pub(super) async fn retry_with_backoff<T>(
     cancel_site: CancelSite,
-    cancel: &cancel::Token,
+    cancel: &Scope,
     mut one: impl AsyncFnMut(Option<&ProviderError>) -> Attempt<T>,
 ) -> Result<T, ProviderError> {
     let mut attempt = 0;
@@ -139,9 +139,8 @@ pub(super) async fn retry_with_backoff<T>(
     }
 }
 
-/// [`cancel::Token`] is a bare atomic with no waker, so a cancel is noticed
-/// only on the next poll — the 50ms is that latency.
-pub(super) async fn wait_for_cancel(cancel: &cancel::Token) {
+/// A scope has no waker; the 50 ms poll is the cancellation latency.
+pub(super) async fn wait_for_cancel(cancel: &Scope) {
     while !cancel.is_cancelled() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -151,6 +150,7 @@ pub(super) async fn wait_for_cancel(cancel: &cancel::Token) {
 mod tests {
     use super::*;
     use crate::provider::Limit;
+    use ral_core::process::DurableRoot;
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -164,7 +164,7 @@ mod tests {
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
             CancelSite::BeforeRequest,
-            &cancel::Token::new(),
+            &DurableRoot::default().child(),
             async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Failed(ProviderError::Transient {
@@ -195,7 +195,7 @@ mod tests {
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
             CancelSite::BeforeRequest,
-            &cancel::Token::new(),
+            &DurableRoot::default().child(),
             async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Failed(error.clone())
@@ -223,7 +223,7 @@ mod tests {
         let seen = std::cell::RefCell::new(Vec::new());
         let _: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
             CancelSite::BeforeRequest,
-            &cancel::Token::new(),
+            &DurableRoot::default().child(),
             async |replaced: Option<&ProviderError>| {
                 seen.borrow_mut().push(replaced.map(ProviderError::summary));
                 Attempt::Failed(ProviderError::local_transient(format!(
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn cancellation_interrupts_backoff() {
         runtime().block_on(async {
-            let cancel = cancel::Token::new();
+            let cancel = DurableRoot::default().child();
             let cancel_during_wait = cancel.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(20)).await;

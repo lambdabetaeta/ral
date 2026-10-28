@@ -7,21 +7,21 @@ fn tree() -> (TestAgent, super::super::tabs::Tabs) {
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("fresh root");
     let mut tabs = super::super::tabs::Tabs::new(
-        root.id,
+        root.id(),
         &crate::record::Born::for_test("main", None),
         fleet,
         None,
     );
-    let a = AgentId::new(root.id.get() + 1);
-    let a1 = AgentId::new(root.id.get() + 2);
-    let a2 = AgentId::new(root.id.get() + 3);
-    let b = AgentId::new(root.id.get() + 4);
-    let b1 = AgentId::new(root.id.get() + 5);
+    let a = AgentId::new(root.id().get() + 1);
+    let a1 = AgentId::new(root.id().get() + 2);
+    let a2 = AgentId::new(root.id().get() + 3);
+    let b = AgentId::new(root.id().get() + 4);
+    let b1 = AgentId::new(root.id().get() + 5);
     for (id, name, parent) in [
-        (a, "a", Some(root.id)),
+        (a, "a", Some(root.id())),
         (a1, "a1", Some(a)),
         (a2, "a2", Some(a)),
-        (b, "b", Some(root.id)),
+        (b, "b", Some(root.id())),
         (b1, "b1", Some(b)),
     ] {
         tabs.born(id, &crate::record::Born::for_test(name, parent), None);
@@ -40,7 +40,7 @@ fn prefixes_keep_full_forest_shape() {
         ["", "├─ ", "│  ├─ ", "│  └─ ", "└─ ", "   └─ "],
         "connectors describe siblings and descendants, not just indentation"
     );
-    assert_eq!(rows[ordered[0].index].id, root.id);
+    assert_eq!(rows[ordered[0].index].id, root.id());
 }
 
 #[test]
@@ -78,20 +78,24 @@ fn neighbour_walks_the_drawn_order_and_stops_at_the_ends() {
     let rows = tabs.rows();
     let step = |id, down| neighbour(&rows, id, down);
 
-    assert_eq!(step(root.id, false), root.id, "the first row is the top");
-    let mut id = root.id;
+    assert_eq!(
+        step(root.id(), false),
+        root.id(),
+        "the first row is the top"
+    );
+    let mut id = root.id();
     for n in 1..=5 {
         id = step(id, true);
         assert_eq!(
             id,
-            AgentId::new(root.id.get() + n),
+            AgentId::new(root.id().get() + n),
             "down walks the drawn order"
         );
     }
     assert_eq!(step(id, true), id, "the last row is the bottom");
     assert_eq!(
         step(id, false),
-        AgentId::new(root.id.get() + 4),
+        AgentId::new(root.id().get() + 4),
         "up walks it back"
     );
 }

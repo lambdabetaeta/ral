@@ -140,7 +140,7 @@ pub(crate) const TEST_TAG: &str = "test";
 /// Dispatch `src` as an input line under the mute host.
 #[cfg(test)]
 pub(crate) fn run_line(t: &dyn ral_core::carrier::Transport, src: &str) {
-    ral_core::carrier::dispatch_to_report(t, exec::line_run(src), std::sync::Arc::new(()))
+    ral_core::carrier::dispatch_to_report(t, exec::line_run(src), std::sync::Arc::new(()), None)
         .expect("the engine is attached");
 }
 

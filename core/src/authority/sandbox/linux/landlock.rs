@@ -356,8 +356,8 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
         }
     };
     let when = |condition, access| if condition { access } else { Access::NONE };
-    let fs = when(restricted, Access::EXECUTE)
-        | when(abi >= Abi::RESOLVE_UNIX, Access::RESOLVE_UNIX);
+    let fs =
+        when(restricted, Access::EXECUTE) | when(abi >= Abi::RESOLVE_UNIX, Access::RESOLVE_UNIX);
     let handled = fs | when(fs != Access::NONE && abi >= Abi::REFER, Access::REFER);
     let scoped = if abi >= Abi::SCOPES {
         Scoped::ENVELOPE
@@ -509,10 +509,7 @@ fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
 /// bind root inside `dir`, whatever its name, since a walk from there meets
 /// the root and the envelope's own directories, never `dir`: an alias, or a
 /// sub-bind under a ceiling that reads only it.  `Any` is `/`, so every root.
-fn lowered(
-    dirs: impl IntoIterator<Item = RealPath>,
-    roots: &[RealPath],
-) -> BTreeSet<RealPath> {
+fn lowered(dirs: impl IntoIterator<Item = RealPath>, roots: &[RealPath]) -> BTreeSet<RealPath> {
     dirs.into_iter()
         .flat_map(|dir| {
             let at = roots.iter().any(|root| root.contains(&dir));

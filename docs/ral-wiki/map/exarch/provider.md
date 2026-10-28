@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3dbbe8f3
-generated_at_date: 2026-10-27
+generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
+generated_at_date: 2026-10-28
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -23,7 +23,9 @@ orchestration, `tools.rs` the tools a request may advertise (`ToolSpec`,
 upstreams a routing service serves a model via (`Via`), and `state.rs` the
 persisted choice. The public facade
 re-exports their established types; sibling modules meet through narrow
-methods on `Engine` and `Transport`, not visible fields.
+methods on `Pool` and `Transport`, not visible fields. `Pool`
+(`provider/transport.rs`) owns the shared async runtime and transport cache;
+the agent's ral `Engine` is a different lifetime and responsibility.
 
 ## Services and accounts
 
@@ -172,7 +174,7 @@ exarch builds one, synod one for all its conversations — and keeps, per
 account, the last meter reading, the user's ration latches, and the instants
 refusals said it is held until: the whole account for a spent allowance, one
 model for a rate. `Provider::complete` is the only caller of
-`Engine::complete`, so its live arm is where nothing can go around:
+`Pool::complete`, so its live arm is where nothing can go around:
 `Rations::admit` before the send refuses a held request with `Refused` and
 nothing sent — only when the hold's `Refusal::recovery` is `Deferred`, a
 nearer one being waited out in place — else spawns a read of the account's
@@ -414,13 +416,13 @@ genai `Client`:
 
 ## One owner for construction
 
-`Provider::build` needs an `Engine` and a `Credential`, and a `Provider`
+`Provider::build` needs a `Pool` and a `Credential`, and a `Provider`
 retains neither — it keeps a built `Transport`. So minting a *second*
-selection has nothing to work from unless the engine and the application's
+selection has nothing to work from unless the pool and the application's
 `Holdings` — credential store, model catalog, allowance record, whose lock
 discipline is stated once on the type — are reachable together.
 `provider/bureau.rs` names them once: `Bureau::Live { engine, holdings }`, or
-`Bureau::Scripted` for a session that mints nothing (`Engine::new` primes the
+`Bureau::Scripted` for a session that mints nothing (`Pool::new` primes the
 pricing catalog over the network, so no unit test may build one). It mirrors
 `Provider`'s own `Backend::{Live, Scripted}` split rather than inventing a
 second idiom.
@@ -430,7 +432,7 @@ second idiom.
 and `with_catalog` are the rest of the surface. The two halves are shared
 (`Arc<Mutex<_>>`) rather than owned, so two hosts compose: exarch builds one
 bureau over its own pair in `run()`, while synod keeps the same pair as
-application-wide window state and mints an engine per conversation. They are
+application-wide window state and mints a provider pool per conversation. They are
 two mutexes and not one so that a credential read never queues behind a
 catalog fold, which writes the disk cache under its lock.
 
@@ -555,7 +557,7 @@ disk-caches both paths:
   `stream_header_timeout` (`STREAM_HEADER_TIMEOUT`, 3 min) and
   `stream_read_timeout` (`STREAM_READ_TIMEOUT`, 10 min, per raw body chunk, SSE
   comments included) on every request, and the stream loop races only the cancel
-  token against `next()`; a `Heartbeat` event adds nothing there. The bound is
+  scope against `next()`; a `Heartbeat` event adds nothing there. The bound is
   patient because HTTP/2 PING and TCP keepalives (`provider/tls.rs`) evict a
   dead peer in about 45 s, so it only judges a live server gone quiet.
   reqwest's `READ_TIMEOUT` stays as the backstop for every client sharing it,
@@ -563,17 +565,18 @@ disk-caches both paths:
   classifies it `Transient`. This lands the slice of
   [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]]
   that fits genai as released: no fork, no semantic clock.
-- Streaming is the **only** call the engine makes. There is no second,
+- Streaming is the **only** completion path the pool runs. There is no second,
   non-streamed path: bounding the window is
-  [[map/exarch/agent|`Avatar::evict`]]'s job and it makes no provider call at
+  [[map/exarch/agent|`Agent::force_eviction`]]'s job and it makes no provider call at
   all ([[decisions/260906_context-rollover|context-rollover]]).
-- `cancel` is the **request-local** cancellation handle: the foreground exchange
-  passes its root token (Esc-linked), an async `agent` passes its own
-  `cancel::Token`, so two concurrent requests never share one
-  process-global slot —
-  the provider-side seam of [[decisions/260617_async-agent-tool|async-agent-tool]];
-  the token and inbox belong to [[map/exarch/tools|tools]] and
-  [[map/exarch/agent|agent]].
+- `cancel: &ral_core::process::Scope` is the **exchange-local** cancellation
+  view, passed explicitly by `Agent::deliberate` through streaming,
+  credential preparation and retry waits. Each child has its own exchange
+  under its life/work ancestry; there is no exarch token or reset.
+  `wait_for_cancel` polls the scope, so its polling period bounds sampling
+  latency, not arbitrary in-flight waits
+  ([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]],
+  [[map/exarch/agent|agent]]).
 
 ## Retry driver
 
@@ -637,7 +640,7 @@ Anthropic, Gemini), or whose `type`/`code` is `context_length_exceeded`, is
 when stated, and is never retried by `retry.rs`. A stated `limit` narrows the
 `Provider`'s interior-mutable window (it only ever shrinks, and dies with a
 `/model` swap), recorded as `Forensic::WindowNarrowed` so every reader agrees;
-`Avatar::deliberate` then sheds the older half and retries the turn once.
+`Agent::deliberate` then sheds the older half and retries the turn once.
 A resume replays the learned window for the same model; a model minted with
 a via starts at the least window its upstreams hold.
 
@@ -693,7 +696,7 @@ ADR, [[internals/session-record|session-record]] covers the persistent
 deliberately not `Clone`, so a built request cannot be kept alive and cloned
 for a later retry; `manufacture(adapter, system, transcript: &[ChatMessage],
 tools)` is called fresh inside each retry attempt in `stream.rs`'s
-`Engine::complete`, and is the only place a request is built.
+`Pool::complete`, and is the only place a request is built.
 
 `manufacture` marks `cache_control: ephemeral` breakpoints on the system
 prompt and the last two messages, for Anthropic alone: two anchors of

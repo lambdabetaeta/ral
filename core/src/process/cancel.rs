@@ -407,7 +407,7 @@ impl Scope {
         })
     }
 
-    pub(crate) fn id(&self) -> ScopeId {
+    pub fn id(&self) -> ScopeId {
         ScopeId(Arc::clone(&self.0))
     }
 }

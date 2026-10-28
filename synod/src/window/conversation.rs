@@ -10,7 +10,7 @@ use super::state::{Accounts, Handle, Held, Inlet, Owner, Review, Running};
 use crate::assistant::conversation::Conversation;
 use crate::folder::manifest::Stop;
 use crate::wire::{
-    AgentStateDto, Choice, ConversationEvent, ConversationUpdate, ExchangeId, ModelMenu, Opening,
+    AgentStateDto, Choice, ConversationEvent, ConversationUpdate, JobId, ModelMenu, Opening,
     PickedFolder, Preparation, SynodEvent, WindowReport,
 };
 use exarch::provider::Holdings;
@@ -56,13 +56,7 @@ impl Emitter {
         clippy::significant_drop_tightening,
         reason = "generation lookup, report replacement and publication must be atomic"
     )]
-    fn exchange_done(
-        &self,
-        exchange: ExchangeId,
-        stopped: bool,
-        folder: &Path,
-        report: Option<WindowReport>,
-    ) {
+    fn job_done(&self, job: JobId, stopped: bool, folder: &Path, report: Option<WindowReport>) {
         let held = self.slot.lock_ignore_poison();
         if let Some(handle) = held.owned_by(self.generation) {
             *self.app.state::<Review>().0.lock_ignore_poison() =
@@ -73,8 +67,8 @@ impl Emitter {
             publish(
                 &self.app,
                 handle,
-                ConversationUpdate::ExchangeDone {
-                    exchange,
+                ConversationUpdate::JobDone {
+                    job,
                     stopped,
                     report,
                 },
@@ -91,18 +85,15 @@ impl Emitter {
 
     #[allow(
         clippy::significant_drop_tightening,
-        reason = "reservation and publication must be atomic"
+        reason = "generation lookup and publication must be atomic"
     )]
-    fn exchange_began(&self) -> Option<(ExchangeId, Arc<super::exchange::Exchanges>)> {
+    fn job_began(&self, job: JobId) -> bool {
         let held = self.slot.lock_ignore_poison();
-        let handle = held.owned_by(self.generation)?;
-        let exchange = handle.exchanges.begin();
-        publish(
-            &self.app,
-            handle,
-            ConversationUpdate::ExchangeBegan { exchange },
-        );
-        Some((exchange, handle.exchanges.clone()))
+        let Some(handle) = held.owned_by(self.generation) else {
+            return false;
+        };
+        publish(&self.app, handle, ConversationUpdate::JobBegan { job });
+        true
     }
 
     #[allow(
@@ -126,13 +117,13 @@ impl Emitter {
         clippy::significant_drop_tightening,
         reason = "installation and queue publication must be atomic"
     )]
-    fn install(&self, helm: exarch::agent::Helm) -> bool {
+    fn install(&self, agent: exarch::agent::AgentHandle) -> bool {
         let mut held = self.slot.lock_ignore_poison();
         let Some(handle) = held.owned_by_mut(self.generation) else {
             return false;
         };
-        for message in handle.inlet.install(helm.clone()) {
-            let _ = helm.steer(message);
+        for message in handle.inlet.install(agent.clone()) {
+            let _ = agent.steer(message);
         }
         publish(
             &self.app,
@@ -241,39 +232,29 @@ pub(crate) fn send_message(
 #[tauri::command]
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "stop reservation and queue publication require generation ownership"
+    reason = "stop and queue publication require generation ownership"
 )]
-pub(crate) async fn stop_exchange(
+pub(crate) fn stop_job(
     app: AppHandle,
     state: State<'_, Running>,
     attempt: String,
-    exchange: ExchangeId,
+    job: JobId,
 ) -> Result<Vec<String>, String> {
-    let (generation, helm, delivery) = {
-        let held = state.0.lock_ignore_poison();
-        let Some(handle) = held.current().filter(|handle| handle.attempt == attempt) else {
-            return Ok(Vec::new());
-        };
-        let Inlet::Live(helm) = &handle.inlet else {
-            return Ok(Vec::new());
-        };
-        let Some(delivery) = handle.exchanges.stop(exchange) else {
-            return Ok(Vec::new());
-        };
-        (handle.generation, helm.clone(), delivery)
-    };
-    let recalled = helm.stop();
-    drop(delivery);
     let held = state.0.lock_ignore_poison();
-    if let Some(handle) = held.owned_by(generation) {
-        publish(
-            &app,
-            handle,
-            ConversationUpdate::Queue {
-                messages: handle.inlet.queued(),
-            },
-        );
-    }
+    let Some(handle) = held.current().filter(|handle| handle.attempt == attempt) else {
+        return Ok(Vec::new());
+    };
+    let recalled = match &handle.inlet {
+        Inlet::Live(agent) => agent.stop(job.into()).unwrap_or_default(),
+        Inlet::Booting(_) => Vec::new(),
+    };
+    publish(
+        &app,
+        handle,
+        ConversationUpdate::Queue {
+            messages: handle.inlet.queued(),
+        },
+    );
     Ok(recalled)
 }
 
@@ -355,7 +336,6 @@ fn spawn_conversation(
         generation,
         attempt,
         inlet: Inlet::Booting(Vec::new()),
-        exchanges: Arc::default(),
         join,
         baseline_stop,
     });
@@ -423,7 +403,7 @@ fn drive(
         };
 
     emitter.opening(opening);
-    if !emitter.install(conversation.helm()) {
+    if !emitter.install(conversation.handle()) {
         let _ = conversation.end();
         return Ok(());
     }
@@ -440,21 +420,21 @@ fn drive(
         state: AgentStateDto::Ready,
     });
 
-    while conversation.await_message() {
-        let Some((exchange, exchanges)) = emitter.exchange_began() else {
+    while let Some(job) = conversation.await_job() {
+        let id = job.id().into();
+        if !emitter.job_began(id) {
             break;
-        };
-        let outcome = conversation.exchange(&mut sink);
-        let stopped = exchanges.finish(exchange);
+        }
+        let end = conversation.run(job, &mut sink);
         if !emitter.current() {
             break;
         }
-        if let Err(e) = outcome {
-            emitter.event(SynodEvent::Failure { message: e });
+        if let Err(e) = &end.outcome {
+            emitter.event(SynodEvent::Failure { message: e.clone() });
         }
-        emitter.exchange_done(
-            exchange,
-            stopped,
+        emitter.job_done(
+            id,
+            end.stopped,
             picked,
             conversation.report().map(WindowReport::of),
         );

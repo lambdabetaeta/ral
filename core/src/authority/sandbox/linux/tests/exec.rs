@@ -635,7 +635,10 @@ fn a_binary_written_to_tmp_runs_only_where_tmp_is_admitted() {
     if !landlock_at_least(Abi::EXEC) {
         return;
     }
-    let dir = workdir("exec-tmp");
+    // `/tmp` itself, whatever `TMPDIR` says: the admit below names it.
+    let dir =
+        std::path::Path::new("/tmp").join(format!("ral-bwrap-exec-tmp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create work dir");
     let planted = dir.join("planted");
     let script = format!(
         "cp /bin/true '{planted}' || echo COPY-FAILED\n\

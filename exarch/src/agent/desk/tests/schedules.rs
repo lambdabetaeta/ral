@@ -85,7 +85,7 @@ fn a_duplicate_schedule_is_refused_and_tiers_its_act_row() {
         .ask(add_req("1s", "nightly", "wake"))
         .expect_err("a duplicate label must be refused");
     assert!(err.message.contains("nightly"), "got: {}", err.message);
-    assert_eq!(desk.services.agent.schedules.list().len(), 1);
+    assert_eq!(desk.services.schedules.list().len(), 1);
 
     let acts: Vec<(String, bool)> = crate::bus::drain_records(&rx)
         .into_iter()

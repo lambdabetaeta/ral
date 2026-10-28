@@ -3,9 +3,13 @@
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
 use crate::path::EnginePath;
-use crate::protocol::{Control, Ending, EnquiryError, Report, Root};
+use crate::process::CancelCause;
+use crate::protocol::{Ending, EnquiryError, Report, Root};
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::Shell;
+
+#[cfg(unix)]
+mod within;
 
 mod identity_cancel_tests {
     use super::*;
@@ -32,6 +36,7 @@ mod identity_cancel_tests {
                         crate::source::SourceOrigin::named("<test>"),
                     ),
                     &(Arc::new(()) as Arc<dyn Host>),
+                    None,
                 );
             })
         };
@@ -71,7 +76,7 @@ mod identity_cancel_tests {
 
     #[test]
     fn an_interrupt_racing_a_fresh_dispatch_is_not_dropped() {
-        race(|control| control.send(Control::Interrupt(DispatchId(1))));
+        race(|control| control.strike(DispatchId(1), CancelCause::Interrupted));
     }
 
     /// Dispatch a child under a forwarder, `raise` once the child is running,
@@ -137,7 +142,7 @@ mod identity_cancel_tests {
     }
 
     /// A SIGINT reaches an identity engine only as its host's
-    /// `Control::Interrupt`: the run unwinds, the session lives on.
+    /// `Control::Strike(_, Interrupted)`: the run unwinds, the session lives on.
     #[cfg(unix)]
     #[test]
     fn a_forwarded_interrupt_unwinds_the_run_in_flight() {
@@ -294,6 +299,7 @@ mod enquiry_tests {
                 &*self.0,
                 crate::protocol::Run::captured("", crate::source::SourceOrigin::named("<test>")),
                 Arc::new(()),
+                None,
             );
             Ok(req)
         }
@@ -582,6 +588,7 @@ mod probe_tests {
             &transport,
             Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
             Arc::new(()),
+            None,
         );
         assert_eq!(refused, Err(first));
     }

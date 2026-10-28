@@ -276,7 +276,7 @@ impl Scratch {
     /// [`CONFINED_TOOL_SETTINGS`] into `shell`, overriding whatever was
     /// inherited: a `CARGO_HOME` under `~/.cargo` lands outside reasonable's
     /// write set, so the sandbox is the trust boundary, not the environment
-    /// exarch was launched in.  One seeder for all three, because the seat's
+    /// exarch was launched in.  One seeder for all three, because the engine's
     /// test double mirrors this call and a second site would drift from it.
     #[cfg(any(test, feature = "test-util"))]
     pub fn install_into(&self, shell: &mut Shell) {

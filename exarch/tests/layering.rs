@@ -10,10 +10,12 @@ type Graph = BTreeMap<String, BTreeSet<String>>;
 
 const SKIPPED: [&str; 2] = ["tests.rs", "testkit.rs"];
 
-const LAYERED: [(&str, &str); 6] = [
+const LAYERED: [(&str, &str); 8] = [
     ("provider", "record"),
     ("record", "bus"),
     ("bus", "agent"),
+    ("bus", "schedule"),
+    ("schedule", "agent"),
     ("shell_eval", "agent"),
     ("agent", "tui"),
     ("agent", "headless"),

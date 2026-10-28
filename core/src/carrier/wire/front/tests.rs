@@ -50,6 +50,35 @@ fn adopt_then_attach_conveys_the_protocol_version() {
     }
 }
 
+#[test]
+fn detach_requires_teardown_acknowledgment_not_eof() {
+    for acknowledge in [false, true] {
+        let (front, back) = UnixStream::pair().unwrap();
+        let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut ch = WireChannel::from_stream(back);
+            assert!(matches!(ch.read_frame().unwrap(), Some(Frame::Attach(_))));
+            ch.write_frame(&Frame::Session(SessionEvent::Attached))
+                .unwrap();
+            loop {
+                match ch.read_frame().unwrap().unwrap() {
+                    Frame::Ping(n) => ch.write_frame(&Frame::Pong(n)).unwrap(),
+                    Frame::Detach => break,
+                    other => panic!("expected Detach, got {other:?}"),
+                }
+            }
+            if acknowledge {
+                ch.write_frame(&Frame::Session(SessionEvent::Ended))
+                    .unwrap();
+            }
+        });
+        attach(&transport);
+        transport.await_attached().unwrap();
+        assert_eq!(transport.end().is_ok(), acknowledge);
+        peer.join().unwrap();
+    }
+}
+
 /// Neither a sender nor the ticker keeps the line: it goes within a tick of
 /// the transport, and a stale sender's verbs are no-ops.
 #[test]
@@ -274,6 +303,7 @@ fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
         id,
         Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
         &(Arc::new(()) as Arc<dyn Host>),
+        None,
     );
 
     match peer

@@ -1,653 +1,668 @@
-//! A session's typed, multi-producer inbound queue: [`Inbox`] is the owned
-//! consumer end, [`Mailbox`] the cloneable sender end.  Idempotent pushes
-//! coalesce; the attend loop drains mid-exchange at a tool boundary
-//! ([`Inbox::drain_mid_exchange`]) and parks at the exchange boundary
-//! ([`Inbox::next_or_idle`]).
-//!
-//! Under the queue mutex before the pop, the verdict reads consumer-owned status
-//! or obligations released after delivery; cancellation may withdraw obligations.
+//! One owner, one lock, and scope-vouched deliveries.
 
-use super::post::{Minted, Source, Stamped};
-use super::{Item, Next, Post, ScheduleId};
-use crate::cancel;
+use super::post::Source;
+use super::{AgentMessage, AgentOutcome, AgentResult, Item, Next, Read, Rewrite, ScheduleId};
+use crate::record::AgentId;
+use ral_core::data::FOValue;
+use ral_core::process::{CancelCause, Scope, ScopeNode};
 use ral_core::sync::{CondvarExt, LockExt};
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-/// How [`Inbox::next_or_idle`] should treat an empty inbox — the verdict
-/// `Avatar::park_mode` recomputes on every wake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ParkMode {
-    /// A live human conversation: ignore interrupts, but never termination.
     Held,
-    /// A child's current reply completion, parked under its reply lease.
-    /// A terminate-cause cancel ends this residency.
     Engaged,
-    /// Live children will each deliver a result up this inbox, so park rather
-    /// than kill a headless root waiting on its fleet; the last one settling
-    /// drops the next verdict to [`Self::Quiesce`].
     HeldByChildren,
-    /// An armed self-schedule may fire a wakeup — park, but a terminate-cause
-    /// cancel still stops now rather than wait for it.
     UntilCancelled,
-    /// Nothing will ever feed this agent again: terminate at quiescence.
     Quiesce,
 }
 
-/// The queue an [`Inbox`] and its [`Mailbox`]es share: posts under a mutex,
-/// plus a [`Condvar`] a parked `next_or_idle` waits on so a push wakes it
-/// without polling.
-struct Shared {
-    queue: Mutex<Queue>,
-    signal: Condvar,
-    /// True while the consumer is parked in [`ParkMode::Held`] or
-    /// [`ParkMode::Engaged`] on an empty queue.  A producer clears it before
-    /// waking the consumer, so a frontend can tell "prompt is editable" from
-    /// "the root is still working" without minting a presentation event.
-    waiting_for_input: AtomicBool,
-    /// Bumped under admission whenever delegated work is abandoned.
-    /// Old captures cannot enroll children, deliver results or reset Stop.
-    epoch: AtomicU64,
+/// How soon a parked owner sees severance or an ancestor's cancellation;
+/// its own end, a Stop and a post notify.
+const PARK_POLL: Duration = Duration::from_millis(100);
+
+/// A host job, from a human message until settlement or Stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobId(u64);
+impl JobId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
 }
-
-/// The posts and exchange clock share a mutex so a follow-up's stamp and
-/// delivery are one step for `Agent::reply_since`.
-struct Queue {
-    posts: VecDeque<Post>,
-    /// The last human or parent exchange — [`Mailbox::steer`] or
-    /// [`Agent::message`](crate::agent::Agent::message) — that reached this
-    /// inbox; `None` before the first.
-    last_exchange: Option<Instant>,
-    stopping: usize,
-}
-
-/// Declare before queue guards: drop reacquires admission.
-pub(crate) struct AdmissionHold(Arc<Shared>);
-
-impl Drop for AdmissionHold {
-    fn drop(&mut self) {
-        self.0.lock().stopping -= 1;
-        self.0.signal.notify_all();
+impl From<u64> for JobId {
+    fn from(id: u64) -> Self {
+        Self(id)
     }
 }
 
-pub(crate) struct Drawn {
-    pub(crate) next: Next,
-    pub(crate) stamp: Stamp,
+#[derive(Clone, Copy)]
+pub(crate) enum Queue {
+    Keep,
+    Recall,
+    Discard,
 }
 
-impl Shared {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            queue: Mutex::new(Queue {
-                posts: VecDeque::new(),
-                last_exchange: None,
-                stopping: 0,
-            }),
-            signal: Condvar::new(),
-            waiting_for_input: AtomicBool::new(true),
-            epoch: AtomicU64::new(0),
+pub(crate) struct Inbox(Arc<Shared>);
+#[derive(Clone)]
+pub(crate) struct Mailbox {
+    shared: Arc<Shared>,
+    scope: Scope,
+}
+#[derive(Clone)]
+pub(crate) struct WeakMailbox {
+    shared: Weak<Shared>,
+    scope: Scope,
+}
+struct Shared {
+    life: ScopeNode,
+    state: Mutex<State>,
+    signal: Condvar,
+}
+
+pub(crate) struct State {
+    posts: VecDeque<Post>,
+    work: Work,
+    exchange: ScopeNode,
+    opening: Option<ScopeNode>,
+    job: Option<OpenJob>,
+    next_job: u64,
+    next_message: u64,
+    accepted: u64,
+    answered: u64,
+    rest: Option<Instant>,
+    reply: Option<FOValue>,
+    replied_at: Option<Instant>,
+    last_exchange: Option<Instant>,
+    waiting_for_input: bool,
+}
+struct Work {
+    scope: ScopeNode,
+    awaiting: BTreeMap<AgentId, u64>,
+}
+struct OpenJob {
+    id: JobId,
+    stopped: bool,
+}
+
+pub(crate) struct Status {
+    pub(crate) rest: Option<Instant>,
+    pub(crate) replied: bool,
+    pub(crate) reply_since: Option<Instant>,
+    pub(crate) busy: bool,
+    pub(crate) waiting_for_input: bool,
+    pub(crate) last_exchange: Option<Instant>,
+}
+
+impl State {
+    pub(crate) fn has_busy_children(&self) -> bool {
+        !self.work.awaiting.is_empty()
+    }
+    pub(crate) fn replied_at(&self) -> Option<Instant> {
+        self.replied_at
+    }
+    fn reply_since(&self) -> Option<Instant> {
+        self.replied_at.filter(|since| {
+            self.accepted <= self.answered && self.last_exchange.is_none_or(|at| at <= *since)
         })
     }
-
-    /// Recovers from a poisoned mutex rather than panicking, as
-    /// `ScheduleRegistry::lock` does: every operation here is a whole push, pop
-    /// or clear, so a panicked holder leaves the deque usable, where
-    /// propagating the poison would kill the fleet's inbox for good.
-    fn lock(&self) -> MutexGuard<'_, Queue> {
-        self.queue.lock_ignore_poison()
+    fn pop(&mut self) -> Option<Next> {
+        // I2: fence provenance at pop, then coalesce newly adjacent human posts.
+        fence(&mut self.posts);
+        let next = match self.posts.pop_front()? {
+            Post::Human(text) => Next::Item(Item::Human(text)),
+            Post::Read(read) => Next::Read(read),
+            Post::Rewrite(rewrite) => Next::Rewrite(rewrite),
+            Post::Scoped { kind, .. } => Next::Item(match kind {
+                Scoped::Result(result) => {
+                    // I6: an old reply cannot discharge a follow-up message.
+                    if self.work.awaiting.get(&result.id).is_some_and(|n| {
+                        !matches!(result.outcome, AgentOutcome::Replied) || result.answers >= *n
+                    }) {
+                        self.work.awaiting.remove(&result.id);
+                    }
+                    Item::Agent(result)
+                }
+                Scoped::Message(message) => {
+                    self.answered = self.answered.max(message.seq);
+                    Item::Message(message)
+                }
+                Scoped::Surface { id, values } => Item::Surface { id, values },
+                Scoped::Wakeup {
+                    label,
+                    trigger,
+                    prompt,
+                    ..
+                } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
+                Scoped::Nudge { prompt, text } => Item::Nudge { prompt, text },
+            }),
+        };
+        Some(next)
     }
-
-    fn push(&self, msg: Post) {
-        let mut q = self.lock();
-        enqueue(&mut q.posts, msg);
-        drop(q);
-        self.wake();
+    fn abandon(&mut self, life: &Scope, queue: Queue) -> Vec<String> {
+        let old = std::mem::replace(
+            &mut self.work,
+            Work {
+                scope: life.child(),
+                awaiting: BTreeMap::new(),
+            },
+        );
+        old.scope.cancel(CancelCause::Cancelled);
+        match queue {
+            Queue::Keep => Vec::new(),
+            Queue::Recall => recall(&mut self.posts),
+            Queue::Discard => {
+                self.posts.clear();
+                Vec::new()
+            }
+        }
     }
+}
 
-    /// A delivery that is also an exchange: stamp and enqueue under one
-    /// acquisition of the queue mutex.
-    fn exchange(&self, msg: Post) {
-        let mut q = self.lock();
-        q.last_exchange = Some(Instant::now());
-        enqueue(&mut q.posts, msg);
-        drop(q);
-        self.wake();
+enum Post {
+    Human(String),
+    Read(Read),
+    Rewrite(Rewrite),
+    Scoped { from: Scope, kind: Scoped },
+}
+pub(crate) enum Scoped {
+    Result(AgentResult),
+    Surface {
+        id: AgentId,
+        values: Vec<FOValue>,
+    },
+    Wakeup {
+        id: ScheduleId,
+        label: String,
+        trigger: String,
+        prompt: String,
+    },
+    Message(AgentMessage),
+    Nudge {
+        prompt: u64,
+        text: String,
+    },
+}
+impl Post {
+    fn source(&self) -> Source {
+        match self {
+            Self::Human(_) => Source::User,
+            Self::Read(_) => Source::Read,
+            Self::Rewrite(_) => Source::Rewrite,
+            Self::Scoped { kind, .. } => match kind {
+                Scoped::Result(_) => Source::Agent,
+                Scoped::Surface { .. } => Source::Surface,
+                Scoped::Wakeup { .. } => Source::Schedule,
+                Scoped::Message(_) => Source::Message,
+                Scoped::Nudge { .. } => Source::Nudge,
+            },
+        }
     }
-
-    fn abandon(&self, q: &mut Queue) -> Vec<String> {
-        let prompts = q
-            .posts
-            .drain(..)
-            .filter_map(|post| match post {
-                Post::UserSteering(text) => Some(text),
-                _ => None,
-            })
-            .collect();
-        self.epoch.fetch_add(1, Ordering::Release);
-        prompts
+}
+fn wakeup(post: &Post, id: ScheduleId) -> bool {
+    matches!(post, Post::Scoped { kind: Scoped::Wakeup { id: queued, .. }, .. } if *queued == id)
+}
+fn enqueue(posts: &mut VecDeque<Post>, post: Post) {
+    let replace = match &post {
+        Post::Scoped {
+            kind: Scoped::Wakeup { id, .. },
+            ..
+        } => posts.iter().position(|p| wakeup(p, *id)),
+        Post::Scoped {
+            kind: Scoped::Nudge { .. },
+            ..
+        } => posts.iter().position(|p| {
+            matches!(
+                p,
+                Post::Scoped {
+                    kind: Scoped::Nudge { .. },
+                    ..
+                }
+            )
+        }),
+        _ => None,
+    };
+    if let Some(index) = replace {
+        posts[index] = post;
+        return;
     }
-
-    fn wake(&self) {
-        self.waiting_for_input.store(false, Ordering::Release);
+    if let Post::Human(text) = &post
+        && let Some(Post::Human(tail)) = posts.back_mut()
+    {
+        tail.push('\n');
+        tail.push_str(text);
+        return;
+    }
+    posts.push_back(post);
+}
+fn fence(posts: &mut VecDeque<Post>) {
+    let before = posts.len();
+    posts.retain(|post| !matches!(post, Post::Scoped { from, .. } if from.is_cancelled()));
+    if posts.len() != before {
+        let live = std::mem::take(posts);
+        for post in live {
+            enqueue(posts, post);
+        }
+    }
+}
+fn recall(posts: &mut VecDeque<Post>) -> Vec<String> {
+    fence(posts);
+    let mut prompts = Vec::new();
+    let mut kept = VecDeque::new();
+    for post in posts.drain(..) {
+        match post {
+            Post::Human(text) => prompts.push(text),
+            other => enqueue(&mut kept, other),
+        }
+    }
+    *posts = kept;
+    prompts
+}
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock_ignore_poison()
+    }
+    fn notify(&self) {
         self.signal.notify_all();
     }
 }
-
-/// The push rule.  The idempotent sources coalesce: a wakeup
-/// replaces a still-queued one for the same schedule id, a `Nudge` replaces a
-/// still-queued nudge (a second means a fresher continuation superseded the
-/// first, not that both are owed), and `UserSteering` joins a steering tail
-/// entry on a new line.  Every other source queues: each is posted at most
-/// once per child, worker, or human keystroke, so the fuel and admission caps
-/// that bound those already bound the queue.
-fn enqueue(q: &mut VecDeque<Post>, msg: Post) {
-    match msg {
-        Post::Stamped {
-            kind: Stamped::Wakeup { id, .. },
-            ..
-        } => replace_or_push(q, msg, |m| queued_wakeup_for(m, id)),
-        Post::UserSteering(text) => match q.back_mut() {
-            Some(Post::UserSteering(s)) => {
-                s.push('\n');
-                s.push_str(&text);
-            }
-            _ => q.push_back(Post::UserSteering(text)),
-        },
-        Post::Nudge { .. } => replace_or_push(q, msg, |m| matches!(m, Post::Nudge { .. })),
-        other => q.push_back(other),
+impl WeakMailbox {
+    pub(crate) fn upgrade(&self) -> Option<Mailbox> {
+        (!self.scope.is_cancelled())
+            .then(|| self.shared.upgrade())
+            .flatten()
+            .map(|shared| Mailbox {
+                shared,
+                scope: self.scope.clone(),
+            })
     }
 }
-
-/// Coalesce: overwrite the queued entry matching `pred` in place, else push.
-fn replace_or_push(q: &mut VecDeque<Post>, msg: Post, pred: impl Fn(&Post) -> bool) {
-    match q.iter().position(pred) {
-        Some(pos) => q[pos] = msg,
-        None => q.push_back(msg),
-    }
-}
-
-/// Whether `m` is a still-queued wakeup for `id` — the predicate [`enqueue`]'s
-/// dedupe and [`Mailbox::has_queued_wakeup`] both read.
-fn queued_wakeup_for(m: &Post, id: ScheduleId) -> bool {
-    matches!(m, Post::Stamped { kind: Stamped::Wakeup { id: eid, .. }, .. } if *eid == id)
-}
-
-/// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes.  A
-/// push notifies immediately; this bound governs only how fast a cancel, which
-/// does not notify, is observed.
-const PARK_POLL: Duration = Duration::from_millis(100);
-
-/// The cloneable **sender** side of a session's inbox — producers hold this,
-/// never the [`Inbox`].
-///
-/// Every agent's own is reached off it, so the frontend can steer a focused
-/// tab and the `message` tool can reach a live agent without exposing raw
-/// senders to model code.
-#[derive(Clone)]
-pub struct Mailbox {
-    shared: Arc<Shared>,
-}
-
 impl Mailbox {
-    /// Post any message, applying the coalesce rule ([`Shared::push`]) and
-    /// waking a parked consumer.  Takes the queue mutex, so no caller may hold
-    /// a fleet lock: clone the mailbox out and push after the guard drops.
-    pub(crate) fn push(&self, msg: Post) {
-        self.shared.push(msg);
+    pub(crate) fn scope(&self) -> Scope {
+        self.scope.clone()
     }
-
-    /// The fleet's delivery door for a human message: an exchange, so it
-    /// stamps the clock in the same step as it delivers.
-    pub(crate) fn steer(&self, text: String) {
-        self.exchange(Post::UserSteering(text));
+    pub(crate) fn downgrade(&self) -> WeakMailbox {
+        WeakMailbox {
+            shared: Arc::downgrade(&self.shared),
+            scope: self.scope.clone(),
+        }
     }
-
-    /// Deliver `msg` as an exchange — a steer, or a parent's marked
-    /// [`Post::AgentMessage`] — stamping the clock atomically with the push.
-    pub(crate) fn exchange(&self, msg: Post) {
-        self.shared.exchange(msg);
+    pub(crate) fn is_current(&self) -> bool {
+        let state = self.shared.lock();
+        state.work.scope.id() == self.scope.id() && !self.scope.is_cancelled()
     }
-
-    /// The last exchange this inbox witnessed, or `None` before the first.
-    pub(crate) fn last_exchange(&self) -> Option<Instant> {
-        self.shared.lock().last_exchange
+    pub(crate) fn adopt(&self, child: AgentId) -> Option<ScopeNode> {
+        let mut state = self.shared.lock();
+        if state.work.scope.id() != self.scope.id() || self.scope.is_cancelled() {
+            return None;
+        }
+        state.work.awaiting.insert(child, 0);
+        Some(state.work.scope.child())
     }
-
-    /// Whether this queue's consumer is parked at a human-input boundary — the
-    /// TUI reads the focused tab's to drive the prompt chrome and the spinner.
-    pub(crate) fn waiting_for_input(&self) -> bool {
-        self.shared.waiting_for_input.load(Ordering::Acquire)
+    pub(crate) fn post(&self, kind: Scoped) -> bool {
+        self.deliver(Post::Scoped {
+            from: self.scope.clone(),
+            kind,
+        })
     }
-
-    /// This inbox's clear-epoch — the race is [`Shared::epoch`]'s doc.
-    pub(crate) fn epoch(&self) -> u64 {
-        self.shared.epoch.load(Ordering::Acquire)
+    fn deliver(&self, post: Post) -> bool {
+        let mut state = self.shared.lock();
+        if self.shared.life.is_cancelled()
+            || matches!(&post, Post::Scoped { from, .. } if from.is_cancelled())
+        {
+            return false;
+        }
+        match &post {
+            Post::Human(_) => state.last_exchange = Some(Instant::now()),
+            Post::Scoped {
+                kind: Scoped::Message(message),
+                ..
+            } => {
+                state.last_exchange = Some(Instant::now());
+                state.accepted = state.accepted.max(message.seq);
+            }
+            _ => {}
+        }
+        enqueue(&mut state.posts, post);
+        state.waiting_for_input = false;
+        drop(state);
+        self.shared.notify();
+        true
     }
-
-    /// Whether a wakeup for `id` is still queued, unconsumed — the reaper's
-    /// overlap check: a fire finding one still here skips, since the queue's
-    /// own dedupe ([`enqueue`]) means at most one is ever waiting.
-    pub(crate) fn has_queued_wakeup(&self, id: ScheduleId) -> bool {
-        self.shared
-            .lock()
+    pub(crate) fn vouched_by(&self, scope: Scope) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            scope,
+        }
+    }
+    pub(crate) fn is_live(&self) -> bool {
+        !self.shared.life.is_cancelled()
+    }
+    pub(crate) fn end(&self, cause: CancelCause) {
+        let _state = self.shared.lock();
+        self.shared.life.cancel(cause);
+        self.shared.notify();
+    }
+    pub(crate) fn notify(&self) {
+        self.shared.notify();
+    }
+    pub(crate) fn interrupt(&self) {
+        let state = self.shared.lock();
+        state.exchange.cancel(CancelCause::Interrupted);
+        if let Some(opening) = &state.opening {
+            opening.cancel(CancelCause::Interrupted);
+        }
+        drop(state);
+        self.shared.notify();
+    }
+    pub(crate) fn steer(&self, text: String) -> bool {
+        self.deliver(Post::Human(text))
+    }
+    pub(crate) fn post_read(&self, read: Read) {
+        self.deliver(Post::Read(read));
+    }
+    pub(crate) fn post_rewrite(&self, rewrite: Rewrite) {
+        self.deliver(Post::Rewrite(rewrite));
+    }
+    pub(crate) fn retire(&self) -> bool {
+        let state = self.shared.lock();
+        self.shared.life.cancel(CancelCause::Cancelled);
+        let replied = state.reply_since().is_some();
+        drop(state);
+        self.shared.notify();
+        replied
+    }
+    pub(crate) fn queued(&self) -> Vec<String> {
+        let state = self.shared.lock();
+        if self.shared.life.is_cancelled() {
+            return Vec::new();
+        }
+        state
             .posts
             .iter()
-            .any(|m| queued_wakeup_for(m, id))
-    }
-
-    /// Everything the human typed and is still waiting on, oldest first, for
-    /// the TUI's queue strip: prompts and the commands queued among them, in
-    /// the one order they were typed.  A command earns its place because it can
-    /// be the reason the rest are waiting — a rewrite holds the queue behind
-    /// it, and a strip that showed only prompts would leave that wait with no
-    /// visible cause.  Other deliveries stay invisible: they are work, not
-    /// queued human text.
-    pub(crate) fn queued_human_messages(&self) -> Vec<String> {
-        self.shared
-            .lock()
-            .posts
-            .iter()
-            .filter_map(|msg| match msg {
-                Post::UserSteering(s) => Some(s.clone()),
+            .filter_map(|p| match p {
+                Post::Human(text) => Some(text.clone()),
                 Post::Read(r) => Some(r.to_string()),
                 Post::Rewrite(r) => Some(r.to_string()),
-                _ => None,
+                Post::Scoped { .. } => None,
             })
             .collect()
     }
-
-    /// Pull every queued user prompt back out for editing, oldest first,
-    /// wherever it sits: a prompt queued behind a wakeup is still the user's
-    /// draft, and the wakeup, left in place, is not.
     pub(crate) fn recall(&self) -> Vec<String> {
-        let mut guard = self.shared.lock();
-        let q = &mut guard.posts;
-        let mut prompts: Vec<String> = Vec::new();
-        let mut kept: VecDeque<Post> = VecDeque::with_capacity(q.len());
-        while let Some(msg) = q.pop_front() {
-            match msg {
-                Post::UserSteering(s) => prompts.push(s),
-                other => kept.push_back(other),
-            }
+        let mut state = self.shared.lock();
+        if self.shared.life.is_cancelled() {
+            return Vec::new();
         }
-        *q = kept;
-        drop(guard);
-        prompts
+        recall(&mut state.posts)
     }
-
-    #[cfg(test)]
-    pub(crate) fn abandon(&self) -> Vec<String> {
-        self.shared.abandon(&mut self.shared.lock())
-    }
-
-    /// Only brief local register operations belong inside this boundary.
-    pub(crate) fn admission<T>(&self, action: impl FnOnce() -> T) -> T {
-        let _queue = self.shared.lock();
-        action()
-    }
-
-    pub(crate) fn steer_live(&self, text: String, token: &cancel::Token) -> bool {
-        let mut q = self.shared.lock();
-        if token.terminated() {
-            return false;
-        }
-        q.last_exchange = Some(Instant::now());
-        enqueue(&mut q.posts, Post::UserSteering(text));
-        drop(q);
-        self.shared.wake();
-        true
-    }
-
-    /// Pause admission without abandoning queued deliveries or their stamps.
-    pub(crate) fn hold<T>(&self, snapshot: impl FnOnce() -> T) -> (AdmissionHold, T) {
-        let hold;
-        let mut q = self.shared.lock();
-        q.stopping += 1;
-        hold = AdmissionHold(self.shared.clone());
-        let captured = snapshot();
-        drop(q);
-        (hold, captured)
-    }
-
-    pub(crate) fn begin_abandon<T>(
-        &self,
-        interrupt: Option<&cancel::Token>,
-        snapshot: impl FnOnce() -> T,
-    ) -> Option<(AdmissionHold, Vec<String>, T)> {
-        let hold;
-        let mut q = self.shared.lock();
-        if interrupt.is_some_and(cancel::Token::terminated) {
+    pub(crate) fn stop(&self, id: JobId) -> Option<Vec<String>> {
+        let mut state = self.shared.lock();
+        if self.shared.life.is_cancelled() {
             return None;
         }
-        q.stopping += 1;
-        hold = AdmissionHold(self.shared.clone());
-        let prompts = self.shared.abandon(&mut q);
-        if let Some(token) = interrupt {
-            token.cancel(ral_core::process::CancelCause::Interrupted);
+        // I7: Stop and close linearise on this lock.
+        let job = state
+            .job
+            .as_mut()
+            .filter(|job| job.id == id && !job.stopped)?;
+        job.stopped = true;
+        let recalled = state.abandon(&self.shared.life, Queue::Recall);
+        drop(state);
+        self.shared.notify();
+        Some(recalled)
+    }
+    pub(crate) fn status(&self) -> Status {
+        let state = self.shared.lock();
+        Status {
+            rest: state.rest,
+            replied: state.reply.is_some(),
+            reply_since: state.reply_since(),
+            busy: state.has_busy_children(),
+            waiting_for_input: state.waiting_for_input,
+            last_exchange: state.last_exchange,
         }
-        let captured = snapshot();
-        drop(q);
-        Some((hold, prompts, captured))
     }
-
-    /// Mint the addressed envelope for a message composed now but pushed
-    /// later — the only way to send a [`Stamped`] message.
-    pub(crate) fn stamp(&self) -> Stamp {
-        Stamp {
-            epoch: self.epoch(),
-            mailbox: self.clone(),
+    pub(crate) fn reply(&self) -> Option<FOValue> {
+        self.shared.lock().reply.clone()
+    }
+    pub(crate) fn answers(&self) -> u64 {
+        self.shared.lock().answered
+    }
+    pub(crate) fn expect(&self, child: AgentId) -> u64 {
+        let mut state = self.shared.lock();
+        state.next_message += 1;
+        let seq = state.next_message;
+        state.work.awaiting.insert(child, seq);
+        seq
+    }
+    pub(crate) fn unexpect(&self, child: AgentId, seq: u64) {
+        let mut state = self.shared.lock();
+        if state.work.awaiting.get(&child) == Some(&seq) {
+            state.work.awaiting.remove(&child);
+        }
+    }
+    pub(crate) fn lapse(&self, since: Instant) {
+        let state = self.shared.lock();
+        if !self.shared.life.is_cancelled() && state.reply_since() == Some(since) {
+            self.shared.life.cancel(CancelCause::TimedOut);
+            self.shared.notify();
+        }
+    }
+    pub(crate) fn has_queued_wakeup(&self, id: ScheduleId) -> bool {
+        let mut state = self.shared.lock();
+        fence(&mut state.posts);
+        state.posts.iter().any(|p| wakeup(p, id))
+    }
+    fn close_job(&self, id: JobId) {
+        let mut state = self.shared.lock();
+        if state.job.as_ref().is_some_and(|j| j.id == id) {
+            state.job.take();
+            drop(state);
+            self.shared.notify();
         }
     }
 }
-
-/// An addressed envelope: the destination mailbox and its clear-epoch,
-/// captured together at composition ([`Mailbox::stamp`]).  Because the pair
-/// travels as one value, a stamp can be neither forgotten ([`Stamped`] is
-/// unsendable without one), taken from a different inbox than the one that
-/// judges it, nor refreshed at push time.
-#[derive(Clone)]
-pub(crate) struct Stamp {
-    mailbox: Mailbox,
-    epoch: u64,
-}
-
-impl Stamp {
-    /// Deliver to the minting mailbox, judged against the minted epoch at
-    /// that inbox's own pop ([`pop_next`]).
-    pub(crate) fn post(&self, kind: Stamped) {
-        self.mailbox.push(Post::Stamped {
-            epoch: Minted(self.epoch),
-            kind,
-        });
-    }
-
-    pub(crate) fn current(&self, token: &cancel::Token) -> bool {
-        let q = self.mailbox.shared.lock();
-        q.stopping == 0 && !self.is_stale() && !token.terminated()
-    }
-
-    pub(crate) fn admit<T>(&self, token: &cancel::Token, action: impl FnOnce() -> T) -> Option<T> {
-        let q = self.mailbox.shared.lock();
-        if q.stopping != 0 || self.is_stale() || token.is_cancelled() {
-            return None;
-        }
-        let accepted = action();
-        drop(q);
-        Some(accepted)
-    }
-
-    pub(crate) fn reset(&self, token: &cancel::Token) -> bool {
-        let mut q = self.mailbox.shared.lock();
-        if q.stopping != 0 || self.is_stale() || token.terminated() {
-            return false;
-        }
-        token.reset();
-        remove_where(&mut q.posts, |post| matches!(post, Post::Nudge { .. }));
-        true
-    }
-
-    /// Whether the minting inbox has cleared since — the desk's spawn
-    /// refusal, with no second epoch read to get wrong.
-    pub(crate) fn is_stale(&self) -> bool {
-        self.mailbox.epoch() != self.epoch
-    }
-}
-
-/// A session's inbox: the owned **consumer** the attend loop pulls from, with
-/// senders minted by [`Self::mailbox`].  Tool-boundary messages drain
-/// mid-exchange ([`Self::drain_mid_exchange`], from `agent::deliberate`), the rest
-/// at the exchange boundary ([`Self::next_or_idle`]).
-#[derive(Clone)]
-pub(crate) struct Inbox {
-    shared: Arc<Shared>,
-}
-
-impl Default for Inbox {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Inbox {
-    pub(crate) fn new() -> Self {
-        Self {
-            shared: Shared::new(),
-        }
+    pub(crate) fn new(life: ScopeNode) -> Self {
+        let work = Work {
+            scope: life.child(),
+            awaiting: BTreeMap::new(),
+        };
+        let exchange = work.scope.child();
+        exchange.cancel(CancelCause::Cancelled);
+        Self(Arc::new(Shared {
+            life,
+            state: Mutex::new(State {
+                posts: VecDeque::new(),
+                work,
+                exchange,
+                opening: None,
+                job: None,
+                next_job: 0,
+                next_message: 0,
+                accepted: 0,
+                answered: 0,
+                rest: None,
+                reply: None,
+                replied_at: None,
+                last_exchange: None,
+                waiting_for_input: true,
+            }),
+            signal: Condvar::new(),
+        }))
     }
-
     pub(crate) fn mailbox(&self) -> Mailbox {
         Mailbox {
-            shared: self.shared.clone(),
+            shared: self.0.clone(),
+            scope: (*self.0.lock().work.scope).clone(),
         }
     }
-
-    /// The self-push path — a nudge or a self-armed wakeup landing in the
-    /// agent's own box.  Same rule as [`Mailbox::push`].
-    pub(crate) fn push(&self, msg: Post) {
-        self.shared.push(msg);
+    pub(crate) fn life_child(&self) -> ScopeNode {
+        self.0.life.child()
     }
-
-    pub(crate) fn push_user(&self, prompt: String) {
-        self.push(Post::UserSteering(prompt));
+    pub(crate) fn life_mailbox(&self) -> Mailbox {
+        Mailbox {
+            shared: self.0.clone(),
+            scope: (*self.0.life).clone(),
+        }
     }
-
-    /// Whether anything is queued.  The attend loop's ready boundary reads it
-    /// to tell an idle pass from one that already has work in hand.
+    pub(crate) fn exchange(&self) -> Scope {
+        (*self.0.lock().exchange).clone()
+    }
+    pub(crate) fn draw(&self, park: impl Fn(&State) -> ParkMode) -> Option<Next> {
+        let mut state = self.0.lock();
+        loop {
+            if self.0.life.is_cancelled() || state.job.as_ref().is_some_and(|j| j.stopped) {
+                return None;
+            }
+            let mode = park(&state);
+            if let Some(next) = state.pop() {
+                if matches!(&next, Next::Item(item) if item.opens_exchange()) {
+                    state.opening = Some(state.work.scope.child());
+                }
+                state.waiting_for_input = false;
+                return Some(next);
+            }
+            if mode == ParkMode::Quiesce {
+                state.waiting_for_input = false;
+                return None;
+            }
+            state.waiting_for_input = matches!(mode, ParkMode::Held | ParkMode::Engaged);
+            (state, _) = self.0.signal.wait_timeout_ignore_poison(state, PARK_POLL);
+        }
+    }
+    pub(crate) fn drain(&self) -> Vec<Next> {
+        let mut state = self.0.lock();
+        let mut arrivals = Vec::new();
+        if state.exchange.is_cancelled() {
+            return arrivals;
+        }
+        loop {
+            match state.pop() {
+                Some(Next::Rewrite(rewrite)) => {
+                    state.posts.push_front(Post::Rewrite(rewrite));
+                    break;
+                }
+                Some(next) => arrivals.push(next),
+                None => break,
+            }
+        }
+        drop(state);
+        arrivals
+    }
+    pub(crate) fn open_exchange(&self) {
+        let mut state = self.0.lock();
+        state.exchange.cancel(CancelCause::Cancelled);
+        // I3: use the scope minted at pop; never erase a racing Stop or Esc.
+        state.exchange = state.opening.take().expect("an opening was minted at pop");
+    }
+    pub(crate) fn decline_opening(&self) {
+        self.0.lock().opening.take();
+    }
+    pub(crate) fn close_exchange(&self) {
+        let state = self.0.lock();
+        state.exchange.cancel(CancelCause::Cancelled);
+        debug_assert!(state.opening.is_none(), "rewrites never open an exchange");
+        drop(state);
+    }
+    pub(crate) fn abandon(&self, queue: Queue) -> Vec<String> {
+        let recalled = self.0.lock().abandon(&self.0.life, queue);
+        self.0.notify();
+        recalled
+    }
+    pub(crate) fn await_job(&self) -> Option<Job> {
+        let mut state = self.0.lock();
+        loop {
+            if self.0.life.is_cancelled() {
+                return None;
+            }
+            if state.job.is_none() && state.posts.iter().any(|p| matches!(p, Post::Human(_))) {
+                state.next_job += 1;
+                let id = JobId(state.next_job);
+                state.job = Some(OpenJob { id, stopped: false });
+                return Some(Job {
+                    id,
+                    mailbox: self.life_mailbox(),
+                });
+            }
+            state.waiting_for_input = true;
+            (state, _) = self.0.signal.wait_timeout_ignore_poison(state, PARK_POLL);
+        }
+    }
+    pub(crate) fn nudge(&self, prompt: u64, text: String) {
+        self.life_mailbox()
+            .vouched_by(self.exchange())
+            .post(Scoped::Nudge { prompt, text });
+    }
+    pub(crate) fn set_resting(&self, resting: bool) {
+        let mut state = self.0.lock();
+        if resting {
+            state.rest.get_or_insert_with(Instant::now);
+        } else {
+            state.rest = None;
+        }
+    }
+    pub(crate) fn deposit_reply(&self, reply: FOValue) -> Instant {
+        let mut state = self.0.lock();
+        let since = Instant::now();
+        state.reply = Some(reply);
+        state.replied_at = Some(since);
+        since
+    }
+    pub(crate) fn disarm_reply_lease(&self) {
+        self.0.lock().replied_at = None;
+    }
     pub(crate) fn is_empty(&self) -> bool {
-        self.shared.lock().posts.is_empty()
+        let mut state = self.0.lock();
+        fence(&mut state.posts);
+        state.posts.is_empty()
     }
-
-    /// Queue depth per source for the `/resources` fold, zeros included so the
-    /// row set is stable.  One pass under the lock; nothing is drained or woken.
     pub(crate) fn source_depths(&self) -> Vec<(Source, u64)> {
-        let mut rows: Vec<(Source, u64)> = Source::ALL.into_iter().map(|s| (s, 0u64)).collect();
-        for msg in &self.shared.lock().posts {
-            if let Some(row) = rows.iter_mut().find(|(s, _)| *s == msg.source()) {
-                row.1 += 1;
+        let mut rows: Vec<_> = Source::ALL.into_iter().map(|s| (s, 0)).collect();
+        for post in &self.0.lock().posts {
+            if let Some((_, count)) = rows.iter_mut().find(|(s, _)| *s == post.source()) {
+                *count += 1;
             }
         }
         rows
     }
+}
 
-    /// Mid-exchange drain at a tool-call boundary: the reads to run and the
-    /// deliveries to hand the model, in the one order they were typed.
-    ///
-    /// The scan stops at a rewrite, which drains only at the exchange boundary
-    /// and holds everything typed after it; a [`Next::Rewrite`] is therefore
-    /// never among the results.
-    #[cfg(test)]
-    pub(crate) fn drain_mid_exchange(&self) -> Vec<Next> {
-        self.drain_drawn(&self.mailbox().stamp(), &cancel::Token::new())
-            .into_iter()
-            .map(|drawn| drawn.next)
-            .collect()
+/// An open job, attended at most once; dropping it unattended closes it.
+#[must_use]
+pub struct Job {
+    id: JobId,
+    mailbox: Mailbox,
+}
+impl Job {
+    pub fn id(&self) -> JobId {
+        self.id
     }
-
-    pub(crate) fn drain_drawn(&self, work: &Stamp, token: &cancel::Token) -> Vec<Drawn> {
-        let mut guard = self.shared.lock();
-        let epoch = self.shared.epoch.load(Ordering::Acquire);
-        let mut arrivals = Vec::new();
-        if guard.stopping != 0 || work.is_stale() || token.is_cancelled() {
-            return arrivals;
-        }
-        while let Some(next) = pop_next(&mut guard.posts, epoch) {
-            match next {
-                Next::Rewrite(r) => {
-                    guard.posts.push_front(Post::Rewrite(r));
-                    break;
-                }
-                next => arrivals.push(Drawn {
-                    next,
-                    stamp: Stamp {
-                        mailbox: self.mailbox(),
-                        epoch,
-                    },
-                }),
-            }
-        }
-        drop(guard);
-        arrivals
+    pub(crate) fn belongs_to(&self, mailbox: &Mailbox) -> bool {
+        Arc::ptr_eq(&self.mailbox.shared, &mailbox.shared)
     }
-
-    /// The next exchange-boundary deliverable.  Never blocks —
-    /// [`Self::next_or_idle`] is the parking variant the attend loop uses.
-    #[cfg(test)]
-    pub(crate) fn next_item(&self) -> Option<Next> {
-        let mut q = self.shared.lock();
-        let epoch = self.shared.epoch.load(Ordering::Acquire);
-        pop_next(&mut q.posts, epoch)
-    }
-
-    /// The attend loop's exchange-boundary pull: the next deliverable, or, on
-    /// an empty queue, whatever the `park` verdict says — the immunity ladder is
-    /// [`ParkMode`]'s doc.  A push wakes the park at once through the condvar;
-    /// a cancellation does not notify, so a non-`Held` park re-checks it every
-    /// [`PARK_POLL`].
-    ///
-    /// Two orderings carry the correctness.  The verdict runs *under the queue
-    /// mutex*, which the condvar releases atomically, so no push interleaves
-    /// between verdict and wait and no wakeup is lost.  And it runs
-    /// *before* the pop, so a `Quiesce` can never win against a delivery
-    /// already queued.
-    #[cfg(test)]
-    pub(crate) fn next_or_idle(
-        &self,
-        park: impl Fn() -> ParkMode,
-        cancel: &cancel::Token,
-    ) -> Option<Next> {
-        self.draw(park, cancel).map(|drawn| drawn.next)
-    }
-
-    pub(crate) fn draw(
-        &self,
-        park: impl Fn() -> ParkMode,
-        cancel: &cancel::Token,
-    ) -> Option<Drawn> {
-        let mut q = self.shared.lock();
-        loop {
-            let mode = park();
-            // Interrupts end exchanges; termination ends every residency.
-            if cancel.terminated() {
-                return None;
-            }
-            let epoch = self.shared.epoch.load(Ordering::Acquire);
-            if q.stopping == 0
-                && let Some(next) = pop_next(&mut q.posts, epoch)
-            {
-                self.shared
-                    .waiting_for_input
-                    .store(false, Ordering::Release);
-                return Some(Drawn {
-                    next,
-                    stamp: Stamp {
-                        mailbox: self.mailbox(),
-                        epoch,
-                    },
-                });
-            }
-            if q.stopping == 0 && mode == ParkMode::Quiesce {
-                self.shared
-                    .waiting_for_input
-                    .store(false, Ordering::Release);
-                return None;
-            }
-            self.shared.waiting_for_input.store(
-                matches!(mode, ParkMode::Held | ParkMode::Engaged),
-                Ordering::Release,
-            );
-            let (guard, _timeout) = self.shared.signal.wait_timeout_ignore_poison(q, PARK_POLL);
-            q = guard;
+    pub(crate) fn close_if_running(&self) -> bool {
+        let mut state = self.mailbox.shared.lock();
+        if state
+            .job
+            .as_ref()
+            .is_some_and(|job| job.id == self.id && !job.stopped)
+        {
+            state.job.take();
+            drop(state);
+            self.mailbox.shared.notify();
+            true
+        } else {
+            false
         }
     }
-
-    /// Drop every pending message — `/clear` rebuilds the agent, so nothing
-    /// queued carries across.  A queued-but-unconsumed wakeup needs no
-    /// separate release: dropping it from the queue is itself what
-    /// [`Mailbox::has_queued_wakeup`] will see.  Bumps the clear-epoch under
-    /// the same lock as the drain ([`Shared::epoch`]).
-    #[cfg(test)]
-    pub(crate) fn clear(&self) {
-        drop(self.mailbox().abandon());
-    }
-
-    pub(crate) fn await_human(&self, cancel: &cancel::Token) -> bool {
-        let mut q = self.shared.lock();
-        loop {
-            if cancel.terminated() {
-                return false;
-            }
-            if q.stopping == 0
-                && q.posts
-                    .iter()
-                    .any(|post| matches!(post, Post::UserSteering(_)))
-            {
-                return true;
-            }
-            self.shared.waiting_for_input.store(true, Ordering::Release);
-            let (guard, _timeout) = self.shared.signal.wait_timeout_ignore_poison(q, PARK_POLL);
-            q = guard;
-        }
-    }
-
-    /// Drop queued self-nudges while preserving user, command, and worker
-    /// messages.  A nudge continues the exchange it was decided in, so a
-    /// rewind that removes that exchange, or a new exchange opening ahead of
-    /// it, makes it stale.
-    pub(crate) fn drop_nudges(&self) {
-        remove_where(&mut self.shared.lock().posts, |msg| {
-            matches!(msg, Post::Nudge { .. })
-        });
+}
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.mailbox.close_job(self.id);
     }
 }
 
-/// Remove every entry matching `pred`, then restore [`enqueue`]'s invariant:
-/// no two steering entries adjacent.  A removal from the middle is the one
-/// thing that can break it.
-fn remove_where(q: &mut VecDeque<Post>, pred: impl Fn(&Post) -> bool) {
-    let before = q.len();
-    q.retain(|m| !pred(m));
-    if q.len() == before {
-        return;
-    }
-    let mut merged: VecDeque<Post> = VecDeque::with_capacity(q.len());
-    for msg in q.drain(..) {
-        enqueue(&mut merged, msg);
-    }
-    *q = merged;
-}
-
-/// Pop the front of a locked queue.  Stale stamped posts are fenced first,
-/// against the caller's read of the clear-epoch taken under this same lock.
-pub(super) fn pop_next(q: &mut VecDeque<Post>, epoch: u64) -> Option<Next> {
-    remove_where(q, |m| m.stale(epoch));
-    q.pop_front().map(to_next)
-}
-
-/// Convert one already-fenced post into what it delivers.
-fn to_next(msg: Post) -> Next {
-    match msg {
-        Post::Stamped { kind, .. } => Next::Item(match kind {
-            Stamped::Wakeup {
-                label,
-                trigger,
-                prompt,
-                ..
-            } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
-            Stamped::AgentResult(line) => Item::Agent(line),
-            Stamped::Surface { id, values } => Item::Surface { id, values },
-        }),
-        Post::AgentMessage(m) => Next::Item(Item::Message(m)),
-        Post::Nudge { prompt, text } => Next::Item(Item::Nudge { prompt, text }),
-        Post::Read(r) => Next::Read(r),
-        Post::Rewrite(r) => Next::Rewrite(r),
-        Post::UserSteering(s) => Next::Item(Item::Human(s)),
-    }
-}
-
-#[cfg(test)]
-mod admission_tests;
 #[cfg(test)]
 mod tests;

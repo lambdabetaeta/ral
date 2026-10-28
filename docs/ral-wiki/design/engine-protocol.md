@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
 ---
 
 # The engine protocol
@@ -59,7 +59,7 @@ and a binding is only the carriage around it.
 
 |                   | answered (call)                                                    | one-way (notice)                                              |
 | ----------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
-| **host → engine** | `Dispatch → Report` — one whole run: clocked, walled, cancel-scoped  | `Control` — interrupt, cancel, terminate, abort, out-of-band     |
+| **host → engine** | `Dispatch → Report` — one whole run: clocked, walled, cancel-scoped  | `Control` — addressed strike, terminate, abort, out-of-band     |
 | **engine → host** | `Enquiry → Answer` — nested inside a run, no clock of its own       | `Surface` — a run's live values, ordered before its Report; a worker's batch, on the session |
 
 Each direction owns one answered channel and one one-way channel, and the
@@ -68,10 +68,10 @@ asymmetries are semantic, not accidental, and are never smoothed into a fake
 mirror pair:
 
 - *Mood.* `Control` is imperative while `Surface` is indicative: this
-  happened, this is now true. `Control` has four verbs, each meaning one
-  thing under either carrier (`Scopes::apply`): `Interrupt(id)` unwinds that
-  dispatch as a Ctrl-C would and `Cancel(id)` as a targeted teardown, either
-  one even before the dispatch has arrived, and a stale id strikes nothing;
+  happened, this is now true. `Control` has three verbs, each meaning one
+  thing under either carrier (`Scopes::apply`): `Strike(id, cause)` unwinds
+  only that dispatch with the exact cause, even before it has arrived, and a
+  stale id strikes nothing. A dispatch-local terminal cause never ends the engine;
   `Terminate` cancels the durable root — every run and every worker,
   for good; `Abort` is `Terminate` as Ctrl-`\` asks it, cause `RootAbort`. No
   engine folds its process's signals: its front-end forwards them as these
@@ -87,7 +87,7 @@ mirror pair:
   a verb that arrives late finds a stale id.
 - *Clock.* `Dispatch` opens the turn's clock and holds the session's single
   worker rendezvous; `Enquiry` happens inside a dispatch and inherits all of
-  it — no wall of its own, and a `Control::Cancel` must wake an engine
+  it — no wall of its own, and a `Control::Strike` must wake an engine
   parked on an unanswered enquiry.
 
 A further frame, `Probe`, rides the `Dispatch → Report` rail rather than
@@ -204,7 +204,7 @@ payload's shape (an `ExecGrant`'s allowance and exclusion sets, verb
 sets as sequences) bumps `PROTOCOL_VERSION` and rebuilds the guest media, whose
 manifest the host compares before packaging. Without the bump stale media passes
 the packaging check and the attach handshake and fails decoding the first
-dispatch. **`PROTOCOL_VERSION` is 33.** `Capabilities` carries an authored
+dispatch. **`PROTOCOL_VERSION` is 34.** `Capabilities` carries an authored
 `ExecGrant` as `every`, `allow` and `deny`: the two sets encode as sequences,
 omitted sets default to empty, and unknown fields are refused. A key may occur
 in both sets. Rebuild guest media with `just guest-boot`. A `Fragment` never
@@ -216,7 +216,7 @@ crosses: it lives only between loading and `extend`.
   foreground cancel scope, no clock of its own. A worker is built
   with no desk at all — a worker outlives its spawning run's `Report`, so one
   that could enquire would answer into a `Report` window already closed.
-- **Cancel wakes a park.** `Control::Cancel` must reach an engine parked on
+- **A strike wakes a park.** `Control::Strike` must reach an engine parked on
   an unanswered enquiry; the wire engine's park polls the run's cancel cause
   between bounded `mpsc` `recv_timeout` waits on its answer channel, so
   cancel and answer race safely.
@@ -318,19 +318,22 @@ conflated into one string a caller might pattern-match.
 
 **One engine process per session, one connection per engine process — the
 connection *is* the session**, so no frame carries a session address.
-`Attach` opens it; the front-end's EOF or the liveness deadline closes it;
+`Attach` opens it; `Detach` closes it with an `Ended` acknowledgment;
+EOF or the liveness deadline closes it without certification.
 `Dispatch`, `Probe`, `Event`, `Control`, `Answer` all ride it unaddressed.
 
 **One owner per connection.** A wire transport alone owns its `Line`:
 the write channel, a never-locked duplicate to shut the socket with, and
 the severance cell. A control sender and the heartbeat hold the line
-weakly, so holding a sender, as an exarch `Agent` does in its `reach`,
-holds no connection, and a verb aimed at a gone line is a no-op: its
-engine ended every run at EOF. A session ends when its front-end drops
-its transport. The wire transport's drop shuts the socket, which acts on
-the connection rather than on one descriptor, and the engine reads EOF;
-the identity transport's drop takes its engine, and every worker, with
-it. There is no explicit session-ending verb.
+weakly, so holding a sender holds no connection, and a verb aimed at a
+gone line is a no-op. The wire transport's drop shuts the socket, which
+acts on the connection rather than on one descriptor, and the engine reads
+EOF; this initiates teardown but proves nothing about when it finishes.
+`WireTransport::end` instead sends `Detach` and waits for `Ended`, emitted
+only after engine-thread join and an empty session-worker census. A timeout
+or severance refuses that proof. Exarch retains membership during this
+exchange; Synod refuses its closing folder walk if certification fails.
+The identity transport's drop destroys its engine directly.
 
 **The process is what makes a session's end final.** Most of what a session
 needs from its boundary is already software: `Control` cancels a dispatch,

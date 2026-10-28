@@ -1,5 +1,5 @@
 use crate::wire::WindowReport;
-use exarch::agent::Helm;
+use exarch::agent::AgentHandle;
 use exarch::provider::Holdings;
 use ral_core::sync::LockExt;
 use std::path::PathBuf;
@@ -90,7 +90,7 @@ impl Running {
 /// Where a message goes: held while the machine boots, then steered.
 pub(crate) enum Inlet {
     Booting(Vec<String>),
-    Live(Helm),
+    Live(AgentHandle),
 }
 
 impl Inlet {
@@ -100,7 +100,7 @@ impl Inlet {
                 messages.push(text);
                 Ok(())
             }
-            Self::Live(helm) => helm
+            Self::Live(agent) => agent
                 .steer(text)
                 .map_err(|_| "The assistant has already finished; nothing was sent.".to_string()),
         }
@@ -109,27 +109,27 @@ impl Inlet {
     pub(crate) fn queued(&self) -> Vec<String> {
         match self {
             Self::Booting(messages) => messages.clone(),
-            Self::Live(helm) => helm.queued(),
+            Self::Live(agent) => agent.queued(),
         }
     }
 
     pub(crate) fn recall(&mut self) -> Vec<String> {
         match self {
             Self::Booting(messages) => std::mem::take(messages),
-            Self::Live(helm) => helm.recall(),
+            Self::Live(agent) => agent.recall(),
         }
     }
 
-    pub(crate) fn install(&mut self, helm: Helm) -> Vec<String> {
-        match std::mem::replace(self, Self::Live(helm)) {
+    pub(crate) fn install(&mut self, agent: AgentHandle) -> Vec<String> {
+        match std::mem::replace(self, Self::Live(agent)) {
             Self::Booting(messages) => messages,
             Self::Live(_) => Vec::new(),
         }
     }
 
     pub(crate) fn end(self) {
-        if let Self::Live(helm) = self {
-            helm.end();
+        if let Self::Live(agent) = self {
+            agent.end();
         }
     }
 }
@@ -139,7 +139,6 @@ pub(crate) struct Handle {
     pub(crate) generation: u64,
     pub(crate) attempt: String,
     pub(crate) inlet: Inlet,
-    pub(super) exchanges: Arc<super::exchange::Exchanges>,
     pub(crate) join: JoinHandle<()>,
     /// Restart and close stop the baseline before joining its worker.
     pub(crate) baseline_stop: crate::folder::manifest::Stop,

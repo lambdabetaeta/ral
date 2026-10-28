@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-verified_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-verified_at_date: 2026-10-27
-anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
+generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
+verified_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
+verified_at_date: 2026-10-28
+anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
 
 # A run, end to end
@@ -69,7 +69,7 @@ looks up the hook table; both then converge on `run_built` and the run
 module's framed scaffold:
 
 - Mint the run's foreground scope — a child of the scope the door was entered
-  under, so a foreground timeout never reaches a worker
+  under, so a foreground timeout never reaches a loose session worker
   ([[internals/cancellation|cancellation]]) — and arm its wall, if any,
   **before compiling**, so `wall` bounds the whole run — compile and typecheck
   included, not only evaluation. `compile_run`'s `process::clear` touches only
@@ -165,7 +165,7 @@ module's framed scaffold:
 - The REPL's `exec::step` (`ral/src/repl/exec.rs`) supplies `origin:
   SourceOrigin::named("<stdin>")`, `GrantStack::root()`, no limits, `RunIo::Inherit`,
   `RequestedTerminalAccess::Leased`, `RunStdin::Inherit`; it builds a
-  `Program::Source` `Run` and drains it through `protocol::dispatch_to_report`
+  `Program::Source` `Run` and drains it through `carrier::dispatch_to_report(..., None)`
   on its `IdentityTransport` with the REPL's own `Host` (`ReplHost`),
   rendering the terminal `Report` with `print_result` — an `Err(Severed)`
   prints the cause and ends the session. The `pre-exec`, `chpwd` and
@@ -177,18 +177,30 @@ module's framed scaffold:
   `origin` naming the call's turn (`turn N`), its session grant profile, a
   per-tool `wall`, a `worker_cap` on concurrently running workers, a 2 s
   `cleanup_grace`, a required `worker_title`, `RunIo::Capture`,
-  `RequestedTerminalAccess::Denied`, `RunStdin::Empty`, `trail:
-  Some(CapturePolicy::Off)`; it builds a `Program::Source` `Run` and drains
-  it through `protocol::dispatch_to_report` against its call's `RunHost` —
+  `RequestedTerminalAccess::Denied`, `RunStdin::Empty`, `trail: None`;
+  it builds a `Program::Source` `Run` and drains it through
+  `carrier::dispatch_to_report(..., Some(exchange))` against its call's `RunHost` —
   one `Host` pairing the enquiry desk with the applier that renders each
   live surface value onto the presentation bus — and hands back the
-  `Result<Report, Severed>` itself; `Avatar::ral` renders the capped
-  `ToolResult`, or the one sentence `agent::seat::EngineLost` renders for a
+  `Result<Report, Severed>` itself; `Agent::ral` renders the capped
+  `ToolResult`, or the one sentence `agent::EngineLost` renders for a
   severance ([[map/exarch/agent|agent]]). **The session's host-installed
   layers *are* the sandbox** — ral's [[design/grant|grant]], not a
   source-level `grant { … }` the model could escape — which is why exarch
-  needs no runtime of its own
-  ([[design/exarch-architecture|exarch-architecture]]).
+  needs no evaluator of its own
+  ([[design/exarch-architecture|exarch-architecture]]). Its owner passes the
+  explicit exchange scope: identity dispatches mint beneath it, while the
+  wire drain polls it every `POLL_SLICE` and strikes only this dispatch id.
+  The dispatcher also checks before sending; cancellation already in force
+  opens the run born cancelled. The engine root still dominates termination:
+  `Scopes::end` strikes both root and current dispatch, even when its parent
+  is an exarch exchange. Cancelling threads never write to an engine.
+  `HostServices` captures current work for enquiries; deferred worker batches
+  instead carry agent life, surviving Stop and reply but not life end or
+  `/clear`'s queue discard. The engine and its loose ral workers outlive
+  delegated work. Synod's enclosing unit is a *job*, opened by human input
+  and closed at fleet settlement or after stopped helpers' teardown
+  ([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]).
 - ral's batch path (`ral/src/batch.rs`) boots an `IdentityTransport` from the
   `batch` installer, dispatches the `_ral-boot` hook, then the script as one
   `Program::Source` run under the mute host, with `RunIo::Inherit` and

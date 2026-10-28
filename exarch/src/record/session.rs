@@ -119,7 +119,7 @@ pub struct AgentLog {
     learned: Option<(String, u64)>,
     /// The one seam: every fact this log authors crosses here as a `Record` —
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
-    /// `Avatar::couple` has attached, in that order, under one lock.
+    /// `Agent::couple` has attached, in that order, under one lock.
     seam: crate::record::Emitter,
 }
 

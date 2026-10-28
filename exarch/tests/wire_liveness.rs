@@ -93,6 +93,7 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
         &transport,
         Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
         Arc::new(()),
+        None,
     )
     .expect("the engine must answer the dispatch with a Report");
 
@@ -120,11 +121,8 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
 
 /// A `Cancel` that overtakes the `Dispatch` it names still stops that run.
 ///
-/// The host stamps the id it is about to send before it takes the write lock,
-/// so a cancel raised in that window reaches the socket first.  Written by
-/// hand here in that order — no thread race to lose — the engine must hold it
-/// and spend it on the run's scope when the dispatch lands, not drop it for
-/// naming a dispatch it has not yet seen.
+/// The scoped dispatcher may strike before sending. The engine must retain
+/// that strike and spend it on the named run when its dispatch arrives.
 #[test]
 fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
     let (transport, _child) = engine_over_socketpair(Liveness::default());
@@ -137,6 +135,7 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
         id,
         Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
         &(Arc::new(()) as Arc<dyn Host>),
+        None,
     );
 
     let report = loop {
@@ -182,6 +181,7 @@ fn a_dead_peer_fails_the_in_flight_run_as_cancelled() {
         DispatchId(1),
         Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
         &(Arc::new(()) as Arc<dyn Host>),
+        None,
     );
 
     // Give the engine time to actually enter the sleep, so what the dropped

@@ -11,7 +11,7 @@
 //! every wake re-reads the wall clock: after a suspend a fire is at most that
 //! late, and a clock step moves it with the clock.
 
-use crate::bus::{Mailbox, ScheduleId, Stamped};
+use crate::bus::{Mailbox, ScheduleId, Scoped, WeakMailbox};
 use crate::clock;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
@@ -367,6 +367,7 @@ struct Entry {
     next: Timestamp,
     /// The next occurrence, armed on the reaper; dropping it disarms.
     deadline: Deadline,
+    mailbox: WeakMailbox,
 }
 
 impl Default for ScheduleRegistry {
@@ -392,7 +393,7 @@ impl ScheduleRegistry {
     /// # Errors
     /// A trigger with no next occurrence, or a `label` already borne by a
     /// live schedule.
-    pub fn schedule(
+    pub(crate) fn schedule(
         &self,
         trigger: Trigger,
         prompt: String,
@@ -411,7 +412,7 @@ impl ScheduleRegistry {
         }
         let id = ScheduleId::new(g.next_id);
         g.next_id += 1;
-        let deadline = self.arm_deadline(id, mailbox, next);
+        let deadline = self.arm_deadline(id, next);
         g.entries.insert(
             id,
             Entry {
@@ -421,6 +422,7 @@ impl ScheduleRegistry {
                 fires: 0,
                 next,
                 deadline,
+                mailbox: mailbox.downgrade(),
             },
         );
         drop(g);
@@ -484,56 +486,62 @@ impl ScheduleRegistry {
 
     /// Arm the reaper toward `next`, at most [`WALL_CHECK`] ahead.  Takes no
     /// registry lock, so `fire` may call it under one.
-    fn arm_deadline(&self, id: ScheduleId, mailbox: &Mailbox, next: Timestamp) -> Deadline {
+    fn arm_deadline(&self, id: ScheduleId, next: Timestamp) -> Deadline {
         let reg = self.clone();
-        let mailbox = mailbox.clone();
         let delay = clock::until(next, Timestamp::now()).min(WALL_CHECK);
-        arm_callback(delay, move || reg.fire(id, &mailbox))
+        arm_callback(delay, move || reg.fire_at(id, Timestamp::now()))
     }
 
-    fn fire(&self, id: ScheduleId, mailbox: &Mailbox) {
-        self.fire_at(id, mailbox, Timestamp::now());
-    }
-
-    /// Inbox → registry is the lock order; posting holds no registry guard.
-    /// A terminal entry carries liveness until its addressed wakeup is posted.
-    fn fire_at(&self, id: ScheduleId, mailbox: &Mailbox, now: Timestamp) {
+    /// Inbox before registry; publication holds no registry guard.
+    fn fire_at(&self, id: ScheduleId, now: Timestamp) {
+        let mailbox = self
+            .lock()
+            .entries
+            .get(&id)
+            .map(|entry| entry.mailbox.clone());
+        let Some(mailbox) = mailbox.and_then(|mailbox| mailbox.upgrade()) else {
+            self.lock().entries.remove(&id);
+            return;
+        };
         let already_queued = mailbox.has_queued_wakeup(id);
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {
-            return; // unscheduled or cleared between arming and firing
+            return;
         };
-        if now < entry.next {
-            entry.deadline = self.arm_deadline(id, mailbox, entry.next);
+        if mailbox.scope().is_cancelled() {
+            g.entries.remove(&id);
             return;
         }
-        let recurring = entry.trigger.is_recurring();
+        if now < entry.next {
+            entry.deadline = self.arm_deadline(id, entry.next);
+            return;
+        }
         let msg = if already_queued {
             None
         } else {
             entry.fires += 1;
-            Some((
-                mailbox.stamp(),
-                Stamped::Wakeup {
-                    id,
-                    label: entry.label.clone(),
-                    trigger: entry.trigger.describe(),
-                    prompt: entry.prompt.clone(),
-                },
-            ))
+            Some(Scoped::Wakeup {
+                id,
+                label: entry.label.clone(),
+                trigger: entry.trigger.describe(),
+                prompt: entry.prompt.clone(),
+            })
         };
-        let next = recurring.then(|| entry.trigger.next_after(now)).flatten();
+        let next = entry
+            .trigger
+            .is_recurring()
+            .then(|| entry.trigger.next_after(now))
+            .flatten();
         if let Some(next) = next {
             entry.next = next;
-            entry.deadline = self.arm_deadline(id, mailbox, next);
+            entry.deadline = self.arm_deadline(id, next);
         }
         let terminal = next.is_none();
         drop(g);
-        if let Some((stamp, kind)) = msg {
+        if let Some(kind) = msg {
             #[cfg(test)]
             tests::before_post();
-            // Clear fences the original stamp; unschedule can overtake publication.
-            stamp.post(kind);
+            mailbox.post(kind);
         }
         if terminal {
             self.lock().entries.remove(&id);
@@ -550,8 +558,9 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::{Inbox, Item, Next};
+    use crate::bus::{Inbox, Item, Next, ParkMode, Queue};
     use jiff::civil::date;
+    use ral_core::process::{CancelCause, DurableRoot};
 
     thread_local! {
         static BEFORE_POST: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
@@ -675,7 +684,7 @@ mod tests {
     #[test]
     fn registry_schedules_lists_and_unschedules() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         let receipt = reg
             .schedule(
                 Trigger::Cron {
@@ -703,7 +712,7 @@ mod tests {
     #[test]
     fn schedule_rejects_a_label_already_borne_by_a_live_schedule() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
@@ -737,7 +746,7 @@ mod tests {
     #[test]
     fn unschedule_by_label_removes_the_match_and_is_a_noop_otherwise() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
@@ -760,7 +769,7 @@ mod tests {
     #[test]
     fn after_fires_once_then_is_removed() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         reg.schedule(
             Trigger::After(Duration::from_millis(40)),
             "ping".into(),
@@ -771,7 +780,7 @@ mod tests {
         let mut fired = None;
         for _ in 0..200 {
             if !reg.armed()
-                && let Some(item) = inbox.next_item()
+                && let Some(item) = inbox.draw(|_| ParkMode::Quiesce)
             {
                 fired = Some(item);
                 break;
@@ -793,7 +802,7 @@ mod tests {
     #[test]
     fn a_fire_before_its_instant_rearms_and_posts_nothing() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         let at = Timestamp::now()
             .checked_add(Duration::from_hours(1))
             .unwrap();
@@ -804,8 +813,11 @@ mod tests {
             &inbox.mailbox(),
         )
         .unwrap();
-        reg.fire(ScheduleId::new(0), &inbox.mailbox());
-        assert!(inbox.next_item().is_none(), "no wakeup is queued");
+        reg.fire_at(ScheduleId::new(0), Timestamp::now());
+        assert!(
+            inbox.draw(|_| ParkMode::Quiesce).is_none(),
+            "no wakeup is queued"
+        );
         let live = reg.list();
         assert_eq!(live.len(), 1, "the entry is still live");
         assert_eq!(live[0].fires, 0, "an early wake counts no fire");
@@ -814,7 +826,7 @@ mod tests {
     #[test]
     fn list_reports_the_time_remaining() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         reg.schedule(
             Trigger::After(Duration::from_hours(2)),
             "x".into(),
@@ -832,7 +844,7 @@ mod tests {
     #[test]
     fn clear_drops_every_schedule() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         reg.schedule(
             Trigger::Cron {
                 schedule: sched("0 3 * * *"),
@@ -859,7 +871,7 @@ mod tests {
 
     fn terminal(family: Terminal) -> (ScheduleRegistry, Inbox, Timestamp) {
         let registry = ScheduleRegistry::new();
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(DurableRoot::default().child());
         let future = Timestamp::now()
             .checked_add(Duration::from_hours(2))
             .unwrap();
@@ -899,13 +911,11 @@ mod tests {
 
     fn paused_fire(
         registry: &ScheduleRegistry,
-        inbox: &Inbox,
         now: Timestamp,
     ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
         let (composed_tx, composed_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let registry = registry.clone();
-        let mailbox = inbox.mailbox();
         let worker = std::thread::spawn(move || {
             BEFORE_POST.set(Some(Box::new(move || {
                 composed_tx.send(()).unwrap();
@@ -913,7 +923,7 @@ mod tests {
                     .recv_timeout(SYNC_TIMEOUT)
                     .expect("release the composed wakeup");
             })));
-            registry.fire_at(ScheduleId::new(0), &mailbox, now);
+            registry.fire_at(ScheduleId::new(0), now);
         });
         composed_rx
             .recv_timeout(SYNC_TIMEOUT)
@@ -921,11 +931,11 @@ mod tests {
         (worker, release_tx)
     }
 
-    struct CancelConsumer(crate::cancel::Token);
+    struct CancelConsumer(Mailbox);
 
     impl Drop for CancelConsumer {
         fn drop(&mut self) {
-            self.0.cancel(ral_core::process::CancelCause::Cancelled);
+            self.0.end(CancelCause::Cancelled);
         }
     }
 
@@ -933,28 +943,23 @@ mod tests {
     fn every_terminal_family_keeps_the_consumer_alive_until_publication() {
         for family in [Terminal::After, Terminal::At, Terminal::ExhaustedCron] {
             let (registry, inbox, now) = terminal(family);
-            let (producer, release) = paused_fire(&registry, &inbox, now);
-            let token = crate::cancel::Token::new();
-            let _cancel = CancelConsumer(token.clone());
+            let (producer, release) = paused_fire(&registry, now);
+            let _cancel = CancelConsumer(inbox.life_mailbox());
             let (park_tx, park_rx) = std::sync::mpsc::sync_channel(1);
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let consumer = {
                 let registry = registry.clone();
-                let inbox = inbox.clone();
                 std::thread::spawn(move || {
-                    let next = inbox.next_or_idle(
-                        || {
-                            let mode = if registry.armed() {
-                                crate::bus::ParkMode::UntilCancelled
-                            } else {
-                                crate::bus::ParkMode::Quiesce
-                            };
-                            let _ = park_tx.try_send(mode);
-                            mode
-                        },
-                        &token,
-                    );
-                    done_tx.send(next).unwrap();
+                    let next = inbox.draw(|_| {
+                        let mode = if registry.armed() {
+                            ParkMode::UntilCancelled
+                        } else {
+                            ParkMode::Quiesce
+                        };
+                        let _ = park_tx.try_send(mode);
+                        mode
+                    });
+                    assert!(done_tx.send((inbox, next)).is_ok());
                 })
             };
             assert_eq!(
@@ -966,7 +971,7 @@ mod tests {
                 Err(std::sync::mpsc::TryRecvError::Empty)
             ));
             release.send(()).unwrap();
-            let next = done_rx
+            let (inbox, next) = done_rx
                 .recv_timeout(SYNC_TIMEOUT)
                 .expect("the final wakeup must reach its parked consumer");
             assert!(
@@ -975,15 +980,15 @@ mod tests {
             producer.join().unwrap();
             consumer.join().unwrap();
             assert!(!registry.armed());
-            assert!(inbox.next_item().is_none());
+            assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
         }
     }
 
     #[test]
-    fn clearing_during_terminal_publication_refuses_the_old_epoch_and_keeps_the_new_id() {
+    fn clearing_during_terminal_publication_fences_old_work_and_keeps_the_new_id() {
         let (registry, inbox, now) = terminal(Terminal::After);
-        let (producer, release) = paused_fire(&registry, &inbox, now);
-        inbox.clear();
+        let (producer, release) = paused_fire(&registry, now);
+        inbox.abandon(Queue::Discard);
         registry.clear();
         registry
             .schedule(
@@ -996,8 +1001,8 @@ mod tests {
         release.send(()).unwrap();
         producer.join().unwrap();
         assert!(
-            inbox.next_item().is_none(),
-            "the composed wakeup retains its old epoch"
+            inbox.draw(|_| ParkMode::Quiesce).is_none(),
+            "the composed wakeup retains its abandoned work scope"
         );
         let guard = registry.lock();
         assert_eq!(guard.entries.len(), 1);
@@ -1007,16 +1012,16 @@ mod tests {
     #[test]
     fn unschedule_can_overtake_a_composed_terminal_wakeup_without_recalling_it() {
         let (registry, inbox, now) = terminal(Terminal::After);
-        let (producer, release) = paused_fire(&registry, &inbox, now);
+        let (producer, release) = paused_fire(&registry, now);
         assert!(registry.unschedule("last"));
         assert!(!registry.armed());
         release.send(()).unwrap();
         producer.join().unwrap();
         assert!(matches!(
-            inbox.next_item(),
+            inbox.draw(|_| ParkMode::Quiesce),
             Some(Next::Item(Item::Wakeup(_)))
         ));
-        assert!(inbox.next_item().is_none());
+        assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
         assert!(!registry.armed());
     }
 
@@ -1024,18 +1029,18 @@ mod tests {
     fn a_terminal_overlap_retires_without_posting_a_second_wakeup() {
         for family in [Terminal::After, Terminal::At, Terminal::ExhaustedCron] {
             let (registry, inbox, now) = terminal(family);
-            inbox.mailbox().stamp().post(Stamped::Wakeup {
+            inbox.mailbox().post(Scoped::Wakeup {
                 id: ScheduleId::new(0),
                 label: "last".into(),
                 trigger: "previous occurrence".into(),
                 prompt: "already queued".into(),
             });
-            registry.fire_at(ScheduleId::new(0), &inbox.mailbox(), now);
+            registry.fire_at(ScheduleId::new(0), now);
             assert!(!registry.armed());
             assert!(
-                matches!(inbox.next_item(), Some(Next::Item(Item::Wakeup(t))) if t.contains("already queued"))
+                matches!(inbox.draw(|_| ParkMode::Quiesce), Some(Next::Item(Item::Wakeup(t))) if t.contains("already queued"))
             );
-            assert!(inbox.next_item().is_none());
+            assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
         }
     }
 
@@ -1052,35 +1057,53 @@ mod tests {
             schedule: sched("* * * * *"),
             expr: "* * * * *".into(),
         };
-        registry.fire_at(ScheduleId::new(0), &inbox.mailbox(), now);
+        registry.fire_at(ScheduleId::new(0), now);
         assert!(registry.armed());
         let next = registry.lock().entries[&ScheduleId::new(0)].next;
-        registry.fire_at(ScheduleId::new(0), &inbox.mailbox(), next);
+        registry.fire_at(ScheduleId::new(0), next);
         assert_eq!(registry.list()[0].fires, 1);
         assert!(matches!(
-            inbox.next_item(),
+            inbox.draw(|_| ParkMode::Quiesce),
             Some(Next::Item(Item::Wakeup(_)))
         ));
-        assert!(inbox.next_item().is_none());
+        assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
         assert!(registry.armed());
+    }
+
+    #[test]
+    fn a_recurring_fire_in_abandoned_work_retires_without_publication_or_rearm() {
+        let (registry, inbox, now) = terminal(Terminal::After);
+        registry
+            .lock()
+            .entries
+            .get_mut(&ScheduleId::new(0))
+            .unwrap()
+            .trigger = Trigger::Cron {
+            schedule: sched("* * * * *"),
+            expr: "* * * * *".into(),
+        };
+        inbox.abandon(Queue::Keep);
+        assert!(
+            registry.armed(),
+            "abandonment leaves timer retirement to fire"
+        );
+        registry.fire_at(ScheduleId::new(0), now);
+        assert!(inbox.is_empty(), "no wakeup is published, even for fencing");
+        assert!(!registry.armed(), "the recurring entry is not rearmed");
     }
 
     #[test]
     fn a_scheduled_park_can_be_cancelled_before_publication() {
         let (registry, inbox, now) = terminal(Terminal::After);
-        let (producer, release) = paused_fire(&registry, &inbox, now);
-        let token = crate::cancel::Token::new();
-        token.cancel(ral_core::process::CancelCause::Cancelled);
+        let (producer, release) = paused_fire(&registry, now);
+        inbox.life_mailbox().end(CancelCause::Cancelled);
         assert!(
             inbox
-                .next_or_idle(
-                    || if registry.armed() {
-                        crate::bus::ParkMode::UntilCancelled
-                    } else {
-                        crate::bus::ParkMode::Quiesce
-                    },
-                    &token
-                )
+                .draw(|_| if registry.armed() {
+                    ParkMode::UntilCancelled
+                } else {
+                    ParkMode::Quiesce
+                })
                 .is_none()
         );
         release.send(()).unwrap();
@@ -1091,21 +1114,21 @@ mod tests {
     #[test]
     fn an_unattended_agent_runs_its_last_wakeup_and_quiesces() {
         use crate::agent::testkit::{ral_call, scripted};
-        use crate::agent::{Avatar, TestTrunk};
+        use crate::agent::{Agent, TestTrunk};
         use crate::provider::scripted::{Reply, Script};
-        let mut avatar = Avatar::for_test_with(TestTrunk {
+        let mut agent = Agent::for_test_with(TestTrunk {
             allow_schedule: true,
             ..TestTrunk::new("system")
         })
         .unwrap();
-        let registry = avatar.agent.schedules.clone();
-        let inbox = avatar.inbox();
+        let services = agent.host_services(&crate::bus::dummy_emitter().0);
+        let registry = services.schedules;
         registry
             .schedule(
                 Trigger::After(Duration::from_hours(2)),
                 "last wakeup".into(),
                 "last".into(),
-                &inbox.mailbox(),
+                &services.mailbox,
             )
             .unwrap();
         let now = Timestamp::now();
@@ -1115,22 +1138,22 @@ mod tests {
             .get_mut(&ScheduleId::new(0))
             .unwrap()
             .next = now;
-        avatar.agent.provider.swap(scripted(
+        agent.handle().0.provider.swap(scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "reply",
                 "exarch-agents `reply 'awake'",
             )])),
         ));
-        let (producer, release) = paused_fire(&registry, &inbox, now);
-        let _cancel = CancelConsumer(avatar.agent.token.clone());
+        let (producer, release) = paused_fire(&registry, now);
+        let _cancel = CancelConsumer(services.mailbox);
         let (tx, rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, avatar.agent.id);
+        let emit = crate::bus::Emitter::new(tx, agent.id());
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker_emit = emit.clone();
         let consumer = std::thread::spawn(move || {
-            let outcome = avatar.attend(&worker_emit);
-            assert!(done_tx.send((avatar, outcome)).is_ok());
+            let outcome = agent.attend(&worker_emit);
+            assert!(done_tx.send((agent, outcome)).is_ok());
         });
         loop {
             let signal = rx
@@ -1147,22 +1170,26 @@ mod tests {
             }
         }
         release.send(()).unwrap();
-        let (mut avatar, outcome) = done_rx
+        let (mut agent, outcome) = done_rx
             .recv_timeout(SYNC_TIMEOUT)
             .expect("the final wakeup must complete");
         producer.join().unwrap();
         consumer.join().unwrap();
         assert!(matches!(outcome, crate::bus::AgentOutcome::Replied));
-        assert!(avatar.is_ready());
+        assert!(agent.is_ready());
         assert!(!registry.armed());
-        assert!(inbox.next_item().is_none());
         assert!(
-            serde_json::to_string(&avatar.rendered_messages())
+            crate::agent::testkit::inbox(&agent)
+                .draw(|_| ParkMode::Quiesce)
+                .is_none()
+        );
+        assert!(
+            serde_json::to_string(&agent.rendered_messages())
                 .unwrap()
                 .contains("last wakeup")
         );
-        avatar.seed("fresh prompt".into());
-        avatar.agent.provider.swap(scripted(
+        agent.seed("fresh prompt".into());
+        agent.handle().0.provider.swap(scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "fresh",
@@ -1170,9 +1197,9 @@ mod tests {
             )])),
         ));
         assert!(matches!(
-            avatar.attend(&emit),
+            agent.attend(&emit),
             crate::bus::AgentOutcome::Replied
         ));
-        assert!(avatar.is_ready());
+        assert!(agent.is_ready());
     }
 }

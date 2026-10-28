@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 61c288f
-generated_at_date: 2026-10-21
+generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+generated_at_date: 2026-10-28
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
@@ -22,7 +22,7 @@ wire half: a `ToolSpec` is a static record — name, description, schema `fn` �
 alone or `ral` plus `thinking`; `Toolset::default()` is empty (`--chat`).
 `agent/tools.rs` is the dispatch half: `dispatch` matches a name to its
 module. The fleet's `Launch` carries one `Toolset`, and both `provider.complete`
-(which puts `Toolset::wire()` on the request) and `Avatar::invoke` (which asks
+(which puts `Toolset::wire()` on the request) and `Agent::invoke` (which asks
 `Toolset::contains` before it dispatches) read it, so what was advertised and
 what is recognised cannot disagree; an unadvertised name earns `unknown tool` and a `Forensic::Error`.
 Every fork and desk spawn inherits its parent's set verbatim. Malformed input is
@@ -32,7 +32,7 @@ can see what it sent.
 
 - **`ral`** (`agent/tools/ral.rs`) — the one call that crosses the provider
   boundary: evaluate ral source against the session shell, synchronously,
-  through `Avatar::ral` and [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `command`
+  through `Agent::ral` and [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `command`
   (the ral source) and a required one-line `description` (shown on the
   [[map/exarch/frontend|rail]]; the full `command` opens in the collapsible
   tool-call block; oversize descriptions are truncated, never rejected). An

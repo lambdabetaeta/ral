@@ -2,13 +2,13 @@
 //! accumulator — name, size, cap, pressure policy — rendered as one card.
 //!
 //! The fold has two halves, split by who may legally read what: the agent
-//! assembles its own rows on its attend thread ([`Avatar::resource_rows`]),
+//! assembles its own rows on its attend thread ([`Agent::resource_rows`]),
 //! and the TUI appends the rows for the accumulators *it* owns
 //! (`tui::resources`).  Neither half reaches across a thread for the other's
 //! figures.  Probing mutates nothing and renews no lease, so `/resources`
 //! cannot immortalise the zombies it exists to reveal.
 
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::agent::EngineLost;
 use crate::agent::fleet::AGENT_LEASE_IDLE;
 use crate::agent::gauge::{EVICT_THRESHOLD, eviction_trigger};
@@ -120,11 +120,11 @@ pub(crate) fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![Mark::heading("resources"), rows_mark(rows)])
 }
 
-/// The eviction-pressure rows, mirroring `Avatar::evict`'s own trigger so
+/// The eviction-pressure rows, mirroring `Agent::force_eviction`'s own trigger so
 /// the pressure shown is the pressure that fires: a known window evicts on
 /// tokens against that window, and only the unknown-window fallback still
 /// runs on serialised bytes. `measured` is `None` when the token count is
-/// stale ([`Avatar::measured_input`]) — a stale read must report unknown,
+/// stale ([`Agent::measured_input`]) — a stale read must report unknown,
 /// never a number that could sit at or over the trigger, so the
 /// `context.tokens` row is omitted rather than shown with a fabricated figure.
 fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>) -> Vec<ProbeRow> {
@@ -167,7 +167,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
     }
 }
 
-impl Avatar {
+impl Agent {
     /// Assemble this agent's half of the fold — one [`ProbeRow`] per
     /// accumulator this attend thread may legally read: the shell's worker
     /// registry and bindings, the inbox, the event log, the log-dir and
@@ -179,7 +179,7 @@ impl Avatar {
     fn resource_rows(&self) -> Result<Vec<ProbeRow>, Severed> {
         let mut rows = Vec::new();
 
-        let entries = self.seat.read(|t| t.workers())?;
+        let entries = self.engine.read(|t| t.workers())?;
         let mut running = 0u64;
         let mut settled = 0u64;
         let mut nearest_expiry: Option<u64> = None;
@@ -243,19 +243,19 @@ impl Avatar {
         rows.extend(pressure_rows(
             self.measured_input(),
             history_bytes,
-            self.agent.current_provider().context_window(),
+            self.handle.current_provider().context_window(),
         ));
 
         rows.push(ProbeRow::new(
             "bindings.count",
-            self.seat.read(|t| t.binding_count())?,
+            self.engine.read(|t| t.binding_count())?,
             None,
             Policy::Reap,
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
-            self.seat.read(|t| t.leased_binding_count())?,
+            self.engine.read(|t| t.leased_binding_count())?,
             None,
             Policy::Reap,
             Some(format!(
@@ -265,7 +265,7 @@ impl Avatar {
         ));
         rows.push(ProbeRow::new(
             "bindings.largest_bytes",
-            self.seat.read(|t| t.largest_binding_bytes())?,
+            self.engine.read(|t| t.largest_binding_bytes())?,
             Some(shell_eval::LARGE_BINDING_BYTES),
             Policy::Warn,
             Some("shallow estimate; a closure's captures are never chased".to_string()),
@@ -305,13 +305,13 @@ impl Avatar {
 
     /// Publish the fold as one [`crate::record::Transient::Resources`] card, drawn live and
     /// never recorded — a probe fold is an interactive diagnostic, not a
-    /// session fact.  Run by `Avatar::read` at whichever boundary drains the
+    /// session fact.  Run by `Agent::read` at whichever boundary drains the
     /// `/resources`; transcript and TUI only, never model-facing.
     pub(crate) fn emit_resources(&self, recorder: &crate::record::Emitter) {
         let rows = match self.resource_rows() {
             Ok(rows) => rows,
             Err(s) => {
-                self.note(EngineLost::running(&s, self.agent.run_dir()).to_string());
+                self.note(EngineLost::running(&s, self.run_dir()).to_string());
                 return;
             }
         };

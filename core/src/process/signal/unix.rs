@@ -79,9 +79,7 @@ pub fn term_handler() -> extern "C" fn(libc::c_int) {
 }
 
 extern "C" fn sigint_handler(_: libc::c_int) {
-    // Forwarded as `Control::Interrupt`, which strikes only the dispatch in
-    // flight: an idle Ctrl-C stays the line editor's, and workers are
-    // spared.
+    // `Control::Strike(_, Interrupted)` spares idle input and workers.
     request_interrupt();
 }
 

@@ -5,10 +5,11 @@
 //! scheduling a wakeup, replying — is an ordinary ral builtin in
 //! `shell_eval/builtins/harness.rs`, answered by [`crate::agent::desk`].
 
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::bus::Emitter;
 use crate::provider::tools::{RAL, THINKING};
 use crate::record::ToolResult;
+use ral_core::process::Scope;
 use serde_json::Value;
 
 pub(crate) mod ral;
@@ -19,11 +20,12 @@ pub(crate) fn dispatch(
     name: &str,
     id: String,
     input: &Value,
-    session: &Avatar,
+    session: &Agent,
+    exchange: &Scope,
     emit: &Emitter,
 ) -> Option<ToolResult> {
     match name {
-        n if n == RAL.name => Some(ral::dispatch(id, input, session, emit)),
+        n if n == RAL.name => Some(ral::dispatch(id, input, session, exchange, emit)),
         n if n == THINKING.name => Some(thinking::dispatch(id, input, session, emit)),
         _ => None,
     }

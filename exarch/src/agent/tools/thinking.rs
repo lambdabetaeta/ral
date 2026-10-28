@@ -3,7 +3,7 @@
 //! ending its turn.
 
 use super::{input_error, required_str};
-use crate::agent::Avatar;
+use crate::agent::Agent;
 use crate::bus::Emitter;
 use crate::record::Display;
 use crate::record::ToolResult;
@@ -23,7 +23,7 @@ fn thought(input: &Value) -> Result<&str, String> {
 /// drained ink the provider's own reasoning does.  Newline-terminated: the
 /// fold grows one thinking block by every thinking record that follows, so the
 /// next stretch would otherwise join mid-line.
-pub(crate) fn dispatch(id: String, input: &Value, session: &Avatar, _emit: &Emitter) -> ToolResult {
+pub(crate) fn dispatch(id: String, input: &Value, session: &Agent, _emit: &Emitter) -> ToolResult {
     let content = match thought(input) {
         Ok(text) => {
             let recorder = session.recorder();

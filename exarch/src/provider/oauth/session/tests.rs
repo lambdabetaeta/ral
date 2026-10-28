@@ -365,7 +365,8 @@ async fn the_exchange_budget_does_not_shrink_with_the_lease_wait() {
     let (state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let file = state.open_write("oauth.lock").unwrap();
-    file.try_lock().unwrap();
+    // Blocking: a sibling test's fork may still share the fixture's lease.
+    file.lock().unwrap();
     let deadline = Instant::now() + Duration::from_secs(1);
     let refreshing = tokio::spawn({
         let handle = handle.clone();
@@ -395,7 +396,8 @@ async fn the_exchange_budget_does_not_shrink_with_the_lease_wait() {
 async fn a_held_file_lock_obeys_the_operation_deadline_without_submitting_http() {
     let (state, handle) = fixture().await;
     let file = state.open_write("oauth.lock").unwrap();
-    file.try_lock().unwrap();
+    // Blocking: a sibling test's fork may still share the fixture's lease.
+    file.lock().unwrap();
     let result = handle
         .prepare_until(
             Instant::now() + Duration::from_millis(100),

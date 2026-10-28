@@ -279,7 +279,10 @@ mod tests {
     #[test]
     fn round_trip_control() {
         let (mut a, mut b) = WireChannel::pair().unwrap();
-        let frame = Frame::Control(Control::Cancel(DispatchId(7)));
+        let frame = Frame::Control(Control::Strike(
+            DispatchId(7),
+            crate::process::CancelCause::Cancelled,
+        ));
         a.write_frame(&frame).unwrap();
         let got = b.read_frame().unwrap().unwrap();
         assert_eq!(got, frame);

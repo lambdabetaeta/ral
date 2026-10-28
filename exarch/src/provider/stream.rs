@@ -3,17 +3,17 @@
 use super::error::{CancelSite, CutShort};
 use super::request::{Request, complete_options};
 use super::retry::{Attempt, retry_with_backoff, wait_for_cancel};
-use super::transport::{Engine, Transport};
+use super::transport::{Pool, Transport};
 use super::usage::{Usage, usage_from};
 use super::wire::{manufacture, tool_defs};
 use super::{ProviderError, Selection};
-use crate::cancel;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
     ChatFrameSink, ChatMessage, ChatStreamEvent, FrameCtx, RawFrameRef, StopReason, StreamEnd,
     ToolCall,
 };
+use ral_core::process::Scope;
 use ral_core::sync::LockExt;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -81,14 +81,14 @@ pub enum Delta<'a> {
     },
 }
 
-impl Engine {
+impl Pool {
     pub(super) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         transport: &Transport,
         selection: &Selection,
         request: Request<'_>,
         on_delta: &mut F,
-        cancel: &cancel::Token,
+        cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
         let model = selection.model.as_str();
         let adapter = transport.adapter();

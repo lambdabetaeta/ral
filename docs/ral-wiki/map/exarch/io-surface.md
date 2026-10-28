@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3dbbe8f3
-generated_at_date: 2026-10-27
+generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+generated_at_date: 2026-10-28
 covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
@@ -15,7 +15,7 @@ is read off the worker's own clock, and the outcome is its real ending — a
 status with the error's message, an `exit`, a stop's cause, or a panic. The
 model's wake-up notice (`surface_notice`, `bus/post.rs`) is that completion
 line followed by a sentence naming how the bound handle and registry inspect it
-(filtered by `Avatar::arrive` if the worker was already claimed during the turn):
+(filtered by `Agent::arrive` if the worker was already claimed during the turn):
 `` `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``
 
 

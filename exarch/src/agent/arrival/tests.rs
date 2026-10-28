@@ -6,6 +6,7 @@ use crate::bus::{AgentOutcome, Emitter};
 use crate::card::testkit::card_value;
 use crate::record::{AgentId, Display, Record};
 use ral_core::carrier::Severed;
+use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{
     BuiltinBody, BuiltinEntry, Done, DoneEvent, Mooring, Settled, WorkerId,
 };
@@ -44,10 +45,10 @@ static ARRIVAL_TEST_BUILTINS: [BuiltinEntry; 1] = [BuiltinEntry::new(
     BuiltinBody::Static(builtin_arrival_hold_until_released),
 )];
 
-fn attach_sink(session: &Avatar) -> crate::bus::BusReceiver {
+fn attach_sink(session: &Agent) -> crate::bus::BusReceiver {
     let (tx, rx) = crate::bus::channel();
     session.recorder().attach(Box::new(crate::bus::FleetSink {
-        id: session.agent.id,
+        id: session.id(),
         tx: tx.downgrade(),
         meter: crate::bus::UsageMeter::default(),
     }));
@@ -81,7 +82,7 @@ fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
 fn arrival_records_display_facts() {
     use crate::bus::AgentResult;
 
-    let session = Avatar::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
 
     assert_eq!(session.arrive(&Item::Human("hello".into())), Ok(true));
@@ -91,6 +92,7 @@ fn arrival_records_display_facts() {
             name: "helper".into(),
             outcome: AgentOutcome::Failed("boom".into()),
             elapsed: Duration::from_millis(1500),
+            answers: 0,
         })),
         Ok(true)
     );
@@ -119,11 +121,11 @@ fn arrival_records_display_facts() {
 /// model context without probing for a worker row.
 #[test]
 fn surface_batch_without_done_event_replays_cards_and_wakes_model() {
-    let session = Avatar::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
 
     let item = Item::Surface {
-        id: session.agent.id,
+        id: session.id(),
         values: vec![card_value(vec![])],
     };
     assert_eq!(session.arrive(&item), Ok(true));
@@ -140,16 +142,21 @@ fn surface_batch_without_done_event_replays_cards_and_wakes_model() {
 /// replaying historical cards and the done breadcrumb.
 #[test]
 fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
-    let session = Avatar::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
     session.couple(&emit);
 
-    session.ral("let h = spawn \"claimed\" { 7 }\nawait $h", 10, &emit);
+    session.ral(
+        &DurableRoot::default().child(),
+        "let h = spawn \"claimed\" { 7 }\nawait $h",
+        10,
+        &emit,
+    );
     let _ = display_facts(&rx);
 
     let item = Item::Surface {
-        id: session.agent.id,
+        id: session.id(),
         values: vec![card_value(vec![]), done_surface(1, "claimed")],
     };
     assert_eq!(
@@ -184,10 +191,11 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
         runtime.install_builtins(&ARRIVAL_TEST_BUILTINS);
     });
     let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.agent.id);
+    let emit = Emitter::new(tx, session.id());
     session.couple(&emit);
 
     session.ral(
+        &DurableRoot::default().child(),
         "let h_run = spawn \"running\" { test-clear-block-forever }\n\
          let h_stop = spawn \"stopping\" { test-arrival-hold }\n\
          let h_ready = spawn \"ready\" { 42 }",
@@ -197,11 +205,11 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     while !ARRIVAL_STOP_ENTERED.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(2));
     }
-    session.ral("cancel $h_stop", 10, &emit);
+    session.ral(&DurableRoot::default().child(), "cancel $h_stop", 10, &emit);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (run_id, stop_id, ready_id) = loop {
-        let rows = session.seat.read(|t| t.workers()).unwrap();
+        let rows = session.engine.read(|t| t.workers()).unwrap();
         let run = rows
             .iter()
             .find(|r| r.title == "running" && matches!(r.state, WorkerState::Running))
@@ -226,7 +234,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     let _ = display_facts(&rx);
 
     let stopping_item = Item::Surface {
-        id: session.agent.id,
+        id: session.id(),
         values: vec![card_value(vec![]), done_surface(stop_id, "stopping")],
     };
     assert_eq!(
@@ -243,7 +251,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     );
 
     let ready_item = Item::Surface {
-        id: session.agent.id,
+        id: session.id(),
         values: vec![done_surface(ready_id, "ready")],
     };
     assert_eq!(
@@ -253,7 +261,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     );
 
     let running_item = Item::Surface {
-        id: session.agent.id,
+        id: session.id(),
         values: vec![done_surface(run_id, "running")],
     };
     assert_eq!(
@@ -274,13 +282,13 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
 /// first and then propagates `Severed`.
 #[test]
 fn severed_worker_probe_propagates_after_replaying_cards() {
-    let session = Avatar::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
     let cause = Severed::Closed("engine gone".into());
-    session.seat.transport().sever(cause.clone());
+    session.engine.transport().sever(cause.clone());
 
     let item = Item::Surface {
-        id: session.agent.id,
+        id: session.id(),
         values: vec![card_value(vec![]), done_surface(9, "orphaned")],
     };
     assert_eq!(session.arrive(&item), Err(cause));

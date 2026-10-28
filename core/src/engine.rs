@@ -185,8 +185,8 @@ impl Engine {
 }
 
 /// What stops an engine's runs, shared with whichever thread carries its
-/// `Control`: each dispatch's scope hangs off `dispatches`, and everything —
-/// workers too — off `root`.
+/// `Control`: dispatches hang off `dispatches` or a host scope; ending `root`
+/// also strikes the current dispatch, wherever it hangs.
 pub(crate) struct Scopes {
     dispatches: Scope,
     root: DurableRoot,
@@ -195,7 +195,7 @@ pub(crate) struct Scopes {
 
 #[derive(Default)]
 struct Slot {
-    /// The dispatch `Interrupt` and `Cancel` strike. Replaced, never cleared:
+    /// The dispatch `Strike` names. Replaced, never cleared:
     /// a settled run's scope is dead, so striking it is a no-op, and a stale
     /// id names a dispatch the next run does not bear.
     current: Option<(DispatchId, ScopeNode)>,
@@ -207,9 +207,12 @@ impl Scopes {
     /// Mint `id`'s node ahead of its run's frame, so a cancel raised
     /// meanwhile has somewhere to land; struck already if a strike foretold
     /// it.  The run gets its view.
-    pub(crate) fn open(&self, id: DispatchId) -> Scope {
-        let node = self.dispatches.child();
+    pub(crate) fn open(&self, id: DispatchId, within: Option<&Scope>) -> Scope {
         let mut slot = self.slot.lock_ignore_poison();
+        let node = within.map_or_else(|| self.dispatches.child(), Scope::child);
+        if let Some(cause) = self.root.cause() {
+            node.cancel(cause);
+        }
         if let Some((_, cause)) = slot.foretold.take_if(|(pending, _)| *pending == id) {
             node.cancel(cause);
         }
@@ -221,8 +224,7 @@ impl Scopes {
     /// One `Control` verb, meaning the same under either carrier.
     pub(crate) fn apply(&self, control: Control) {
         match control {
-            Control::Interrupt(id) => self.aim(id, CancelCause::Interrupted),
-            Control::Cancel(id) => self.aim(id, CancelCause::Cancelled),
+            Control::Strike(id, cause) => self.aim(id, cause),
             Control::Terminate => self.end(CancelCause::Terminated),
             Control::Abort => self.end(CancelCause::Aborted),
         }
@@ -243,7 +245,7 @@ impl Scopes {
         }
     }
 
-    /// The dispatch `Interrupt` and `Cancel` strike now.
+    /// The dispatch `Strike` names now.
     #[cfg(test)]
     pub(crate) fn current(&self) -> Option<DispatchId> {
         self.slot
@@ -255,7 +257,11 @@ impl Scopes {
 
     /// Cancel the durable root: every run, and every worker.
     pub(crate) fn end(&self, cause: CancelCause) {
+        let slot = self.slot.lock_ignore_poison();
         self.root.cancel(cause);
+        if let Some((_, node)) = &slot.current {
+            node.cancel(cause);
+        }
     }
 }
 

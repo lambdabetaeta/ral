@@ -1,647 +1,272 @@
-# Agents: the uniform node, the forest, and the parent-less root
+# Agents: one owner, one address, one forest
 
-**An exarch run is a *fleet* of structurally identical *agents* arranged in a
-forest, one tree per *root*, driven by the single shared `attend` loop; the only
-thing that distinguishes one agent from another is its *role* — whom it
-answers.** A sub-agent
-is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
-from a value-snapshot of its parent's shell, under its parent's capability
-stack plus one layer, with a strong `Arc<Agent>` parent edge inside its role. The `Fleet` holds what every node
-shares — the `Launch` fixed once for the run, the by-name index, and the idle
-lease ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
+**An exarch run is a *fleet* of uniform agents, one tree per root, driven by
+one attend loop.** An `Agent` is the attending thread's owner; an
+`AgentHandle` is its shared address, never its lifetime. The fleet holds
+launch settings, names, a cancellation root and teardown accounting
+([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]],
+[[map/exarch/agent|agent]]).
 
-## One role, fixed at construction
+## Role is fixed; parking is computed
 
-There is no `is_root`. Whom an agent answers is a **construction-fixed
-`Role`** on the `Agent`, one of three:
+**Whom an agent answers is a construction-fixed `Role`, not an `is_root`
+flag.**
 
-- `Converses` — answers nobody, holds no `reply`: an attended or embedded
-  root, the root of its own tree;
-- `Headless` — the headless root, replying once to the process's caller;
-- `Child { parent, consumer }` — a `fork`ed sub-agent, replying to its parent,
-  whose strong edge and mailbox `Stamp` it carries.
+- `Converses` answers no caller and withholds `reply`: an attended or
+  embedded root.
+- `Headless` replies once to the process's caller, then leaves attendance.
+- `Child { parent: AgentHandle }` replies to its parent, then parks for
+  follow-up work. Its parent edge is strong and fixed; downward views are
+  fleet lookups filtered by ancestry, not a mutable children list.
 
-At a root the role is decided by how the run is driven (`Launch::trunk`:
-`Trunk::Headless` builds `Headless`; `Attended` and `Embedded` build
-`Converses`), the same for every root of the run. A parented agent that
-converses is unrepresentable. The role is the single source of truth for every
-reader: parking, the desk's `reply` refusal
-([[map/exarch/builtins|builtins]]), the nudge's must-reply fact, and the
-per-agent prompt resolved from it before `Avatar::assemble` — so reply
-availability, parking, and the advertised vocabulary cannot disagree. **Fuel is
-a separate construction-fixed depth budget:** an agent's spawn surface is present
-exactly when `fuel > 0`; it does not decide whether the agent returns. Position
-still fixes the signal path: OS signals reach every root (`signals::face`) and
-a sub-agent only through the tree cascade
-([[decisions/260726_cancel-is-a-join|cancel-is-a-join]];
-[[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it does
-not decide who returns.
+Role governs reply admission, prompt obligations and parking. Fuel is a
+separate depth bound; it does not decide whether an agent returns.
+`Trunk::{Attended, Embedded, Headless}` fixes how roots are driven.
 
-- **A returning agent holds `reply`.** A `Child` at any depth, *and* the
-  `Headless` root seeded once to produce one result, both advertise it. The
-  headless root ends on its reply; a child parks on it, to be messaged again.
-  This is
-  [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]'s
-  reply gate, read off the construction-fixed role rather than off
-  `is_root && interactive`.
-- **A conversing agent has `reply` withheld at construction** and parks for a human
-  instead of returning. Its `reply` call is refused at the desk, and the verb is
-  dropped from its builtin index, both keyed on the same role. Every attended
-  root is one such agent — parent-less, its writer ever-present — and a fleet
-  holds any number of them ([[#Roots are sessions|below]]). "Parent-less" and
-  "converses" are not the same set — the headless root is parent-less and
-  returns — which is exactly why the property is a role fixed at construction
-  rather than a predicate on position.
+- An attended conversing root parks `Held` for human input.
+- A child holding a current reply parks `Engaged` under its follow-up lease.
+- Outstanding child obligations give `HeldByChildren`; armed self-schedules
+  give `UntilCancelled`; otherwise the node quiesces.
+- Life cancellation ends every park. A severed engine runs nothing further.
+  Quiescence never wins over a live queued delivery.
 
-"Returns a value" and "does not park for a human" remain the *same fact*, read in
-one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — a
-`ParkMode` (`Held` / `Engaged` / `HeldByChildren` / `UntilCancelled` / `Quiesce`)
-derived on every wake: a conversing agent with a human attached (the launch's
-`attended` — the TUI) parks `Held` while its own cancel token is unterminated,
-an unattended conversing root (synod's, driven one exchange at a time) holds
-for busy children and quiesces once they settle, and a child with a current
-reply completion parks `Engaged` under that reply's follow-up lease. Busy
-children and permitted self-schedules carry their own continuation; otherwise
-the agent quiesces. Whether a node converses and whether a human will type
-into it are two facts — one per node, one per run — and the park verdict
-reads both.
+## Scope is the control boundary
 
-**An embedded conversation owns its root, but its host holds only a weak
-`Helm`.** `SettledConversation` waits for human steering before opening an
-exchange; a shell worker's surface batch alone never starts work. Its bus
-lives across exchanges. A helper's `Ready` precedes its reply notification,
-so completion reaches the sink before the parent's result. Quiescence measures
-outstanding work; replied helpers retain their follow-up lease, and their
-signals between exchanges wait for the next drain. Explicit
-`SettledConversation::end_fleet` instead ends every root in the shared fleet,
-then drops the driver/root and awaits detached teardown completion; it is
-whole-launch shutdown, not a synonym for ending this root's subtree.
+**Interrupt < stop < end is depth in ral's own cancellation tree.** No
+exarch cancellation token is reset at an exchange boundary.
 
-The host's control order is **interrupt < stop < end**: interrupt unwinds the
-turn with helpers intact; stop returns queued prompts, drains and fences the
-remaining inbox, cancels descendants, then unwinds the root's turn; end
-terminates the whole subtree for good. A stop leaves the root available for
-another human message. Admission remains closed through out-of-lock stop
-delivery; only accepted current-generation uptake may reset interruption.
-Delegation retains its originating stamp through final atomic enrollment.
-Synod addresses Stop to a per-attempt exchange ID; stale Stop leaves the queue
-untouched, and backend completion alone certifies “Stopped.” The TUI's Esc
-remains an interrupt
-([[decisions/261027_a-host-holds-a-helm|a-host-holds-a-helm]]).
+```text
+fleet root
+└── life
+    └── work
+        ├── exchange and its continuations
+        └── lives of adopted children
+```
+
+- *Exchange* is one item taken up by exarch, including nudge continuations.
+  TUI Esc / Ctrl-C cancel only the focused exchange with `Interrupted`;
+  helpers survive. SIGINT is forwarded to root exchanges.
+- *Work* is the current delegation extent. Stop, `/clear` and `reply`
+  abandon it with `Cancelled`, replacing it beneath the same life. Children
+  adopted in it end structurally, including their descendants.
+- *Life* is the owner's extent. End, `/close`, agent cancel and owner drop
+  end it; idle lease lapse does so with `TimedOut`. Dropping an owner ends
+  its subtree: an address cannot leave live work without its consumer.
+- `/quit` and whole-fleet shutdown cancel the fleet root. A new root under
+  an ended fleet is born cancelled. Signals supply `Terminated` or `Aborted`
+  without a second cancellation path.
+- Provider waits read exchange. Identity ral runs nest their dispatch scope
+  beneath it; wire dispatchers poll and strike their own dispatch id.
+  Cancelling threads write flags and notify, never call into an engine.
+  Factory, attach, probe and protocol-write waits retain their own deadlines.
+
+The agent's ral `Engine` owns loose shell workers independently of delegated
+work. Stop and `reply` preserve them and their incarnation-vouched completion
+batches. The incarnation is a scope under life, parallel to work; `/clear`
+cancels and replaces it even if reboot fails, fencing old batches. A successful
+reboot terminates the old transport; owner destruction ends the current engine
+([[internals/cancellation|cancellation]]).
+
+## One inbox, one provenance rule
+
+**A delivery is taken up only while the scope vouching for it is live.**
+The check occurs once at pop, under the inbox's one mutex. Cancellation is
+monotone, so stale provenance stays stale.
+
+- Human text and commands are unfenced. Results carry the parent's work
+  captured at adoption; wakeups their arming work; nudges their exchange;
+  worker batches the engine incarnation.
+- Messages carry the scope under which the sender's life hangs. Words from
+  a normally ended sender may still arrive; words from an abandoned subtree
+  die with that work.
+- A mailbox captures destination and provenance together. A delayed spawn
+  must adopt through that original work mailbox, never freshen its authority
+  after constructing an engine. A refusal leaves no enrolled child.
+- Stop recalls queued human text oldest first; other deliveries live or die
+  by provenance. Reply keeps queued posts; `/clear` discards all of them.
+- Opening an exchange cancels its predecessor. Its scope is minted at pop,
+  so Stop or Esc racing take-up cannot be erased. Declining an already
+  claimed worker completion opens nothing and preserves a queued nudge.
+- A drawn human prompt is recorded before the exchange is polled: a racing
+  gesture cannot lose it or start a provider round under a dead scope.
+  Mid-exchange steering drains only while that exchange is live.
+
+**Outstanding children are obligations, not liveness guesses.** Adoption
+records `awaiting[child] = 0`. A follow-up to a direct child records a fresh
+sequence before delivery. Each result carries the latest parent message it
+answers; a reply discharges only a covered obligation, while a terminal
+non-reply discharges it unconditionally. Thus an old queued reply cannot
+make a newer follow-up disappear. A dropped owner still owing its parent a
+report posts failure; abandoned work discards its obligations.
+
+## Embedded jobs and the host's address
+
+**A Synod *job* runs from queued human input through fleet settlement or
+Stop, distinct from exarch's item-level exchange.**
+
+- `SettledConversation` owns one root and a conversation-lived bus. Its host
+  keeps `handle()`, not an owner reference. `await_job` opens only on human
+  input; a worker batch alone does not start a job.
+- `run(job, sink)` attends at most once. Replied helpers remain leased
+  residents but are no longer outstanding work. Dropping an unattended job
+  closes it. Self-scheduling and reset-resume are refused.
+- `AgentHandle::stop(JobId)` acts only while that job is running and not
+  already stopped, under the same inbox lock as closing. It marks stopped
+  and abandons work with recall; stale Stop changes nothing.
+- A stopped job takes up nothing new. Text sent after Stop stays queued for
+  the next job, which has its own id. Every job pumps output until ended
+  helpers' teardown is acknowledged; the closing folder walk and “Stopped.”
+  cannot overtake those writes or final output
+  ([[decisions/260806_exchange-ends-at-fleet-quiescence|job settlement]]).
+- Synod keeps Send available while busy. The queue strip shows waiting
+  text; transcript position is recorded uptake, not submission. Serialized
+  Stop/recall withdrawals restore text in gesture order. Backend `JobDone`
+  alone certifies “Stopped.”; no frontend pending-Stop register is needed.
+- `end_fleet` ends every root in the shared launch, drops the owner, then
+  waits on detached teardown accounting, retaining no launch or factory.
+  Synod recovers the machine only after that barrier.
+
+Settlement excludes the attending owner's single retained membership even
+if its life ends; helpers and unfinished claims must still tear down.
+
+Live means life is not cancelled; torn down means the final `Membership`
+has been released. Retained addresses are neither consumers nor outstanding
+teardown. Membership starts at name claim, covering construction; the owner's
+engine and log drop before its name releases that membership. A wire engine
+answers `Detach` with `Ended` only after its engine thread and session workers
+have torn down. Missing acknowledgment refuses settlement and the folder scan,
+rather than treating socket closure as proof of teardown.
 
 ## Roots are sessions
 
-**A root is a session: a fresh engine booted from the launch's recipe, its own
-`sessions/<n>/record.jsonl`, its own `/clear`, its own resume.** Nothing about
-`main` is special except that it is born first. The recipe is the
-launch's `Genesis` (installers, typed cwd, the launch's grants, terminal
-capabilities, the run's scratch),
-so a root born at runtime is built exactly as the first was, and a host that
-boots no further engines — a wire host, synod's one embedded root — has
-`genesis: None` and refuses a second session in a sentence. Every root runs
-under the launch's own stack and fuel (a root is depth 0), found once by
-`Fleet::found` and hatched by `Avatar::hatch`.
+**A root has a fresh engine and its own `record.jsonl`; a root is never a
+fork.** `Genesis` is the launch's identity-engine recipe, absent on a wire
+host that boots no further roots.
 
-The human opens and ends roots from whichever tab is focused:
+- `/new [name]` hatches a blank root; `/branch [name]` imports the focused
+  context with a fresh shell. Imported ancestry is recorded through
+  `Inherited`, not a spawn-parent edge.
+- `/close` writes `SessionClosed` and ends that life permanently; `/quit`
+  ends the fleet while leaving roots resumable.
+- `--resume` reopens roots with no `SessionClosed`, each with its context
+  replayed and shell fresh. Pins, schedules, workers and bindings are not
+  restored. Headless resume requires exactly one live root record.
+- `/clear` checks engine rebootability before any mutation, then abandons
+  work/queue, cancels and replaces the engine incarnation, clears pins,
+  reboots, clears the context and rebirths readings.
+  An adopted or wire engine refuses before discarding anything. A failed
+  boot after admission leaves the old engine with its work/queue discarded.
+- Names are fleet-unique reservations claimed before engine/log preparation.
+  Owner-held name guards release them on teardown. Host commands alone open
+  roots; a model has no session-opening builtin.
 
-- **`/new [name]`** hatches a blank (`amnemon`) root;
-- **`/branch [name]`** hatches a root importing the focused agent's
-  model-visible context, exactly as a `mnemon` spawn imports it
-  ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]); the shell
-  is **fresh**, as under `--resume`, and no shell state is forked. The new root
-  is parent-less: `SessionStarted.parent` is the tree parent, so a branch's
-  ancestry stays readable only through its `Inherited` pointers;
-- **`/close`** ends the focused agent's session for good, writing
-  `Forensic::SessionClosed`; the process exits when no root is left;
-- **`/quit`** ends every root, resumable;
-- **`--resume`** reopens every root of the run that holds no `SessionClosed`,
-  each under its recorded name, with its context replayed and its shell fresh.
+## Uniform spawning and the one snapshot law
 
-A root born by either command is *not* a child: it has no parent, no lease, no
-`reply` and no result to post, so its death touches no other agent's context,
-and it never idle-reaps. A name is the fleet's unique identity either way, so a
-refused name leaves no session behind. There is no engine-side door for any of
-this: `/new` and `/branch` are host commands, handled on the attend thread
-(`spawn_root`), never a builtin a model could reach.
+**Every agent with fuel may spawn; each fork gives the child one less unit,
+without debiting the parent.** `SPAWN_FUEL = 3` bounds depth, not fan-out.
+The desk refuses a zero-fuel spawn; its prompt omits the dead spawn family.
 
-## Prompt obligations follow construction
+`` exarch-agents `start `` takes the closed record
+`[prompt, name, type, grant, model]`. Missing or misspelled fields are static
+errors; variant decoders enumerate legal runtime tags. It is always
+asynchronous: construct, adopt and launch the child, then return a summary;
+`` exarch-agents `list `` reads the roster.
 
-The prompt is an *agent-invariant base* plus one per-agent resolution step. The
-same construction facts that govern the desk govern what the model is taught:
+- `Shell::bequeath` snapshots the **serialisable fragment** of lexical scope,
+  dynamic context and builtin table. Every handle becomes an opaque
+  placeholder, including in captured closures, native applied arguments and
+  handler arms. Hooks do not cross. No terminal authority crosses.
+- The child receives a fresh inbox, life/work scopes, provider handle and
+  engine. Its `cd`, environment and new bindings never flow back; reply is
+  the sole return path. The fork carries session policy, including inherited
+  bindings sealed as baseline and worker-retention terms.
+- Identity parks the bequest for `IdentityTransport::adopt_parked`; wire
+  seals it and names the bytes in an enquiry. The host asks its `Factory`
+  for a fresh engine stream, attaches the seal, waits for `Attached`, then
+  adopts the child. Engine/log preparation is outside every inbox lock.
+- Both carriers consume the same bequest and scrub, hence the same scope,
+  handlers, builtin table and policy. No engine spawns an engine; the host
+  relays the sealed bytes without interpreting the parent's session.
+- Synod's factory dials the guest daemon's host-CID-only listener, one
+  engine per connection. A failed construction drops that stream; no birth
+  token table, acknowledgement protocol or expiry is needed
+  ([[design/engine-protocol|engine-protocol]], [[map/synod|synod]]).
 
-- **The role gates `# Spawned` and `# Reply`.** Every returning agent receives
-  `Reply`, the deliberate-return contract, worded to be true of any receiver;
-  only a `Child` also receives `Spawned` — the spawner's snapshot, the spawner
-  binding the reply, the idle wait for follow-ups. The headless trunk is never
-  told it was spawned. Conversing agents receive neither.
-- **`interactive` gates `Surfacing`.** Human-facing guidance remains in the
-  shared base, so a returning interactive child can receive both it and
-  `# Reply`.
-- **`fuel > 0` gates `# Agents`.** A leaf receives neither spawn
-  guidance nor the spawn family in its builtin index.
-- **The builtin index has three inputs** — the `Role`, `allow_schedule`, and `spawns` (`fuel > 0`) — cached once from the booted shell. The unresolved base
-  stays on the launch, and every root, identity fork and wire child resolves
-  its own prompt (`Launch::prompt_for`) before the log bookend records its
-  byte length.
+`type` selects model memory, not shell isolation:
 
-## Uniform spawning: bounded by spawn fuel
+- `` `amnemon `` imports no history; only snapshot and prompt cross.
+- `` `mnemon `` imports the parent's turn table and residues through
+  `Protocol::Inherited` pointers, retaining lineage ids and file addresses,
+  then appends the new prompt. An unanswered tool-call frame is omitted.
+  Views are projections of that structure, not copied rendered messages.
 
-Spawning is **available to every agent with fuel left**, so the spawn tree is
-not capped at one level. The effective `spawns` bit is `fuel > 0`; when it is
-false, the prompt index omits `exarch-agents` as a dead family, while the desk remains
-the runtime authority. Depth-N works
-structurally — a child claims its name, enrols in the fleet and joins its parent's
-`children` and `fork` snapshots the parent's shell by value at any depth —
-but each `fork` hands the child one
-less unit of `fuel` than the parent holds (the parent's own `fuel` is untouched,
-so fan-out itself is unbounded), and a `fuel == 0` agent's spawn call is refused
-at the desk with the exhaustion text: a delegation chain terminates by refusal
-a fixed number of generations down rather than recursing forever
-(superseding the depth-1 cap of
-[[decisions/260617_async-agent-tool|async-agent-tool]];
-[[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
-that decision left open).
+`model` is required data: `` `inherit `` takes the current provider;
+`` `role <name> `` selects one the human bound at launch with `--role`
+(and provider/via qualifiers). Roles carry providers, never grants or
+personae. The model discovers no catalog or account. Tuning is fixed at
+launch for roles; a later `/model` changes only its addressed agent.
+`provider::Bureau` mints selections over a shared `Pool` and credentials
+([[map/exarch/provider|provider]]).
 
-The `` exarch-agents `start `` tag is **launch-only and always asynchronous**
-([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
-single closed record
-`[prompt: …, name: …, type: …, grant: …, model: …]` —
-a record literal, so a missing or misspelled field is a *static* error naming
-it, while the `type` (`` `amnemon ``/`` `mnemon ``), `grant` and
-`model` tags are
-checked at the runtime door that enumerates their legal labels
-([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
-One call:
+Selective delegation is ordinary data flow: bind transcript slices silently,
+evict irrelevant context under a note, then name that binding in an
+`amnemon` child's short prompt. The slice crosses once in the shell snapshot,
+not again interpolated into prose
+([[internals/session-record|session-record]]).
 
-- **`fork`s a child `Agent`** through `Shell::bequeath`
-  ([[map/core/shell-state|the flow matrix]]). The child snapshots the
-  **serialisable fragment** of its parent's lexical scope — every binding,
-  each handle in it replaced by an `` `opaque `` placeholder — with the
-  dynamic context (cwd, env, grants, handlers) and the installed builtin table;
-  sets `parent` to the spawning agent's id, takes the spawn's `name` as its
-  identity, and starts fresh in everything else — its own inbox, a fresh cancel
-  token, an owned provider handle seeded from the parent's current model, no
-  terminal authority. This is a **value snapshot**: the child's `cd`, env, and
-  new bindings die with it; there is no flow-back, and the parent receives a
-  string, not the child's bindings. The isolation mirrors a
-  [[design/pipelines|byte-pipeline stage]]'s subshell — see
-  [[#Wire-seat children: the same snapshot, a different wire|below]] for why
-  the promise is the serialisable fragment rather than the whole scope;
-- **runs it on a detached thread** through the same `attend` loop, answering
-  at once with the roster afterwards — the child's row carrying `name`,
-  `elapsed-s`, and `log-dir` — a ral record the script can bind and fan out
-  over. The child runs off the parent's critical path — the one shape
-  in-exchange concurrency cannot express, the parent exchange ending before
-  the child does — an *exchange* on this page being a human round, the fleet's
-  own clock, never a unit of the context, which has only turns and their roles
-  ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]);
-- **wakes the parent when the child replies** with a one-line notice through
-  the parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names.
-  The value itself stays on the child's own `Agent` (`Agent::status.reply`,
-  written by the child's avatar alone) until the parent fetches it with
-  `` exarch-agents `read <name> ``
-  ([[decisions/260826_reply-parks|reply-parks]],
-  [[decisions/260827_agent-and-avatar|agent-and-avatar]]). The reply is a boundary:
-  the `` `read `` admits it against the fields the parent's script projects, so a
-  reply missing `verdict` fails there, naming `/reply/verdict`
-  ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
+## Reply, follow-up and scheduling
 
-The spawn's **`type`** field chooses the child's **model memory**, not its shell
-isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
+**A returned value is deposited state, not prose scraped from a final turn.**
 
-- **`` `amnemon ``** is tabula rasa. The child starts with no conversation history;
-  only the shell value-snapshot and the chosen prompt cross the edge. It has no
-  ancestry: its transcript is its own and nothing else's.
-- **`` `mnemon ``** remembers. The child imports the parent's model-visible context
-  and appends the call's `prompt` as a fresh final user prompt. Left on the
-  parent's own selection it reuses that provider's prompt cache; sent to
-  another account or model it is still sound — reasoning crosses the transcript
-  as plain text (`ContentPart::ReasoningContent`), not as signed blocks — but
-  forfeits the cache. If the parent is mid-tool-call, the unanswered assistant
-  tool-call frame is
-  not inherited; the child forks the request context, not a dangling protocol.
-
-Inheritance is **the parent's table, under the parent's own ids**. Ahead of
-everything goes one `Protocol::Inherited { turns, residues }` — the parent's whole
-turn table, each row `kind: Inherited`, `location` as the parent had it and
-carrying the address of its transcript copy, beside the residues its
-evictions left. The child records no copy of the parent's messages:
-folding the link reads each resident row's records back through its address
-and keeps them under the parent's own turn ids and roles.
-`` exarch-context `survey `` shows them as `inherited` rows, and
-`` exarch-context `evict `` names any run of them by turn ids, exactly as it
-names the child's own. Nothing rendered crosses by value — a residue renders
-from its own record, and the child's context, survey and index are the same
-projections of the same fold
-([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]],
-[[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
-That link is what makes the two logs **one transcript**: an id at or below the
-reach
-resolves through its row's address into the file that first recorded it — the
-link flattens the lineage, so a grandchild's row names the grandparent's file
-directly — so a `mnemon` child can `` exarch-transcript `read `` or `` `grep `` anything its lineage
-ever recorded, evicted from the parent's context long before the fork included.
-Ids are therefore lineage-monotone: the child mints its first prompt above the
-parent's floor, and along any lineage an id names exactly one turn. The
-chain breaks only where an ancestor's file has been taken away by hand, and
-the refusal names the ancestor and the path rather than calling the turn
-unrecorded ([[decisions/260906_context-rollover|context-rollover]]).
-
-The spawn's **`model`** field chooses what the child runs on, and **the agent
-discovers no model**: which models an agent may delegate to is the human's
-decision, not ambient authority an agent could search for. ral has no optional
-record field and no null: absence is *data*, carried by a variant
-([[invariants/optionality-via-variants|optionality-via-variants]]), so the
-field is required and its value carries the optionality — `` `inherit `` or
-`` `role <Str> ``. The record row therefore stays closed, and a misspelled
-field stays a static error.
-
-`` `inherit `` takes the parent's own `Arc<Provider>` verbatim, allocating
-nothing. `` `role `` names a **role**: a provider the human bound to a name at
-launch with `--role NAME=MODEL` (and, only to break a tie between accounts
-listing the model, `--role-provider NAME=ACCOUNT`; to choose the upstreams
-that serve it on a routing service, `--role-via NAME=TAGS`), minted through
-`Bureau::build` — the one door every provider passes, which refuses a model its
-account does not list — before any child exists. Roles are fixed at launch,
-flags only, never persisted, and carry nothing but a provider: no grant, no
-persona, no prompt. With none configured every child inherits, `` `role `` is
-refused saying that only the human can add one, and the system prompt says
-nothing about roles; otherwise a `Roles` section lists each `name: model` to
-agents that spawn.
-
-A role's tuning is the launch's (`Tuning::initial` plus `--effort`) and
-`--max-tokens`, captured when it is minted; a later `/model` changes only the
-switching agent's own provider, and roles are untouched. The reachable set is
-the root's selection together with the roles' providers.
-
-`provider::Bureau` is what makes any of this possible: `Provider::build` needs
-an engine and a credential that no `Provider` retains, so the bureau names that
-trio once and is the only place a live provider is minted
-([[map/exarch/provider|provider]]). A scripted session holds `Bureau::Scripted`
-and mints no roles.
-
-### Bind and hand: context as a value
-
-Selective delegation is ordinary data flow, not a new memory mode. The parent
-surveys and reads closed turns, binds the returned records without
-printing them, slices or reshapes them in ral, evicts the originals, and hands
-the binding to an `` `amnemon `` child:
-
-```ral
-let ctx = exarch-transcript `read [turns: !{range 4 9}]
-let handoff = take 12 $ctx[0][messages]
-exarch-context `evict [from: 4, to: 8, note: #'handed to researcher'#]
-exarch-agents `start [
-  prompt: "read `handoff` for the material to work from; report your findings",
-  name: 'researcher',
-  type: `amnemon,
-  grant: `read-only,
-  model: `inherit,
-]
-```
-
-`handoff` crosses in the child's forked scope, not in `prompt`'s text: `prompt`
-stays a short instruction naming the binding, so the twelve messages travel
-once, as data, rather than twice — once as a binding and once spliced into the
-first model-visible message. The child receives `handoff` through the ordinary
-serialisable value snapshot;
-the same idiom can recur down the delegation tree. The token cost is paid at
-the leaf for the slice that is actually handed over. Small, certainly needed
-material may still be spliced into a prompt; a large binding should remain a
-binding, since binding is silent while stdout and a final shell value become
-model material.
-
-## Wire-seat children: the same snapshot, a different wire
-
-A `Seat::Wire` trunk ([[map/exarch/agent|agent]]) runs its shell in a guest
-engine, host-side of a vsock connection
-([[design/engine-protocol|engine-protocol]]) — the desk
-that answers `` exarch-agents `start `` sits in the host process, and cannot reach a
-`Shell` living in another machine the way it reaches into its own nursery.
-**The whole of that asymmetry is one field of one enquiry.** Beside the model's
-record, `` `start `` carries a `fork` tag saying how the child's forked session
-is to be reached: `` `parked <id> ``, a nursery slot the handler adopts by id,
-or `` `sealed <bytes> ``, the parent's bequest sealed for an engine the host will make. Both arms run
-every authority check the desk runs before anything is spawned, and both answer
-the same roster, so the enquiring builtin cannot tell which one served it.
-
-**The host makes the engine.** A wire spawn is one exchange, and no engine
-spawns an engine:
-
-- the builtin does no I/O. It bequeaths the scrubbed fork, seals it
-  (`seed::seal`) and names the bytes in the enquiry; a `Shell` never crosses,
-  and the seal is all the desk ever holds of the parent's session, bytes it
-  relays and never reads. The bequest carries the spawn's `grant` as a
-  `SpawnGrant`, and a `` `restrict `` record crosses it **undecoded**: the
-  places in it must freeze against the child's own working directory, and the
-  child engine is the side standing in it
-  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]);
-- the desk, *while answering*, asks its `Factory` for a connection to a fresh
-  engine: synod's is the guest daemon, which spawns one engine per connection
-  the host dials on `guest_abi::ports::FACTORY` and admits only `VMADDR_CID_HOST`;
-- the desk builds the child's `Attach` from the parent's own plus the seal,
-  adopts the stream as a `Seat::Wire` exactly as the trunk itself was seated,
-  and waits for `Attached`;
-- only then does it answer the enquiry and hand the seat to the same
-  `spawn_async` an identity trunk's fork reaches.
-
-**No connection has to ask which it is.** The host dialled the daemon for this
-spawn, in the enquiry it is still answering, so it already holds the spawn the
-connection is for; there is no preamble, no table keyed by one, no pump and no
-expiry ([[design/engine-protocol|engine-protocol]]). Admission is the peer's
-CID, a kernel-enforced identity: the
-[[map/core/io-process|spawn jail]] refuses `socket(AF_VSOCK)` with `EPERM`,
-and a guest process cannot present the host's CID. Peer-CID admission is the
-second line behind the jail's deny-set.
-
-**The child exists before the roster names it.** The desk answers the enquiry
-only after `Seat::wire` returned from `await_attached`, and enrols the child in
-the fleet only after that. There is no window in which an enrolled agent has no
-engine behind it, which is why the roster's `state` column is derived from the
-agent tree at listing time, and why `` exarch-agents `list `` reads as a fact
-rather than as an intent.
-
-A spawn that fails leaves nothing to reconcile. A desk that refuses never
-dials; a factory that cannot make an engine, or an engine that refuses its
-`Attach`, reaches the parent as the desk's refusal, in the engine's words.
-Nothing was reserved, so nothing has to expire. Once the child is attached, a
-refusal from there on simply drops the stream: the child reads EOF on its
-protocol fd, exits, and the daemon reaps it.
-
-Depth beyond one needs nothing extra: a wire child's own spawns reach the same
-factory through the host, so a helper spawning a helper is dialled exactly as it
-was, and `fuel` bounds the recursion as it does in the in-process lattice.
-
-**The one snapshot law: an identity fork and a sealed child give the child the
-same scope, handler stack and hooks, every name resolving to the same value or
-the same absence, and the same session policy.** A handle is what stands in the way — live authority over a
-parent-side worker, with no wire form — and it is exactly the class of
-authority every other line of the fork law already denies a child: the parent's
-cancel domain, its terminal, its inbox, its provider handle. So the scrub lives
-in `Shell::bequeath`, the one package both seats take: a child is
-`Shell::child_of(runtime, bequest)` on either seat — the identity arm parks the
-`Bequest` in the nursery, the wire arm seals it — and each
-handle becomes an `` `opaque `` placeholder wherever it stood: in a binding, in
-any scope a closure captured, in a native's applied arguments, in a handler
-frame's arms. A `Bequest` cannot express a hook: hooks are the installing
-host's lifecycle entry points, and a child engine is not that host. A shell
-that reaches no handle bequeaths itself, its scope shared rather than copied.
-The bequest carries scope, handler frames, sources, terms, fixings and the
-spawn grant. The policy is the session's own and owes nothing to the seat. That
-means its exit hints, its lease terms with everything inherited sealed as
-baseline, its worker retention, the size of its detach budget, and a snapshot
-of its `comparable` fixings. `Shell::construct` arms all of it from the
-bequest, the same code on either seat. A round-trip test pins the law and is
-both a codec test and a constructor test: construct a child from a bequest in
-memory, construct one from the same bequest through `EngineSeed` bytes, and
-compare bindings, captured scopes, applied arguments, handler frames and that
-policy, with no hook in either child ([[map/core/transport|transport]]).
-
-Past that one field the seat asymmetry ends and the fleet's uniformity resumes:
-`` exarch-agents `message ``, `` exarch-agents `cancel ``, and the idle-lease reaper all
-resolve a descendant by name through the fleet, then scope-check it with a
-climb (`Agent::descendant`), whatever seat it sits on,
-and a wire helper's `message` crosses as an enquiry on its own connection
-exactly as an identity peer's does — sender and recipient never learn each
-other's transport.
-
-## Returning: the deliberate `reply`
-
-A returning agent hands back the argument of an explicit **`` exarch-agents `reply ``**
-call ([[map/exarch/builtins|builtins]]) — never a scrape of whatever prose ended
-the run ([[decisions/260622_agent-reply-tool|agent-reply-tool]]). It is the
-*sole* return path: a returning agent that finishes without it is re-nudged
-within budget, then **fails honestly** rather than handing up a trailing
-fragment that masquerades as the answer. The payload is the faithful
-first-order ral value the model passed (`FOValue`): a headless trunk's goes to
-the harness as JSON through the `user_json` projection
-([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]);
-a child's is **deposited on its own `Agent`** (`Agent::deposit_reply`, the
-one write `Agent::status.reply` ever takes) and answered, as a value, to
-the parent's `` exarch-agents `read <name> ``
-([[decisions/260826_reply-parks|reply-parks]],
-[[decisions/260827_agent-and-avatar|agent-and-avatar]]). The parent learns of
-the reply from a one-line inbox notice, never the payload. The last payload
-remains readable across new work; only `replied_at` records a current completion.
-A readable old value never suppresses repairs on a new attempt.
-
-A child's `reply` does not end it. Once the enclosing `ral` call's batch
-finishes, severance and cancellation are checked before the staged reply is
-taken. That reply ends admission: queued inputs stay queued for the next attend
-item, before any model-only reminders are generated. The child cancels and reaps its proper descendants — a parent may
-abandon unfinished children, but never leave live agents registered beneath a
-node that has answered — and **parks**, waiting for a message under its idle
-lease. `` exarch-agents `message `` wakes it into a new exchange; a later `reply`
-overwrites the deposit and notifies again. Only a non-reply finish — failure,
-stop, cancellation — settles after budgeted repairs and genuine continuations
-are exhausted, with its one-line tag. A follow-up accepted before dequeue also
-supersedes the prior reply for cancellation reporting; reaping an unchanged
-idle reply posts no duplicate notice.
-
-## Focus is presentation; the idle lease is lifecycle
-
-The human attachment is a presentational `AgentId` the frontend alone owns,
-read by neither the fleet nor `park_mode`. Matrix navigation is a second such
-value, and the matrix's only retained state: an agent identity, never a row
-number, so a cursor whose agent has gone reads as the attached tab rather than
-stranding off-list. `TAB` enters and leaves the surface, `↑`/`↓` (and
-Shift-Tab) move the cursor, and `Enter` attaches the human to the cursor's row
-*and* leaves navigation, so attach-and-type is one gesture. Navigation is
-modal: while it owns the keyboard `Esc` leaves the surface rather than
-cancelling the focused exchange — `Ctrl-C` alone still interrupts — and no
-other key reaches the draft. The attached tab receives typed lines; moving
-either cursor and looking at a tab keep nothing alive. A child's follow-up
-lease starts when it deposits a reply: one hour (`AGENT_LEASE_IDLE`) to receive
-another task. Birth and active work have no such deadline. A queued human or
-agent message disarms the old lease; taking up work clears its reply timestamp,
-and a later reply starts a fresh hour. The callback retains the timestamp it
-was armed for, so an old deadline cannot cancel a later reply's waiting period.
-Roots have no reply lease. Reading replies, matrix navigation, and resource
-probes do not extend it.
-
-A tab whose agent is parked waiting for input and has sat idle for five
-minutes demotes in place to a compact slate matrix row carrying its idle age —
-a per-frame projection off the inbox's own exchange clock, never stored state,
-and the focused tab alone is exempt. It keeps its position in the spawn tree: the
-matrix draws `├─`/`└─` branches from the complete forest before clipping its
-window, so an off-screen sibling cannot change a visible connector. The window
-itself is a total function of the cursor and the fleet: the same pair always
-draws the same strip, so no frame's height leaks into the next. It always
-contains the cursor's own row, and it spends one line on each side it hides,
-stating how many agents lie there. A surface a cursor moves through cannot be
-invisible, so while navigation owns the keyboard the strip is drawn whatever
-the frame's height, taking a row from the transcript if it must; watching, it
-fits in whatever the transcript's floor leaves over. `/focus <name>` remains
-the direct textual attachment. Every one of these gestures is presentation only
-and never touches the lease. When the lease itself runs out, the reaper cancels
-the whole subtree at the bound whether or not a human happens to be looking at
-it — mere focus was never immunity.
-
-## Descendant messages: marked notes, not shared memory
-
-An agent may send a **marked message** by **name** to a proper descendant
-through `` exarch-agents `message ``. The fleet resolves the name to the recipient's
-`Agent`; `Agent::message` stamps its exchange clock and posts an
-`AgentMessage`; the recipient sees it at the
-next tool boundary as a marked note naming the sender, not as human input. This is
-coordination, not a return edge: it does not share shell state, does not grant
-authority, and does not wait for an answer. The durable result path remains
-`reply`; the durable cancellation path remains `` exarch-agents `cancel ``, addressed
-by name the same way.
-
-## Cancellation: a key interrupts one exchange; a terminator cascades the subtree
-
-In the TUI, `Esc` and `Ctrl-C` are a **per-tab exchange interrupt** — they unwind only the focused
-tab's current exchange, never a subtree and never an agent
-([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
-behind **lifecycle terminators** and the host's exchange stop: the
-`` exarch-agents `cancel `` tag, the per-agent idle-lease reaper, `/clear`,
-`/close`, and `Helm::stop`. They share one cascade over the
-agent tree itself (`Role::Child`/`Agent::children`), so terminating a
-mid-tree agent (`Agent::cancel_tree`) reaps everything below it
-(each node closes admission before snapshotting direct children, then
-recurses without ancestor locks); `/clear`
-(`Agent::forget`) additionally drains this agent's own inbox, whose
-clear-epoch bump drops a late result or deferred surface batch addressed
-into the rebuilt context; `/close` cancels the descendants and ends the root.
-OS signals are the other direction: `signals::face` forwards each to every
-live root, where a key reaches one agent only. A `reply` still
-cancels only the replier's proper descendants — a
-parent may abandon unfinished children, but never leave live agents registered
-beneath a node that has answered. This refines
-[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus cancel
-token interrupts one exchange in place; terminating a node cascades through
-it, while a host stop cancels only its descendants and preserves the node.
-
-**Retained identity is not consumer liveness.** A child strongly retains its
-parent, but Avatar drop retires that parent's token under admission before
-teardown, without itself cancelling descendants. Weak shutdown walks retain
-terminated ancestors while descendants remain. Fleet emptiness instead counts
-Avatar-owned membership guards, released last after seat/log and fleet/identity
-references. Their detached `Departures` counter retains no launch or factory,
-so a shutdown waiter does not prevent the resource recovery it awaits.
-Identity references and temporary Helm upgrades do not count as outstanding
-teardown.
-
-In the TUI, that break is a distinct cancelled rail shape: it wears the `╳`
-marker used for errors, while the matrix's failure cell remains reserved for
-actual failures.
-
-## Self-scheduling is inherited
-
-An agent may arm its own wakeups (a cron expression or `after <dur>`) into its own
-inbox when the trunk was launched `--allow-schedule`: the grant is
-**inherited by a fork**, so it flows down the spawn tree. Scheduling is
-gated by that authority — refused at the desk without it, and the schedule
-family is dropped from an ungranted agent's builtin index
-([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). A live self-schedule
-parks its agent `ParkMode::UntilCancelled`: waiting for the wakeup, but stopped
-by a terminate-cause cancel. A terminal schedule stays armed until its wakeup
-is posted, so either registry or inbox carries the pending work; publication
-mechanics live in [[map/exarch/frontend|frontend]].
+- `` exarch-agents `reply `` stages a faithful `FOValue`; after the whole
+  tool batch, cancellation/severance are checked before harvesting it.
+  Reply abandons delegated work, clears schedules, publishes Ready,
+  deposits the value and notifies the parent with a covered message sequence.
+- The child parks. Its parent reads the value through
+  `` exarch-agents `read <name> ``, checked against the demanded type. A
+  headless root instead returns the same value to its harness. Finishing
+  without reply is repaired within budget, then fails honestly.
+- Historical reply payload remains readable during new work; only the
+  completion timestamp answers whether that work has replied. A readable old
+  value never suppresses a new attempt's reply obligation.
+- A child's one-hour follow-up lease starts at reply, not birth. New human
+  or agent input stamps the inbox atomically with enqueue; the old lease
+  cannot race it into reaping the child. A callback checks its exact reply
+  timestamp. Focus, reading replies and probes renew nothing; roots have no
+  reply lease.
+- Focus and matrix navigation are presentation only. A cancelled exchange
+  is visible as cancelled, not a failed matrix cell.
+- With `--allow-schedule`, every fork inherits scheduling admission. Each
+  entry holds a weak mailbox of its arming work; abandoned work retires the
+  entry instead of rearming. Owner abandonment clears schedules; Stop leaves
+  callback retirement to observe the dead scope. Synod refuses schedules.
 
 ## Permissions: a spawn pushes one layer
 
-**Every spawn states the child's authority explicitly**, through a *mandatory*
-`grant` field with six spellings:
+**A spawn narrows the parent's stack; it never establishes a new ceiling.**
+Its mandatory `grant` is one of
+`` `inherit | `confined | `read-only | `edit-only | `reasonable | `restrict R ``.
 
-```text
-  grant: `inherit | `confined | `read-only | `edit-only | `reasonable | `restrict R
-```
-
-Four name a capability bake-in (the bake-ins are ordered loosest-to-tightest in
-[[map/exarch/policy|policy]]); `` `restrict R `` states a capability record
-outright, written in the parent's shell in exactly the vocabulary of
-`grant [...] { body }`; `` `inherit `` names ⊤, a layer that says nothing. An unknown tag,
-or an `R` with an unknown key, is refused at the runtime door in the declared
-table's own words ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
-
-**One field, because a spawn has one question.** At the CLI, `--base` and
-`--restrict` are different acts: a base *establishes* a ceiling with nothing
-beneath it, a restrict *narrows* what is already established. At a spawn there
-is nothing to establish — the parent's `GrantStack` is already underneath — so
-a named base is pushed *as if it were a restrict*, and both acts collapse into
-"what single layer does this child get?". The CLI keeps its two flags, because
-there the two acts genuinely differ; the mirror worth having between the two
-surfaces is in the vocabulary of values, not of flag names.
-
-The child is born with its parent's whole stack, plus at most one layer:
-
-```text
-  child_stack = parent_stack ++ [layer(grant)]
-```
-
-`policy::base_layer` (the installer's `GrantNarrower`) resolves a named base,
-`decode_capability_map` an `R`, both frozen against the **child's** working
-directory so the layer lands already resolved
-([[design/capability-freeze|capabilities]]). The bequest carries the parent's
-stack and the grant, and `Shell::child_of` pushes the layer onto it through
-`SpawnGrant::narrow_onto`: at adoption for
-an identity child (`IdentityTransport::adopt_parked`), at `Engine::boot` for a
-sealed one ([[map/core/transport|transport]],
-[[map/exarch/policy|policy]]). There is no meet and no `Capabilities`
-folded against another: the stack's own per-check fold ANDs every layer's
-verdict, so a pushed layer can **narrow** the child below the parent and can
-**never escalate** it past the parent's reach
-([[design/grant|the grant lattice]], [[decisions/260906_object-not-name|object-not-name]]):
-
-- naming a base *looser* than the parent simply changes nothing — a network-off
-  `confined` parent stays offline even under `reasonable`, since the fold ANDs
-  both layers' verdicts;
-- an `R` claiming authority the parent does not hold is ANDed away for the same
-  reason, so it needs no comparison against the parent to be safe;
-- `` `inherit `` resolves to ⊤, which the fold leaves no trace of, so the child
-  runs at the parent's own ceiling.
-
-`` `inherit `` is the one spelling the CLI has no name for, and the spawn
-surface has no `` `dangerous ``: at a spawn the lattice top is a layer that says
-nothing, which is *inherit the parent verbatim* under a name that claims
-otherwise. `` `inherit `` says it plainly, in the spelling `provider` and
-`model` already use for *no opinion*, while `` `dangerous `` stays a `--base`
-name, where ⊤ genuinely is no ceiling.
-
-The four bake-in names are a *subset* of the `--base` vocabulary, and the
-door's own label list is where the two part company. A grantable base must admit
-the bundled coreutils (`ral_core::uutils`), which spawn by bare name and so
-match no directory prefix: `read-only` and `edit-only` name each tool literally
-for exactly this reason. A base whose `exec` block is prefixes alone leaves the
-child unable to run `ls`, and — the ceiling being non-escalating — with no way
-to ask for it back. A human at the CLI can see that and reach for
-`--extend`; a child can only spend turns discovering it.
-
-A spawn's `R` mints no self-denial. `--restrict` denies the restriction
-*files'* own paths, so the agent cannot rewrite the bytes that shape its
-permissions; an `R` is a value computed in the parent's shell at the instant of
-the spawn, with no file for the child to reach.
-
-The authority decision is the spawn site's, not the child's: the desk carries
-the spawn's `SpawnGrant` into the child's seating (`ExarchDesk::fork_seat`), and
-the child receives only the layer it resolves to.
+- Named profiles and explicit `R` are the same act: at most one layer atop
+  the parent's whole stack. `` `inherit `` is the no-op top layer; there is
+  no spawn `` `dangerous `` spelling.
+- The bequest carries `SpawnGrant`. Named bases resolve through
+  `policy::base_layer`; explicit records remain undecoded until the child's
+  engine freezes them against its own cwd. `SpawnGrant::narrow_onto` is the
+  common layering point under either carrier.
+- Per-check intersection means a looser child layer cannot grant what the
+  parent lacks. A restriction value creates no self-denial file; CLI
+  restriction files remain a different authority boundary.
+- The snapshot law and the grant law are independent: memory mode changes
+  neither shell isolation nor authority
+  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]],
+  [[design/grant|grant]], [[design/capability-freeze|capability-freeze]]).
 
 ## See also
 
-[[design/exarch-architecture|exarch-architecture]] (the agent as a provider loop
-over one `ral` tool),
-[[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
-(the record-spec `` exarch-agents `start `` tag, names as fleet-unique identity,
-schedule labels, commitments retired),
-[[design/grant|grant]] (the capability lattice the fold runs in),
-[[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]] (why `grant` is
-one field with six spellings, and why the CLI's two flags are not),
-[[map/exarch/tools|tools]], [[map/exarch/agent|agent]],
-[[map/exarch/policy|policy]],
-[[decisions/260617_async-agent-tool|async-agent-tool]],
-[[decisions/260622_agent-reply-tool|agent-reply-tool]],
-[[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]],
-[[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]],
-[[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab exchange
-interrupt, not a subtree cascade),
-[[design/engine-protocol|engine-protocol]] (why the daemon
-listens and the host dials, what that direction deletes, and the enquiry
-class per registry, every tag answering the registry's state),
-[[decisions/260827_agent-and-avatar|agent-and-avatar]] (`Agent` as the `Arc`,
-`Avatar` as its embodiment, the fleet as `{ names, roots, lease, launch }`),
-[[map/synod|synod]] (the factory's landed home, and the helper surface built
-over wire-seat children),
-[[decisions/260806_exchange-ends-at-fleet-quiescence|synod's exchange ends at
-fleet quiescence]] (the product law a wire-seat fleet's caller must satisfy).
+[[design/exarch-architecture|exarch-architecture]],
+[[map/exarch/agent|agent]], [[map/exarch/frontend|frontend]],
+[[map/exarch/builtins|builtins]], [[map/exarch/policy|policy]],
+[[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]],
+[[decisions/260826_reply-parks|reply-parks]],
+[[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]].
