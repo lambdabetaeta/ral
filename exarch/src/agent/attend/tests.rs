@@ -1,10 +1,10 @@
 use super::*;
 use crate::agent::TestTrunk;
 use crate::agent::testkit::*;
-use crate::bus::{AgentResult, Scoped};
+use crate::bus::Scoped;
 use crate::provider::Refusal;
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Forensic, Memory, Record};
+use crate::record::{Forensic, Memory, Record, Settlement};
 use ral_core::data::FOValue;
 use ral_core::process::{CancelCause, DurableRoot};
 use std::time::Duration;
@@ -99,7 +99,7 @@ fn failed_mandatory_repair_ends_only_its_session_and_reports_to_its_parent() {
     assert_eq!(faults, vec![why.clone()]);
     let report = pop(&parent.inbox).expect("the parent receives failure");
     assert!(
-        matches!(report, Next::Item(Item::Agent(result)) if matches!(&result.outcome, AgentOutcome::Failed(error) if *error == why))
+        matches!(report, Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. }) if reason == why)
     );
     assert!(parent.handle().is_live());
     assert!(parent.check_available().is_ok());
@@ -157,7 +157,7 @@ fn a_late_recording_failure_reaches_the_parent_even_after_cancelled_attendance()
         child.settle(outcome, &emit);
         let report = pop(&parent.inbox).expect("the parent receives terminal failure");
         assert!(
-            matches!(report, Next::Item(Item::Agent(result)) if matches!(&result.outcome, AgentOutcome::Failed(error) if *error == why))
+            matches!(report, Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. }) if reason == why)
         );
         assert!(parent.handle().is_live());
     }
@@ -744,10 +744,10 @@ fn a_nonreply_followup_waits_for_real_schedules_or_busy_descendants() {
             let result = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
             assert!(matches!(
                 result.next,
-                Next::Item(Item::Agent(AgentResult {
-                    outcome: AgentOutcome::Failed(_),
+                Next::Item(Item::Agent {
+                    settled: Settlement::Failed { .. },
                     ..
-                }))
+                })
             ));
         }
         child.schedules.clear();

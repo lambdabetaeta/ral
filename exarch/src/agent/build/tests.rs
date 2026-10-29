@@ -580,9 +580,7 @@ fn late_child_result_after_clear_is_refused_at_publication() {
     )
     .unwrap();
     session.clear().unwrap();
-    worker
-        .inbox
-        .retire(crate::bus::AgentOutcome::Stopped("late".into()));
+    worker.inbox.retire("late".into());
     assert!(
         session.inbox.is_empty(),
         "abandoned work refuses late results"
@@ -600,12 +598,10 @@ fn a_clear_in_one_tab_leaves_another_tabs_late_result_alone() {
     )
     .unwrap();
     branch.clear().unwrap();
-    worker
-        .inbox
-        .retire(crate::bus::AgentOutcome::Stopped("done".into()));
+    worker.inbox.retire("done".into());
     assert!(matches!(
         pop(&trunk.inbox),
-        Some(Next::Item(Item::Agent(_)))
+        Some(Next::Item(Item::Agent { .. }))
     ));
 }
 

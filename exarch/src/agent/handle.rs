@@ -73,27 +73,23 @@ impl AgentHandle {
         self.0.mailbox.post_rewrite(rewrite);
     }
     pub(crate) fn message(&self, from: &Self, text: String) -> Result<(), Ended> {
-        // Owe before delivery; never hold both inboxes.
-        let owed = self
+        let message = AgentMessage {
+            from: from.id(),
+            from_name: from.0.name.clone(),
+            text,
+        };
+        let mailbox = self.0.mailbox.vouched_by(from.0.under.clone());
+        let delivered = if self
             .0
             .role
             .parent()
-            .filter(|parent| parent.id() == from.id())
-            .and_then(|_| self.0.mailbox.report())
-            .and_then(|report| report.owe());
-        self.0
-            .mailbox
-            .vouched_by(from.0.under.clone())
-            .post(Scoped::Message {
-                message: AgentMessage {
-                    from: from.id(),
-                    from_name: from.0.name.clone(),
-                    text,
-                },
-                owed,
-            })
-            .then_some(())
-            .ok_or(Ended)
+            .is_some_and(|parent| parent.id() == from.id())
+        {
+            mailbox.follow_up(message)
+        } else {
+            mailbox.post(Scoped::Message(message))
+        };
+        delivered.then_some(()).ok_or(Ended)
     }
     pub(crate) fn lapse(&self, lease: &Lease) {
         self.0.mailbox.lapse(lease);

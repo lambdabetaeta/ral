@@ -2,9 +2,9 @@ use super::*;
 use crate::agent::testkit::{
     WORKER_REGISTRY_TEST_BUILTINS, dressed_trunk, scheme_test_clear_block_forever, workers,
 };
-use crate::bus::{AgentOutcome, Emitter};
+use crate::bus::Emitter;
 use crate::card::testkit::card_value;
-use crate::record::{Display, Record};
+use crate::record::{Display, Record, Settlement};
 use ral_core::carrier::Severed;
 use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{
@@ -80,18 +80,18 @@ fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
 /// since its `Protocol` record is the one fact of it.
 #[test]
 fn arrival_records_display_facts() {
-    use crate::bus::AgentResult;
-
     let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
 
     assert_eq!(session.arrive(&Item::Human("hello".into())), Ok(true));
     assert_eq!(
-        session.arrive(&Item::Agent(AgentResult {
+        session.arrive(&Item::Agent {
             name: "helper".into(),
-            outcome: AgentOutcome::Failed("boom".into()),
+            settled: Settlement::Failed {
+                reason: "boom".into(),
+            },
             elapsed: Duration::from_millis(1500),
-        })),
+        }),
         Ok(true)
     );
 

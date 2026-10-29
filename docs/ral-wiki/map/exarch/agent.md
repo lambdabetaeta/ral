@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e82dee76
+generated_at_commit: 0e83863c
 generated_at_date: 2026-10-29
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
@@ -39,34 +39,44 @@ The role and snapshot laws are [[design/agents|agents]]'s.
 
 - `Inbox` is the non-cloneable consumer; `Mailbox` pairs destination with
   a vouching `Scope`. `WeakMailbox` lets timers retain no inbox owner.
-- `State` holds `Posts`, current `Work` (scope and receipt pool), exchange
-  and pending opening, open job and counter, debts taken up, the parent
-  `Report`, the reply `Lease`, rest/reply clocks and waiting-for-input.
-  `Status` is a snapshot, not a second state register.
+- `State` holds `Posts`, current `Work` (scope and `children`), exchange
+  and pending opening, open job and counter, the reply `Lease`, rest/reply
+  clocks and waiting-for-input. `Shared` holds the immutable optional
+  `Report`; `Status` is a snapshot, not a second state register.
 - The scope tree is fleet root → life → work → exchange and adopted child
   lives. Scopes never reset. `AgentHandle::interrupt` cancels exchange and
   opening; `stop(JobId)` abandons matching job work; `end` cancels life.
 - Private `Post` distinguishes human text, reads, rewrites and scoped
   deliveries. `Posts` is the only way to observe them, and every observation
-  first drops a scoped delivery whose provenance is cancelled. `State::pop`
-  then releases a result's receipts and takes up a message's debt atomically.
+  first drops a scoped delivery whose provenance is cancelled. `Post::admit`
+  maps messages and parent `Scoped::FollowUp` input to `Item::Message`.
   [[map/exarch/frontend|Frontend]] maps ordering and coalescing.
 - `Inbox::mailbox` captures current work. `Mailbox::adopt` accepts only
-  that live work and returns the child's life node, `Report` and first
-  `Owed`. A delayed construction cannot adopt into replacement work.
-- An `Owed` is one answer promised to a parent, minted at adoption and at
-  each follow-up (`Report::owe`, under the adopting parent's lock). Paying
-  consumes it into a `Result` carrying its `Receipt`; dropping it pays `Cancelled`; a refused post
-  withdraws it silently in `deliver`. Busy is exactly receipts outstanding
-  for the current work, never a live-child intersection.
+  that live work, enrolls the optional shared `Child` born Working, and
+  returns its life node. A delayed construction cannot adopt into
+  replacement work.
+- `Child` holds name, birth time, a record seam and one `ChildStatus`;
+  `Report` pairs it with the parent's work mailbox, absent for headless
+  roots. `Child::has_replied` observes the variant without cloning the value.
+  `Work.children` determines busy: some child is Working, without a
+  liveness filter. `Mailbox::child_status` reads the newest child of a name,
+  live or ended, from that work.
+- `Mailbox::follow_up` posts parent input, then records and shows Working
+  under `Child.record`; refusal changes nothing. `Report::transition`
+  records before publication, outside inbox locks. `Mailbox::finish` sets
+  status and queues the value-free notice together under the parent lock.
+  Retirement takes the seam and fails only a Working child
+  ([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
 - `Agent::abandon` applies `Queue::{Keep, Recall}` under the inbox
   lock and clears schedules after unlocking. Reply keeps queued posts, Stop
   recalls human text. A committed `/clear` discards only its captured old
   queue boundary, retaining later human input. Stop itself runs
   through the handle and touches no owner register.
-- Never hold two inboxes. The inbox may read the schedule registry's leaf
-  lock; `fire_at` releases it before posting. Provider work, engine
-  construction, probes, writes and destruction run outside inbox locks.
+- No path holds two inbox locks. `Child.record` precedes any inbox lock
+  and the child's log; `Child.status` is a leaf. The inbox may read the
+  schedule registry's leaf lock; `fire_at` releases it before posting.
+  Provider work, engine construction, probes, writes and destruction run
+  outside inbox locks.
 
 ## The engine
 
@@ -121,13 +131,14 @@ fleet root, lease policy and `Tenancy`.
   its engine before its claim releases. An armed claim publishes terminal
   `Died` before removing its name/census entry, outside the census lock;
   a bare unarmed claim releases silently and certifies nothing.
-- `Agent::assemble` (`agent/build.rs`) adopts through the call's captured
-  mailbox only after engine and log exist. A dead parent is `SessionDead`;
-  abandoned work is `Abandoned`. A root's life is a fleet-root child; a
-  child's life is a child of its parent's captured work. Its engine incarnation
-  is a child of life, parallel to work. `Emitter::bind` and `Transport::bind`
-  bind the writer's failure and engine's severance to that life; either
-  latch cancels it.
+- `Agent::assemble` (`agent/build.rs`) creates a `Child` for each returning
+  role after engine and log exist. `Fleet::lodge` enrolls it through the
+  captured work mailbox and builds its `Report` and inbox. A dead parent is
+  `SessionDead`; abandoned work is `Abandoned`. A root's life is a
+  fleet-root child; a child's life is beneath its parent's captured work.
+  Its engine incarnation is a child of life, parallel to work. `Emitter::bind`
+  and `Transport::bind` bind the writer's failure and engine's severance to
+  that life; either latch cancels it.
 - `Fleet::{resolve, live, roots}` derive live addresses from names, sorted
   by id, with roots filtered by role. There is no separate children or roots
   index. `roster::listing` / `summary` project these live handles.
@@ -138,10 +149,13 @@ fleet root, lease policy and `Tenancy`.
   wait for no tenants; `wait_settled(waiter, &Pumping)` waits until every
   tenant but the waiter's is bound and live, then reports accumulated
   teardown failures. The census takes no inbox lock under its own.
-- `Agent::drop` ends life first, clears schedules and records `SessionEnded`
-  unless panicking; the inbox then reports any owed failure, and the
-  `Incarnation` drops last: its `Tenancy` awaits a wire engine's
-  `Detach → Ended`, records a missing acknowledgment as a census failure,
+- `Agent::drop` first retires the inbox: it ends life and fails a Working
+  child with `ENDED_BEFORE_REPORTING`, recording unless panicking. It then
+  clears schedules and records `SessionEnded` unless panicking, preserving
+  the tail bookend. Inbox drop retires idempotently; a replied child keeps
+  its value and posts nothing. The `Incarnation` drops last: its `Tenancy`
+  awaits a wire engine's `Detach → Ended`, records a missing acknowledgment
+  as a census failure,
   then drops the engine. Its claim publishes any armed terminal cue before
   releasing name and tenant, so a final drain cannot overtake death.
   Owner drop ends descendants; retained addresses never prolong teardown.
@@ -165,8 +179,8 @@ lock belongs to the launcher, not an agent.
   and terminal-failure observation. On exit, `attend` asserts that a live
   owner's exchange ends prompt-admissible.
 - Parking is computed: an attended conversing root is `Held`; a replied
-  child is `Engaged`; outstanding obligations give `HeldByChildren`; armed
-  schedules give `UntilCancelled`; otherwise `Quiesce`. A severance ends
+  child is `Engaged`; a Working child of current work gives `HeldByChildren`;
+  armed schedules give `UntilCancelled`; otherwise `Quiesce`. A severance ends
   life, which the inbox checks itself.
 - `take_up` runs reads/rewrites or calls `arrive`. A declined claimed-worker
   completion drops its `Opening`. An accepted exchange-opening item
@@ -187,13 +201,14 @@ lock belongs to the launcher, not an agent.
   first rewrite. A cancelled exchange drains nothing. A staged reply is
   checked after the complete batch and before this drain or reminders.
 - `replied` first commits its required quiesce records, then abandons work
-  with `Keep`, clears schedules and publishes Ready. `deposit_reply`
-  stores the value and pays every taken-up debt as
-  `Replied`. A child parks; a headless root returns. Consuming `settle`
-  (`agent/spawn.rs`) concludes: a recording failure overrides the outcome and
-  is announced once through the independent fleet sink. It then retires the
-  inbox and drops the owner. Teardown and terminal publication remain inside
-  census-counted completion.
+  with `Keep`, clears schedules and publishes Ready. `Inbox::deposit_reply`
+  records and shows `Replied(value)` unless a parent follow-up is queued;
+  that crossing leaves Working without a notice. A child parks; a headless
+  root returns. Consuming `settle` (`agent/spawn.rs`) concludes: a recording
+  failure overrides the outcome and is announced once through the independent
+  fleet sink. It then retires with `AgentOutcome::reason`, failing only a
+  Working child, and drops the owner. Teardown and terminal publication
+  remain inside census-counted completion.
 - A severed engine has ended life and so cancelled the exchange. `halted`
   names the loss as `Fault::Severed`, repaired as `Aborted`; calls left unrun
   answer `EngineLost` rather than an interruption. Headless/Synod end the

@@ -472,6 +472,7 @@ impl Blocks {
             | Forensic::Unpin { .. }
             | Forensic::SessionEnded
             | Forensic::SessionClosed
+            | Forensic::Status { .. }
             | Forensic::Retried { .. } => Delta::Quiet,
         }
     }

@@ -8,6 +8,8 @@ status: accepted
 > there is no registry entry. A reply lives on `Agent::status.reply`,
 > written by the avatar alone and read by anyone still holding the `Arc`.
 > The decision below — deposit and park, never terminate — stands.
+> `read` asks the reader's own work: refused while the child works, readable
+> after it ends ([[261029_a-child-is-a-status|a-child-is-a-status]]).
 
 **A returned value is a fact the registry holds, not a message the parent
 reads.** A returning agent's `reply` deposits its value on the agent's own

@@ -47,6 +47,7 @@ impl Selection {
             Forensic::WindowNarrowed { context_window } => self.narrowed = Some(*context_window),
             Forensic::SessionEnded
             | Forensic::SessionClosed
+            | Forensic::Status { .. }
             | Forensic::TurnStarted { .. }
             | Forensic::UsageDelta { .. }
             | Forensic::Cancelled

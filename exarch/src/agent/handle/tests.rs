@@ -4,11 +4,13 @@ use crate::agent::engine::EngineKind;
 use crate::agent::fleet::{Fleet, Unborn};
 use crate::agent::outcome::Outcome;
 use crate::agent::testkit::{
-    TestAgent, TestAgentSpec, open_next, pop, pop_outcome, test_agent, trunk,
+    TestAgent, TestAgentSpec, open_next, pop, pop_settled, test_agent, trunk,
 };
-use crate::bus::{AgentOutcome, Emitter, Item, Next, ParkMode, Queue, Sink};
+use crate::bus::{
+    AgentOutcome, ENDED_BEFORE_REPORTING, Emitter, Item, Next, ParkMode, Queue, Sink,
+};
 use crate::headless::SettledConversation;
-use crate::record::{Forensic, Protocol, Record, Voice};
+use crate::record::{ChildStatus, Forensic, Protocol, Record, Settlement, Voice};
 use std::sync::Barrier;
 
 fn root(fleet: &Arc<Fleet>, name: &str) -> TestAgent {
@@ -35,13 +37,13 @@ fn heard(worker: &TestAgent) -> bool {
     matches!(pop(&worker.inbox), Some(Next::Item(Item::Message(_))))
 }
 
-/// The worker replies; the parent pops `Replied` and owes nothing more.
+/// The worker replies; the parent takes its notice and has no busy child.
 fn replied(parent: &TestAgent, worker: &TestAgent) -> Lease {
     let lease = worker
         .inbox
         .deposit_reply(FOValue::Unit)
         .expect("no input is queued");
-    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
+    assert!(matches!(pop_settled(&parent.inbox), Settlement::Replied));
     assert!(!parent.has_busy_children());
     lease
 }
@@ -102,20 +104,24 @@ fn message_provenance_survives_normal_end_but_not_abandoned_work() {
 }
 
 #[test]
-fn an_old_reply_cannot_pay_a_newer_follow_up() {
+fn an_old_notice_does_not_hide_a_newer_follow_up() {
     let (_fleet, parent, worker) = family();
     worker.inbox.deposit_reply(FOValue::Unit);
     worker.message(&parent, "follow up".into()).unwrap();
-    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
+    assert_eq!(
+        parent.inbox.mailbox().child_status("worker"),
+        Some(ChildStatus::Working)
+    );
+    assert!(matches!(pop_settled(&parent.inbox), Settlement::Replied));
     assert!(parent.has_busy_children());
     assert!(heard(&worker));
     worker.inbox.deposit_reply(FOValue::Unit);
-    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
+    assert!(matches!(pop_settled(&parent.inbox), Settlement::Replied));
     assert!(!parent.has_busy_children());
 }
 
 #[test]
-fn a_reply_pays_every_heard_debt_in_one_result() {
+fn one_reply_answers_every_follow_up_heard() {
     let (_fleet, parent, worker) = family();
     for text in ["one", "two"] {
         worker.message(&parent, text.into()).unwrap();
@@ -123,55 +129,84 @@ fn a_reply_pays_every_heard_debt_in_one_result() {
     }
     assert!(parent.has_busy_children());
     worker.inbox.deposit_reply(FOValue::Unit);
-    assert!(matches!(pop_outcome(&parent.inbox), AgentOutcome::Replied));
+    assert!(matches!(pop_settled(&parent.inbox), Settlement::Replied));
     assert!(!parent.has_busy_children());
     assert!(pop(&parent.inbox).is_none());
 }
 
 #[test]
-fn an_accepted_follow_up_is_paid_when_the_child_retires() {
+fn a_child_retired_while_working_fails() {
     let (_fleet, parent, worker) = family();
     replied(&parent, &worker);
     worker.message(&parent, "follow up".into()).unwrap();
     assert!(parent.has_busy_children());
-    worker.inbox.retire(AgentOutcome::Replied);
+    worker.inbox.retire(AgentOutcome::Replied.reason());
     assert!(matches!(
-        pop_outcome(&parent.inbox),
-        AgentOutcome::Cancelled
+        pop_settled(&parent.inbox),
+        Settlement::Failed { reason } if reason == "cancelled"
     ));
     assert!(!parent.has_busy_children());
     assert!(pop(&parent.inbox).is_none());
 }
 
 #[test]
-fn a_refused_message_withdraws_its_debt_silently() {
+fn a_cancelled_child_ends_failed_after_its_parent_waited() {
+    let (_fleet, parent, worker) = family();
+    worker.end();
+    assert!(parent.has_busy_children());
+    assert!(parent.inbox.is_empty());
+    drop(worker);
+    assert_eq!(
+        parent.inbox.mailbox().child_status("worker"),
+        Some(ChildStatus::Failed(ENDED_BEFORE_REPORTING.into()))
+    );
+    assert!(!parent.has_busy_children());
+    assert!(!parent.inbox.is_empty());
+    assert!(matches!(
+        pop_settled(&parent.inbox),
+        Settlement::Failed { reason } if reason == ENDED_BEFORE_REPORTING
+    ));
+    assert!(parent.inbox.is_empty());
+}
+
+#[test]
+fn a_refused_follow_up_changes_nothing() {
     let (_fleet, parent, worker) = family();
     replied(&parent, &worker);
     worker.end();
     assert_eq!(worker.message(&parent, "too late".into()), Err(Ended));
+    assert_eq!(
+        parent.inbox.mailbox().child_status("worker"),
+        Some(ChildStatus::Replied(FOValue::Unit))
+    );
     assert!(!parent.has_busy_children());
     assert!(pop(&parent.inbox).is_none());
 }
 
 #[test]
-fn a_debt_paid_into_abandoned_work_posts_nothing() {
+fn a_finish_into_abandoned_work_posts_nothing() {
     let (_fleet, parent, worker) = family();
     parent.inbox.abandon(Queue::Keep);
     assert!(!worker.is_live());
-    worker.inbox.retire(AgentOutcome::Failed("late".into()));
+    worker
+        .inbox
+        .retire(AgentOutcome::Failed("late".into()).reason());
     assert!(pop(&parent.inbox).is_none());
     assert!(!parent.has_busy_children());
 }
 
 #[test]
-fn a_childs_clear_pays_a_discarded_follow_up_as_cancelled() {
+fn a_childs_clear_leaves_it_working_until_it_finishes() {
     let (_fleet, parent, worker) = family();
     replied(&parent, &worker);
     worker.message(&parent, "follow up".into()).unwrap();
     worker.inbox.apply_clear(worker.inbox.clear_boundary());
+    assert!(parent.has_busy_children());
+    assert!(parent.inbox.is_empty());
+    drop(worker);
     assert!(matches!(
-        pop_outcome(&parent.inbox),
-        AgentOutcome::Cancelled
+        pop_settled(&parent.inbox),
+        Settlement::Failed { reason } if reason == ENDED_BEFORE_REPORTING
     ));
     assert!(!parent.has_busy_children());
 }
@@ -196,6 +231,21 @@ fn an_unbroken_lease_lapses_to_timed_out() {
         worker.0.mailbox.scope().cause(),
         Some(CancelCause::TimedOut)
     );
+}
+
+#[test]
+fn a_replied_then_lapsed_child_stays_readable() {
+    let (fleet, parent, worker) = family();
+    let lease = replied(&parent, &worker);
+    worker.lapse(&lease);
+    assert!(!worker.is_live());
+    drop(worker);
+    assert_eq!(
+        parent.inbox.mailbox().child_status("worker"),
+        Some(ChildStatus::Replied(FOValue::Unit))
+    );
+    assert!(fleet.resolve("worker").is_none());
+    assert!(parent.inbox.is_empty());
 }
 
 #[test]
@@ -282,7 +332,7 @@ fn a_refused_adoption_certifies_its_occupying_engine() {
 }
 
 #[test]
-fn an_owner_drop_pays_failed() {
+fn an_owner_drop_fails_a_working_child() {
     let parent = trunk(false);
     let child = parent.fork_named("worker").unwrap();
     child
@@ -292,12 +342,13 @@ fn an_owner_drop_pays_failed() {
     let next = pop(&child.inbox).unwrap();
     assert!(matches!(next, Next::Item(Item::Message(_))));
     drop(child);
-    assert!(parent.handle().has_busy_children());
-    let Some(Next::Item(Item::Agent(result))) = pop(&parent.inbox) else {
+    assert!(!parent.handle().has_busy_children());
+    assert!(!parent.inbox.is_empty());
+    let Some(Next::Item(Item::Agent { name, settled, .. })) = pop(&parent.inbox) else {
         panic!("drop must report failure");
     };
-    assert_eq!(result.name, "worker");
-    assert!(matches!(result.outcome, AgentOutcome::Failed(why) if why == "ended before reporting"));
+    assert_eq!(&*name, "worker");
+    assert!(matches!(settled, Settlement::Failed { reason } if reason == ENDED_BEFORE_REPORTING));
     assert!(!parent.handle().has_busy_children());
 }
 

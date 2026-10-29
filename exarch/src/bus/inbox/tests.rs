@@ -1,12 +1,31 @@
 use super::*;
-use crate::agent::testkit::{open_next, pop, pop_outcome};
-use crate::record::Memory;
+use crate::agent::testkit::{open_next, pop, pop_settled, tmp};
+use crate::bus::AgentOutcome;
+use crate::record::{Memory, RECORD, Record, read_records};
+use ral_core::own::OwnDir;
 use ral_core::process::DurableRoot;
 use ral_core::test_helper::eventually;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 fn inbox() -> Inbox {
     Inbox::new(DurableRoot::default().child(), None)
+}
+
+fn adopted(parent: &Inbox, name: &str, record: Recorder) -> Inbox {
+    let child = Arc::new(Child::new(name.into(), Instant::now(), record));
+    let life = parent.mailbox().adopt(Some(child.clone())).unwrap();
+    Inbox::new(life, Some(Report::new(child, Some(parent.mailbox()))))
+}
+
+fn recorded_statuses(dir: &OwnDir) -> Vec<ChildStatus> {
+    read_records(&dir.path().join(RECORD))
+        .expect("read the child's record log")
+        .into_iter()
+        .map(|record| match record {
+            Record::Forensic(Forensic::Status { status }) => status,
+            other => panic!("expected a child status record, got {other:?}"),
+        })
+        .collect()
 }
 
 fn draw(inbox: &Inbox) -> Option<Drawn> {
@@ -60,14 +79,11 @@ fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> Scoped {
     }
 }
 
-fn result(outcome: AgentOutcome) -> Scoped {
-    Scoped::Result {
-        result: AgentResult {
-            name: "worker".into(),
-            outcome,
-            elapsed: Duration::ZERO,
-        },
-        paid: Vec::new(),
+fn finished(settled: Settlement) -> Scoped {
+    Scoped::Agent {
+        name: "worker".into(),
+        settled,
+        elapsed: Duration::ZERO,
     }
 }
 
@@ -80,10 +96,7 @@ fn follow_up(text: &str) -> AgentMessage {
 }
 
 fn message() -> Scoped {
-    Scoped::Message {
-        message: follow_up("please inspect the parser branch"),
-        owed: None,
-    }
+    Scoped::Message(follow_up("please inspect the parser branch"))
 }
 
 fn surface() -> Scoped {
@@ -178,7 +191,7 @@ fn committed_clear_preserves_later_commands_but_refuses_old_scoped_producers() {
         surface(),
         message(),
         wakeup(1, "old", "@", "go"),
-        result(AgentOutcome::Replied),
+        finished(Settlement::Replied),
     ] {
         assert!(old.post(kind));
     }
@@ -187,7 +200,7 @@ fn committed_clear_preserves_later_commands_but_refuses_old_scoped_producers() {
         surface(),
         message(),
         wakeup(1, "late", "@", "go"),
-        result(AgentOutcome::Replied),
+        finished(Settlement::Replied),
     ] {
         assert!(!old.post(kind));
     }
@@ -203,7 +216,9 @@ fn committed_clear_preserves_later_commands_but_refuses_old_scoped_producers() {
 fn every_scoped_kind_is_fenced_at_pop() {
     let cases: [(Source, fn() -> Scoped); 5] = [
         (Source::Agent, || {
-            result(AgentOutcome::Stopped("done".into()))
+            finished(Settlement::Failed {
+                reason: "done".into(),
+            })
         }),
         (Source::Surface, surface),
         (Source::Schedule, || wakeup(1, "nightly", "@", "go")),
@@ -541,12 +556,13 @@ fn inbox_recall_extracts_all_leaving_non_user_in_order() {
 }
 
 #[test]
-fn abandon_applies_each_queue_policy_and_forgets_its_debts() {
+fn abandon_applies_each_queue_policy_and_forgets_its_children() {
     for queue in [Queue::Keep, Queue::Recall] {
         let inbox = active();
         let work = inbox.mailbox();
         let life = inbox.life_mailbox();
-        let (child, _owing) = work.adopt("child".into(), Instant::now()).unwrap();
+        let child = Arc::new(Child::new("child".into(), Instant::now(), Recorder::none()));
+        let child_life = work.adopt(Some(child)).unwrap();
         let exchange = inbox.exchange();
         assert!(work.status().busy);
         work.steer("first".into());
@@ -555,12 +571,13 @@ fn abandon_applies_each_queue_policy_and_forgets_its_debts() {
         work.steer("third".into());
         work.post(wakeup(1, "x", "@", "p"));
         let recalled = inbox.abandon(queue);
-        assert!(child.is_cancelled());
+        assert!(child_life.is_cancelled());
         assert!(exchange.is_cancelled());
         assert!(!work.is_current());
         assert!(inbox.mailbox().is_current());
         assert!(!life.status().busy);
-        assert!(work.adopt("late".into(), Instant::now()).is_err());
+        let late = Arc::new(Child::new("late".into(), Instant::now(), Recorder::none()));
+        assert!(work.adopt(Some(late)).is_err());
         match queue {
             Queue::Keep => {
                 assert_eq!(recalled, [] as [String; 0]);
@@ -799,31 +816,45 @@ fn opening_an_exchange_and_rewind_fence_old_nudges() {
 }
 
 #[test]
-fn busy_clears_exactly_when_the_paid_result_is_popped() {
+fn busy_clears_at_finish_with_its_notice_queued() {
     for drain in [false, true] {
-        let inbox = active();
-        let work = inbox.mailbox();
-        let (_, (report, owed)) = work.adopt("worker".into(), Instant::now()).unwrap();
-        assert!(work.status().busy);
-        report.pay(AgentOutcome::Replied, [owed.into_receipt()]);
-        assert!(work.status().busy);
+        let parent = active();
+        let child = adopted(&parent, "worker", Recorder::none());
+        assert!(parent.mailbox().status().busy);
+        child.deposit_reply(FOValue::Unit);
+        assert!(!parent.mailbox().status().busy);
+        assert!(!parent.is_empty());
         let next = if drain {
-            inbox.drain().pop()
+            parent.drain().pop()
         } else {
-            pop(&inbox)
+            parent
+                .draw(|state| {
+                    if state.has_busy_children() {
+                        ParkMode::HeldByChildren
+                    } else {
+                        ParkMode::Quiesce
+                    }
+                })
+                .map(|drawn| drawn.next)
         };
-        assert!(matches!(next, Some(Next::Item(Item::Agent(_)))));
-        assert!(!work.status().busy);
+        assert!(matches!(
+            next,
+            Some(Next::Item(Item::Agent {
+                settled: Settlement::Replied,
+                ..
+            }))
+        ));
+        assert!(!parent.mailbox().status().busy);
     }
 }
 
 #[test]
 fn a_quiesce_verdict_cannot_beat_a_queued_result() {
     let inbox = inbox();
-    inbox
-        .mailbox()
-        .post(result(AgentOutcome::Stopped("done".into())));
-    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Agent(_)))));
+    inbox.mailbox().post(finished(Settlement::Failed {
+        reason: "done".into(),
+    }));
+    assert!(matches!(pop(&inbox), Some(Next::Item(Item::Agent { .. }))));
     assert!(pop(&inbox).is_none());
 }
 
@@ -899,30 +930,228 @@ fn a_panic_in_the_second_settlement_still_closes_the_ticket() {
 }
 
 #[test]
-fn accepted_input_preceding_an_older_reply_prevents_lease_and_clean_retirement() {
+fn a_reply_crossing_a_follow_up_neither_settles_nor_leases() {
     let parent = active();
-    let (life, owing) = parent
-        .mailbox()
-        .adopt("worker".into(), Instant::now())
-        .unwrap();
-    let child = Inbox::new(life, Some(owing));
+    let child = adopted(&parent, "worker", Recorder::none());
     let mailbox = child.mailbox();
-    let owed = mailbox.report().and_then(|report| report.owe());
-    assert!(mailbox.post(Scoped::Message {
-        message: follow_up("follow up"),
-        owed,
-    }));
+    assert!(mailbox.follow_up(follow_up("follow up")));
     assert!(child.deposit_reply(FOValue::Unit).is_none());
     assert!(mailbox.status().reply_since.is_none());
     assert!(mailbox.is_live());
-    child.retire(AgentOutcome::Replied);
+    assert!(parent.is_empty());
+    assert!(parent.mailbox().status().busy);
+    child.retire(AgentOutcome::Replied.reason());
     assert!(!mailbox.is_live());
     assert!(!mailbox.post(message()));
-    let busy = || parent.mailbox().status().busy;
-    assert!(matches!(pop_outcome(&parent), AgentOutcome::Replied));
-    assert!(busy(), "the accepted follow-up is still owed");
-    assert!(matches!(pop_outcome(&parent), AgentOutcome::Cancelled));
-    assert!(!busy());
+    assert!(matches!(
+        pop_settled(&parent),
+        Settlement::Failed { reason } if reason == "cancelled"
+    ));
+    assert!(!parent.mailbox().status().busy);
+    assert!(parent.is_empty());
+}
+
+#[test]
+fn a_crossing_reply_waits_for_the_follow_up() {
+    let dir = tmp("inbox-crossing-reply");
+    let parent = inbox();
+    let child = adopted(&parent, "worker", Recorder::create(&dir).unwrap());
+    assert_eq!(recorded_statuses(&dir), [] as [ChildStatus; 0]);
+    assert!(child.mailbox().follow_up(follow_up("follow up")));
+    assert!(child.deposit_reply(FOValue::Unit).is_none());
+    assert_eq!(
+        parent.mailbox().child_status("worker"),
+        Some(ChildStatus::Working)
+    );
+    assert!(parent.mailbox().status().busy);
+    assert!(parent.is_empty());
+    assert_eq!(recorded_statuses(&dir), [] as [ChildStatus; 0]);
+    assert!(matches!(pop(&child), Some(Next::Item(Item::Message(m))) if m.text == "follow up"));
+    assert!(child.is_empty());
+
+    let value = FOValue::String {
+        value: "answer".into(),
+    };
+    assert!(child.deposit_reply(value.clone()).is_some());
+    let replied = ChildStatus::Replied(value);
+    assert_eq!(
+        parent.mailbox().child_status("worker"),
+        Some(replied.clone())
+    );
+    assert_eq!(recorded_statuses(&dir), [replied]);
+    assert!(!parent.mailbox().status().busy);
+    assert_eq!(pop_settled(&parent), Settlement::Replied);
+    assert!(parent.is_empty());
+}
+
+#[test]
+fn abandonment_forgets_old_children_and_their_late_finish() {
+    let parent = inbox();
+    let child = adopted(&parent, "worker", Recorder::none());
+    assert!(parent.mailbox().status().busy);
+    parent.abandon(Queue::Keep);
+    assert!(!parent.mailbox().status().busy);
+    assert!(parent.mailbox().child_status("worker").is_none());
+
+    let value = FOValue::String {
+        value: "late answer".into(),
+    };
+    child.deposit_reply(value.clone());
+    assert_eq!(child.mailbox().reply(), Some(value));
+    assert!(!parent.mailbox().status().busy);
+    assert!(parent.mailbox().child_status("worker").is_none());
+    assert!(parent.is_empty());
+}
+
+#[test]
+fn the_parent_never_quiesces_on_an_unread_finish() {
+    enum Finish {
+        Reply,
+        Retire,
+        Drop,
+    }
+    let busy_or_quiesce = |state: &State| {
+        if state.has_busy_children() {
+            ParkMode::HeldByChildren
+        } else {
+            ParkMode::Quiesce
+        }
+    };
+    for finish in [Finish::Reply, Finish::Retire, Finish::Drop] {
+        let parent = inbox();
+        let child = adopted(&parent, "worker", Recorder::none());
+        assert!(parent.mailbox().status().busy);
+        let expected = match finish {
+            Finish::Reply => {
+                child.deposit_reply(FOValue::Unit);
+                Settlement::Replied
+            }
+            Finish::Retire => {
+                child.retire("retired".into());
+                Settlement::Failed {
+                    reason: "retired".into(),
+                }
+            }
+            Finish::Drop => {
+                drop(child);
+                Settlement::Failed {
+                    reason: ENDED_BEFORE_REPORTING.into(),
+                }
+            }
+        };
+        assert!(!parent.mailbox().status().busy);
+        assert!(!parent.is_empty());
+        assert!(matches!(
+            parent.draw(busy_or_quiesce).map(|drawn| drawn.next),
+            Some(Next::Item(Item::Agent { name, settled, .. }))
+                if &*name == "worker" && settled == expected
+        ));
+        assert!(parent.is_empty());
+        assert!(parent.draw(busy_or_quiesce).is_none());
+    }
+
+    for _ in 0..64 {
+        let parent = inbox();
+        let child = adopted(&parent, "worker", Recorder::none());
+        let next = std::thread::scope(|scope| {
+            let finish = scope.spawn(|| {
+                child.deposit_reply(FOValue::Unit);
+            });
+            let next = parent.draw(busy_or_quiesce).map(|drawn| drawn.next);
+            finish.join().unwrap();
+            next
+        });
+        assert!(matches!(
+            next,
+            Some(Next::Item(Item::Agent {
+                settled: Settlement::Replied,
+                ..
+            }))
+        ));
+        assert!(!parent.mailbox().status().busy);
+        assert!(parent.is_empty());
+        assert!(parent.draw(busy_or_quiesce).is_none());
+    }
+}
+
+#[test]
+fn a_peer_message_never_makes_a_child_working() {
+    let dir = tmp("inbox-peer-message");
+    let parent = inbox();
+    let child = adopted(&parent, "worker", Recorder::create(&dir).unwrap());
+    let value = FOValue::String {
+        value: "answer".into(),
+    };
+    child.deposit_reply(value.clone());
+    let replied = ChildStatus::Replied(value);
+    assert_eq!(pop_settled(&parent), Settlement::Replied);
+    assert_eq!(recorded_statuses(&dir), std::slice::from_ref(&replied));
+
+    assert!(child.mailbox().post(message()));
+    assert_eq!(
+        parent.mailbox().child_status("worker"),
+        Some(replied.clone())
+    );
+    assert_eq!(recorded_statuses(&dir), [replied]);
+    assert!(!parent.mailbox().status().busy);
+    assert!(parent.is_empty());
+}
+
+#[test]
+fn a_refused_follow_up_records_nothing() {
+    let dir = tmp("inbox-refused-follow-up");
+    let parent = inbox();
+    let child = adopted(&parent, "worker", Recorder::create(&dir).unwrap());
+    let value = FOValue::String {
+        value: "answer".into(),
+    };
+    child.deposit_reply(value.clone());
+    let replied = ChildStatus::Replied(value);
+    assert_eq!(pop_settled(&parent), Settlement::Replied);
+    assert_eq!(recorded_statuses(&dir), std::slice::from_ref(&replied));
+
+    child.mailbox().end(CancelCause::Cancelled);
+    assert!(!child.mailbox().follow_up(follow_up("too late")));
+    assert_eq!(
+        parent.mailbox().child_status("worker"),
+        Some(replied.clone())
+    );
+    assert_eq!(recorded_statuses(&dir), [replied]);
+    assert!(!parent.mailbox().status().busy);
+    assert!(parent.is_empty());
+}
+
+#[test]
+fn retirement_keeps_a_reply_and_is_idempotent() {
+    let dir = tmp("inbox-replied-retirement");
+    let parent = inbox();
+    let child = adopted(&parent, "worker", Recorder::create(&dir).unwrap());
+    let value = FOValue::String {
+        value: "kept answer".into(),
+    };
+    child.deposit_reply(value.clone());
+    let replied = ChildStatus::Replied(value);
+    assert_eq!(pop_settled(&parent), Settlement::Replied);
+    assert_eq!(recorded_statuses(&dir), std::slice::from_ref(&replied));
+
+    for reason in ["first retirement", "second retirement"] {
+        child.retire(reason.into());
+        assert!(!child.mailbox().is_live());
+        assert_eq!(
+            parent.mailbox().child_status("worker"),
+            Some(replied.clone())
+        );
+        assert_eq!(recorded_statuses(&dir), std::slice::from_ref(&replied));
+        assert!(!parent.mailbox().status().busy);
+        assert!(parent.is_empty());
+    }
+    assert!(!child.mailbox().follow_up(follow_up("too late")));
+    assert_eq!(
+        parent.mailbox().child_status("worker"),
+        Some(replied.clone())
+    );
+    assert_eq!(recorded_statuses(&dir), [replied]);
+    assert!(parent.is_empty());
 }
 
 #[test]

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e82dee76
+generated_at_commit: 0e83863c
 generated_at_date: 2026-10-29
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
@@ -27,9 +27,10 @@ mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
   outside the abandoned tree. A committed `/clear` discards its captured
   queue boundary and cancels the old incarnation, fencing future batches
   while preserving later human input.
-- Releasing a result's receipts and taking up a message's `Owed` are atomic
-  with pop. Busy is receipts outstanding for the current work; each reply
-  pays the debts it covers, and a dropped debt pays `Cancelled`.
+- Taking up a message is plain; a parent's follow-up is `Scoped::FollowUp`.
+  Busy is a Working child of the current work; finish queues the value-free
+  notice with the status under the parent's lock
+  ([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
 - `Inbox::draw` checks life and stopped job, computes the park verdict under
   the lock, then pops before honouring `Quiesce`. It mints an owned
   `Opening` at pop. Accepted arrival `open`s it; a declined claimed-worker

@@ -1,8 +1,9 @@
 use super::*;
 use crate::agent::testkit::{TestAgent, TestAgentSpec, open_next, pop, test_agent};
 use crate::agent::{AgentHandle, roster};
-use crate::bus::{AgentOutcome, Item, Lease, Next, ParkMode, Pumping, Queue};
+use crate::bus::{Item, Lease, Next, ParkMode, Pumping, Queue};
 use crate::enquiry::Spawner;
+use crate::record::Settlement;
 use ral_core::data::FOValue;
 use ral_core::test_helper::eventually;
 use std::time::Instant;
@@ -563,13 +564,13 @@ fn steering_stamps_the_exchange_clock_and_resets_idle() {
 }
 
 #[test]
-fn a_settling_childs_result_outruns_the_quiesce_verdict() {
+fn a_finished_childs_notice_outruns_the_quiesce_verdict() {
     let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
     assert!(trunk.has_busy_children());
     drop(child);
-    assert!(trunk.has_busy_children(), "ended is not heard");
+    assert!(!trunk.has_busy_children());
     let next = trunk
         .inbox
         .draw(|state| {
@@ -581,7 +582,7 @@ fn a_settling_childs_result_outruns_the_quiesce_verdict() {
         })
         .map(|drawn| drawn.next);
     assert!(
-        matches!(next, Some(Next::Item(Item::Agent(r))) if r.name == "child" && matches!(r.outcome, AgentOutcome::Failed(_)))
+        matches!(next, Some(Next::Item(Item::Agent { name, settled: Settlement::Failed { .. }, .. })) if &*name == "child")
     );
     assert!(!trunk.has_busy_children());
     assert!(trunk.inbox.draw(|_| ParkMode::Quiesce).is_none());

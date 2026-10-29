@@ -10,7 +10,7 @@ use crate::agent::handle::Shared;
 use crate::agent::index::BuiltinIndex;
 use crate::agent::{Agent, AgentHandle, LogCell, ProviderHandle, Readings, ReplyCell, Role};
 use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
-use crate::bus::{Emitter, Inbox, Mailbox};
+use crate::bus::{Child, ENDED_BEFORE_REPORTING, Emitter, Inbox, Mailbox, Report};
 use crate::provider::{Provider, Toolset};
 use crate::record::{AgentId, AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
 use crate::shell_eval::builtins;
@@ -221,17 +221,18 @@ impl Fleet {
     pub(crate) fn lodge(
         &self,
         parent: Option<Mailbox>,
-        name: &str,
-        born: Instant,
+        child: Option<Child>,
     ) -> Result<(Scope, ScopeNode, Inbox), Unborn> {
-        let (under, life, owing) = match parent {
-            Some(mailbox) => {
-                let (life, owing) = mailbox.adopt(name.into(), born)?;
-                (mailbox.scope(), life, Some(owing))
-            }
-            None => ((*self.root).clone(), self.root.child(), None),
+        let child = child.map(Arc::new);
+        let (under, life) = match &parent {
+            Some(work) => (work.scope(), work.adopt(child.clone())?),
+            None => ((*self.root).clone(), self.root.child()),
         };
-        Ok((under, life.clone(), Inbox::new(life, owing)))
+        Ok((
+            under,
+            life.clone(),
+            Inbox::new(life, child.map(|child| Report::new(child, parent))),
+        ))
     }
 }
 impl Agent {
@@ -248,7 +249,10 @@ impl Agent {
         } = b;
         let id = log.id();
         let started = Instant::now();
-        let (under, life, inbox) = fleet.lodge(parent, tenancy.claim().name(), started)?;
+        let child = role
+            .returns()
+            .then(|| Child::new(tenancy.claim().name().into(), started, log.record_emitter()));
+        let (under, life, inbox) = fleet.lodge(parent, child)?;
         // A failed writer or a lost engine ends this life.
         log.record_emitter().bind(life.clone());
         tenancy.transport().bind(life);
@@ -594,8 +598,8 @@ impl TestTrunk {
 }
 impl Drop for Agent {
     fn drop(&mut self) {
-        // I8: end the life before any owner field tears down.
-        self.handle.end();
+        // I8: retire, ending the life, before any owner field tears down.
+        self.inbox.retire(ENDED_BEFORE_REPORTING.into());
         self.schedules.clear();
         if !std::thread::panicking() {
             self.recorder()

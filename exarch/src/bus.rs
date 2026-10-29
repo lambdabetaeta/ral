@@ -22,10 +22,10 @@ pub use sink::Sink;
 pub(crate) use channel::MERGE_TEXT_CAP;
 pub(crate) use emitter::{FleetBus, UsageMeter};
 pub(crate) use inbox::{
-    Closed, Drawn, Inbox, Lease, Mailbox, ParkMode, Queue, Refused, Scoped, State, Status,
-    WeakMailbox,
+    Child, Closed, Drawn, ENDED_BEFORE_REPORTING, Inbox, Lease, Mailbox, ParkMode, Queue, Refused,
+    Report, Scoped, State, Status, WeakMailbox,
 };
-pub(crate) use post::{AgentMessage, AgentResult, Item, Next, Read, Rewrite};
+pub(crate) use post::{AgentMessage, Item, Next, Read, Rewrite};
 pub(crate) use signal::WORKER_PANIC_PREFIX;
 #[cfg(test)]
 pub(crate) use sink::drain_records;

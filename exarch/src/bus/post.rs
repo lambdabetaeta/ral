@@ -3,7 +3,7 @@
 use crate::card::elapsed_phrase;
 use crate::record::{AgentId, Memory, Settlement, Voice};
 use ral_core::data::FOValue;
-use std::{fmt, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 /// Monotonic and never reused, including across `/clear`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -71,36 +71,23 @@ pub enum AgentOutcome {
     Failed(String),
 }
 impl AgentOutcome {
-    pub(crate) fn settlement(&self) -> Settlement {
+    /// Why a child still working ends with this outcome.
+    pub(crate) fn reason(&self) -> String {
         match self {
-            Self::Replied => Settlement::Finished,
-            Self::Cancelled => Settlement::Cancelled,
-            Self::Stopped(reason) | Self::Failed(reason) => Settlement::Failed {
-                reason: reason.clone(),
-            },
-        }
-    }
-    pub(crate) fn marked_item(&self, name: &str, elapsed: Duration) -> String {
-        let took = elapsed_phrase(elapsed);
-        match self {
-            Self::Replied => format!(
-                "[agent '{name}' replied after {took}: run `` exarch-agents `read '{name}' `` to read it]"
-            ),
-            Self::Stopped(r) => format!("[agent '{name}' stopped after {took}: {r}]"),
-            Self::Cancelled => format!("[agent '{name}' was cancelled after {took}]"),
-            Self::Failed(e) => format!("[agent '{name}' failed after {took}: {e}]"),
+            Self::Replied | Self::Cancelled => "cancelled".into(),
+            Self::Stopped(reason) | Self::Failed(reason) => reason.clone(),
         }
     }
 }
-#[derive(Clone, Debug)]
-pub(crate) struct AgentResult {
-    pub name: String,
-    pub outcome: AgentOutcome,
-    pub elapsed: Duration,
-}
-impl AgentResult {
-    pub(super) fn render(&self) -> String {
-        self.outcome.marked_item(&self.name, self.elapsed)
+fn notice(name: &str, settled: &Settlement, elapsed: Duration) -> String {
+    let took = elapsed_phrase(elapsed);
+    match settled {
+        Settlement::Replied => format!(
+            "[agent '{name}' replied after {took}: run `` exarch-agents `read '{name}' `` to read it]"
+        ),
+        Settlement::Failed { reason } => {
+            format!("[agent '{name}' failed after {took}: {reason}]")
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -184,17 +171,31 @@ pub(crate) enum Next {
 pub(crate) enum Item {
     Human(String),
     Wakeup(String),
-    Agent(AgentResult),
+    Agent {
+        name: Arc<str>,
+        settled: Settlement,
+        elapsed: Duration,
+    },
     Message(AgentMessage),
-    Nudge { prompt: u64, text: String },
-    Surface { id: AgentId, values: Vec<FOValue> },
+    Nudge {
+        prompt: u64,
+        text: String,
+    },
+    Surface {
+        id: AgentId,
+        values: Vec<FOValue>,
+    },
 }
 impl Item {
     pub(crate) fn text(&self) -> String {
         match self {
             Self::Human(s) | Self::Wakeup(s) => s.clone(),
             Self::Nudge { text, .. } => text.clone(),
-            Self::Agent(r) => r.render(),
+            Self::Agent {
+                name,
+                settled,
+                elapsed,
+            } => notice(name, settled, *elapsed),
             Self::Message(m) => m.render(),
             Self::Surface { values, .. } => surface_notice(values),
         }
@@ -204,7 +205,7 @@ impl Item {
             Self::Human(_) => Voice::Human,
             Self::Wakeup(_) => Voice::Wakeup,
             Self::Message(_) => Voice::Peer,
-            Self::Agent(_) | Self::Nudge { .. } | Self::Surface { .. } => Voice::Harness,
+            Self::Agent { .. } | Self::Nudge { .. } | Self::Surface { .. } => Voice::Harness,
         }
     }
     pub(crate) fn opens_exchange(&self) -> bool {
@@ -225,14 +226,20 @@ mod tests {
     /// The parent's own context carries how long the child ran, and a reply
     /// still quotes the fetch command rather than any payload.
     #[test]
-    fn the_marked_item_names_the_fetch_and_the_runtime() {
+    fn a_notice_names_the_fetch_and_the_runtime() {
         let took = Duration::from_secs(72);
         assert_eq!(
-            AgentOutcome::Replied.marked_item("helper", took),
+            notice("helper", &Settlement::Replied, took),
             "[agent 'helper' replied after 1 min 12 secs: run `` exarch-agents `read 'helper' `` to read it]"
         );
         assert_eq!(
-            AgentOutcome::Failed("boom".into()).marked_item("helper", took),
+            notice(
+                "helper",
+                &Settlement::Failed {
+                    reason: "boom".into(),
+                },
+                took,
+            ),
             "[agent 'helper' failed after 1 min 12 secs: boom]"
         );
     }

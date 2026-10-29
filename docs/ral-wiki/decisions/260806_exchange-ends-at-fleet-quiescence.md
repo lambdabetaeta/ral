@@ -1,11 +1,15 @@
 ---
 status: active
-verified_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
-verified_at_date: 2026-10-28
+verified_at_commit: 0e83863c
+verified_at_date: 2026-10-29
 anchors: [SettledConversation::await_job, SettledConversation::run, Fleet::wait_settled, AgentHandle::stop, JobEnd, Census, Tenancy]
 ---
 
 # Synod's job ends at fleet quiescence
+
+> Amended by [[261029_a-child-is-a-status|a-child-is-a-status]]: the
+> obligation ledger is the current work's child statuses; a child is
+> outstanding while Working.
 
 **Synod's closing folder account follows fleet settlement, never merely the
 trunk's first quiet moment.** A *job* opens on human input and ends when the
@@ -95,7 +99,7 @@ driver indefinitely
 
 - `exarch/src/headless.rs`: `SettledConversation::{await_job, run, end_fleet}`,
   `JobEnd`.
-- `exarch/src/bus/inbox.rs`: `Job`, `JobId`, work debts, addressed Stop.
+- `exarch/src/bus/inbox.rs`: `Job`, `JobId`, child statuses, addressed Stop.
 - `exarch/src/agent/fleet.rs`: `Fleet::wait_settled`, `Census`, `Tenancy`.
 - `synod/src/assistant/conversation.rs`: `Conversation::run`, closing walk.
 

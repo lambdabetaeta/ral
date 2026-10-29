@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e82dee76
+verified_at_commit: 0e83863c
 verified_at_date: 2026-10-29
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
 ---
 
 # Session record: one seam, one log
@@ -109,8 +109,9 @@ class that can say it.**
   `SessionResumed`, `SessionEnded`) and `SessionClosed`, the one record that
   says `/close` ended a session for good, so resume skips it (a record that
   cannot be read at all is an error naming its session, never a silent skip);
-  the shape a turn's request goes out under — sampling and routing both,
-  beside the id the request will produce (`TurnStarted`), so a retaken request
+  a child's status transitions (`Status`); the shape a turn's request goes
+  out under — sampling and routing both, beside the id the request will
+  produce (`TurnStarted`), so a retaken request
   shows the same id twice; usage deltas, cancellation, an overflow-learned window (`WindowNarrowed`),
   provider/stall/error rows, nudges, and other breadcrumbs. The view fold
   admits the rows that belong on scrollback; the model fold ignores them.
@@ -124,6 +125,28 @@ state changes, boundaries, child lifecycle, stop reasons, live pins/resources,
 and terminal recording failures. These are drawn or routed while the process
 is alive. They are not a hidden fourth record class, and no resume attempts
 to reconstruct them.
+
+## A child's status is a fold
+
+**A returning agent's latest recorded status is a fold of its own log**
+([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
+
+- `ChildStatus::fold` yields Working until the first `Forensic::Status`,
+  then the last status recorded. The parent reads the shared live cell;
+  the fold defines its recorded meaning, not a second live register.
+- Parent follow-up and child finish hold `Child.record` across decision,
+  record and publication. `Report::transition` appends before showing the
+  status, outside every inbox lock; a failed append still shows it, since
+  the failure has ended life and the parent must hear the finish.
+- A follow-up is posted before its status is recorded: refusal leaves no
+  transition. Retirement takes the record seam and permits no later
+  transition. A normal Working owner's Failed record precedes `SessionEnded`.
+- An unwinding Working owner shows Failed without a status record or
+  `SessionEnded`, leaving its log Working. A crash commits no terminal
+  status; the last record is the evidence that remains.
+- `Forensic::Status` carries the child's reply value; model and presentation
+  folds ignore it. The parent records its own notice uptake as
+  `Display::SubagentDone`, carrying only the value-free `Settlement`.
 
 ## The two folds
 

@@ -5,6 +5,7 @@ use crate::agent::engine::{Engine, EngineKind};
 use crate::agent::roster::summary;
 use crate::enquiry::{Deposit, ForkClaim, Message, Name, Selection, Start};
 use crate::provider::Provider;
+use crate::record::ChildStatus;
 use crate::shell_eval;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
@@ -287,34 +288,25 @@ impl ExarchDesk {
         Ok(self.summary())
     }
 
-    /// `` `read `` — fetch the value the live descendant named by the payload
-    /// last handed to `` `reply ``, scoped as `` `message `` is. The
-    /// one tag that answers neither summary nor roster, but the fetched record
-    /// instead, since that is the whole point of the call. A read is an
-    /// observation, not an act, so nothing is committed to [`DeskAct`] — it
-    /// changes nothing, exactly like `` `list ``.
+    /// `` `read `` — the value the reader's own child last replied, live or ended.
+    /// An observation, not a [`DeskAct`].
     pub(super) fn agent_read(&self, name: String) -> Result<FOValue, Error> {
         let s = &self.services;
 
-        let content = match s.fleet.resolve(&name) {
+        let content = match s.mailbox.child_status(&name) {
             None => Err(format!(
-                "no live agent named '{name}'; did it finish, or was it never started?"
+                "you started no agent named '{name}' in your current work; {} reads only your own \
+                 children, and your reply, a stop or a clear forgets earlier ones",
+                ral_core::text::code("exarch-agents `read")
             )),
-            Some(found) => match s.handle.descendant(&found) {
-                None => Err(format!(
-                    "agent '{name}' is not an agent you started; {} may only reach \
-                     a descendant of yours",
-                    ral_core::text::code("exarch-agents `read")
-                )),
-                // The deposit is left in place, so the fetch is idempotent
-                // until the descendant replies again.
-                Some(to) => to.reply().ok_or_else(|| {
-                    format!(
-                        "agent '{name}' has not replied yet: it is still working; wait for its \
-                         notice instead of polling"
-                    )
-                }),
-            },
+            Some(ChildStatus::Working) => Err(format!(
+                "agent '{name}' has not replied yet: it is still working; wait for its \
+                 notice instead of polling"
+            )),
+            Some(ChildStatus::Failed(reason)) => Err(format!(
+                "agent '{name}' failed without a reply to read: {reason}"
+            )),
+            Some(ChildStatus::Replied(reply)) => Ok(reply),
         };
         match content {
             Ok(reply) => {

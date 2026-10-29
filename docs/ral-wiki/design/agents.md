@@ -25,8 +25,8 @@ separate depth bound; it does not decide whether an agent returns.
 
 - An attended conversing root parks `Held` for human input.
 - A child holding a current reply parks `Engaged` under its follow-up lease.
-- Outstanding child obligations give `HeldByChildren`; armed self-schedules
-  give `UntilCancelled`; otherwise the node quiesces.
+- A Working child gives `HeldByChildren`; armed self-schedules give
+  `UntilCancelled`; otherwise the node quiesces.
 - Life cancellation ends every park; a severed engine or a failed record
   writer cancels life. Quiescence never wins over a live queued delivery.
 
@@ -94,14 +94,24 @@ monotone, so stale provenance stays stale.
   gesture cannot lose it or start a provider round under a dead scope.
   Mid-exchange steering drains only while that exchange is live.
 
-**Outstanding children are owned debts, not liveness guesses.** Adoption
-mints one `Owed`, and a follow-up to a direct child mints another before
-delivery. Paying consumes a debt: a reply moves its receipt into the
-parent's queue, and the work is busy exactly while receipts are outstanding.
-Dropping a debt pays `Cancelled`, a refused post withdraws its debt silently,
-and a dropped owner still owing its parent a report posts failure. Each
-follow-up is its own receipt, so an old queued reply cannot make a newer
-one disappear; abandoned work starts a fresh pool.
+**A child is a status.** Parent and child share one
+`Working | Replied(FOValue) | Failed(String)` cell
+([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
+
+- Adoption enrolls a Working child in the parent's current work. Only an
+  accepted parent follow-up makes a replied child Working again; peer
+  messages, steering and wakeups do not.
+- A reply settles only when no parent follow-up is queued. A crossing reply
+  leaves the child Working and posts no notice.
+- Finish publishes status and a value-free notice under the same parent
+  lock. Busy means some child of the current work is Working, irrespective
+  of liveness; `draw` hears a queued finish before quiescing.
+- Retirement fails only a Working child. A replied child keeps its value
+  after lease lapse or teardown; owner drop still reports a Working child
+  as failed. Abandoning work forgets its children.
+- `read` reaches the newest own child of a name in the reader's current
+  work, live or ended, refusing Working and Failed. A headless root returns
+  through the same cell without a parent mailbox.
 
 ## Embedded jobs and the host's address
 
@@ -226,15 +236,15 @@ not again interpolated into prose
 - `` exarch-agents `reply `` stages a faithful `FOValue`; after the whole
   tool batch, cancellation is checked before harvesting it. A severed engine
   has already cancelled the exchange.
-  Reply abandons delegated work, clears schedules, publishes Ready,
-  deposits the value and pays every debt taken up to the parent.
+  Reply abandons delegated work, clears schedules, publishes Ready and
+  settles its status unless a parent follow-up is queued.
 - The child parks. Its parent reads the value through
   `` exarch-agents `read <name> ``, checked against the demanded type. A
   headless root instead returns the same value to its harness. Finishing
   without reply is repaired within budget, then fails honestly.
-- Historical reply payload remains readable during new work; only the
-  completion timestamp answers whether that work has replied. A readable old
-  value never suppresses a new attempt's reply obligation.
+- `read` answers a child's reply until a parent follow-up sets it Working,
+  and after it ends. It refuses during that follow-up's work; an old queued
+  notice does not make the previous value readable.
 - A child's one-hour follow-up lease starts at reply, not birth. The lease is a
   `Weak` whose only strong owner is the inbox: new human or agent input
   breaks it atomically with enqueue, so the old lease cannot race it into

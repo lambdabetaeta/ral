@@ -288,11 +288,8 @@ impl Headless<'_> {
                 let took =
                     crate::card::elapsed_phrase(std::time::Duration::from_millis(*elapsed_ms));
                 let _ = match outcome {
-                    Settlement::Finished => {
-                        writeln!(self.err, "[agent {name} finished after {took}]")
-                    }
-                    Settlement::Cancelled => {
-                        writeln!(self.err, "[agent {name} cancelled after {took}]")
+                    Settlement::Replied => {
+                        writeln!(self.err, "[agent {name} replied after {took}]")
                     }
                     Settlement::Failed { reason } => {
                         writeln!(self.err, "[agent {name} failed after {took}: {reason}]")

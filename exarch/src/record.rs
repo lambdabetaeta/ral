@@ -23,6 +23,10 @@ mod selection;
 mod session;
 mod view;
 
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests;
+
 pub use log::Unavailable;
 pub use model::{ItemKind, Linked, Location, Pointer, Residue, Span, SpanRow, TurnRow};
 pub use replay::{Refusal, replay};
@@ -255,12 +259,52 @@ pub enum Voice {
     Harness,
 }
 
-/// How a child's run ended, as its `↘` breadcrumb reports it.
+/// What a parent can know about a child; a child's log folds to its last.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildStatus {
+    Working,
+    /// The value its parent reads with `` exarch-agents `read ``.
+    Replied(FOValue),
+    Failed(String),
+}
+
+impl ChildStatus {
+    /// What the parent hears: nothing while it works.
+    #[must_use]
+    pub fn settlement(&self) -> Option<Settlement> {
+        match self {
+            Self::Working => None,
+            Self::Replied(_) => Some(Settlement::Replied),
+            Self::Failed(reason) => Some(Settlement::Failed {
+                reason: reason.clone(),
+            }),
+        }
+    }
+
+    /// `Working` before the first status record, then the last.
+    #[must_use]
+    pub fn fold<'a>(records: impl IntoIterator<Item = &'a Record>) -> Self {
+        records
+            .into_iter()
+            .filter_map(|record| {
+                if let Record::Forensic(Forensic::Status { status }) = record {
+                    Some(status)
+                } else {
+                    None
+                }
+            })
+            .last()
+            .cloned()
+            .unwrap_or(Self::Working)
+    }
+}
+
+/// What a parent hears of a child's status, without its value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Settlement {
-    Finished,
-    Cancelled,
+    Replied,
     Failed { reason: String },
 }
 
@@ -383,6 +427,10 @@ pub enum Forensic {
     /// `/close`: the session is over for good, and a resume skips it.
     /// [`Self::SessionEnded`] is written on every drop and says no such thing.
     SessionClosed,
+    /// A child's status changed.
+    Status {
+        status: ChildStatus,
+    },
     /// The meta half of taking a turn: the shape the request goes out under,
     /// sampling and upstreams both.  `turn` is the id the request will produce,
     /// so a retaken request shows the same one twice.

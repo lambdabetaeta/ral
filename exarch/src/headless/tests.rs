@@ -1321,7 +1321,7 @@ fn settled_conversation_drains_a_lease_death_at_the_next_job() {
         .expect("the queued death must drain at the next exchange");
     assert!(
         second.facts.iter().any(|fact| matches!(fact,
-            Record::Display(Display::SubagentDone { name, outcome: Settlement::Finished, .. })
+            Record::Display(Display::SubagentDone { name, outcome: Settlement::Replied, .. })
                 if name == "helper"
         )),
         "the expired helper must have replied successfully"

@@ -3,9 +3,9 @@ use crate::agent::testkit::{
     TestAgentSpec, close_exchange, pop, ral_call, scripted, set_provider, test_agent,
     wait_for_settle,
 };
-use crate::bus::{AgentOutcome, AgentResult, Emitter, Item, Next, channel};
+use crate::bus::{Emitter, Item, Next, channel};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::Voice;
+use crate::record::{Settlement, Voice};
 use ral_core::process::DurableRoot;
 
 fn run(session: &Agent, source: &str, budget: u64) -> String {
@@ -178,7 +178,7 @@ fn misspelled_start_field_errors_statically_naming_the_field() {
     no_children(&session);
 }
 
-fn start_child(session: &Agent, name: &str, prompt: &str, command: &str) -> AgentResult {
+fn start_child(session: &Agent, name: &str, prompt: &str, command: &str) -> Item {
     set_provider(
         session,
         scripted(
@@ -197,7 +197,7 @@ fn start_child(session: &Agent, name: &str, prompt: &str, command: &str) -> Agen
         "the summary must count the child: {result}"
     );
     match wait_for_settle(crate::agent::testkit::inbox(session)) {
-        Next::Item(Item::Agent(result)) => result,
+        Next::Item(item @ Item::Agent { .. }) => item,
         other => panic!("expected an Agent result item, got: {other:?}"),
     }
 }
@@ -205,13 +205,13 @@ fn start_child(session: &Agent, name: &str, prompt: &str, command: &str) -> Agen
 #[test]
 fn agent_full_stack_round_trip_answers_the_summary_and_parks_a_reply() {
     let session = trunk();
-    let result = start_child(
+    let item = start_child(
         &session,
         "helper",
         "say hi",
         "exarch-agents `reply 'say hi'",
     );
-    let notice = result.outcome.marked_item(&result.name, result.elapsed);
+    let notice = item.text();
     assert!(notice.contains("exarch-agents `read 'helper'"), "{notice}");
     let read = eval(&session, "exarch-agents `read 'helper'");
     assert!(read.contains("say hi"), "{read}");
@@ -437,16 +437,21 @@ fn double_reply_in_one_exchange_is_last_wins() {
 #[test]
 fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
     let session = trunk();
-    let result = start_child(
+    let item = start_child(
         &session,
         "pinner",
         "pin and read back",
         r#"exarch-pins `set [key: "note", body: `card ["hi there"]]; exarch-agents `reply !{exarch-pins `read "note"}"#,
     );
     assert!(
-        matches!(result.outcome, AgentOutcome::Replied),
-        "{:?}",
-        result.outcome
+        matches!(
+            item,
+            Item::Agent {
+                settled: Settlement::Replied,
+                ..
+            }
+        ),
+        "{item:?}"
     );
     let read = eval(&session, "exarch-agents `read 'pinner'");
     assert!(
@@ -477,16 +482,21 @@ fn a_reply_missing_a_projected_field_is_refused_at_the_read() {
 #[test]
 fn pin_read_full_stack_absent_key_replies_none() {
     let session = trunk();
-    let result = start_child(
+    let item = start_child(
         &session,
         "reader",
         "read an absent key",
         r#"exarch-agents `reply !{exarch-pins `read "nope"}"#,
     );
     assert!(
-        matches!(result.outcome, AgentOutcome::Replied),
-        "{:?}",
-        result.outcome
+        matches!(
+            item,
+            Item::Agent {
+                settled: Settlement::Replied,
+                ..
+            }
+        ),
+        "{item:?}"
     );
     let read = eval(&session, "exarch-agents `read 'reader'");
     assert!(read.contains("reply: `none"), "{read}");

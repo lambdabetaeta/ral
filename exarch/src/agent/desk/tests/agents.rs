@@ -1,6 +1,8 @@
 //! The agents family: `start`, `cancel`, `message`, `read`, `reply`.
 
 use super::*;
+use crate::agent::testkit::{TestAgentSpec, test_agent};
+use crate::record::Settlement;
 
 /// The child's reply notice lands in the parent's inbox once it settles, and
 /// `` `read `` answers the very value it deposited.
@@ -26,11 +28,10 @@ fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
     assert_eq!(live, 1, "the child is the one other agent alive");
 
     match wait_for_settle(parent_inbox) {
-        crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
+        crate::bus::Next::Item(crate::bus::Item::Agent { settled, .. }) => {
             assert!(
-                matches!(result.outcome, crate::bus::AgentOutcome::Replied),
-                "the child's reply notice must reach the parent's inbox, got: {:?}",
-                result.outcome
+                matches!(settled, Settlement::Replied),
+                "the child's reply notice must reach the parent's inbox, got: {settled:?}"
             );
         }
         other => panic!("expected an Agent result item, got {other:?}"),
@@ -40,6 +41,68 @@ fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
         .expect("a descendant that has replied must answer its reply");
     assert_eq!(str_field(&answer, "name"), Some("helper"));
     assert_eq!(str_field(&answer, "reply"), Some("hi from child"));
+}
+
+#[test]
+fn read_answers_an_ended_childs_reply() {
+    let (desk, fleet, agent) = spawnable_desk(3);
+    let child = test_agent(
+        &fleet,
+        TestAgentSpec::child("helper", &desk.services.handle, agent.inbox.mailbox()),
+    )
+    .expect("a fresh child of a live parent");
+    child.inbox.deposit_reply(text("hi from child"));
+    child.end();
+    drop(child);
+    assert!(fleet.resolve("helper").is_none());
+
+    let answer = desk
+        .ask(Request::Agents(Agents::Read("helper".into())))
+        .expect("an ended child's reply stays readable");
+    assert_eq!(str_field(&answer, "name"), Some("helper"));
+    assert_eq!(str_field(&answer, "reply"), Some("hi from child"));
+}
+
+#[test]
+fn read_refuses_a_working_or_failed_child_and_a_grandchild() {
+    let (desk, fleet, agent) = spawnable_desk(3);
+    let child = test_agent(
+        &fleet,
+        TestAgentSpec::child("helper", &desk.services.handle, agent.inbox.mailbox()),
+    )
+    .expect("a fresh child of a live parent");
+    let grandchild = test_agent(
+        &fleet,
+        TestAgentSpec::child("grandchild", &child, child.inbox.mailbox()),
+    )
+    .expect("a fresh child of the desk's child");
+    grandchild.inbox.deposit_reply(text("hi from grandchild"));
+
+    let err = desk
+        .ask(Request::Agents(Agents::Read("helper".into())))
+        .expect_err("a working child has no reply to read");
+    assert_eq!(
+        err.message,
+        "agent 'helper' has not replied yet: it is still working; wait for its notice instead of polling"
+    );
+
+    let err = desk
+        .ask(Request::Agents(Agents::Read("grandchild".into())))
+        .expect_err("a grandchild's reply is not the desk's to read");
+    assert_eq!(
+        err.message,
+        "you started no agent named 'grandchild' in your current work; `` exarch-agents `read `` reads only your own children, and your reply, a stop or a clear forgets earlier ones"
+    );
+
+    child.end();
+    drop(child);
+    let err = desk
+        .ask(Request::Agents(Agents::Read("helper".into())))
+        .expect_err("a child that failed without replying has no value to read");
+    assert_eq!(
+        err.message,
+        "agent 'helper' failed without a reply to read: ended before reporting"
+    );
 }
 
 /// The state *is* the answer, not a receipt about the child just started:
@@ -341,10 +404,9 @@ fn fuel_bounds_depth_not_fanout() {
 
     for _ in 0..3 {
         match wait_for_settle(parent_inbox) {
-            crate::bus::Next::Item(crate::bus::Item::Agent(result)) => assert!(
-                matches!(result.outcome, crate::bus::AgentOutcome::Replied),
-                "every sibling must settle by replying, got: {:?}",
-                result.outcome
+            crate::bus::Next::Item(crate::bus::Item::Agent { settled, .. }) => assert!(
+                matches!(settled, Settlement::Replied),
+                "every sibling must settle by replying, got: {settled:?}"
             ),
             other => panic!("expected an Agent result item, got {other:?}"),
         }

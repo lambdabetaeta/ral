@@ -421,10 +421,11 @@ Read a reply
 
 Returns [name: Str, reply: Value]. The reply is checked against the fields and
 types your script uses; a missing field is reported at read, with its path.
-Only descendants may be read. A missing agent or one without a reply is refused.
-Reading does not consume the value: repeated reads return the last reply until
-another is deposited. After a follow-up, wait for the new notice before reading
-so you do not mistake the previous reply for the new answer.
+Only your own children may be read, including ones that have ended; your
+own reply, a stop or a clear forgets earlier ones. A child still working,
+or one that failed, is refused with the reason. Reading does not consume
+the value: repeated reads return it until a follow-up sets the child to
+work again.
 
 Message a running or replied agent
 

@@ -140,6 +140,7 @@ fn forensic(role: Role, forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
         | Forensic::SessionClosed
+        | Forensic::Status { .. }
         | Forensic::Retried { .. }
         | Forensic::UsageDelta { .. }
         | Forensic::TurnStarted { .. } => None,
@@ -214,7 +215,7 @@ impl Router {
                 let elapsed_secs = *elapsed_ms as f64 / 1000.0;
                 Some(SynodEvent::HelperDone {
                     name: name.clone(),
-                    ok: *outcome == Settlement::Finished,
+                    ok: *outcome == Settlement::Replied,
                     elapsed_secs,
                 })
             }
@@ -698,7 +699,7 @@ mod tests {
             name,
             ok,
             elapsed_secs,
-        }) = router.route_fact(AgentId::new(0), &done(Settlement::Finished))
+        }) = router.route_fact(AgentId::new(0), &done(Settlement::Replied))
         else {
             panic!("expected a HelperDone event");
         };

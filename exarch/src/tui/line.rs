@@ -203,8 +203,8 @@ fn agent_name(name: &str, hue: Color) -> Span<'static> {
     bold(format!("[{name}]"), hue)
 }
 
-/// An async subagent's landed line: `agent [NAME] finished · 1 min 12 secs`, the
-/// bold `name` turning [`ORANGE`] with the verb unless it finished.  No body
+/// An async subagent's landed line: `agent [NAME] replied · 1 min 12 secs`, the
+/// bold `name` turning [`ORANGE`] with the verb unless it replied.  No body
 /// and no magnitude — a reply is a value on the child's own agent, read with
 /// `` exarch-agents `read ``, so there is nothing here to size or to disclose.  The
 /// `↘` is the rail's, not this line's.
@@ -214,8 +214,7 @@ pub(super) fn subagent_header(
     elapsed: Duration,
 ) -> Vec<Line<'static>> {
     let (verb, ink) = match outcome {
-        Settlement::Finished => ("finished", LIME),
-        Settlement::Cancelled => ("cancelled", ORANGE),
+        Settlement::Replied => ("replied", LIME),
         Settlement::Failed { .. } => ("failed", ORANGE),
     };
     let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);

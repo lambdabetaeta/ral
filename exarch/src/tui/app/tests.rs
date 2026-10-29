@@ -2,7 +2,7 @@ use super::*;
 use crate::agent::testkit::{TestAgent, TestAgentSpec, pop, test_agent};
 use crate::bus::Signal;
 use crate::card::Mark;
-use crate::record::AgentState;
+use crate::record::{AgentState, Settlement};
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
 use crate::tui::status::StateSpan;
@@ -240,7 +240,7 @@ fn recording_failure_with_independent_root(poison: bool) {
 fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
     use crate::agent::outcome::Outcome;
     use crate::agent::testkit::{inbox, scripted, set_provider, trunk};
-    use crate::bus::{AgentOutcome, FleetBus, Item, Next};
+    use crate::bus::{FleetBus, Item, Next};
     use crate::provider::ProviderError;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Voice};
@@ -352,8 +352,10 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
                                 assert!(!handle.is_live());
                                 let report =
                                     pop(inbox(&parent)).expect("parent retirement precedes Died");
-                                assert!(matches!(report, Next::Item(Item::Agent(result))
-                                    if matches!(result.outcome, AgentOutcome::Failed(ref why) if *why == cause)));
+                                assert!(
+                                    matches!(report, Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. })
+                                    if reason == cause)
+                                );
                                 app.transient(agent, transient, rx);
                                 break;
                             }

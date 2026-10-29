@@ -1,8 +1,8 @@
 //! One owner, one lock, and scope-vouched deliveries.
 
 use super::post::Source;
-use super::{AgentMessage, AgentOutcome, AgentResult, Item, Next, Read, Rewrite, ScheduleId};
-use crate::record::AgentId;
+use super::{AgentMessage, Item, Next, Read, Rewrite, ScheduleId};
+use crate::record::{AgentId, ChildStatus, Emitter as Recorder, Forensic, Settlement};
 use ral_core::data::FOValue;
 use ral_core::process::{CancelCause, Scope, ScopeId, ScopeNode};
 use ral_core::sync::{CondvarExt, LockExt};
@@ -22,6 +22,8 @@ pub(crate) enum ParkMode {
 /// How soon a parked owner sees a cancellation nobody notified: an
 /// ancestor's, or a terminal failure's; its own end, a Stop and a post notify.
 const PARK_POLL: Duration = Duration::from_millis(100);
+
+pub(crate) const ENDED_BEFORE_REPORTING: &str = "ended before reporting";
 
 /// A host job, from a human message until settlement or Stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +58,7 @@ pub(crate) struct WeakMailbox {
 }
 struct Shared {
     life: ScopeNode,
+    report: Option<Report>,
     state: Mutex<State>,
     signal: Condvar,
 }
@@ -68,32 +71,20 @@ pub(crate) struct State {
     job: Option<OpenJob>,
     next_job: u64,
     rest: Option<Instant>,
-    reply: Option<FOValue>,
     last_exchange: Option<Instant>,
     waiting_for_input: bool,
-    report: Option<Arc<Report>>,
-    heard: Vec<Owed>,
     lease: Option<Arc<Instant>>,
 }
 struct Work {
     scope: ScopeNode,
-    receipts: Arc<()>,
+    children: Vec<Arc<Child>>,
 }
 impl Work {
     fn under(life: &Scope) -> Self {
         Self {
             scope: life.child(),
-            receipts: Arc::new(()),
+            children: Vec::new(),
         }
-    }
-    /// Receipts are minted only here, under the owner's lock.
-    fn owe(&self, report: Arc<Report>) -> Owed {
-        Owed(Some((
-            report,
-            Receipt {
-                _share: self.receipts.clone(),
-            },
-        )))
     }
 }
 /// The exchange minted at pop; `open` installs it, Drop declines it.
@@ -140,7 +131,7 @@ impl State {
         self.work.scope.id() == scope.id() && !scope.is_cancelled()
     }
     pub(crate) fn has_busy_children(&self) -> bool {
-        Arc::strong_count(&self.work.receipts) > 1
+        self.work.children.iter().any(|child| child.is_working())
     }
     pub(crate) fn leased(&self) -> bool {
         self.lease.is_some()
@@ -152,35 +143,10 @@ impl State {
         self.opening.take_if(|node| node.id() == *id)
     }
     fn pop(&mut self) -> Option<Next> {
-        self.posts.pop().map(|post| self.admit(post))
+        self.posts.pop().map(Post::admit)
     }
     fn pop_before_rewrite(&mut self) -> Option<Next> {
-        self.posts.pop_before_rewrite().map(|post| self.admit(post))
-    }
-    fn admit(&mut self, post: Post) -> Next {
-        match post {
-            Post::Human(text) => Next::Item(Item::Human(text)),
-            Post::Read(read) => Next::Read(read),
-            Post::Rewrite(rewrite) => Next::Rewrite(rewrite),
-            Post::Scoped { kind, .. } => Next::Item(match kind {
-                Scoped::Result { result, paid } => {
-                    drop(paid);
-                    Item::Agent(result)
-                }
-                Scoped::Message { message, owed } => {
-                    self.heard.extend(owed);
-                    Item::Message(message)
-                }
-                Scoped::Surface { id, values } => Item::Surface { id, values },
-                Scoped::Wakeup {
-                    label,
-                    trigger,
-                    prompt,
-                    ..
-                } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
-                Scoped::Nudge { prompt, text } => Item::Nudge { prompt, text },
-            }),
-        }
+        self.posts.pop_before_rewrite().map(Post::admit)
     }
     fn abandon(&mut self, life: &Scope, queue: Queue) -> Vec<String> {
         let old = std::mem::replace(&mut self.work, Work::under(life));
@@ -192,56 +158,72 @@ impl State {
     }
 }
 
-/// A share of one work's outstanding answers; dropping it takes no lock.
-pub(crate) struct Receipt {
-    _share: Arc<()>,
-}
-
-/// Where and as whom a child reports; one per child, shared by its debts.
-pub(crate) struct Report {
-    to: Mailbox,
+/// What a parent can know about a child; shared by both.
+pub(crate) struct Child {
     name: Arc<str>,
     born: Instant,
+    /// Held across record and publication; `None` once retired.
+    record: Mutex<Option<Recorder>>,
+    /// A leaf.
+    status: Mutex<ChildStatus>,
+}
+impl Child {
+    pub(crate) fn new(name: Arc<str>, born: Instant, record: Recorder) -> Self {
+        Self {
+            name,
+            born,
+            record: Mutex::new(Some(record)),
+            status: Mutex::new(ChildStatus::Working),
+        }
+    }
+    fn status(&self) -> ChildStatus {
+        self.status.lock_ignore_poison().clone()
+    }
+    fn is_working(&self) -> bool {
+        matches!(*self.status.lock_ignore_poison(), ChildStatus::Working)
+    }
+    fn has_replied(&self) -> bool {
+        matches!(*self.status.lock_ignore_poison(), ChildStatus::Replied(_))
+    }
+    fn set(&self, status: ChildStatus) {
+        *self.status.lock_ignore_poison() = status;
+    }
+}
+
+/// Where a returning agent reports: its status and, if any, its parent's work.
+pub(crate) struct Report {
+    child: Arc<Child>,
+    to: Option<Mailbox>,
 }
 impl Report {
-    /// A further answer owed to the adopting work, while it stands.
-    pub(crate) fn owe(self: &Arc<Self>) -> Option<Owed> {
-        let state = self.to.shared.lock();
-        state
-            .vouches(&self.to.scope)
-            .then(|| state.work.owe(self.clone()))
+    pub(crate) fn new(child: Arc<Child>, to: Option<Mailbox>) -> Self {
+        Self { child, to }
     }
-    /// The one way a result reaches a parent.
-    fn pay(&self, outcome: AgentOutcome, paid: impl IntoIterator<Item = Receipt>) {
-        self.to.post(Scoped::Result {
-            result: AgentResult {
-                name: self.name.to_string(),
-                outcome,
-                elapsed: self.born.elapsed(),
-            },
-            paid: paid.into_iter().collect(),
-        });
-    }
-}
-/// One answer owed under a `Report`; dropping it pays `Cancelled`.
-#[must_use]
-pub(crate) struct Owed(Option<(Arc<Report>, Receipt)>);
-impl Owed {
-    fn withdraw(mut self) {
-        self.0.take();
-    }
-    fn into_receipt(mut self) -> Receipt {
-        self.0
-            .take()
-            .expect("an owed holds its debt until consumed")
-            .1
-    }
-}
-impl Drop for Owed {
-    fn drop(&mut self) {
-        if let Some((report, receipt)) = self.0.take() {
-            report.pay(AgentOutcome::Cancelled, [receipt]);
+    fn show(&self, status: ChildStatus) {
+        match &self.to {
+            Some(parent) => parent.finish(&self.child, status),
+            None => self.child.set(status),
         }
+    }
+    /// `log` is borrowed from the held record lock.
+    fn transition(&self, log: &Recorder, status: ChildStatus) {
+        log.emit_or_end(Forensic::Status {
+            status: status.clone(),
+        });
+        self.show(status);
+    }
+    fn end(&self, reason: String) {
+        let mut record = self.child.record.lock_ignore_poison();
+        let Some(log) = record.take() else { return };
+        if self.child.is_working() {
+            let status = ChildStatus::Failed(reason);
+            if std::thread::panicking() {
+                self.show(status);
+            } else {
+                self.transition(&log, status);
+            }
+        }
+        drop(record);
     }
 }
 
@@ -264,9 +246,10 @@ enum Post {
     Scoped { from: Scope, kind: Scoped },
 }
 pub(crate) enum Scoped {
-    Result {
-        result: AgentResult,
-        paid: Vec<Receipt>,
+    Agent {
+        name: Arc<str>,
+        settled: Settlement,
+        elapsed: Duration,
     },
     Surface {
         id: AgentId,
@@ -278,26 +261,51 @@ pub(crate) enum Scoped {
         trigger: String,
         prompt: String,
     },
-    Message {
-        message: AgentMessage,
-        owed: Option<Owed>,
-    },
+    Message(AgentMessage),
+    FollowUp(AgentMessage),
     Nudge {
         prompt: u64,
         text: String,
     },
 }
 impl Post {
+    fn admit(self) -> Next {
+        match self {
+            Self::Human(text) => Next::Item(Item::Human(text)),
+            Self::Read(read) => Next::Read(read),
+            Self::Rewrite(rewrite) => Next::Rewrite(rewrite),
+            Self::Scoped { kind, .. } => Next::Item(match kind {
+                Scoped::Agent {
+                    name,
+                    settled,
+                    elapsed,
+                } => Item::Agent {
+                    name,
+                    settled,
+                    elapsed,
+                },
+                Scoped::Message(message) | Scoped::FollowUp(message) => Item::Message(message),
+                Scoped::Surface { id, values } => Item::Surface { id, values },
+                Scoped::Wakeup {
+                    label,
+                    trigger,
+                    prompt,
+                    ..
+                } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
+                Scoped::Nudge { prompt, text } => Item::Nudge { prompt, text },
+            }),
+        }
+    }
     fn source(&self) -> Source {
         match self {
             Self::Human(_) => Source::User,
             Self::Read(_) => Source::Read,
             Self::Rewrite(_) => Source::Rewrite,
             Self::Scoped { kind, .. } => match kind {
-                Scoped::Result { .. } => Source::Agent,
+                Scoped::Agent { .. } => Source::Agent,
                 Scoped::Surface { .. } => Source::Surface,
                 Scoped::Wakeup { .. } => Source::Schedule,
-                Scoped::Message { .. } => Source::Message,
+                Scoped::Message(_) | Scoped::FollowUp(_) => Source::Message,
                 Scoped::Nudge { .. } => Source::Nudge,
             },
         }
@@ -307,18 +315,6 @@ impl Post {
     }
     fn is_input(&self) -> bool {
         matches!(self.source(), Source::User | Source::Message)
-    }
-    /// A refused post pays nothing: its debt, if any, is withdrawn.
-    fn withdraw(self) {
-        if let Self::Scoped {
-            kind: Scoped::Message {
-                owed: Some(owed), ..
-            },
-            ..
-        } = self
-        {
-            owed.withdraw();
-        }
     }
 }
 /// Human fragments retain their arrival until consumed, so a clear can split
@@ -401,18 +397,17 @@ impl Posts {
         self.fence();
         self.queue.iter().any(|(_, p)| p.is_input())
     }
-    fn take_owed(&mut self) -> Vec<Owed> {
+    fn has_parent_input(&mut self) -> bool {
         self.fence();
-        self.queue
-            .iter_mut()
-            .filter_map(|(_, post)| match post {
+        self.queue.iter().any(|(_, post)| {
+            matches!(
+                post,
                 Post::Scoped {
-                    kind: Scoped::Message { owed, .. },
+                    kind: Scoped::FollowUp(_),
                     ..
-                } => owed.take(),
-                _ => None,
-            })
-            .collect()
+                }
+            )
+        })
     }
     fn recall(&mut self) -> Vec<String> {
         self.fence();
@@ -508,28 +503,60 @@ impl Mailbox {
     pub(crate) fn is_current(&self) -> bool {
         self.shared.lock().vouches(&self.scope)
     }
-    pub(crate) fn adopt(
-        &self,
-        name: Arc<str>,
-        born: Instant,
-    ) -> Result<(ScopeNode, (Arc<Report>, Owed)), Refused> {
-        let state = self.shared.lock();
+    pub(crate) fn adopt(&self, child: Option<Arc<Child>>) -> Result<ScopeNode, Refused> {
+        let mut state = self.shared.lock();
         if self.shared.life.is_cancelled() {
             return Err(Refused::Dead);
         }
         if !state.vouches(&self.scope) {
             return Err(Refused::Abandoned);
         }
-        let report = Arc::new(Report {
-            to: self.clone(),
-            name,
-            born,
-        });
-        let owed = state.work.owe(report.clone());
-        Ok((state.work.scope.child(), (report, owed)))
+        state.work.children.extend(child);
+        Ok(state.work.scope.child())
     }
-    pub(crate) fn report(&self) -> Option<Arc<Report>> {
-        self.shared.lock().report.clone()
+    fn finish(&self, child: &Child, status: ChildStatus) {
+        let notice = status.settlement().map(|settled| Post::Scoped {
+            from: self.scope.clone(),
+            kind: Scoped::Agent {
+                name: child.name.clone(),
+                settled,
+                elapsed: child.born.elapsed(),
+            },
+        });
+        let mut state = self.shared.lock();
+        child.set(status);
+        let queued = notice.is_some_and(|post| self.enqueue(&mut state, post));
+        drop(state);
+        if queued {
+            self.shared.notify();
+        }
+    }
+    pub(crate) fn follow_up(&self, message: AgentMessage) -> bool {
+        let Some(report) = &self.shared.report else {
+            return self.post(Scoped::Message(message));
+        };
+        let record = report.child.record.lock_ignore_poison();
+        let Some(log) = record.as_ref() else {
+            return false;
+        };
+        if !self.post(Scoped::FollowUp(message)) {
+            return false;
+        }
+        if !report.child.is_working() {
+            report.transition(log, ChildStatus::Working);
+        }
+        drop(record);
+        true
+    }
+    pub(crate) fn child_status(&self, name: &str) -> Option<ChildStatus> {
+        self.shared
+            .lock()
+            .work
+            .children
+            .iter()
+            .rev()
+            .find(|child| &*child.name == name)
+            .map(|child| child.status())
     }
     pub(crate) fn post(&self, kind: Scoped) -> bool {
         self.deliver(Post::Scoped {
@@ -537,13 +564,10 @@ impl Mailbox {
             kind,
         })
     }
-    fn deliver(&self, post: Post) -> bool {
-        let mut state = self.shared.lock();
+    fn enqueue(&self, state: &mut State, post: Post) -> bool {
         if self.shared.life.is_cancelled()
             || matches!(&post, Post::Scoped { from, .. } if from.is_cancelled())
         {
-            drop(state);
-            post.withdraw();
             return false;
         }
         if post.is_input() {
@@ -552,9 +576,16 @@ impl Mailbox {
         }
         state.posts.push(post);
         state.waiting_for_input = false;
-        drop(state);
-        self.shared.notify();
         true
+    }
+    fn deliver(&self, post: Post) -> bool {
+        let mut state = self.shared.lock();
+        let queued = self.enqueue(&mut state, post);
+        drop(state);
+        if queued {
+            self.shared.notify();
+        }
+        queued
     }
     pub(crate) fn vouched_by(&self, scope: Scope) -> Self {
         Self {
@@ -625,7 +656,11 @@ impl Mailbox {
         let state = self.shared.lock();
         Status {
             rest: state.rest,
-            replied: state.reply.is_some(),
+            replied: self
+                .shared
+                .report
+                .as_ref()
+                .is_some_and(|report| report.child.has_replied()),
             reply_since: state.reply_since(),
             busy: state.has_busy_children(),
             waiting_for_input: state.waiting_for_input,
@@ -633,7 +668,10 @@ impl Mailbox {
         }
     }
     pub(crate) fn reply(&self) -> Option<FOValue> {
-        self.shared.lock().reply.clone()
+        match self.shared.report.as_ref()?.child.status() {
+            ChildStatus::Replied(value) => Some(value),
+            ChildStatus::Working | ChildStatus::Failed(_) => None,
+        }
     }
     pub(crate) fn lapse(&self, lease: &Lease) {
         let _state = self.shared.lock();
@@ -648,13 +686,13 @@ impl Mailbox {
     }
 }
 impl Inbox {
-    pub(crate) fn new(life: ScopeNode, parent: Option<(Arc<Report>, Owed)>) -> Self {
+    pub(crate) fn new(life: ScopeNode, report: Option<Report>) -> Self {
         let work = Work::under(&life);
-        let (report, owed) = parent.unzip();
         let exchange = work.scope.child();
         exchange.cancel(CancelCause::Cancelled);
         Self(Arc::new(Shared {
             life,
+            report,
             state: Mutex::new(State {
                 posts: Posts::default(),
                 work,
@@ -663,11 +701,8 @@ impl Inbox {
                 job: None,
                 next_job: 0,
                 rest: None,
-                reply: None,
                 last_exchange: None,
                 waiting_for_input: true,
-                report,
-                heard: owed.into_iter().collect(),
                 lease: None,
             }),
             signal: Condvar::new(),
@@ -789,44 +824,34 @@ impl Inbox {
             state.rest = None;
         }
     }
-    pub(crate) fn deposit_reply(&self, reply: FOValue) -> Option<Lease> {
+    pub(crate) fn deposit_reply(&self, value: FOValue) -> Option<Lease> {
+        let record = self
+            .0
+            .report
+            .as_ref()
+            .map(|report| report.child.record.lock_ignore_poison());
         let mut state = self.0.lock();
-        state.reply = Some(reply);
-        let heard = std::mem::take(&mut state.heard);
+        let crossed = state.posts.has_parent_input();
         state.lease = (!state.posts.has_input()).then(|| Arc::new(Instant::now()));
         let lease = state.lease.as_ref().map(|held| Lease(Arc::downgrade(held)));
-        let report = state.report.clone();
         drop(state);
-        if let Some(report) = report {
-            report.pay(
-                AgentOutcome::Replied,
-                heard.into_iter().map(Owed::into_receipt),
-            );
+        if !crossed && let (Some(report), Some(Some(log))) = (&self.0.report, record.as_deref()) {
+            report.transition(log, ChildStatus::Replied(value));
         }
+        drop(record);
         lease
     }
     pub(crate) fn disarm_reply_lease(&self) {
         self.0.lock().lease = None;
     }
-    pub(crate) fn retire(&self, outcome: AgentOutcome) {
-        let mut state = self.0.lock();
+    pub(crate) fn retire(&self, reason: String) {
+        let state = self.0.lock();
         self.0.life.cancel(CancelCause::Cancelled);
-        let report = state.report.take();
-        let mut debts = std::mem::take(&mut state.heard);
-        debts.extend(state.posts.take_owed());
-        let clean = state.leased();
         drop(state);
         self.0.notify();
-        let Some(report) = report else { return };
-        let outcome = match outcome {
-            AgentOutcome::Replied if clean => {
-                debug_assert!(debts.is_empty(), "a clean reply leaves no debt behind");
-                return;
-            }
-            AgentOutcome::Replied => AgentOutcome::Cancelled,
-            outcome => outcome,
-        };
-        report.pay(outcome, debts.into_iter().map(Owed::into_receipt));
+        if let Some(report) = &self.0.report {
+            report.end(reason);
+        }
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.0.lock().posts.is_empty()
@@ -838,7 +863,7 @@ impl Inbox {
 
 impl Drop for Inbox {
     fn drop(&mut self) {
-        self.retire(AgentOutcome::Failed("ended before reporting".into()));
+        self.retire(ENDED_BEFORE_REPORTING.into());
     }
 }
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1e3124cb
-generated_at_date: 2026-10-26
+generated_at_commit: 0e83863c
+generated_at_date: 2026-10-29
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -365,10 +365,16 @@ its one-hour follow-up lease; working time is outside that lease
   — the reader's whole tree, itself among them, since what it may *message* is
   wider than what it spawned. The climb stops at a root, so one root session
   never lists another's. `` `read `` answers `[name: Str, reply: α]`,
-  the value a replied child deposited, which is why the family's answer type is
-  a bare `α` (the `` exarch-pins `read `` precedent) rather than a roster
-  ([[decisions/260826_reply-parks|reply-parks]]). `` `reply `` is the sole
-  return path of a returning agent — first-orderness checked at the door,
+  the value deposited by the newest own child of that name in the reader's
+  current work, live or ended. It refuses Working and Failed; a follow-up
+  makes a replied child Working, and the reader's reply, Stop or clear
+  forgets earlier children. Reading consumes nothing and reaches no
+  grandchildren. The family's answer type is a bare `α` (the
+  `` exarch-pins `read `` precedent) rather than a roster
+  ([[decisions/260826_reply-parks|reply-parks]],
+  [[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
+  `` `reply `` is the sole return path of a returning agent — first-orderness
+  checked at the door,
   refused on every non-returning agent with the desk's own didactic text, last
   write wins within a run, deposited once the enclosing `ral` batch drains. The
   outer row is open so an unknown tag reaches a door that enumerates the tags; each known
@@ -418,9 +424,10 @@ its one-hour follow-up lease; working time is outside that lease
   tree and only a note to oneself refuses. The roster is the fleet to match —
   every live agent, the reader included — so what a model may list and what it
   may message are one set rather than two that drift. Each row's `spawner`
-  (`` `root `` for one a human started, `` `agent <name> `` otherwise) carries
-  the scope `` `cancel `` and `` `read `` still enforce: the listing states the
-  rule it does not impose. Where a
+  (`` `root `` for one a human started, `` `agent <name> `` otherwise) names
+  ancestry: `` `cancel `` reaches descendants, while `` `read `` reaches only
+  the reader's own current-work children. The listing states the relation
+  without restricting messages to it. Where a
   removed schedule is simply gone from its answer, a cancelled agent is not:
   `Agent::cancel_tree` only sets the cooperative token (and stamps the eval
   reach), so **a successful

@@ -24,7 +24,7 @@ Message a running agent to correct its direction, supply a discovery, or change 
       to: #'plan-review'#, text: #'The empty-input behavior is intentional. Focus on whether the new duplicate check changes error precedence.'#
     ]
 
-Reuse a replied child for related work: it retains its context and shell. Each reply starts a one-hour follow-up window; a new message resumes work, and its next reply starts a fresh window. Wait for the new notice before reading again, since `read` still exposes the previous reply while it works:
+Reuse a replied child for related work: it retains its context and shell. Each reply starts a one-hour follow-up window; a new message resumes work, and its next reply starts a fresh window. Wait for its next notice before reading again: `read` refuses while it works:
 
     exarch-agents `message [
       to: #'plan-review'#, text: #'Check src/parser/ for the same error-precedence issue. Return the same shape.'#

@@ -1,7 +1,7 @@
 //! The detach spine behind every attended root and the desk's `` exarch-agents `start ``.
 //! Every spawn is launch-only: the node runs the same [`Agent::attend`] loop
 //! on a detached thread; a reply notice reaches the parent's inbox when a
-//! child replies, a non-reply end when it quiesces.
+//! child replies, a failure when it ends still working.
 
 use crate::agent::Agent;
 use crate::bus::{AgentOutcome, Emitter};
@@ -14,7 +14,7 @@ impl Agent {
     /// teardown precede the claim's terminal cue.
     pub(crate) fn settle(self, outcome: AgentOutcome, emit: &Emitter) {
         let outcome = self.conclude(outcome, emit);
-        self.inbox.retire(outcome);
+        self.inbox.retire(outcome.reason());
         drop(self);
     }
 
@@ -187,7 +187,7 @@ pub(crate) fn spawn_async(
                 });
                 AgentOutcome::Failed("sub-agent panicked".into())
             });
-            // A root reports to nobody; `settle` pays only what is still owed.
+            // `settle` finishes a child still working.
             child.settle(outcome, &child_emit);
         });
     match worker {

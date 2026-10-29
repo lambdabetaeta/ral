@@ -1,0 +1,108 @@
+---
+status: active
+verified_at_commit: 0e83863c
+verified_at_date: 2026-10-29
+anchors: [ChildStatus, ChildStatus::fold, Settlement, Forensic::Status, Child, Child::has_replied, Report, Report::transition, Work, Mailbox::adopt, Mailbox::follow_up, Mailbox::child_status, Inbox::deposit_reply, Inbox::retire, ENDED_BEFORE_REPORTING]
+---
+
+# A child is a status
+
+**What a parent can know about a child is its latest state, so a child is a
+status, not a sum of owed answers.** This reverses the debt mechanism of
+[[261028_one-scope-tree-one-inbox]] and keeps its scope tree and fence.
+
+## Diagnosis
+
+- One reply answered every request a child had taken up with one notice,
+  and `` exarch-agents `read `` returned one value: the parent observed one
+  state per child.
+- Counting it took a token per request, a pool per work, a drop that paid
+  `Cancelled` and a withdrawal for refused posts.
+
+## The decision
+
+- `ChildStatus` is `Working | Replied(FOValue) | Failed(String)`, held by a
+  `Child` that parent and child share; `Work.children` retains those cells.
+  `Child::has_replied` observes the variant without cloning its value.
+- **A child is born Working**, enrolled by adoption under its parent's lock.
+  **Only its parent makes it Working again:** `Mailbox::follow_up` posts,
+  records and sets the status under the child's record lock. Peer messages,
+  steering and wakeups do not.
+- **A reply settles only if no parent follow-up is queued.** A crossing
+  reply leaves the child Working and posts no notice; its next reply after
+  taking up the follow-up answers both. Other input prevents a lease, not
+  settlement.
+- **Finish publishes status and notice under the same parent lock.**
+  `Mailbox::finish` sets the status and queues
+  `Item::Agent { name, settled, elapsed }` together. Busy clears at finish,
+  and `draw` pops the notice before honouring `Quiesce`.
+- **Busy is some child of the current work Working**, with no liveness
+  filter. Life cancellation alone does not clear it; retirement finishes a
+  Working child, so the parent cannot quiesce between cancellation and its
+  notice. Abandonment replaces the work and forgets its children.
+- **Ending finishes only a Working child**, as `Failed(reason)`. Owner drop
+  uses `ENDED_BEFORE_REPORTING` ("ended before reporting"); `settle` uses
+  `AgentOutcome::reason`. Retirement preserves a replied child's value and
+  posts nothing for it.
+- `read` asks the reader's current work for its newest own child of that
+  name, live or ended. It refuses Working and Failed, returns Replied
+  without consuming it, and reaches neither grandchildren nor abandoned work.
+- A headless root reports to its harness through the same cell, without a
+  parent mailbox.
+
+## The status is a fold of the child's log
+
+- `ChildStatus::fold` reads Working before the first `Forensic::Status`,
+  then the last status recorded. `Report::transition` records before showing
+  the status, outside every inbox lock.
+- The parent's delivery and the child's finish both transition a child, so
+  each holds `Child.record` across decision, record and publication: the
+  log orders transitions as memory does. Retirement takes the record seam;
+  it is idempotent, and a retired child takes no further transition.
+- A follow-up is posted before its record, so a refused post records and
+  changes nothing. Before retirement, between transitions, a queued follow-up
+  implies Working. A failed append still shows the transition: the failure
+  has ended life, and the parent must hear it.
+- A Working owner unwinding through a panic shows Failed without recording
+  it and skips `SessionEnded`; its log still reads Working. A crash writes
+  no terminal status. On normal owner drop, the Failed record precedes
+  `SessionEnded`, the tail bookend.
+- `ChildStatus::settlement` produces the value-free
+  `Settlement::Replied | Failed { reason }` carried by the notice.
+  `Agent::arrive` records the parent's uptake as `Display::SubagentDone`;
+  that display fact carries no reply value. Model and presentation folds
+  ignore `Forensic::Status`.
+
+## Lock order
+
+- No path holds two inbox locks.
+- A child's record lock (`Child.record`) precedes any inbox lock and the
+  child's log. It is never taken while any inbox lock or status lock is held.
+- `Child.status` is a leaf, taken under the parent's inbox lock (busy, finish,
+  `child_status`), under the child's own inbox lock (`status()`), or under none.
+- Inbox, then the schedule registry's leaf, as today. Scope cancellation and
+  polling take no lock.
+
+## Accepted consequences
+
+- A stale reply notice cannot settle a newer follow-up: the status is
+  Working, and `read` refuses until its next settling reply. A reply remains
+  readable after lease lapse or teardown, until the parent's work is abandoned
+  or a newer child of that name is enrolled.
+- A child's `/clear` that discards a queued follow-up leaves it Working
+  until it next replies or ends.
+- Current work retains every child's status and reply value; retirement
+  releases the record seam, not the status.
+
+## Where
+
+- `exarch/src/record.rs`: `ChildStatus`, `ChildStatus::fold`, `Settlement`,
+  `Forensic::Status`.
+- `exarch/src/bus/inbox.rs`: `Child`, `Child::has_replied`, `Report`,
+  `Report::transition`, `Work`, `Mailbox::{adopt, follow_up, child_status}`,
+  `Inbox::{deposit_reply, retire}`, `ENDED_BEFORE_REPORTING`.
+- `exarch/src/agent/{build,spawn,handle}.rs`, `agent/desk/agents.rs`:
+  construction, retirement, parent delivery and reply reading.
+
+[[design/agents|agents]], [[internals/session-record|session-record]],
+[[map/exarch/agent|agent]], [[map/exarch/frontend|frontend]].

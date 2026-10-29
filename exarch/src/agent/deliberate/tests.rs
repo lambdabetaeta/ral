@@ -1,9 +1,9 @@
 use super::*;
 use crate::agent::gauge::{EVICT_THRESHOLD, Measure};
 use crate::agent::testkit::*;
-use crate::bus::{AgentOutcome, AgentResult, Item, ParkMode, Scoped};
+use crate::bus::{AgentOutcome, Item, ParkMode, Scoped};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Display, Protocol, Publish, Record, Recorded};
+use crate::record::{Display, Protocol, Publish, Record, Recorded, Settlement};
 use genai::chat::ChatRole;
 use ral_core::process::{CancelCause, DurableRoot, ScopeNode};
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
@@ -431,12 +431,10 @@ fn reply_cancels_live_descendants() {
     assert!(!direct.is_live());
     assert!(!grandchild.is_live());
     assert!(sibling.is_live());
-    sibling
-        .inbox
-        .retire(AgentOutcome::Stopped("still delivers".into()));
+    sibling.inbox.retire("still delivers".into());
     assert!(matches!(
         pop(&parent.inbox),
-        Some(Next::Item(Item::Agent(_)))
+        Some(Next::Item(Item::Agent { .. }))
     ));
     drop(grandchild);
     drop(direct);
@@ -892,13 +890,12 @@ fn work_vouched_deliveries_never_reach_the_model_after_abandonment() {
                 values: Vec::new(),
             }
         } else {
-            Scoped::Result {
-                result: AgentResult {
-                    name: "late".into(),
-                    outcome: AgentOutcome::Stopped("done".into()),
-                    elapsed: Duration::ZERO,
+            Scoped::Agent {
+                name: "late".into(),
+                settled: Settlement::Failed {
+                    reason: "done".into(),
                 },
-                paid: Vec::new(),
+                elapsed: Duration::ZERO,
             }
         });
         set_provider(
@@ -928,13 +925,12 @@ fn live_work_vouched_deliveries_reach_the_model() {
                 values: Vec::new(),
             }
         } else {
-            Scoped::Result {
-                result: AgentResult {
-                    name: "worker".into(),
-                    outcome: AgentOutcome::Stopped("found it".into()),
-                    elapsed: Duration::ZERO,
+            Scoped::Agent {
+                name: "worker".into(),
+                settled: Settlement::Failed {
+                    reason: "found it".into(),
                 },
-                paid: Vec::new(),
+                elapsed: Duration::ZERO,
             }
         });
         set_provider(
@@ -1273,13 +1269,13 @@ fn reply_boundary_preserves_live_deliveries_and_fences_abandoned_work() {
         Message,
         Steering,
         Wakeup,
-        AgentResult,
+        Agent,
     }
     for source in [
         Delivery::Message,
         Delivery::Steering,
         Delivery::Wakeup,
-        Delivery::AgentResult,
+        Delivery::Agent,
     ] {
         let parent = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
         let mut child = started_child(&parent, "helper", "`inherit");
@@ -1300,9 +1296,11 @@ fn reply_boundary_preserves_live_deliveries_and_fences_abandoned_work() {
             .unwrap();
         assert!(child.schedules.armed());
         let report = mailbox.clone();
-        let result = AgentResult {
-            name: grandchild.0.name.clone(),
-            outcome: AgentOutcome::Stopped("boundary delivery".into()),
+        let notice = Scoped::Agent {
+            name: grandchild.0.name.clone().into(),
+            settled: Settlement::Failed {
+                reason: "boundary delivery".into(),
+            },
             elapsed: Duration::ZERO,
         };
         let owner = parent.handle();
@@ -1320,11 +1318,8 @@ fn reply_boundary_preserves_live_deliveries_and_fences_abandoned_work() {
                     prompt: "boundary delivery".into(),
                 });
             }
-            Delivery::AgentResult => {
-                report.post(Scoped::Result {
-                    result,
-                    paid: Vec::new(),
-                });
+            Delivery::Agent => {
+                report.post(notice);
             }
         })));
         let provider = scripted(

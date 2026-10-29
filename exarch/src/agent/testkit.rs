@@ -7,11 +7,11 @@ use crate::agent::{
     Agent, AgentHandle, ProviderHandle, Role, RootConfig, RootEngine, SPAWN_FUEL, Trunk,
 };
 use crate::app::Scratch;
-use crate::bus::{AgentOutcome, Emitter, Inbox, Mailbox, ParkMode};
+use crate::bus::{AgentOutcome, Child, Emitter, Inbox, Mailbox, ParkMode};
 use crate::provider::Toolset;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
-use crate::record::Voice;
+use crate::record::{Settlement, Voice};
 use ral_core::HostSurface;
 use ral_core::Runtime;
 use ral_core::Shell;
@@ -211,7 +211,14 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
     let started = Instant::now()
         .checked_sub(idle)
         .expect("test birth fits the clock");
-    let (under, _life, inbox) = fleet.lodge(parent, &name, started)?;
+    let child = role.returns().then(|| {
+        Child::new(
+            name.as_str().into(),
+            started,
+            crate::record::Emitter::none(),
+        )
+    });
+    let (under, _life, inbox) = fleet.lodge(parent, child)?;
     let handle = AgentHandle(Arc::new(Shared {
         id,
         name,
@@ -513,8 +520,8 @@ static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new
 pub(crate) static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] =
     &WORKER_REGISTRY_TEST_BUILTINS_ARR;
 
-/// Poll `inbox` for the next exchange-boundary item — a spawned child's
-/// settled [`crate::bus::AgentResult`] lands here; any opening is declined.
+/// Poll `inbox` for the next exchange-boundary item — a child's notice lands
+/// here; any opening is declined.
 pub(crate) fn wait_for_settle(inbox: &crate::bus::Inbox) -> crate::bus::Next {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -543,10 +550,10 @@ pub(crate) fn pop(inbox: &Inbox) -> Option<crate::bus::Next> {
     inbox.draw(|_| ParkMode::Quiesce).map(|drawn| drawn.next)
 }
 
-/// Draw the next item, which must be a child's result, and return its outcome.
-pub(crate) fn pop_outcome(inbox: &Inbox) -> AgentOutcome {
+/// Draw the next item, which must be a child's notice, and return its settlement.
+pub(crate) fn pop_settled(inbox: &Inbox) -> Settlement {
     match pop(inbox) {
-        Some(crate::bus::Next::Item(crate::bus::Item::Agent(result))) => result.outcome,
-        other => panic!("expected a child's result, got {other:?}"),
+        Some(crate::bus::Next::Item(crate::bus::Item::Agent { settled, .. })) => settled,
+        other => panic!("expected a child's notice, got {other:?}"),
     }
 }

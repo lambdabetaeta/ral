@@ -3,6 +3,9 @@
 use super::*;
 use crate::agent::AgentHandle;
 use crate::agent::testkit::wait_for_settle;
+use crate::bus::ENDED_BEFORE_REPORTING;
+use crate::record::{ChildStatus, RECORD, read_records};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn attend_and_deliver(mut child: Agent) -> std::thread::JoinHandle<AgentOutcome> {
     let id = child.id();
@@ -71,11 +74,9 @@ fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
     ));
     child_agent.steer("second message".into()).unwrap();
     match wait_for_settle(&parent.inbox) {
-        Next::Item(Item::Agent(result)) => assert!(
-            matches!(result.outcome, AgentOutcome::Replied),
-            "{:?}",
-            result.outcome
-        ),
+        Next::Item(Item::Agent { settled, .. }) => {
+            assert!(matches!(settled, Settlement::Replied), "{settled:?}");
+        }
         other => panic!("expected an Agent result, got {other:?}"),
     }
     assert_eq!(
@@ -120,10 +121,10 @@ fn a_child_working_past_the_reply_lease_is_not_reaped() {
     assert!(!reaped, "the reply lease must not limit working time");
     assert!(matches!(
         wait_for_settle(&parent.inbox),
-        Next::Item(Item::Agent(AgentResult {
-            outcome: AgentOutcome::Cancelled,
+        Next::Item(Item::Agent {
+            settled: Settlement::Failed { reason },
             ..
-        }))
+        }) if reason == "cancelled"
     ));
 }
 
@@ -152,10 +153,10 @@ fn child_is_reaped_after_its_reply_not_before_its_seed() {
     let handle = attend_and_deliver(child);
     assert!(matches!(
         wait_for_settle(&parent.inbox),
-        Next::Item(Item::Agent(AgentResult {
-            outcome: AgentOutcome::Replied,
+        Next::Item(Item::Agent {
+            settled: Settlement::Replied,
             ..
-        }))
+        })
     ));
     assert_eq!(child_agent.reply(), Some(FOValue::Int { value: 42 }));
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -188,15 +189,21 @@ fn initial_reply() -> Reply {
 }
 
 fn consume_reply(parent: &Agent) {
-    let Next::Item(item @ Item::Agent(_)) = wait_for_settle(&parent.inbox) else {
+    let Next::Item(item @ Item::Agent { .. }) = wait_for_settle(&parent.inbox) else {
         panic!("expected reply notice")
     };
-    assert!(matches!(&item, Item::Agent(r) if matches!(r.outcome, AgentOutcome::Replied)));
+    assert!(matches!(
+        &item,
+        Item::Agent {
+            settled: Settlement::Replied,
+            ..
+        }
+    ));
     parent.arrive(&item).unwrap();
 }
 
 #[test]
-fn a_readable_previous_reply_does_not_suppress_followup_repairs() {
+fn a_previous_reply_does_not_suppress_followup_repairs() {
     for repair in [
         Reply::text("prose without a return"),
         Reply::empty(),
@@ -364,7 +371,84 @@ fn nonreply_followups_release_the_embedded_parent() {
 }
 
 #[test]
-fn retirement_reports_input_accepted_before_an_older_reply_was_deposited() {
+fn a_childs_log_folds_to_its_live_status() {
+    let parent = trunk(false);
+    let child = parent.fork_named("helper").unwrap();
+    let log = child.log_dir().path().join(RECORD);
+    let assert_status = |expected, count| {
+        let records = read_records(&log).unwrap();
+        assert_eq!(ChildStatus::fold(&records), expected);
+        assert_eq!(
+            parent.inbox.mailbox().child_status("helper"),
+            Some(expected)
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, Record::Forensic(Forensic::Status { .. })))
+                .count(),
+            count
+        );
+    };
+    assert_status(ChildStatus::Working, 0);
+    child.inbox.deposit_reply(FOValue::Int { value: 1 });
+    assert_status(ChildStatus::Replied(FOValue::Int { value: 1 }), 1);
+    child
+        .handle()
+        .message(&parent.handle(), "follow up".into())
+        .unwrap();
+    assert_status(ChildStatus::Working, 2);
+    child.inbox.deposit_reply(FOValue::Int { value: 2 });
+    assert_status(ChildStatus::Working, 2);
+    assert!(matches!(
+        pop(&child.inbox),
+        Some(Next::Item(Item::Message(_)))
+    ));
+    child.inbox.deposit_reply(FOValue::Int { value: 3 });
+    assert_status(ChildStatus::Replied(FOValue::Int { value: 3 }), 3);
+    child
+        .handle()
+        .message(&parent.handle(), "another follow up".into())
+        .unwrap();
+    assert_status(ChildStatus::Working, 4);
+    drop(child);
+    assert_status(ChildStatus::Failed(ENDED_BEFORE_REPORTING.into()), 5);
+    let records = read_records(&log).unwrap();
+    let last_status = records
+        .iter()
+        .rposition(|record| matches!(record, Record::Forensic(Forensic::Status { .. })))
+        .unwrap();
+    let ended = records
+        .iter()
+        .position(|record| matches!(record, Record::Forensic(Forensic::SessionEnded)))
+        .unwrap();
+    assert!(last_status < ended);
+}
+
+#[test]
+fn an_owner_unwinding_shows_failed_and_its_log_reads_working() {
+    let parent = trunk(false);
+    let child = parent.fork_named("helper").unwrap();
+    let log = child.log_dir().path().join(RECORD);
+    assert!(
+        catch_unwind(AssertUnwindSafe(move || {
+            let _owner = child;
+            panic!("unwind");
+        }))
+        .is_err()
+    );
+    assert_eq!(
+        parent.inbox.mailbox().child_status("helper"),
+        Some(ChildStatus::Failed(ENDED_BEFORE_REPORTING.into()))
+    );
+    assert_eq!(
+        ChildStatus::fold(&read_records(&log).unwrap()),
+        ChildStatus::Working
+    );
+}
+
+#[test]
+fn a_crossing_reply_settles_only_at_retirement() {
     let parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
     child
@@ -372,17 +456,14 @@ fn retirement_reports_input_accepted_before_an_older_reply_was_deposited() {
         .message(&parent.handle(), "follow up".into())
         .unwrap();
     child.inbox.deposit_reply(FOValue::Unit);
-    assert!(
-        matches!(wait_for_settle(&parent.inbox), Next::Item(Item::Agent(r))
-        if matches!(r.outcome, AgentOutcome::Replied))
-    );
+    assert!(parent.inbox.is_empty());
     assert!(parent.handle().has_busy_children());
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     child.settle(AgentOutcome::Replied, &emit);
     assert!(
-        matches!(wait_for_settle(&parent.inbox), Next::Item(Item::Agent(r))
-        if matches!(r.outcome, AgentOutcome::Cancelled))
+        matches!(wait_for_settle(&parent.inbox), Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. })
+        if reason == "cancelled")
     );
     assert!(!parent.handle().has_busy_children());
 }
@@ -420,10 +501,16 @@ fn cancellation_before_followup_pop_reports_new_work_once() {
         "cancellation won before dequeue"
     );
     child.settle(outcome, &emit);
-    let Next::Item(item @ Item::Agent(_)) = wait_for_settle(&parent.inbox) else {
+    let Next::Item(item @ Item::Agent { .. }) = wait_for_settle(&parent.inbox) else {
         panic!("cancel result")
     };
-    assert!(matches!(&item, Item::Agent(r) if matches!(r.outcome, AgentOutcome::Cancelled)));
+    assert!(matches!(
+        &item,
+        Item::Agent {
+            settled: Settlement::Failed { reason },
+            ..
+        } if reason == "cancelled"
+    ));
     parent.arrive(&item).unwrap();
     assert!(!parent.handle().has_busy_children());
     assert!(parent.inbox.draw(|_| ParkMode::Quiesce).is_none());

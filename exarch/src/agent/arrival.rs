@@ -19,11 +19,15 @@ impl Agent {
     pub(super) fn arrive(&self, item: &Item) -> Result<bool, Severed> {
         let recorder = self.recorder();
         match item {
-            Item::Agent(r) => {
+            Item::Agent {
+                name,
+                settled,
+                elapsed,
+            } => {
                 recorder.emit_or_end(Display::SubagentDone {
-                    name: r.name.clone(),
-                    outcome: r.outcome.settlement(),
-                    elapsed_ms: u64::try_from(r.elapsed.as_millis()).unwrap_or(u64::MAX),
+                    name: name.to_string(),
+                    outcome: settled.clone(),
+                    elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 });
                 Ok(true)
             }

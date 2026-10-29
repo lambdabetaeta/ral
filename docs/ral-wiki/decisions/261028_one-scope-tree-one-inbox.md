@@ -1,13 +1,18 @@
 ---
 status: active
-generated_at_commit: e82dee76
+generated_at_commit: 0e83863c
 generated_at_date: 2026-10-29
-verified_at_commit: e82dee76
+verified_at_commit: 0e83863c
 verified_at_date: 2026-10-29
-anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Owed, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report, Unavailable, Emitter::bind, Agent::conclude, Tenancy::discard, Fatal, Transport::bind, Transport::unbind, Agent::halted]
+anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Child, ChildStatus, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report, Unavailable, Emitter::bind, Agent::conclude, Tenancy::discard, Fatal, Transport::bind, Transport::unbind, Agent::halted]
 ---
 
 # One scope tree, one inbox
+
+> Amended by [[261029_a-child-is-a-status|a-child-is-a-status]]: child
+> obligations are statuses, not debts; the lock-order sentence on `Owed` and
+> §"Work and exact outstanding replies" from "Every promised answer" on no
+> longer hold.
 
 **An agent has one owner, one inbox, and one monotone cancellation tree.**
 This supersedes [[261027_a-host-holds-a-helm]]'s mechanism and retains its
@@ -331,8 +336,9 @@ D1–D8 fix the policy as well as the mechanism.
 
 - `exarch/src/agent.rs`, `agent/{handle,build,engine,fleet}.rs`: owner,
   address, ancestry, construction, destruction and the tenancy census.
-- `exarch/src/bus/inbox.rs`: provenance, fence, work, adoption, exchanges,
-  job opening/closing and addressed Stop; `bus/post.rs`: delivery payloads.
+- `exarch/src/bus/inbox.rs`: provenance, fence, work, child statuses,
+  adoption, exchanges, job opening/closing and addressed Stop;
+  `bus/post.rs`: delivery payloads.
 - `exarch/src/agent/{attend,deliberate,shell,desk}.rs`, `schedule.rs`:
   owner loop, explicit exchange scope and captured work mailboxes.
 - `core/src/carrier.rs`, `carrier/identity.rs`, `engine.rs`: dispatch-local
