@@ -1,183 +1,115 @@
-# Agents: one owner, one address, one forest
+# Agents: one thread, one life, one conversation
 
-**An exarch run is a *fleet* of uniform agents, one tree per root, driven by
-one attend loop.** An `Agent` is the attending thread's owner; an
-`AgentHandle` is its shared address, never its lifetime. The fleet holds
-launch settings, names, a cancellation root and teardown accounting
-([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]],
-[[map/exarch/agent|agent]]).
+**An agent owns its conversation and shell on one joined thread.** Its
+address admits messages and publishes status, never retaining the engine or
+attending owner. A fleet is a forest of lives, owned through root and helper
+join guards ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
 
-## Role is fixed; parking is computed
+## Role and admission are independent
 
-**Whom an agent answers is a construction-fixed `Role`, not an `is_root`
-flag.**
+- `Converses` answers in conversation; `Returns` owes its caller a value;
+  `Child { parent }` answers its parent and can rest for follow-ups.
+  `Trunk::{Converses, Returns}` chooses how roots answer.
+- `Free` admits any input at rest. `Gated` consumes one host release per
+  job. `Parent` admits the human and parent; a resting helper refuses peers,
+  while a working helper accepts anyone. Quiet commands and child reports
+  or departures are never held.
+- A helper ends after resting with no admissible input for its idle interval:
+  five hours by default, configurable through `--helper-idle`. Reading,
+  focus and probes do not renew it. Roots have no idle timeout.
 
-- `Converses` answers no caller and withholds `reply`: an attended or
-  embedded root.
-- `Headless` replies once to the process's caller, then leaves attendance.
-- `Child { parent: AgentHandle }` replies to its parent, then parks for
-  follow-up work. Its parent edge is strong and fixed; downward views are
-  fleet lookups filtered by ancestry, not a mutable children list.
+## Stop < end
 
-Role governs reply admission, prompt obligations and parking. Fuel is a
-separate depth bound; it does not decide whether an agent returns.
-`Trunk::{Attended, Embedded, Headless}` fixes how roots are driven.
-
-- An attended conversing root parks `Held` for human input.
-- A child holding a current reply parks `Engaged` under its follow-up lease.
-- A Working child gives `HeldByChildren`; armed self-schedules give
-  `UntilCancelled`; otherwise the node quiesces.
-- Life cancellation ends every park; a severed engine or a failed record
-  writer cancels life. Quiescence never wins over a live queued delivery.
-
-## Scope is the control boundary
-
-**Interrupt < stop < end is depth in ral's own cancellation tree.** No
-exarch cancellation token is reset at an exchange boundary.
+**Cancellation has two extents: life contains exchange.**
 
 ```text
 fleet root
-└── life
-    └── work
-        ├── exchange and its continuations
-        └── lives of adopted children
+└── root life
+    ├── exchange and local nudge continuations
+    └── helper life
+        ├── exchange
+        └── helper life …
 ```
 
-- *Exchange* is one item taken up by exarch, including nudge continuations.
-  TUI Esc / Ctrl-C cancel only the focused exchange with `Interrupted`;
-  helpers survive. SIGINT is forwarded to root exchanges.
-- *Work* is the current delegation extent. Stop, `/clear` and `reply`
-  abandon it with `Cancelled`, replacing it beneath the same life. Children
-  adopted in it end structurally, including their descendants.
-- *Life* is the owner's extent. End, `/close`, agent cancel, owner drop and
-  its writer's failure end it; idle lease lapse does so with `TimedOut`.
-  Dropping an owner ends its subtree: an address cannot leave live work
-  without its consumer.
-- `/quit` and whole-fleet shutdown cancel the fleet root. A new root under
-  an ended fleet is born cancelled. Signals supply `Terminated` or `Aborted`
-  without a second cancellation path.
-- Provider waits read exchange. Identity ral runs nest their dispatch scope
-  beneath it; wire dispatchers poll and strike their own dispatch id.
-  Cancelling threads write flags and notify, never call into an engine.
-  Factory, attach, probe and protocol-write waits retain their own deadlines.
+- An exchange takes up one input through its nudge continuations. Stop —
+  Esc, Ctrl-C, Synod Stop, SIGINT or the desk's `` `stop `` — cancels only
+  that exchange with `Interrupted`. Human gestures recall queued text;
+  the desk and SIGINT leave it queued.
+- Helpers, schedules and loose shell workers survive Stop. Helpers can
+  report and wake the agent again within the same busy period.
+- End, `/close`, dismissal, writer failure or engine severance ends life.
+  Teardown joins helpers before ending its engine; owner drop preserves that
+  ordering on unwind. A retained address cannot leave an orphan thread.
+- `` `dismiss `` ends and joins one's own helper; `` `stop `` may target a
+  descendant. `/clear` dismisses helpers only after engine preparation succeeds.
+- Provider waits poll exchange; ral dispatchers strike only their own id.
+  Cancelling threads do not call into engines. Factory, attach, probe and
+  protocol writes keep their own deadlines. Cancellation never resets.
 
-The agent's ral `Engine` owns loose shell workers independently of delegated
-work. Stop and `reply` preserve them and their incarnation-vouched completion
-batches. The incarnation is a scope under life, parallel to work; a committed
-`/clear` cancels and replaces it, fencing old batches and certifying the old
-engine. Failed preparation preserves it; a failed commit ends life.
-Owner destruction ends the current engine
-([[internals/cancellation|cancellation]]).
+## Busy periods are observed
 
-## One inbox, one provenance rule
+**A job is a recorded busy period, not a cancellation scope.**
 
-**A delivery is taken up only while the scope vouching for it is live.**
-The check occurs once at pop, under the inbox's one mutex. Cancellation is
-monotone, so stale provenance stays stale.
+- Accepted input at rest opens `JobOpened`, whose commit number names it.
+  Declined stale input opens nothing. Mid-job input opens no second job.
+- `JobSettled` is committed under the queue lock that finds nothing queued
+  and no pending helpers. An unjoined helper is pending while it owes its
+  parent or its life has ended; the parent reads each helper's life afresh
+  under its own lock, so an end seen before settlement is joined first.
+- Stop shares this lock and marks the matching job stopped; human gestures recall text;
+  stale ids do nothing. Further input may run before that same job settles.
+- `Host` launches roots and owns their feed, then ends and joins all of
+  them on end or drop. Frontends observe; they do not drive agents.
+- Synod gates each job across its baseline and closing folder walk. A
+  release allows human text, wakeups, worker batches or messages to open a
+  job. Scheduling and reset-resume remain disabled by Synod policy.
+- TUI Stop restoration prepends recalled text to the live draft without
+  Up's mode/history guards. Synod serializes withdrawals by gesture and
+  attempt. Human transcript position is recorded uptake, not submission.
 
-- Human text and commands are unfenced. Results carry the parent's work
-  captured at adoption; wakeups their arming work; nudges their exchange;
-  worker batches the engine incarnation.
-- Messages carry the scope under which the sender's life hangs. Words from
-  a normally ended sender may still arrive; words from an abandoned subtree
-  die with that work.
-- A mailbox captures destination and provenance together. A delayed spawn
-  must adopt through that original work mailbox, never freshen its authority
-  after constructing an engine. A refusal leaves no enrolled child.
-- Stop recalls queued human text oldest first; other deliveries live or die
-  by provenance. Reply keeps queued posts; committed `/clear` discards only
-  posts before its captured boundary, preserving later human input.
-- Opening an exchange cancels its predecessor. Its scope is minted at pop,
-  so Stop or Esc racing take-up cannot be erased. Declining an already
-  claimed worker completion opens nothing and preserves a queued nudge.
-- A drawn human prompt is recorded before the exchange is polled: a racing
-  gesture cannot lose it or start a provider round under a dead scope.
-  Mid-exchange steering drains only while that exchange is live.
+## Reports belong to whoever asked
 
-**A child is a status.** Parent and child share one
-`Working | Replied(FOValue) | Failed(String)` cell
-([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
+**A helper's published status and its obligation are different facts.**
 
-- Adoption enrolls a Working child in the parent's current work. Only an
-  accepted parent follow-up makes a replied child Working again, or a resumed
-  returning root's own reopen; peer messages, steering and wakeups do not.
-  Construction pairs a parent's work with its child by type, so neither can
-  be stated alone.
-- A reply settles only when no parent follow-up is queued. A crossing reply
-  leaves the child Working and posts no notice.
-- Finish publishes status and a value-free notice under the same parent
-  lock. Busy means some child of the current work is Working, irrespective
-  of liveness; `draw` hears a queued finish before quiescing.
-- Retirement fails only a Working child. A replied child keeps its value
-  after lease lapse or teardown; owner drop still reports a Working child
-  as failed. If retirement cannot record that failure, the child shows the
-  recording failure, which the parent hears. Abandoning work forgets its
-  children.
-- `read` reaches the newest own child of a name in the reader's current
-  work, live or ended, refusing Working and Failed. A headless root returns
-  through the same cell without a parent mailbox.
+- A returning agent owes a report after taking up human or parent input,
+  until reply, rest or end. Reports are `Replied(FOValue)`, `Failed(reason)`
+  or `Stopped`, recorded in its own log and published in its mailbox.
+- A helper's mailbox starts owing its parent. Parent enqueue sets that flag
+  atomically; reporting posts `Child` to the parent under the helper lock,
+  then retains the flag only if another parent message remains queued.
+- The parent cannot rest between seeing the obligation and hearing the
+  report. `Gone`, the helper thread's last post, joins without a model prompt.
+- Human-only dealings with a resting helper are quiet to its parent: views
+  show its job/report, but the parent's model is not notified and no parent
+  job opens. A view's working predicate is obligation or open job.
+- `read` asks the nursery for the newest own helper by name, including after
+  teardown; it refuses while live and working and returns the faithful reply value.
+- The body is owned plainly between shell calls and lent only for foreground
+  dispatch. The loan returns on unwind too; a later enquiry answers `no desk`.
+  Call-local acts use `AtomicRefCell`, not a persistent shared agent cell.
 
-## Embedded jobs and the host's address
+## Roots, replacement and teardown
 
-**A Synod *job* runs from queued human input through fleet settlement or
-Stop, distinct from exarch's item-level exchange.**
+**Roots are sessions with fresh engines; helpers are shell snapshots.**
 
-- `SettledConversation` owns one root and a conversation-lived bus. Its host
-  keeps `handle()`, not an owner reference. `await_job` opens only on human
-  input; a worker batch alone does not start a job.
-- `run(job, sink)` attends at most once. Replied helpers remain leased
-  residents but are no longer outstanding work. Dropping an unattended job
-  closes it. Self-scheduling and reset-resume are refused.
-- `AgentHandle::stop(JobId)` acts only while that job is running and not
-  already stopped, under the same inbox lock as closing. It marks stopped
-  and abandons work with recall; stale Stop changes nothing.
-- A stopped job takes up nothing new. Text sent after Stop stays queued for
-  the next job, which has its own id. Every job pumps output until ended
-  helpers' teardown is acknowledged; the closing folder walk and “Stopped.”
-  cannot overtake those writes or final output
-  ([[decisions/260806_exchange-ends-at-fleet-quiescence|job settlement]]).
-- Synod keeps Send available while busy. The queue strip shows waiting
-  text; transcript position is recorded uptake, not submission. Serialized
-  Stop/recall withdrawals restore text in gesture order. Backend `JobDone`
-  alone certifies “Stopped.”; no frontend pending-Stop register is needed.
-- `end_fleet` ends every root in the shared launch, drops the owner, then
-  waits on detached teardown accounting, retaining no launch or factory.
-  Synod recovers the machine only after that barrier.
-
-Settlement excludes the attending owner's own tenant even if its life ends;
-helpers and unfinished claims must still tear down.
-
-Live means life is not cancelled; torn down means the `Tenancy` has been
-released. Retained addresses are neither consumers nor outstanding
-teardown. A census entry starts at name claim, covering construction; the
-owner's log drops before its `Tenancy` ends and certifies the engine, then
-releases name and entry. A wire engine answers `Detach` with `Ended` only
-after its engine thread and session workers have torn down. Missing acknowledgment refuses settlement and the folder scan,
-rather than treating socket closure as proof of teardown.
-
-## Roots are sessions
-
-**A root has a fresh engine and its own `record.jsonl`; a root is never a
-fork.** `Genesis` is the launch's identity-engine recipe, absent on a wire
-host that boots no further roots.
-
-- `/new [name]` hatches a blank root; `/branch [name]` imports the focused
-  context with a fresh shell. Imported ancestry is recorded through
-  `Inherited`, not a spawn-parent edge.
-- `/close` writes `SessionClosed` and ends that life permanently; `/quit`
-  ends the fleet while leaving roots resumable.
-- `--resume` reopens roots with no `SessionClosed`, each with its context
-  replayed and shell fresh. Pins, schedules, workers and bindings are not
-  restored. Headless resume requires exactly one live root record.
-- `/clear` preflights recording/readiness and prepares a fresh engine before
-  mutation. An adopted or wire engine refuses; failed preparation preserves
-  live resources. Only committed `Cleared` permits applying the inbox
-  boundary, abandoning work, clearing registers and replacing the incarnation.
-  A failed commit ends the session and certifies the unused prepared engine,
-  leaving the current engine, record and registers as they were.
-- Names are fleet-unique reservations claimed before engine/log preparation.
-  The owner's `Tenancy` releases them on teardown. Host commands alone open
-  roots; a model has no session-opening builtin.
+- `/new` opens blank context; `/branch` imports context, not shell state.
+  `/close` records permanent closure; `/quit` leaves roots resumable.
+  Resume folds open root logs with fresh shell state, not restored workers,
+  pins or schedules. Headless requires one open root.
+- Names are reserved before construction and removed after owner teardown,
+  before `Died`. `Gone` follows death. Retained addresses retain no engine.
+- `/clear` preflights context and prepares an eligible identity-root engine
+  before mutation. Failure changes nothing. Then it joins helpers, commits
+  `Cleared`, transfers the life binding, replaces and retires the outgoing
+  engine, resets registers and invalidates batches/wakeups. It keeps every
+  queued human input, message and command. A failed commit ends life and
+  retires the unused prepared engine.
+- `Option<Engine>` makes final retirement consumptive and repeated teardown
+  harmless. Each uncertified end records `TeardownFailed` once in the owning
+  log; failures propagate through joins to the host. A failed launch returns
+  both its cause and teardown failures. Panic is itself a teardown failure.
+- Wire `Detach → Ended` certifies engine/worker teardown, not socket EOF.
+  Synod recovers its machine factory only after every agent thread joins.
 
 ## Uniform spawning and the one snapshot law
 
@@ -195,7 +127,7 @@ asynchronous: construct, adopt and launch the child, then return a summary;
   dynamic context and builtin table. Every handle becomes an opaque
   placeholder, including in captured closures, native applied arguments and
   handler arms. Hooks do not cross. No terminal authority crosses.
-- The child receives a fresh inbox, life/work scopes, provider handle and
+- The child receives a fresh mailbox, life/exchange scopes, provider handle and
   engine. Its `cd`, environment and new bindings never flow back; reply is
   the sole return path. The fork carries session policy, including inherited
   bindings sealed as baseline and worker-retention terms.
@@ -235,31 +167,20 @@ not again interpolated into prose
 
 ## Reply, follow-up and scheduling
 
-**A returned value is deposited state, not prose scraped from a final turn.**
+**Reply is a faithful value, not prose scraped from a final turn.**
 
-- `` exarch-agents `reply `` stages a faithful `FOValue`; after the whole
-  tool batch, cancellation is checked before harvesting it. A severed engine
-  has already cancelled the exchange.
-  Reply abandons delegated work, clears schedules, publishes Ready and
-  settles its status unless a parent follow-up is queued.
-- The child parks. Its parent reads the value through
-  `` exarch-agents `read <name> ``, checked against the demanded type. A
-  headless root instead returns the same value to its harness. Finishing
-  without reply is repaired within budget, then fails honestly.
-- `read` answers a child's reply until a parent follow-up sets it Working,
-  and after it ends. It refuses during that follow-up's work; an old queued
-  notice does not make the previous value readable.
-- A child's one-hour follow-up lease starts at reply, not birth. The lease is a
-  `Weak` whose only strong owner is the inbox: new human or agent input
-  breaks it atomically with enqueue, so the old lease cannot race it into
-  reaping the child, and a reply refuses one while input is queued. Focus,
-  reading replies and probes renew nothing; roots have no reply lease.
-- Focus and matrix navigation are presentation only. A cancelled exchange
-  is visible as cancelled, not a failed matrix cell.
-- With `--allow-schedule`, every fork inherits scheduling admission. Each
-  entry holds a weak mailbox of its arming work; abandoned work retires the
-  entry instead of rearming. Owner abandonment clears schedules; Stop leaves
-  callback retirement to observe the dead scope. Synod refuses schedules.
+- `` exarch-agents `reply `` stages the value; the complete tool batch ends
+  before harvesting it, and cancellation discards it. Quiescing precedes
+  reporting. Reply clears schedules, not helpers; the agent may rest.
+- A parent binds `` exarch-agents `read <name> `` under its demanded type.
+  New parent input makes the helper pending again; a crossing report keeps
+  that obligation while the follow-up remains queued.
+- With scheduling authority, a conversing agent's wakeup may open a later
+  job; a returning agent waits for armed schedules and clears them on report.
+  Epochs invalidate queued wakeups across reset. Firing, coalescing and final
+  registry retirement occur in one mailbox transaction, preventing false rest.
+- Timers retain a weak reference to mailbox shared state, never a temporary
+  address wrapper or an owner. Focus and diagnostic reads mutate no lifecycle.
 
 ## Permissions: a spawn pushes one layer
 
@@ -284,9 +205,7 @@ Its mandatory `grant` is one of
 
 ## See also
 
-[[design/exarch-architecture|exarch-architecture]],
 [[map/exarch/agent|agent]], [[map/exarch/frontend|frontend]],
-[[map/exarch/builtins|builtins]], [[map/exarch/policy|policy]],
-[[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]],
-[[decisions/260826_reply-parks|reply-parks]],
+[[map/synod|synod]], [[internals/cancellation|cancellation]],
+[[internals/session-record|session-record]],
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]].

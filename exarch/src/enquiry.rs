@@ -192,14 +192,17 @@ pub(crate) enum Agents {
     List,
     Start(Start),
     Message(Message),
-    Cancel(String),
+    Stop(String),
+    Dismiss(String),
     Reply(FOValue),
     Read(String),
 }
 
 impl Family for Agents {
     const CLASS: &'static str = "agents";
-    const TAGS: &'static [&'static str] = &["list", "start", "message", "cancel", "reply", "read"];
+    const TAGS: &'static [&'static str] = &[
+        "list", "start", "message", "stop", "dismiss", "reply", "read",
+    ];
 
     fn request(self) -> Request {
         Request::Agents(self)
@@ -210,7 +213,8 @@ impl Family for Agents {
             Self::List => tag("list", None),
             Self::Start(start) => tag("start", Some(start.encode())),
             Self::Message(message) => tag("message", Some(message.encode())),
-            Self::Cancel(name) => tag("cancel", Some(name.encode())),
+            Self::Stop(name) => tag("stop", Some(name.encode())),
+            Self::Dismiss(name) => tag("dismiss", Some(name.encode())),
             Self::Reply(value) => tag("reply", Some(value)),
             Self::Read(name) => tag("read", Some(name.encode())),
         }
@@ -221,7 +225,8 @@ impl Family for Agents {
             "list" => bare(payload).map(|()| Self::List),
             "start" => datum(payload).map(Self::Start),
             "message" => datum(payload).map(Self::Message),
-            "cancel" => datum(payload).map(Self::Cancel),
+            "stop" => datum(payload).map(Self::Stop),
+            "dismiss" => datum(payload).map(Self::Dismiss),
             "reply" => carried(payload).cloned().map(Self::Reply),
             "read" => datum(payload).map(Self::Read),
             _ => return None,
@@ -1354,10 +1359,22 @@ mod tests {
                 to: "parent".into(),
                 text: "hi".into(),
             })),
-            Request::Agents(Agents::Cancel("scout".into())),
+            Request::Agents(Agents::Stop("scout".into())),
+            Request::Agents(Agents::Dismiss("scout".into())),
             Request::Agents(Agents::Reply(restriction())),
             Request::Agents(Agents::Read("scout".into())),
         ]);
+    }
+
+    #[test]
+    fn cancel_is_refused_and_the_agents_vocabulary_offers_stop_and_dismiss() {
+        let Err(why) = family::<Agents>(&tag("cancel", Some("scout".to_string().encode()))) else {
+            panic!("cancel was removed, not aliased to either gesture");
+        };
+        assert!(why.starts_with("unrecognised tag in `` exarch-agents `cancel ``"));
+        for verb in ["stop", "dismiss"] {
+            assert!(why.contains(&format!("`{verb}")), "{why}");
+        }
     }
 
     #[test]

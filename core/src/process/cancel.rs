@@ -157,11 +157,15 @@ struct Listener {
 static LISTENERS: Mutex<Vec<(u64, Listener)>> = Mutex::new(Vec::new());
 
 /// Hand every ambient cause raised from now on to `forward`, on a thread of
-/// its own, until the guard drops.
+/// its own. Dropping the guard unregisters it, drains queued callbacks, and
+/// waits for their captures to be released.
 ///
 /// A root request already standing is handed on at once, being absolute; an
 /// interrupt raised before now is not, having been aimed at a run that was in
 /// flight then.
+///
+/// The callback must not destroy its own guard or wait on resources held by
+/// the guard's dropping owner.
 ///
 /// # Panics
 /// If the forwarding thread cannot be spawned.
@@ -171,7 +175,7 @@ pub fn forward_ambient(forward: impl Fn(Ambient) + Send + 'static) -> AmbientFor
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("ral-signals".into())
         .spawn(move || rx.iter().for_each(forward))
         .expect("spawn the signal forwarder");
@@ -182,7 +186,10 @@ pub fn forward_ambient(forward: impl Fn(Ambient) + Send + 'static) -> AmbientFor
     };
     LISTENERS.lock_ignore_poison().push((id, listener));
     scan_ambient();
-    AmbientForward { id }
+    AmbientForward {
+        id,
+        thread: Some(thread),
+    }
 }
 
 /// Pass each listener what was raised since it last heard; interrupts raised
@@ -205,10 +212,15 @@ pub(crate) fn scan_ambient() {
     }
 }
 
-/// A registered [`forward_ambient`]; dropping it ends the forwarding thread.
+/// A registered [`forward_ambient`]; dropping it unregisters, drains queued
+/// callbacks, and waits for their captures to be released.
+///
+/// A callback must not destroy this guard or wait on resources held by its
+/// dropping owner.
 #[must_use]
 pub struct AmbientForward {
     id: u64,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for AmbientForward {
@@ -216,6 +228,9 @@ impl Drop for AmbientForward {
         LISTENERS
             .lock_ignore_poison()
             .retain(|(id, _)| *id != self.id);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -748,6 +763,148 @@ mod tests {
         let s = node.shielded(Duration::from_millis(400));
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(s.cause(), Some(CancelCause::Cancelled));
+    }
+
+    fn deliver_to_forwarder(guard: &AmbientForward, causes: &[Ambient]) {
+        let listeners = LISTENERS.lock_ignore_poison();
+        let (_, listener) = listeners
+            .iter()
+            .find(|(id, _)| *id == guard.id)
+            .expect("the test forwarder is registered");
+        for cause in causes {
+            listener
+                .tx
+                .send(*cause)
+                .expect("deliver to the test listener");
+        }
+        drop(listeners);
+    }
+
+    fn wait_for_forwarder_unregistration(id: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if LISTENERS
+                .try_lock()
+                .is_ok_and(|listeners| listeners.iter().all(|(registered, _)| *registered != id))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "drop must unregister and release LISTENERS before waiting for the callback"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn dropping_an_idle_ambient_forwarder_releases_its_capture() {
+        let _serial = REQUEST_SERIAL.lock();
+        let capture = Arc::new(());
+        let captured = Arc::clone(&capture);
+        let guard = forward_ambient(move |_| {
+            assert_eq!(Arc::strong_count(&captured), 2);
+        });
+
+        drop(guard);
+
+        assert!(
+            Arc::into_inner(capture).is_some(),
+            "guard destruction must release the callback's capture before returning"
+        );
+    }
+
+    fn drop_blocked_ambient_forwarder(during_drop: impl Fn() + Send + 'static) {
+        let _serial = REQUEST_SERIAL.lock();
+        let timeout = Duration::from_secs(5);
+        let capture = Arc::new(());
+        let captured = Arc::clone(&capture);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (forwarded_tx, forwarded_rx) = std::sync::mpsc::channel();
+        let guard = forward_ambient(move |ambient| {
+            assert_eq!(Arc::strong_count(&captured), 2);
+            if ambient == Ambient::Interrupt {
+                entered_tx.send(()).expect("announce callback entry");
+                release_rx
+                    .recv_timeout(timeout)
+                    .expect("the test releases the blocked callback");
+                during_drop();
+            }
+            forwarded_tx.send(ambient).expect("record queued delivery");
+        });
+        let causes = [Ambient::Interrupt, Ambient::Root(CancelCause::Terminated)];
+        deliver_to_forwarder(&guard, &causes);
+        entered_rx.recv_timeout(timeout).expect("callback entered");
+
+        let id = guard.id;
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            drop(guard);
+            dropped_tx.send(()).expect("announce completed destruction");
+        });
+        wait_for_forwarder_unregistration(id);
+        let pending = dropped_rx.recv_timeout(Duration::from_millis(100));
+        release_tx.send(()).expect("release the callback");
+        if pending == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            dropped_rx
+                .recv_timeout(timeout)
+                .expect("destruction completes after the callback is released");
+        }
+        dropper.join().expect("guard destruction must not panic");
+
+        assert_eq!(
+            pending,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "destruction must wait for the blocked callback"
+        );
+        assert!(
+            Arc::into_inner(capture).is_some(),
+            "destruction must release the callback's capture"
+        );
+        assert_eq!(
+            forwarded_rx.try_iter().collect::<Vec<_>>(),
+            causes,
+            "destruction must drain queued causes in order"
+        );
+    }
+
+    #[test]
+    fn dropping_an_ambient_forwarder_waits_for_its_blocked_callback() {
+        drop_blocked_ambient_forwarder(|| {});
+    }
+
+    #[test]
+    fn dropping_an_ambient_forwarder_releases_the_registry_before_joining() {
+        drop_blocked_ambient_forwarder(|| {
+            let nested = forward_ambient(|_| {});
+            drop(nested);
+        });
+    }
+
+    #[test]
+    fn dropping_a_panicked_ambient_forwarder_releases_its_capture_without_panicking() {
+        let _serial = REQUEST_SERIAL.lock();
+        let capture = Arc::new(());
+        let captured = Arc::clone(&capture);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let guard = forward_ambient(move |_| {
+            assert_eq!(Arc::strong_count(&captured), 2);
+            entered_tx.send(()).expect("announce callback entry");
+            panic!("test callback panic");
+        });
+        deliver_to_forwarder(&guard, &[Ambient::Interrupt]);
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the panicking callback entered");
+
+        let dropped = std::thread::spawn(move || drop(guard)).join();
+
+        assert!(dropped.is_ok(), "callback panic must not escape guard drop");
+        assert!(
+            Arc::into_inner(capture).is_some(),
+            "guard destruction must release the panicked callback's capture"
+        );
     }
 
     /// A forwarder hears the interrupts raised after it and none before, and a

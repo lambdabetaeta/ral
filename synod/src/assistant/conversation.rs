@@ -1,17 +1,22 @@
-//! One folder and one guest; queued human messages open settled jobs.
+//! One folder and one guest; each released job follows the preceding folder walk.
 
 use super::accounts::{Selected, select_account};
 use super::baseline::Baseline;
+use super::gate::Seat;
 use super::guest::Guest;
 use crate::folder::grant::Grant;
 use crate::folder::{
     changes::{JobReport, job_report},
     manifest::{self, Manifest},
 };
-use crate::wire::{Choice, Opening};
+use crate::wire::{Choice, Opening, WindowReport};
+use exarch::agent::fleet::HELPER_IDLE;
+use exarch::agent::{Admission, EngineLost, Trunk};
 use exarch::app::SYNOD;
-use exarch::headless::{Job, JobEnd};
+use exarch::bus::BusReceiver;
 use exarch::provider::{self, Bureau, Holdings, Pool};
+use exarch::record::AgentId;
+use ral_core::carrier::Severed;
 use ral_core::path::{XdgKind, shown};
 use std::path::Path;
 use std::sync::Arc;
@@ -99,12 +104,11 @@ impl Conversation {
         let config = exarch::agent::RootConfig {
             system,
             run_dir,
-            // Only user messages may start work.
             allow_schedule: false,
-            // A refusal ends the job; Law B leaves nothing to wake.
             resume_on_reset: false,
-            // Only busy descendants hold a job open.
-            trunk: exarch::agent::Trunk::Embedded,
+            trunk: Trunk::Converses,
+            admission: Admission::Gated,
+            helper_idle: HELPER_IDLE,
             tools: exarch::provider::Toolset::offered(false),
             disk_warn_bytes,
             fuel: exarch::agent::SPAWN_FUEL,
@@ -146,61 +150,8 @@ impl Conversation {
         self.guest.handle()
     }
 
-    pub(crate) fn await_job(&self) -> Option<Job> {
-        self.guest.await_job()
-    }
-
     pub(crate) fn settle_baseline(&mut self) -> Result<(), String> {
         self.baseline.manifest().map(drop)
-    }
-
-    /// Walk only after baseline admission and certified job settlement.
-    pub(crate) fn run<S: exarch::bus::Sink>(&mut self, job: Job, sink: &mut S) -> JobEnd {
-        if let Err(why) = self.baseline.manifest() {
-            self.report = None;
-            self.handle().end();
-            let id = job.id();
-            drop(job);
-            return JobEnd {
-                id,
-                stopped: false,
-                outcome: Err(why),
-            };
-        }
-        let mut end = self.guest.run(job, sink);
-        if end.outcome.is_err() {
-            end.outcome = self.capture_a_dead_engine().and(end.outcome);
-            self.report = None;
-            self.handle().end();
-            return end;
-        }
-        let after = Manifest::of_folder(self.grant.root());
-        self.report = match (self.baseline.manifest(), &after) {
-            (Ok(before), Ok(after)) => Some(job_report(before, after)),
-            _ => None,
-        };
-        // Capture engine loss while the machine still exists, after the closing walk.
-        end.outcome = self
-            .capture_a_dead_engine()
-            .and(end.outcome)
-            .and_then(|()| after.map(drop));
-        end
-    }
-
-    #[must_use]
-    pub(crate) fn report(&self) -> Option<&JobReport> {
-        self.report.as_ref()
-    }
-
-    /// The engine's loss, captured while the machine exists; the loss has
-    /// already ended the root's life.
-    pub(crate) fn capture_a_dead_engine(&self) -> Result<(), String> {
-        self.guest.severance().map_or(Ok(()), Err)
-    }
-
-    /// A terminal failure or host `end` closes the root's inbox life.
-    pub(crate) fn lost(&self) -> bool {
-        !self.handle().is_live()
     }
 
     pub(crate) fn end(self) -> Result<(), String> {
@@ -211,6 +162,50 @@ impl Conversation {
         // The machine shuts down before an abandoned baseline is joined.
         drop(baseline);
         shutdown
+    }
+}
+
+impl Seat for Conversation {
+    fn root(&self) -> AgentId {
+        self.handle().id()
+    }
+
+    fn feed(&self) -> &BusReceiver {
+        self.guest.feed()
+    }
+
+    /// Captured while the machine exists.
+    fn engine_lost(&self, cause: &Severed) -> String {
+        let lost = EngineLost::running(cause, self.guest.run_dir());
+        self.guest.capture(&lost);
+        lost.to_string()
+    }
+
+    /// After the baseline, and after any job's walk.
+    fn release(&self) -> Result<(), String> {
+        self.baseline.settled_manifest()?;
+        if self.handle().release() {
+            Ok(())
+        } else {
+            Err("The assistant ended before it could begin the next job.".to_string())
+        }
+    }
+
+    fn settled(&mut self) -> Result<(), String> {
+        self.report = None;
+        let before = self.baseline.settled_manifest()?;
+        let after = Manifest::of_folder(self.grant.root())?;
+        self.report = Some(job_report(before, &after));
+        Ok(())
+    }
+
+    fn report(&self) -> Option<WindowReport> {
+        self.report.as_ref().map(WindowReport::of)
+    }
+
+    fn invalidate(&mut self) {
+        self.report = None;
+        self.handle().end();
     }
 }
 
@@ -232,21 +227,5 @@ impl Grant {
             folder: self.root().into(),
             read_only: false,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn the_machine_holds_exactly_the_granted_folder() {
-        let dir = crate::test_fixture::workshop("grant-machine");
-        let grant = Grant::open(dir.path()).expect("granted folder");
-        let spec = grant.machine_spec();
-        assert_eq!(spec.folder, grant.root());
-        assert!(
-            !spec.read_only,
-            "the agent works in the folder; the accept gate is what makes changes real"
-        );
     }
 }

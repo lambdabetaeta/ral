@@ -18,50 +18,9 @@ fn reply() -> FOValue {
 }
 
 #[test]
-fn fold_of_no_status_is_working() {
-    assert_eq!(ChildStatus::fold([]), ChildStatus::Working);
-    let records = [
-        Protocol::Cleared.into(),
-        Display::Answer {
-            text: "an answer is not a status".into(),
-        }
-        .into(),
-        Forensic::SessionEnded.into(),
-    ];
-    assert_eq!(ChildStatus::fold(&records), ChildStatus::Working);
-}
-
-#[test]
-fn fold_is_the_last_status_record() {
-    let mut records = Vec::new();
-    for status in [
-        ChildStatus::Replied(reply()),
-        ChildStatus::Working,
-        ChildStatus::Failed("ended before reporting".into()),
-    ] {
-        records.extend([
-            Protocol::Cleared.into(),
-            Forensic::Status {
-                status: status.clone(),
-            }
-            .into(),
-            Display::Answer {
-                text: "not a status".into(),
-            }
-            .into(),
-            Forensic::SystemNote {
-                text: "also not a status".into(),
-            }
-            .into(),
-        ]);
-        assert_eq!(ChildStatus::fold(&records), status);
-    }
-}
-
-#[test]
 fn a_status_record_round_trips() {
     for (status, wire_status) in [
-        (ChildStatus::Working, json!("working")),
+        (ChildStatus::Stopped, json!("stopped")),
         (ChildStatus::Replied(reply()), json!({ "replied": reply() })),
         (
             ChildStatus::Failed("cancelled".into()),
@@ -90,15 +49,100 @@ fn a_status_record_round_trips() {
 
 #[test]
 fn settlement_drops_the_value() {
-    assert_eq!(ChildStatus::Working.settlement(), None);
     assert_eq!(
         ChildStatus::Replied(reply()).settlement(),
-        Some(Settlement::Replied)
+        Settlement::Replied
     );
     assert_eq!(
         ChildStatus::Failed("cancelled".into()).settlement(),
-        Some(Settlement::Failed {
+        Settlement::Failed {
             reason: "cancelled".into(),
-        })
+        }
     );
+    assert_eq!(ChildStatus::Stopped.settlement(), Settlement::Stopped);
+}
+
+#[test]
+fn a_stopped_settlement_round_trips() {
+    let outcome = ChildStatus::Stopped.settlement();
+    let wire = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(wire, json!({ "outcome": "stopped" }));
+    assert_eq!(serde_json::from_value::<Settlement>(wire).unwrap(), outcome);
+}
+
+#[test]
+fn a_job_id_is_its_opening_commit_number() {
+    for commit in [0, 42, u64::MAX] {
+        let job = JobId::from(commit);
+        assert_eq!(job.get(), commit);
+        let wire = serde_json::to_value(job).unwrap();
+        assert_eq!(wire, json!(commit));
+        assert_eq!(serde_json::from_value::<JobId>(wire).unwrap(), job);
+    }
+}
+
+#[test]
+fn job_and_engine_forensics_round_trip() {
+    use ral_core::carrier::Severed;
+    use std::time::Duration;
+
+    for (forensic, wire_forensic) in [
+        (Forensic::JobOpened, json!("job_opened")),
+        (
+            Forensic::JobSettled {
+                job: JobId::from(42),
+                stopped: false,
+            },
+            json!({ "job_settled": { "job": 42, "stopped": false } }),
+        ),
+        (
+            Forensic::JobSettled {
+                job: JobId::from(42),
+                stopped: true,
+            },
+            json!({ "job_settled": { "job": 42, "stopped": true } }),
+        ),
+        (
+            Forensic::EngineSevered {
+                cause: Severed::Refused("version mismatch".into()),
+            },
+            json!({ "engine_severed": { "cause": { "Refused": "version mismatch" } } }),
+        ),
+        (
+            Forensic::EngineSevered {
+                cause: Severed::Closed("unexpected EOF".into()),
+            },
+            json!({ "engine_severed": { "cause": { "Closed": "unexpected EOF" } } }),
+        ),
+        (
+            Forensic::EngineSevered {
+                cause: Severed::Silent(Duration::from_millis(1500)),
+            },
+            json!({ "engine_severed": {
+                "cause": { "Silent": { "secs": 1, "nanos": 500_000_000 } }
+            } }),
+        ),
+        (
+            Forensic::EngineSevered {
+                cause: Severed::Faulted("invalid frame".into()),
+            },
+            json!({ "engine_severed": { "cause": { "Faulted": "invalid frame" } } }),
+        ),
+        (
+            Forensic::TeardownFailed {
+                failure: "engine end was not certified".into(),
+            },
+            json!({ "teardown_failed": { "failure": "engine end was not certified" } }),
+        ),
+    ] {
+        let record = Record::Forensic(forensic);
+        let line = commit_line(std::slice::from_ref(&record));
+        let wire: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(wire["commit"]["records"][0]["Forensic"], wire_forensic);
+        let (_, records) = parse_line(&line).expect("a forensic record's line must unseal");
+        let [Record::Forensic(back)] = records.as_slice() else {
+            panic!("a forensic record must round-trip as a forensic record");
+        };
+        assert_eq!(serde_json::to_value(back).unwrap(), wire_forensic);
+    }
 }

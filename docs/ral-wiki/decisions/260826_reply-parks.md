@@ -1,7 +1,10 @@
 ---
-status: accepted
+status: superseded
+superseded_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
 ---
 
+
+> Superseded by [[261029_an-agent-is-a-thread|an-agent-is-a-thread]].
 # Reply parks
 
 > Superseded, in part, by [[decisions/260827_agent-and-avatar|agent-and-avatar]]:

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
-generated_at_date: 2026-10-28
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
+generated_at_commit: e5a23909
+generated_at_date: 2026-10-29
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
 # Map: exarch
@@ -78,13 +78,17 @@ exit code.
   (`policy::for_invocation`, passing `sandbox::pinned_arg0()` for its self layer;
   → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the first root
-  [[map/exarch/agent|`Agent`]] via `Agent::root(RootConfig, RootEngine, provider)`
+  [[map/exarch/agent|agent]] through
+  `Host::found(RootConfig, RootEngine, provider)`
   — or, for the TUI under `--resume`, every live root of the run via
-  `Agent::resume` — the exarch binary uses `RootEngine::Identity`; a wire
+  `Host::resume` — the exarch binary uses `RootEngine::Identity`; a wire
   engine runs remotely, and synod reuses the same construction — and hands off to one frontend — the inline TUI or the
   pipe-friendly headless runner, selected explicitly by `--headless` or
   implicitly by `--prompt` (which refuses to resume a run with more than one
-  open session) — which shares the roots' one [[map/exarch/agent|`Fleet`]].
+  open session) — which observes the host's feed. Roots use `Admission::Free`; `Trunk::Returns`
+  selects headless, `Converses` the TUI. `--helper-idle` sets helpers' rest
+  timeout (default five hours). After the frontend returns, `Host::end` joins
+  the fleet and contributes teardown failures to the result.
 
 ## Accounts
 
@@ -338,7 +342,7 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   reply, and the idle wait for follow-ups. A headless root therefore gets
   `Reply` but never `Spawned`. `Agents` uses point/call examples: pass bindings,
   request a reply shape, assign disjoint write grants, wait without polling,
-  read, follow up, and cancel. **`Roles`** (`data/roles.md` plus one
+  read, follow up, stop an exchange, and dismiss an own helper. **`Roles`** (`data/roles.md` plus one
   `name: model` line per `--role`) follows `Agents`, iff the agent spawns and
   the human bound any.
   The detailed permissions, schemas, and fan-out examples live in
@@ -357,7 +361,7 @@ the per-agent index and optional sections still resolve from the stored base.
 - [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the attend loop
   (provider round-trips, tool-call batches with prompt-queue steering, context eviction,
   the nudge-retry policy, sub-agent fork), the `Role` each node is born with, the owned
-  hot-swappable provider, dynamic focus, and the life/work/exchange scope tree.
+  hot-swappable provider, dynamic focus, and the life/exchange scope tree.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry
   driver, prompt caching, usage and dollar accounting.
 - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level
@@ -400,17 +404,18 @@ and [[map/exarch/policy|policy]].
 
 ## Scheduled wakeups
 
-With `--allow-schedule`, the agent may schedule its own wakeups (`schedules`)
-— a cron expression or a one-shot `after <dur>`. A wakeup schedules the
-*agent*, not a worker: at its time a synthetic user item is posted to the
-agent's own inbox and delivered at a tool or exchange boundary, re-engaging
-its loop with no human present. Each schedule holds a weak mailbox for the
-work in which it was armed: abandoning that work makes its wakeup stale;
-`reply` and `/clear` also clear the registry. Stop leaves retirement to the
-callback, and Synod refuses scheduling outright. It is off by default — waking yourself
-indefinitely is real authority. The inbox/reaper mechanics live on the
-[[map/exarch/frontend|frontend]] and [[map/exarch/agent|agent]] pages; see
-[[decisions/260617_scheduled-wakeups|scheduled-wakeups]].
+With `--allow-schedule`, an agent may schedule wakeups through cron or
+`after <dur>`. Timers hold a weak shared mailbox address. Firing coalesces
+queued ids, updates or retires the registry entry and publishes under one
+mailbox transaction; registry epochs invalidate wakeups across clear/report.
+A conversing agent's schedules survive jobs and wake it from rest; a
+returning agent waits for them and clears them on reporting. Stop preserves
+schedules. Synod launches with scheduling and reset-resume off, as policy
+rather than a host-construction restriction. Scheduling is off by default:
+waking oneself indefinitely is authority.
+
+[[map/exarch/agent|Agent]] and [[map/exarch/frontend|frontend]] map the loop;
+[[decisions/260617_scheduled-wakeups|scheduled-wakeups]] records the feature.
 
 ## Where to look
 

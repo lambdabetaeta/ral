@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 3dbbe8f3
-verified_at_date: 2026-10-27
+verified_at_commit: e5a23909
+verified_at_date: 2026-10-29
 anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT, budget, retryable, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -312,14 +312,14 @@ Only exarch's terminal trunk then arms a wakeup of its own
 (`resume_on_reset`): `resume_at` replaces any `provider-reset` schedule with a
 one-shot at the reset, whose prompt says when requests were refused and until
 when, and to carry on. It is a wall-clock `Trigger::At`, and fires as an
-ordinary `Post::Wakeup`, a new exchange the log admits after
+ordinary `Input::Wakeup`, a new exchange the log admits after
 `quiesce(Aborted)`. The harness arms it, not the model, so the
-`allow_schedule` grant does not apply. Nobody else resumes: a headless run
-fails fast with the reset in its summary (`usage limit reached until Tue
-14:05`), synod's exchange ends on the refusal (Law B leaves nothing to wake
-it), and a child fails up to its parent, whose next request meets the hold
-itself. Every fork gets `resume_on_reset: false`, and `headless::SettledConversation::new`
-refuses a trunk that holds it.
+`allow_schedule` grant does not apply. CLI headless runs keep this policy off and fail honestly with the reset in
+the summary. Synod also launches with reset-resume and scheduling off; gated
+admission itself permits wakeups. Helpers do not arm provider-reset wakeups:
+`Agent::resumes_at_reset` admits roots only. A child's failure reaches its
+parent, whose next request meets the same account hold. This is launch/role
+policy, not a host-construction restriction.
 
 The refusal is also the account's or the model's, not only the turn's:
 `Rations::settle` keeps its `resets_at` in the per-account record

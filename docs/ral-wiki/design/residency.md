@@ -106,17 +106,16 @@ against it:
 - **warn** — the exit story: what survives, what is named. Shell exit
   names any worker handle still running first — it dies with the process,
   so naming it is its only farewell.
-- **cascade** — cancellation follows ownership edges regardless of
-  population. Cancelling a resident cancels what it owns: an agent's
-  teardown reaches its own workers through its shell's durable root (a
-  worker's cancel scope is a child of that root, so cancelling it walks the
-  ancestor chain with no extra edge), and reaches its schedules and
-  children through scope ancestry (`Role::Child`).
-- **provenance** — a `Mailbox` captures its destination and a vouching
-  scope. The inbox fences scoped posts under its lock before uptake:
-  child results and schedules carry work, worker batches carry engine
-  incarnation, and `/clear` cancels both. Cancellation is addressed, not
-  global: one tab's `/clear` leaves another tab's outstanding work alone.
+- **cascade** — ending an agent's life reaches its helper lives by scope
+  ancestry; teardown joins those helpers before retiring the engine and its
+  loose shell workers. Schedules clear on report or reset and their timers
+  retain only weak shared mailbox addresses.
+- **delivery** — mailbox admission controls rest; a helper's parent obligation
+  orders its report before parent settlement. Engine generations and schedule
+  epochs reject batches and wakeups across reset. Scheduled firing updates
+  its registry and enqueues atomically under the mailbox lock. One tab's
+  clear changes only its owned state and helper subtree
+  ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
 - **probe** — the `/resources` projection, over residents and accumulators
   alike.
 

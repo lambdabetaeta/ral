@@ -5,17 +5,31 @@
 use std::ops::ControlFlow;
 
 use crate::agent::Agent;
-use crate::bus::{Emitter, Read, Rewrite};
+use crate::bus::{Command, Emitter, Read, Rewrite};
 use crate::record::Forensic;
 
 impl Agent {
+    pub(super) fn command(&mut self, command: Command, emit: &Emitter) -> ControlFlow<()> {
+        match command {
+            Command::Read(read) => {
+                self.read(&read, emit);
+                ControlFlow::Continue(())
+            }
+            Command::Rewrite(rewrite) => self.rewrite(&rewrite, emit),
+        }
+    }
+
     /// Survey the context or open a session from it; it is left as it was.
-    pub(crate) fn read(&self, cmd: &Read, emit: &Emitter) {
+    pub(crate) fn read(&mut self, cmd: &Read, emit: &Emitter) {
         match cmd {
             Read::Hatch { memory, name } => {
                 match crate::agent::spawn::spawn_root(self, *memory, name.clone(), emit) {
                     Ok(root) => {
-                        self.note(format!("session {} opened (agent {})", root.name, root.id));
+                        self.note(format!(
+                            "session {} opened (agent {})",
+                            root.0.name,
+                            root.id()
+                        ));
                     }
                     Err(e) => self.note_error(&format!("could not open a session: {e}")),
                 }
@@ -34,7 +48,7 @@ impl Agent {
                 }
             }
             Rewrite::Evict => {
-                if self.log.borrow().context().can_evict() {
+                if self.body.log.context().can_evict() {
                     self.force_eviction();
                 } else {
                     self.note_error("cannot evict while tool results are pending");
@@ -46,8 +60,8 @@ impl Agent {
                 }
             }
             Rewrite::Close => {
-                self.handle.end();
                 self.recorder().emit_or_end(Forensic::SessionClosed);
+                self.handle.end();
                 return ControlFlow::Break(());
             }
         }

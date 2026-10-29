@@ -1,4 +1,4 @@
-//! One owner, one inbox, one cancellation tree.
+//! One owner, one mailbox, one cancellation tree.
 
 mod arrival;
 mod attend;
@@ -14,7 +14,9 @@ pub mod fleet;
 pub(crate) mod gauge;
 mod handle;
 pub(crate) mod index;
+pub(crate) mod loan;
 pub mod nudge;
+pub(crate) mod nursery;
 pub mod outcome;
 pub mod resources;
 pub mod roster;
@@ -25,6 +27,7 @@ pub(crate) mod spawn;
 pub(crate) mod testkit;
 pub(crate) mod tools;
 
+pub use crate::bus::Admission;
 #[cfg(test)]
 pub(crate) use build::TestTrunk;
 pub(crate) use build::fresh_id;
@@ -32,36 +35,54 @@ pub use build::{RootConfig, RootEngine, Trunk};
 pub use engine_lost::{EngineLost, EnginePhase};
 pub use factory::Factory;
 pub use handle::{AgentHandle, Ended};
-pub(crate) use shell::{Evaluated, LogCell, ReplyCell, SharedCell};
+pub(crate) use shell::Evaluated;
 
-use crate::agent::engine::Incarnation;
-use crate::agent::fleet::{Fleet, TenantId};
-use crate::bus::{Inbox, Queue};
+use crate::agent::engine::Engine;
+use crate::agent::fleet::{Fleet, Name};
+use crate::agent::loan::Loanable;
+use crate::agent::nursery::Nursery;
+use crate::bus::AgentMailbox;
 use crate::provider::Provider;
-use crate::record::{AgentId, Unavailable};
+use crate::record::{AgentId, AgentLog, Unavailable};
 use crate::schedule::ScheduleRegistry;
-use crate::shell_eval::PinDigests;
+use crate::shell_eval::PinDigest;
+use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
 use ral_core::sync::LockExt;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// An agent, owned by the one thread that attends it.
 pub struct Agent {
     handle: AgentHandle,
-    inbox: Inbox,
-    log: LogCell,
-    reply: ReplyCell,
-    pins: PinDigests,
-    schedules: ScheduleRegistry,
+    // Drop order: end life, join helpers, drop engine, release name.
+    pub(crate) mailbox: AgentMailbox,
+    pub(crate) body: Loanable<Body>,
+    engine: Option<Engine>,
+    generation: u64,
     pub(crate) fleet: Arc<Fleet>,
-    readings: Readings,
-    // Last: the tenancy ends the engine, then releases, after SessionEnded and the inbox.
-    pub(crate) engine: Incarnation,
+    _name: Name,
+}
+
+pub(crate) struct Body {
+    pub(crate) log: AgentLog,
+    pub(crate) state: State,
+}
+
+pub(crate) type Pins = BTreeMap<String, PinDigest>;
+pub(crate) struct State {
+    pub(crate) nursery: Nursery,
+    pub(crate) reply: Option<FOValue>,
+    pub(crate) owed: bool,
+    pub(crate) failures: Vec<String>,
+    pub(crate) pins: Pins,
+    pub(crate) schedules: ScheduleRegistry,
+    pub(crate) readings: Readings,
 }
 
 pub(crate) enum Role {
     Converses,
-    Headless,
+    Returns,
     Child { parent: AgentHandle },
 }
 impl Role {
@@ -71,11 +92,11 @@ impl Role {
     pub(crate) fn parent(&self) -> Option<&AgentHandle> {
         match self {
             Self::Child { parent } => Some(parent),
-            Self::Converses | Self::Headless => None,
+            Self::Converses | Self::Returns => None,
         }
     }
 }
-struct Readings {
+pub(crate) struct Readings {
     measure: Option<gauge::Measure>,
     gauges: gauge::Gauges,
     nudges: nudge::Nudges,
@@ -114,12 +135,6 @@ impl Agent {
     pub fn id(&self) -> AgentId {
         self.handle.id()
     }
-    pub(crate) fn tenant(&self) -> TenantId {
-        self.engine.tenant()
-    }
-    pub(crate) fn await_job(&self) -> Option<crate::bus::Job> {
-        self.inbox.await_job()
-    }
     pub fn log_dir(&self) -> &OwnDir {
         &self.handle.0.log_dir
     }
@@ -127,32 +142,25 @@ impl Agent {
         self.handle.run_dir()
     }
     pub fn severance(&self) -> Option<ral_core::carrier::Severed> {
-        self.engine.severed()
+        self.engine.as_ref().and_then(Engine::severed)
     }
-    pub(crate) fn abandon(&self, queue: Queue) -> Vec<String> {
-        let recalled = self.inbox.abandon(queue);
-        self.schedules.clear();
-        recalled
+    pub(crate) fn engine(&self) -> &Engine {
+        self.engine
+            .as_ref()
+            .expect("an attending agent owns its engine")
     }
     pub(crate) fn resumes_at_reset(&self) -> bool {
         self.handle.0.role.parent().is_none() && self.fleet.launch.resume_on_reset
     }
-    /// # Panics
-    /// Panics on reentrant log access.
     pub fn is_ready(&self) -> bool {
-        self.check_available().is_ok() && self.log.borrow().context().is_ready()
+        self.check_available().is_ok() && self.body.log.context().is_ready()
     }
     /// # Errors
     /// Recording failed: this session has ended; resuming the run reconstructs what was recorded.
-    ///
-    /// # Panics
-    /// Panics on reentrant log access.
     pub fn check_available(&self) -> Result<(), Unavailable> {
-        self.log.borrow().record_emitter().check_available()
+        self.body.log.record_emitter().check_available()
     }
-    /// # Panics
-    /// Panics on reentrant log access.
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
-        self.log.borrow().context().rendered()
+        self.body.log.context().rendered()
     }
 }

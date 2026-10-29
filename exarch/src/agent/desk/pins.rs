@@ -4,43 +4,34 @@ use crate::card::{Card, encode_card};
 use crate::shell_eval::{self, surface, surface::Surface};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
-use ral_core::sync::LockExt;
+use ral_core::shell::runtime::Error;
 
 use super::ExarchDesk;
 
 impl ExarchDesk {
-    /// `` `set ``/`` `clear `` — write or empty the register slot under
-    /// `key`: update the mirror `` `read ``/`` `list `` answer from, then draw
-    /// the forensic row and transient through [`surface::record`]. Answers
-    /// `()`.
-    pub(super) fn apply_pin(&self, key: String, card: Option<Card>) -> FOValue {
-        {
-            let mut m = self.services.pins.lock_ignore_poison();
-            match &card {
-                Some(card) => {
-                    m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
-                }
-                None => {
-                    m.remove(&key);
-                }
+    pub(super) fn apply_pin(&self, key: String, card: Option<Card>) -> Result<FOValue, Error> {
+        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        match &card {
+            Some(card) => {
+                body.state
+                    .pins
+                    .insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
+            }
+            None => {
+                body.state.pins.remove(&key);
             }
         }
-        let recorder = self.services.log.borrow().record_emitter();
         let surface = match card {
             Some(card) => Surface::Pin { key, card },
             None => Surface::Unpin { key },
         };
-        surface::record(&recorder, &surface);
-        FOValue::Unit
+        surface::record(&body.log.record_emitter(), &surface);
+        Ok(FOValue::Unit)
     }
 
-    /// `` `read `` — `` `some `` the card stored under `key` on this agent's
-    /// own register, canonically re-encoded, or `` `none `` on a miss.
-    /// Read-after-write within one run is sound: `` `set ``/`` `clear ``
-    /// write the mirror synchronously, on this same enquiry desk.
-    pub(super) fn pin_read(&self, key: &str) -> FOValue {
-        let m = self.services.pins.lock_ignore_poison();
-        match m.get(key) {
+    pub(super) fn pin_read(&self, key: &str) -> Result<FOValue, Error> {
+        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        Ok(match body.state.pins.get(key) {
             Some(digest) => FOValue::Variant {
                 label: "some".into(),
                 payload: Some(Box::new(encode_card(&digest.card))),
@@ -49,13 +40,11 @@ impl ExarchDesk {
                 label: "none".into(),
                 payload: None,
             },
-        }
+        })
     }
 
-    /// `` `list `` — the keys currently occupied on this agent's own
-    /// register, in `BTreeMap` order.
-    pub(super) fn pin_list(&self) -> FOValue {
-        let pins = self.services.pins.lock_ignore_poison();
-        Vec::from_iter(pins.keys().cloned()).encode()
+    pub(super) fn pin_list(&self) -> Result<FOValue, Error> {
+        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        Ok(Vec::from_iter(body.state.pins.keys().cloned()).encode())
     }
 }

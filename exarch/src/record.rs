@@ -85,6 +85,24 @@ impl fmt::Display for AgentId {
     }
 }
 
+/// The commit number of the record that opened a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JobId(u64);
+
+impl JobId {
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for JobId {
+    fn from(commit: u64) -> Self {
+        Self(commit)
+    }
+}
+
 /// Whether a child starts blank or inherits its parent's conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Memory {
@@ -249,45 +267,27 @@ pub enum Voice {
     Harness,
 }
 
-/// What a parent can know about a child; a child's log folds to its last.
+/// How a returning agent answered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildStatus {
-    Working,
     /// The value its parent reads with `` exarch-agents `read ``.
     Replied(FOValue),
     Failed(String),
+    Stopped,
 }
 
 impl ChildStatus {
-    /// What the parent hears: nothing while it works.
+    /// What the parent hears, without the reply value.
     #[must_use]
-    pub fn settlement(&self) -> Option<Settlement> {
+    pub fn settlement(&self) -> Settlement {
         match self {
-            Self::Working => None,
-            Self::Replied(_) => Some(Settlement::Replied),
-            Self::Failed(reason) => Some(Settlement::Failed {
+            Self::Replied(_) => Settlement::Replied,
+            Self::Failed(reason) => Settlement::Failed {
                 reason: reason.clone(),
-            }),
+            },
+            Self::Stopped => Settlement::Stopped,
         }
-    }
-
-    /// `Working` before the first status record, then the last: the oracle
-    /// the live status must agree with.
-    #[cfg(test)]
-    pub(crate) fn fold<'a>(records: impl IntoIterator<Item = &'a Record>) -> Self {
-        records
-            .into_iter()
-            .filter_map(|record| {
-                if let Record::Forensic(Forensic::Status { status }) = record {
-                    Some(status)
-                } else {
-                    None
-                }
-            })
-            .last()
-            .cloned()
-            .unwrap_or(Self::Working)
     }
 }
 
@@ -297,6 +297,7 @@ impl ChildStatus {
 pub enum Settlement {
     Replied,
     Failed { reason: String },
+    Stopped,
 }
 
 /// The records the view fold needs — cut, coalesced, and reduced *before*
@@ -418,6 +419,19 @@ pub enum Forensic {
     /// `/close`: the session is over for good, and a resume skips it.
     /// [`Self::SessionEnded`] is written on every drop and says no such thing.
     SessionClosed,
+    /// The agent left rest; this record's commit names the job.
+    JobOpened,
+    JobSettled {
+        job: JobId,
+        stopped: bool,
+    },
+    EngineSevered {
+        cause: ral_core::carrier::Severed,
+    },
+    /// An engine this agent stopped using ended without certified teardown.
+    TeardownFailed {
+        failure: String,
+    },
     /// A child's status changed.
     Status {
         status: ChildStatus,
@@ -543,7 +557,9 @@ pub enum Transient {
     /// step's last record has landed: a printer may take it as leave to drop
     /// whatever line each lane still has open, since no record will cover it.
     Boundary,
-    Died,
+    Died {
+        failures: Vec<String>,
+    },
     /// The durable copy already rides [`Protocol::AssistantMessage`].
     StopReason(String),
     /// Drawn, not recorded.
@@ -560,10 +576,12 @@ pub enum Transient {
     Unpin {
         key: String,
     },
-    /// A session's terminal recording failure, announced once by its owner,
-    /// or a channel elision marker: a fact about the plumbing, not about the
-    /// session, so it has no durable form.
+    /// A session's terminal recording failure, announced by its owner.
     Fault {
+        text: String,
+    },
+    /// Presentation output was elided by the bus.
+    Elided {
         text: String,
     },
 }

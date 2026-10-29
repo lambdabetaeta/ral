@@ -2,28 +2,29 @@
 //!
 //! Headless text and JSON both project the root's deliberate `reply` to `out`
 //! once the run finishes; progress, tool calls, cards, failures, and the run
-//! summary go to `err`. A conversational host drives [`SettledConversation`]
-//! with its own [`Sink`], seeing raw signals rather than rendered text.
+//! summary go to `err`.
 //! Recording is not this module's concern: every session writes its own
 //! record at the seam, through [`crate::record`].
 
 use crate::SessionInfo;
-use crate::agent::spawn::announce;
-use crate::agent::{Agent, AgentHandle};
-use crate::bus::{AgentOutcome, CANCELLED, Closed, FleetBus, Pumping, Sink, pump};
-pub use crate::bus::{Job, JobId};
+use crate::bus::Sink;
 use crate::card::{self, Card, Landed, Mark, Row, observation_card};
+use crate::host::Host;
 use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
 use crate::record::fault::Remedy;
-use crate::record::{self, Blocks, Delta, Record, Recorded, Settlement, Transient, Unavailable};
+use crate::record::{
+    self, Blocks, ChildStatus, Delta, Forensic, Record, Recorded, Settlement, Transient,
+};
 use crate::shell_eval::user_json;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::shell::runtime::{Observation, Observed};
-use std::collections::HashMap;
 use std::io::{self, Write};
-use std::time::Instant;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
+
+const POLL: Duration = Duration::from_millis(10);
 
 /// What the root agent's output looks like on stdout in headless mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -40,9 +41,7 @@ pub enum OutputFormat {
 pub struct Headless<'a> {
     out: &'a mut (dyn Write + Send),
     err: &'a mut (dyn Write + Send),
-    /// Read once from the bus's shared usage meter at the end of the run, so
-    /// it counts muted sub-agents too.  A `Forensic::UsageDelta` reaching the
-    /// sink is already in that meter and must not be added again.
+    /// Fleet usage is read once from the host, never added by the sink.
     usage: Usage,
     root_id: AgentId,
     started: Instant,
@@ -53,15 +52,13 @@ pub struct Headless<'a> {
     /// The root's deliberate `reply`, kept as a value until the consuming
     /// projection chooses ral text or [`user_json`].
     reply: Option<ral_core::data::FOValue>,
-    /// `pump` recovers from a worker unwind and returns the worker value as
-    /// normal, so without latching the panic here a crashed exchange would
-    /// report as a clean, empty success.
     panicked: bool,
     ended_with_newline: bool,
-    /// One view-fold memo per source agent — a fact's `Seq` is only unique
-    /// within its own session log, so root's records and a child's may not
-    /// share one fold.
-    folds: HashMap<AgentId, Blocks>,
+    fold: Blocks,
+    status: Option<ChildStatus>,
+    ended: bool,
+    fault: Option<String>,
+    terminal_failures: Vec<String>,
 }
 
 impl<'a> Headless<'a> {
@@ -81,7 +78,33 @@ impl<'a> Headless<'a> {
             reply: None,
             panicked: false,
             ended_with_newline: false,
-            folds: HashMap::new(),
+            fold: Blocks::default(),
+            status: None,
+            ended: false,
+            fault: None,
+            terminal_failures: Vec::new(),
+        }
+    }
+
+    fn finished(&self) -> bool {
+        self.status.is_some() || self.ended
+    }
+
+    fn verdict(&mut self) -> Result<(), String> {
+        if !self.terminal_failures.is_empty() {
+            return Err(self.terminal_failures.join("\n"));
+        }
+        match self.status.take() {
+            Some(ChildStatus::Replied(value)) => {
+                self.reply = Some(value);
+                Ok(())
+            }
+            Some(ChildStatus::Failed(reason)) => Err(reason),
+            Some(ChildStatus::Stopped) => Err("the agent was stopped".into()),
+            None => Err(self
+                .fault
+                .take()
+                .unwrap_or_else(|| "the agent ended without a reply".into())),
         }
     }
 
@@ -189,13 +212,22 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
 
 impl Sink for Headless<'_> {
     fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
-        self.step(id, rec);
+        if id != self.root_id {
+            return;
+        }
+        self.step(rec);
+        if let Record::Forensic(Forensic::Status { status }) = rec.value() {
+            self.status = Some(status.clone());
+        }
     }
 
     fn transient(&mut self, id: AgentId, t: &Transient) {
-        // Terminal recording failures and channel elisions draw from any source;
-        // everything else rides root's own register.
-        if id != self.root_id && !matches!(t, Transient::Fault { .. }) {
+        if id != self.root_id
+            && !matches!(
+                t,
+                Transient::Fault { .. } | Transient::Elided { .. } | Transient::Died { .. }
+            )
+        {
             return;
         }
         match t {
@@ -203,10 +235,21 @@ impl Sink for Headless<'_> {
                 self.last_stop = Some(raw.clone());
                 let _ = writeln!(self.err, "[stop: {raw}]");
             }
-            // A session's terminal recording failure, announced by its owner,
-            // or a channel elision marker.
             Transient::Fault { text } => {
                 let _ = writeln!(self.err, "{text}");
+                self.fault = Some(text.clone());
+            }
+            Transient::Elided { text } => {
+                let _ = writeln!(self.err, "{text}");
+            }
+            Transient::Died { failures } => {
+                self.panicked |= failures
+                    .iter()
+                    .any(|failure| failure.starts_with(crate::bus::WORKER_PANIC_PREFIX));
+                if id == self.root_id {
+                    self.terminal_failures.clone_from(failures);
+                    self.ended = true;
+                }
             }
             Transient::Resources { card, .. } => {
                 for line in card_stderr(card) {
@@ -220,7 +263,6 @@ impl Sink for Headless<'_> {
             | Transient::Token(_)
             | Transient::Thinking(_)
             | Transient::State(_)
-            | Transient::Died
             | Transient::Pin { .. }
             | Transient::Unpin { .. } => {}
         }
@@ -228,29 +270,29 @@ impl Sink for Headless<'_> {
 }
 
 impl Headless<'_> {
-    /// Step this source agent's own fold and print what the step opened.
+    /// Step the root's fold and print what the step opened.
     ///
     /// A block opened is a block to narrate; a block *grown* is prose or
     /// reasoning, the two lanes this projection draws nothing for at all, and
     /// a patched call's line count reaches stderr through no line either.
-    fn step(&mut self, id: AgentId, rec: &Recorded<Record>) {
-        let mut fold = self.folds.remove(&id).unwrap_or_default();
+    fn step(&mut self, rec: &Recorded<Record>) {
+        let mut fold = std::mem::take(&mut self.fold);
         let delta = fold.step(rec);
         if let (Delta::Opened(_) | Delta::Cleared, Some(block)) = (delta, fold.blocks().last()) {
-            self.print_block(id, block.kind());
+            self.print_block(block.kind());
         }
-        let _ = self.folds.insert(id, fold);
+        self.fold = fold;
     }
 
     /// One fold block, projected onto stderr as a rendering chosen fresh
     /// each time from the block kinds this frontend's own memo holds.
     #[allow(clippy::match_same_arms)]
-    fn print_block(&mut self, id: AgentId, kind: &record::BlockKind) {
+    fn print_block(&mut self, kind: &record::BlockKind) {
         use record::BlockKind as K;
         match kind {
             K::ToolCall {
                 tool, cmd, summary, ..
-            } if id == self.root_id => {
+            } => {
                 let _ = writeln!(self.err, "[tool: {tool}]");
                 if let Some(s) = summary {
                     for line in s.lines() {
@@ -268,7 +310,7 @@ impl Headless<'_> {
                 subject,
                 payload,
                 ..
-            } if id == self.root_id => {
+            } => {
                 let _ = writeln!(self.err, "[tool: {verb}]");
                 if let Some(s) = subject {
                     let _ = writeln!(self.err, "  {s}");
@@ -277,7 +319,6 @@ impl Headless<'_> {
                     let _ = writeln!(self.err, "  {line}");
                 }
             }
-            K::ToolCall { .. } | K::HarnessCall { .. } => {}
             // Sub-agent tokens never reach `out`, so this breadcrumb is the
             // only live sign of a child; its own log dir holds the rest.
             K::SubagentDone {
@@ -293,6 +334,9 @@ impl Headless<'_> {
                     }
                     Settlement::Failed { reason } => {
                         writeln!(self.err, "[agent {name} failed after {took}: {reason}]")
+                    }
+                    Settlement::Stopped => {
+                        writeln!(self.err, "[agent {name} stopped after {took}]")
                     }
                 };
             }
@@ -327,10 +371,8 @@ impl Headless<'_> {
                 self.print_card(&record::context_rows_card(rows));
             }
             K::Turn { id: turn } => {
-                if id == self.root_id {
-                    self.turns += 1;
-                    let _ = writeln!(self.err, "[turn {turn}]");
-                }
+                self.turns += 1;
+                let _ = writeln!(self.err, "[turn {turn}]");
             }
             K::Evicted { residue } => {
                 let _ = writeln!(self.err, "{}", residue.evicted_line());
@@ -410,16 +452,15 @@ impl Headless<'_> {
     }
 }
 
-/// Attend `session` to quiescence in a one-shot headless run from `seed`.
+/// Read the root's report in a one-shot headless run from `seed`.
 /// Text and JSON both write the root's deliberate reply to stdout once; all
 /// progress and operational output goes to stderr.
 ///
 /// # Errors
-/// Returns `Err` if no launch prompt was supplied, if recording fails, if the
-/// attend worker panics, if the sink's drive fails, or if the run ends without
-/// a `reply` (stopped, cancelled, or failed).
+/// Returns `Err` if no launch prompt was supplied, the agent ends without a
+/// reply, or writing the reply fails.
 pub fn run(
-    session: &mut Agent,
+    host: &Host,
     info: &SessionInfo<'_>,
     p: &Provider,
     seed: Option<String>,
@@ -439,41 +480,19 @@ pub fn run(
         p.model(),
         info.base
     );
-    let mut headless = Headless::new(session.id(), &mut stdout, &mut stderr);
-    // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
-    // any in-exchange producer share one queue.  It closes when the worker
-    // finishes, muting async children on the display — never in the trace.
-    let bus = FleetBus::per_exchange();
-    // A headless trunk is a returning agent that does not park, so `attend`
-    // runs this seeded work and returns once idle.
-    session.seed(prompt);
-    let root_id = session.id();
-    let recorder = session.recorder();
-    // An OS signal must reach the fleet's roots for as long as this one attends.
-    let _signals = crate::signals::face(&session.fleet);
-    let attended = pump(&mut headless, &bus, root_id, &recorder, |emit, _| {
-        session.attend(emit)
-    });
-    // The attend digest drives `is_error`/`error`; a panic arrives as `Ok(None)`.
-    // The root's deliberate `reply` stays on its agent.
-    headless.reply = session.handle().reply();
-    let mut r = match session.check_available() {
-        Ok(()) => pumped(attended).and_then(|outcome| match outcome {
-            AgentOutcome::Replied => Ok(()),
-            AgentOutcome::Stopped(s) => Err(s),
-            AgentOutcome::Cancelled => Err(CANCELLED.into()),
-            AgentOutcome::Failed(e) => Err(e),
-        }),
-        // The failure overrides the attended outcome, announced after it.
-        Err(failure) => {
-            let reason = failure.to_string();
-            let announcement = announced(&mut headless, &bus, root_id, &recorder, failure, |_| ());
-            failed(std::iter::once(reason).chain(announcement.err()))
+    let root = &host.roots()[0];
+    let mut headless = Headless::new(root.id(), &mut stdout, &mut stderr);
+    root.steer(prompt)
+        .map_err(|_| "the agent ended before it could take the prompt")?;
+    while !headless.finished() {
+        match host.feed().recv_timeout(POLL) {
+            Ok(sig) => headless.accept(sig),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
         }
-    };
-    // Summed at the emit seam, so it includes async children muted on this
-    // per-exchange bus whose usage never reached the sink.
-    headless.usage = bus.usage_total();
+    }
+    let mut r = headless.verdict();
+    headless.usage = host.usage();
     let elapsed = headless.started.elapsed();
     // A write failure here (e.g. a closed pipe) must not report as the clean
     // success `r` would otherwise carry — text and JSON both project the same
@@ -497,7 +516,7 @@ pub fn run(
     {
         r = Err(format!("writing reply: {e}"));
     }
-    let _ = writeln!(headless.err, "Agent log: {}", session.log_dir());
+    let _ = writeln!(headless.err, "Agent log: {}", root.log_dir());
     let _ = writeln!(
         headless.err,
         "[done] {} turns · {:.1}s · {}",
@@ -506,162 +525,6 @@ pub fn run(
         headless.usage
     );
     r
-}
-
-/// A pump's worker value, or why it has none.
-fn pumped<T>(ran: io::Result<Option<T>>) -> Result<T, String> {
-    match ran {
-        Ok(Some(value)) => Ok(value),
-        Ok(None) => Err("worker panicked".to_string()),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-/// Every failure, one per line, or success.
-fn failed(failures: impl IntoIterator<Item = String>) -> Result<(), String> {
-    let failures: Vec<_> = failures.into_iter().collect();
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("\n"))
-    }
-}
-
-/// Announce `failure` in a pump of its own, then `then` under it: the
-/// pumped termini conclude after attendance, however it ended.
-fn announced<S: Sink, R: Send>(
-    sink: &mut S,
-    bus: &FleetBus,
-    root: AgentId,
-    recorder: &record::Emitter,
-    failure: Unavailable,
-    then: impl Send + FnOnce(&Pumping) -> R,
-) -> Result<R, String> {
-    pumped(pump(sink, bus, root, recorder, move |emit, pumping| {
-        announce(&failure, emit);
-        then(pumping)
-    }))
-}
-
-/// A severed engine ends the conversation, not merely the job.
-fn attendance(session: &Agent, outcome: AgentOutcome) -> Result<(), String> {
-    match outcome {
-        AgentOutcome::Failed(reason) if session.severance().is_some() => Err(reason),
-        AgentOutcome::Replied
-        | AgentOutcome::Stopped(_)
-        | AgentOutcome::Cancelled
-        | AgentOutcome::Failed(_) => Ok(()),
-    }
-}
-
-/// The host-level unit has closed, either at fleet quiescence or after Stop.
-pub struct JobEnd {
-    pub id: JobId,
-    pub stopped: bool,
-    pub outcome: Result<(), String>,
-}
-
-/// A root-bound conversation whose jobs end at fleet quiescence.
-pub struct SettledConversation {
-    bus: FleetBus,
-    root: Agent,
-}
-impl SettledConversation {
-    /// # Errors
-    /// Refuses self-scheduling and reset-resume wakeups.
-    pub fn new(root: Agent) -> Result<Self, String> {
-        if root.fleet.launch.allow_schedule || root.fleet.launch.resume_on_reset {
-            return Err("A settled conversation ends each job only once the fleet quiesces, and an armed self-schedule or reset-resume wakeup may fire again with nothing to wait it out: refused rather than parked past quiescence".into());
-        }
-        Ok(Self {
-            bus: FleetBus::session(),
-            root,
-        })
-    }
-    pub fn handle(&self) -> AgentHandle {
-        self.root.handle()
-    }
-    pub fn severance(&self) -> Option<ral_core::carrier::Severed> {
-        self.root.severance()
-    }
-    pub fn run_dir(&self) -> &ral_core::own::OwnDir {
-        self.root.run_dir()
-    }
-    pub fn await_job(&self) -> Option<Job> {
-        self.root.await_job()
-    }
-    pub fn end_fleet(self) {
-        self.end_fleet_after(|| {});
-    }
-    fn end_fleet_after(self, waiting: impl FnOnce()) {
-        let census = self.root.fleet.census();
-        self.root
-            .fleet
-            .end(ral_core::process::CancelCause::Cancelled);
-        drop(self);
-        census.wait_empty_after(waiting);
-    }
-    /// Attend once; pump through ended helpers' certified teardown.
-    ///
-    /// # Panics
-    /// If the job belongs to another conversation.
-    pub fn run<S: Sink>(&mut self, job: Job, sink: &mut S) -> JobEnd {
-        let id = job.id();
-        assert!(
-            job.belongs_to(&self.root.handle().0.mailbox),
-            "this job belongs to another conversation; run it on the conversation that opened it"
-        );
-        let root = &mut self.root;
-        let recorder = root.recorder();
-        let _signals = crate::signals::face(&root.fleet);
-        let ended = pump(sink, &self.bus, root.id(), &recorder, |emit, pumping| {
-            let outcome = root.attend(emit);
-            let settle = || root.fleet.wait_settled(root.tenant(), pumping);
-            let first = settle();
-            let (settlement, stopped) = match job.close() {
-                Closed::Ran => (first, false),
-                // Stop may end helpers after the first census; `_held` closes after the second.
-                Closed::Stopped(_held) => (first.and_then(|()| settle()), true),
-            };
-            (outcome, stopped, settlement)
-        });
-        let (stopped, attended, settlement) = match pumped(ended) {
-            // Judged before any settlement sever, which would read as engine loss.
-            Ok((outcome, stopped, settlement)) => (stopped, attendance(root, outcome), settlement),
-            Err(why) => (false, Err(why), Ok(())),
-        };
-        // A recording failure overrides the attended outcome, as at every terminus.
-        let (verdict, settlement) = match root.check_available() {
-            Ok(()) => (attended, settlement),
-            // The helpers it ended settle in a second pump, whose census report
-            // supersedes the first.
-            Err(failure) => {
-                let reason = failure.to_string();
-                let (fleet, tenant) = (&root.fleet, root.tenant());
-                match announced(
-                    sink,
-                    &self.bus,
-                    root.id(),
-                    &recorder,
-                    failure,
-                    move |pumping| fleet.wait_settled(tenant, pumping),
-                ) {
-                    Ok(settled) => (Err(reason), settled),
-                    Err(why) => (failed([reason, why]), settlement),
-                }
-            }
-        };
-        if let Err(why) = &settlement {
-            root.engine
-                .transport()
-                .sever(ral_core::carrier::Severed::Faulted(why.clone()));
-        }
-        JobEnd {
-            id,
-            stopped,
-            outcome: failed(verdict.err().into_iter().chain(settlement.err())),
-        }
-    }
 }
 
 #[cfg(test)]

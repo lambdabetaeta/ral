@@ -7,6 +7,7 @@
 //! JSON over a socket, answered by the engine process in `wire/serve.rs`. Both
 //! hold their front-end side in one [`Ends`], so the severance law, the event
 //! stream and the session sink are stated once.
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
@@ -42,7 +43,7 @@ pub use wire::run_engine;
 /// Why no further frame will cross the protocol. Terminal: a severed transport
 /// never recovers, so a front-end that sees one ends its session.
 /// A front-end binds the life it ends with [`Transport::bind`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Severed {
     /// The engine refused `Attach`, in its own words: a protocol version
     /// mismatch, an unknown installer, a seed it could not apply.

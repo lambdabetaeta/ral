@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
-generated_at_date: 2026-10-28
+generated_at_commit: e5a23909
+generated_at_date: 2026-10-29
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -572,10 +572,10 @@ disk-caches both paths:
 - `cancel: &ral_core::process::Scope` is the **exchange-local** cancellation
   view, passed explicitly by `Agent::deliberate` through streaming,
   credential preparation and retry waits. Each child has its own exchange
-  under its life/work ancestry; there is no exarch token or reset.
+  under its life ancestry; there is no exarch token or reset.
   `wait_for_cancel` polls the scope, so its polling period bounds sampling
   latency, not arbitrary in-flight waits
-  ([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]],
+  ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]],
   [[map/exarch/agent|agent]]).
 
 ## Retry driver

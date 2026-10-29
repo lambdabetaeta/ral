@@ -31,9 +31,9 @@ static PANIC_BUILTINS: &[BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
 #[test]
 fn let_bound_context_read_does_not_echo_the_transcript() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     {
-        let mut log = session.log.borrow_mut();
+        let log = &mut session.body.log;
         log.append_user("material that must stay bound".into(), None, Voice::Human)
             .unwrap();
         log.append_assistant(
@@ -78,17 +78,24 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
                 .then(Reply::text("recovered")),
         ),
     );
-    session.seed("compute then crash".into());
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let _ = session.attend(&emit);
+    let provider = session.handle().current_provider();
+    let outcome = session.deliberate(
+        &session.mailbox.life().child(),
+        &provider,
+        Some(("compute then crash".into(), Voice::Human)),
+        None,
+        &emit,
+    );
+    assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     assert_eq!(
         probe_count(&session, ral_core::test_access::grant_depth),
         baseline_grant_depth,
         "the panicking call's grant frame must not leak into the next run"
     );
     assert!(
-        scope_has(&session, "a4_x"),
+        scope_has(&mut session, "a4_x"),
         "a completed binding survives a later panic"
     );
     assert!(session.is_ready());
@@ -108,7 +115,7 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
 
 #[test]
 fn large_binding_install_warns_on_its_own_run_stderr() {
-    let session = dressed_trunk_over(
+    let mut session = dressed_trunk_over(
         |_| {},
         |shell| {
             shell.arm_binding_lease(ral_core::shell::runtime::BindingLease {
@@ -140,7 +147,7 @@ fn large_binding_install_warns_on_its_own_run_stderr() {
 #[cfg(unix)]
 #[test]
 fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let result = session
@@ -163,7 +170,7 @@ fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
 #[cfg(unix)]
 #[test]
 fn the_wall_names_the_workers_that_survived_it() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let result = session
@@ -183,7 +190,7 @@ fn the_wall_names_the_workers_that_survived_it() {
 
 #[test]
 fn a_call_that_returns_says_nothing_about_its_workers() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let result = session
@@ -203,7 +210,7 @@ fn a_call_that_returns_says_nothing_about_its_workers() {
 #[cfg(unix)]
 #[test]
 fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let result = session
@@ -237,7 +244,7 @@ fn panic_after_prune_does_not_resurrect_binding() {
     for command in ["let panic_prune_x = 1", "let _spin1 = 0", "let _spin2 = 0"] {
         session.ral(&DurableRoot::default().child(), command, 5, &emit);
     }
-    assert!(!scope_has(&session, "panic_prune_x"));
+    assert!(!scope_has(&mut session, "panic_prune_x"));
     set_provider(
         &session,
         scripted(
@@ -251,19 +258,26 @@ fn panic_after_prune_does_not_resurrect_binding() {
                 .then(Reply::text("recovered")),
         ),
     );
-    session.seed("compute then crash".into());
-    let _ = session.attend(&emit);
-    assert!(scope_has(&session, "survives_y"));
-    assert!(!scope_has(&session, "panic_prune_x"));
+    let provider = session.handle().current_provider();
+    let outcome = session.deliberate(
+        &session.mailbox.life().child(),
+        &provider,
+        Some(("compute then crash".into(), Voice::Human)),
+        None,
+        &emit,
+    );
+    assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
+    assert!(scope_has(&mut session, "survives_y"));
+    assert!(!scope_has(&mut session, "panic_prune_x"));
 }
 
 #[test]
 fn boot_names_survive_past_the_idle_bound() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let boot_name = session
-        .engine
+        .engine()
         .read(|t| t.bindings())
         .unwrap()
         .into_iter()
@@ -279,7 +293,7 @@ fn boot_names_survive_past_the_idle_bound() {
         );
     }
     assert!(
-        scope_has(&session, &boot_name),
+        scope_has(&mut session, &boot_name),
         "baseline bindings never age out"
     );
 }

@@ -1,5 +1,6 @@
 ---
-status: active
+status: superseded
+superseded_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
 generated_at_commit: 0e83863c
 generated_at_date: 2026-10-29
 verified_at_commit: 0e83863c
@@ -7,6 +8,8 @@ verified_at_date: 2026-10-29
 anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Child, ChildStatus, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report, Unavailable, Emitter::bind, Agent::conclude, Tenancy::discard, Fatal, Transport::bind, Transport::unbind, Agent::halted]
 ---
 
+
+> Superseded by [[261029_an-agent-is-a-thread|an-agent-is-a-thread]].
 # One scope tree, one inbox
 
 > Amended by [[261029_a-child-is-a-status|a-child-is-a-status]]: child

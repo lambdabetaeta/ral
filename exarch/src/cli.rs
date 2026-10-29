@@ -7,6 +7,10 @@ use crate::prompt::EditScheme;
 use crate::provider::identity::Login;
 use crate::site::{Silent, site};
 use clap::{ArgGroup, Parser, Subcommand};
+use std::{sync::LazyLock, time::Duration};
+
+static HELPER_IDLE_DEFAULT: LazyLock<String> =
+    LazyLock::new(|| crate::schedule::fmt_duration(crate::agent::fleet::HELPER_IDLE));
 
 /// All flags are long-form only: short letters would collide, and there are
 /// few enough to spell out.
@@ -193,6 +197,15 @@ pub struct Cli {
     #[arg(long = "allow-schedule", conflicts_with = "chat")]
     pub allow_schedule: bool,
 
+    /// How long a helper agent rests, with nothing from its parent, before it ends.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = crate::schedule::parse_duration,
+        default_value = HELPER_IDLE_DEFAULT.as_str()
+    )]
+    pub helper_idle: Duration,
+
     /// Use vi-style keys to edit prompts in the terminal interface.
     ///
     /// The editor starts in insert mode. Without this option, it uses
@@ -306,6 +319,31 @@ mod tests {
     use super::{Cli, Command};
     use crate::provider::identity::Login;
     use clap::Parser;
+
+    #[test]
+    fn helper_idle_defaults_to_five_hours() {
+        let cli = Cli::try_parse_from(["exarch"]).expect("default helper idle");
+        assert_eq!(cli.helper_idle, std::time::Duration::from_hours(5));
+    }
+
+    #[test]
+    fn helper_idle_accepts_duration_units() {
+        for (text, seconds) in [("45s", 45), ("30m", 1800), ("2h", 7200), ("1d", 86_400)] {
+            let cli = Cli::try_parse_from(["exarch", "--helper-idle", text])
+                .expect("positive helper idle duration");
+            assert_eq!(cli.helper_idle, std::time::Duration::from_secs(seconds));
+        }
+    }
+
+    #[test]
+    fn helper_idle_rejects_missing_zero_malformed_and_overflowing_durations() {
+        assert!(Cli::try_parse_from(["exarch", "--helper-idle"]).is_err());
+        for text in ["0s", "0h", "10", "2x", "h", "", "18446744073709551615d"] {
+            let error = Cli::try_parse_from(["exarch", "--helper-idle", text])
+                .expect_err("invalid helper idle duration");
+            assert!(error.to_string().contains("--helper-idle"), "{error}");
+        }
+    }
 
     #[test]
     fn prompt_is_headless_mode() {

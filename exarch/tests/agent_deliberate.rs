@@ -3,7 +3,7 @@
 //! End-to-end tests for [`exarch::agent::Agent::deliberate`] driven through
 //! a scripted provider backend (`exarch::provider::Provider::scripted`).
 //! This is the composition the protocol machine (`event.rs`) is exercised
-//! under in production: `deliberate` renders the transcript, calls the
+//! on an agent's own thread: `deliberate` renders the transcript, calls the
 //! provider, commits the reply, runs the tool batch, drains tool-boundary
 //! steering, and continues until it reaches quiescence — the path
 //! `event.rs`'s unit tests never see.
@@ -26,9 +26,7 @@ use genai::chat::{ChatRole, ContentPart, ToolCall};
 use ral_core::process::DurableRoot;
 use std::sync::Arc;
 
-/// A scripted provider behind the `Arc` the attend loop threads — the same
-/// shape the live driver holds so an async `agent` worker could capture a
-/// clone.
+/// The provider snapshot one exchange reads before deliberating.
 fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
 }

@@ -20,7 +20,7 @@ pub(crate) fn dispatch(
     name: &str,
     id: String,
     input: &Value,
-    session: &Agent,
+    session: &mut Agent,
     exchange: &Scope,
     emit: &Emitter,
 ) -> Option<ToolResult> {

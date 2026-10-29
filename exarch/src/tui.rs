@@ -68,7 +68,7 @@ pub fn enter(run: &OwnDir) -> Result<TerminalGuard, String> {
 /// How long a dead subagent's tab survives in the bar, so its last frame is
 /// still readable before `tabs` ages it out.
 pub(super) const LINGER: Duration = Duration::from_secs(90);
-/// How long a leased child may sit idle-and-parked before its row demotes to a
+/// How long a resting helper may sit idle before its row demotes to a
 /// compact slate, in place in the spawn tree.
 ///
 /// A frontend rule read off the agent's own exchange clock: nothing agent-side

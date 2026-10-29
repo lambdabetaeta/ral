@@ -2,12 +2,11 @@
 //!
 //! No engine faces the process's signals itself.  ral's handlers raise ambient
 //! causes, and [`face`] forwards them to every live root of the fleet as that
-//! agent's own interrupt or cancel: OS signals reach every root.
+//! agent's Stop or end: OS signals reach every root.
 //!
-//! Esc and Ctrl-C are the other way round: a per-tab exchange interrupt on the
-//! one focused agent, never a cascade, never an agent's death, and they never
-//! tick ral's escalation ladder.  They route through
-//! [`crate::agent::AgentHandle::interrupt`], which cancels only its exchange.
+//! Esc and Ctrl-C instead stop the focused agent's exchange and recall queued
+//! human text. Helpers keep working; neither gesture ticks ral's escalation
+//! ladder.
 //!
 //! On Unix [`install`] points SIGINT at ral's *non-escalating*
 //! `interrupt_handler`, never the `term_handler` whose third delivery
@@ -35,13 +34,13 @@ use ral_core::process::{Ambient, AmbientForward};
 use std::sync::Arc;
 
 /// Forward this process's signals to every live root of `fleet` for as long
-/// as the guard lives: an interrupt unwinds each exchange, a shutdown ends it.
+/// as the guard lives: an interrupt stops each root, a shutdown ends the fleet.
 pub(crate) fn face(fleet: &Arc<Fleet>) -> AmbientForward {
     let fleet = Arc::clone(fleet);
     ral_core::process::forward_ambient(move |ambient| match ambient {
         Ambient::Interrupt => {
             for root in fleet.roots() {
-                root.interrupt();
+                let _ = root.stop_current();
             }
         }
         Ambient::Root(cause) => fleet.end(cause),
@@ -165,9 +164,15 @@ mod tests {
         let fleet = crate::agent::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
         trunk.steer("open an exchange".into()).unwrap();
-        let drawn = trunk.inbox.draw(|_| crate::bus::ParkMode::Quiesce).unwrap();
-        drawn.opening.unwrap().open();
-        let exchange = trunk.inbox.exchange();
+        let crate::bus::Next::Take { exchange, .. } = trunk.mailbox.next(&crate::bus::Rest {
+            owing: false,
+            lives: Vec::new(),
+            schedules: false,
+        }) else {
+            panic!("the queued prompt must mint an exchange");
+        };
+        assert!(trunk.mailbox.begin());
+        trunk.steer("queued human text".into()).unwrap();
         let _signals = face(&fleet);
 
         assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "raise SIGINT");
@@ -183,6 +188,7 @@ mod tests {
             trunk.is_live(),
             "a SIGINT interrupts the trunk, never ends it"
         );
+        assert_eq!(trunk.queued(), ["queued human text"]);
         assert!(
             !ral_core::process::escalation_pending(),
             "SIGINT routes into the non-escalating handler, never the force-exit ladder"

@@ -7,7 +7,7 @@
 //! reaches the sender without the writer, and channel order is log order by
 //! construction.  The publisher is *attachable* rather than fixed at
 //! construction because the log outlives any one bus — a session's log is
-//! built before the first frontend and survives every per-exchange bus a
+//! built before the first frontend and survives every bus a
 //! headless run mints.
 //!
 //! The channel is a fast path, never the record: a record appended with no
@@ -442,7 +442,7 @@ impl Log {
 
     /// Point this log's publisher at a fleet channel.  Called wherever a
     /// session's seam meets a run's bus (attend, deliberate, a direct
-    /// `Agent::ral`); re-attaching over a dead per-exchange channel is the
+    /// `Agent::ral`); re-attaching over a dead channel is the
     /// ordinary way a headless session's next exchange comes back on air.
     pub(super) fn attach(&self, sink: Box<dyn Publish>) {
         if let Ok(mut inner) = self.inner.lock_strict() {

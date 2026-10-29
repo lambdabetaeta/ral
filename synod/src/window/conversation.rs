@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use super::state::{Accounts, Handle, Held, Inlet, Owner, Review, Running};
 use crate::assistant::conversation::Conversation;
+use crate::assistant::gate::{self, Seat as _, Stage};
 use crate::folder::manifest::Stop;
 use crate::wire::{
     AgentStateDto, Choice, ConversationEvent, ConversationUpdate, JobId, ModelMenu, Opening,
@@ -50,6 +51,23 @@ impl Emitter {
         if let Some(handle) = held.owned_by(self.generation) {
             publish(&self.app, handle, update);
         }
+    }
+
+    pub(crate) fn failure(&self, message: String) {
+        publish_failure(
+            &self.slot,
+            &self.app.state::<Review>(),
+            self.generation,
+            |handle| {
+                publish(
+                    &self.app,
+                    handle,
+                    ConversationUpdate::Event {
+                        event: SynodEvent::Failure { message },
+                    },
+                );
+            },
+        );
     }
 
     #[allow(
@@ -150,6 +168,23 @@ impl Emitter {
             publish(&self.app, handle, ConversationUpdate::Ended { explained });
             *held = Owner::default();
         }
+    }
+}
+
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "generation lookup, report invalidation and publication must be atomic"
+)]
+fn publish_failure(
+    slot: &Mutex<Owner>,
+    review: &Review,
+    generation: u64,
+    publish: impl FnOnce(&Handle),
+) {
+    let held = slot.lock_ignore_poison();
+    if let Some(handle) = held.owned_by(generation) {
+        *review.0.lock_ignore_poison() = None;
+        publish(handle);
     }
 }
 
@@ -361,15 +396,25 @@ fn run_conversation(
     }
     emitter.preparing(Preparation::Starting);
 
-    let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        drive(&emitter, &holdings, &folder, choice, &baseline_stop)
-    }))
-    .unwrap_or(Err(false));
+    let ended = catch_driver(
+        || drive(&emitter, &holdings, &folder, choice, &baseline_stop),
+        || emitter.failure("The assistant's conversation driver stopped unexpectedly.".into()),
+    );
 
     // Ok means restart or close already vacated the slot; nothing remains to announce.
     if let Err(explained) = ended {
         emitter.ended(explained);
     }
+}
+
+fn catch_driver(
+    run: impl FnOnce() -> Result<(), bool>,
+    failure: impl FnOnce(),
+) -> Result<(), bool> {
+    panic::catch_unwind(panic::AssertUnwindSafe(run)).unwrap_or_else(|_| {
+        failure();
+        Err(true)
+    })
 }
 
 fn drive(
@@ -397,61 +442,112 @@ fn drive(
         match Conversation::begin(picked, holdings, choice, baseline_stop, report_walk) {
             Ok(begun) => begun,
             Err(e) => {
-                emitter.event(SynodEvent::Failure { message: e });
+                emitter.failure(e);
                 return Err(true);
             }
         };
 
     emitter.opening(opening);
     if !emitter.install(conversation.handle()) {
-        let _ = conversation.end();
-        return Ok(());
+        return finish_conversation(emitter, conversation, Ok(()));
     }
     if let Err(e) = conversation.settle_baseline() {
         if !emitter.current() {
-            let _ = conversation.end();
-            return Ok(());
+            return finish_conversation(emitter, conversation, Ok(()));
         }
-        emitter.event(SynodEvent::Failure { message: e });
-        let _ = conversation.end();
-        return Err(true);
+        emitter.failure(e);
+        conversation.invalidate();
+        return finish_conversation(emitter, conversation, Err(true));
     }
     emitter.event(SynodEvent::State {
         state: AgentStateDto::Ready,
     });
 
-    let ended = loop {
-        // The wait ends with the root's life: closed by the host, or ended by
-        // its engine's loss.
-        let Some(job) = conversation.await_job() else {
-            // Captured while the machine exists, and reported before it stops.
-            break conversation.capture_a_dead_engine().map_err(|message| {
-                emitter.event(SynodEvent::Failure { message });
-                true
-            });
-        };
-        let id = job.id().into();
-        if !emitter.job_began(id) {
-            break Ok(());
-        }
-        let end = conversation.run(job, &mut sink);
-        if !emitter.current() {
-            break Ok(());
-        }
-        if let Err(e) = &end.outcome {
-            emitter.event(SynodEvent::Failure { message: e.clone() });
-        }
-        emitter.job_done(
-            id,
-            end.stopped,
-            picked,
-            conversation.report().map(WindowReport::of),
-        );
-        if conversation.lost() {
-            break Err(true);
-        }
+    let stage = Seated {
+        emitter,
+        folder: picked,
     };
+    let ended = gate::run(&mut conversation, &stage, &mut sink);
+    finish_conversation(emitter, conversation, ended)
+}
 
-    let _ = conversation.end();
-    ended
+/// The emitter, bound to the folder its reports describe.
+struct Seated<'a> {
+    emitter: &'a Emitter,
+    folder: &'a Path,
+}
+
+impl Stage for Seated<'_> {
+    fn current(&self) -> bool {
+        self.emitter.current()
+    }
+
+    fn failure(&self, message: String) {
+        self.emitter.failure(message);
+    }
+
+    fn job_began(&self, job: JobId) -> bool {
+        self.emitter.job_began(job)
+    }
+
+    fn job_done(&self, job: JobId, stopped: bool, report: Option<WindowReport>) {
+        self.emitter.job_done(job, stopped, self.folder, report);
+    }
+}
+
+fn finish_conversation(
+    emitter: &Emitter,
+    conversation: Conversation,
+    result: Result<(), bool>,
+) -> Result<(), bool> {
+    match conversation.end() {
+        Ok(()) => result,
+        Err(message) => {
+            emitter.failure(message);
+            Err(true)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_withdraws_current_review_but_never_a_successors_review() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let slot = Mutex::new(Owner::Open(Some(Handle {
+            generation: 2,
+            attempt: "next".into(),
+            inlet: Inlet::Booting(vec![]),
+            join: std::thread::spawn(|| {}),
+            baseline_stop: Stop::default(),
+        })));
+        let review = Review(Mutex::new(Some(Held {
+            folder: PathBuf::from("folder"),
+            report: WindowReport {
+                files: vec![],
+                unreadable: vec![],
+            },
+        })));
+        let published = AtomicBool::new(false);
+        publish_failure(&slot, &review, 1, |_| {
+            published.store(true, Ordering::SeqCst);
+        });
+        assert!(!published.load(Ordering::SeqCst));
+        assert!(review.0.lock_ignore_poison().is_some());
+        publish_failure(&slot, &review, 2, |_| {
+            assert!(review.0.lock_ignore_poison().is_none());
+            published.store(true, Ordering::SeqCst);
+        });
+        assert!(published.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_driver_panic_publishes_failure_before_ending() {
+        let failed = std::cell::Cell::new(false);
+        let outcome = catch_driver(|| panic!("walk panicked"), || failed.set(true));
+        assert_eq!(outcome, Err(true));
+        assert!(failed.get());
+    }
 }

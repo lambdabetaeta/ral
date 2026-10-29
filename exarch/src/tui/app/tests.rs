@@ -1,8 +1,8 @@
 use super::*;
-use crate::agent::testkit::{TestAgent, TestAgentSpec, pop, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
 use crate::bus::Signal;
 use crate::card::Mark;
-use crate::record::{AgentState, Settlement};
+use crate::record::AgentState;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
 use crate::tui::status::StateSpan;
@@ -20,27 +20,67 @@ pub(in crate::tui) fn app() -> (App, BusReceiver, TestAgent) {
 
 /// [`app`] over a root announced as `born`.
 pub(in crate::tui) fn app_born(born: &Born) -> (App, BusReceiver, TestAgent) {
+    let (app, rx, root, _fleet) = app_in_fleet(born);
+    (app, rx, root)
+}
+
+/// [`app_born`], with the fleet a test adds helpers to.
+fn app_in_fleet(born: &Born) -> (App, BusReceiver, TestAgent, Arc<Fleet>) {
     let (_tx, rx) = crate::bus::channel();
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     let mut app = App::new(
         root.id(),
         born,
-        fleet,
+        fleet.clone(),
         UsageMeter::default(),
         prompt(false),
         Card(Vec::new()),
         mpsc::channel().0,
     );
     app.copy_sink = Some(Box::new(|_| Ok(clipboard::Copied::Whole)));
-    (app, rx, root)
+    (app, rx, root, fleet)
 }
 
-/// An open exchange on `root`, so an interrupt becomes observable.
-fn open_exchange(root: &TestAgent) -> ral_core::process::Scope {
+const REST: crate::bus::Rest = crate::bus::Rest {
+    owing: false,
+    lives: Vec::new(),
+    schedules: false,
+};
+
+fn job_commit(app: &mut App, id: AgentId, number: u64, fact: crate::record::Forensic) {
+    app.commit(
+        id,
+        &Commit::placeholder(
+            number,
+            crate::record::NonEmpty::one(crate::record::Record::Forensic(fact)),
+        ),
+    );
+}
+
+/// Keep the exchange lease alive while the UI addresses its recorded job.
+fn open_exchange(app: &mut App, root: &TestAgent) -> crate::bus::Lease {
     root.steer("busy".into()).unwrap();
-    crate::agent::testkit::open_next(&root.inbox);
-    root.inbox.exchange()
+    let crate::bus::Next::Take { exchange, .. } = root.mailbox.next(&REST) else {
+        panic!("the queued prompt starts an exchange");
+    };
+    assert!(root.mailbox.begin());
+    let job = root.status().job.expect("begin records a job");
+    job_commit(
+        app,
+        root.id(),
+        job.get(),
+        crate::record::Forensic::JobOpened,
+    );
+    exchange
+}
+
+fn apply_signal(app: &mut App, rx: &BusReceiver, signal: Signal) {
+    match signal {
+        Signal::Born(id, born) => app.born(id, &born),
+        Signal::Commit(id, commit) => app.commit(id, &commit),
+        Signal::Transient(id, transient) => app.transient(id, transient, rx),
+    }
 }
 
 /// A scripted bureau and a bare session: the handles a command is serviced against.
@@ -122,21 +162,29 @@ fn recording_failure_ends_only_its_tab_and_leaves_an_independent_root_usable() {
 }
 
 fn recording_failure_with_independent_root(poison: bool) {
+    use crate::agent::Trunk;
     use crate::agent::outcome::Outcome;
-    use crate::agent::spawn::{AsyncSpawn, hatch_root, spawn_async};
+    use crate::agent::spawn::hatch_root;
     use crate::agent::testkit::{scripted, trunk};
     use crate::bus::FleetBus;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Memory, Voice};
     use ral_core::process::DurableRoot;
 
-    let root = trunk(true);
+    let root = trunk(Trunk::Converses);
     let id = root.id();
     let fleet = root.fleet.clone();
     let mut other = hatch_root(&root, Memory::Amnemon, Some("independent".into()))
         .expect("an independent root");
     let bus = FleetBus::session();
     let emit = bus.emitter(id);
+    let born = Born {
+        log_dir: root.log_dir().clone(),
+        name: "main".into(),
+        parent: None,
+        resumed: None,
+        recorder: root.recorder(),
+    };
     let other_born = Born {
         log_dir: other.log_dir().clone(),
         name: other.handle().0.name.clone(),
@@ -144,25 +192,17 @@ fn recording_failure_with_independent_root(poison: bool) {
         resumed: None,
         recorder: other.recorder(),
     };
-    root.couple(&emit);
     if poison {
         root.recorder().poison_append();
     } else {
         root.recorder().fail_after(7);
     }
-    spawn_async(
-        root,
-        AsyncSpawn {
-            name: "main".into(),
-            prompt: Some("must be recorded before sending".into()),
-            resumed: None,
-        },
-        &emit,
-    )
-    .expect("the attended worker starts");
+    let thread = root
+        .launch(born, Some("must be recorded before sending".into()), &emit)
+        .expect("the owner thread starts");
     let rx = bus.rx();
     let Signal::Born(born_id, born) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
-        panic!("birth precedes the attended worker's output");
+        panic!("birth precedes the owner's output");
     };
     assert_eq!(born_id, id);
     let mut app = App::new(
@@ -180,31 +220,31 @@ fn recording_failure_with_independent_root(poison: bool) {
     loop {
         let signal = rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("recording failure must end attendance, not park Ready");
-        let died = matches!(&signal, Signal::Transient(agent, Transient::Died) if *agent == id);
-        match signal {
-            Signal::Born(agent, born) => app.born(agent, &born),
-            Signal::Commit(agent, commit) => app.commit(agent, &commit),
-            Signal::Transient(agent, transient) => {
-                if agent == id {
-                    assert!(!matches!(&transient, Transient::State(AgentState::Ready)));
-                    if let Transient::Fault { text } = &transient {
-                        faults += 1;
-                        fault = Some(text.clone());
-                    }
-                }
-                app.transient(agent, transient, rx);
-            }
+            .expect("the failed owner ends");
+        let died =
+            matches!(&signal, Signal::Transient(agent, Transient::Died { .. }) if *agent == id);
+        if let Signal::Transient(agent, Transient::Fault { text }) = &signal
+            && *agent == id
+        {
+            faults += 1;
+            fault = Some(text.clone());
         }
+        if died {
+            assert!(
+                fleet.resolve("main").is_none(),
+                "the name leaves before Died"
+            );
+            assert_fault_visible(&mut app, id, fault.as_deref().expect("fault precedes Died"));
+        }
+        apply_signal(&mut app, rx, signal);
         if died {
             break;
         }
     }
-
+    thread.join().unwrap();
     assert!(born.recorder.check_available().is_err());
     assert_eq!(faults, 1);
-    let fault = fault.expect("the terminal recording fault reaches the screen");
-    assert_fault_visible(&mut app, id, &fault);
+    assert_fault_visible(&mut app, id, &fault.unwrap());
     assert!(matches!(
         app.tabs.status(id).unwrap().state,
         StateSpan::Ended
@@ -229,27 +269,27 @@ fn recording_failure_with_independent_root(poison: bool) {
     ));
     other
         .check_available()
-        .expect("the other root's writer remains usable");
-    let context = format!("{:?}", other.rendered_messages());
-    assert!(context.contains("still usable"), "{context}");
+        .expect("the independent writer remains usable");
+    assert!(format!("{:?}", other.rendered_messages()).contains("still usable"));
     drop(other);
-    fleet.wait_empty();
+    assert!(fleet.is_empty());
 }
 
 #[test]
-fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
+fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
+    use crate::agent::Trunk;
     use crate::agent::outcome::Outcome;
-    use crate::agent::testkit::{inbox, scripted, set_provider, trunk};
-    use crate::bus::{FleetBus, Item, Next};
-    use crate::provider::ProviderError;
+    use crate::agent::testkit::{ral_call, scripted, set_provider, trunk};
+    use crate::bus::{FleetBus, Input, Next};
     use crate::provider::scripted::{Reply, Script};
-    use crate::record::{Display, Voice};
+    use crate::record::{ChildStatus, Display, Voice};
     use ral_core::process::DurableRoot;
+    use ral_core::test_helper::eventually;
 
     for poison in [false, true] {
-        let mut parent = trunk(true);
+        let mut parent = trunk(Trunk::Converses);
         let fleet = parent.fleet.clone();
-        let mut child = parent.fork_named("failing").unwrap();
+        let child = parent.fork_named("failing").unwrap();
         let id = child.id();
         let recorder = child.recorder();
         let handle = child.handle();
@@ -258,9 +298,10 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
             &child,
             scripted(
                 "test-model",
-                Script::new().then(Reply::error(ProviderError::Other(
-                    "ordinary refusal".into(),
-                ))),
+                Script::new().then(Reply::tool_calls(vec![ral_call(
+                    "reply",
+                    "exarch-agents `reply ()",
+                )])),
             ),
         );
         let bus = FleetBus::session();
@@ -280,31 +321,25 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
             Card(Vec::new()),
             mpsc::channel().0,
         );
-        let (arrived, finalizing) = mpsc::channel();
-        let (release, wait) = mpsc::channel();
-        let child_emit = bus.emitter(parent.id()).child(
-            id,
-            Born {
-                log_dir: child.log_dir().clone(),
-                name: "failing".into(),
-                parent: Some(parent.id()),
-                resumed: None,
-                recorder: child.recorder(),
-            },
+        let born = Born {
+            log_dir: child.log_dir().clone(),
+            name: "failing".into(),
+            parent: Some(parent.id()),
+            resumed: None,
+            recorder: recorder.clone(),
+        };
+        let thread = child
+            .launch(born, Some("reply then rest".into()), &bus.emitter(id))
+            .unwrap();
+        assert!(
+            eventually(Duration::from_secs(5), || {
+                let status = handle.status();
+                (status.job.is_none() && matches!(status.report, Some(ChildStatus::Replied(_))))
+                    .then_some(())
+            })
+            .is_some(),
+            "the helper replies and rests before its writer fails"
         );
-        child.seed("finish attendance first".into());
-        child
-            .engine
-            .publish_death_on_release(child_emit.fleet_sink());
-        let worker = std::thread::spawn(move || {
-            let outcome = child.attend(&child_emit);
-            arrived.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(5)).unwrap();
-            child.settle(outcome, &child_emit);
-        });
-        finalizing
-            .recv_timeout(Duration::from_secs(5))
-            .expect("attendance reaches the finalization boundary while still usable");
         recorder.check_available().unwrap();
         if poison {
             recorder.poison_append();
@@ -320,58 +355,46 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
         }
         let cause = recorder.check_available().unwrap_err().to_string();
         let bytes = std::fs::read(&path).unwrap();
-        release.send(()).unwrap();
-
         let rx = bus.rx();
         let mut faults = 0;
         let mut fault = None;
         loop {
             let signal = rx
                 .recv_timeout(Duration::from_secs(5))
-                .expect("the owner must retire");
-            match signal {
-                Signal::Born(agent, born) => {
-                    app.born(agent, &born);
+                .expect("the failed owner retires");
+            let died =
+                matches!(&signal, Signal::Transient(agent, Transient::Died { .. }) if *agent == id);
+            match &signal {
+                Signal::Born(agent, _) => {
+                    let agent = *agent;
+                    apply_signal(&mut app, rx, signal);
                     app.tabs.set_focus(agent);
+                    continue;
                 }
-                Signal::Commit(agent, commit) => app.commit(agent, &commit),
-                Signal::Transient(agent, transient) => {
-                    if agent == id {
-                        match &transient {
-                            Transient::Fault { text } => {
-                                faults += 1;
-                                assert!(text.contains(&cause), "{text}");
-                                fault = Some(text.clone());
-                            }
-                            Transient::Died => {
-                                assert_fault_visible(
-                                    &mut app,
-                                    id,
-                                    fault.as_deref().expect("fault precedes Died"),
-                                );
-                                assert!(!handle.is_live());
-                                let report =
-                                    pop(inbox(&parent)).expect("parent retirement precedes Died");
-                                assert!(
-                                    matches!(report, Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. })
-                                    if reason == cause)
-                                );
-                                app.transient(agent, transient, rx);
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    app.transient(agent, transient, rx);
+                Signal::Transient(agent, Transient::Fault { text }) if *agent == id => {
+                    faults += 1;
+                    assert!(text.contains(&cause), "{text}");
+                    fault = Some(text.clone());
                 }
+                _ => {}
+            }
+            if died {
+                assert_fault_visible(&mut app, id, fault.as_deref().expect("fault precedes Died"));
+                assert!(!handle.is_live());
+                assert!(
+                    matches!(parent.mailbox.next(&REST), Next::Take {
+                    input: Input::Child { id: child_id, status: ChildStatus::Replied(_), .. }, ..
+                } if child_id == id),
+                    "the already-owed reply precedes retirement"
+                );
+            }
+            apply_signal(&mut app, rx, signal);
+            if died {
+                break;
             }
         }
+        thread.join().unwrap();
         assert_eq!(faults, 1);
-        assert_fault_visible(&mut app, id, fault.as_deref().unwrap());
-        assert!(matches!(
-            app.tabs.status(id).unwrap().state,
-            StateSpan::Ended
-        ));
         assert!(app.tabs.lingering(id));
         assert_eq!(app.tabs.focused(), parent.id());
         let frozen = text(&mut app, id);
@@ -382,7 +405,6 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
             StateSpan::Ended
         ));
         assert_eq!(text(&mut app, id), frozen);
-        assert_eq!(recorder.check_available().unwrap_err().to_string(), cause);
         assert_eq!(
             recorder
                 .emit(Display::Answer {
@@ -390,7 +412,7 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
                 })
                 .unwrap_err()
                 .to_string(),
-            cause,
+            cause
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert!(app.is_steerable() && parent.handle().is_live());
@@ -411,76 +433,38 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
         assert!(parent.check_available().is_ok());
         assert!(format!("{:?}", parent.rendered_messages()).contains("still usable"));
         drop(parent);
-        fleet.wait_empty();
-        worker.join().unwrap();
+        assert!(fleet.is_empty());
     }
 }
 
 #[test]
-fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
-    use crate::agent::spawn::{AsyncSpawn, spawn_async};
-    use crate::agent::testkit::trunk;
+fn root_completion_not_directory_emptiness_certifies_the_tui_final_drain() {
+    use crate::agent::Trunk;
+    use crate::agent::nursery::Joined;
+    use crate::agent::spawn::hatch_root;
+    use crate::agent::testkit::{host, trunk};
     use crate::bus::FleetBus;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    struct EngineTeardown {
-        entered: mpsc::Sender<()>,
-        release: std::sync::Mutex<mpsc::Receiver<()>>,
-        complete: Arc<AtomicBool>,
-    }
-
-    impl ral_core::shell::runtime::DeferredSink for EngineTeardown {
-        fn deliver(&self, _values: Vec<ral_core::data::FOValue>) {}
-    }
-
-    impl Drop for EngineTeardown {
-        fn drop(&mut self) {
-            self.entered.send(()).unwrap();
-            self.release
-                .get_mut()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap();
-            self.complete.store(true, Ordering::Release);
-        }
-    }
+    use crate::record::Memory;
+    use ral_core::test_helper::eventually;
 
     for poison in [false, true] {
-        let root = trunk(true);
+        let control = trunk(Trunk::Converses);
+        let root = hatch_root(&control, Memory::Amnemon, Some("last".into())).unwrap();
+        let host = host(control);
+        host.roots()[0].end();
+        let fleet = host.fleet().clone();
         let id = root.id();
         let handle = root.handle();
-        let fleet = root.fleet.clone();
         let recorder = root.recorder();
         let bus = FleetBus::session();
-        let emit = bus.emitter(id);
-        let (entered, tearing_down) = mpsc::channel();
-        let (release, held) = mpsc::channel();
-        let complete = Arc::new(AtomicBool::new(false));
-        root.engine.install_raw(Arc::new(EngineTeardown {
-            entered,
-            release: std::sync::Mutex::new(held),
-            complete: complete.clone(),
-        }));
-        if poison {
-            recorder.poison_append();
-        } else {
-            recorder.fail_after(7);
-        }
-        spawn_async(
-            root,
-            AsyncSpawn {
-                name: "main".into(),
-                prompt: Some("recording must fail before provider work".into()),
-                resumed: None,
-            },
-            &emit,
-        )
-        .unwrap();
-        let rx = bus.rx();
-        let Signal::Born(born_id, born) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
-            panic!("birth precedes worker output");
+        let born = Born {
+            log_dir: root.log_dir().clone(),
+            name: "last".into(),
+            parent: None,
+            resumed: None,
+            recorder: recorder.clone(),
         };
-        assert_eq!(born_id, id);
+        let emit = bus.emitter(id).child(id, born.clone());
         let mut app = App::new(
             id,
             &born,
@@ -490,19 +474,50 @@ fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
             Card(Vec::new()),
             mpsc::channel().0,
         );
-        tearing_down.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Pause the root producer at the name-removal / terminal-publication seam.
+        let (arrived, before_terminal) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        handle
+            .steer("recording fails before provider work".into())
+            .unwrap();
+        if poison {
+            recorder.poison_append();
+        } else {
+            recorder.fail_after(7);
+        }
+        let terminal_recorder = recorder.clone();
+        fleet.adopt_root(Joined::new(std::thread::spawn(move || {
+            let mut teardown = root.run(&emit);
+            let failure = terminal_recorder.check_available().unwrap_err();
+            crate::agent::spawn::announce(&failure, &emit);
+            teardown.failures.push(failure.to_string());
+            arrived.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            emit.fleet_sink().transient(Transient::Died {
+                failures: teardown.failures.clone(),
+            });
+            teardown
+        })));
+        before_terminal
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert!(eventually(Duration::from_secs(5), || fleet.is_empty().then_some(())).is_some());
         assert!(!handle.is_live());
-        assert!(!fleet.is_empty(), "the only owner is still tearing down");
-        assert!(!complete.load(Ordering::Acquire));
+        assert!(
+            !host.is_finished(),
+            "an empty directory does not certify the final cue"
+        );
+        let rx = bus.rx();
         let mut signals = Vec::new();
         while let Ok(signal) = rx.try_recv() {
-            assert!(!matches!(&signal, Signal::Transient(_, Transient::Died)));
+            assert!(!matches!(
+                &signal,
+                Signal::Transient(_, Transient::Died { .. })
+            ));
             signals.push(signal);
         }
         release.send(()).unwrap();
-        fleet.wait_empty();
-        assert!(complete.load(Ordering::Acquire));
-        // The TUI's final uncapped, nonblocking drain after observing empty.
+        assert!(eventually(Duration::from_secs(5), || host.is_finished().then_some(())).is_some());
         while let Ok(signal) = rx.try_recv() {
             signals.push(signal);
         }
@@ -510,31 +525,27 @@ fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
         let mut faults = 0;
         let mut fault = None;
         for signal in signals {
-            match signal {
-                Signal::Born(agent, born) => app.born(agent, &born),
-                Signal::Commit(agent, commit) => app.commit(agent, &commit),
-                Signal::Transient(agent, transient) => {
-                    assert_eq!(agent, id);
-                    match &transient {
-                        Transient::Fault { text } => {
-                            faults += 1;
-                            fault = Some(text.clone());
-                        }
-                        Transient::Died => {
-                            deaths += 1;
-                            assert_fault_visible(
-                                &mut app,
-                                id,
-                                fault.as_deref().expect("the fault precedes Died"),
-                            );
-                        }
-                        _ => {}
-                    }
-                    app.transient(agent, transient, rx);
-                }
+            if matches!(&signal, Signal::Born(..)) {
+                continue;
             }
+            match &signal {
+                Signal::Transient(_, Transient::Fault { text }) => {
+                    faults += 1;
+                    fault = Some(text.clone());
+                }
+                Signal::Transient(_, Transient::Died { .. }) => {
+                    deaths += 1;
+                    assert_fault_visible(
+                        &mut app,
+                        id,
+                        fault.as_deref().expect("fault precedes Died"),
+                    );
+                }
+                _ => {}
+            }
+            apply_signal(&mut app, rx, signal);
         }
-        assert_eq!(deaths, 1, "empty census certifies the final cue is queued");
+        assert_eq!(deaths, 1);
         assert_eq!(faults, 1);
         assert!(recorder.check_available().is_err());
         assert!(matches!(
@@ -544,6 +555,10 @@ fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
         assert!(app.tabs.lingering(id));
         assert!(!app.is_steerable());
         assert_fault_visible(&mut app, id, fault.as_deref().unwrap());
+        assert_eq!(
+            host.end(),
+            [recorder.check_available().unwrap_err().to_string()]
+        );
     }
 }
 
@@ -568,44 +583,249 @@ fn live_vi_completion_escape_undo_and_redo_restore_the_partial_command() {
 }
 
 #[test]
-fn escape_and_ctrl_c_interrupt_only_the_focused_exchange() {
-    use crate::agent::testkit::open_next;
-    use crate::bus::{Item, Next};
+fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
+    use crate::bus::{Command, Input, Next, Read};
+    use crate::record::Forensic;
     use ral_core::process::CancelCause;
 
-    for key in [
+    for helper_focused in [false, true] {
+        for key in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let fleet = Fleet::for_test();
+            let root = test_agent(&fleet, TestAgentSpec::new("main")).unwrap();
+            let mut app = App::new(
+                root.id(),
+                &Born::for_test("main", None),
+                fleet.clone(),
+                UsageMeter::default(),
+                prompt(false),
+                Card(Vec::new()),
+                mpsc::channel().0,
+            );
+            let child = test_agent(
+                &fleet,
+                TestAgentSpec::child("child", &root, root.mailbox.life().child()),
+            )
+            .unwrap();
+            born(&mut app, child.id(), "child", root.id());
+            let root_exchange = open_exchange(&mut app, &root);
+            let child_exchange = open_exchange(&mut app, &child);
+            let (focused, exchange, untouched) = if helper_focused {
+                (&child, &child_exchange, &root_exchange)
+            } else {
+                (&root, &root_exchange, &child_exchange)
+            };
+            app.tabs.set_focus(focused.id());
+            let job = app.tabs.focused_job().expect("JobOpened addresses Stop");
+            focused.steer("one".into()).unwrap();
+            focused.post_command(Command::Read(Read::Resources));
+            focused.steer("two\n界\n".into()).unwrap();
+            app.prompt_state.set_prompt("unfinished draft");
+
+            app.key(key, &ctx());
+
+            assert_eq!(exchange.cause(), Some(CancelCause::Interrupted));
+            assert!(!untouched.is_cancelled());
+            assert!(root.is_live() && child.is_live(), "Stop ends no lives");
+            assert_eq!(focused.queued(), ["/resources"]);
+            assert_eq!(
+                app.prompt_state.prompt_text(),
+                "one\n\ntwo\n界\n\n\nunfinished draft"
+            );
+            assert_eq!(app.tabs.focused_job(), Some(job), "Stop is not settlement");
+            assert!(matches!(
+                focused.mailbox.next(&REST),
+                Next::Command(Command::Read(Read::Resources))
+            ));
+            assert!(matches!(
+                focused.mailbox.next(&REST),
+                Next::Settled { stopped: true }
+            ));
+            job_commit(
+                &mut app,
+                focused.id(),
+                job.get() + 1,
+                Forensic::JobSettled { job, stopped: true },
+            );
+            assert_eq!(app.tabs.focused_job(), None);
+            app.key(key, &ctx());
+            assert_eq!(
+                app.prompt_state.prompt_text(),
+                "one\n\ntwo\n界\n\n\nunfinished draft"
+            );
+
+            focused.steer("next".into()).unwrap();
+            let Next::Take {
+                input: Input::Human(text),
+                exchange: next,
+            } = focused.mailbox.next(&REST)
+            else {
+                panic!("a new exchange takes the next prompt");
+            };
+            assert_eq!(text, "next");
+            assert!(!next.is_cancelled());
+            assert!(child.is_live());
+        }
+    }
+}
+
+#[test]
+fn a_root_parked_on_a_working_helper_reads_as_waiting_on_agents() {
+    let (mut app, rx, root, fleet) = app_in_fleet(&Born::for_test("main", None));
+    let child = test_agent(
+        &fleet,
+        TestAgentSpec::child("child", &root, root.mailbox.life().child()),
+    )
+    .unwrap();
+    born(&mut app, child.id(), "child", root.id());
+    app.transient(
+        root.id(),
+        Transient::State(AgentState::WaitingOnAgents),
+        &rx,
+    );
+
+    let state = app.tabs.status(root.id()).unwrap().state;
+    assert!(matches!(
+        state,
+        StateSpan::Active {
+            state: AgentState::WaitingOnAgents,
+            ..
+        }
+    ));
+    assert!(state.pending(), "a wait on the fleet is outstanding work");
+    let rule: String =
+        crate::tui::status::rule_line(80, state, None, &Usage::default(), 0, None, "m")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+    assert!(rule.contains("waiting on agents"), "{rule}");
+}
+
+#[test]
+fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_continues_the_job() {
+    use crate::bus::{Input, Next};
+    use crate::record::{ChildStatus, Forensic};
+    use ral_core::process::CancelCause;
+
+    let (mut app, _rx, root, fleet) = app_in_fleet(&Born::for_test("main", None));
+    let helper = test_agent(
+        &fleet,
+        TestAgentSpec::child("helper", &root, root.mailbox.life().child()),
+    )
+    .unwrap();
+    born(&mut app, helper.id(), "helper", root.id());
+    let root_exchange = open_exchange(&mut app, &root);
+    let job = root.status().job.expect("the root's job is open");
+
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx());
+
+    assert_eq!(root_exchange.cause(), Some(CancelCause::Interrupted));
+    assert!(helper.is_live(), "Stop preserves helpers");
+    assert!(!helper.mailbox.life().is_cancelled());
+    helper.report(ChildStatus::Stopped);
+    let Next::Take {
+        input: Input::Child { id, .. },
+        exchange,
+    } = root.mailbox.next(&REST)
+    else {
+        panic!("the helper's report wakes the stopped root");
+    };
+    assert_eq!(id, helper.id());
+    assert!(!exchange.is_cancelled(), "the report runs a live exchange");
+    assert!(root.mailbox.begin());
+    assert_eq!(root.status().job, Some(job), "the same job continues");
+    assert!(matches!(
+        root.mailbox.next(&REST),
+        Next::Settled { stopped: true }
+    ));
+    job_commit(
+        &mut app,
+        root.id(),
+        job.get() + 1,
+        Forensic::JobSettled { job, stopped: true },
+    );
+    assert_eq!(app.tabs.focused_job(), None);
+}
+
+#[test]
+fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
+    use crate::bus::Next;
+    use crate::record::Forensic;
+
+    let (mut app, _, root) = app();
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    root.steer("waiting at rest".into()).unwrap();
+    app.prompt_state.set_prompt("draft");
+    app.key(esc, &ctx());
+    assert_eq!(root.queued(), ["waiting at rest"]);
+    let Next::Take { exchange, .. } = root.mailbox.next(&REST) else {
+        panic!("queued input");
+    };
+    assert!(root.mailbox.begin());
+    let job = root.status().job.unwrap();
+    app.key(esc, &ctx());
+    assert!(
+        !exchange.is_cancelled(),
+        "the UI has not observed JobOpened"
+    );
+    job_commit(&mut app, root.id(), job.get(), Forensic::JobOpened);
+    app.key(esc, &ctx());
+    assert!(exchange.is_cancelled());
+    assert!(matches!(
+        root.mailbox.next(&REST),
+        Next::Settled { stopped: true }
+    ));
+    job_commit(
+        &mut app,
+        root.id(),
+        job.get() + 1,
+        Forensic::JobSettled { job, stopped: true },
+    );
+    root.steer("future prompt".into()).unwrap();
+    app.key(esc, &ctx());
+    assert_eq!(root.queued(), ["future prompt"]);
+    assert_eq!(app.prompt_state.prompt_text(), "draft");
+}
+
+#[test]
+fn popup_and_overlay_own_escape_before_stop() {
+    use crate::record::{NonEmpty, Protocol, Record, Voice};
+
+    let (mut app, _, root) = app();
+    let exchange = open_exchange(&mut app, &root);
+    root.steer("queued".into()).unwrap();
+    app.prompt_state.set_prompt("/th");
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx());
+    assert!(app.prompt_state.menu().is_none());
+    assert!(!exchange.is_cancelled());
+    assert_eq!(root.queued(), ["queued"]);
+    assert_eq!(app.prompt_state.prompt_text(), "/th");
+
+    app.commit(
+        root.id(),
+        &Commit::placeholder(
+            2,
+            NonEmpty::one(Record::Protocol(Protocol::UserPrompt {
+                turn: 1,
+                text: "hello".into(),
+                voice: Voice::Human,
+            })),
+        ),
+    );
+    for cancel in [
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ] {
-        let fleet = Fleet::for_test();
-        let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
-        let mut app = App::new(
-            root.id(),
-            &Born::for_test("main", None),
-            fleet.clone(),
-            UsageMeter::default(),
-            prompt(false),
-            Card(Vec::new()),
-            mpsc::channel().0,
-        );
-        let child = test_agent(
-            &fleet,
-            TestAgentSpec::child("child", &root, root.inbox.mailbox()),
-        )
-        .expect("a child in the root's work");
-        let exchange = open_exchange(&root);
-
-        app.key(key, &ctx());
-
-        assert_eq!(exchange.cause(), Some(CancelCause::Interrupted));
-        assert!(root.is_live() && child.is_live());
-        root.steer("next".into()).unwrap();
-        assert!(matches!(
-            open_next(&root.inbox),
-            Next::Item(Item::Human(text)) if text == "next"
-        ));
-        assert!(!root.inbox.exchange().is_cancelled());
-        assert!(child.is_live());
+        rewind::rewind(&mut app);
+        assert!(app.overlay.is_some());
+        app.key(cancel, &ctx());
+        assert!(app.overlay.is_none());
+        assert!(!exchange.is_cancelled());
+        assert_eq!(root.queued(), ["queued"]);
+        assert_eq!(app.prompt_state.prompt_text(), "/th");
     }
 }
 
@@ -694,7 +914,7 @@ fn routing_boundaries_disarm_the_external_editor_prefix() {
 #[test]
 fn external_editor_chords_return_to_the_loop_without_submitting() {
     let (mut app, _, root) = app();
-    let exchange = open_exchange(&root);
+    let exchange = open_exchange(&mut app, &root);
     app.prompt_state.set_prompt("draft");
     let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
     assert!(app.key(ctrl('g'), &ctx()));
@@ -756,7 +976,7 @@ fn select_prompt(app: &mut App) -> String {
 fn every_copy_alias_preserves_failed_selection_and_retries_without_interrupting() {
     for chord in copy_chords() {
         let (mut app, _, root) = app();
-        let exchange = open_exchange(&root);
+        let exchange = open_exchange(&mut app, &root);
         let selected = select_prompt(&mut app);
         let expected = selected.clone();
         let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -788,7 +1008,7 @@ fn every_copy_alias_preserves_failed_selection_and_retries_without_interrupting(
 #[test]
 fn copy_chord_is_gated_like_right_click_copy() {
     let (mut app, _, root) = app();
-    let exchange = open_exchange(&root);
+    let exchange = open_exchange(&mut app, &root);
     let selected = select_prompt(&mut app);
     app.copy_sink = Some(Box::new(|_| panic!("copy is gated")));
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -815,7 +1035,7 @@ fn copy_chord_is_gated_like_right_click_copy() {
 #[test]
 fn right_click_copies_only_an_explicit_prompt_selection() {
     let (mut app, _, root) = app();
-    let exchange = open_exchange(&root);
+    let exchange = open_exchange(&mut app, &root);
     let selected = select_prompt(&mut app);
     app.copy_sink = Some(Box::new(|_| panic!("right click outside prompt")));
     left_mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 2, 1);
@@ -854,7 +1074,7 @@ fn right_click_does_not_steal_an_owned_drag() {
 #[test]
 fn prompt_mouse_selection_does_not_start_transcript_selection() {
     let (mut app, _, root) = app();
-    let exchange = open_exchange(&root);
+    let exchange = open_exchange(&mut app, &root);
     app.prompt_state.set_prompt("select this draft");
     mouse_frame(&mut app);
     let select = |app: &mut App| {
@@ -903,7 +1123,7 @@ fn history_search_cancel_preserves_the_draft_without_interrupting() {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ] {
         let (mut app, _, root) = app();
-        let exchange = open_exchange(&root);
+        let exchange = open_exchange(&mut app, &root);
         app.prompt_state.set_prompt("historical prompt");
         assert!(app.prompt_state.submit().is_some());
         app.prompt_state.set_prompt("unfinished draft");
@@ -952,8 +1172,10 @@ fn matrix_cursor_does_not_change_focus_until_enter() {
 }
 
 #[test]
-fn esc_leaves_the_matrix_without_moving_focus() {
+fn esc_leaves_the_matrix_without_moving_focus_or_stopping_the_job() {
     let (mut app, _, root) = app();
+    let exchange = open_exchange(&mut app, &root);
+    root.steer("queued".into()).unwrap();
     born(
         &mut app,
         AgentId::new(root.id().get() + 1),
@@ -967,6 +1189,8 @@ fn esc_leaves_the_matrix_without_moving_focus() {
     app.key(key(KeyCode::Esc), &ctx());
 
     assert!(!app.matrix_navigating(), "Esc leaves the surface");
+    assert!(!exchange.is_cancelled());
+    assert_eq!(root.queued(), ["queued"]);
     assert_eq!(
         app.tabs.focused(),
         root.id(),
@@ -1102,7 +1326,7 @@ fn a_dying_tab_admits_no_straggler() {
             })),
         ),
     );
-    app.transient(helper, Transient::Died, &rx);
+    app.transient(helper, Transient::Died { failures: vec![] }, &rx);
     let blocks = app
         .tabs
         .scrollback(helper)
@@ -1218,7 +1442,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
 /// tab has focus by then.
 #[test]
 fn rewind_acts_on_the_tab_it_was_opened_on() {
-    use crate::bus::{Next, Rewrite};
+    use crate::bus::{Command, Next, Rewrite};
     use crate::record::{Commit, NonEmpty, Protocol, Record, Voice};
 
     let fleet = Fleet::for_test();
@@ -1252,7 +1476,10 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
 
     assert!(app.overlay.is_none(), "Enter closes the overlay");
     assert!(
-        matches!(pop(&root.inbox), Some(Next::Rewrite(Rewrite::Rewind(1)))),
+        matches!(
+            root.mailbox.next(&REST),
+            Next::Command(Command::Rewrite(Rewrite::Rewind(1)))
+        ),
         "the rewind went to the tab it was opened on"
     );
 }
@@ -1460,7 +1687,7 @@ fn a_transcript_gesture_survives_keys() {
 fn editor_search_owns_enter_escape_and_external_editor_shortcuts() {
     for finish in [KeyCode::Enter, KeyCode::Esc] {
         let (mut app, _, root) = app();
-        let exchange = open_exchange(&root);
+        let exchange = open_exchange(&mut app, &root);
         app.prompt_state = prompt(true);
         app.prompt_state.set_prompt("searchable draft");
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
@@ -1483,4 +1710,46 @@ fn editor_search_owns_enter_escape_and_external_editor_shortcuts() {
         assert!(!exchange.is_cancelled());
         assert_eq!(app.prompt_state.prompt_text(), "searchable draft");
     }
+}
+
+#[test]
+fn stale_escape_reaches_vi_editor_but_ctrl_c_does_not() {
+    use crate::record::Forensic;
+
+    for esc in [true, false] {
+        let (mut app, _, root) = app();
+        app.prompt_state = prompt(true);
+        app.prompt_state.set_prompt("abc");
+        let stale = crate::record::JobId::from(999);
+        job_commit(&mut app, root.id(), stale.get(), Forensic::JobOpened);
+        let key = if esc {
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        } else {
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        };
+        app.key(key, &ctx());
+        app.key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &ctx(),
+        );
+        assert_eq!(
+            app.prompt_state.prompt_text(),
+            if esc { "ab" } else { "abcx" }
+        );
+    }
+}
+
+#[test]
+fn successful_stop_with_no_recalled_text_consumes_vi_escape() {
+    let (mut app, _, root) = app();
+    app.prompt_state = prompt(true);
+    app.prompt_state.set_prompt("abc");
+    let exchange = open_exchange(&mut app, &root);
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx());
+    assert!(exchange.is_cancelled());
+    app.key(
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        &ctx(),
+    );
+    assert_eq!(app.prompt_state.prompt_text(), "abcx");
 }

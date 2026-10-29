@@ -1,13 +1,19 @@
 ---
 status: active
-generated_at_commit: 0e83863c
+amended_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
+generated_at_commit: e5a23909
 generated_at_date: 2026-10-29
-verified_at_commit: 34266ac0
+verified_at_commit: e5a23909
 verified_at_date: 2026-10-29
-anchors: [ChildStatus, Settlement, Forensic::Status, Child, Child::has_replied, Report, Report::transition, Work, Mailbox::adopt, Mailbox::follow_up, Mailbox::child_status, Post::FollowUp, Inbox::deposit_reply, Inbox::retire, Inbox::resume, Report::resume, Kin, Lodging, ENDED_BEFORE_REPORTING, ENDED_BEFORE_ANSWERING, CANCELLED]
+anchors: [ChildStatus, Settlement, Forensic::Status, AgentAddress::report, Nursery::pending, Status::working]
 ---
 
 # A child is a status
+
+> Amended by [[261029_an-agent-is-a-thread|an-agent-is-a-thread]]: no
+> `Working` variant or shared child cell; reports are messages, posted only
+> while the helper mailbox owes its parent. Published status lives in that
+> mailbox; the historical mechanism below is superseded.
 
 **What a parent can know about a child is its latest state, so a child is a
 status, not a sum of owed answers.** This reverses the debt mechanism of
@@ -115,17 +121,14 @@ status, not a sum of owed answers.** This reverses the debt mechanism of
 
 ## Where
 
-- `exarch/src/record.rs`: `ChildStatus`, `Settlement`, `Forensic::Status`
-  (and the test-only `ChildStatus::fold`).
-- `exarch/src/bus/inbox.rs`: `Child`, `Child::has_replied`, `Report`,
-  `Report::{transition, resume}`, `Work`, `Post::FollowUp`,
-  `Mailbox::{adopt, follow_up, child_status}`,
-  `Inbox::{deposit_reply, retire, resume}`.
-- `exarch/src/bus/post.rs`: `ENDED_BEFORE_REPORTING`,
-  `ENDED_BEFORE_ANSWERING`, `CANCELLED`, `AgentOutcome::reason`.
-- `exarch/src/agent/{build,spawn,handle}.rs`, `agent/desk/agents.rs`:
-  construction (`Kin`, `Lodging`), retirement, parent delivery and reply
-  reading.
+- `exarch/src/record.rs`: `ChildStatus`, `Settlement`, `Forensic::Status`.
+- `exarch/src/bus/mailbox.rs`: `Status::working`, `AgentAddress::report`,
+  mailbox publication and parent obligation.
+- `exarch/src/agent/nursery.rs`: `Nursery::pending`, retained helper handles
+  and joins; `agent/desk/agents.rs`: newest own helper's `read`.
+- `exarch/src/agent/{attend,arrival,spawn}.rs`: recording reports, parent
+  uptake and terminal reporting/departure.
 
-[[design/agents|agents]], [[internals/session-record|session-record]],
-[[map/exarch/agent|agent]], [[map/exarch/frontend|frontend]].
+[[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] states the
+current publication and obligation laws; the reasoning above records the
+superseded shared-cell mechanism.

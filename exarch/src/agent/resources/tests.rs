@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::testkit::*;
-use crate::bus::Emitter;
+use crate::bus::{Emitter, Input};
 use crate::record::Voice;
 use ral_core::process::DurableRoot;
 
@@ -40,9 +40,9 @@ fn row<'a>(rows: &'a [ProbeRow], name: &str) -> &'a ProbeRow {
 fn context_survey_records_a_display_commit() {
     use crate::record::{Display, Record};
 
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     {
-        let mut log = session.log.borrow_mut();
+        let log = &mut session.body.log;
         log.append_user("one".into(), None, Voice::Human).unwrap();
         log.append_assistant(genai::chat::ChatMessage::assistant("answer"), vec![], None)
             .unwrap();
@@ -108,13 +108,13 @@ static RESOURCES_TEST_BUILTINS: [ral_core::shell::runtime::BuiltinEntry; 1] =
 /// The agent half surveys what this thread owns: the worker registry's
 /// running/settled split (counting `Stopping` against the running cap and
 /// `Ready` under settled with its retention note), the binding count,
-/// the inbox depths (counted, never drained), and the idle lease's
+/// the mailbox depths (counted, never drained), and the idle
 /// fallback when nothing has forked.
 #[test]
 fn resource_rows_survey_the_agents_accumulators() {
     RESOURCES_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
     RESOURCES_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
-    let session = dressed_trunk(|runtime| {
+    let mut session = dressed_trunk(|runtime| {
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         runtime.install_builtins(&RESOURCES_TEST_BUILTINS);
     });
@@ -148,7 +148,7 @@ fn resource_rows_survey_the_agents_accumulators() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !{
         let ws = session
-            .engine
+            .engine()
             .read(|t| t.workers())
             .expect("an identity engine never severs");
         ws.iter().any(|w| matches!(w.state, WorkerState::Running))
@@ -210,8 +210,8 @@ fn resource_rows_survey_the_agents_accumulators() {
         "shell-only work has not entered the model view"
     );
     let record_bytes = session
+        .body
         .log
-        .borrow()
         .dir()
         .open(crate::record::RECORD)
         .expect("the session record exists")
@@ -225,31 +225,38 @@ fn resource_rows_survey_the_agents_accumulators() {
     );
 
     assert_eq!(
-        row(&rows, "agents.lease").current,
-        AGENT_LEASE_IDLE.as_secs(),
-        "no live children: the lease row reports the full idle window"
+        row(&rows, "agents.idle").current,
+        crate::agent::fleet::HELPER_IDLE.as_secs(),
+        "no resting helpers: the idle row reports the full idle window"
     );
 
     // The settled spawn's deferred `Surface` batch may also sit queued —
     // a legitimate arrival, not the probe's doing — so stability
     // compares snapshots rather than pinning the whole vector.
-    session.handle().steer("open".into()).unwrap();
-    open_next(&session.inbox);
     session.handle().steer("hold".into()).unwrap();
-    session.inbox.nudge(1, "go on".into());
-    let depths_before = session.inbox.source_depths();
+    session
+        .mailbox
+        .address()
+        .post(Input::Message(crate::bus::AgentMessage {
+            from: crate::record::AgentId::new(90),
+            from_name: "peer".into(),
+            text: "go on".into(),
+            from_parent: false,
+        }))
+        .unwrap();
+    let depths_before = session.mailbox.source_depths();
     let rows = session
         .resource_rows()
         .expect("an identity engine never severs");
     assert_eq!(row(&rows, "inbox[user]").current, 1);
-    assert_eq!(row(&rows, "inbox[nudge]").current, 1);
+    assert_eq!(row(&rows, "inbox[message]").current, 1);
     assert_eq!(
         row(&rows, "inbox[agent]").current,
         0,
         "an idle source still emits its zero row: the row set is stable"
     );
     assert_eq!(
-        session.inbox.source_depths(),
+        session.mailbox.source_depths(),
         depths_before,
         "probing drained nothing"
     );

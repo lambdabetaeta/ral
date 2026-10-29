@@ -89,6 +89,23 @@ impl PromptState {
         true
     }
 
+    pub(super) fn restore_stopped_prompts(&mut self, prompts: Vec<String>) {
+        let mut prompts = prompts.into_iter();
+        let Some(mut text) = prompts.next() else {
+            return;
+        };
+        for prompt in prompts {
+            text.push_str("\n\n");
+            text.push_str(&prompt);
+        }
+        let draft = self.editor.text();
+        if !draft.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(&draft);
+        }
+        self.adopt_draft(&text);
+    }
+
     pub(super) fn paste(&mut self, s: &str) {
         let text = normalize_newlines(s);
         if let Some(search) = &mut self.search {

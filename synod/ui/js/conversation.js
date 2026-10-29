@@ -1,5 +1,5 @@
 import { $, show, screens } from "./dom.js";
-import { advance } from "./attempt.js";
+import { acceptEvent, acceptsUpdate, advance } from "./attempt.js";
 import { withdrawals } from "./withdrawals.js";
 import { state, confirmDialog } from "./core.js";
 import { startConversation, sendMessage, stopJob, recallQueued, openUrl, onConversationEvent } from "./ipc.js";
@@ -133,13 +133,13 @@ $("transcript").addEventListener("click", (e) => {
 });
 
 onConversationEvent(({ attempt, update }) => {
-  if (assistant.attempt !== attempt || assistant.phase === "ended") return;
+  if (!acceptsUpdate(assistant, attempt)) return;
   switch (update.type) {
     case "opening":
       if (transition({ attempt, type: "opening" })) onOpening(update.opening);
       break;
     case "event":
-      onSynodEvent(update.event);
+      acceptEvent(assistant, attempt, update.event, () => showReport(null), onSynodEvent);
       break;
     case "job_began":
       if (transition({ attempt, type: "job_began", job: update.job })) setStatus("Working…");

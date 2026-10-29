@@ -12,14 +12,13 @@ pub(crate) mod clip;
 pub(crate) mod report;
 pub mod surface;
 
-use crate::bus::{Emitter, Mailbox, Scoped};
-use crate::record::AgentId;
+use crate::bus::{AgentAddress, Input};
 use base64::Engine;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::data::FOValue;
 use ral_core::shell::runtime::{DeferredSink, TitlePolicy};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Admission cap on concurrently *running* workers per agent, enforced by core
@@ -84,35 +83,26 @@ impl PinDigest {
     }
 }
 
-/// A shared, session-owned register of pinned-state digests, written by the
-/// desk's `exarch-pins` family and read back by its `` `read ``/`` `list ``
-/// and by the boundary nudge.
-pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
-
-/// Deferred worker batches are vouched by the engine's `Incarnation` scope, on either carrier.
-struct InboxDeferred {
-    mailbox: Mailbox,
-    /// The **root** session's id: a spawn worker registers no tab of its own,
-    /// so its cards must land in the root scrollback.
-    root: AgentId,
+/// Deferred worker batches carry the engine generation that produced them.
+struct SurfacePoster {
+    address: AgentAddress,
+    generation: u64,
 }
 
-impl DeferredSink for InboxDeferred {
+impl DeferredSink for SurfacePoster {
     fn deliver(&self, values: Vec<FOValue>) {
-        self.mailbox.post(Scoped::Surface {
-            id: self.root,
+        let _ = self.address.post(Input::Surface {
+            generation: self.generation,
             values,
         });
     }
 }
 
-/// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
-/// Core clones it into each worker's run state, so a nested `spawn` inherits it
-/// and flushes at its own completion.
-pub(crate) fn deferred_sink(emit: &Emitter, mailbox: Mailbox) -> Arc<dyn DeferredSink> {
-    Arc::new(InboxDeferred {
-        mailbox,
-        root: emit.id(),
+/// Workers retain their engine's generation across later dispatches.
+pub(crate) fn deferred_sink(address: &AgentAddress, generation: u64) -> Arc<dyn DeferredSink> {
+    Arc::new(SurfacePoster {
+        address: address.clone(),
+        generation,
     })
 }
 

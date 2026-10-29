@@ -1,74 +1,11 @@
-//! The consuming end of the bus: the [`Sink`] presentation surface and
-//! [`drain_signals`], the one rule for when an exchange's signal loop ends.
-//!
-//! That rule is the worker's explicit `done` flag — never the channel emptying
-//! or disconnecting, since a worker (a `spawn`ed server, a background
-//! `agent`) may hold a sender clone forever. Both the headless [`Sink::drive`]
-//! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
+//! The consuming end of the bus: the [`Sink`] presentation surface.
 
-use super::{BusReceiver, Emitter, FleetBus, Signal, WORKER_PANIC_PREFIX};
-use crate::record::{AgentId, Born, Forensic, Record, Recorded, Transient};
-use std::io;
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
-use std::time::Duration;
+#[cfg(test)]
+use super::BusReceiver;
+use super::Signal;
+use crate::record::{AgentId, Born, Record, Recorded, Transient};
 
-/// How often a blocked drain wakes to re-check `done`. A worker's
-/// sender keeps the channel from ever disconnecting, so this timeout — not a
-/// disconnect — is what lets a finished worker be noticed.
-const DRAIN_POLL: Duration = Duration::from_millis(10);
-
-/// The verdict of one [`drain_signals`] pass: end the loop, wait for the next
-/// signal, or drain again at once.
-pub(crate) enum Pass {
-    Stop,
-    Idle,
-    More,
-}
-
-/// Drain up to `max` buffered signals through `handle`, then report where the
-/// loop stands.
-///
-/// `done` is latched *before* the first receive: a finished worker ends the
-/// pass even while background producers keep the channel full, where waiting
-/// for a momentarily-empty channel would wait forever. Its buffered batch still
-/// drains up to `max` — the caller renders a final frame from it — and the
-/// remainder is left for the caller, which is why the TUI's exit path runs one
-/// last uncapped pass. `None` `max` drains everything (headless renders nothing
-/// between signals); `Some(n)` bounds a pass so a token flood cannot starve the
-/// TUI's input poll, reporting [`Pass::More`]. Disconnect also stops.
-fn drain_signals(
-    rx: &BusReceiver,
-    done: &AtomicBool,
-    max: Option<usize>,
-    mut handle: impl FnMut(Signal),
-) -> Pass {
-    let finished = done.load(Ordering::Acquire);
-    let mut n = 0usize;
-    loop {
-        if max.is_some_and(|m| n >= m) {
-            return if finished { Pass::Stop } else { Pass::More };
-        }
-        match rx.try_recv() {
-            Ok(sig) => {
-                handle(sig);
-                n += 1;
-            }
-            Err(TryRecvError::Empty) => {
-                return if finished { Pass::Stop } else { Pass::Idle };
-            }
-            Err(TryRecvError::Disconnected) => return Pass::Stop,
-        }
-    }
-}
-
-/// One frontend: itself a fold over the one log, stepping its own memo per
-/// record and drawing the increment that step reports.
-///
-/// The default [`Self::drive`] — headless and the tests — blocks between
-/// drain passes; the TUI is not a `Sink`, but its `ui_loop` drains
-/// [`drain_signals`] on its render cadence, so completion is identical on both.
+/// A frontend fold over records and live signals.
 pub trait Sink {
     /// Each record of a [`Signal::Commit`], in order, within one `accept`:
     /// witnessed, since a fold is stepped by the record *and* its locus.
@@ -91,23 +28,6 @@ pub trait Sink {
     /// has a use for one.
     fn transient(&mut self, _id: AgentId, _t: &Transient) {}
 
-    /// # Errors
-    /// Propagates an implementation's surface write failure; the default
-    /// drain-and-render loop is infallible.
-    fn drive(&mut self, rx: &BusReceiver, done: &AtomicBool) -> io::Result<()> {
-        loop {
-            match drain_signals(rx, done, None, |sig| self.accept(sig)) {
-                Pass::Stop => return Ok(()),
-                // An uncapped pass never reports `More`.
-                Pass::Idle | Pass::More => match rx.recv_timeout(DRAIN_POLL) {
-                    Ok(sig) => self.accept(sig),
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return Ok(()),
-                },
-            }
-        }
-    }
-
     /// Route one raw signal to `fact`, `born` or `transient`.
     fn accept(&mut self, sig: Signal) {
         match sig {
@@ -120,60 +40,6 @@ pub trait Sink {
             Signal::Transient(id, t) => self.transient(id, &t),
         }
     }
-}
-
-/// Witness that output is being pumped on this thread; only `pump` makes one.
-pub(crate) struct Pumping(PhantomData<*const ()>);
-#[cfg(test)]
-impl Pumping {
-    pub(crate) fn for_test() -> Self {
-        Self(PhantomData)
-    }
-}
-
-/// Run `work` on a scoped thread over `bus`'s channel, drive `sink`, join.
-///
-/// A worker panic rides out through `recorder` as a [`Forensic::Error`] and
-/// `pump` returns `None`. The channel is `bus`'s, not `pump`'s, so it outlives
-/// the exchange whenever the bus does (the TUI's session bus, streaming a
-/// background `agent`); completion follows [`drain_signals`] regardless.
-///
-/// # Errors
-/// Propagates a failure from [`Sink::drive`].
-pub(crate) fn pump<S, R>(
-    sink: &mut S,
-    bus: &FleetBus,
-    root_id: AgentId,
-    recorder: &crate::record::Emitter,
-    work: impl Send + FnOnce(&Emitter, &Pumping) -> R,
-) -> io::Result<Option<R>>
-where
-    S: Sink,
-    R: Send,
-{
-    // Outside the scope, so the borrow shared by the worker thread and `drive`
-    // outlives the spawned thread's `'env`.
-    let done = AtomicBool::new(false);
-    let done_ref = &done;
-    let emit = bus.emitter(root_id);
-    std::thread::scope(|s| -> io::Result<Option<R>> {
-        let h = s.spawn(move || {
-            let pumping = Pumping(PhantomData);
-            let r =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit, &pumping)));
-            if let Err(p) = &r {
-                let msg = panic_msg(p);
-                let text = format!("{WORKER_PANIC_PREFIX}{msg}");
-                recorder.emit_or_end(Forensic::Error { text });
-            }
-            // Set before `emit` — and its sender clone — drops: the drain stops
-            // on this, not on the channel closing.
-            done_ref.store(true, Ordering::Release);
-            r.ok()
-        });
-        sink.drive(bus.rx(), done_ref)?;
-        Ok(h.join().ok().flatten())
-    })
 }
 
 /// Every [`Record`] a test's own channel has buffered, so a test asserts what

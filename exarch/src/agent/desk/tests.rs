@@ -1,11 +1,13 @@
 //! The desk's own tests.
 
 use super::*;
-use crate::agent::Trunk;
-use crate::agent::build::Kin;
+use crate::agent::loan::Loanable;
+use crate::agent::nursery::Nursery;
 use crate::agent::roster::summary;
-use crate::agent::testkit::{TestAgent, ral_call, wait_for_settle};
+use crate::agent::testkit::{TestAgent, ral_call};
+use crate::agent::{Body, Readings, Role, State};
 use crate::bus::FleetSink;
+use crate::bus::{Input, Next, Rest};
 use crate::bus::{Signal, channel};
 use crate::card::Card;
 use crate::enquiry::AgentInfo;
@@ -17,6 +19,7 @@ use crate::provider::{
     scripted::{Reply, Script},
 };
 use crate::record::AgentLog;
+use crate::record::ChildStatus;
 use crate::record::EditAuthority;
 use crate::record::{AgentId, Memory, Voice};
 use crate::record::{Display, Record, Transient};
@@ -24,7 +27,9 @@ use crate::schedule::{Trigger, parse_duration};
 use ral_core::data::datum::tag;
 use ral_core::shell::runtime::NurseryId;
 use regex::Regex;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 fn fresh_log() -> AgentLog {
     AgentLog::for_test(
@@ -35,38 +40,55 @@ fn fresh_log() -> AgentLog {
     .expect("session log")
 }
 
-/// A fresh fleet's trunk and the [`HostServices`] a desk running as it
-/// captures, alongside the fleet and its owner.
-fn services_with(
+fn with_fleet_desk<R>(
     fuel: u32,
     launch: crate::agent::fleet::Launch,
-) -> (HostServices, Arc<Fleet>, TestAgent) {
-    let fleet = Fleet::new(launch, crate::agent::fleet::AGENT_LEASE_IDLE);
+    f: impl FnOnce(ExarchDesk, Arc<Fleet>, TestAgent) -> R,
+) -> R {
+    let fleet = Fleet::new(launch);
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
     spec.fuel = fuel;
-    spec.kin = Kin::Trunk(Trunk::Headless);
+    spec.role = Role::Returns;
     let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
+    let mut owner = Loanable::new(Body {
+        log: fresh_log(),
+        state: State {
+            nursery: Nursery::default(),
+            reply: None,
+            owed: false,
+            failures: Vec::new(),
+            pins: BTreeMap::default(),
+            schedules: crate::schedule::ScheduleRegistry::new(),
+            readings: Readings::new(true),
+        },
+    });
     let (emit, _rx) = crate::bus::dummy_emitter();
-    let services = HostServices {
-        fleet: fleet.clone(),
-        kind: EngineKind::Identity(Arc::new(crate::boot::test_transport())),
-        mailbox: agent.inbox.mailbox(),
-        handle: (*agent).clone(),
-        pins: PinDigests::default(),
-        schedules: ScheduleRegistry::new(),
-        emit,
-        reply: ReplyCell::default(),
-        log: LogCell::new(fresh_log()),
-        acts: ActFragment::default(),
-    };
-    (services, fleet, agent)
+    owner.lend(|loan| {
+        let desk = ExarchDesk {
+            loan: loan.clone(),
+            call: Call {
+                handle: (*agent).clone(),
+                life: agent.mailbox.life(),
+                fleet: fleet.clone(),
+                kind: EngineKind::Identity(Arc::new(crate::boot::test_transport())),
+                emit,
+                acts: AtomicRefCell::new(Vec::new()),
+            },
+        };
+        let answer = f(desk, fleet, agent);
+        let mut body = loan.get().expect("the test still owns its dispatch");
+        let failures = body.state.nursery.dismiss_all();
+        assert!(failures.is_empty(), "helper teardown failed: {failures:?}");
+        answer
+    })
 }
 
-/// The base capture every desk below builds on, so growing [`HostServices`]
-/// means touching one literal, not three.
-fn desk() -> (ExarchDesk, TestAgent) {
-    let (services, _, agent) = services_with(3, crate::agent::fleet::Launch::for_test());
-    (ExarchDesk { services }, agent)
+fn with_desk<R>(f: impl FnOnce(ExarchDesk, TestAgent) -> R) -> R {
+    with_fleet_desk(
+        3,
+        crate::agent::fleet::Launch::for_test(),
+        |desk, _, agent| f(desk, agent),
+    )
 }
 
 fn append_prompt_and_answer(log: &mut AgentLog, prompt: &str, answer: &str) {
@@ -158,22 +180,56 @@ fn table(answer: FOValue) -> Vec<FOValue> {
     items
 }
 
-/// [`desk`] holding the self-wakeup grant, so a schedule test reaches past it.
-fn granted_desk() -> (ExarchDesk, TestAgent) {
-    let (services, _, agent) = services_with(
+fn with_granted_desk<R>(f: impl FnOnce(ExarchDesk, TestAgent) -> R) -> R {
+    with_fleet_desk(
         3,
         crate::agent::fleet::Launch {
             allow_schedule: true,
             ..crate::agent::fleet::Launch::for_test()
         },
-    );
-    (ExarchDesk { services }, agent)
+        |desk, _, agent| f(desk, agent),
+    )
 }
 
-/// A shared desk whose owner keeps child results observable.
-fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, TestAgent) {
-    let (services, fleet, agent) = services_with(fuel, crate::agent::fleet::Launch::for_test());
-    (Arc::new(ExarchDesk { services }), fleet, agent)
+fn with_spawnable_desk<R>(
+    fuel: u32,
+    f: impl FnOnce(Arc<ExarchDesk>, Arc<Fleet>, TestAgent) -> R,
+) -> R {
+    with_fleet_desk(
+        fuel,
+        crate::agent::fleet::Launch::for_test(),
+        |desk, fleet, agent| f(Arc::new(desk), fleet, agent),
+    )
+}
+
+fn next_input(mailbox: &crate::bus::AgentMailbox) -> Input {
+    let address = mailbox.address();
+    let (done, wait) = std::sync::mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if wait.recv_timeout(Duration::from_secs(10)).is_err() {
+            address.end(ral_core::process::CancelCause::TimedOut);
+        }
+    });
+    let next = mailbox.next(&Rest {
+        owing: true,
+        lives: Vec::new(),
+        schedules: false,
+    });
+    let _ = done.send(());
+    watchdog.join().expect("the input watchdog joins");
+    match next {
+        Next::Take { input, .. } => input,
+        _ => panic!("expected a queued input before timeout"),
+    }
+}
+
+fn wait_at_rest(helper: &crate::agent::AgentHandle) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while helper.status().working() {
+        assert!(helper.is_live(), "the helper ended before resting");
+        assert!(Instant::now() < deadline, "the helper never rested");
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 type Parked<R> = Box<dyn FnOnce(&ExarchDesk, NurseryId) -> R + Send>;
@@ -223,7 +279,7 @@ fn parked_by<R: Send + 'static>(
     source: &str,
     f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
 ) -> R {
-    let EngineKind::Identity(parent) = &desk.services.kind else {
+    let EngineKind::Identity(parent) = &desk.call.kind else {
         panic!("an identity desk parks in process")
     };
     let host = Arc::new(Parking {
@@ -247,7 +303,7 @@ fn parked_by<R: Send + 'static>(
 
 /// Whether the fork `id` still waits in the desk's parent's pen.
 fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
-    let EngineKind::Identity(parent) = &desk.services.kind else {
+    let EngineKind::Identity(parent) = &desk.call.kind else {
         panic!("an identity desk parks in process")
     };
     parent.adopt_parked(id).is_ok()
@@ -255,14 +311,15 @@ fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
 
 #[test]
 fn unknown_class_answers_the_extension_error() {
-    let (desk, _agent) = desk();
-    let err = desk
-        .handle(&FOValue::Variant {
-            label: "no-such-class".into(),
-            payload: None,
-        })
-        .expect_err("an unrecognised class must not answer Ok");
-    assert_eq!(err.message, "unrecognised enquiry class `no-such-class`");
+    with_desk(|desk, _agent| {
+        let err = desk
+            .handle(&FOValue::Variant {
+                label: "no-such-class".into(),
+                payload: None,
+            })
+            .expect_err("an unrecognised class must not answer Ok");
+        assert_eq!(err.message, "unrecognised enquiry class `no-such-class`");
+    });
 }
 
 /// Nesting the tag under the family must not open a silent hole one level
@@ -270,55 +327,58 @@ fn unknown_class_answers_the_extension_error() {
 #[test]
 fn unknown_tag_answers_the_extension_error_too() {
     for class in ["agents", "schedules", "pins", "context", "transcript"] {
-        let (desk, _agent) = desk();
-        let err = desk
-            .handle(&family_req(class, "no-such-tag", None))
-            .expect_err("an unrecognised tag must not answer Ok");
-        assert!(
-            err.message.starts_with(&format!(
-                "unrecognised tag in `` exarch-{class} `no-such-tag ``: "
-            )),
-            "got: {}",
-            err.message
-        );
+        with_desk(|desk, _agent| {
+            let err = desk
+                .handle(&family_req(class, "no-such-tag", None))
+                .expect_err("an unrecognised tag must not answer Ok");
+            assert!(
+                err.message.starts_with(&format!(
+                    "unrecognised tag in `` exarch-{class} `no-such-tag ``: "
+                )),
+                "got: {}",
+                err.message
+            );
+        });
     }
 }
 
 /// Names the expected shape rather than panicking or silently defaulting.
 #[test]
 fn non_variant_request_errors_didactically() {
-    let (desk, _agent) = desk();
-    let err = desk
-        .handle(&FOValue::Unit)
-        .expect_err("a non-variant request must not answer Ok");
-    assert!(
-        err.message.contains("must be a variant"),
-        "error must name the expected shape, got: {}",
-        err.message
-    );
+    with_desk(|desk, _agent| {
+        let err = desk
+            .handle(&FOValue::Unit)
+            .expect_err("a non-variant request must not answer Ok");
+        assert!(
+            err.message.contains("must be a variant"),
+            "error must name the expected shape, got: {}",
+            err.message
+        );
+    });
 }
 
 /// The audit is the model's only account of what survived an unwind, so it
 /// must name every committed act, in the order the call committed them.
 #[test]
 fn the_fragment_keeps_committed_acts_in_the_order_they_landed() {
-    let (desk, _agent) = granted_desk();
-    desk.ask(add_req("2h", "nightly", "wake"))
-        .expect("a valid schedule must succeed");
-    desk.ask(remove_req("nightly"))
-        .expect("unscheduling the label just armed must remove it");
-    desk.ask(reply_req(FOValue::String {
-        value: "done".into(),
-    }))
-    .expect("a returning agent's reply must succeed");
+    with_granted_desk(|desk, _agent| {
+        desk.ask(add_req("2h", "nightly", "wake"))
+            .expect("a valid schedule must succeed");
+        desk.ask(remove_req("nightly"))
+            .expect("unscheduling the label just armed must remove it");
+        desk.ask(reply_req(FOValue::String {
+            value: "done".into(),
+        }))
+        .expect("a returning agent's reply must succeed");
 
-    assert_eq!(
-        desk.services.acts.audit().as_deref(),
-        Some(
-            "audit: this call had already armed the wakeup 'nightly'; removed the wakeup \
+        assert_eq!(
+            desk.call.audit().as_deref(),
+            Some(
+                "audit: this call had already armed the wakeup 'nightly'; removed the wakeup \
              'nightly'; staged your reply; that work stands; do not repeat it.\n"
-        )
-    );
+            )
+        );
+    });
 }
 
 /// The rail parity a seventh act cannot break by construction: a landed
@@ -327,47 +387,48 @@ fn the_fragment_keeps_committed_acts_in_the_order_they_landed() {
 #[test]
 fn rail_draws_every_attempt_the_fragment_holds_only_what_landed() {
     let (tx, rx) = channel();
-    let (mut desk, _agent) = granted_desk();
-    desk.services
-        .log
-        .borrow_mut()
-        .record_emitter()
-        .attach(Box::new(FleetSink {
-            id: AgentId::new(0),
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        }));
-    desk.services.emit = Emitter::new(tx, AgentId::new(0));
+    with_granted_desk(|mut desk, _agent| {
+        desk.loan
+            .get()
+            .unwrap()
+            .log
+            .record_emitter()
+            .attach(Box::new(FleetSink {
+                id: AgentId::new(0),
+                tx: tx.downgrade(),
+                meter: crate::bus::UsageMeter::default(),
+            }));
+        desk.call.emit = Emitter::new(tx, AgentId::new(0));
 
-    desk.ask(add_req("1s", "nightly", "wake"))
-        .expect("a valid schedule must land");
-    desk.ask(message_req("nobody", "hi"))
-        .expect_err("a message to an unknown name must be refused");
+        desk.ask(add_req("1s", "nightly", "wake"))
+            .expect("a valid schedule must land");
+        desk.ask(message_req("nobody", "hi"))
+            .expect_err("a message to an unknown name must be refused");
 
-    let rows: Vec<(String, bool)> = crate::bus::drain_records(&rx)
-        .into_iter()
-        .filter_map(|rec| match rec {
-            Record::Display(Display::HarnessCall { verb, failed, .. }) => Some((verb, failed)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        rows.iter()
-            .map(|(v, f)| (v.as_str(), *f))
-            .collect::<Vec<_>>(),
-        vec![("schedule", false), ("message", true)],
-        "the rail draws one row per attempt, landed or refused"
-    );
+        let rows: Vec<(String, bool)> = crate::bus::drain_records(&rx)
+            .into_iter()
+            .filter_map(|rec| match rec {
+                Record::Display(Display::HarnessCall { verb, failed, .. }) => Some((verb, failed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows.iter()
+                .map(|(v, f)| (v.as_str(), *f))
+                .collect::<Vec<_>>(),
+            vec![("schedule", false), ("message", true)],
+            "the rail draws one row per attempt, landed or refused"
+        );
 
-    let audit = desk
-        .services
-        .acts
-        .audit()
-        .expect("the landed schedule owes an audit");
-    assert!(
-        audit.contains("armed the wakeup") && !audit.contains("message"),
-        "the fragment carries the landed schedule alone, got: {audit}"
-    );
+        let audit = desk
+            .call
+            .audit()
+            .expect("the landed schedule owes an audit");
+        assert!(
+            audit.contains("armed the wakeup") && !audit.contains("message"),
+            "the fragment carries the landed schedule alone, got: {audit}"
+        );
+    });
 }
 
 fn add_req(after: &str, label: &str, prompt: &str) -> Request {
@@ -392,3 +453,80 @@ mod pins;
 mod schedules;
 #[cfg(unix)]
 mod wire;
+
+#[test]
+fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
+    let mut agent = crate::agent::Agent::for_test("system").unwrap();
+    let EngineKind::Identity(transport) = agent.engine().kind() else {
+        panic!("the test dispatch runs in process")
+    };
+    let recorder = agent.recorder();
+    let call = Call {
+        handle: agent.handle(),
+        life: agent.mailbox.life(),
+        fleet: agent.fleet.clone(),
+        kind: agent.engine().kind(),
+        emit: crate::bus::dummy_emitter().0,
+        acts: AtomicRefCell::new(Vec::new()),
+    };
+    let (report, host) = agent.body.lend(|loan| {
+        let host = Arc::new(RunHost {
+            desk: ExarchDesk {
+                loan: loan.clone(),
+                call,
+            },
+            apply: SurfaceApplier::new(recorder),
+        });
+        let report = crate::shell_eval::run_shell(
+            &*transport,
+            "loan test",
+            "exarch-agents `reply 'returned state'",
+            5,
+            host.clone(),
+            None,
+        )
+        .unwrap();
+        (report, host)
+    });
+    assert!(
+        matches!(report, ral_core::protocol::Report::Ran { ending, .. } if ending.status() == 0)
+    );
+    assert_eq!(agent.body.state.reply, Some(text("returned state")));
+    let error = host
+        .enquire(Request::Agents(Agents::List).encode())
+        .unwrap_err();
+    assert_eq!(error.status, EnquiryError::no_desk().status);
+    assert_eq!(error.message, EnquiryError::no_desk().message);
+}
+
+#[test]
+fn an_unwinding_desk_dispatch_returns_the_mutated_body() {
+    let mut agent = crate::agent::Agent::for_test("system").unwrap();
+    let call = Call {
+        handle: agent.handle(),
+        life: agent.mailbox.life(),
+        fleet: agent.fleet.clone(),
+        kind: agent.engine().kind(),
+        emit: crate::bus::dummy_emitter().0,
+        acts: AtomicRefCell::new(Vec::new()),
+    };
+    let mut retained = None;
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        agent.body.lend(|loan| {
+            let desk = ExarchDesk {
+                loan: loan.clone(),
+                call,
+            };
+            desk.ask(reply_req(text("before panic"))).unwrap();
+            retained = Some(desk);
+            panic!("the dispatch panicked");
+        });
+    }));
+    assert!(panic.is_err());
+    assert_eq!(agent.body.state.reply, Some(text("before panic")));
+    let error = retained
+        .unwrap()
+        .ask(Request::Agents(Agents::List))
+        .unwrap_err();
+    assert_eq!(error.message, EnquiryError::no_desk().message);
+}

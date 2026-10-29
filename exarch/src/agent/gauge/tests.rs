@@ -87,7 +87,7 @@ fn disk_warning_unconfigured_never_walks_or_warns() {
         "unconfigured: never warns, ever"
     );
     assert!(
-        session.readings.gauges.disk_walked.is_none(),
+        session.body.state.readings.gauges.disk_walked.is_none(),
         "the early return never stamps a walk"
     );
 }

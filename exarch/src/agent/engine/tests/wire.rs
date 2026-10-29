@@ -1,13 +1,10 @@
 use super::super::*;
-use crate::agent::Trunk;
-use crate::agent::build::Kin;
-use crate::agent::desk::{ExarchDesk, HostServices, RunHost};
-use crate::agent::fleet::Fleet;
-use crate::agent::testkit::pop;
-use crate::bus::{Emitter, Inbox};
-use crate::record::{AgentId, AgentLog};
+use crate::agent::Agent;
+use crate::agent::desk::{Call, ExarchDesk, RunHost};
+use crate::bus::{Admission, AgentMailbox, Drained, Emitter, Input};
 use crate::shell_eval::surface::SurfaceApplier;
 use crate::test_helper::engine_over_socketpair;
+use atomic_refcell::AtomicRefCell;
 use ral_core::carrier::{Host, WireTransport};
 use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::protocol::channel::Liveness;
@@ -15,27 +12,6 @@ use ral_core::protocol::{EnquiryError, Report};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-/// Each log takes the next session id, as in `agent::desk`'s fixture, so
-/// two of them are never the same session to the wire.
-fn test_log() -> AgentLog {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    AgentLog::for_test(
-        AgentId::new(n),
-        "test",
-        &crate::record::RecordedAccount::for_test("test"),
-    )
-    .expect("session log")
-}
-
-/// The trunk a wire desk's handlers scope against — inert: this file's
-/// tests never spawn from it.
-fn test_trunk(fleet: &Arc<Fleet>) -> crate::agent::testkit::TestAgent {
-    let mut spec = crate::agent::testkit::TestAgentSpec::new("wire-trunk");
-    spec.kin = Kin::Trunk(Trunk::Headless);
-    crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
-}
 
 fn wire_engine(liveness: Liveness) -> (Engine, std::process::Child) {
     let (transport, child) = engine_over_socketpair(liveness);
@@ -47,25 +23,31 @@ fn wire_engine(liveness: Liveness) -> (Engine, std::process::Child) {
     )
 }
 
-fn wire_host_services(
+fn with_wire_host<R>(
+    parent: &mut Agent,
     emit: &Emitter,
-    parent: &crate::agent::testkit::TestAgent,
-    fleet: &Arc<Fleet>,
-) -> HostServices {
-    HostServices {
-        fleet: fleet.clone(),
+    run: impl FnOnce(Arc<dyn Host>) -> R,
+) -> R {
+    let call = Call {
+        fleet: parent.fleet.clone(),
         kind: EngineKind::Wire {
             engine: crate::boot::test_attach().0,
         },
-        mailbox: parent.inbox.mailbox(),
-        handle: (**parent).clone(),
-        schedules: crate::schedule::ScheduleRegistry::default(),
-        pins: crate::shell_eval::PinDigests::default(),
+        handle: parent.handle(),
+        life: parent.mailbox.life(),
         emit: emit.clone(),
-        reply: crate::agent::ReplyCell::default(),
-        log: crate::agent::LogCell::new(test_log()),
-        acts: crate::agent::desk::ActFragment::default(),
-    }
+        acts: AtomicRefCell::new(Vec::new()),
+    };
+    let recorder = parent.recorder();
+    parent.body.lend(|loan| {
+        run(Arc::new(RunHost {
+            desk: ExarchDesk {
+                loan: loan.clone(),
+                call,
+            },
+            apply: SurfaceApplier::new(recorder),
+        }))
+    })
 }
 
 /// A `Host` that only records the values it is surfaced, for the
@@ -131,24 +113,18 @@ fn wire_engine_run_round_trips_and_surfaces_a_value() {
 fn wire_engine_enquiry_is_answered_through_the_drain_loop() {
     let (engine, mut child) = wire_engine(Liveness::default());
     let (emit, _rx) = crate::bus::dummy_emitter();
-    let fleet = Fleet::for_test();
-    let trunk = test_trunk(&fleet);
-    let host: Arc<dyn Host> = Arc::new(RunHost {
-        desk: ExarchDesk {
-            services: wire_host_services(&emit, &trunk, &fleet),
-        },
-        apply: SurfaceApplier::new(crate::record::Emitter::none()),
-    });
-
-    let report = ral_core::carrier::dispatch_to_report(
-        engine.transport(),
-        ral_core::protocol::Run::captured(
-            "exarch-agents `list",
-            ral_core::source::SourceOrigin::named("<test>"),
-        ),
-        host,
-        None,
-    )
+    let mut parent = Agent::for_test("system").unwrap();
+    let report = with_wire_host(&mut parent, &emit, |host| {
+        ral_core::carrier::dispatch_to_report(
+            engine.transport(),
+            ral_core::protocol::Run::captured(
+                "exarch-agents `list",
+                ral_core::source::SourceOrigin::named("<test>"),
+            ),
+            host,
+            None,
+        )
+    })
     .expect("the engine must answer the dispatch with a Report");
 
     match report {
@@ -165,31 +141,17 @@ fn wire_engine_enquiry_is_answered_through_the_drain_loop() {
     let _ = child.wait();
 }
 
-/// A `spawn` worker settles after its spawning dispatch has
-/// already reported, so its batch has no dispatch to ride: it crosses on
-/// `Frame::Session` and reaches the `InboxDeferred` this engine installs,
-/// landing in `inbox` as a `Post::Surface`. Polled with no dispatch in
-/// flight, the shape a real front-end sees between tool calls.
+/// A deferred worker batch crosses the wire with no dispatch in flight.
 #[test]
 fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     let (engine, mut child) = wire_engine(Liveness::default());
-    let inbox = Inbox::new(DurableRoot::default().child(), None);
-    let (tx, _rx) = crate::bus::channel();
-    let fleet = Fleet::for_test();
-    let trunk = test_trunk(&fleet);
-    let root_id = trunk.id();
-    let emit = Emitter::new(tx, root_id);
-
-    engine.install_deferred(crate::shell_eval::deferred_sink(
-        &emit,
-        inbox.life_mailbox(),
-    ));
-    let host: Arc<dyn Host> = Arc::new(RunHost {
-        desk: ExarchDesk {
-            services: wire_host_services(&emit, &trunk, &fleet),
-        },
-        apply: SurfaceApplier::new(crate::record::Emitter::none()),
-    });
+    let mailbox = AgentMailbox::new(
+        DurableRoot::default().child(),
+        crate::record::Emitter::none(),
+        Admission::Free,
+    );
+    engine.install(&mailbox.address(), 17);
+    let host: Arc<dyn Host> = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
 
     let report = ral_core::carrier::dispatch_to_report(
         engine.transport(),
@@ -212,36 +174,23 @@ fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
         "the spawning statement itself must settle to Report::Ran {{ Ok }}, got {report:?}"
     );
 
-    // No dispatch is in flight from here on: the worker settles on its own
-    // and its batch must still reach `inbox` through the installed sink.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let item = loop {
-        if let Some(next) = pop(&inbox) {
-            break next;
+    let input = loop {
+        if let Some(Drained::Input(input)) = mailbox.drain().pop() {
+            break input;
         }
         assert!(
             Instant::now() < deadline,
-            "the settled worker's batch never reached the inbox"
+            "the settled worker's batch never reached the mailbox"
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    match item {
-        crate::bus::Next::Item(crate::bus::Item::Surface { id, values, .. }) => {
-            assert_eq!(id, root_id, "stamped with the root session id");
-            // Not a singleton: a `sleep 1` worker's batch also carries its
-            // own exec-summary record ahead of the completion marker, so
-            // this asserts on content rather than length.
-            assert!(
-                values.iter().any(
-                    |v| matches!(v, ral_core::data::FOValue::Variant { label, .. } if label == "done")
-                ),
-                "the batch must carry the worker's completion marker, got {values:?}"
-            );
-        }
-        other => {
-            panic!("expected the settled batch to surface as Item::Surface, got {other:?}")
-        }
-    }
+    let Input::Surface { generation, values } = input else {
+        panic!("a deferred surface batch")
+    };
+    assert_eq!(generation, 17);
+    assert!(values.iter().any(|value| matches!(value, ral_core::data::FOValue::Variant { label, .. } if label == "done")),
+        "the batch carries the worker's completion marker: {values:?}");
 
     let _ = child.kill();
     let _ = child.wait();
@@ -328,7 +277,9 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
         RootConfig {
             system: "system".into(),
             run_dir: (*run_dir).clone(),
-            trunk: Trunk::Embedded,
+            trunk: Trunk::Converses,
+            admission: Admission::Free,
+            helper_idle: crate::agent::fleet::HELPER_IDLE,
             tools: Toolset::offered(false),
             allow_schedule: false,
             resume_on_reset: false,

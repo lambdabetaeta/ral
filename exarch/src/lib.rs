@@ -22,6 +22,7 @@ pub mod clock;
 pub mod config;
 pub mod enquiry;
 pub mod headless;
+pub mod host;
 pub(crate) mod latch;
 pub mod library;
 pub mod net_policy;
@@ -41,8 +42,8 @@ pub mod tui;
 pub mod wallet;
 
 use crate::site::{Silent, site};
-use agent::Agent;
 use clap::Parser;
+use host::Host;
 use provider::state::{Opening, opening};
 use provider::{Bureau, Choice, Holdings, Pool};
 use ral_core::own::{self, OwnDir};
@@ -118,7 +119,7 @@ pub struct SessionInfo<'a> {
 /// The binary's entry point, lifted into the library so integration tests can
 /// link the whole crate.
 ///
-/// It parses the CLI, composes the capability lattice, builds an [`Agent`] +
+/// It parses the CLI, composes the capability lattice, builds a [`Host`] and
 /// [`provider::Provider`], and hands off to a frontend.
 ///
 /// # Errors
@@ -127,11 +128,11 @@ pub struct SessionInfo<'a> {
 /// capability policy, setting up the scratch/log directories, or the chosen
 /// frontend fails.
 pub fn run() -> Result<(), String> {
-    let c = cli::Cli::parse();
+    let mut c = cli::Cli::parse();
     let headless = c.is_headless();
     // Subcommands act and exit before the provider-availability check below,
     // since `login` is how the OpenAI provider becomes available.
-    if let Some(command) = c.command {
+    if let Some(command) = c.command.take() {
         return match command {
             cli::Command::Login {
                 service,
@@ -174,7 +175,7 @@ pub fn run() -> Result<(), String> {
             }
         };
     }
-    let seed = cli::load_seed(c.prompt, c.file)?;
+    let seed = cli::load_seed(c.prompt.take(), c.file.take())?;
 
     let store = wallet::Wallet::of(app::EXARCH, config::CONFIG_FILE, config::LABEL)?.prepare()?;
     let disk_warn_bytes = config::disk_warn_bytes()?;
@@ -228,7 +229,7 @@ pub fn run() -> Result<(), String> {
     let (_mode, terminal, _warn) = ral_core::io::terminal::TerminalState::probe_from_env();
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
-    let (run, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume)?;
+    let (run, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume.take())?;
     if headless && resumes {
         let open = record::AgentLog::live_roots(&run.dir("sessions")?)
             .map_err(|e| format!("could not inspect {run}: {e}"))?
@@ -277,45 +278,25 @@ pub fn run() -> Result<(), String> {
         &state_dir,
         &provider::state::State::of(&provider, &available),
     );
-    let config = agent::RootConfig {
+    let config = root_config(
+        &c,
         system,
-        run_dir: run.clone(),
-        // An attended trunk parks for the human; a headless one terminates
-        // once its seeded work is idle.
-        trunk: if headless {
-            agent::Trunk::Headless
-        } else {
-            agent::Trunk::Attended
-        },
-        tools: if c.chat {
-            provider::Toolset::default()
-        } else {
-            provider::Toolset::offered(c.thinking_tool)
-        },
-        allow_schedule: c.allow_schedule,
-        resume_on_reset: !headless,
+        run.clone(),
         disk_warn_bytes,
-        fuel: agent::SPAWN_FUEL,
         search,
-        factory: None,
-        bureau: Arc::clone(&bureau),
+        &bureau,
         roles,
-    };
+    );
     let engine = agent::RootEngine::Identity {
         scratch,
         cwd: launch_cwd.clone(),
         grants: invocation.stack,
         terminal,
     };
-    let roots: Vec<_> = if resumes {
-        Agent::resume(config, engine, &provider).map(|roots| {
-            roots
-                .into_iter()
-                .map(|(root, resumed)| (root, Some(resumed)))
-                .collect()
-        })
+    let host = if resumes {
+        Host::resume(config, engine, &provider)
     } else {
-        Agent::root(config, engine, Arc::clone(&provider)).map(|root| vec![(root, None)])
+        Host::found(config, engine, Arc::clone(&provider))
     }
     .map_err(|e| format!("session init: {e}"))?;
 
@@ -327,16 +308,64 @@ pub fn run() -> Result<(), String> {
         restrict_files: &invocation.restricts,
         cwd: &launch_cwd,
     };
-    if headless {
-        let [(mut session, _)] =
-            <[_; 1]>::try_from(roots).map_err(|_| "a headless run holds exactly one root")?;
-        headless::run(&mut session, &info, &provider, seed, c.output_format)
+    let result = if headless {
+        if host.roots().len() == 1 {
+            headless::run(&host, &info, &provider, seed, c.output_format)
+        } else {
+            Err("a headless run holds exactly one root".into())
+        }
     } else {
         let screen = match screen {
-            Some(screen) => screen,
-            None => tui::enter(&run)?,
+            Some(screen) => Ok(screen),
+            None => tui::enter(&run),
         };
-        tui::run(screen, roots, &info, &bureau, seed, c.vi)
+        screen.and_then(|screen| tui::run(screen, &host, &info, &bureau, seed, c.vi))
+    };
+    combine_failures(result, &host.end())
+}
+
+/// The root's configuration under the parsed command line.
+fn root_config(
+    c: &cli::Cli,
+    system: String,
+    run_dir: OwnDir,
+    disk_warn_bytes: Option<u64>,
+    search: bool,
+    bureau: &Arc<Bureau>,
+    roles: provider::roles::Roles,
+) -> agent::RootConfig {
+    let headless = c.is_headless();
+    agent::RootConfig {
+        system,
+        run_dir,
+        trunk: if headless {
+            agent::Trunk::Returns
+        } else {
+            agent::Trunk::Converses
+        },
+        admission: agent::Admission::Free,
+        helper_idle: c.helper_idle,
+        tools: if c.chat {
+            provider::Toolset::default()
+        } else {
+            provider::Toolset::offered(c.thinking_tool)
+        },
+        allow_schedule: c.allow_schedule,
+        resume_on_reset: !headless,
+        disk_warn_bytes,
+        fuel: agent::SPAWN_FUEL,
+        search,
+        factory: None,
+        bureau: Arc::clone(bureau),
+        roles,
+    }
+}
+
+fn combine_failures(result: Result<(), String>, failures: &[String]) -> Result<(), String> {
+    match (result, failures.is_empty()) {
+        (result, true) => result,
+        (Ok(()), false) => Err(failures.join("\n")),
+        (Err(error), false) => Err(format!("{error}\n{}", failures.join("\n"))),
     }
 }
 
@@ -458,5 +487,69 @@ fn open(
             ),
         },
         Opening::Choose(among, why) => choose(among, why),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Host, combine_failures, root_config};
+    use crate::agent::RootEngine;
+    use crate::app::{self, Scratch};
+    use crate::provider::roles::Roles;
+    use crate::provider::scripted::Script;
+    use crate::provider::{Bureau, Provider};
+    use clap::Parser;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn combining_failures_keeps_the_frontend_verdict_then_teardown_lines() {
+        let teardown = ["a".to_string(), "b".to_string()];
+        assert_eq!(combine_failures(Ok(()), &[]), Ok(()));
+        assert_eq!(
+            combine_failures(Err("frontend".into()), &[]),
+            Err("frontend".into())
+        );
+        assert_eq!(combine_failures(Ok(()), &teardown), Err("a\nb".into()));
+        assert_eq!(
+            combine_failures(Err("frontend".into()), &teardown),
+            Err("frontend\na\nb".into())
+        );
+    }
+
+    #[test]
+    fn the_parsed_helper_idle_reaches_the_founded_fleet() {
+        let dir = ral_core::own::OwnDir::for_test("root-config").unwrap();
+        let found = |args: &[&str]| {
+            let c = crate::cli::Cli::try_parse_from(
+                std::iter::once("exarch").chain(args.iter().copied()),
+            )
+            .unwrap();
+            let cfg = root_config(
+                &c,
+                "system".into(),
+                (*dir).clone(),
+                None,
+                false,
+                &Arc::new(Bureau::Scripted),
+                Roles::default(),
+            );
+            let engine = RootEngine::Identity {
+                scratch: Arc::new(Scratch::for_test(app::EXARCH, "root-config").unwrap()),
+                cwd: ral_core::host::cwd().unwrap(),
+                grants: ral_core::authority::policy::GrantStack::default(),
+                terminal: ral_core::io::terminal::TerminalState::default(),
+            };
+            let provider = Arc::new(Provider::scripted("test-model", Script::new()));
+            Host::found(cfg, engine, provider).unwrap()
+        };
+        for (args, idle) in [
+            (&[][..], crate::agent::fleet::HELPER_IDLE),
+            (&["--helper-idle", "90m"][..], Duration::from_mins(90)),
+        ] {
+            let host = found(args);
+            assert_eq!(host.fleet().launch.idle, idle);
+            assert_eq!(host.end(), [] as [String; 0]);
+        }
     }
 }

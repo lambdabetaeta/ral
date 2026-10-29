@@ -1,11 +1,11 @@
-//! The factory owns the machine until the settled driver and agent release it.
+//! The factory owns the machine until the host has joined every agent.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use exarch::agent::{Agent, AgentHandle, Factory, RootConfig, RootEngine};
-use exarch::bus::Sink;
-use exarch::headless::{Job, JobEnd, SettledConversation};
+use exarch::agent::{AgentHandle, EngineLost, Factory, RootConfig, RootEngine};
+use exarch::bus::BusReceiver;
+use exarch::host::Host;
 use exarch::provider::Provider;
 use ral_core::authority::policy::Capabilities;
 use ral_core::own::OwnDir;
@@ -35,7 +35,7 @@ impl Factory for MachineFactory {
 
 pub(crate) struct Guest {
     factory: Arc<MachineFactory>,
-    settled: SettledConversation,
+    host: Host,
     net: netgate::Session,
 }
 
@@ -56,52 +56,35 @@ impl Guest {
         )?;
         let factory = Arc::new(MachineFactory(Mutex::new(machine)));
         config.factory = Some(factory.clone());
-        let agent = Agent::root(config, root_engine, provider)
+        let host = Host::found(config, root_engine, provider)
             .map_err(|why| start_failed(&factory, &why))?;
-        let settled = SettledConversation::new(agent)?;
         let net = netgate::run(wires.net.into(), net)
             .map_err(|why| format!("could not start guest networking: {why}"))?;
-        Ok(Self {
-            factory,
-            settled,
-            net,
-        })
+        Ok(Self { factory, host, net })
     }
 
     pub(crate) fn handle(&self) -> AgentHandle {
-        self.settled.handle()
+        self.host.roots()[0].clone()
     }
 
-    pub(crate) fn await_job(&self) -> Option<Job> {
-        self.settled.await_job()
+    pub(crate) fn feed(&self) -> &BusReceiver {
+        self.host.feed()
     }
 
-    pub(crate) fn run<S: Sink>(&mut self, job: Job, sink: &mut S) -> JobEnd {
-        self.settled.run(job, sink)
+    pub(crate) fn run_dir(&self) -> &OwnDir {
+        self.host.run_dir()
     }
 
-    pub(crate) fn severance(&self) -> Option<String> {
-        let cause = self.settled.severance()?;
-        let run_dir = self.settled.run_dir();
-        let lost = exarch::agent::EngineLost::running(&cause, run_dir);
-        capture(run_dir, &lost.logged(), &self.console());
-        Some(lost.to_string())
-    }
-
-    pub(crate) fn console(&self) -> GuestConsole {
-        self.factory.console()
+    pub(crate) fn capture(&self, lost: &EngineLost) {
+        capture(self.run_dir(), &lost.logged(), &self.factory.console());
     }
 
     pub(crate) fn end(self) -> Result<(), String> {
-        let Self {
-            factory,
-            settled,
-            net,
-        } = self;
-        // Control EOF and fleet teardown precede machine recovery, net join, and shutdown.
-        settled.end_fleet();
+        let Self { factory, host, net } = self;
+        // Agent joins precede machine recovery, net join, and shutdown.
+        let failures = host.end();
         let machine = Arc::into_inner(factory)
-            .expect("settled conversation teardown must release every guest factory owner")
+            .expect("host teardown must release every guest factory owner")
             .0
             .into_inner_ignore_poison();
         net.stop();
@@ -115,6 +98,13 @@ impl Guest {
                 )
             })
             .and(net_end)
+            .and_then(|()| {
+                if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(failures.join("\n"))
+                }
+            })
     }
 }
 
@@ -143,7 +133,12 @@ fn capture(run_dir: &OwnDir, why: &str, console: &GuestConsole) -> Option<()> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use exarch::bus::Signal;
+    use exarch::provider::scripted::{Reply, Script};
+    use exarch::record::{Forensic, JobId, Record};
     use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     #[cfg(windows)]
     use std::net::TcpStream as GuestEnd;
@@ -167,6 +162,7 @@ mod tests {
 
     struct FakeMachine {
         guest_ends: Arc<Mutex<Vec<GuestEnd>>>,
+        shutdown: Arc<AtomicBool>,
     }
 
     impl vm_manager::Machine for FakeMachine {
@@ -182,8 +178,113 @@ mod tests {
             vm_manager::GuestConsole::Unkept
         }
         fn shutdown(self: Box<Self>) -> Result<(), vm_manager::Error> {
+            assert!(!self.shutdown.swap(true, Ordering::SeqCst));
             Ok(())
         }
+    }
+
+    fn machine_factory() -> (Arc<MachineFactory>, Arc<AtomicBool>) {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let factory = Arc::new(MachineFactory(Mutex::new(Box::new(FakeMachine {
+            guest_ends: Arc::default(),
+            shutdown: shutdown.clone(),
+        }))));
+        (factory, shutdown)
+    }
+
+    fn host_with_factory(factory: &Arc<MachineFactory>, run_dir: &OwnDir) -> Host {
+        crate::test_fixture::scripted_host(
+            run_dir,
+            Some(factory.clone()),
+            Script::new().then(Reply::text("done")),
+        )
+    }
+
+    #[test]
+    fn host_end_joins_the_root_and_makes_the_machine_factory_unique() {
+        let run_dir = OwnDir::for_test("guest-factory-join").expect("run directory");
+        let (factory, shutdown) = machine_factory();
+        let host = host_with_factory(&factory, &run_dir);
+        let root = host.roots()[0].clone();
+        assert!(root.is_live());
+        assert!(Arc::strong_count(&factory) > 1);
+
+        assert_eq!(host.end(), Vec::<String>::new());
+        assert!(!root.is_live());
+        let machine = Arc::into_inner(factory)
+            .expect("joined agents and signal forwarding release every factory owner")
+            .0
+            .into_inner_ignore_poison();
+        machine.shutdown().expect("recovered machine shuts down");
+        assert!(shutdown.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn guest_exposes_the_hosts_jobs_and_recovers_the_machine_on_end() {
+        let run_dir = OwnDir::for_test("guest-host-migration").expect("run directory");
+        let (factory, shutdown) = machine_factory();
+        let weak_factory = Arc::downgrade(&factory);
+        let host = host_with_factory(&factory, &run_dir);
+        let (net_peer, net_wire) = local_pair().expect("network wire");
+        let net = netgate::run(
+            net_wire.into(),
+            netgate::Config {
+                policy: Arc::new(ral_core::egress::NetPolicy::for_test(&[])),
+                audit: netgate::AuditLog::open(
+                    run_dir.make_dir("network").expect("audit directory"),
+                )
+                .expect("audit ledger"),
+                dialer: Arc::new(netgate::System),
+            },
+        )
+        .expect("network session");
+        let guest = Guest { factory, host, net };
+        let root = guest.handle();
+        assert_eq!(root.id(), guest.host.roots()[0].id());
+        assert!(std::ptr::eq(guest.feed(), guest.host.feed()));
+        assert_eq!(guest.run_dir().path(), run_dir.path());
+
+        root.steer("go".into()).expect("live root accepts input");
+        assert_eq!(root.queued(), ["go"]);
+        assert!(root.release());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut opened = None;
+        'job: loop {
+            let signal = guest
+                .feed()
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("the host publishes a settled job");
+            if let Signal::Commit(id, commit) = signal
+                && id == root.id()
+            {
+                for recorded in commit.records() {
+                    match recorded.value() {
+                        Record::Forensic(Forensic::JobOpened) => {
+                            assert!(opened.replace(JobId::from(commit.number())).is_none());
+                        }
+                        Record::Forensic(Forensic::JobSettled { job, stopped }) => {
+                            assert_eq!(Some(*job), opened);
+                            assert!(!stopped);
+                            break 'job;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let cause = ral_core::carrier::Severed::Faulted("fixture engine loss".into());
+        let lost = EngineLost::running(&cause, guest.run_dir());
+        guest.capture(&lost);
+        let diagnostic = std::fs::read_to_string(run_dir.path().join(FILE)).expect("captured loss");
+        assert!(diagnostic.contains("fixture engine loss"));
+        assert!(!shutdown.load(Ordering::SeqCst));
+
+        guest.end().expect("joined host permits machine recovery");
+        assert!(!root.is_live());
+        assert!(weak_factory.upgrade().is_none());
+        assert!(shutdown.load(Ordering::SeqCst));
+        drop(net_peer);
     }
 
     #[test]
@@ -191,6 +292,7 @@ mod tests {
         let guest_ends = Arc::new(Mutex::new(Vec::new()));
         let factory = MachineFactory(Mutex::new(Box::new(FakeMachine {
             guest_ends: Arc::clone(&guest_ends),
+            shutdown: Arc::default(),
         })));
 
         let mut host = factory.engine().expect("the fake machine dials");

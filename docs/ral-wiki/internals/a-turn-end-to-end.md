@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
-verified_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
-verified_at_date: 2026-10-28
+generated_at_commit: e5a23909
+verified_at_commit: e5a23909
+verified_at_date: 2026-10-29
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
 
@@ -195,12 +195,14 @@ module's framed scaffold:
   opens the run born cancelled. The engine root still dominates termination:
   `Scopes::end` strikes both root and current dispatch, even when its parent
   is an exarch exchange. Cancelling threads never write to an engine.
-  `HostServices` captures current work for enquiries; deferred worker batches
-  instead carry agent life, surviving Stop and reply but not life end or
-  `/clear`'s queue discard. The engine and its loose ral workers outlive
-  delegated work. Synod's enclosing unit is a *job*, opened by human input
-  and closed at fleet settlement or after stopped helpers' teardown
-  ([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]).
+  A foreground shell call borrows the agent body through `Loanable::lend`;
+  it returns on unwind too. Deferred worker batches carry engine generation,
+  surviving Stop/reply and rejected after clear replaces the engine. Loose
+  workers belong to the engine. Jobs are recorded busy periods for every
+  agent; Synod gates its root across baseline and closing walks. Stop recalls
+  human text and cancels only exchange, leaving helpers working
+  ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
+
 - ral's batch path (`ral/src/batch.rs`) boots an `IdentityTransport` from the
   `batch` installer, dispatches the `_ral-boot` hook, then the script as one
   `Program::Source` run under the mute host, with `RunIo::Inherit` and

@@ -10,31 +10,24 @@ use ral_core::shell::runtime::Error;
 use super::{DeskAct, ExarchDesk};
 
 impl ExarchDesk {
-    /// The context as the log holds it. Silent, like the roster: a survey
-    /// commits no act, and every edit tag answers one of these too.
-    pub(super) fn context_survey(&self) -> ContextSurvey {
-        self.services.log.borrow().context().context_survey()
+    pub(super) fn context_survey(&self) -> Result<ContextSurvey, Error> {
+        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        Ok(body.log.context().context_survey())
     }
 
-    /// The tail every `` `exarch-transcript `` tag shares: `locate` under the
-    /// session lock, `read` once it is gone.  The family draws no row: a read
-    /// is a listing, and a listing's telling is the record it answers with.
+    /// Locate against the loan, then release it before reading files.
     pub(super) fn locate_then_read<P>(
         &self,
         locate: impl FnOnce(&mut AgentLog) -> Result<P, String>,
         read: impl FnOnce(P) -> Result<FOValue, String>,
     ) -> Result<FOValue, Error> {
-        // Its own statement: the guard dies at this semicolon, so a long read
-        // never holds the seam, the bus and `/resources` behind it.
-        let located = locate(&mut self.services.log.borrow_mut());
+        let located = {
+            let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+            locate(&mut body.log)
+        };
         located.and_then(read).map_err(Error::new)
     }
 
-    /// `` `exarch-context `evict `` — the run `[from, to]` leaves the
-    /// context at once, one residue standing for it with the model's note.
-    /// Commits the act under `refused` on either outcome, and mirrors the
-    /// surviving weight or the refusal onto the trace before answering the
-    /// survey.
     pub(super) fn context_evict(
         &self,
         Evict {
@@ -42,21 +35,20 @@ impl ExarchDesk {
             note: Note(note),
         }: Evict,
     ) -> Result<FOValue, Error> {
+        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         let payload = format!("note {note}");
-        let evicted = self
-            .services
+        let evicted = body
             .log
-            .borrow_mut()
             .evict(span, Some(note), EditAuthority::Model)
             .map_err(|why| why.to_string());
-        // The act row is this eviction's only row.
-        self.services.commit_act(
+        self.call.commit_act(
+            &body,
             DeskAct::ContextEvict,
             Some(&span.to_string()),
             payload,
             evicted.is_err(),
         );
-        let survey = evicted.map(|()| self.context_survey());
+        let survey = evicted.map(|()| body.log.context().context_survey());
         let text = match &survey {
             Ok(survey) => {
                 let stand = if span.is_single() { "stands" } else { "stand" };
@@ -67,9 +59,7 @@ impl ExarchDesk {
             }
             Err(error) => error.clone(),
         };
-        self.services
-            .log
-            .borrow()
+        body.log
             .record_emitter()
             .emit_or_end(crate::record::Forensic::HarnessResult { text });
         survey

@@ -445,6 +445,18 @@ impl Blocks {
                     },
                 ),
             },
+            Forensic::EngineSevered { cause } => self.push(
+                seq,
+                BlockKind::SystemNote {
+                    text: format!("the ral engine was lost ({}): {cause}", cause.code()),
+                },
+            ),
+            Forensic::TeardownFailed { failure } => self.push(
+                seq,
+                BlockKind::Error {
+                    text: failure.clone(),
+                },
+            ),
             Forensic::SystemNote { text } => {
                 self.push(seq, BlockKind::SystemNote { text: text.clone() })
             }
@@ -472,6 +484,8 @@ impl Blocks {
             | Forensic::Unpin { .. }
             | Forensic::SessionEnded
             | Forensic::SessionClosed
+            | Forensic::JobOpened
+            | Forensic::JobSettled { .. }
             | Forensic::Status { .. }
             | Forensic::Retried { .. } => Delta::Quiet,
         }

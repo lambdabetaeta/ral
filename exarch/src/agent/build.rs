@@ -3,14 +3,18 @@
 use crate::agent::EngineLost;
 #[cfg(any(test, feature = "test-util"))]
 use crate::agent::SPAWN_FUEL;
-use crate::agent::engine::{Engine, Incarnation};
+use crate::agent::engine::Engine;
 use crate::agent::factory::Factory;
-use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Genesis, Launch, Tenancy, Unborn};
+#[cfg(any(test, feature = "test-util"))]
+use crate::agent::fleet::HELPER_IDLE;
+use crate::agent::fleet::{Fleet, Launch, Name};
 use crate::agent::handle::Shared;
 use crate::agent::index::BuiltinIndex;
-use crate::agent::{Agent, AgentHandle, LogCell, ProviderHandle, Readings, ReplyCell, Role};
+use crate::agent::loan::Loanable;
+use crate::agent::nursery::Nursery;
+use crate::agent::{Admission, Agent, AgentHandle, Body, ProviderHandle, Readings, Role, State};
 use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
-use crate::bus::{Child, ENDED_BEFORE_REPORTING, Emitter, Inbox, Mailbox, Report};
+use crate::bus::{AgentMailbox, Emitter};
 use crate::provider::{Provider, Toolset};
 use crate::record::{AgentId, AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
 use crate::shell_eval::builtins;
@@ -20,11 +24,11 @@ use ral_core::data::datum::Datum as _;
 use ral_core::engine::EngineInstaller;
 use ral_core::own::OwnDir;
 use ral_core::path::{CwdPath, EnginePath, GuestPath};
-use ral_core::process::{Scope, ScopeNode};
+use ral_core::process::ScopeNode;
 use ral_core::protocol::channel::{Liveness, WireStream};
 use ral_core::protocol::{Attach, EngineSpec, Origin, Root};
-use ral_core::sync::LockExt;
 use std::{
+    collections::BTreeMap,
     io,
     sync::{
         Arc,
@@ -43,72 +47,39 @@ fn seed_id_counter(sessions_root: &OwnDir) -> io::Result<()> {
     }
     Ok(())
 }
+fn with_teardown_failures(error: io::Error, failures: &[String]) -> io::Error {
+    if failures.is_empty() {
+        error
+    } else {
+        io::Error::other(format!("{error}\n{}", failures.join("\n")))
+    }
+}
 const TRUNK_NAME: &str = "main";
 const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindings, workers, and \
     cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths \
     in the old context are dead), pinned state and scheduled events are gone (exarch-pins `list \
     and exarch-schedules `list to confirm), and any sub-agents from before have ended.";
 
-/// Whom a life answers to: its trunk's harness or host, or its parent's work.
-pub(crate) enum Kin {
-    Trunk(Trunk),
-    Child { parent: AgentHandle, work: Mailbox },
-}
-impl Kin {
-    pub(crate) fn role(&self) -> Role {
-        match self {
-            Self::Trunk(trunk) => trunk.role(),
-            Self::Child { parent, .. } => Role::Child {
-                parent: parent.clone(),
-            },
-        }
-    }
-    /// Where it hangs; `born` runs only when someone hears of it.
-    pub(crate) fn lodging(self, born: impl FnOnce() -> Child) -> Lodging {
-        match self {
-            Self::Child { work, .. } => Lodging::Under(work, born()),
-            Self::Trunk(trunk) if trunk.role().returns() => Lodging::Reporting(born()),
-            Self::Trunk(_) => Lodging::Root,
-        }
-    }
-}
-/// Where a life hangs; a parent always hears of its child.
-pub(crate) enum Lodging {
-    Root,
-    Reporting(Child),
-    Under(Mailbox, Child),
-}
-pub(crate) struct Build {
-    pub(crate) tenancy: Tenancy,
-    pub(crate) log: AgentLog,
-    pub(crate) kin: Kin,
-    pub(crate) fuel: u32,
-    pub(crate) provider: ProviderHandle,
-    pub(crate) search: bool,
-    pub(crate) fleet: Arc<Fleet>,
-}
+/// How a root answers: in conversation, or with one `reply` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trunk {
-    Headless,
-    Attended,
-    /// A host opens jobs on it: synod.
-    Embedded,
+    Converses,
+    Returns,
 }
 impl Trunk {
     pub(crate) fn role(self) -> Role {
         match self {
-            Self::Headless => Role::Headless,
-            Self::Attended | Self::Embedded => Role::Converses,
+            Self::Converses => Role::Converses,
+            Self::Returns => Role::Returns,
         }
-    }
-    pub(crate) fn attended(self) -> bool {
-        matches!(self, Self::Attended)
     }
 }
 pub struct RootConfig {
     pub system: String,
     pub run_dir: OwnDir,
     pub trunk: Trunk,
+    pub admission: Admission,
+    pub helper_idle: Duration,
     pub tools: Toolset,
     pub allow_schedule: bool,
     pub resume_on_reset: bool,
@@ -163,12 +134,13 @@ impl Fleet {
         cfg: RootConfig,
         root_engine: RootEngine,
         installers: &'static [EngineInstaller],
-        lease: Duration,
     ) -> io::Result<(Arc<Self>, Engine)> {
         let RootConfig {
             system,
             run_dir,
             trunk,
+            admission,
+            helper_idle,
             tools,
             allow_schedule,
             resume_on_reset,
@@ -194,24 +166,15 @@ impl Fleet {
         }
         let sessions_root = run_dir.make_dir("sessions")?;
         let lost = |s: Severed| io::Error::other(EngineLost::starting(&s, &run_dir));
-        let (engine, genesis) = match root_engine {
+        let engine = match root_engine {
             RootEngine::Identity {
                 scratch,
                 cwd,
                 grants,
                 terminal,
-            } => {
-                let genesis = Genesis {
-                    installers,
-                    cwd,
-                    grants,
-                    terminal,
-                    scratch,
-                };
-                (genesis.engine().map_err(lost)?, Some(genesis))
-            }
+            } => Engine::root(installers, cwd, grants, terminal, scratch).map_err(lost)?,
             RootEngine::Wire { transport, attach } => {
-                (Engine::wire(*transport, attach).map_err(lost)?, None)
+                Engine::wire(*transport, attach).map_err(lost)?
             }
         };
         let index = BuiltinIndex::resolve(engine.read(|t| t.builtin_names()).map_err(lost)?);
@@ -219,115 +182,109 @@ impl Fleet {
             .read(|t| t.env_var(SCRATCH_VAR))
             .map_err(lost)?
             .ok_or_else(|| io::Error::other(format!("the engine names no ${SCRATCH_VAR}")))?;
-        let fleet = Self::new(
-            Launch {
-                trunk,
-                allow_schedule,
-                resume_on_reset,
-                tools,
-                disk_warn_bytes,
-                factory,
-                bureau,
-                roles,
-                system: system
-                    .replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch)
-                    .into(),
-                index,
-                fuel,
-                search,
-                run_dir,
-                sessions_root,
-                genesis,
-                #[cfg(test)]
-                _scratch: None,
-            },
-            lease,
-        );
+        let fleet = Self::new(Launch {
+            trunk,
+            admission,
+            idle: helper_idle,
+            allow_schedule,
+            resume_on_reset,
+            tools,
+            disk_warn_bytes,
+            factory,
+            bureau,
+            roles,
+            system: system
+                .replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch)
+                .into(),
+            index,
+            fuel,
+            search,
+            run_dir,
+            sessions_root,
+            engine: engine.rebirth(),
+            #[cfg(test)]
+            _scratch: None,
+        });
         Ok((fleet, engine))
-    }
-    /// I1: a life hangs under its parent's work or the fleet root.
-    pub(crate) fn lodge(&self, lodging: Lodging) -> Result<(Scope, ScopeNode, Inbox), Unborn> {
-        let (under, life, report) = match lodging {
-            Lodging::Under(work, child) => {
-                let child = Arc::new(child);
-                let life = work.adopt(child.clone())?;
-                (work.scope(), life, Some(Report::new(child, Some(work))))
-            }
-            Lodging::Reporting(child) => (
-                (*self.root).clone(),
-                self.root.child(),
-                Some(Report::new(Arc::new(child), None)),
-            ),
-            Lodging::Root => ((*self.root).clone(), self.root.child(), None),
-        };
-        Ok((under, life.clone(), Inbox::new(life, report)))
     }
 }
 impl Agent {
-    pub(crate) fn assemble(b: Build) -> Result<Self, Unborn> {
-        let Build {
-            tenancy,
-            log,
-            kin,
-            fuel,
-            provider,
-            search,
-            fleet,
-        } = b;
-        let id = log.id();
-        let started = Instant::now();
-        let role = kin.role();
-        let lodging = kin
-            .lodging(|| Child::new(tenancy.claim().name().into(), started, log.record_emitter()));
-        let (under, life, inbox) = fleet.lodge(lodging)?;
-        // A failed writer or a lost engine ends this life.
+    pub(crate) fn assemble(
+        name: Name,
+        engine: Engine,
+        log: AgentLog,
+        role: Role,
+        life: ScopeNode,
+        provider: ProviderHandle,
+        fleet: Arc<Fleet>,
+    ) -> Self {
+        let (fuel, search, admission) = match &role {
+            Role::Child { parent } => (
+                parent.0.fuel.saturating_sub(1),
+                parent.0.search,
+                Admission::Parent {
+                    idle: fleet.launch.idle,
+                },
+            ),
+            Role::Converses | Role::Returns => (
+                fleet.launch.fuel,
+                fleet.launch.search,
+                fleet.launch.admission,
+            ),
+        };
         log.record_emitter().bind(life.clone());
-        tenancy.transport().bind(life);
+        engine.transport().bind(life.clone());
+        let mailbox = AgentMailbox::new(life, log.record_emitter(), admission);
+        engine.install(&mailbox.address(), 0);
         let handle = AgentHandle(Arc::new(Shared {
-            id,
-            name: tenancy.claim().name().to_string(),
+            id: log.id(),
+            name: name.name().to_string(),
             log_dir: log.dir().clone(),
             run_dir: fleet.launch.run_dir().clone(),
-            started,
+            started: Instant::now(),
             role,
             fuel,
             provider,
             search,
-            under,
-            mailbox: inbox.life_mailbox(),
+            address: mailbox.address(),
         }));
-        tenancy.claim().bind(&handle);
+        fleet.bind(&name, &handle);
         let readings = Readings::new(!fleet.launch.tools.is_empty());
-        let engine = Incarnation::new(tenancy, inbox.life());
-        Ok(Self {
+        Self {
             handle,
-            inbox,
-            log: LogCell::new(log),
-            reply: ReplyCell::default(),
-            pins: Arc::default(),
-            schedules: crate::schedule::ScheduleRegistry::new(),
+            mailbox,
+            body: Loanable::new(Body {
+                log,
+                state: State {
+                    nursery: Nursery::default(),
+                    reply: None,
+                    owed: false,
+                    failures: Vec::new(),
+                    pins: BTreeMap::default(),
+                    schedules: crate::schedule::ScheduleRegistry::new(),
+                    readings,
+                },
+            }),
+            engine: Some(engine),
+            generation: 0,
             fleet,
-            readings,
-            engine,
-        })
+            _name: name,
+        }
     }
     /// # Errors
     /// Refuses an engine or session log that cannot be opened.
-    pub fn root(cfg: RootConfig, engine: RootEngine, provider: Arc<Provider>) -> io::Result<Self> {
-        Self::first(
-            fresh_id(),
-            cfg,
-            engine,
-            provider,
-            &crate::INSTALLERS,
-            AGENT_LEASE_IDLE,
-        )
+    pub(crate) fn root(
+        cfg: RootConfig,
+        engine: RootEngine,
+        provider: Arc<Provider>,
+    ) -> io::Result<Self> {
+        Self::first(fresh_id(), cfg, engine, provider, &crate::INSTALLERS)
     }
     /// Reopen every root not closed with `/close`, with fresh engines.
     ///
     /// # Errors
     /// Refuses chat, wire engines, missing sessions, or failed construction.
-    pub fn resume(
+    pub(crate) fn resume(
         cfg: RootConfig,
         engine: RootEngine,
         provider: &Arc<Provider>,
@@ -351,29 +308,45 @@ impl Agent {
                 cfg.run_dir
             )));
         };
-        let (fleet, first_engine) =
-            Fleet::found(cfg, engine, &crate::INSTALLERS, AGENT_LEASE_IDLE)?;
+        let (fleet, first_engine) = Fleet::found(cfg, engine, &crate::INSTALLERS)?;
         let mut founding = Some(first_engine);
-        std::iter::once(first)
-            .chain(live)
-            .map(|(id, name)| {
-                let claim = fleet
-                    .claim(&name)
+        let mut roots: Vec<(Self, Resumed)> = Vec::new();
+        for (id, name) in std::iter::once(first).chain(live) {
+            let reopened = (|| {
+                let name = fleet
+                    .name(&name)
                     .map_err(|why| io::Error::other(why.to_string()))?;
                 let engine = founding.take().map_or_else(|| fleet.launch.engine(), Ok)?;
-                Self::reopen(&fleet, claim.occupy(engine), id, provider.clone())
-            })
-            .collect()
+                Self::reopen(&fleet, name, engine, id, provider.clone())
+            })();
+            match reopened {
+                Ok(root) => roots.push(root),
+                Err(error) => {
+                    let failures: Vec<_> = roots
+                        .into_iter()
+                        .flat_map(|(agent, _)| agent.discard())
+                        .collect();
+                    return Err(with_teardown_failures(error, &failures));
+                }
+            }
+        }
+        Ok(roots)
     }
+
     fn reopen(
         fleet: &Arc<Fleet>,
-        tenancy: Tenancy,
+        name: Name,
+        engine: Engine,
         id: AgentId,
         provider: Arc<Provider>,
     ) -> io::Result<(Self, Resumed)> {
         let live = provider.clone();
-        let (agent, resumed) =
-            Self::hatch(fleet, tenancy, provider, |sessions, _, account, system| {
+        let (mut agent, resumed) = Self::hatch(
+            fleet,
+            name,
+            engine,
+            provider,
+            |sessions, _, account, system| {
                 let mut log = AgentLog::resume(sessions, id)?;
                 let resumed = log.resumed_summary();
                 if let Some((model, window)) = log.learned_window()
@@ -388,13 +361,18 @@ impl Agent {
                     crate::app::now_unix_ms(),
                 )?;
                 Ok((log, resumed))
-            })?;
-        agent.inbox.resume()?;
-        agent
+            },
+        )?;
+        if let Err(error) = agent
+            .body
             .log
-            .borrow_mut()
             .import_note(genai::chat::ChatMessage::user(RESUME_NOTE))
-            .map_err(io::Error::other)?;
+        {
+            return Err(with_teardown_failures(
+                io::Error::other(error),
+                &agent.discard(),
+            ));
+        }
         Ok((agent, resumed))
     }
     pub(crate) fn first(
@@ -403,16 +381,15 @@ impl Agent {
         engine: RootEngine,
         provider: Arc<Provider>,
         installers: &'static [EngineInstaller],
-        lease: Duration,
     ) -> io::Result<Self> {
-        let (fleet, engine) = Fleet::found(cfg, engine, installers, lease)?;
-        let tenancy = fleet
-            .claim(TRUNK_NAME)
-            .map_err(|why| io::Error::other(why.to_string()))?
-            .occupy(engine);
+        let (fleet, engine) = Fleet::found(cfg, engine, installers)?;
+        let name = fleet
+            .name(TRUNK_NAME)
+            .map_err(|why| io::Error::other(why.to_string()))?;
         Self::hatch(
             &fleet,
-            tenancy,
+            name,
+            engine,
             provider,
             |sessions, model, account, system| {
                 AgentLog::root(sessions, id, TRUNK_NAME, model, account, system, None)
@@ -423,14 +400,15 @@ impl Agent {
     }
     pub(crate) fn hatch<T>(
         fleet: &Arc<Fleet>,
-        tenancy: Tenancy,
+        name: Name,
+        engine: Engine,
         provider: Arc<Provider>,
         open: impl FnOnce(&OwnDir, &RecordedModel, &RecordedAccount, &str) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
-        let kin = Kin::Trunk(launch.trunk);
+        let role = launch.trunk.role();
         let system = launch
-            .prompt_for(&tenancy, &kin.role(), launch.fuel, tenancy.claim().name())
+            .prompt_for(&engine, &role, launch.fuel, name.name())
             .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let (log, opened) = open(
@@ -439,88 +417,94 @@ impl Agent {
             &account,
             &system,
         )?;
-        let agent = Self::assemble(Build {
-            tenancy,
+        let life = fleet.root.child();
+        let agent = Self::assemble(
+            name,
+            engine,
             log,
-            kin,
-            fuel: launch.fuel,
-            provider: ProviderHandle::new(provider),
-            search: launch.search,
-            fleet: fleet.clone(),
-        })
-        .map_err(|why| io::Error::other(why.to_string()))?;
+            role,
+            life,
+            ProviderHandle::new(provider),
+            fleet.clone(),
+        );
         Ok((agent, opened))
     }
     pub(crate) fn child_of(
-        (parent, work): (&AgentHandle, Mailbox),
+        (parent, life): (&AgentHandle, ScopeNode),
         parent_log: &AgentLog,
         fleet: &Arc<Fleet>,
-        tenancy: Tenancy,
+        name: Name,
+        engine: Engine,
         provider: Arc<Provider>,
         memory: Memory,
     ) -> Result<Self, String> {
         let launch = &fleet.launch;
         let fuel = parent.0.fuel.saturating_sub(1);
-        let kin = Kin::Child {
+        let role = Role::Child {
             parent: parent.clone(),
-            work,
         };
         let system = launch
-            .prompt_for(&tenancy, &kin.role(), fuel, tenancy.claim().name())
+            .prompt_for(&engine, &role, fuel, name.name())
             .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let log = parent_log
             .fork(
                 fresh_id(),
-                tenancy.claim().name(),
+                name.name(),
                 &RecordedModel::of(&provider),
                 &account,
                 &system,
                 memory,
             )
-            .map_err(|e| format!("could not fork child session log: {e}"))?;
-        Self::assemble(Build {
-            tenancy,
+            .map_err(|error| format!("could not fork child session log: {error}"))?;
+        Ok(Self::assemble(
+            name,
+            engine,
             log,
-            kin,
-            fuel,
-            provider: ProviderHandle::new(provider),
-            search: parent.0.search,
-            fleet: fleet.clone(),
-        })
-        .map_err(|why| why.to_string())
+            role,
+            life,
+            ProviderHandle::new(provider),
+            fleet.clone(),
+        ))
     }
     pub(crate) fn clear(&mut self) -> Result<(), String> {
-        self.log
-            .borrow()
+        self.body
+            .log
             .prepare_clear()
             .map_err(|why| why.to_string())?;
-        let boundary = self.inbox.clear_boundary();
-        let fresh = self.engine.prepare_rebirth()?;
-        // Bound, so the log's borrow ends before the engine is touched.
-        let committed = self.log.borrow_mut().clear();
-        if let Err(failure) = committed {
-            self.engine.discard(fresh);
+        let fresh = self.engine().prepare_rebirth()?;
+        let failures = self.body.state.nursery.dismiss_all();
+        self.body.state.failures.extend(failures);
+        self.body.state.nursery = Nursery::default();
+        if let Err(failure) = self.body.log.clear() {
+            self.body.retire_engine(&self.handle.0.name, &fresh);
             return Err(failure.to_string());
         }
-
-        self.inbox.apply_clear(boundary);
-        self.schedules.clear();
-        self.pins.lock_ignore_poison().clear();
-        self.readings = self.readings.reborn();
-        self.engine.install_rebirth(fresh);
+        fresh.inherit(self.engine());
+        let outgoing = self
+            .engine
+            .replace(fresh)
+            .expect("clear replaces a live engine");
+        self.body.retire_engine(&self.handle.0.name, &outgoing);
+        self.generation += 1;
+        self.engine()
+            .install(&self.mailbox.address(), self.generation);
+        self.body.state.pins.clear();
+        self.body.state.schedules.clear();
+        self.body.state.readings = self.body.state.readings.reborn();
+        self.mailbox.clear();
         Ok(())
     }
     pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {
         self.couple(emit);
-        self.log
-            .borrow_mut()
+        self.body
+            .log
             .rewind(anchor)
-            .map_err(|e| e.to_string())?;
-        self.inbox.close_exchange();
-        self.readings.nudges = self.readings.nudges.reborn();
+            .map_err(|error| error.to_string())?;
+        self.body.state.readings.nudges = self.body.state.readings.nudges.reborn();
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn seed(&self, prompt: String) {
         let _ = self.handle.steer(prompt);
     }
@@ -531,16 +515,41 @@ impl Agent {
     }
     #[cfg(test)]
     pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
-        let claim = self.fleet.claim(name).map_err(|e| e.to_string())?;
-        let tenancy = claim.occupy(self.fleet.launch.engine().map_err(|e| e.to_string())?);
+        let name = self.fleet.name(name).map_err(|error| error.to_string())?;
+        let engine = self
+            .fleet
+            .launch
+            .engine()
+            .map_err(|error| error.to_string())?;
         Self::child_of(
-            (&self.handle, self.inbox.mailbox()),
-            &self.log.borrow(),
+            (&self.handle, self.mailbox.life().child()),
+            &self.body.log,
             &self.fleet,
-            tenancy,
+            name,
+            engine,
             self.handle.current_provider(),
             Memory::Amnemon,
         )
+    }
+    /// # Errors
+    /// Refuses an engine or session log that cannot be opened.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn root_for_test(
+        cfg: RootConfig,
+        engine: RootEngine,
+        provider: Arc<Provider>,
+    ) -> io::Result<Self> {
+        Self::root(cfg, engine, provider)
+    }
+    /// # Errors
+    /// Refuses chat, wire engines, missing sessions, or failed construction.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn resume_for_test(
+        cfg: RootConfig,
+        engine: RootEngine,
+        provider: &Arc<Provider>,
+    ) -> io::Result<Vec<(Self, Resumed)>> {
+        Self::resume(cfg, engine, provider)
     }
     /// # Errors
     /// Refuses a scratch directory or session log that cannot be created.
@@ -560,7 +569,11 @@ impl Agent {
             resume_on_reset,
             search,
             disk_warn_bytes,
-            lease,
+            helper_idle,
+            trunk,
+            admission,
+            tools,
+            fuel,
             installers,
             grants,
         } = cfg;
@@ -573,12 +586,14 @@ impl Agent {
         let config = RootConfig {
             system,
             run_dir,
-            trunk: Trunk::Headless,
-            tools: Toolset::offered(false),
+            trunk,
+            admission,
+            helper_idle,
+            tools,
             allow_schedule,
             resume_on_reset,
             disk_warn_bytes,
-            fuel: SPAWN_FUEL,
+            fuel,
             search,
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
@@ -594,7 +609,7 @@ impl Agent {
             "test-model",
             crate::provider::scripted::Script::new(),
         ));
-        Self::first(id, config, engine, provider, installers, lease)
+        Self::first(id, config, engine, provider, installers)
     }
 }
 #[cfg(any(test, feature = "test-util"))]
@@ -605,7 +620,11 @@ pub(crate) struct TestTrunk {
     pub(crate) resume_on_reset: bool,
     pub(crate) search: bool,
     pub(crate) disk_warn_bytes: Option<u64>,
-    pub(crate) lease: Duration,
+    pub(crate) helper_idle: Duration,
+    pub(crate) trunk: Trunk,
+    pub(crate) admission: Admission,
+    pub(crate) tools: Toolset,
+    pub(crate) fuel: u32,
     pub(crate) installers: &'static [EngineInstaller],
 }
 #[cfg(any(test, feature = "test-util"))]
@@ -618,17 +637,21 @@ impl TestTrunk {
             resume_on_reset: false,
             search: true,
             disk_warn_bytes: None,
-            lease: AGENT_LEASE_IDLE,
+            helper_idle: HELPER_IDLE,
+            trunk: Trunk::Returns,
+            admission: Admission::Free,
+            tools: Toolset::offered(false),
+            fuel: SPAWN_FUEL,
             installers: &crate::INSTALLERS,
         }
     }
 }
 impl Drop for Agent {
     fn drop(&mut self) {
-        // I8: retire, ending the life, before any owner field tears down.
-        self.inbox.retire(ENDED_BEFORE_REPORTING.into());
-        self.schedules.clear();
+        self.body.state.schedules.clear();
+        // An unwind leaves the fields to end the life and join helpers (A3).
         if !std::thread::panicking() {
+            let _unclaimed = self.teardown();
             self.recorder()
                 .emit_or_end(crate::record::Forensic::SessionEnded);
         }

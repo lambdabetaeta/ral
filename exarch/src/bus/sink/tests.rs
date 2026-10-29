@@ -1,78 +1,115 @@
-use super::{Sink, pump};
-use crate::bus::{Emitter, FleetBus};
-use crate::record::AgentId;
-use crate::record::{Record, Recorded, Transient};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use super::{Sink, panic_msg};
+use crate::bus::{FleetBus, Signal};
+use crate::record::{AgentId, Born, Forensic, NonEmpty, Record, Recorded, Transient};
 
-/// `pump` returns on the worker's `done` while a holder keeps an `Emitter`
-/// clone — a live sender — past the worker's return, as a `spawn`ed server
-/// that never terminates would.
-#[test]
-fn pump_returns_on_worker_done_not_sender_disconnect() {
-    struct CountSink(usize);
-    impl Sink for CountSink {
-        fn transient(&mut self, _id: AgentId, _t: &Transient) {
-            self.0 += 1;
-        }
+#[derive(Default)]
+struct Trace(Vec<(AgentId, String)>);
+
+impl Sink for Trace {
+    fn born(&mut self, id: AgentId, born: &Born) {
+        self.0.push((id, format!("born {}", born.name)));
     }
 
-    let mut sink = CountSink(0);
-    let bus = FleetBus::session();
-    // Outlives `pump`, holding an `Emitter` clone whose sender keeps the
-    // channel from ever disconnecting.
-    let holder: Mutex<Option<Emitter>> = Mutex::new(None);
+    fn fact(&mut self, id: AgentId, record: &Recorded<Record>) {
+        let Record::Forensic(Forensic::SystemNote { text }) = record.value() else {
+            panic!("the test commits only system notes")
+        };
+        self.0.push((id, text.clone()));
+    }
 
-    let recorder = crate::record::Emitter::none();
-    recorder.attach(bus.emitter(AgentId::new(0)).fleet_sink());
-
-    let t0 = Instant::now();
-    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |emit, _| {
-        *holder.lock().unwrap() = Some(emit.clone());
-        recorder.transient(Transient::Boundary);
-        "done"
-    })
-    .expect("pump returns Ok");
-
-    assert!(
-        t0.elapsed() < Duration::from_secs(5),
-        "pump must return on the explicit done signal, not wait for sender disconnect (took {:?})",
-        t0.elapsed()
-    );
-    assert_eq!(r, Some("done"), "pump returns the worker's value");
-    assert_eq!(sink.0, 1, "the worker's one delta was delivered");
-    assert!(holder.lock().unwrap().is_some());
+    fn transient(&mut self, id: AgentId, transient: &Transient) {
+        assert!(matches!(transient, Transient::Boundary));
+        self.0.push((id, "boundary".into()));
+    }
 }
 
-/// A recovered worker panic records a `Forensic::Error` through the seam
-/// rather than vanishing into the join, and `pump` reports `None`.
 #[test]
-fn recovered_panic_records_a_forensic_error() {
-    struct FactSink(Vec<String>);
-    impl Sink for FactSink {
-        fn fact(&mut self, _id: AgentId, rec: &Recorded<Record>) {
-            if let Record::Forensic(crate::record::Forensic::Error { text }) = rec.value() {
-                self.0.push(text.clone());
+fn accept_routes_birth_commit_records_and_transient_in_feed_order() {
+    let bus = FleetBus::session();
+    let id = AgentId::new(1);
+    let recorder = crate::record::Emitter::none();
+    let dir = ral_core::own::OwnDir::for_test("sink-birth").unwrap();
+    let child = bus.emitter(AgentId::new(0)).child(
+        id,
+        Born {
+            log_dir: (*dir).clone(),
+            name: "helper".into(),
+            parent: Some(AgentId::new(0)),
+            resumed: None,
+            recorder: recorder.clone(),
+        },
+    );
+    recorder.attach(child.fleet_sink());
+    let _commit = recorder
+        .commit(NonEmpty {
+            first: Forensic::SystemNote {
+                text: "first".into(),
             }
-        }
+            .into(),
+            rest: vec![
+                Forensic::SystemNote {
+                    text: "second".into(),
+                }
+                .into(),
+            ],
+        })
+        .unwrap();
+    recorder.transient(Transient::Boundary);
+
+    let mut trace = Trace::default();
+    while let Ok(signal) = bus.rx().try_recv() {
+        trace.accept(signal);
     }
 
-    let mut sink = FactSink(Vec::new());
+    assert_eq!(
+        trace.0,
+        [
+            (id, "born helper".into()),
+            (id, "first".into()),
+            (id, "second".into()),
+            (id, "boundary".into()),
+        ]
+    );
+}
+
+#[test]
+fn drain_records_keeps_committed_order_and_excludes_transients() {
     let bus = FleetBus::session();
     let recorder = crate::record::Emitter::none();
     recorder.attach(bus.emitter(AgentId::new(0)).fleet_sink());
+    recorder.transient(Transient::Boundary);
+    for text in ["first", "second"] {
+        let _recorded = recorder
+            .emit(Forensic::SystemNote { text: text.into() })
+            .unwrap();
+    }
+    recorder.transient(Transient::Died { failures: vec![] });
 
-    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |_emit, _| {
-        panic!("boom")
-    })
-    .expect("pump returns Ok even when the worker panics");
+    let records = super::drain_records(bus.rx());
 
-    assert_eq!(r, None, "a panicked worker yields no value");
-    assert!(
-        sink.0
-            .iter()
-            .any(|text| text.starts_with(crate::bus::WORKER_PANIC_PREFIX) && text.contains("boom")),
-        "the panic reaches the seam as a Forensic::Error, got {:?}",
-        sink.0
-    );
+    assert!(matches!(records.as_slice(), [
+        Record::Forensic(Forensic::SystemNote { text: first }),
+        Record::Forensic(Forensic::SystemNote { text: second }),
+    ] if first == "first" && second == "second"));
+    assert!(bus.rx().try_recv().is_err());
+}
+
+#[test]
+fn panic_messages_preserve_both_string_payloads_and_name_other_payloads() {
+    let borrowed: Box<dyn std::any::Any + Send> = Box::new("borrowed panic");
+    let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned panic"));
+    let other: Box<dyn std::any::Any + Send> = Box::new(17_u32);
+    assert_eq!(panic_msg(&borrowed), "borrowed panic");
+    assert_eq!(panic_msg(&owned), "owned panic");
+    assert_eq!(panic_msg(&other), "non-string payload");
+}
+
+#[test]
+fn a_sink_may_ignore_signals_it_does_not_present() {
+    struct Silent;
+    impl Sink for Silent {}
+    Silent.accept(Signal::Transient(
+        AgentId::new(0),
+        Transient::Died { failures: vec![] },
+    ));
 }

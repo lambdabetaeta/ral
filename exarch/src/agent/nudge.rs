@@ -17,7 +17,7 @@
 //! gauge hands over a [`Reminder`] and nothing it has worded.
 //!
 //! [`Nudges`] is per-session because the attend loop runs one
-//! `Agent::deliberate` per inbox item, not one per exchange, so this state
+//! `Agent::deliberate` per attempt within an exchange, so this state
 //! must outlive a single deliberation.  [`Nudges::reset`] clears the repair
 //! count at an exchange opening and after each completed tool round, never on a
 //! self-nudge; the edge fields survive it.  Every path that discards a
@@ -211,7 +211,7 @@ impl Nudges {
         Some(wrap_reminder(&reminder.body()))
     }
 
-    /// Decide the synthetic prompt the attend loop self-posts, or `None` to
+    /// Decide the exchange-local continuation prompt, or `None` to
     /// accept the attempt as it stands.
     pub fn react(
         &mut self,

@@ -11,7 +11,7 @@
 //! same agent, and a flood of one class bounds itself to one growing entry.
 //!
 //! Past [`MERGE_TEXT_CAP`] a merged entry sheds its oldest text and the shed
-//! count rides out as a `Transient::Fault` marker when the entry drains —
+//! count rides out as a `Transient::Elided` marker when the entry drains —
 //! degradation the user sees, never silence; being a fact about the
 //! transport, not the session, it is never durable.
 
@@ -154,7 +154,7 @@ fn pop_one(q: &mut BusQueue) -> Option<Signal> {
             merge_key(&entry.signal).expect("elided is only ever set on a coalescible entry");
         q.markers.push_back(Signal::Transient(
             id,
-            Transient::Fault {
+            Transient::Elided {
                 text: overflow_note(class, entry.elided),
             },
         ));
@@ -162,8 +162,8 @@ fn pop_one(q: &mut BusQueue) -> Option<Signal> {
     Some(entry.signal)
 }
 
-/// `receiver_alive` lets a sender whose receiver is already gone — which
-/// `Emitter::muted_child` arranges deliberately — no-op its pushes instead of
+/// `receiver_alive` lets a sender whose receiver is already gone — a frontend
+/// that exited while agent threads still emit — fail its pushes instead of
 /// growing a queue nobody will drain.
 struct BusShared {
     state: Mutex<BusQueue>,
@@ -173,7 +173,7 @@ struct BusShared {
 }
 
 impl BusShared {
-    /// Ignore poison rather than propagate it — the inbox's policy too: every
+    /// Ignore poison rather than propagate it — as the mailbox does: every
     /// mutation under this lock is total, so a panicked holder cannot leave the
     /// queue torn, and poisoning would deafen every later sender and receiver
     /// over one unrelated panic.
@@ -209,9 +209,8 @@ impl Drop for BusSender {
 }
 
 impl BusSender {
-    /// Push `sig` under the merge rule and wake a parked receiver; a no-op
-    /// once the receiver is gone, which is what lets `Emitter::muted_child`
-    /// swallow a display stream forever without leaking it.
+    /// Push `sig` under the merge rule and wake a parked receiver; rejected
+    /// once the receiver is gone, so a late emitter cannot leak a queue.
     ///
     /// # Errors
     /// Returns `Err(SendError(sig))` when the receiver has been dropped.
@@ -299,6 +298,16 @@ impl BusReceiver {
             None if self.0.senders.load(Ordering::Acquire) == 0 => Err(TryRecvError::Disconnected),
             None => Err(TryRecvError::Empty),
         }
+    }
+
+    /// Drain the finite queue snapshot, including its overflow markers.
+    pub fn drain_pending(&self) -> Vec<Signal> {
+        let mut queue = self.0.lock();
+        let mut signals = Vec::new();
+        while let Some(signal) = pop_one(&mut queue) {
+            signals.push(signal);
+        }
+        signals
     }
 
     /// [`Self::recv`] bounded by `timeout`.

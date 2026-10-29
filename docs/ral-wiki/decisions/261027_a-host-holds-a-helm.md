@@ -1,5 +1,6 @@
 ---
-status: "superseded by [[261028_one-scope-tree-one-inbox]]"
+status: superseded
+superseded_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
 verified_at_commit: e6941768
 verified_at_date: 2026-10-28
 anchors: [Helm, Avatar::helm, Agent::stop, Agent::abandon_delegation, AdmissionHold, Stamp::admit, Stamp::reset, Membership, Departures, SettledConversation::end_fleet, Inbox::await_human, SettledConversation::await_message, SettledConversation::exchange, ExchangeId, Exchanges]
@@ -7,8 +8,9 @@ anchors: [Helm, Avatar::helm, Agent::stop, Agent::abandon_delegation, AdmissionH
 
 # A host holds a helm
 
-Superseded by [[261028_one-scope-tree-one-inbox]]: its scope tree and inbox
-replace this mechanism; the queue, Stop semantics and control ladder stand.
+Superseded by [[261028_one-scope-tree-one-inbox]] for its mechanism, and
+[[261029_an-agent-is-a-thread|an-agent-is-a-thread]] for its product boundary:
+Stop cancels the exchange and preserves helpers; end ends life.
 
 **A host may steer an agent without owning its lifetime.** Exarch's public
 host boundary is a cloneable *Helm*, a `Weak<Agent>` obtained from its avatar.

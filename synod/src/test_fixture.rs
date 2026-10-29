@@ -9,3 +9,40 @@ pub(crate) fn workshop(tag: &str) -> tempfile::TempDir {
         .tempdir_in(root)
         .expect("temp workshop")
 }
+
+/// A gated root over the identity engine; the factory is the machine's, when it has one.
+pub(crate) fn scripted_host(
+    run_dir: &ral_core::own::OwnDir,
+    factory: Option<std::sync::Arc<dyn exarch::agent::Factory>>,
+    script: exarch::provider::scripted::Script,
+) -> exarch::host::Host {
+    use exarch::agent::{Admission, RootConfig, RootEngine, Trunk, fleet::HELPER_IDLE};
+    use exarch::app::{SYNOD, Scratch};
+    use exarch::provider::{Bureau, Provider, Toolset};
+    use std::sync::Arc;
+
+    let config = RootConfig {
+        system: "system".into(),
+        run_dir: ral_core::own::OwnDir::clone(run_dir),
+        trunk: Trunk::Converses,
+        admission: Admission::Gated,
+        helper_idle: HELPER_IDLE,
+        tools: Toolset::default(),
+        allow_schedule: false,
+        resume_on_reset: false,
+        disk_warn_bytes: None,
+        fuel: 0,
+        search: false,
+        factory,
+        bureau: Arc::new(Bureau::Scripted),
+        roles: exarch::provider::roles::Roles::default(),
+    };
+    let engine = RootEngine::Identity {
+        scratch: Arc::new(Scratch::for_test(SYNOD, "synod-host").expect("engine scratch")),
+        cwd: ral_core::host::cwd().expect("test cwd"),
+        grants: ral_core::authority::policy::GrantStack::default(),
+        terminal: ral_core::io::terminal::TerminalState::default(),
+    };
+    let provider = Arc::new(Provider::scripted("test-model", script));
+    exarch::host::Host::found(config, engine, provider).expect("host launches its root")
+}

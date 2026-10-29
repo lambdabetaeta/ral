@@ -9,10 +9,10 @@
 
 use super::surface::{Decoded, Surface, decode_surface};
 use super::*;
-use crate::agent::testkit::pop;
-use crate::bus::{Emitter, ParkMode, channel};
+use crate::bus::{Drained, Emitter, Input, Next, Rest, channel};
 use crate::card::Change;
 use crate::card::Row;
+use crate::record::AgentId;
 use ral_core::authority::policy::Capabilities;
 use ral_core::carrier::IdentityTransport;
 use ral_core::data::datum::Datum as _;
@@ -650,46 +650,39 @@ fn decode_surface_round_trips_each_class() {
     assert!(matches!(decode_surface(&s("nope")), Decoded::Unknown));
 }
 
-/// Worker batches belong to the engine incarnation, not originating work.
+/// Deferred batches carry their producer's generation until the owner ends.
 #[test]
-fn inbox_deferred_survives_abandoned_work_but_not_its_owner() {
+fn deferred_batches_keep_the_engine_generation_and_refuse_an_ended_owner() {
     use crate::agent::testkit::{TestAgentSpec, test_agent};
 
     let fleet = crate::agent::fleet::Fleet::for_test();
-    let agent = test_agent(&fleet, TestAgentSpec::new("root")).expect("a fresh trunk");
-    let inbox = &agent.inbox;
-    let (tx, _rx) = channel();
-    let emit = Emitter::new(tx, agent.id());
-    let incarnation = inbox.life().child();
-    let deferred = deferred_sink(
-        &emit,
-        inbox.life_mailbox().vouched_by((*incarnation).clone()),
-    );
-
-    for abandoned in [false, true] {
-        if abandoned {
-            inbox.abandon(crate::bus::Queue::Keep);
-        }
-        deferred.deliver(vec![ral_core::data::FOValue::Unit]);
-        match pop(inbox) {
-            Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
-                assert_eq!(id, agent.id(), "the batch names the root session");
-            }
-            other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
-        }
+    let agent = test_agent(&fleet, TestAgentSpec::new("root")).unwrap();
+    let deferred = deferred_sink(&agent.mailbox.address(), 7);
+    for _ in 0..2 {
+        deferred.deliver(vec![FOValue::Unit]);
+        let inputs = agent.mailbox.drain();
+        assert!(
+            matches!(inputs.as_slice(), [Drained::Input(Input::Surface { generation: 7, values })] if values == &[FOValue::Unit])
+        );
     }
-
     agent.end();
-    deferred.deliver(vec![ral_core::data::FOValue::Unit]);
-    assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
+    deferred.deliver(vec![FOValue::Unit]);
+    assert!(agent.mailbox.drain().is_empty());
+    assert!(matches!(
+        agent.mailbox.next(&Rest {
+            owing: false,
+            lives: Vec::new(),
+            schedules: false
+        }),
+        Next::Ended
+    ));
 }
 
 /// A failed worker wakes the model with how it really ended, never `exit 0`,
 /// and with the call that gets its result back.
 #[test]
 fn a_failed_spawn_wakes_the_model_with_its_status() {
-    let session = crate::agent::Agent::for_test("system").unwrap();
-    let inbox = crate::agent::testkit::inbox(&session);
+    let mut session = crate::agent::Agent::for_test("system").unwrap();
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
     let _ = session.ral(
@@ -700,19 +693,18 @@ fn a_failed_spawn_wakes_the_model_with_its_status() {
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let text = loop {
-        match pop(inbox) {
-            Some(crate::bus::Next::Item(item @ crate::bus::Item::Surface { .. })) => {
-                break item.text();
-            }
-            Some(_) => {}
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the failed worker never surfaced"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+        let inputs = session.mailbox.drain();
+        if let Some(Drained::Input(Input::Surface { values, .. })) = inputs
+            .into_iter()
+            .find(|input| matches!(input, Drained::Input(Input::Surface { .. })))
+        {
+            break crate::bus::surface_notice(&values);
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed worker never surfaced"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     };
     for part in ["(exit 5)", "(boom)", "await $h", "workers"] {
         assert!(text.contains(part), "the notice names {part}: {text:?}");

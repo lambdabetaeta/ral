@@ -65,7 +65,7 @@ impl Emitter {
 
     /// Point this session's log at a [`Publish`]er; facts append and
     /// publish under one lock from then on.  Idempotent, and re-attaching
-    /// after a per-exchange bus died is the ordinary path back on air.
+    /// after its bus died is the ordinary path back on air.
     pub(crate) fn attach(&self, sink: Box<dyn Publish>) {
         self.log.attach(sink);
     }

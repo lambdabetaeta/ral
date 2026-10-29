@@ -14,7 +14,6 @@ use super::prompt::editor::completion::Candidate;
 use super::providers;
 use super::rewind;
 use crate::SessionInfo;
-use crate::agent::AgentHandle;
 use crate::agent::fleet::Fleet;
 use crate::bus::{Read, Rewrite};
 use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
@@ -486,9 +485,7 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
         // model as one.
         None => match unrecognized_command(trimmed) {
             Some(head) => app.push_error(focused, &format!("unknown command: {head} (see /help)")),
-            // `steer` is the one delivery path: it renews the agent's idle
-            // lease, and the line is dropped if that agent died since it was
-            // focused.
+            // A line is refused if its focused agent has ended.
             None => {
                 if let Some(agent) = app.tabs.agent(focused) {
                     let _ = agent.steer(text);
@@ -498,13 +495,7 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
     }
 }
 
-/// Interrupt `agent`'s exchange, then queue `rewrite` behind it.
-fn interrupt_then(agent: &AgentHandle, rewrite: Rewrite) {
-    agent.interrupt();
-    agent.post_rewrite(rewrite);
-}
-
-/// A retained parent identity need not have an inbox consumer.
+/// A retained parent identity need not have a mailbox consumer.
 pub(super) fn quit(fleet: &Fleet) {
     fleet.end(ral_core::process::CancelCause::Cancelled);
 }
@@ -514,8 +505,8 @@ pub(super) fn quit(fleet: &Fleet) {
 /// clipboard, file, or picker, so it runs here on the UI thread; `/quit`
 /// cancels the fleet directly. A session command becomes its [`Read`] or
 /// [`Rewrite`] and rides the focused agent's
-/// inbox to its attend thread, which owns the context.  `/rewind` is both: its
-/// picker runs here, and the choice rides the inbox.
+/// mailbox to its attend thread, which owns the context.  `/rewind` is both: its
+/// picker runs here, and the choice rides the mailbox.
 fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
     match command {
         Command::Focus(name) => cmd_focus(app, &name),
@@ -528,8 +519,8 @@ fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
         Command::Login => login::login(app),
         Command::Providers => providers::providers(app, ctx),
         Command::Limits => cmd_limits(app, ctx),
-        Command::Clear => app.session(|agent| interrupt_then(agent, Rewrite::Clear)),
-        Command::Close => app.session(|agent| interrupt_then(agent, Rewrite::Close)),
+        Command::Clear => app.post_rewrite(Rewrite::Clear),
+        Command::Close => app.post_rewrite(Rewrite::Close),
         Command::Quit => quit(app.tabs.fleet()),
         Command::Evict => app.post_rewrite(Rewrite::Evict),
         Command::Rewind => rewind::rewind(app),

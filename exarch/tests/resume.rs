@@ -3,10 +3,12 @@
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
+use exarch::agent::fleet::HELPER_IDLE;
 use exarch::agent::outcome::Outcome;
-use exarch::agent::{Agent, RootConfig, RootEngine, Trunk};
+use exarch::agent::{Admission, Agent, RootConfig, RootEngine, Trunk};
 use exarch::app::{EXARCH, Scratch};
-use exarch::bus::{Emitter, channel};
+use exarch::bus::{Emitter, Signal, channel};
+use exarch::host::Host;
 use exarch::provider::Provider;
 use exarch::provider::Toolset;
 use exarch::provider::scripted::{Reply, Script};
@@ -67,7 +69,9 @@ fn root_config(run_dir: &OwnDir) -> RootConfig {
     RootConfig {
         system: "system".into(),
         run_dir: OwnDir::clone(run_dir),
-        trunk: Trunk::Attended,
+        trunk: Trunk::Converses,
+        admission: Admission::Free,
+        helper_idle: HELPER_IDLE,
         tools: Toolset::offered(false),
         allow_schedule: false,
         resume_on_reset: false,
@@ -89,8 +93,9 @@ fn identity_engine(tag: &str) -> RootEngine {
     }
 }
 
-#[test]
-fn scripted_run_kill_resume_and_continue() {
+/// A killed child's crash-shaped ledger, in a run directory of its own; the
+/// state home is returned to keep that directory alive.
+fn crashed_run() -> (ral_core::own::TestDir, OwnDir) {
     // A state home of this test's own, with the run made in it: the child
     // reaches the same directory through `XDG_STATE_HOME`, as exarch's own
     // launches reach theirs.
@@ -124,9 +129,14 @@ fn scripted_run_kill_resume_and_continue() {
     }
     child.kill().expect("terminate scripted child");
     let _ = child.wait();
+    (state, child_dir)
+}
 
+#[test]
+fn scripted_run_kill_resume_and_continue() {
+    let (_state, child_dir) = crashed_run();
     let [(mut resumed, _)] = <[_; 1]>::try_from(
-        Agent::resume(
+        Agent::resume_for_test(
             root_config(&child_dir),
             identity_engine("resume-parent"),
             &scripted("test-model", Script::new()),
@@ -188,6 +198,43 @@ fn scripted_run_kill_resume_and_continue() {
     );
 }
 
+#[test]
+fn the_host_resumes_a_crashed_run_and_carries_on() {
+    let (_state, child_dir) = crashed_run();
+    let host = Host::resume(
+        root_config(&child_dir),
+        identity_engine("resume-host"),
+        &scripted("test-model", Script::new().then(Reply::text("continued"))),
+    )
+    .expect("resume the crashed run");
+    let [root] = host.roots() else {
+        panic!("one open session, got {}", host.roots().len())
+    };
+    root.steer("continue after the crash".into()).unwrap();
+
+    let (mut resumed, mut answered) = (None, false);
+    while !answered {
+        match host
+            .feed()
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the resumed root settles its job")
+        {
+            Signal::Born(id, born) if id == root.id() => resumed = born.resumed,
+            Signal::Commit(id, commit) if id == root.id() => {
+                answered = commit.records().iter().any(|record| {
+                    matches!(record.value(), record::Record::Display(record::Display::Answer { text })
+                        if text == "continued")
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let resumed = resumed.expect("a resumed root is born with what it picked up");
+    assert!(resumed.bytes > 0);
+    assert_eq!(host.end(), [] as [String; 0]);
+}
+
 /// A record the fold does not recognise refuses the whole session rather
 /// than silently dropping the line or panicking — the versioned display
 /// vocabulary's own law.
@@ -241,7 +288,7 @@ fn resume_child() {
         .own(XdgKind::State)
         .and_then(|app| app.dir(CHILD_RUN))
         .expect("the run dir the parent made");
-    let mut session = Agent::root(
+    let mut session = Agent::root_for_test(
         root_config(&dir),
         identity_engine("resume-child"),
         scripted("test-model", Script::new()),

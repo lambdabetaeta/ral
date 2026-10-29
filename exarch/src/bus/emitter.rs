@@ -10,9 +10,8 @@ use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
 /// A usage accumulator shared by every emitter of one run — where a
-/// session's record log is per-session, this is per-run.  Usage tees here at
-/// the emit seam, so a display-muted child whose events reach no sink still
-/// counts toward the total.
+/// session's record log is per-session, this is per-run. Usage tees here at
+/// the record seam, independently of the frontend.
 #[derive(Clone, Default)]
 pub(crate) struct UsageMeter(Arc<Mutex<Usage>>);
 
@@ -28,8 +27,7 @@ impl UsageMeter {
 
 /// Where a witnessed record goes beside the file: the fleet-wide channel a
 /// frontend drains, tagged with the owning session's id, and the run's usage
-/// meter; accounting follows the fact through the seam, so a display-muted
-/// child on a dead channel still counts toward the run total.
+/// meter; accounting follows the fact even when the channel has no receiver.
 pub(crate) struct FleetSink {
     pub(crate) id: AgentId,
     /// Weak on purpose: the log outlives any one bus and its facts are
@@ -65,20 +63,10 @@ impl Publish for FleetSink {
     }
 }
 
-/// Whether an async `agent` child (a worker) cloning this emitter gets a live
-/// tab or streams nowhere.  Display only: a [`Children::Muted`] child still
-/// records through its own record seam and still meters.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Children {
-    Muted,
-    Live,
-}
-
 #[derive(Clone)]
 pub struct Emitter {
     tx: BusSender,
     id: AgentId,
-    children: Children,
     meter: UsageMeter,
 }
 
@@ -87,21 +75,7 @@ impl Emitter {
         Self {
             tx,
             id,
-            children: Children::Muted,
             meter: UsageMeter::default(),
-        }
-    }
-
-    /// A child emitter onto a channel whose receiver is already dropped, so it
-    /// streams nowhere, but carrying the parent run's meter.  What an async
-    /// `agent` child takes off a bus whose children are [`Children::Muted`].
-    pub(crate) fn muted_child(&self, id: AgentId) -> Self {
-        let (tx, _rx) = channel();
-        Self {
-            tx,
-            id,
-            children: Children::Muted,
-            meter: self.meter.clone(),
         }
     }
 
@@ -114,7 +88,6 @@ impl Emitter {
         Self {
             tx: self.tx.clone(),
             id,
-            children: self.children,
             meter: self.meter.clone(),
         }
     }
@@ -129,50 +102,27 @@ impl Emitter {
             meter: self.meter.clone(),
         })
     }
-
-    /// This emitter's own agent id, for `shell_eval::deferred_sink`, which
-    /// stamps a spawn worker's surface batch with the owning session's id.
-    pub(crate) fn id(&self) -> AgentId {
-        self.id
-    }
-
-    /// Whether a worker inherits the live session bus through [`Self::child`]
-    /// or records off the display through [`Self::muted_child`].
-    pub(crate) fn spawns_live_children(&self) -> bool {
-        self.children == Children::Live
-    }
 }
 
-/// A session bus keeps leased helpers connected across exchanges;
-/// a per-exchange bus mutes children while retaining their recorded usage.
+/// One fleet-wide channel and usage meter, spanning every job.
 pub(crate) struct FleetBus {
     tx: BusSender,
     rx: BusReceiver,
-    children: Children,
     /// The one meter every emitter minted from this bus shares.
     meter: UsageMeter,
 }
 
 impl FleetBus {
     pub(crate) fn session() -> Self {
-        Self::build(Children::Live)
-    }
-
-    pub(crate) fn per_exchange() -> Self {
-        Self::build(Children::Muted)
-    }
-
-    fn build(children: Children) -> Self {
         let (tx, rx) = channel();
         Self {
             tx,
             rx,
-            children,
             meter: UsageMeter::default(),
         }
     }
 
-    /// The receiver the exchange's `Sink` drains.
+    /// The receiver the frontend drains.
     pub(crate) fn rx(&self) -> &BusReceiver {
         &self.rx
     }
@@ -182,7 +132,6 @@ impl FleetBus {
         Emitter {
             tx: self.tx.clone(),
             id,
-            children: self.children,
             meter: self.meter.clone(),
         }
     }
@@ -207,16 +156,13 @@ pub(crate) fn dummy_emitter() -> (Emitter, BusReceiver) {
 #[cfg(test)]
 mod tests {
     use super::FleetBus;
+    use crate::bus::Signal;
+    use crate::provider::Usage;
+    use crate::record::{AgentId, Born, Emitter as Recorder, Forensic};
+    use ral_core::own::OwnDir;
 
-    /// Accounting follows the fact through the record seam, not its emitter:
-    /// no sink ever sees the muted child's usage, yet the run total includes
-    /// it, because a coupled log meters through the sink whatever the state
-    /// of the channel it publishes on.
     #[test]
-    fn usage_meter_counts_a_muted_child_on_a_dead_channel() {
-        use crate::provider::Usage;
-        use crate::record::{AgentId, Emitter as Recorder, Forensic};
-
+    fn session_meters_root_and_child_before_and_after_channel_closure() {
         let root_usage = Usage {
             input: 100,
             output: 20,
@@ -230,36 +176,63 @@ mod tests {
             ..Usage::default()
         };
 
-        let bus = FleetBus::per_exchange();
-        let root = bus.emitter(AgentId::new(0));
-        let child = root.muted_child(AgentId::new(1));
-
+        let bus = FleetBus::session();
+        let root_id = AgentId::new(0);
+        let child_id = AgentId::new(1);
+        let root = bus.emitter(root_id);
         let root_seam = Recorder::none();
         root_seam.attach(root.fleet_sink());
         let child_seam = Recorder::none();
-        child_seam.attach(child.fleet_sink());
-
-        let _recorded = root_seam
-            .emit(Forensic::UsageDelta {
-                usage: root_usage,
-                generation: None,
-                provider: None,
-            })
-            .expect("a fileless seam still stamps");
-        let _recorded = child_seam
-            .emit(Forensic::UsageDelta {
-                usage: child_usage,
-                generation: None,
-                provider: None,
-            })
-            .expect("a fileless seam still stamps");
-
-        let total = bus.usage_total();
-        assert_eq!(total.input, 107, "the muted child's input is counted");
-        assert_eq!(total.output, 23, "the muted child's output is counted");
-        assert!(
-            (total.dollars - 0.625).abs() < f64::EPSILON,
-            "the muted child's cost is counted",
+        let dir = OwnDir::for_test("emitter-child").expect("child log directory");
+        let child = root.child(
+            child_id,
+            Born {
+                log_dir: (*dir).clone(),
+                name: "helper".into(),
+                parent: Some(root_id),
+                resumed: None,
+                recorder: child_seam.clone(),
+            },
         );
+        child_seam.attach(child.fleet_sink());
+        let record_usage = || {
+            for (seam, usage) in [(&root_seam, root_usage), (&child_seam, child_usage)] {
+                let _recorded = seam
+                    .emit(Forensic::UsageDelta {
+                        usage,
+                        generation: None,
+                        provider: None,
+                    })
+                    .expect("a fileless seam still stamps");
+            }
+        };
+
+        record_usage();
+
+        let signals: Vec<_> = std::iter::from_fn(|| bus.rx().try_recv().ok()).collect();
+        assert!(matches!(signals.as_slice(), [
+            Signal::Born(born_id, born),
+            Signal::Commit(committing_root, _),
+            Signal::Commit(committing_child, _),
+        ] if *born_id == child_id && born.name == "helper" && born.parent == Some(root_id)
+            && *committing_root == root_id && *committing_child == child_id));
+        let total = bus.usage_total();
+        assert_eq!(total.input, 107);
+        assert_eq!(total.output, 23);
+        assert!((total.dollars - 0.625).abs() < f64::EPSILON);
+
+        let meter = bus.meter();
+        drop(bus);
+        drop(root);
+        drop(child);
+        record_usage();
+
+        let total = meter.total();
+        assert_eq!(
+            total.input, 214,
+            "both record seams meter without a channel"
+        );
+        assert_eq!(total.output, 46);
+        assert!((total.dollars - 1.25).abs() < f64::EPSILON);
     }
 }

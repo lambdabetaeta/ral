@@ -13,6 +13,7 @@ The layers, leaves first (see [[design/exarch-architecture|exarch-architecture]]
 - `shell_eval`
 - `agent`
 - `boot`
+- `host`
 - `tui`, `headless`
 - `cli`, `lib`
 
@@ -20,9 +21,11 @@ Each boundary says what the lower layer is spared:
 
 - `provider` knows no `record`: a provider speaks the wire and nothing of the session's durable log.
 - `record` knows no `bus`: it publishes through its `Publish` trait, never to a concrete bus.
-- `bus` knows no `agent`: it owns `Inbox` / `Mailbox` and uses ral's
-  `Scope` / `ScopeNode` for provenance and cancellation. `schedule` and
-  `shell_eval` reach that inbox without depending on its agent owner.
+- `bus` knows no `agent`: it owns `AgentMailbox` / `AgentAddress` and uses
+  ral scopes for life/exchange cancellation. `schedule` and `shell_eval`
+  reach that mailbox without depending on its agent owner.
+- `agent` knows no `host`: the host launches and joins roots; frontends
+  depend on the host, never the reverse.
 - `shell_eval` knows no `agent`: the desk is reached through `ral_core::carrier::Host`.
 - `prompt` and `enquiry` know no `agent`: both are read by the agent, never the converse.
 

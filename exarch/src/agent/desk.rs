@@ -1,26 +1,20 @@
-//! The exarch enquiry desk: the host half of `shell.enquire(class)`.
-//!
-//! [`HostServices`] captures plain values from the owner, since reentrancy bars a handler from
-//! taking the session lock. [`ExarchDesk`] answers one enquiry against that
-//! capture, paired with its [`SurfaceApplier`] in one [`RunHost`], which
-//! implements [`ral_core::carrier::Host`] — the object every dispatch
-//! rides, so a handler's chrome can never outrun the run's earlier surface
-//! output.
+//! One shell call's enquiry desk, borrowing the owner's body through a loan.
 
 use crate::agent::engine::EngineKind;
 use crate::agent::fleet::Fleet;
+use crate::agent::loan::Loan;
 use crate::agent::roster::listing;
-use crate::agent::{AgentHandle, LogCell, ReplyCell, SharedCell};
-use crate::bus::{Emitter, Mailbox};
+use crate::agent::{AgentHandle, Body};
+use crate::bus::Emitter;
 use crate::enquiry::{
     Agents, Context, Hits, Indexed, Material, Pins, Request, Schedules, Survey, Transcript,
 };
-use crate::schedule::ScheduleRegistry;
-use crate::shell_eval::PinDigests;
 use crate::shell_eval::surface::SurfaceApplier;
+use atomic_refcell::AtomicRefCell;
 use ral_core::carrier::Host;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::process::Scope;
 use ral_core::protocol::EnquiryError;
 use ral_core::shell::runtime::Error;
 use std::sync::Arc;
@@ -31,7 +25,8 @@ use std::sync::Arc;
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum DeskAct {
     Spawn,
-    Cancel,
+    Stop,
+    Dismiss,
     Message,
     Schedule,
     Unschedule,
@@ -44,7 +39,8 @@ impl DeskAct {
     pub(crate) fn verb(self) -> &'static str {
         match self {
             Self::Spawn => "spawn",
-            Self::Cancel => "cancel",
+            Self::Stop => "stop",
+            Self::Dismiss => "dismiss",
             Self::Message => "message",
             Self::Schedule => "schedule",
             Self::Unschedule => "unschedule",
@@ -61,7 +57,8 @@ impl DeskAct {
         };
         match self {
             Self::Spawn => named("started agent"),
-            Self::Cancel => named("cancelled agent"),
+            Self::Stop => named("stopped agent"),
+            Self::Dismiss => named("dismissed agent"),
             Self::Message => named("delivered a message to agent"),
             Self::Schedule => named("armed the wakeup"),
             Self::Unschedule => named("removed the wakeup"),
@@ -73,24 +70,20 @@ impl DeskAct {
     }
 }
 
-/// What this `ral` call has committed, in the order it landed: one entry per
-/// act that landed, minted at [`HostServices::commit_act`] — the one place every
-/// acting handler funnels through — and read back once the call has failed.
-///
-/// A call the wall cut short still started what it started and delivered what
-/// it delivered, and no other in-band channel says so: the model's only other
-/// signal — the diagnostic — speaks of the failure and not of the acts.
-///
-/// Only committed acts are recorded. A refused act changed nothing, so it
-/// leaves no entry: this fragment answers *what stands*.
-#[derive(Clone, Default)]
-pub(crate) struct ActFragment(SharedCell<Vec<(DeskAct, Option<String>)>>);
+/// Plain values fixed for one shell call.
+pub(crate) struct Call {
+    pub(crate) handle: AgentHandle,
+    pub(crate) life: Scope,
+    pub(crate) fleet: Arc<Fleet>,
+    pub(crate) kind: EngineKind,
+    pub(crate) emit: Emitter,
+    pub(crate) acts: AtomicRefCell<Vec<(DeskAct, Option<String>)>>,
+}
 
-impl ActFragment {
-    /// The sentence an unwind owes the model, or `None` when this call committed
-    /// nothing at all — where silence is the whole truth.
+impl Call {
+    /// Committed acts survive a failed dispatch, even when its bindings do not.
     pub(crate) fn audit(&self) -> Option<String> {
-        let acts = self.0.borrow();
+        let acts = self.acts.borrow();
         if acts.is_empty() {
             return None;
         }
@@ -103,41 +96,17 @@ impl ActFragment {
             "audit: this call had already {done}; that work stands; do not repeat it.\n"
         ))
     }
-}
 
-/// A call's local services, retaining its originating work scope.
-pub(crate) struct HostServices {
-    /// This run's own agent: parent of what it spawns, root of the descendant
-    /// check `` `message ``/`` `cancel `` enforce, and the source every
-    /// immutable-config read (`fuel`, `role`, …) is taken from.
-    pub handle: AgentHandle,
-    pub schedules: ScheduleRegistry,
-    pub pins: PinDigests,
-    pub fleet: Arc<Fleet>,
-    /// How this call's forks reach the desk: `` `start `` chooses its arm on
-    /// this fact.
-    pub kind: EngineKind,
-    pub emit: Emitter,
-    /// Where the `reply` handler stages its value, holding no `&mut Agent` to
-    /// write it any other way.
-    pub reply: ReplyCell,
-    /// A `mnemon` spawn forks its inherited context off this.
-    pub log: LogCell,
-    /// The originating work's envelope; never refreshed at installation.
-    pub mailbox: Mailbox,
-    /// What this call has committed so far: minted per `ral` call, and read
-    /// back by [`crate::shell_eval::report::tool_result`] when a raise discards
-    /// the bindings but not the acts.
-    pub acts: ActFragment,
-}
-
-impl HostServices {
-    /// The one place every acting handler commits an attempt through: the
-    /// rail row always, the fragment only when `refused` is false, so a verb
-    /// cannot draw one and miss the other.
-    fn commit_act(&self, act: DeskAct, subject: Option<&str>, payload: String, refused: bool) {
-        self.log
-            .borrow()
+    /// Every attempt draws a row; only committed acts enter the audit.
+    fn commit_act(
+        &self,
+        body: &Body,
+        act: DeskAct,
+        subject: Option<&str>,
+        payload: String,
+        refused: bool,
+    ) {
+        body.log
             .record_emitter()
             .emit_or_end(crate::record::Display::HarnessCall {
                 verb: act.verb().to_string(),
@@ -147,17 +116,20 @@ impl HostServices {
             });
         if !refused {
             self.acts
-                .0
                 .borrow_mut()
                 .push((act, subject.map(str::to_string)));
         }
     }
 }
 
-/// Answers one [`FOValue`] enquiry against a captured [`HostServices`]. Fresh
-/// per `ral` call; wrapped in [`RunHost`], the [`Host`] every dispatch rides.
+/// The loan is the only access to owner state; dispatch returns it.
 pub(crate) struct ExarchDesk {
-    pub(crate) services: HostServices,
+    pub(crate) loan: Arc<Loan<Body>>,
+    pub(crate) call: Call,
+}
+
+fn no_desk() -> Error {
+    EnquiryError::no_desk().into()
 }
 
 impl ExarchDesk {
@@ -167,29 +139,29 @@ impl ExarchDesk {
     /// # Errors
     /// The decoder's refusal, or the addressed handler's.
     pub(crate) fn handle(&self, req: &FOValue) -> Result<FOValue, Error> {
+        drop(self.loan.get().ok_or_else(no_desk)?);
         match Request::decode(req).map_err(Error::new)? {
             Request::Agents(Agents::List) => {
-                Ok(listing(&self.services.handle, &self.services.fleet).encode())
+                Ok(listing(&self.call.handle, &self.call.fleet).encode())
             }
             Request::Agents(Agents::Start(start)) => self.launch(start),
             Request::Agents(Agents::Message(message)) => self.message(message),
-            Request::Agents(Agents::Cancel(name)) => self.agent_cancel(&name),
+            Request::Agents(Agents::Stop(name)) => self.agent_stop(&name),
+            Request::Agents(Agents::Dismiss(name)) => self.agent_dismiss(&name),
             Request::Agents(Agents::Reply(value)) => self.agent_reply(value),
             Request::Agents(Agents::Read(name)) => self.agent_read(name),
             Request::Schedules(Schedules::List) => {
                 self.require_schedule_grant("exarch-schedules `list")?;
-                Ok(self.schedule_table())
+                self.schedule_table()
             }
             Request::Schedules(Schedules::Add(add)) => self.schedule(add),
             Request::Schedules(Schedules::Remove(label)) => self.unschedule(&label),
-            Request::Pins(Pins::Set(pin)) => Ok(self.apply_pin(pin.key, Some(pin.body))),
-            Request::Pins(Pins::Clear(key)) => Ok(self.apply_pin(key, None)),
-            Request::Pins(Pins::Read(key)) => Ok(self.pin_read(&key)),
-            Request::Pins(Pins::List) => Ok(self.pin_list()),
-            Request::Context(Context::Survey) => Ok(Survey::from(self.context_survey()).encode()),
+            Request::Pins(Pins::Set(pin)) => self.apply_pin(pin.key, Some(pin.body)),
+            Request::Pins(Pins::Clear(key)) => self.apply_pin(key, None),
+            Request::Pins(Pins::Read(key)) => self.pin_read(&key),
+            Request::Pins(Pins::List) => self.pin_list(),
+            Request::Context(Context::Survey) => Ok(Survey::from(self.context_survey()?).encode()),
             Request::Context(Context::Evict(evict)) => self.context_evict(evict),
-            // The index stays whole under the lock: it is a projection of
-            // rows the structure already holds, touching no file.
             Request::Transcript(Transcript::Index) => self.locate_then_read(
                 |log| {
                     Ok(Vec::from_iter(

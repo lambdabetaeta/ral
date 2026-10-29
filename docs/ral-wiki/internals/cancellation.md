@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 0e83863c
+verified_at_commit: e5a23909
 verified_at_date: 2026-10-29
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::interrupt, AgentHandle::stop, Inbox, Mailbox, Posts, Child, Opening, Census, Claim, Tenancy, Incarnation, JobId, Fleet::wait_settled, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Transport::unbind]
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Transport::unbind]
 ---
 
 # Cancellation
@@ -519,18 +519,18 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)`, + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |
-| **Ctrl-C / Esc** | exarch TUI, active exchange | `AgentHandle::interrupt` on the focused address | cancels exchange and pending opening with `Interrupted`; helpers survive; dispatcher strikes its own dispatch id |
-| **Stop / Esc** | synod, active job | `AgentHandle::stop(JobId)` under the root inbox lock | matching job abandons work with `Cancelled`, recalls human text and ends adopted descendants; stale/duplicate Stop does nothing; closing waits for helper teardown |
-| **`reply` / `/clear`** | exarch owner | work abandonment | cancels work and replaces it; reply keeps queued posts, clear discards them; owner clears schedules |
-| **end / `/close` / agent cancel / owner drop** | exarch | life cancellation | ends subtree with `Cancelled`; membership releases after engine/log teardown |
+| **Ctrl-C / Esc** | exarch TUI, open job | `AgentHandle::stop(JobId)` on the focused address | cancels latest exchange with `Interrupted`, recalls queued human text losslessly ahead of the draft; helpers survive |
+| **Stop / Esc** | synod, open job | `AgentHandle::stop(JobId)` under the mailbox lock | matching job is marked stopped, latest exchange cancelled with `Interrupted`, human text recalled; helpers continue and reports can resume the root within the job |
+| **`reply` / `/clear`** | exarch owner | owner-thread transition | reply reports and clears schedules; clear prepares first, joins helpers and replaces the engine, retaining queued human text/messages/commands |
+| **end / `/close` / dismiss / owner drop** | exarch | life cancellation | ends subtree with `Cancelled`; helpers join before engine retirement |
 | **first failed record append** | exarch | life cancellation | the writer's `Fatal` ends its bound life with `Cancelled`; the owner announces the failure at its end |
 | **engine severance** | exarch | life cancellation | the transport's `Fatal` ends its bound life with `Cancelled` from the severing thread; the owner names the loss at its end |
-| **idle lease lapse** | exarch child | life cancellation | `TimedOut` for the same reply timestamp and no newer accepted exchange |
-| **`/quit` / `end_fleet`** | exarch host | fleet-root cancellation | `Cancelled` reaches all lives; shutdown drops the owner before waiting on detached departures |
-| **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to every live root's `AgentHandle::interrupt` |
+| **helper idle timeout** | exarch helper | life cancellation | `TimedOut` under the mailbox lock after resting idle with no admissible input |
+| **`/quit` / `Host::end` / host drop** | exarch host | fleet-root cancellation | `Cancelled` reaches all lives; host joins all root threads |
+| **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to every live root's `AgentHandle::stop_current` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
-| **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `signals::face` to every live root's `AgentHandle::interrupt` |
+| **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `signals::face` to every live root's `AgentHandle::stop_current` |
 | **async SIGTERM / SIGHUP** | exarch | ral's `handler` | forwarded as `Fleet::end(Terminated)`; dispatchers observe exchange ancestry; ladder `+1` |
 
 ### ral interactive signal dispositions
@@ -566,91 +566,70 @@ child gets them back in `reset_child_signals`:
   ever being stopped itself, and rewrites terminal state without being
   stopped ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
-### exarch's scopes hang off ral's tree
+### exarch: life contains exchange
 
-**Life, delegated work and exchange are ral scopes, never resettable tokens.**
-One fleet `DurableRoot` contains lives; each life contains current work;
-work contains its exchange and adopted child lives; a parallel engine
-incarnation scope under life vouches for worker batches
-([[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]).
+**Every agent owns one life, with exchanges and helper lives beneath it.**
+An exchange is one input through local nudge continuations; a job is its
+recorded busy period, not a scope
+([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
 
-- Interrupt cancels exchange and pending opening with `Interrupted`.
-  Stop, `/clear` and `reply` cancel work with `Cancelled` and replace it.
-  End and owner drop cancel life; a recording failure or an engine's
-  severance cancels it from the latching thread. Lease expiry uses `TimedOut`.
-  `/quit` cancels the fleet root. Ancestry propagates causes without a
-  mutable children walk.
-- `Agent` alone owns engine, log, schedules, pins and reply staging.
-  `AgentHandle` retains identity and a life mailbox, never an engine.
-  Owner drop cancels life first, ending descendants; engine destruction
-  ends its ral workers. Releasing the engine's `Tenancy` witnesses completed
-  teardown.
-- `Inbox` / `Mailbox` (`bus/inbox.rs`) carry scope provenance, checked once
-  at pop under the inbox lock; `Posts` fences before every observation.
-  Results and wakeups carry work; nudges
-  exchange; worker batches the engine incarnation; messages the sender's
-  containing scope.
-  Human text and commands are unfenced.
-- Exchange scope is minted at pop under current work. Accepted arrival
-  `open`s it, cancelling its predecessor; a declined worker completion
-  drops the `Opening`, and only that. Esc strikes both opening and exchange: no reset
-  erases it. `deliberate` appends a drawn prompt before polling cancellation,
-  recording human text once without a provider round under a dead scope.
-- Parks read life on every condvar wake or `PARK_POLL` (100 ms); provider
-  waits read exchange; ral runs pass `Some(exchange)` to
-  `dispatch_to_report`. Own end, Stop and posts notify. Factory, attach,
-  probe and protocol writes retain their own deadlines, not scope-driven
-  cancellation.
-- **The dispatcher owns each engine strike.** Before dispatch and after
-  every nonterminal event or `POLL_SLICE` timeout it strikes its own id only when the
-  cause rises. `Control::Strike(id, cause)` preserves the exact cause and
-  affects only that dispatch, never engine shutdown. A strike before send
-  foretells cancellation, so no effect starts in a dead scope.
-- Identity `Scopes::open(id, within)` mints beneath exchange before the
-  engine lock; inline evaluation polls ancestry directly. Wire dispatch
-  ignores foreign parenting and receives addressed controls from its loop.
-  `Scopes::end` cancels root and current dispatch, including one beneath an
-  external scope. Cancelling threads never write to a transport; a strike
-  cannot hit a later dispatch.
-- Loose ral workers belong to the engine, not work. Stop and reply preserve
-  them; their batches carry engine incarnation under both carriers. A
-  committed `/clear` applies its queue boundary and replaces the incarnation,
-  certifying the outgoing engine. Failed preparation changes neither; a
-  failed commit ends life and certifies the unused prepared engine.
-- `signals::face` forwards interrupts to root exchanges and shutdown to
-  `Fleet::end`. `boot::face_process_signals` installs ral then exarch's
-  non-escalating SIGINT disposition once at entry. Raw-mode keys are local;
-  no shell has terminal authority and no key broadcasts a process signal.
-  Overlays and matrix navigation consume their own gestures.
-- `Chrome::Cancelled` makes interruption visible without inventing failure;
-  `Scrollback::last_is_error` reserves matrix failure for actual errors.
+- Stop cancels only the current exchange with `Interrupted`. Human gestures
+  recall queued text; desk Stop and SIGINT retain it. Helpers, schedules, messages and loose shell workers
+  survive. End cancels life; helper rest timeout uses `TimedOut`; writer
+  failure and engine severance latch life cancellation. No scope resets.
+- `AgentMailbox::next` mints the exchange lease at pop. `begin` opens a job
+  only after the owner accepts input; Stop at rest, including before that
+  opening, does nothing. Mid-job Stop sees the newly minted exchange.
+- `JobOpened` and registration, `JobSettled` and clearing, and Stop's mark
+  share the mailbox lock. New input may continue a stopped job; settlement
+  waits for the empty queue, pending helpers and returning-agent schedules.
+- A helper is pending while it owes its parent or has announced retirement,
+  until joined. Retirement posts a quiet notification under descendant then
+  ancestor mailbox locks before cancelling life. The persistent status makes
+  the obligation survive notification consumption; `Gone` joins quietly.
+  A settlement preceding announcement may overlap cleanup, so a later
+  failure invalidates the walk and account.
+- Provider waits poll exchange; parks poll life every condvar wake or
+  `PARK_POLL`. Own end, Stop and posts notify. Factory, attach, probe and
+  protocol writes retain independent deadlines.
+- `dispatch_to_report(..., Some(exchange))` owns the strike for its own
+  dispatch id, before sending and after each nonterminal event or slice.
+  Identity parents beneath exchange; wire uses addressed controls. A strike
+  cannot hit a later dispatch, and cancelling threads never write transport.
+  `Scopes::end` ends engine root and current dispatch, even externally parented.
+- Engine-owned loose workers survive exchange cancellation. Deferred batches
+  carry generation; clear advances it. Clear prepares first, joins helpers,
+  commits and replaces the engine; failed preparation changes nothing.
+  Failed commit ends life and retires the prepared engine.
+- Timers use weak shared addresses. Scheduled firing checks coalescing,
+  updates/retires the registry and posts under one mailbox transaction,
+  ordered mailbox → registry. Epochs invalidate wakeups across clear/report.
+- Teardown ends life, reports owed failure, joins helpers, then takes and
+  retires `Option<Engine>` once. `Joined` drop and owner field order preserve
+  helper-before-engine destruction on unwind. `Host` end/drop joins roots.
+  Uncertified engine end is `TeardownFailed`, propagated through join results.
 
-### Synod: abandon a job, preserve its root
+### Synod and TUI observe Stop
 
-**Stop is a work cancellation linearised with job closing.**
+**Stop preserves the agent and its helpers, not a frozen job boundary.**
 
-- `SettledConversation::await_job` opens a human-triggered `Job` under the
-  root inbox lock. `AgentHandle::stop(JobId)` marks only the matching
-  running, unstopped job, abandoning work with recall. Stale or duplicate
-  Stop changes nothing.
-- Stopped `draw` takes up nothing more. Text sent after Stop stays queued
-  and opens the next job. Human text returns oldest first; other posts live
-  or die by provenance, including surviving incarnation-vouched worker batches.
-- `SettledConversation::run` waits through `Fleet::wait_settled` inside the
-  output pump, linearises closing against Stop, and settles again if Stop
-  wins before returning `JobEnd`. The attending owner is excluded by tenant id,
-  independent of liveness; every other ended owner and unfinished claim must
-  tear down. Wire owners retain their `Tenancy` through `Detach → Ended`, certified only
-  after engine-thread join and a drained session-worker census. Missing
-  acknowledgment refuses settlement and Synod's closing folder scan.
-  The next job and “Stopped.” cannot overtake those writes or final output.
-- Synchronous `stop_job` returns recalled text; serialized withdrawals
-  restore it ahead of the draft without retargeting a newer job. Backend
-  `JobDone.stopped` alone draws “Stopped.” after in-flight output.
-- `end_fleet` cancels the whole fleet, drops its owner, then waits through
-  detached `Census`. Each tenancy releases after engine/log teardown;
-  the waiter retains no launch or factory. Synod recovers `MachineFactory`
-  only after this barrier.
+- Synod uses gated admission. Baseline and each closing folder walk precede
+  release of the next job. Human text, messages, wakeups and worker batches
+  may then open it. A stopped helper's report can wake the root in the same
+  job; a stopped mark is carried by the eventual `JobSettled`.
+- Settlement follows pending-helper joins, not shutdown of resting engines.
+  A resting helper ending during a walk can report teardown failure later;
+  Synod treats `TeardownFailed` as terminal. Engine end requires the wire
+  `Detach → Ended` acknowledgment, not EOF. `Guest::end` joins all agents
+  through `Host::end` before recovering its machine factory.
+- TUI tabs use recorded job ids for Stop. Recalled text is prepended to the
+  draft even during history browsing or non-insert mode; Up recall remains
+  guarded. Synod serializes withdrawals in gesture order and binds them to
+  the attempt/job captured at the gesture. Backend `JobDone.stopped` alone
+  draws “Stopped.” after in-flight output.
+- `signals::face` forwards SIGINT to root `stop_current`, shutdown to the
+  fleet. Raw keys stay local, and overlays/search/copy own their gestures
+  first. `Chrome::Cancelled` distinguishes cancellation from failure.
 
 ## Why interactive Ctrl-C cannot force-exit
 
@@ -658,7 +637,7 @@ A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor i
 unreachable from an interactive prompt.** Interactive SIGINT goes to
 `interrupt_handler`, which never ticks the ladder; the TUI's active-exchange
 Ctrl-C goes to
-`AgentHandle::interrupt`, which never touches the ladder. Repeated presses re-write the same cause
+`AgentHandle::stop`, which never touches the ladder. Repeated presses re-write the same cause
 (`fetch_max`), never escalate. The hard
 floor exists for batch scripts (`handler`) and for external SIGTERM/SIGHUP. Interactive cancellation is cooperative
 by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
@@ -677,8 +656,8 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
   root/foreground split and the `CancelCause` order.
 - [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]] —
   why the user interrupt writes a flag, not a counter.
-- [[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]] —
-  structural exchange/work/life extents, provenance and addressed jobs.
+- [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] —
+  life/exchange scopes, observed jobs, reports and structured teardown.
 - [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] — the original
   cooperative-poll insight.
 - [[decisions/260726_cancel-is-a-join|cancel-is-a-join]] — why the handler

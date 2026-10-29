@@ -10,7 +10,7 @@ type Graph = BTreeMap<String, BTreeSet<String>>;
 
 const SKIPPED: [&str; 2] = ["tests.rs", "testkit.rs"];
 
-const LAYERED: [(&str, &str); 8] = [
+const LAYERED: [(&str, &str); 11] = [
     ("provider", "record"),
     ("record", "bus"),
     ("bus", "agent"),
@@ -19,6 +19,9 @@ const LAYERED: [(&str, &str); 8] = [
     ("shell_eval", "agent"),
     ("agent", "tui"),
     ("agent", "headless"),
+    ("agent", "host"),
+    ("host", "tui"),
+    ("host", "headless"),
 ];
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {

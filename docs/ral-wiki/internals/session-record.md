@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 34266ac0
+verified_at_commit: e5a23909
 verified_at_date: 2026-10-29
-anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
+anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Forensic::JobOpened, Forensic::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal]
 ---
 
 # Session record: one seam, one log
@@ -52,16 +52,14 @@ append lock; append checks the latch under its lock. Failed appends advance
 neither the commit count nor the byte cursor, and the owned `File` has no
 user-space buffer to flush on drop.
 
-The latch ends the life node `Fleet::lodge` mints, handed to the writer by
-`Emitter::bind`, from whichever thread latches it. No producer reports the
-failure. The owner's terminus — `settle`, the headless run or
-`SettledConversation::run` — announces it once as
-`Transient::Fault` on the independent fleet sink, which the failed writer
-cannot block, and makes it the outcome. Announcement precedes the terminal
-death cue. A failure first met by `Agent::drop`'s `SessionEnded`, after its
-owner concluded, latches but is announced by no one; what was recorded
-before it stays resumable. Records are surrendered to the OS, not `fsync`ed:
-process-crash durability is not a power-loss guarantee.
+The latch ends the life supplied by agent construction and bound through
+`Emitter::bind`, from whichever thread latches it. Producers do not announce
+it. After owner drop, terminal finalization announces it once as
+`Transient::Fault` on the independent fleet sink and includes it in
+`Died { failures }` and the join result. This includes failure of the final
+`SessionEnded` append; the recorded prefix remains resumable. Records
+are surrendered to the OS, not `fsync`ed: process-crash durability is not a
+power-loss guarantee.
 
 Protocol mutations distinguish `Uncommitted::Refused`, which leaves the
 session usable without recording, from `Uncommitted::Unavailable`, which
@@ -69,9 +67,8 @@ means the writer failed and the session ended.
 
 Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
-can catch up. The sink is attachable because the session log outlives a TUI
-session bus and the headless per-exchange buses that are attached to it in
-turn. What a log appends with no sink attached reaches no channel; a mirror
+can catch up. Each root or helper attaches its log to the host session bus.
+What a log appends with no sink attached reaches no channel; a mirror
 reads it from the file with `Emitter::since`. Redelivery is safe because the
 view fold ignores a `Seq` it has already folded: a resumed memo seeded from
 the file is not stepped a second time by the same head records.
@@ -137,33 +134,41 @@ and terminal recording failures. These are drawn or routed while the process
 is alive. They are not a hidden fourth record class, and no resume attempts
 to reconstruct them.
 
-## A child's status is a fold
+## Jobs, reports and teardown evidence
 
-**A returning agent's latest recorded status is a fold of its own log**
-([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
+**Busy periods and reports are recorded by the owning agent; the mailbox
+publishes their live state.**
 
-- The parent reads the shared live cell. `ChildStatus::fold` (test-only)
-  yields Working until the first `Forensic::Status`, then the last status
-  recorded: the oracle the live status must agree with, defining its
-  recorded meaning rather than a second live register.
-- Parent follow-up and child finish hold `Child.record` across decision,
-  record and publication. `Report::transition` appends before showing the
-  status, outside every inbox lock; a failed append still shows it, since
-  the failure has ended life and the parent must hear the finish. Retirement's
-  own failed `Failed` append shows `Failed(<the recording failure>)`.
-- A resumed returning root (headless) records Working again through
-  `Inbox::resume`, called from `Agent::reopen`; a conversing root records
-  nothing. A headless root running several jobs in one conversation would keep
-  `Replied(v1)` during a later job: accepted, unreachable today.
-- A follow-up is posted before its status is recorded: refusal leaves no
-  transition. Retirement takes the record seam and permits no later
-  transition. A normal Working owner's Failed record precedes `SessionEnded`.
-- An unwinding Working owner shows Failed without a status record or
-  `SessionEnded`, leaving its log Working. A crash commits no terminal
-  status; the last record is the evidence that remains.
-- `Forensic::Status` carries the child's reply value; model and presentation
-  folds ignore it. The parent records its own notice uptake as
-  `Display::SubagentDone`, carrying only the value-free `Settlement`.
+- `Forensic::JobOpened`'s commit number names `JobId`. Opening and job
+  registration share the queue lock. `JobSettled { job, stopped }` commits
+  under the lock that finds no queued input or pending work and clears it.
+  A job without settlement ended with life; a job is not cancellable scope.
+- Stop marks the matching open job under that same lock, cancels exchange
+  and recalls human text. Later exchanges can run in the same job; its
+  stopped mark remains until settlement.
+- `Forensic::Status` carries `Replied(FOValue)`, `Failed(String)` or
+  `Stopped`. The owner records before publishing mailbox status. Working
+  is computed for views from parent obligation or an open job, not recorded
+  as a report variant.
+- A helper's mailbox starts owing its parent; parent enqueue sets that flag.
+  Under the helper lock, reporting posts `Child` to the parent iff owed,
+  then retains the obligation only if parent input remains queued. Human-only
+  dealings with a resting helper publish status without notifying the parent.
+- Parent uptake records `Display::SubagentDone` with value-free `Settlement`.
+  `read` fetches the faithful value from the helper's published status. A
+  panicked thread publishes `Failed` through its surviving address; a crash
+  need not have a terminal report in its log.
+- `EngineSevered { cause }` records engine loss captured before intentional
+  end. `TeardownFailed { failure }` records each uncertified engine retirement
+  once in its owner's log; joins propagate that failure without recording it
+  again. `Option<Engine>` is taken at final retirement, so repeated teardown
+  cannot duplicate the end.
+- Model and selection folds ignore these facts. The view fold keeps jobs
+  quiet, renders engine loss as a system note and teardown failure as error.
+  Synod observes job/teardown facts directly before narration.
+
+See [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] for
+linearisation and join laws.
 
 ## The two folds
 
@@ -504,8 +509,7 @@ prose with reads both of its terms off the fold rather than being told the
 denominator.
 The TUI keeps a 1:1 mirror of its memo (`tui::Mirror`), one `tui::Block` per
 incident, with deliberation and the work it ordered collapsed into a group as
-they land; headless keeps one memo per source agent and prints each opened
-block.
+they land; headless keeps one root memo and prints its opened blocks.
 
 Live and replay use the same view fold. The TUI's `App::commit` and
 `App::transient` are the two distinct routes: durable blocks are fold-backed,
@@ -522,25 +526,19 @@ resumed root's tab reads only the bytes that predate this run and then draws the
 "resumed" note at the true boundary. Cumulative usage comes from the replayed
 forensic deltas.
 
-**`/clear` prepares, commits, then installs.** Its separately requested
-interrupt cancels the in-flight exchange. The owner preflights context
-readiness and engine rebirth eligibility, captures a non-destructive inbox
-boundary, and boots a replacement without touching the live engine. Only a
-committed `Protocol::Cleared` permits discarding old-boundary input,
-abandoning work and schedules, replacing the engine and resetting pins and
-readings. Refusal or failed preparation leaves those live resources
-untouched. A failed commit latches the writer and ends the session;
-`Tenancy::discard` certifies the unused prepared engine. The current engine,
-record and registers stay as they were. Human input arriving after the
-captured boundary survives a successful clear, including a suffix coalesced
-with an older prompt; cancelled old producer scopes cannot deliver into the
-new context. The inbox boundary is
-applied before outgoing engine teardown. No fallible boot remains after the
-commit. The frontend learns of it from the record itself: the mirror steps
-`Delta::Cleared`, retires every block it held, resets its open lines and scroll
-state, redraws the opening, and `App` retires the cleared agent's descendant
-tabs. No file is replaced, so existing `Emitter` clones and the attached bus keep
-publishing without a handoff.
+**`/clear` prepares, joins helpers, commits, then installs.** Its queued
+rewrite runs at the exchange boundary. Context readiness and engine rebirth
+are checked before mutation; preparation failure preserves helpers, queue
+and engine. Then the owner dismisses and joins helpers and commits
+`Protocol::Cleared`. A failed commit ends life through the writer latch and
+retires the unused prepared engine. Success transfers the life binding to
+the fresh engine, replaces and retires the outgoing engine once, advances
+batch generation and resets pins, schedules and readings. Mailbox clear
+drops reports, departures, wakeups and batches, retaining all human text,
+messages and commands. Epoch/generation checks reject racing stale inputs.
+No fallible boot remains after the commit. The mirror learns from the record,
+retires blocks and resets open lines/scroll state; descendant tabs retire
+through their death signals. The log file and attached bus stay in place.
 
 **A transcript is rendered on demand, not written.** `tui::export_to(record,
 dest, format)` is the one place a transcript file is created, and it never

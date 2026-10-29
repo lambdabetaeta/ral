@@ -1,10 +1,13 @@
 ---
-status: active
+status: superseded
+superseded_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
 verified_at_commit: 0e83863c
 verified_at_date: 2026-10-29
 anchors: [SettledConversation::await_job, SettledConversation::run, Fleet::wait_settled, AgentHandle::stop, JobEnd, Census, Tenancy]
 ---
 
+
+> Superseded by [[261029_an-agent-is-a-thread|an-agent-is-a-thread]].
 # Synod's job ends at fleet quiescence
 
 > Amended by [[261029_a-child-is-a-status|a-child-is-a-status]]: the

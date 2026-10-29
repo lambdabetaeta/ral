@@ -60,11 +60,11 @@ fn bus_queue_flood_past_the_byte_cap_yields_one_overflow_marker() {
     }
 
     match rx.try_recv().expect("exactly one overflow marker") {
-        Signal::Transient(ONE, Transient::Fault { text }) => {
+        Signal::Transient(ONE, Transient::Elided { text }) => {
             assert!(text.contains("100"), "names the elided count: {text}");
             assert!(text.contains("token"), "names the class: {text}");
         }
-        _ => panic!("expected a Transient::Fault overflow marker"),
+        _ => panic!("expected a Transient::Elided overflow marker"),
     }
     assert!(
         matches!(rx.try_recv(), Err(TryRecvError::Empty)),
@@ -98,8 +98,11 @@ fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
         ))
         .unwrap();
     }
-    tx.send_signal(Signal::Transient(AgentId::new(1), Transient::Died))
-        .unwrap();
+    tx.send_signal(Signal::Transient(
+        AgentId::new(1),
+        Transient::Died { failures: vec![] },
+    ))
+    .unwrap();
 
     assert_eq!(
         rx.depth(),
@@ -121,7 +124,7 @@ fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
     }
     assert!(matches!(
         rx.try_recv().unwrap(),
-        Signal::Transient(ONE, Transient::Died)
+        Signal::Transient(ONE, Transient::Died { .. })
     ));
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 }
@@ -216,8 +219,7 @@ fn bus_queue_bytes_tracks_resident_merged_text() {
     assert_eq!(rx.bytes(), 0, "draining the entry frees its bytes");
 }
 
-/// `Emitter::muted_child` leans on this to swallow a display stream forever
-/// without leaking the queue behind it.
+/// A late emitter must not leak the queue behind a gone receiver.
 #[test]
 fn bus_sender_send_past_dropped_receiver_is_rejected_not_grown() {
     let (tx, rx) = channel();
@@ -229,4 +231,36 @@ fn bus_sender_send_past_dropped_receiver_is_rejected_not_grown() {
         ))
         .unwrap_err();
     assert!(matches!(err.0, Signal::Transient(ONE, Transient::Token(ref s)) if s == "x"));
+}
+
+#[test]
+fn drain_pending_includes_generated_overflow_markers_and_leaves_a_finite_snapshot() {
+    let (tx, rx) = channel();
+    tx.send_signal(Signal::Transient(
+        AgentId::new(1),
+        Transient::Token("x".repeat(MERGE_TEXT_CAP)),
+    ))
+    .unwrap();
+    tx.send_signal(Signal::Transient(
+        AgentId::new(1),
+        Transient::Token("x".into()),
+    ))
+    .unwrap();
+    let snapshot = rx.drain_pending();
+    assert!(matches!(
+        snapshot.as_slice(),
+        [
+            Signal::Transient(_, Transient::Token(_)),
+            Signal::Transient(_, Transient::Elided { .. })
+        ]
+    ));
+    assert_eq!(rx.depth(), 0);
+    tx.send_signal(Signal::Transient(
+        AgentId::new(1),
+        Transient::Died { failures: vec![] },
+    ))
+    .unwrap();
+    assert!(
+        matches!(rx.try_recv().unwrap(), Signal::Transient(_, Transient::Died { failures }) if failures.is_empty())
+    );
 }

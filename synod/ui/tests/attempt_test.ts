@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 
-import { advance } from "../js/attempt.js";
+import { acceptEvent, advance } from "../js/attempt.js";
 import type { Attempt } from "../js/attempt.js";
 
 function equal(actual: unknown, expected: unknown) {
@@ -28,4 +28,26 @@ Deno.test("superseded and duplicate completions cannot settle current work", () 
   equal(advance(done, { attempt: "b", type: "job_done", job: 1 }), null);
   const ended: Attempt = { attempt: "b", phase: "ended" };
   equal(advance(ended, { attempt: "b", type: "job_began", job: 2 }), null);
+});
+
+Deno.test("late failure withdraws the displayed account before narration, but not a successor's", () => {
+  const busy: Attempt = { attempt: "a", phase: "ready", job: 1 };
+  const settled = advance(busy, { attempt: "a", type: "job_done", job: 1 });
+  if (!settled) throw new Error("job did not settle");
+  let report: string | null = "previous report";
+  const events: string[] = [];
+  const withdraw = () => { report = null; events.push("withdraw"); };
+  const narrate = () => { events.push(`narrate:${report}`); };
+  const failure = { type: "failure", message: "uncertified teardown" } as const;
+  acceptEvent(settled, "a", failure, withdraw, narrate);
+  equal(report, null);
+  equal(events, ["withdraw", "narrate:null"]);
+  report = "successor report";
+  const successor: Attempt = { attempt: "b", phase: "ready", job: null };
+  acceptEvent(successor, "a", failure, withdraw, narrate);
+  equal(report, "successor report");
+  equal(events.length, 2);
+  acceptEvent(successor, "b", { type: "error", message: "ordinary narration" }, withdraw, narrate);
+  equal(report, "successor report");
+  equal(events, ["withdraw", "narrate:null", "narrate:successor report"]);
 });

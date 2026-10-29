@@ -4,16 +4,9 @@ use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
 
 /// A root that stays resolvable while its fixture lives.
-fn root(idle: Duration) -> (Arc<Fleet>, TestAgent) {
+fn root() -> (Arc<Fleet>, TestAgent) {
     let fleet = Fleet::for_test();
-    let root = test_agent(
-        &fleet,
-        TestAgentSpec {
-            idle,
-            ..TestAgentSpec::new("main")
-        },
-    )
-    .expect("a fresh root");
+    let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     (fleet, root)
 }
 
@@ -25,7 +18,7 @@ fn born(tabs: &mut Tabs, id: AgentId, name: &str, parent: Option<AgentId>) {
 
 #[test]
 fn parent_focus_climbs_past_a_lingering_ancestor() {
-    let (fleet, root) = root(Duration::ZERO);
+    let (fleet, root) = root();
     let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
     let (child, grandchild) = (
         AgentId::new(root.id().get() + 1),
@@ -46,7 +39,7 @@ fn parent_focus_climbs_past_a_lingering_ancestor() {
 /// only the expired view goes.
 #[test]
 fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
-    let (fleet, root) = root(Duration::ZERO);
+    let (fleet, root) = root();
     let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
     let child = AgentId::new(root.id().get() + 1);
     born(&mut tabs, child, "child", Some(root.id()));
@@ -83,7 +76,7 @@ fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
 /// restart the clock.
 #[test]
 fn the_first_retirement_stamp_wins() {
-    let (fleet, root) = root(Duration::ZERO);
+    let (fleet, root) = root();
     let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
     let child = AgentId::new(root.id().get() + 1);
     born(&mut tabs, child, "child", Some(root.id()));
@@ -116,4 +109,47 @@ fn pins_overwrite_in_place_and_keep_insertion_order() {
 
     status.drop_pin("tasks");
     assert_eq!(keys(&status), ["build"]);
+}
+
+#[test]
+fn job_opened_and_settled_update_only_the_named_tab() {
+    use crate::record::NonEmpty;
+
+    let (fleet, root) = root();
+    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
+    let child = AgentId::new(root.id().get() + 1);
+    born(&mut tabs, child, "child", Some(root.id()));
+    let fact =
+        |number, forensic| Commit::placeholder(number, NonEmpty::one(Record::Forensic(forensic)));
+    assert_eq!(tabs.focused_job(), None);
+    tabs.commit_job(root.id(), &fact(7, Forensic::JobOpened));
+    assert_eq!(tabs.focused_job(), Some(JobId::from(7)));
+    tabs.commit_job(child, &fact(11, Forensic::JobOpened));
+    assert_eq!(tabs.focused_job(), Some(JobId::from(7)));
+    tabs.set_focus(child);
+    assert_eq!(tabs.focused_job(), Some(JobId::from(11)));
+    tabs.commit_job(
+        root.id(),
+        &fact(
+            8,
+            Forensic::JobSettled {
+                job: JobId::from(7),
+                stopped: true,
+            },
+        ),
+    );
+    assert_eq!(tabs.focused_job(), Some(JobId::from(11)));
+    tabs.commit_job(
+        child,
+        &fact(
+            12,
+            Forensic::JobSettled {
+                job: JobId::from(11),
+                stopped: false,
+            },
+        ),
+    );
+    assert_eq!(tabs.focused_job(), None);
+    tabs.set_focus(root.id());
+    assert_eq!(tabs.focused_job(), None);
 }

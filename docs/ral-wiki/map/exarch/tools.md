@@ -1,13 +1,13 @@
 ---
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
-generated_at_date: 2026-10-28
+generated_at_commit: e5a23909
+generated_at_date: 2026-10-29
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
 # Map: exarch / tools
 
 **`ral` is exarch's tool.** Every other harness affordance — spawning,
-messaging, cancelling, scheduling, replying, and reading a reply — is a ral
+messaging, stopping, dismissing, scheduling, replying, and reading a reply — is a ral
 builtin, not a provider-advertised `Tool`, reached by writing ral inside
 `ral` itself, per the
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]

@@ -4,13 +4,13 @@
 //! stops calling tools.  A forced eviction is weighed at every turn boundary,
 //! against the thresholds in [`gauge`](super::gauge); the standing-condition
 //! warnings ride the steering channel at a tool boundary.
-//! [`Agent::attend`] is the loop around this, one call per inbox item.
+//! The owner loop runs one exchange per accepted input.
 
 use crate::agent::Agent;
 use crate::agent::gauge::Warning;
 use crate::agent::outcome::{Fault, Outcome};
 use crate::agent::tools;
-use crate::bus::{Emitter, Next, Queue};
+use crate::bus::{Drained, Emitter};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::stream::Stream;
@@ -60,12 +60,11 @@ impl Agent {
         continues: Option<u64>,
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
-        self.inbox.disarm_reply_lease();
         // Entry is the one point every route into a deliberation crosses, so a
         // reply staged by a batch a cancel or an error cut short dies here.
-        self.reply.borrow_mut().take();
+        self.body.state.reply = None;
         if let Some((text, voice)) = prompt {
-            self.log.borrow_mut().append_user(text, continues, voice)?;
+            self.body.log.append_user(text, continues, voice)?;
         }
         let mut retried = false;
         loop {
@@ -102,7 +101,7 @@ impl Agent {
         retried: bool,
     ) -> Result<Turn, Fault> {
         let recorder = self.recorder();
-        let turn = self.log.borrow().context().next_id();
+        let turn = self.body.log.context().next_id();
         recorder
             .emit(Forensic::TurnStarted {
                 turn,
@@ -110,12 +109,8 @@ impl Agent {
                 via: provider.via().cloned(),
             })
             .map(drop)?;
-        let messages = self
-            .log
-            .borrow()
-            .render_messages()
-            .map_err(Fault::Refused)?;
-        let system = self.log.borrow().context().system().clone();
+        let messages = self.body.log.render_messages().map_err(Fault::Refused)?;
+        let system = self.body.log.context().system().clone();
         recorder.transient(Transient::State(AgentState::AwaitingModel));
         let mut stream = Stream::default();
         let taken = provider.complete(
@@ -160,7 +155,7 @@ impl Agent {
 
     /// A provider failure, unless it is an overflow an eviction relieves.
     fn relieve(
-        &self,
+        &mut self,
         exchange: &Scope,
         error: ProviderError,
         provider: &Provider,
@@ -216,7 +211,7 @@ impl Agent {
         }
         admit_assistant(&mut assistant_message);
         let tool_ids = tool_calls.iter().map(|tc| tc.call_id.clone()).collect();
-        self.log.borrow_mut().append_assistant(
+        self.body.log.append_assistant(
             assistant_message,
             tool_ids,
             stop_reason.as_ref().map(|r| r.raw().to_string()),
@@ -262,31 +257,29 @@ impl Agent {
         emit: &Emitter,
     ) -> Result<ControlFlow<Outcome>, Fault> {
         let results = self.run_batch(exchange, calls, emit);
-        self.log.borrow_mut().append_tool_results(results)?;
-        self.readings.nudges.reset();
+        self.body.log.append_tool_results(results)?;
+        self.body.state.readings.nudges.reset();
+        let reply = self.body.state.reply.take();
         // A cancelled batch admits nothing: a read run or a steer recorded
         // here would belong to the exchange being dropped.
         if exchange.is_cancelled() {
             return self.halted().map(ControlFlow::Break);
         }
-        // Reply abandons work; arrivals stay queued for the next draw.
-        if let Some(payload) = self.reply.borrow_mut().take() {
+        // A reply leaves arrivals queued for the next exchange.
+        if let Some(payload) = reply {
             return self.replied(payload).map(ControlFlow::Break);
         }
         // Arrivals are taken in the order typed: a read runs against the
         // context as it stands at its place in the queue, a delivery lands as
         // a steering line of its own.  The warnings trail them.
-        for next in self.inbox.drain() {
-            match next {
-                Next::Read(read) => self.read(&read, emit),
-                Next::Item(item) => {
-                    if self.arrive(&item)? {
-                        self.log
-                            .borrow_mut()
-                            .append_steering(item.text(), item.voice())?;
+        for drained in self.mailbox.drain() {
+            match drained {
+                Drained::Read(read) => self.read(&read, emit),
+                Drained::Input(input) => {
+                    if let Some(prompt) = self.admit(input) {
+                        self.body.log.append_steering(prompt.text, prompt.voice)?;
                     }
                 }
-                Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
             }
         }
         if exchange.is_cancelled() {
@@ -295,8 +288,8 @@ impl Agent {
         let climbed = self.climbed(provider)?;
         let steering = self.tell(climbed);
         if !steering.is_empty() {
-            self.log
-                .borrow_mut()
+            self.body
+                .log
                 .append_steering(steering.join("\n"), Voice::Harness)?;
         }
         Ok(ControlFlow::Continue(()))
@@ -312,9 +305,12 @@ impl Agent {
                     self.note(line);
                     None
                 }
-                Warning::Model(reminder) => {
-                    self.readings.nudges.remind(&reminder, &self.log.borrow())
-                }
+                Warning::Model(reminder) => self
+                    .body
+                    .state
+                    .readings
+                    .nudges
+                    .remind(&reminder, &self.body.log),
             })
             .collect()
     }
@@ -322,8 +318,8 @@ impl Agent {
     /// Force-evict the older half of the context, the harness writing no note of its
     /// own: the model's own `` exarch-context `evict `` is where a note comes
     /// from. Whether anything was evicted.
-    pub(crate) fn force_eviction(&self) -> bool {
-        if !self.log.borrow().context().can_evict() {
+    pub(crate) fn force_eviction(&mut self) -> bool {
+        if !self.body.log.context().can_evict() {
             return false;
         }
         // No turn old enough to shed is a no-op, not an event.
@@ -343,7 +339,7 @@ impl Agent {
     /// rest answer why, unrun. Every call answers synchronously — a `spawn`
     /// returns a start receipt, not a join handle.
     fn run_batch(
-        &self,
+        &mut self,
         exchange: &Scope,
         tool_calls: Vec<ToolCall>,
         emit: &Emitter,
@@ -364,7 +360,7 @@ impl Agent {
         results
     }
 
-    fn invoke(&self, exchange: &Scope, call: ToolCall, emit: &Emitter) -> SessionToolResult {
+    fn invoke(&mut self, exchange: &Scope, call: ToolCall, emit: &Emitter) -> SessionToolResult {
         // The names this agent recognises are exactly the ones its request
         // advertised.  Every harness verb (`agent`, `reply`, `schedule`, …)
         // is a builtin *inside* `ral`, not a tool of its own.
@@ -397,38 +393,28 @@ impl Agent {
         })
     }
 
-    /// The batch carried a `reply`.  Live descendants are cancelled and
-    /// reaped, the value is deposited for this agent's consumer, and the
-    /// round-trip — which never asked for a final assistant message, so the
-    /// session sits in `AwaitingAssistantAfterToolResults` — is wound back
-    /// with its own breadcrumb.  A child then parks, deposit and all; only a
-    /// parentless agent's `attend` loop stops here.
-    fn replied(&self, payload: FOValue) -> Result<Outcome, Fault> {
-        self.log.borrow_mut().quiesce(QuiesceReason::Replied)?;
-        self.abandon(Queue::Keep);
-        self.recorder()
-            .transient(Transient::State(AgentState::Ready));
-        if let Some(lease) = self.inbox.deposit_reply(payload) {
-            self.fleet.lease_reply(&self.handle, lease);
-        }
+    /// A reply ends this exchange, leaving helpers and queued input intact.
+    fn replied(&mut self, payload: FOValue) -> Result<Outcome, Fault> {
+        self.body.log.quiesce(QuiesceReason::Replied)?;
+        self.report(crate::record::ChildStatus::Replied(payload));
         Ok(Outcome::Replied)
     }
 
     /// The exchange halted: its engine was lost, which ended the life, or it
     /// was cancelled. A cancellation's `Forensic::Cancelled` comes from
     /// `quiesce` itself; the view fold draws it.
-    fn halted(&self) -> Result<Outcome, Fault> {
-        if let Some(lost) = self.engine.severed() {
+    fn halted(&mut self) -> Result<Outcome, Fault> {
+        if let Some(lost) = self.engine().severed() {
             return Err(lost.into());
         }
-        self.log.borrow_mut().quiesce(QuiesceReason::Cancelled)?;
+        self.body.log.quiesce(QuiesceReason::Cancelled)?;
         Ok(Outcome::Cancelled)
     }
 
     /// What a call its halted exchange never ran answers: the engine's loss,
     /// or an interruption.
     fn unrun(&self) -> String {
-        self.engine.severed().map_or_else(
+        self.engine().severed().map_or_else(
             || INTERRUPTED.to_string(),
             |lost| crate::agent::EngineLost::running(&lost, self.run_dir()).to_string(),
         )

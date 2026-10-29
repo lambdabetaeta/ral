@@ -12,7 +12,7 @@ impl ExarchDesk {
     /// handed the tag the model typed, so the refusal names that and not a
     /// vocabulary the model was never taught.
     pub(super) fn require_schedule_grant(&self, verb: &str) -> Result<(), Error> {
-        if self.services.fleet.launch.allow_schedule {
+        if self.call.fleet.launch.allow_schedule {
             return Ok(());
         }
         Err(Error::new(format!(
@@ -36,19 +36,16 @@ impl ExarchDesk {
         }: Add,
     ) -> Result<FOValue, Error> {
         self.require_schedule_grant("exarch-schedules `add")?;
-        let s = &self.services;
-        if !s.mailbox.is_current() {
-            return Err(Error::new(
-                crate::agent::fleet::Unborn::Abandoned.to_string(),
-            ));
-        }
+        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let call = &self.call;
 
         // The row goes up after the registry call, so a refusal tiers instead
         // of reading as one that landed.
         let described = trigger.describe();
-        let result = s
-            .schedules
-            .schedule(trigger, prompt, label.clone(), &s.mailbox);
+        let result =
+            body.state
+                .schedules
+                .schedule(trigger, prompt, label.clone(), &call.handle.0.address);
         let (payload, content) = match &result {
             Ok(receipt) => (
                 described,
@@ -60,23 +57,29 @@ impl ExarchDesk {
             ),
             Err(e) => (format!("refused: {e}"), format!("could not schedule: {e}")),
         };
-        s.commit_act(DeskAct::Schedule, Some(&label), payload, result.is_err());
-        s.log
-            .borrow()
+        call.commit_act(
+            &body,
+            DeskAct::Schedule,
+            Some(&label),
+            payload,
+            result.is_err(),
+        );
+        body.log
             .record_emitter()
             .emit_or_end(crate::record::Forensic::HarnessResult {
                 text: content.clone(),
             });
         match result {
-            Ok(_) => Ok(self.schedule_table()),
+            Ok(_) => Ok(body.state.schedules.list().encode()),
             Err(_) => Err(Error::new(content)),
         }
     }
 
     /// A snapshot of this agent's live wakeups — every `` `exarch-schedules ``
     /// tag's answer.
-    pub(super) fn schedule_table(&self) -> FOValue {
-        self.services.schedules.list().encode()
+    pub(super) fn schedule_table(&self) -> Result<FOValue, Error> {
+        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        Ok(body.state.schedules.list().encode())
     }
 
     /// `` `remove `` — take one scheduled wakeup off the table by label. Only
@@ -84,10 +87,11 @@ impl ExarchDesk {
     /// call answering a table that does not carry it.
     pub(super) fn unschedule(&self, label: &str) -> Result<FOValue, Error> {
         self.require_schedule_grant("exarch-schedules `remove")?;
-        let s = &self.services;
+        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let call = &self.call;
         // The rail's payload column spells out the miss the table only implies,
         // since the verb has no argument of its own to show there.
-        let removed = s.schedules.unschedule(label);
+        let removed = body.state.schedules.unschedule(label);
         let (payload, content) = if removed {
             (String::new(), format!("unscheduled '{label}'"))
         } else {
@@ -96,11 +100,10 @@ impl ExarchDesk {
                 format!("no live schedule labelled '{label}'"),
             )
         };
-        s.commit_act(DeskAct::Unschedule, Some(label), payload, !removed);
-        s.log
-            .borrow()
+        call.commit_act(&body, DeskAct::Unschedule, Some(label), payload, !removed);
+        body.log
             .record_emitter()
             .emit_or_end(crate::record::Forensic::HarnessResult { text: content });
-        Ok(self.schedule_table())
+        Ok(body.state.schedules.list().encode())
     }
 }

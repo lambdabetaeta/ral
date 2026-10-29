@@ -216,6 +216,7 @@ pub(super) fn subagent_header(
     let (verb, ink) = match outcome {
         Settlement::Replied => ("replied", LIME),
         Settlement::Failed { .. } => ("failed", ORANGE),
+        Settlement::Stopped => ("stopped", SLATE),
     };
     let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
     let mut spans = vec![

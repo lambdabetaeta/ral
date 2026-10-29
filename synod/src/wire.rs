@@ -327,7 +327,7 @@ pub(crate) enum SynodEvent {
     ProviderError(ReadoutDto),
     /// Always Warn: the job survived and its partial reply stands.
     Stalled(ReadoutDto),
-    /// Emitted by the window, never the bus; opening failure ends, job failure permits retry.
+    /// Invalidates the cumulative account and explains the failure.
     Failure {
         message: String,
     },
@@ -344,13 +344,13 @@ pub(crate) struct ConversationEvent {
 #[ts(export, export_to = "../ui/js/bindings/")]
 pub(crate) struct JobId(#[ts(type = "number")] u64);
 
-impl From<exarch::headless::JobId> for JobId {
-    fn from(id: exarch::headless::JobId) -> Self {
+impl From<exarch::record::JobId> for JobId {
+    fn from(id: exarch::record::JobId) -> Self {
         Self(id.get())
     }
 }
 
-impl From<JobId> for exarch::headless::JobId {
+impl From<JobId> for exarch::record::JobId {
     fn from(id: JobId) -> Self {
         Self::from(id.0)
     }
@@ -559,12 +559,14 @@ mod tests {
     }
 
     #[test]
-    fn a_job_id_round_trips_as_a_number_without_narrowing() {
-        let id = exarch::headless::JobId::from(1_u64 << 40);
-        let json = serde_json::to_string(&JobId::from(id)).expect("serializable job id");
-        assert_eq!(json, "1099511627776");
-        let decoded: JobId = serde_json::from_str(&json).expect("deserializable job id");
-        assert_eq!(exarch::headless::JobId::from(decoded), id);
+    fn a_job_id_beyond_the_f64_integers_round_trips_as_a_number() {
+        for number in [(1_u64 << 53) - 1, u64::MAX] {
+            let id = exarch::record::JobId::from(number);
+            let json = serde_json::to_string(&JobId::from(id)).expect("serializable job id");
+            assert_eq!(json, number.to_string());
+            let decoded: JobId = serde_json::from_str(&json).expect("deserializable job id");
+            assert_eq!(exarch::record::JobId::from(decoded), id);
+        }
     }
 
     #[test]

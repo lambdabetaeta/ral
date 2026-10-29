@@ -11,7 +11,7 @@
 //! every wake re-reads the wall clock: after a suspend a fire is at most that
 //! late, and a clock step moves it with the clock.
 
-use crate::bus::{Mailbox, ScheduleId, Scoped, WeakMailbox};
+use crate::bus::{AgentAddress, Refused, ScheduleId, WeakAgentAddress};
 use crate::clock;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
@@ -355,6 +355,7 @@ struct Inner {
     /// Never reset, so a fire armed before a `/clear` cannot reach a
     /// schedule created after it.
     next_id: u64,
+    epoch: u64,
     entries: HashMap<ScheduleId, Entry>,
 }
 
@@ -367,7 +368,7 @@ struct Entry {
     next: Timestamp,
     /// The next occurrence, armed on the reaper; dropping it disarms.
     deadline: Deadline,
-    mailbox: WeakMailbox,
+    address: WeakAgentAddress,
 }
 
 impl Default for ScheduleRegistry {
@@ -381,14 +382,15 @@ impl ScheduleRegistry {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 next_id: 0,
+                epoch: 0,
                 entries: HashMap::new(),
             })),
         }
     }
 
     /// Add a schedule and arm its first occurrence on the reaper.  `label` is
-    /// refused if a live schedule already bears it.  `mailbox` is the owning
-    /// session's — a session schedules only itself.
+    /// refused if a live schedule already bears it. `address` belongs to the
+    /// scheduling agent itself.
     ///
     /// # Errors
     /// A trigger with no next occurrence, or a `label` already borne by a
@@ -398,12 +400,13 @@ impl ScheduleRegistry {
         trigger: Trigger,
         prompt: String,
         label: String,
-        mailbox: &Mailbox,
+        address: &AgentAddress,
     ) -> Result<ScheduleReceipt, String> {
         let now = Timestamp::now();
         let next = trigger
             .next_after(now)
             .ok_or_else(|| "this trigger has no next occurrence".to_string())?;
+        let address = address.downgrade();
         let mut g = self.lock();
         if g.entries.values().any(|e| e.label == label) {
             return Err(format!(
@@ -422,7 +425,7 @@ impl ScheduleRegistry {
                 fires: 0,
                 next,
                 deadline,
-                mailbox: mailbox.downgrade(),
+                address,
             },
         );
         drop(g);
@@ -478,10 +481,16 @@ impl ScheduleRegistry {
         rows.into_iter().map(|(_, info)| info).collect()
     }
 
-    /// `/clear`: drop every schedule, disarming each deadline.  The id source
-    /// is left alone, for the reason `Inner::next_id` gives.
+    /// The epoch stamped on wakeups, including ones awaiting publication.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.lock().epoch
+    }
+
+    /// Disarm every schedule and invalidate wakeups already composed.
     pub fn clear(&self) {
-        self.lock().entries.clear();
+        let mut g = self.lock();
+        g.epoch += 1;
+        g.entries.clear();
     }
 
     /// Arm the reaper toward `next`, at most [`WALL_CHECK`] ahead.  Takes no
@@ -492,58 +501,53 @@ impl ScheduleRegistry {
         arm_callback(delay, move || reg.fire_at(id, Timestamp::now()))
     }
 
-    /// Inbox before registry; publication holds no registry guard.
+    /// The mailbox transaction orders publication with terminal retirement.
     fn fire_at(&self, id: ScheduleId, now: Timestamp) {
-        let mailbox = self
+        let address = self
             .lock()
             .entries
             .get(&id)
-            .map(|entry| entry.mailbox.clone());
-        let Some(mailbox) = mailbox.and_then(|mailbox| mailbox.upgrade()) else {
+            .map(|entry| entry.address.clone());
+        let Some(address) = address.and_then(|address| address.upgrade()) else {
             self.lock().entries.remove(&id);
             return;
         };
-        let already_queued = mailbox.has_queued_wakeup(id);
-        let mut g = self.lock();
-        let Some(entry) = g.entries.get_mut(&id) else {
-            return;
-        };
-        if mailbox.scope().is_cancelled() {
-            g.entries.remove(&id);
-            return;
-        }
-        if now < entry.next {
-            entry.deadline = self.arm_deadline(id, entry.next);
-            return;
-        }
-        let msg = if already_queued {
-            None
-        } else {
-            entry.fires += 1;
-            Some(Scoped::Wakeup {
-                id,
-                label: entry.label.clone(),
-                trigger: entry.trigger.describe(),
-                prompt: entry.prompt.clone(),
-            })
-        };
-        let next = entry
-            .trigger
-            .is_recurring()
-            .then(|| entry.trigger.next_after(now))
-            .flatten();
-        if let Some(next) = next {
-            entry.next = next;
-            entry.deadline = self.arm_deadline(id, next);
-        }
-        let terminal = next.is_none();
-        drop(g);
-        if let Some(kind) = msg {
-            #[cfg(test)]
-            tests::before_post();
-            mailbox.post(kind);
-        }
-        if terminal {
+        #[cfg(test)]
+        tests::before_fire_transaction();
+        let result = address.post_wakeup_with(id, |already_queued| {
+            let mut g = self.lock();
+            let epoch = g.epoch;
+            let entry = g.entries.get_mut(&id)?;
+            if now < entry.next {
+                entry.deadline = self.arm_deadline(id, entry.next);
+                return None;
+            }
+            let wakeup = (!already_queued).then(|| {
+                entry.fires += 1;
+                (
+                    epoch,
+                    format!(
+                        "[scheduled '{}' · {}] {}",
+                        entry.label,
+                        entry.trigger.describe(),
+                        entry.prompt,
+                    ),
+                )
+            });
+            let next = entry
+                .trigger
+                .is_recurring()
+                .then(|| entry.trigger.next_after(now))
+                .flatten();
+            if let Some(next) = next {
+                entry.next = next;
+                entry.deadline = self.arm_deadline(id, next);
+            } else {
+                g.entries.remove(&id);
+            }
+            wakeup
+        });
+        if matches!(result, Err(Refused::Ended)) {
             self.lock().entries.remove(&id);
         }
     }
@@ -558,20 +562,33 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::testkit::pop;
-    use crate::bus::{Inbox, Item, Next, ParkMode, Queue};
+    use crate::agent::Trunk;
+    use crate::agent::nursery::Joined;
+    use crate::agent::testkit::{host, ral_call, scripted, set_provider, trunk};
+    use crate::bus::{AgentMailbox, Drained, Input, Next, Rest, Signal};
+    use crate::provider::scripted::{Reply, Script};
+    use crate::record::{
+        AgentState, ChildStatus, Forensic, JobId, Protocol, Record, Transient, Voice,
+    };
     use jiff::civil::date;
     use ral_core::process::{CancelCause, DurableRoot};
 
     thread_local! {
-        static BEFORE_POST: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        static BEFORE_FIRE_TRANSACTION: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::Cell::new(None) };
     }
 
-    pub(super) fn before_post() {
-        if let Some(hook) = BEFORE_POST.take() {
+    pub(super) fn before_fire_transaction() {
+        if let Some(hook) = BEFORE_FIRE_TRANSACTION.take() {
             hook();
         }
+    }
+
+    fn mailbox() -> AgentMailbox {
+        let life = DurableRoot::default().child();
+        let record = crate::record::Emitter::none();
+        record.bind(life.clone());
+        AgentMailbox::new(life, record, crate::agent::Admission::Free)
     }
 
     fn sched(expr: &str) -> CronSchedule {
@@ -685,7 +702,7 @@ mod tests {
     #[test]
     fn registry_schedules_lists_and_unschedules() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         let receipt = reg
             .schedule(
                 Trigger::Cron {
@@ -694,7 +711,7 @@ mod tests {
                 },
                 "run tests".into(),
                 "nightly".into(),
-                &inbox.mailbox(),
+                &mailbox.address(),
             )
             .unwrap();
         assert_eq!(receipt.label, "nightly");
@@ -713,12 +730,12 @@ mod tests {
     #[test]
     fn schedule_rejects_a_label_already_borne_by_a_live_schedule() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
             "nightly".into(),
-            &inbox.mailbox(),
+            &mailbox.address(),
         )
         .unwrap();
         let err = reg
@@ -726,7 +743,7 @@ mod tests {
                 Trigger::After(Duration::from_mins(1)),
                 "y".into(),
                 "nightly".into(),
-                &inbox.mailbox(),
+                &mailbox.address(),
             )
             .expect_err("a duplicate label must be refused");
         assert!(
@@ -747,12 +764,12 @@ mod tests {
     #[test]
     fn unschedule_by_label_removes_the_match_and_is_a_noop_otherwise() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
             "nightly".into(),
-            &inbox.mailbox(),
+            &mailbox.address(),
         )
         .unwrap();
         assert!(
@@ -770,28 +787,22 @@ mod tests {
     #[test]
     fn after_fires_once_then_is_removed() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         reg.schedule(
             Trigger::After(Duration::from_millis(40)),
             "ping".into(),
             "ping".into(),
-            &inbox.mailbox(),
+            &mailbox.address(),
         )
         .unwrap();
-        let mut fired = None;
-        for _ in 0..200 {
-            if !reg.armed()
-                && let Some(next) = pop(&inbox)
-            {
-                fired = Some(next);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let item = fired.expect("a one-shot `after` schedule must fire");
-        let Next::Item(Item::Wakeup(text)) = item else {
-            panic!("delivered tagged as a wakeup item, got {item:?}")
+        let fired = ral_core::test_helper::eventually(SYNC_TIMEOUT, || {
+            (!reg.armed()).then(|| mailbox.drain())
+        })
+        .expect("a one-shot `after` schedule must fire");
+        let [Drained::Input(Input::Wakeup { epoch, text, .. })] = fired.as_slice() else {
+            panic!("exactly one tagged wakeup must be delivered");
         };
+        assert_eq!(*epoch, reg.epoch());
         assert!(text.contains("ping"), "delivered the prompt: {text}");
         assert!(text.starts_with("[scheduled"), "marked wakeup: {text}");
         assert!(
@@ -803,7 +814,7 @@ mod tests {
     #[test]
     fn a_fire_before_its_instant_rearms_and_posts_nothing() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         let at = Timestamp::now()
             .checked_add(Duration::from_hours(1))
             .unwrap();
@@ -811,14 +822,11 @@ mod tests {
             Trigger::At(at),
             "later".into(),
             "later".into(),
-            &inbox.mailbox(),
+            &mailbox.address(),
         )
         .unwrap();
         reg.fire_at(ScheduleId::new(0), Timestamp::now());
-        assert!(
-            inbox.draw(|_| ParkMode::Quiesce).is_none(),
-            "no wakeup is queued"
-        );
+        assert!(mailbox.drain().is_empty(), "no wakeup is queued");
         let live = reg.list();
         assert_eq!(live.len(), 1, "the entry is still live");
         assert_eq!(live[0].fires, 0, "an early wake counts no fire");
@@ -827,12 +835,12 @@ mod tests {
     #[test]
     fn list_reports_the_time_remaining() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         reg.schedule(
             Trigger::After(Duration::from_hours(2)),
             "x".into(),
             "x".into(),
-            &inbox.mailbox(),
+            &mailbox.address(),
         )
         .unwrap();
         let next_in = Duration::from_secs(reg.list()[0].next_s);
@@ -845,7 +853,7 @@ mod tests {
     #[test]
     fn clear_drops_every_schedule() {
         let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         reg.schedule(
             Trigger::Cron {
                 schedule: sched("0 3 * * *"),
@@ -853,15 +861,22 @@ mod tests {
             },
             "x".into(),
             "x".into(),
-            &inbox.mailbox(),
+            &mailbox.address(),
         )
         .unwrap();
         assert_eq!(reg.list().len(), 1);
+        let epoch = reg.epoch();
         reg.clear();
         assert!(reg.list().is_empty(), "/clear drops schedules");
+        assert_eq!(reg.epoch(), epoch + 1, "/clear invalidates old wakeups");
     }
 
     const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+    const QUIET: Rest = Rest {
+        owing: false,
+        lives: Vec::new(),
+        schedules: false,
+    };
 
     #[derive(Clone, Copy)]
     enum Terminal {
@@ -870,9 +885,9 @@ mod tests {
         ExhaustedCron,
     }
 
-    fn terminal(family: Terminal) -> (ScheduleRegistry, Inbox, Timestamp) {
+    fn terminal(family: Terminal) -> (ScheduleRegistry, AgentMailbox, Timestamp) {
         let registry = ScheduleRegistry::new();
-        let inbox = Inbox::new(DurableRoot::default().child(), None);
+        let mailbox = mailbox();
         let future = Timestamp::now()
             .checked_add(Duration::from_hours(2))
             .unwrap();
@@ -881,7 +896,7 @@ mod tests {
                 Trigger::At(future),
                 "last wakeup".into(),
                 "last".into(),
-                &inbox.mailbox(),
+                &mailbox.address(),
             )
             .unwrap();
         let now = if matches!(family, Terminal::ExhaustedCron) {
@@ -907,32 +922,32 @@ mod tests {
                 assert!(no_next);
             }
         }
-        (registry, inbox, now)
+        (registry, mailbox, now)
     }
 
     fn paused_fire(
         registry: &ScheduleRegistry,
         now: Timestamp,
-    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
-        let (composed_tx, composed_rx) = std::sync::mpsc::channel();
+    ) -> (Joined<()>, std::sync::mpsc::Sender<()>) {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let registry = registry.clone();
-        let worker = std::thread::spawn(move || {
-            BEFORE_POST.set(Some(Box::new(move || {
-                composed_tx.send(()).unwrap();
+        let worker = Joined::new(std::thread::spawn(move || {
+            BEFORE_FIRE_TRANSACTION.set(Some(Box::new(move || {
+                ready_tx.send(()).unwrap();
                 release_rx
                     .recv_timeout(SYNC_TIMEOUT)
-                    .expect("release the composed wakeup");
+                    .expect("release the fire transaction");
             })));
             registry.fire_at(ScheduleId::new(0), now);
-        });
-        composed_rx
+        }));
+        ready_rx
             .recv_timeout(SYNC_TIMEOUT)
-            .expect("fire must reach publication");
+            .expect("fire must reach its mailbox transaction");
         (worker, release_tx)
     }
 
-    struct CancelConsumer(Mailbox);
+    struct CancelConsumer(AgentAddress);
 
     impl Drop for CancelConsumer {
         fn drop(&mut self) {
@@ -941,110 +956,139 @@ mod tests {
     }
 
     #[test]
-    fn every_terminal_family_keeps_the_consumer_alive_until_publication() {
+    fn every_terminal_family_queues_its_wakeup_before_the_job_can_settle() {
         for family in [Terminal::After, Terminal::At, Terminal::ExhaustedCron] {
-            let (registry, inbox, now) = terminal(family);
+            let (registry, mailbox, now) = terminal(family);
+            assert!(mailbox.begin());
             let (producer, release) = paused_fire(&registry, now);
-            let _cancel = CancelConsumer(inbox.life_mailbox());
-            let (park_tx, park_rx) = std::sync::mpsc::sync_channel(1);
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let consumer = {
-                let registry = registry.clone();
-                std::thread::spawn(move || {
-                    let next = inbox.draw(|_| {
-                        let mode = if registry.armed() {
-                            ParkMode::UntilCancelled
-                        } else {
-                            ParkMode::Quiesce
+            std::thread::scope(|scope| {
+                let _cancel = CancelConsumer(mailbox.address());
+                let (park_tx, park_rx) = std::sync::mpsc::channel();
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let consumer = {
+                    let mailbox = &mailbox;
+                    let registry = &registry;
+                    scope.spawn(move || {
+                        let rest = Rest {
+                            owing: false,
+                            lives: Vec::new(),
+                            schedules: registry.armed(),
                         };
-                        let _ = park_tx.try_send(mode);
-                        mode
-                    });
-                    assert!(done_tx.send((inbox, next.map(|drawn| drawn.next))).is_ok());
-                })
-            };
-            assert_eq!(
-                park_rx.recv_timeout(SYNC_TIMEOUT).unwrap(),
-                crate::bus::ParkMode::UntilCancelled
-            );
-            assert!(matches!(
-                done_rx.try_recv(),
-                Err(std::sync::mpsc::TryRecvError::Empty)
-            ));
-            release.send(()).unwrap();
-            let (inbox, next) = done_rx
-                .recv_timeout(SYNC_TIMEOUT)
-                .expect("the final wakeup must reach its parked consumer");
-            assert!(
-                matches!(next, Some(Next::Item(Item::Wakeup(text))) if text.contains("last wakeup"))
-            );
-            producer.join().unwrap();
-            consumer.join().unwrap();
-            assert!(!registry.armed());
-            assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
+                        park_tx.send(rest.schedules).unwrap();
+                        assert!(done_tx.send(mailbox.next(&rest)).is_ok());
+                    })
+                };
+                assert!(park_rx.recv_timeout(SYNC_TIMEOUT).unwrap());
+                assert!(
+                    registry.armed(),
+                    "the transaction has not retired the entry"
+                );
+                assert!(matches!(
+                    done_rx.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ));
+                release.send(()).unwrap();
+                let next = done_rx
+                    .recv_timeout(SYNC_TIMEOUT)
+                    .expect("terminal publication must reach its waiting consumer");
+                assert!(matches!(next, Next::Take {
+                    input: Input::Wakeup { text, epoch: 0, .. }, ..
+                } if text.contains("last wakeup")));
+                producer.join().unwrap();
+                consumer.join().unwrap();
+                assert!(!registry.armed());
+                assert!(matches!(mailbox.next(&QUIET), Next::Settled { .. }));
+            });
         }
     }
 
     #[test]
-    fn clearing_during_terminal_publication_fences_old_work_and_keeps_the_new_id() {
-        let (registry, inbox, now) = terminal(Terminal::After);
+    fn clear_before_the_fire_transaction_suppresses_the_old_id_and_keeps_the_new_one() {
+        let (registry, mailbox, now) = terminal(Terminal::After);
         let (producer, release) = paused_fire(&registry, now);
-        inbox.abandon(Queue::Keep);
         registry.clear();
+        mailbox.clear();
         registry
             .schedule(
                 Trigger::After(Duration::from_hours(2)),
                 "new task".into(),
                 "last".into(),
-                &inbox.mailbox(),
+                &mailbox.address(),
             )
             .unwrap();
         release.send(()).unwrap();
         producer.join().unwrap();
-        assert!(
-            inbox.draw(|_| ParkMode::Quiesce).is_none(),
-            "the composed wakeup retains its abandoned work scope"
-        );
+        assert!(mailbox.drain().is_empty(), "the cleared ID cannot publish");
         let guard = registry.lock();
+        assert_eq!(guard.epoch, 1);
         assert_eq!(guard.entries.len(), 1);
         assert_eq!(guard.entries[&ScheduleId::new(1)].prompt, "new task");
     }
 
     #[test]
-    fn unschedule_can_overtake_a_composed_terminal_wakeup_without_recalling_it() {
-        let (registry, inbox, now) = terminal(Terminal::After);
+    fn unschedule_before_the_fire_transaction_suppresses_publication() {
+        let (registry, mailbox, now) = terminal(Terminal::After);
         let (producer, release) = paused_fire(&registry, now);
         assert!(registry.unschedule("last"));
         assert!(!registry.armed());
         release.send(()).unwrap();
         producer.join().unwrap();
-        assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
-        assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
+        assert!(mailbox.drain().is_empty());
         assert!(!registry.armed());
+    }
+
+    #[test]
+    fn unschedule_after_publication_does_not_recall_the_queued_wakeup() {
+        let (registry, mailbox, now) = terminal(Terminal::After);
+        registry.fire_at(ScheduleId::new(0), now);
+        assert!(
+            !registry.unschedule("last"),
+            "the terminal entry already retired"
+        );
+        assert!(matches!(mailbox.drain().as_slice(),
+            [Drained::Input(Input::Wakeup { text, .. })] if text.contains("last wakeup")
+        ));
     }
 
     #[test]
     fn a_terminal_overlap_retires_without_posting_a_second_wakeup() {
         for family in [Terminal::After, Terminal::At, Terminal::ExhaustedCron] {
-            let (registry, inbox, now) = terminal(family);
-            inbox.mailbox().post(Scoped::Wakeup {
-                id: ScheduleId::new(0),
-                label: "last".into(),
-                trigger: "previous occurrence".into(),
-                prompt: "already queued".into(),
-            });
+            let (registry, mailbox, now) = terminal(family);
+            mailbox
+                .address()
+                .post(Input::Wakeup {
+                    id: ScheduleId::new(0),
+                    epoch: registry.epoch(),
+                    text: "already queued".into(),
+                })
+                .unwrap();
             registry.fire_at(ScheduleId::new(0), now);
             assert!(!registry.armed());
-            assert!(
-                matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(t))) if t.contains("already queued"))
-            );
-            assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
+            assert!(matches!(mailbox.drain().as_slice(),
+                [Drained::Input(Input::Wakeup { text, .. })] if text == "already queued"
+            ));
         }
     }
 
     #[test]
+    fn racing_terminal_callbacks_publish_only_one_wakeup() {
+        let (registry, mailbox, now) = terminal(Terminal::After);
+        let (first, release_first) = paused_fire(&registry, now);
+        let (second, release_second) = paused_fire(&registry, now);
+        release_first.send(()).unwrap();
+        release_second.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(!registry.armed());
+        assert!(matches!(
+            mailbox.drain().as_slice(),
+            [Drained::Input(Input::Wakeup { .. })]
+        ));
+    }
+
+    #[test]
     fn recurring_publication_stays_armed_and_skips_queued_overlap() {
-        let (registry, inbox, now) = terminal(Terminal::After);
+        let (registry, mailbox, now) = terminal(Terminal::After);
         let now = now.checked_add(Duration::from_hours(2)).unwrap();
         registry
             .lock()
@@ -1060,14 +1104,27 @@ mod tests {
         let next = registry.lock().entries[&ScheduleId::new(0)].next;
         registry.fire_at(ScheduleId::new(0), next);
         assert_eq!(registry.list()[0].fires, 1);
-        assert!(matches!(pop(&inbox), Some(Next::Item(Item::Wakeup(_)))));
-        assert!(inbox.draw(|_| ParkMode::Quiesce).is_none());
+        assert!(matches!(
+            mailbox.drain().as_slice(),
+            [Drained::Input(Input::Wakeup { .. })]
+        ));
         assert!(registry.armed());
+        let next = registry.lock().entries[&ScheduleId::new(0)].next;
+        registry.fire_at(ScheduleId::new(0), next);
+        assert_eq!(
+            registry.list()[0].fires,
+            2,
+            "taking up input permits another fire"
+        );
+        assert!(matches!(
+            mailbox.drain().as_slice(),
+            [Drained::Input(Input::Wakeup { .. })]
+        ));
     }
 
     #[test]
-    fn a_recurring_fire_in_abandoned_work_retires_without_publication_or_rearm() {
-        let (registry, inbox, now) = terminal(Terminal::After);
+    fn a_recurring_fire_for_an_ended_life_retires_without_publication_or_rearm() {
+        let (registry, mailbox, now) = terminal(Terminal::After);
         registry
             .lock()
             .entries
@@ -1077,124 +1134,281 @@ mod tests {
             schedule: sched("* * * * *"),
             expr: "* * * * *".into(),
         };
-        inbox.abandon(Queue::Keep);
+        mailbox.address().end(CancelCause::Cancelled);
         assert!(
             registry.armed(),
-            "abandonment leaves timer retirement to fire"
+            "ending a life leaves timer retirement to fire"
         );
         registry.fire_at(ScheduleId::new(0), now);
-        assert!(inbox.is_empty(), "no wakeup is published, even for fencing");
+        assert!(mailbox.drain().is_empty());
         assert!(!registry.armed(), "the recurring entry is not rearmed");
     }
 
     #[test]
-    fn a_scheduled_park_can_be_cancelled_before_publication() {
-        let (registry, inbox, now) = terminal(Terminal::After);
+    fn a_scheduled_job_can_end_before_the_fire_transaction() {
+        let (registry, mailbox, now) = terminal(Terminal::After);
+        assert!(mailbox.begin());
         let (producer, release) = paused_fire(&registry, now);
-        inbox.life_mailbox().end(CancelCause::Cancelled);
-        assert!(
-            inbox
-                .draw(|_| if registry.armed() {
-                    ParkMode::UntilCancelled
-                } else {
-                    ParkMode::Quiesce
-                })
-                .is_none()
-        );
+        mailbox.address().end(CancelCause::Cancelled);
+        assert!(matches!(
+            mailbox.next(&Rest {
+                owing: false,
+                lives: Vec::new(),
+                schedules: registry.armed(),
+            }),
+            Next::Ended
+        ));
         release.send(()).unwrap();
         producer.join().unwrap();
+        assert!(mailbox.drain().is_empty());
         assert!(!registry.armed());
     }
 
+    fn job_records(host: &crate::host::Host) -> Vec<Record> {
+        let mut records = Vec::new();
+        loop {
+            match host
+                .feed()
+                .recv_timeout(SYNC_TIMEOUT)
+                .expect("the job must settle")
+            {
+                Signal::Commit(_, commit) => {
+                    let settled = commit.records().iter().any(|recorded| {
+                        matches!(
+                            recorded.value(),
+                            Record::Forensic(Forensic::JobSettled { .. })
+                        )
+                    });
+                    records.extend(
+                        commit
+                            .records()
+                            .iter()
+                            .map(|recorded| recorded.value().clone()),
+                    );
+                    if settled {
+                        return records;
+                    }
+                }
+                Signal::Transient(_, Transient::Died { .. } | Transient::Fault { .. }) => {
+                    panic!("the root must stay live until its job settles");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn settled_job(records: &[Record]) -> JobId {
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| { matches!(record, Record::Forensic(Forensic::JobOpened)) })
+                .count(),
+            1
+        );
+        records
+            .iter()
+            .find_map(|record| match record {
+                Record::Forensic(Forensic::JobSettled { job, .. }) => Some(*job),
+                _ => None,
+            })
+            .expect("a settled job")
+    }
+
     #[test]
-    fn an_unattended_agent_runs_its_last_wakeup_and_quiesces() {
-        use crate::agent::testkit::{ral_call, scripted};
-        use crate::agent::{Agent, TestTrunk};
-        use crate::provider::scripted::{Reply, Script};
-        let mut agent = Agent::for_test_with(TestTrunk {
-            allow_schedule: true,
-            ..TestTrunk::new("system")
-        })
-        .unwrap();
-        let services = agent.host_services(&crate::bus::dummy_emitter().0);
-        let registry = services.schedules;
+    fn a_conversing_roots_schedule_survives_settlement_and_opens_a_job_at_rest() {
+        let agent = trunk(Trunk::Converses);
+        let registry = agent.body.state.schedules.clone();
         registry
             .schedule(
                 Trigger::After(Duration::from_hours(2)),
-                "last wakeup".into(),
-                "last".into(),
-                &services.mailbox,
+                "wake from rest".into(),
+                "later".into(),
+                &agent.mailbox.address(),
             )
             .unwrap();
-        let now = Timestamp::now();
-        registry
-            .lock()
-            .entries
-            .get_mut(&ScheduleId::new(0))
-            .unwrap()
-            .next = now;
-        agent.handle().0.provider.swap(scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call(
-                "reply",
-                "exarch-agents `reply 'awake'",
-            )])),
-        ));
-        let (producer, release) = paused_fire(&registry, now);
-        let _cancel = CancelConsumer(services.mailbox);
-        let (tx, rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, agent.id());
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let worker_emit = emit.clone();
-        let consumer = std::thread::spawn(move || {
-            let outcome = agent.attend(&worker_emit);
-            assert!(done_tx.send((agent, outcome)).is_ok());
-        });
+        set_provider(
+            &agent,
+            scripted(
+                "test-model",
+                Script::new()
+                    .then(Reply::text("first answer"))
+                    .then(Reply::text("awake")),
+            ),
+        );
+        agent.handle().steer("first prompt".into()).unwrap();
+        let host = host(agent);
+        let first = job_records(&host);
+        let first_job = settled_job(&first);
+        assert!(registry.armed(), "conversation schedules outlive their job");
+        assert!(host.roots()[0].status().job.is_none());
+        let next = registry.lock().entries[&ScheduleId::new(0)].next;
+        registry.fire_at(ScheduleId::new(0), next);
+        let second = job_records(&host);
+        assert_ne!(settled_job(&second), first_job);
+        assert!(second.iter().any(|record| matches!(record,
+            Record::Protocol(Protocol::UserPrompt { voice: Voice::Wakeup, text, .. })
+                if text.contains("wake from rest")
+        )));
+        assert!(!registry.armed());
+        assert_eq!(host.end(), [] as [String; 0]);
+    }
+
+    fn wait_for_scheduled_rest(host: &crate::host::Host) -> JobId {
+        let mut exhausted = false;
+        let mut first_job = None;
         loop {
-            let signal = rx
+            match host
+                .feed()
                 .recv_timeout(SYNC_TIMEOUT)
-                .expect("the unattended agent must enter its scheduled park");
-            if matches!(
-                signal,
-                crate::bus::Signal::Transient(
-                    _,
-                    crate::record::Transient::State(crate::record::AgentState::Ready)
-                )
-            ) {
-                break;
+                .expect("the agent must wait for its schedule")
+            {
+                Signal::Commit(_, commit) => {
+                    for recorded in commit.records() {
+                        match recorded.value() {
+                            Record::Forensic(Forensic::JobOpened) => {
+                                assert!(
+                                    first_job
+                                        .replace(JobId::from(recorded.locus().seq().commit()))
+                                        .is_none()
+                                );
+                            }
+                            Record::Forensic(Forensic::Error { text })
+                                if text.contains("nudge budget") =>
+                            {
+                                exhausted = true;
+                            }
+                            Record::Forensic(
+                                Forensic::JobSettled { .. } | Forensic::Status { .. },
+                            ) => {
+                                panic!("an armed schedule must keep the returning job open");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Signal::Transient(_, Transient::State(AgentState::Ready)) if exhausted => break,
+                Signal::Transient(_, Transient::Died { .. } | Transient::Fault { .. }) => {
+                    panic!("the scheduled root must stay live")
+                }
+                _ => {}
             }
         }
-        release.send(()).unwrap();
-        let (mut agent, outcome) = done_rx
-            .recv_timeout(SYNC_TIMEOUT)
-            .expect("the final wakeup must complete");
-        producer.join().unwrap();
-        consumer.join().unwrap();
-        assert!(matches!(outcome, crate::bus::AgentOutcome::Replied));
-        assert!(agent.is_ready());
-        assert!(!registry.armed());
-        assert!(
-            crate::agent::testkit::inbox(&agent)
-                .draw(|_| ParkMode::Quiesce)
-                .is_none()
-        );
-        assert!(
-            serde_json::to_string(&agent.rendered_messages())
-                .unwrap()
-                .contains("last wakeup")
-        );
-        agent.seed("fresh prompt".into());
-        agent.handle().0.provider.swap(scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call(
+        first_job.expect("the human prompt opened a job")
+    }
+
+    #[test]
+    fn a_returning_agents_schedule_holds_its_job_and_its_report_clears_all_schedules() {
+        let agent = trunk(Trunk::Returns);
+        let registry = agent.body.state.schedules.clone();
+        for label in ["wake", "still armed"] {
+            registry
+                .schedule(
+                    Trigger::After(Duration::from_hours(2)),
+                    "last wakeup".into(),
+                    label.into(),
+                    &agent.mailbox.address(),
+                )
+                .unwrap();
+        }
+        let mut script = Script::new();
+        for _ in 0..4 {
+            script = script.then(Reply::text("waiting for the wakeup"));
+        }
+        script = script
+            .then(Reply::tool_calls(vec![ral_call(
+                "reply",
+                "exarch-agents `reply 'awake'",
+            )]))
+            .then(Reply::tool_calls(vec![ral_call(
                 "fresh",
                 "exarch-agents `reply 'fresh'",
-            )])),
-        ));
-        assert!(matches!(
-            agent.attend(&emit),
-            crate::bus::AgentOutcome::Replied
-        ));
-        assert!(agent.is_ready());
+            )]));
+        set_provider(&agent, scripted("test-model", script));
+        agent.handle().steer("start".into()).unwrap();
+        let host = host(agent);
+        let first_job = wait_for_scheduled_rest(&host);
+        assert_eq!(host.roots()[0].status().job, Some(first_job));
+        assert_eq!(registry.list().len(), 2);
+        let next = registry.lock().entries[&ScheduleId::new(0)].next;
+        let (producer, release) = paused_fire(&registry, next);
+        assert_eq!(host.roots()[0].status().job, Some(first_job));
+        release.send(()).unwrap();
+        producer.join().unwrap();
+        let records = job_records(&host);
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record, Record::Forensic(Forensic::JobOpened)))
+        );
+        assert!(records.iter().any(|record| matches!(record,
+            Record::Forensic(Forensic::JobSettled { job, .. }) if *job == first_job
+        )));
+        assert!(records.iter().any(|record| matches!(record,
+            Record::Forensic(Forensic::Status { status: ChildStatus::Replied(value) })
+                if value == &ral_core::data::FOValue::String { value: "awake".into() }
+        )));
+        assert!(
+            !registry.armed(),
+            "the report clears even schedules that have not fired"
+        );
+        assert!(registry.epoch() > 0);
+        assert!(records.iter().any(|record| matches!(record,
+            Record::Protocol(Protocol::UserPrompt { voice: Voice::Wakeup, text, .. })
+                if text.contains("last wakeup")
+        )));
+        host.roots()[0].steer("fresh prompt".into()).unwrap();
+        let fresh = job_records(&host);
+        assert_ne!(settled_job(&fresh), first_job);
+        assert!(fresh.iter().any(|record| matches!(record,
+            Record::Forensic(Forensic::Status { status: ChildStatus::Replied(value) })
+                if value == &ral_core::data::FOValue::String { value: "fresh".into() }
+        )));
+        assert_eq!(host.end(), [] as [String; 0]);
+    }
+
+    #[test]
+    fn a_wakeup_from_before_clear_is_declined_without_opening_a_job() {
+        let mut agent = trunk(Trunk::Converses);
+        let registry = agent.body.state.schedules.clone();
+        registry
+            .schedule(
+                Trigger::After(Duration::from_hours(2)),
+                "stale wakeup".into(),
+                "old".into(),
+                &agent.mailbox.address(),
+            )
+            .unwrap();
+        let next = registry.lock().entries[&ScheduleId::new(0)].next;
+        registry.fire_at(ScheduleId::new(0), next);
+        let mut composed = agent.mailbox.drain();
+        assert_eq!(composed.len(), 1);
+        let Some(Drained::Input(old)) = composed.pop() else {
+            panic!("a queued wakeup")
+        };
+        agent.clear().expect("a test engine can clear");
+        assert_eq!(registry.epoch(), 1);
+        agent.mailbox.address().post(old).unwrap();
+        agent.handle().steer("fresh prompt".into()).unwrap();
+        set_provider(
+            &agent,
+            scripted(
+                "test-model",
+                Script::new().then(Reply::text("fresh answer")),
+            ),
+        );
+        let host = host(agent);
+        let records = job_records(&host);
+        settled_job(&records);
+        let prompts: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Protocol(Protocol::UserPrompt { text, voice, .. }) => {
+                    Some((text.as_str(), *voice))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, [("fresh prompt", Voice::Human)]);
+        assert_eq!(host.end(), [] as [String; 0]);
     }
 }

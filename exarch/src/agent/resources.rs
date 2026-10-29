@@ -5,12 +5,10 @@
 //! assembles its own rows on its attend thread ([`Agent::resource_rows`]),
 //! and the TUI appends the rows for the accumulators *it* owns
 //! (`tui::resources`).  Neither half reaches across a thread for the other's
-//! figures.  Probing mutates nothing and renews no lease, so `/resources`
-//! cannot immortalise the zombies it exists to reveal.
+//! figures. Probing mutates nothing and never delays a helper's idle end.
 
 use crate::agent::Agent;
 use crate::agent::EngineLost;
-use crate::agent::fleet::AGENT_LEASE_IDLE;
 use crate::agent::gauge::{EVICT_THRESHOLD, eviction_trigger};
 use crate::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::shell_eval;
@@ -170,16 +168,16 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
 impl Agent {
     /// Assemble this agent's half of the fold — one [`ProbeRow`] per
     /// accumulator this attend thread may legally read: the shell's worker
-    /// registry and bindings, the inbox, the event log, the log-dir and
+    /// registry and bindings, the mailbox, the event log, the log-dir and
     /// scratch footprint (walked here at invocation, not on a timer), and
-    /// the sub-agent idle lease. Nothing mutated, no lease renewed.
+    /// the helper idle limit. Nothing mutated, no idle clock renewed.
     ///
     /// # Errors
     /// The engine's severance.
     fn resource_rows(&self) -> Result<Vec<ProbeRow>, Severed> {
         let mut rows = Vec::new();
 
-        let entries = self.engine.read(|t| t.workers())?;
+        let entries = self.engine().read(|t| t.workers())?;
         let mut running = 0u64;
         let mut settled = 0u64;
         let mut nearest_expiry: Option<u64> = None;
@@ -212,7 +210,7 @@ impl Agent {
             nearest_expiry.map(|n| format!("nearest expiry in {n} ral calls")),
         ));
 
-        for (source, depth) in self.inbox.source_depths() {
+        for (source, depth) in self.mailbox.source_depths() {
             let (policy, note) = if source.coalesces() {
                 (Policy::Coalesce, "merges/dedupes")
             } else {
@@ -227,12 +225,10 @@ impl Agent {
             ));
         }
 
-        let log = self.log.borrow();
         let (events, history_bytes) = (
-            log.context().event_count() as u64,
-            log.context().history_bytes() as u64,
+            self.body.log.context().event_count() as u64,
+            self.body.log.context().history_bytes() as u64,
         );
-        drop(log);
         rows.push(ProbeRow::new(
             "log.events",
             events,
@@ -248,14 +244,14 @@ impl Agent {
 
         rows.push(ProbeRow::new(
             "bindings.count",
-            self.engine.read(|t| t.binding_count())?,
+            self.engine().read(|t| t.binding_count())?,
             None,
             Policy::Reap,
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
-            self.engine.read(|t| t.leased_binding_count())?,
+            self.engine().read(|t| t.leased_binding_count())?,
             None,
             Policy::Reap,
             Some(format!(
@@ -265,13 +261,13 @@ impl Agent {
         ));
         rows.push(ProbeRow::new(
             "bindings.largest_bytes",
-            self.engine.read(|t| t.largest_binding_bytes())?,
+            self.engine().read(|t| t.largest_binding_bytes())?,
             Some(shell_eval::LARGE_BINDING_BYTES),
             Policy::Warn,
             Some("shallow estimate; a closure's captures are never chased".to_string()),
         ));
 
-        let log_dir = self.log.borrow().dir().path().to_path_buf();
+        let log_dir = self.body.log.dir().path().to_path_buf();
         rows.push(ProbeRow::new(
             "disk.log_dir",
             ral_core::path::tree::bytes(&log_dir),
@@ -289,15 +285,21 @@ impl Agent {
             ));
         }
 
+        let idle = self.fleet.launch.idle;
+        let nearest = self
+            .fleet
+            .live()
+            .iter()
+            .filter(|agent| !agent.is_root())
+            .filter_map(|agent| agent.status().rest)
+            .map(|rest| idle.saturating_sub(rest.elapsed()))
+            .min();
         rows.push(ProbeRow::new(
-            "agents.lease",
-            self.fleet
-                .nearest_reap()
-                .unwrap_or(AGENT_LEASE_IDLE)
-                .as_secs(),
-            Some(AGENT_LEASE_IDLE.as_secs()),
+            "agents.idle",
+            nearest.unwrap_or(idle).as_secs(),
+            Some(idle.as_secs()),
             Policy::Reap,
-            Some("renewed by a human exchange".to_string()),
+            Some("helpers end after resting with no admissible input".to_string()),
         ));
 
         Ok(rows)
@@ -323,7 +325,7 @@ impl Agent {
     /// `/context`'s one fact: the survey's rows as they stand, for the
     /// scrollback fold to draw.
     pub(crate) fn emit_context_survey(&self) {
-        let survey = self.log.borrow().context().context_survey();
+        let survey = self.body.log.context().context_survey();
         // The card is a rendering the scrollback fold rebuilds at draw time,
         // never what the log carries.
         self.recorder()

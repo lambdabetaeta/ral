@@ -1,7 +1,7 @@
 use super::*;
 use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{TestAgentSpec, test_agent};
-use crate::bus::Read;
+use crate::bus::{Command, Read};
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::{Terminal, backend::TestBackend};
@@ -154,7 +154,7 @@ fn queued_recall_is_fresh_and_keeps_history_bookkeeping() {
     prompt.submit();
     agent.steer("one".into()).unwrap();
     // A non-user entry keeps the steering messages separate.
-    agent.post_read(Read::Resources);
+    agent.post_command(Command::Read(Read::Resources));
     agent.steer("two".into()).unwrap();
     assert_eq!(agent.queued(), ["one", "/resources", "two"]);
     assert!(prompt.edit_queued_prompt(|| agent.recall()));

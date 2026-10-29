@@ -143,7 +143,7 @@ fn family_scheme(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> 
     scheme(&vars, &rows, ty)
 }
 
-/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, model: Variant ρ3] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ4> → F α`
+/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, model: Variant ρ3] | message [to: Str, text: Str] | stop Str | dismiss Str | reply β | read Str | ρ4> → F α`
 ///
 /// The outer tag row is open (`ρ4`) so an unrecognised tag reaches the
 /// runtime decoder that names the legal ones, rather than dying as a
@@ -196,7 +196,8 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
                         "message",
                         closed_record(&[("to", Ty::String), ("text", Ty::String)]),
                     ),
-                    ("cancel", Ty::String),
+                    ("stop", Ty::String),
+                    ("dismiss", Ty::String),
                     ("reply", Ty::Var(reply_ty)),
                     ("read", Ty::String),
                 ],
@@ -421,9 +422,9 @@ Read a reply
 
 Returns [name: Str, reply: Value]. The reply is checked against the fields and
 types your script uses; a missing field is reported at read, with its path.
-Only your own children may be read, including ones that have ended; your
-own reply, a stop or a clear forgets earlier ones. A child still working,
-or one that failed, is refused with the reason. Reading does not consume
+Only your own children may be read, including ones that have ended. A clear
+forgets earlier children; a reply or Stop does not. A child still working,
+or one that failed or stopped, is refused with the reason. Reading does not consume
 the value: repeated reads return it until a follow-up sets the child to
 work again.
 
@@ -435,9 +436,11 @@ Message a running or replied agent
 
 Steer running work with a correction or new information, or give a replied
 agent a follow-up task. A message can reach any other live agent in your tree,
-including a parent or sibling. A missing recipient or your own name is refused.
-A replied child parks for one hour from its reply. A follow-up disarms that deadline while it works;
-its next reply starts a fresh hour. Reading a reply does not extend the lease.
+including a parent or sibling, while it works. A resting helper accepts only
+its parent or the human. A missing recipient or your own name is refused.
+A helper rests for five hours by default (--helper-idle sets the limit), then
+ends if there is nothing it may take up. A follow-up resumes it; reading does
+not extend its rest limit.
 
 Reply to your caller
 
@@ -446,16 +449,24 @@ Reply to your caller
 Available to spawned and headless agents; interactive roots converse with the
 user instead. Return first-order data: no blocks, handles, or environments.
 Write reply last: the value is deposited after the enclosing ral batch drains.
-Final prose alone does not deliver a reply. A child cancels its descendants and
-parks after replying; a headless root finishes.
+Final prose alone does not deliver a reply. A child keeps its helpers and
+rests once its pending work settles; a headless root finishes. Human dealings
+with a helper are quiet: its parent sees its status but receives no notice.
 
-Cancel a descendant
+Stop a descendant
 
-    exarch-agents `cancel #'plan-review'#
+    exarch-agents `stop #'plan-review'#
 
-Requests cancellation of that agent and its subtree. Cancellation is not
-instantaneous, so the agent may still appear in list. An absent name is a no-op;
+Cancels only its current exchange; its own helpers keep working. The agent
+remains available for follow-up messages. An absent or resting name is a no-op;
 a live agent outside your descendants is refused.
+
+Dismiss one of your own helpers
+
+    exarch-agents `dismiss #'plan-review'#
+
+Ends and joins that helper and its descendants, freeing its live name. You may
+dismiss only a helper you started, not a grandchild; its parent may dismiss it.
 
 List live agents
 
@@ -500,7 +511,7 @@ only the binding changes. After both completion notices, collect the replies:
     BuiltinEntry::new(
         Cow::Borrowed("exarch-schedules"),
         scheme_schedules,
-        "exarch-schedules <tag>  — your self-wakeups. Every tag returns the live table, oldest first: [[label: Str, trigger: Str, next-s: Int, fires: Int]]. Needs the self-wakeup grant (--allow-schedule). Foreground only: inside spawn { … } every tag errors.\n\nexarch-schedules `list  — read the table: `trigger` as its source text, `next-s` the seconds to the next fire, `fires` the count so far. A spent one-shot removes itself, so an `after label that has vanished has fired. Use it to recover labels after an eviction.\nexarch-schedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a wakeup. When it fires, `prompt` (an instruction, not code) reaches your inbox at the next exchange boundary as `[scheduled '<label>' · <trigger>] <prompt>`, re-engaging you with no human present. `cron '<expr>'` recurs on a classic five-field cron expression in local time, e.g. `cron '0 9 * * 1-5'`: minute hour day-of-month month day-of-week, each a comma list of `*`, N, a-b, or a step (`*/15`), names allowed for month and weekday (jan, mon). `after '<n><unit>'` fires once, unit s/m/h/d, e.g. `after '30m'`. A trigger that can never fire is refused. `label` is required and unique among live schedules. Check the new row's `next-s` to catch a cron that parsed but means something else. A fire is skipped while the previous one sits undrained. While any schedule is live the session parks instead of ending, so an unremoved cron keeps you alive indefinitely; `/clear` drops them all.\nexarch-schedules `remove <label>  — disarm a wakeup. An absent label is not an error: a one-shot may already have fired.\n\nA tag that raises may still have landed; `list shows what is armed.",
+        "exarch-schedules <tag>  — your self-wakeups. Every tag returns the live table, oldest first: [[label: Str, trigger: Str, next-s: Int, fires: Int]]. Needs the self-wakeup grant (--allow-schedule). Foreground only: inside spawn { … } every tag errors.\n\nexarch-schedules `list  — read the table: `trigger` as its source text, `next-s` the seconds to the next fire, `fires` the count so far. A spent one-shot removes itself, so an `after label that has vanished has fired. Use it to recover labels after an eviction.\nexarch-schedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a wakeup. When it fires, `prompt` (an instruction, not code) is posted to your mailbox and reaches you at the next exchange boundary, or wakes you if you are at rest, as `[scheduled '<label>' · <trigger>] <prompt>`, re-engaging you with no human present. `cron '<expr>'` recurs on a classic five-field cron expression in local time, e.g. `cron '0 9 * * 1-5'`: minute hour day-of-month month day-of-week, each a comma list of `*`, N, a-b, or a step (`*/15`), names allowed for month and weekday (jan, mon). `after '<n><unit>'` fires once, unit s/m/h/d, e.g. `after '30m'`. A trigger that can never fire is refused. `label` is required and unique among live schedules. Check the new row's `next-s` to catch a cron that parsed but means something else. A fire is skipped while the previous one sits undrained. A conversing agent's wakeup at rest opens a new job. A returning agent waits while its schedules are armed, then clears them with its report; `/clear` drops them all.\nexarch-schedules `remove <label>  — disarm a wakeup. An absent label is not an error: a one-shot may already have fired.\n\nA tag that raises may still have landed; `list shows what is armed.",
         BuiltinBody::Static(builtin_family::<Schedules>),
     ),
     BuiltinEntry::boundary(

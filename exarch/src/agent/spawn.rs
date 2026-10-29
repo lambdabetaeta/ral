@@ -1,25 +1,122 @@
-//! The detach spine behind every attended root and the desk's `` exarch-agents `start ``.
-//! Every spawn is launch-only: the node runs the same [`Agent::attend`] loop
-//! on a detached thread; a reply notice reaches the parent's inbox when a
-//! child replies, a failure when it ends still working.
+//! Every agent attends on its own, joined thread.
 
-use crate::agent::Agent;
-use crate::bus::{AgentOutcome, Emitter};
-use crate::record::{AgentLog, Born, Memory, Resumed, Transient, Unavailable};
+use crate::agent::nursery::{Joined, Teardown};
+use crate::agent::{Agent, AgentHandle};
+use crate::bus::{Emitter, Input, WORKER_PANIC_PREFIX, panic_msg};
+use crate::record::{AgentLog, Born, ChildStatus, Forensic, Memory, Transient, Unavailable};
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::thread;
 
-impl Agent {
-    /// Retire with `outcome`, then drop: `SessionEnded` and engine teardown
-    /// precede the claim's terminal cue. A recording failure, retirement's
-    /// own included, is what a working child ends with, announced once.
-    pub(crate) fn settle(self, outcome: AgentOutcome, emit: &Emitter) {
-        self.inbox.retire(outcome.reason());
-        if let Err(failure) = self.check_available() {
-            announce(&failure, emit);
+/// A thread that would not start; the agent was torn down without one.
+#[derive(Debug)]
+pub(crate) struct LaunchError {
+    pub(crate) cause: io::Error,
+    pub(crate) failures: Vec<String>,
+}
+
+/// Publishes `Died`, then posts `Gone` to the parent, when dropped.
+struct Terminal {
+    emit: Emitter,
+    handle: AgentHandle,
+    recorder: crate::record::Emitter,
+    completion: Option<Vec<String>>,
+}
+impl Terminal {
+    fn complete(&mut self, mut teardown: Teardown) -> Teardown {
+        if let Err(failure) = self.recorder.check_available() {
+            announce(&failure, &self.emit);
+            teardown.failures.push(failure.to_string());
         }
-        drop(self);
+        self.completion = Some(teardown.failures.clone());
+        teardown
     }
+}
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        self.emit.fleet_sink().transient(Transient::Died {
+            failures: self.completion.take().unwrap_or_else(|| {
+                vec!["agent thread ended without a completed teardown result".into()]
+            }),
+        });
+        if let Some(parent) = self.handle.parent() {
+            let _posted = parent.0.address.post(Input::Gone(self.handle.id()));
+        }
+    }
+}
+
+impl Agent {
+    /// Attend on a joined thread of its own, `first` queued first. The agent
+    /// is handed over only once its thread runs: a failed spawn discards it.
+    pub(crate) fn launch(
+        self,
+        born: Born,
+        first: Option<String>,
+        emit: &Emitter,
+    ) -> Result<Joined<Teardown>, LaunchError> {
+        let (handoff, receipt) = sync_channel::<(Self, Emitter)>(1);
+        let spawned = thread::Builder::new()
+            .name(format!("exarch-agent-{}", self.id()))
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || match receipt.recv() {
+                Ok((agent, emit)) => live(agent, emit),
+                // The launcher unwound before the handoff: nothing attended.
+                Err(_) => Teardown {
+                    failures: Vec::new(),
+                },
+            });
+        let thread = match spawned {
+            Ok(thread) => thread,
+            Err(cause) => {
+                return Err(LaunchError {
+                    cause,
+                    failures: self.discard(),
+                });
+            }
+        };
+        let emit = emit.child(self.id(), born);
+        if let Some(first) = first {
+            let _posted = self.handle.steer(first);
+        }
+        handoff
+            .send((self, emit))
+            .expect("a spawned thread awaits its agent");
+        Ok(Joined::new(thread))
+    }
+
+    /// Tear down an agent no thread attended: its failures, a failed last
+    /// record among them.
+    pub(crate) fn discard(mut self) -> Vec<String> {
+        let recorder = self.recorder();
+        let mut failures = self.teardown().failures;
+        drop(self);
+        failures.extend(recorder.check_available().err().map(|f| f.to_string()));
+        failures
+    }
+}
+
+/// A launched agent's thread: its life, then `Died` and `Gone`, also on unwind.
+fn live(agent: Agent, emit: Emitter) -> Teardown {
+    let mut terminal = Terminal {
+        handle: agent.handle(),
+        recorder: agent.recorder(),
+        emit,
+        completion: None,
+    };
+    let teardown =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| agent.run(&terminal.emit)))
+            .unwrap_or_else(|payload| {
+                let failure = format!("{WORKER_PANIC_PREFIX}{}", panic_msg(&payload));
+                terminal.recorder.emit_or_end(Forensic::Error {
+                    text: failure.clone(),
+                });
+                terminal.handle.report(ChildStatus::Failed(failure.clone()));
+                Teardown {
+                    failures: vec![failure],
+                }
+            });
+    terminal.complete(teardown)
 }
 
 /// Announce a recording failure at its owner's end, on `emit`'s fleet
@@ -36,7 +133,7 @@ pub(crate) fn announce(failure: &Unavailable, emit: &Emitter) {
 static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// A new root of `session`'s fleet under `name`, or under a minted `root-{N}`
-/// where the human named none: a fresh engine from the launch's genesis, blank
+/// where the human named none: a fresh engine from the launch's recipe, blank
 /// for `Amnemon`, or importing `session`'s model-visible context for
 /// `Mnemon`.
 pub(crate) fn hatch_root(
@@ -46,12 +143,20 @@ pub(crate) fn hatch_root(
 ) -> Result<Agent, String> {
     let name =
         name.unwrap_or_else(|| format!("root-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)));
-    let claim = session.fleet.claim(&name).map_err(|e| e.to_string())?;
-    let tenancy = claim.occupy(session.fleet.launch.engine().map_err(|e| e.to_string())?);
-    let inherited = (memory == Memory::Mnemon).then(|| session.log.borrow().inherited_context());
+    let reserved = session
+        .fleet
+        .name(&name)
+        .map_err(|error| error.to_string())?;
+    let engine = session
+        .fleet
+        .launch
+        .engine()
+        .map_err(|error| error.to_string())?;
+    let inherited = (memory == Memory::Mnemon).then(|| session.body.log.inherited_context());
     Agent::hatch(
         &session.fleet,
-        tenancy,
+        reserved,
+        engine,
         session.handle.current_provider(),
         |sessions, model, account, system| {
             let id = crate::agent::fresh_id();
@@ -67,20 +172,17 @@ pub(crate) fn hatch_root(
 /// parks for the human rather than seeding a first exchange: what to say next
 /// is said to the new tab.
 pub(crate) fn spawn_root(
-    session: &Agent,
+    session: &mut Agent,
     memory: Memory,
     name: Option<String>,
     emit: &Emitter,
-) -> Result<SpawnedChild, String> {
+) -> Result<crate::agent::AgentHandle, String> {
     let root = hatch_root(session, memory, name)?;
     let name = root.handle.0.name.clone();
     let tool = match memory {
         Memory::Amnemon => "/new",
         Memory::Mnemon => "/branch",
     };
-    // The row's display record, authored beside the rail row `spawn_async`
-    // emits from the same inputs; a harness spawn's recorded row is the
-    // desk's own HarnessCall commit instead.
     session
         .recorder()
         .emit_or_end(crate::record::Display::ToolCall {
@@ -88,104 +190,29 @@ pub(crate) fn spawn_root(
             cmd: "(waiting for you)".to_string(),
             summary: Some(format!("Agent {name} spawned ({tool}).")),
         });
-    let spec = AsyncSpawn {
+    let handle = root.handle();
+    let born = Born {
+        log_dir: root.log_dir().clone(),
         name,
-        prompt: None,
+        parent: None,
         resumed: None,
+        recorder: root.recorder(),
     };
-    spawn_async(root, spec, emit)
-}
-
-/// The half of an async spawn that varies between `` exarch-agents `start ``,
-/// a new root, and a resumed one; [`spawn_async`] holds the half they share.
-pub(crate) struct AsyncSpawn {
-    pub name: String,
-    /// `None` parks for the human rather than seeding a first exchange.
-    pub prompt: Option<String>,
-    /// What a resumed root picked up, for its tab to replay.
-    pub resumed: Option<Resumed>,
-}
-
-/// A start receipt, built only for a child genuinely running: an unspawnable
-/// thread yields `Err(String)` instead.
-pub(crate) struct SpawnedChild {
-    pub id: crate::record::AgentId,
-    pub name: String,
-}
-
-/// Hand an already-built `child` to a worker thread that
-/// attends it off the parent's critical path, and return its identity at once.
-/// Callers differ only in how they built `child` and `spec`.
-///
-/// Construction already adopted the child; a failed thread start drops it.
-///
-/// # Errors
-/// Returns `Err(String)` if the worker thread could not be spawned.
-pub(crate) fn spawn_async(
-    mut child: Agent,
-    spec: AsyncSpawn,
-    emit: &Emitter,
-) -> Result<SpawnedChild, String> {
-    let AsyncSpawn {
-        name,
-        prompt,
-        resumed,
-    } = spec;
-    let agent_id = child.id();
-    // Off a bus whose children are muted (headless's per-exchange default)
-    // the child's receiver is already dropped, so it streams nowhere; either
-    // way its own record seam is recorded through whether or not anyone
-    // watches.
-    let child_emit = if emit.spawns_live_children() {
-        let born = Born {
-            log_dir: child.log_dir().clone(),
-            name: name.clone(),
-            parent: child
-                .handle
-                .0
-                .role
-                .parent()
-                .map(crate::agent::AgentHandle::id),
-            resumed,
-            recorder: child.recorder(),
-        };
-        emit.child(agent_id, born)
-    } else {
-        emit.muted_child(agent_id)
+    let thread = match root.launch(born, None, emit) {
+        Ok(thread) => thread,
+        Err(error) => {
+            session.body.state.failures.extend(error.failures);
+            return Err(format!(
+                "could not spawn a worker thread for agent {}: {}",
+                handle.id(),
+                error.cause
+            ));
+        }
     };
-    // The only downward edge into the child is this one write.
-    if let Some(p) = &prompt {
-        child.seed(p.clone());
-    }
-    // The dispatch's own row is authored at each caller with session access —
-    // `spawn_root`'s `Display::ToolCall` beside this call, a harness spawn's
-    // at the desk's own commitment arm — so this spine mints no row of its own.
-    // Arm before handing ownership to spawn: failed launches drop the closure.
-    child
-        .engine
-        .publish_death_on_release(child_emit.fleet_sink());
-    let worker = thread::Builder::new()
-        .name(format!("exarch-agent-{agent_id}"))
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let recorder = child.recorder();
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                child.attend(&child_emit)
-            }))
-            .unwrap_or_else(|_| {
-                recorder.emit_or_end(crate::record::Forensic::Error {
-                    text: "sub-agent panicked".into(),
-                });
-                AgentOutcome::Failed("sub-agent panicked".into())
-            });
-            // `settle` finishes a child still working.
-            child.settle(outcome, &child_emit);
-        });
-    match worker {
-        Ok(_) => Ok(SpawnedChild { id: agent_id, name }),
-        // The failed launch already dropped the owner; its caller reports why.
-        Err(e) => Err(format!(
-            "could not spawn a worker thread for agent {agent_id}: {e}"
-        )),
-    }
+    session.fleet.adopt_root(thread);
+    Ok(handle)
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests;

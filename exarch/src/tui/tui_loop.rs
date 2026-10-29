@@ -1,5 +1,4 @@
-//! The REPL: the terminal guard, every root's worker thread, and the merged
-//! render+input loop the UI thread runs beside them.
+//! The terminal guard and render+input loop beside the host's agents.
 
 use std::{
     io::{self},
@@ -14,14 +13,10 @@ use crossterm::event::{Event as CtEvent, KeyEventKind, poll as ct_poll, read as 
 
 use crate::{
     SessionInfo,
-    agent::{
-        Agent,
-        fleet::Fleet,
-        spawn::{AsyncSpawn, spawn_async},
-    },
-    bus::{BusReceiver, FleetBus, Pass, Signal},
+    bus::{BusReceiver, Signal},
+    host::Host,
     provider::Bureau,
-    record::{AgentId, RECORD, Resumed, Transient},
+    record::{AgentId, RECORD, Transient},
 };
 use std::sync::mpsc::TryRecvError;
 
@@ -42,41 +37,25 @@ struct Tui {
     app: App,
 }
 
-/// Attend every root, the `seed` prompt going to the first, until the last
-/// ends.
-///
-/// Each root runs on its own worker thread beside the UI loop; afterwards the
-/// logs are flushed and the paths and usage printed on the restored shell.
+/// Show the host's agents until the last ends, steering the first with `seed`.
 ///
 /// # Errors
-/// Returns `Err` if a root cannot be started, or if the UI render/input loop
-/// hits a fatal terminal error.
+/// Returns `Err` if there is no root or the terminal input/render loop fails.
 pub fn run(
     screen: TerminalGuard,
-    roots: Vec<(Agent, Option<Resumed>)>,
+    host: &Host,
     info: &SessionInfo<'_>,
     bureau: &Bureau,
-    mut seed: Option<String>,
+    seed: Option<String>,
     vi: bool,
 ) -> Result<(), String> {
-    let fleet = Arc::clone(&roots.first().ok_or("there is no session to open")?.0.fleet);
-    // A *session*-lived bus, not per-exchange: a root's workers keep streaming
-    // to their tabs after the exchange that spawned them ends.
-    let bus = FleetBus::session();
-    let _signals = crate::signals::face(&fleet);
-    for (root, resumed) in roots {
-        let emit = bus.emitter(root.id());
-        let spec = AsyncSpawn {
-            name: root.handle().0.name.clone(),
-            prompt: seed.take(),
-            resumed,
-        };
-        spawn_async(root, spec, &emit)?;
+    let first = host.roots().first().ok_or("there is no session to open")?;
+    let fleet = host.fleet();
+    let rx = host.feed();
+    if let Some(seed) = seed {
+        let _ = first.steer(seed);
     }
-    // The first root's birth went out as the loop above minted its emitter,
-    // before any thread could send: the app exists only once there is a tab
-    // to focus.
-    let Signal::Born(id, born) = bus.rx().recv().map_err(|e| e.to_string())? else {
+    let Signal::Born(id, born) = rx.recv().map_err(|e| e.to_string())? else {
         return Err(
             "the first signal of a run was not a root's birth: there is no tab to open".into(),
         );
@@ -91,8 +70,8 @@ pub fn run(
         app: App::new(
             id,
             &born,
-            Arc::clone(&fleet),
-            bus.meter(),
+            Arc::clone(fleet),
+            host.meter(),
             PromptState::new(vi, history),
             banner::session_card(info),
             jobs,
@@ -106,12 +85,10 @@ pub fn run(
     }
 
     let ctx = CommandCtx { bureau, info };
-    let r = ui_loop(&mut tui, &bus, &fleet, &inbox, &ctx);
+    let r = ui_loop(&mut tui, rx, host, &inbox, &ctx);
     if r.is_err() {
-        commands::quit(&fleet);
+        commands::quit(fleet);
     }
-    // Every root's teardown writes its log's last records.
-    fleet.wait_empty();
     r.map_err(|e| e.to_string())?;
 
     let logs = tui.app.tabs.log_dirs();
@@ -136,9 +113,14 @@ fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
     }
 }
 
-/// The drain contract — the fleet's emptiness, read *before* the pass, ends it,
-/// never the channel merely emptying — over the TUI's own dispatch loop, on its
-/// render cadence rather than a `Sink`'s blocking one.
+enum Pass {
+    Stop,
+    Idle,
+    More,
+}
+
+/// Producer completion, read before the pass, ends the drain; an empty name
+/// directory or channel does not certify that terminal signals were published.
 fn drain_signals(
     rx: &BusReceiver,
     finished: bool,
@@ -164,18 +146,16 @@ fn drain_signals(
 }
 
 /// The merged render + input loop, on the UI thread beside the roots' workers.
-/// Returns once the fleet is empty, after one last frame that includes
-/// everything they emitted.
+/// Returns once the roots finish, after one last frame with all their signals.
 fn ui_loop(
     tui: &mut Tui,
-    bus: &FleetBus,
-    fleet: &Fleet,
+    rx: &BusReceiver,
+    host: &Host,
     inbox: &Receiver<Job>,
     ctx: &CommandCtx<'_>,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
-    let rx = bus.rx();
     // Seeded a frame in the past so the first iteration paints at once.  Gating
     // draws on it decouples the redraw rate from the drain rate: a token flood
     // coalesces into one frame per interval, not a rewrite per batch.
@@ -189,19 +169,17 @@ fn ui_loop(
     loop {
         dirty |= flush_due_input(tui, &mut paste, Instant::now(), ctx)?;
         let prev_focus = tui.app.tabs.focused();
-        // The explicit-done contract, shared with the headless `Sink::drive`:
-        // stop only when every root is *done*, never when the channel empties,
-        // so a background agent flooding the bus cannot end the loop
-        // early.  The cap bounds how long that flood starves the input poll.
+        // Names leave before terminal publication; wait for the roots to finish.
+        // The cap keeps a signal flood from starving input.
         let mut handled_any = false;
-        let more = match drain_signals(rx, fleet.is_empty(), Some(BATCH), |sig| {
+        let more = match drain_signals(rx, host.is_finished(), Some(BATCH), |sig| {
             handled_any = true;
             guard_owner(tui, &mut paste, ctx, |tui, paste| {
                 // Facts can retire a subtree; death can change the focused
                 // owner.  Streaming transients must not split a concurrent paste.
                 if matches!(
                     &sig,
-                    Signal::Commit(..) | Signal::Transient(_, Transient::Died)
+                    Signal::Commit(..) | Signal::Transient(_, Transient::Died { .. })
                 ) {
                     deliver(tui, paste.flush_pending(), ctx)?;
                 }

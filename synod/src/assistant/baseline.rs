@@ -29,12 +29,19 @@ impl Baseline {
     }
 
     pub(crate) fn manifest(&mut self) -> Result<&Manifest, String> {
-        match self.walk {
-            Walk::Settled(ref result) => result.as_ref().map_err(Clone::clone),
-            Walk::Running(_) => {
-                self.settle();
-                self.manifest()
-            }
+        if matches!(self.walk, Walk::Running(_)) {
+            self.settle();
+        }
+        self.settled_manifest()
+    }
+
+    pub(crate) fn settled_manifest(&self) -> Result<&Manifest, String> {
+        match &self.walk {
+            Walk::Settled(result) => result.as_ref().map_err(Clone::clone),
+            Walk::Running(_) => Err(
+                "Synod cannot admit work before the opening folder scan has been settled."
+                    .to_string(),
+            ),
         }
     }
 
@@ -97,11 +104,12 @@ mod tests {
         let dir = workshop("baseline-abandoned");
         std::fs::write(dir.path().join("letter.txt"), b"dear all").expect("fixture");
 
-        let baseline = Baseline::spawn(
-            dir.path().to_path_buf(),
-            &Stop::default(),
-            Box::new(|_so_far| {}),
-        );
+        let stop = Stop::default();
+        let baseline = Baseline::spawn(dir.path().to_path_buf(), &stop, Box::new(|_so_far| {}));
         drop(baseline);
+        assert!(
+            stop.is_stopped(),
+            "dropping an unsettled baseline stops its walk"
+        );
     }
 }

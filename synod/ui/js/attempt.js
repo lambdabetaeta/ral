@@ -2,10 +2,25 @@
 /** @typedef {{ attempt: string, phase: "starting" } | { attempt: string, phase: "ended" } | { attempt: string, phase: "accepted" | "ready", job: JobId | null }} Attempt */
 /** @typedef {{ attempt: string, type: "accepted" | "opening" | "ended" } | { attempt: string, type: "job_began" | "job_done", job: JobId }} Action */
 
+/** @param {Attempt} current @param {string} attempt */
+export function acceptsUpdate(current, attempt) {
+  return current.attempt === attempt && current.phase !== "ended";
+}
+
+/** @param {Attempt} current @param {string} attempt
+ * @param {import("./bindings/SynodEvent.ts").SynodEvent} event
+ * @param {() => void} withdrawReport
+ * @param {(event: import("./bindings/SynodEvent.ts").SynodEvent) => void} narrate */
+export function acceptEvent(current, attempt, event, withdrawReport, narrate) {
+  if (!acceptsUpdate(current, attempt)) return;
+  if (event.type === "failure") withdrawReport();
+  narrate(event);
+}
+
 // Terminal attempts are absorbing; only addressed completions settle a job.
 /** @param {Attempt} current @param {Action} action @returns {Attempt | null} */
 export function advance(current, action) {
-  if (current.attempt !== action.attempt || current.phase === "ended") return null;
+  if (!acceptsUpdate(current, action.attempt) || current.phase === "ended") return null;
   const attempt = current.attempt;
   switch (action.type) {
     case "accepted":

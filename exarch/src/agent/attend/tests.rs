@@ -1,17 +1,41 @@
 use super::*;
-use crate::agent::TestTrunk;
 use crate::agent::testkit::*;
-use crate::bus::Scoped;
+use crate::agent::{TestTrunk, Trunk};
+use crate::bus::{Input, Signal};
 use crate::provider::Refusal;
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Forensic, Memory, Record, Settlement};
+use crate::record::{Display, Memory, Protocol, Record, Voice};
+use ral_core::carrier::{Severed, Transport};
 use ral_core::data::FOValue;
 use ral_core::process::{CancelCause, DurableRoot};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-fn leave_tool_owed(session: &Agent) {
-    let mut log = session.log.borrow_mut();
-    log.append_user("unfinished".into(), None, crate::record::Voice::Human)
+fn emitter(session: &Agent) -> (Emitter, crate::bus::BusReceiver) {
+    let (tx, rx) = crate::bus::channel();
+    (Emitter::new(tx, session.id()), rx)
+}
+
+fn human_exchange(session: &mut Agent, text: &str, emit: &Emitter) -> AgentOutcome {
+    session.handle().steer(text.into()).unwrap();
+    let Next::Take { input, exchange } = session.mailbox.next(&session.rest()) else {
+        panic!("a queued human input is taken up")
+    };
+    let prompt = session.admit(input).unwrap();
+    assert!(session.mailbox.begin());
+    session.body.state.readings.nudges.reset();
+    session.exchange(&exchange, prompt, emit)
+}
+
+fn settle(session: &mut Agent, last: AgentOutcome) {
+    let Next::Settled { stopped } = session.mailbox.next(&session.rest()) else {
+        panic!("an empty job with no pending helpers settles")
+    };
+    session.settled(stopped, Some(last));
+}
+
+fn leave_tool_owed(session: &mut Agent) {
+    let log = &mut session.body.log;
+    log.append_user("unfinished".into(), None, Voice::Human)
         .unwrap();
     log.append_assistant(
         genai::chat::ChatMessage::assistant(vec![genai::chat::ContentPart::ToolCall(ral_call(
@@ -23,176 +47,179 @@ fn leave_tool_owed(session: &Agent) {
     .unwrap();
 }
 
+fn wait_until(reason: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{reason}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn reply(value: &str) -> Reply {
+    Reply::tool_calls(vec![ral_call(
+        "reply",
+        &format!("exarch-agents `reply {value}"),
+    )])
+}
+
 #[test]
-fn an_ended_life_draws_nothing_and_announces_no_idle_state() {
-    let mut session = Agent::for_test("system").unwrap();
-    session.handle().post_read(crate::bus::Read::Context);
+fn an_ended_life_takes_nothing_and_announces_no_idle_state() {
+    let session = Agent::for_test("system").unwrap();
+    session
+        .handle()
+        .post_command(crate::bus::Command::Read(crate::bus::Read::Context));
     session.recorder().fail_after(0);
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    assert!(matches!(session.attend(&emit), AgentOutcome::Cancelled));
-    assert!(!session.handle().is_live());
+    session.recorder().emit_or_end(Forensic::Error {
+        text: "fail".into(),
+    });
+    let (emit, rx) = emitter(&session);
+    let handle = session.handle();
+    let _teardown = session.run(&emit);
+    assert!(!handle.is_live());
     assert!(
-        !std::iter::from_fn(|| rx.try_recv().ok()).any(|signal| matches!(
-            signal,
-            crate::bus::Signal::Transient(_, Transient::State(_))
-        ))
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|signal| matches!(signal, Signal::Transient(_, Transient::State(_))))
     );
 }
 
 #[test]
-fn a_severed_engine_ends_the_life_and_its_attendance() {
-    let mut session = Agent::for_test("system").unwrap();
+fn a_severed_engine_ends_the_life_and_records_its_cause() {
+    let session = Agent::for_test("system").unwrap();
     let cause = Severed::Closed("engine lost".into());
-    session.engine.transport().sever(cause.clone());
-    assert!(!session.handle().is_live());
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    let lost = EngineLost::running(&cause, session.run_dir()).to_string();
-    assert!(matches!(session.attend(&emit), AgentOutcome::Failed(why) if why == lost));
-    assert!(
-        !std::iter::from_fn(|| rx.try_recv().ok()).any(|signal| matches!(
-            signal,
-            crate::bus::Signal::Transient(_, Transient::State(_))
-        ))
+    session.engine().transport().sever(cause.clone());
+    let (emit, rx) = emitter(&session);
+    let handle = session.handle();
+    let _teardown = session.run(&emit);
+    assert!(!handle.is_live());
+    let records = crate::bus::drain_records(&rx);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record,
+                Record::Forensic(Forensic::EngineSevered { cause: recorded }) if recorded == &cause
+            ))
+            .count(),
+        1
     );
 }
 
 #[test]
-fn failed_mandatory_repair_ends_only_its_session_and_reports_to_its_parent() {
-    let mut parent = Agent::for_test("system").unwrap();
+fn failed_mandatory_repair_ends_the_child_not_its_parent() {
+    let parent = Agent::for_test("system").unwrap();
     let mut child = parent.fork().unwrap();
     let descendant = child.fork().unwrap();
-    let handle = child.handle();
-    leave_tool_owed(&child);
-    child.seed("must not request a model".into());
-    let recorder = child.recorder();
-    recorder.fail_after(19);
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, child.id());
-    let outcome = child.attend(&emit);
-    let AgentOutcome::Failed(why) = &outcome else {
-        panic!("{outcome:?}");
-    };
-    let why = why.clone();
-    assert!(why.contains("injected record write failure"), "{why}");
+    leave_tool_owed(&mut child);
+    child.recorder().fail_after(0);
+    assert!(child.abort_unready().is_err());
     assert!(!child.is_ready());
-    assert!(!handle.is_live());
+    assert!(!child.handle().is_live());
     assert!(!descendant.handle().is_live());
-    assert!(handle.steer("no more work".into()).is_err());
-    assert!(!child.log.borrow().context().is_ready());
-    let records =
-        crate::record::read_records(&child.log_dir().path().join("record.jsonl")).unwrap();
-    assert!(!records.iter().any(|record| matches!(
-        record,
-        Record::Protocol(crate::record::Protocol::ToolResults { .. })
-            | Record::Forensic(Forensic::TurnStarted { .. })
-    )));
-    drop(descendant);
-    child.settle(outcome, &emit);
-    let faults: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
-        .filter_map(|signal| match signal {
-            crate::bus::Signal::Transient(_, Transient::Fault { text }) => Some(text),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(faults, vec![why.clone()]);
-    let report = pop(&parent.inbox).expect("the parent receives failure");
-    assert!(
-        matches!(report, Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. }) if reason == why)
-    );
+    let _teardown = child.teardown();
+    assert!(matches!(
+        parent.mailbox.next(&parent.rest()),
+        Next::Take {
+            input: Input::Child {
+                status: ChildStatus::Failed(_),
+                ..
+            },
+            ..
+        }
+    ));
     assert!(parent.handle().is_live());
     assert!(parent.check_available().is_ok());
-    set_provider(
-        &parent,
-        scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call(
-                "reply",
-                "exarch-agents `reply 42",
-            )])),
-        ),
-    );
-    parent.seed("independent work".into());
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, parent.id());
-    assert!(matches!(parent.attend(&emit), AgentOutcome::Replied));
 }
 
 #[test]
-fn a_late_recording_failure_reaches_the_parent_even_after_cancelled_attendance() {
-    for cancelled in [false, true] {
-        let parent = Agent::for_test("system").unwrap();
-        let mut child = parent.fork().unwrap();
-        child.seed("work".into());
-        if cancelled {
-            child.handle().end();
-        } else {
-            set_provider(
-                &child,
-                scripted(
-                    "test-model",
-                    Script::new().then(Reply::error(ProviderError::Other(
-                        "ordinary refusal".into(),
-                    ))),
-                ),
-            );
-        }
-        let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, child.id());
-        let outcome = child.attend(&emit);
-        assert!(child.check_available().is_ok());
-        assert!(matches!(
-            outcome,
-            AgentOutcome::Failed(_) | AgentOutcome::Cancelled
-        ));
+fn a_recording_failure_is_announced_even_when_the_life_was_already_ended() {
+    for ended in [false, true] {
+        let mut parent = trunk(Trunk::Converses);
+        let child = parent.fork().unwrap();
+        let handle = child.handle();
         let recorder = child.recorder();
-        recorder.fail_after(11);
-        let why = recorder
-            .emit(crate::record::Display::Answer {
+        if ended {
+            handle.end();
+        }
+        recorder.fail_after(0);
+        let failure = recorder
+            .emit(Forensic::Error {
                 text: "late".into(),
             })
             .unwrap_err()
             .to_string();
-        child.settle(outcome, &emit);
-        let report = pop(&parent.inbox).expect("the parent receives terminal failure");
-        assert!(
-            matches!(report, Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. }) if reason == why)
-        );
-        assert!(parent.handle().is_live());
+        let (emit, rx) = emitter(&parent);
+        let helper = launch_child(&mut parent, child, None, &emit);
+        let failures = parent.body.state.nursery.join(helper.id());
+        assert_eq!(failures, vec![failure.clone()]);
+        let faults: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|signal| match signal {
+                Signal::Transient(_, Transient::Fault { text }) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(faults, vec![failure]);
+        assert!(matches!(
+            parent.mailbox.next(&parent.rest()),
+            Next::Take {
+                input: Input::Child {
+                    status: ChildStatus::Failed(_),
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            handle.status().report,
+            Some(ChildStatus::Failed(_))
+        ));
     }
 }
 
 #[test]
 fn ordinary_log_refusal_repairs_and_remains_usable() {
     let mut session = Agent::for_test("system").unwrap();
-    leave_tool_owed(&session);
-    session.seed("refused while results owed".into());
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    assert!(matches!(session.attend(&emit), AgentOutcome::Failed(_)));
+    leave_tool_owed(&mut session);
+    let (emit, _rx) = emitter(&session);
+    let outcome = human_exchange(&mut session, "refused while results owed", &emit);
+    assert!(
+        matches!(&outcome, AgentOutcome::Failed(reason) if !reason.starts_with(WORKER_PANIC_PREFIX))
+    );
     assert!(session.is_ready());
-    assert!(session.check_available().is_ok());
     assert!(session.handle().is_live());
+    settle(&mut session, outcome);
     set_provider(
         &session,
-        scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call(
-                "reply",
-                "exarch-agents `reply 42",
-            )])),
-        ),
+        scripted("test-model", Script::new().then(reply("42"))),
     );
-    session.seed("now admissible".into());
-    assert!(matches!(session.attend(&emit), AgentOutcome::Replied));
+    assert!(matches!(
+        human_exchange(&mut session, "now admissible", &emit),
+        AgentOutcome::Replied
+    ));
 }
 
-fn assert_refused_human(session: &Agent, records: &[Record], expected: &str) {
+#[test]
+fn stop_after_a_mid_job_pop_records_the_prompt_without_running_a_turn() {
+    let mut session = Agent::for_test("system").unwrap();
+    let (emit, rx) = emitter(&session);
+    session.couple(&emit);
+    assert!(session.mailbox.begin());
+    session.handle().steer("old".into()).unwrap();
+    let Next::Take { input, exchange } = session.mailbox.next(&session.rest()) else {
+        panic!("human input")
+    };
+    let prompt = session.admit(input).unwrap();
+    let job = session.handle().status().job.unwrap();
+    assert_eq!(session.handle().stop(job), Some(vec![]));
+    session.handle().steer("fresh".into()).unwrap();
+    assert!(matches!(
+        session.exchange(&exchange, prompt, &emit),
+        AgentOutcome::Cancelled
+    ));
+    assert_eq!(exchange.cause(), Some(CancelCause::Interrupted));
+    assert_eq!(session.handle().queued(), vec!["fresh"]);
     assert!(session.is_ready());
-    assert!(session.inbox.exchange().is_cancelled());
+    let records = crate::bus::drain_records(&rx);
     assert_eq!(records.iter().filter(|record| matches!(record,
-        Record::Protocol(crate::record::Protocol::UserPrompt { text, voice: crate::record::Voice::Human, .. }) if text == expected
+        Record::Protocol(Protocol::UserPrompt { text, voice: Voice::Human, .. }) if text == "old"
     )).count(), 1);
     assert!(
         !records
@@ -207,115 +234,11 @@ fn assert_refused_human(session: &Agent, records: &[Record], expected: &str) {
 }
 
 #[test]
-fn stop_after_arrival_acceptance_preserves_stop_and_new_queue_contents() {
-    let mut session = Agent::for_test("system").unwrap();
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    session.couple(&emit);
-    session.seed("old".into());
-    let job = session.inbox.await_job().unwrap();
-    let drawn = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    let Next::Item(item) = &drawn.next else {
-        panic!("human item")
-    };
-    assert!(session.arrive(item).unwrap());
-    assert_eq!(session.handle().stop(job.id()), Some(vec![]));
-    session.handle().steer("fresh".into()).unwrap();
-    let step = session.take_up(drawn, &emit).unwrap();
-    assert!(matches!(step.settled, Some(AgentOutcome::Cancelled)));
-    assert_refused_human(&session, &crate::bus::drain_records(&rx), "old");
-    assert_eq!(session.handle().queued(), vec!["fresh"]);
-}
-
-#[test]
-fn stop_after_draw_records_the_removed_human_without_running_old_work() {
-    let mut session = Agent::for_test("system").unwrap();
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    session.couple(&emit);
-    session.seed("old".into());
-    let job = session.inbox.await_job().unwrap();
-    let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    assert_eq!(session.handle().stop(job.id()), Some(vec![]));
-    session.handle().steer("fresh".into()).unwrap();
-    let step = session.take_up(next, &emit).unwrap();
-    assert!(matches!(step.settled, Some(AgentOutcome::Cancelled)));
-    assert_refused_human(&session, &crate::bus::drain_records(&rx), "old");
-    assert_eq!(session.handle().queued(), vec!["fresh"]);
-}
-
-#[test]
-fn interrupt_after_pop_records_the_prompt_without_starting_a_turn() {
-    let mut session = Agent::for_test("system").unwrap();
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    session.couple(&emit);
-    session.seed("interrupted".into());
-    let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.handle().interrupt();
-    let step = session.take_up(next, &emit).unwrap();
-    assert!(matches!(step.settled, Some(AgentOutcome::Cancelled)));
-    assert_refused_human(&session, &crate::bus::drain_records(&rx), "interrupted");
-    assert_eq!(
-        session.inbox.exchange().cause(),
-        Some(CancelCause::Interrupted)
-    );
-}
-
-#[test]
-fn only_a_current_reply_completion_parks_a_child_for_followups() {
-    let held = trunk(true);
-    assert_eq!(held.park_snapshot(), ParkMode::Held);
-    let parent = Agent::for_test("system").unwrap();
-    let child = parent.fork().unwrap();
-    assert_eq!(child.park_snapshot(), ParkMode::Quiesce);
-    child.handle().steer("hi".into()).unwrap();
-    assert_eq!(child.park_snapshot(), ParkMode::Quiesce);
-    child.inbox.deposit_reply(FOValue::Int { value: 1 });
-    assert_eq!(
-        child.park_snapshot(),
-        ParkMode::Quiesce,
-        "input outdates the reply"
-    );
-    assert!(pop(&child.inbox).is_some());
-    child.inbox.deposit_reply(FOValue::Int { value: 2 });
-    assert_eq!(child.park_snapshot(), ParkMode::Engaged);
-    child.inbox.disarm_reply_lease();
-    assert!(child.handle().has_reply());
-    assert_eq!(child.park_snapshot(), ParkMode::Quiesce);
-}
-
-#[test]
-fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
-    let embedded = trunk(false);
-    assert!(!embedded.handle.0.role.returns() && !embedded.fleet.launch.trunk.attended());
-    assert_eq!(embedded.park_snapshot(), ParkMode::Quiesce);
-    let _helper = test_agent(
-        &embedded.fleet,
-        TestAgentSpec::child("helper", &embedded.handle(), embedded.inbox.mailbox()),
-    )
-    .unwrap();
-    assert_eq!(embedded.park_snapshot(), ParkMode::HeldByChildren);
-}
-
-#[test]
-fn reply_refused_identically_for_every_conversing_root() {
-    let root = trunk(true);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, root.id());
-    let root_result = root
-        .ral(
-            &DurableRoot::default().child(),
-            "exarch-agents `reply 1",
-            5,
-            &emit,
-        )
-        .text;
+fn reply_is_refused_identically_for_every_conversing_root() {
+    let mut root = trunk(Trunk::Converses);
+    let (emit, _rx) = emitter(&root);
     let refusal = "you converse with the user; you do not return";
-    assert!(root_result.contains(refusal), "{root_result}");
-    let other =
-        crate::agent::spawn::hatch_root(&root, Memory::Amnemon, Some("other".into())).unwrap();
-    let other_result = other
+    let result = root
         .ral(
             &DurableRoot::default().child(),
             "exarch-agents `reply 1",
@@ -323,89 +246,111 @@ fn reply_refused_identically_for_every_conversing_root() {
             &emit,
         )
         .text;
-    assert!(other_result.contains(refusal), "{other_result}");
-    assert_eq!(other.park_snapshot(), ParkMode::Held);
+    assert!(result.contains(refusal), "{result}");
+    let mut other =
+        crate::agent::spawn::hatch_root(&root, Memory::Amnemon, Some("other".into())).unwrap();
+    let result = other
+        .ral(
+            &DurableRoot::default().child(),
+            "exarch-agents `reply 1",
+            5,
+            &emit,
+        )
+        .text;
+    assert!(result.contains(refusal), "{result}");
+    assert!(!other.handle.0.role.returns());
 }
 
 #[test]
-fn sub_agent_without_reply_is_re_nudged_then_fails() {
-    let parent = Agent::for_test("system").unwrap();
+fn a_child_without_reply_is_renudged_then_publishes_failure_at_rest() {
+    let parent = trunk(Trunk::Converses);
     let mut child = parent.fork().unwrap();
-    child.seed("do the thing".into());
-    let script = (0..8).fold(Script::new(), |s, _| {
-        s.then(Reply::text("here is prose, but no reply"))
+    let script = (0..4).fold(Script::new(), |script, _| {
+        script.then(Reply::text("prose, no reply"))
     });
-    let outcome = drive_peer(&mut child, scripted("test-model", script));
-    assert!(matches!(outcome, AgentOutcome::Failed(_)), "{outcome:?}");
-    assert!(child.handle().reply().is_none());
+    set_provider(&child, scripted("test-model", script));
+    let (emit, rx) = emitter(&child);
+    let outcome = human_exchange(&mut child, "do the thing", &emit);
+    assert!(matches!(&outcome, AgentOutcome::Failed(reason) if reason == NO_REPLY_REASON));
+    settle(&mut child, outcome);
+    assert!(
+        matches!(child.handle().status().report, Some(ChildStatus::Failed(reason)) if reason == NO_REPLY_REASON)
+    );
     assert!(child.is_ready());
+    assert_eq!(
+        crate::bus::drain_records(&rx)
+            .iter()
+            .filter(|record| matches!(record, Record::Forensic(Forensic::Nudge { .. })))
+            .count(),
+        3
+    );
 }
 
 #[test]
-fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
+fn provider_panic_is_recorded_and_the_next_prompt_still_deliberates() {
     let mut session = Agent::for_test("system").unwrap();
-    let script = (0..8).fold(Script::new().then(Reply::panicking()), |s, _| {
-        s.then(Reply::text("recovered"))
-    });
-    set_provider(&session, scripted("test-model", script));
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    session.seed("crash on this one".into());
-    let panicked = session.attend(&emit);
+    set_provider(
+        &session,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::panicking()).then(reply("42")),
+        ),
+    );
+    let (emit, rx) = emitter(&session);
+    let panicked = human_exchange(&mut session, "crash", &emit);
     assert!(
-        matches!(&panicked, AgentOutcome::Failed(m) if m.starts_with(WORKER_PANIC_PREFIX)),
-        "{panicked:?}"
+        matches!(&panicked, AgentOutcome::Failed(reason) if reason.starts_with(WORKER_PANIC_PREFIX))
     );
     assert!(session.is_ready());
-    session.seed("but answer this one".into());
-    let outcome = session.attend(&emit);
-    let signals: Vec<crate::bus::Signal> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert!(signals.iter().any(|s| matches!(s,
-        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|fact| matches!(fact.value(), Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX)))
-    )));
-    assert!(signals.iter().any(|s| matches!(s,
-        crate::bus::Signal::Transient(_, crate::record::Transient::Token(t)) if t == "recovered"
-    )));
-    assert!(matches!(outcome, AgentOutcome::Failed(_)), "{outcome:?}");
-    assert!(session.is_ready());
-    let parsed =
-        crate::record::read_records(&session.log_dir().path().join("record.jsonl")).unwrap();
-    assert!(parsed.iter().any(|r| matches!(r,
-        Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX)
-    )));
+    settle(&mut session, panicked);
+    assert!(matches!(
+        human_exchange(&mut session, "recover", &emit),
+        AgentOutcome::Replied
+    ));
+    let recorded_panic = |record: &Record| {
+        matches!(record,
+            Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX)
+        )
+    };
+    assert!(crate::bus::drain_records(&rx).iter().any(recorded_panic));
+    assert!(
+        crate::record::read_records(&session.log_dir().path().join(crate::record::RECORD))
+            .unwrap()
+            .iter()
+            .any(recorded_panic)
+    );
 }
 
 #[test]
-fn pinned_state_reminder_reads_the_live_register_and_becomes_the_next_prompt() {
+fn pinned_state_reminder_reads_the_live_register_and_continues_the_prompt() {
     let mut session = Agent::for_test("system").unwrap();
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
+    let (emit, rx) = emitter(&session);
     session.ral(
         &DurableRoot::default().child(),
         r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "ship the reminder"]]]]"#,
         5,
         &emit,
     );
-    let digest = session.pinned_digest().unwrap();
-    assert!(digest.contains("ship the reminder"), "{digest}");
+    assert!(
+        session
+            .pinned_digest()
+            .unwrap()
+            .contains("ship the reminder")
+    );
     set_provider(
         &session,
         scripted(
             "test-model",
-            Script::new()
-                .then(Reply::text("done"))
-                .then(Reply::tool_calls(vec![ral_call(
-                    "r1",
-                    "exarch-agents `reply 'x'",
-                )])),
+            Script::new().then(Reply::text("done")).then(reply("'x'")),
         ),
     );
-    session.seed("get on with it".into());
-    let outcome = session.attend(&emit);
-    assert!(matches!(outcome, AgentOutcome::Replied), "{outcome:?}");
+    assert!(matches!(
+        human_exchange(&mut session, "get on with it", &emit),
+        AgentOutcome::Replied
+    ));
     assert!(
         crate::bus::drain_records(&rx)
-            .into_iter()
+            .iter()
             .any(|record| matches!(record,
                 Record::Forensic(Forensic::Nudge { cause, .. }) if cause == "pinned-state reminder"
             ))
@@ -418,10 +363,9 @@ fn pinned_state_reminder_reads_the_live_register_and_becomes_the_next_prompt() {
 }
 
 #[test]
-fn pin_reminder_does_not_relivelock_the_interactive_root() {
-    let mut session = trunk(true);
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
+fn pin_reminder_does_not_relivelock_a_conversing_root() {
+    let mut session = trunk(Trunk::Converses);
+    let (emit, rx) = emitter(&session);
     session.ral(
         &DurableRoot::default().child(),
         r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep going"]]]]"#,
@@ -432,48 +376,38 @@ fn pin_reminder_does_not_relivelock_the_interactive_root() {
         &session,
         scripted(
             "test-model",
-            Script::new().then(Reply::text("working on it")),
+            Script::new()
+                .then(Reply::text("working"))
+                .then(Reply::text("still working")),
         ),
     );
-    session.seed("go".into());
-    let item = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.take_up(item, &emit).unwrap();
-    let nudge = session
-        .inbox
-        .draw(|_| ParkMode::Quiesce)
-        .expect("first completion queues one reminder");
-    assert!(
-        matches!(&nudge.next, Next::Item(Item::Nudge { text, .. }) if text.contains("There is pinned state")),
-        "{:?}",
-        nudge.next
+    let outcome = human_exchange(&mut session, "go", &emit);
+    settle(&mut session, outcome);
+    assert!(session.handle().status().job.is_none());
+    assert_eq!(
+        crate::bus::drain_records(&rx)
+            .iter()
+            .filter(|record| matches!(record,
+                Record::Forensic(Forensic::Nudge { cause, .. }) if cause == "pinned-state reminder"
+            ))
+            .count(),
+        1
     );
-    set_provider(
-        &session,
-        scripted(
-            "test-model",
-            Script::new().then(Reply::text("still working")),
-        ),
-    );
-    session.take_up(nudge, &emit).unwrap();
-    assert!(session.inbox.draw(|_| ParkMode::Quiesce).is_none());
 }
 
 #[test]
 fn chat_trunk_never_nudges() {
     let mut session = chat_trunk();
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
+    let (emit, rx) = emitter(&session);
     set_provider(
         &session,
         scripted("test-model", Script::new().then(Reply::empty())),
     );
-    session.seed("hello".into());
-    let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    session.take_up(next, &emit).unwrap();
-    assert!(session.inbox.draw(|_| ParkMode::Quiesce).is_none());
+    let outcome = human_exchange(&mut session, "hello", &emit);
+    settle(&mut session, outcome);
     assert!(
         !crate::bus::drain_records(&rx)
-            .into_iter()
+            .iter()
             .any(|record| matches!(record, Record::Forensic(Forensic::Nudge { .. })))
     );
     let view = serde_json::to_string(&session.rendered_messages()).unwrap();
@@ -482,54 +416,40 @@ fn chat_trunk_never_nudges() {
 }
 
 fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Agent {
-    let mut session = Agent::for_test_with(TestTrunk {
+    let session = Agent::for_test_with(TestTrunk {
         resume_on_reset,
         ..TestTrunk::new("system")
     })
     .unwrap();
-    let refusal = || {
-        Reply::error(ProviderError::Refused(Refusal::for_test(
+    for _ in 0..2 {
+        session.record_failure(&ProviderError::Refused(Refusal::for_test(
             Limit::Allowance,
             Some(resets_in),
-        )))
-    };
-    set_provider(
-        &session,
-        scripted("test-model", Script::new().then(refusal()).then(refusal())),
-    );
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    session.couple(&emit);
-    for prompt in ["first", "again"] {
-        session.seed(prompt.into());
-        let item = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-        session.take_up(item, &emit).unwrap();
+        )));
     }
     session
 }
 
 #[test]
-fn a_deferred_refusal_arms_one_resume_wakeup() {
+fn a_deferred_refusal_arms_only_one_resume_wakeup() {
     let session = refused_twice(true, Duration::from_hours(5));
-    assert!(session.schedules.unschedule(RESUME_LABEL));
-    assert!(!session.schedules.armed());
+    assert!(session.body.state.schedules.unschedule(RESUME_LABEL));
+    assert!(!session.body.state.schedules.armed());
 }
 
 #[test]
-fn only_a_resuming_trunk_arms_a_resume_and_only_past_the_in_place_wait() {
-    let armed = |resumes, resets_in| refused_twice(resumes, resets_in).schedules.armed();
+fn only_a_resuming_root_arms_a_resume_past_the_in_place_wait() {
+    let armed = |resumes, delay| refused_twice(resumes, delay).body.state.schedules.armed();
     assert!(!armed(false, Duration::from_hours(5)));
     assert!(!armed(true, Duration::from_secs(5)));
 }
 
 #[test]
-fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
+fn an_already_claimed_worker_batch_replays_cards_but_opens_no_job() {
     use crate::card::testkit::card_value;
-    use crate::record::Display;
     use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
-    let mut session = Agent::for_test("system").unwrap();
-    let (tx, rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
+    let mut session = trunk(Trunk::Converses);
+    let (emit, rx) = emitter(&session);
     session.couple(&emit);
     session.ral(
         &DurableRoot::default().child(),
@@ -537,11 +457,7 @@ fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
         10,
         &emit,
     );
-    while session.inbox.draw(|_| ParkMode::Quiesce).is_some() {}
-    let _ = crate::bus::drain_records(&rx);
-    session.seed("open".into());
-    open_next(&session.inbox);
-    let exchange = session.inbox.exchange();
+    let _records = crate::bus::drain_records(&rx);
     let done = DoneEvent {
         id: WorkerId(1),
         title: "claimed".into(),
@@ -549,210 +465,147 @@ fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
         outcome: Done::Ok,
     }
     .to_surface();
-    session.inbox.life_mailbox().post(Scoped::Surface {
-        id: session.id(),
-        values: vec![card_value(vec![]), done],
-    });
-    session.inbox.nudge(1, "continue exchange".into());
-    set_provider(
-        &session,
-        scripted("test-model", Script::new().then(Reply::panicking())),
-    );
-    let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    let step = session.take_up(next, &emit).unwrap();
-    assert!(step.settled.is_none());
-    assert!(session.rendered_messages().is_empty());
-    assert_eq!(session.inbox.exchange().id(), exchange.id());
     assert!(
-        !exchange.is_cancelled(),
-        "a declined surface neither opens nor closes an exchange"
+        session
+            .admit(Input::Surface {
+                generation: session.generation,
+                values: vec![card_value(vec![]), done]
+            })
+            .is_none()
     );
-    assert!(
-        matches!(pop(&session.inbox), Some(Next::Item(Item::Nudge { text, .. })) if text == "continue exchange")
-    );
+    assert!(session.handle().status().job.is_none());
     let records = crate::bus::drain_records(&rx);
     assert!(
         records
             .iter()
-            .any(|r| matches!(r, Record::Display(Display::Card { .. }))),
-        "{records:?}"
+            .any(|record| matches!(record, Record::Display(Display::Card { .. })))
     );
     assert!(
         records
             .iter()
-            .any(|r| matches!(r, Record::Display(Display::Done { id: Some(1), .. }))),
-        "{records:?}"
+            .any(|record| matches!(record, Record::Display(Display::Done { id: Some(1), .. })))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record, Record::Forensic(Forensic::JobOpened)))
     );
 }
 
 #[test]
-fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed() {
+fn ready_workers_and_non_done_surfaces_are_admitted_but_stale_batches_are_not() {
     use crate::card::testkit::card_value;
     use ral_core::protocol::probe::WorkerState;
     use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
-    let mut session = Agent::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    session.couple(&emit);
-    let stale = session.inbox.mailbox();
+    let mut session = trunk(Trunk::Converses);
+    let (emit, _rx) = emitter(&session);
+    let stale = session.generation;
     session.clear().unwrap();
-    stale.post(Scoped::Surface {
-        id: session.id(),
-        values: vec![card_value(vec![])],
-    });
-    assert!(session.inbox.draw(|_| ParkMode::Quiesce).is_none());
-    session.ral(
+    assert!(
+        session
+            .admit(Input::Surface {
+                generation: stale,
+                values: vec![card_value(vec![])]
+            })
+            .is_none()
+    );
+    let result = session.ral(
         &DurableRoot::default().child(),
         "let h = spawn \"ready-job\" { 42 }",
         10,
         &emit,
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let next = loop {
-        let rows = session.engine.read(|t| t.workers()).unwrap();
-        if rows
+    assert!(!result.failed, "{}", result.text);
+    wait_until("worker did not become ready", || {
+        session
+            .engine()
+            .read(|transport| transport.workers())
+            .unwrap()
             .iter()
-            .any(|r| matches!(r.state, WorkerState::Ready(_)))
-            && let Some(next) = session.inbox.draw(|_| ParkMode::Quiesce)
-        {
-            break next;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "worker did not settle"
-        );
-        std::thread::sleep(Duration::from_millis(5));
+            .any(|worker| matches!(worker.state, WorkerState::Ready(_)))
+    });
+    let worker = session
+        .engine()
+        .read(|transport| transport.workers())
+        .unwrap()
+        .into_iter()
+        .find(|worker| worker.title == "ready-job" && matches!(worker.state, WorkerState::Ready(_)))
+        .expect("the ready worker is visible");
+    let generation = session.generation;
+    let batch = || Input::Surface {
+        generation,
+        values: vec![
+            DoneEvent {
+                id: WorkerId(worker.id),
+                title: "ready-job".into(),
+                elapsed_ms: 5,
+                outcome: Done::Ok,
+            }
+            .to_surface(),
+        ],
     };
-    set_provider(
-        &session,
-        scripted(
-            "test-model",
-            Script::new()
-                .then(Reply::text("acknowledged ready"))
-                .then(Reply::text("acknowledged card")),
-        ),
-    );
-    assert!(session.take_up(next, &emit).unwrap().settled.is_some());
-    let view = serde_json::to_string(&session.rendered_messages()).unwrap();
+    let prompt = session.admit(batch()).unwrap();
     assert!(
-        view.contains("If you kept its handle and the result is still unclaimed, `await $h`"),
-        "{view}"
+        prompt
+            .text
+            .contains("If you kept its handle and the result is still unclaimed, `await $h`"),
+        "{}",
+        prompt.text
     );
-    session.inbox.life_mailbox().post(Scoped::Surface {
-        id: session.id(),
-        values: vec![card_value(vec![])],
-    });
-    let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    assert!(session.take_up(next, &emit).unwrap().settled.is_some());
-    let view = serde_json::to_string(&session.rendered_messages()).unwrap();
-    assert!(view.contains("errand finished."), "{view}");
-    let done = DoneEvent {
-        id: WorkerId(1),
-        title: "ready-job".into(),
-        elapsed_ms: 5,
-        outcome: Done::Ok,
-    }
-    .to_surface();
-    session.inbox.life_mailbox().post(Scoped::Surface {
-        id: session.id(),
-        values: vec![done],
-    });
-    // Drawn first: the severance ends the life, which draws nothing more.
-    let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-    let cause = Severed::Closed("engine lost".into());
-    session.engine.transport().sever(cause.clone());
-    assert!(matches!(session.take_up(next, &emit), Err(c) if c == cause));
+    let prompt = session
+        .admit(Input::Surface {
+            generation: session.generation,
+            values: vec![card_value(vec![])],
+        })
+        .unwrap();
+    assert!(prompt.text.contains("errand finished."), "{}", prompt.text);
+    session
+        .engine()
+        .transport()
+        .sever(Severed::Closed("engine lost".into()));
+    assert!(session.admit(batch()).is_none());
     assert!(!session.handle().is_live());
 }
 
 #[test]
-fn a_nonreply_followup_waits_for_real_schedules_or_busy_descendants() {
-    for scheduled in [false, true] {
-        let parent = Agent::for_test_with(TestTrunk {
-            allow_schedule: true,
-            ..TestTrunk::new("system")
-        })
+fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
+    let parent = Agent::for_test_with(TestTrunk {
+        allow_schedule: true,
+        ..TestTrunk::new("system")
+    })
+    .unwrap();
+    let mut child = parent.fork_named("helper").unwrap();
+    child
+        .body
+        .state
+        .schedules
+        .schedule(
+            Trigger::After(Duration::from_hours(2)),
+            "continue".into(),
+            "continuation".into(),
+            &child.mailbox.address(),
+        )
         .unwrap();
-        let mut child = parent.fork_named("helper").unwrap();
-        let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, child.id());
-        set_provider(
-            &child,
-            scripted(
-                "test-model",
-                Script::new().then(Reply::tool_calls(vec![ral_call(
-                    "first",
-                    "exarch-agents `reply 'first'",
-                )])),
-            ),
-        );
-        child.seed("initial task".into());
-        let first = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-        child.take_up(first, &emit).unwrap();
-        assert!(child.handle().reply_since().is_some());
-        let descendant = if scheduled {
-            child
-                .schedules
-                .schedule(
-                    Trigger::After(Duration::from_hours(2)),
-                    "continue later".into(),
-                    "continuation".into(),
-                    &child.inbox.mailbox(),
-                )
-                .unwrap();
-            None
-        } else {
-            Some(
-                test_agent(
-                    &child.fleet,
-                    TestAgentSpec::child("grandchild", &child.handle(), child.inbox.mailbox()),
-                )
-                .unwrap(),
-            )
-        };
-        set_provider(
-            &child,
-            scripted(
-                "test-model",
-                Script::new().then(Reply::error(ProviderError::Api {
-                    status: Some(400),
-                    model: "test-model".into(),
-                    message: "terminal request error".into(),
-                    body: None,
-                })),
-            ),
-        );
-        child
-            .handle()
-            .message(&parent.handle(), "follow up".into())
-            .unwrap();
-        let followup = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-        let step = child.take_up(followup, &emit).unwrap();
-        assert!(matches!(step.settled, Some(AgentOutcome::Failed(_))));
-        assert!(child.handle().reply_since().is_none());
-        assert_eq!(
-            child.park_snapshot(),
-            if scheduled {
-                ParkMode::UntilCancelled
-            } else {
-                ParkMode::HeldByChildren
-            }
-        );
-        assert!(child.is_ready());
-        if let Some(descendant) = descendant {
-            drop(descendant);
-            let result = child.inbox.draw(|_| ParkMode::Quiesce).unwrap();
-            assert!(matches!(
-                result.next,
-                Next::Item(Item::Agent {
-                    settled: Settlement::Failed { .. },
-                    ..
-                })
-            ));
-        }
-        child.schedules.clear();
-        assert_eq!(child.park_snapshot(), ParkMode::Quiesce);
-    }
+    assert!(child.rest().schedules);
+    child.report(ChildStatus::Replied(FOValue::Unit));
+    assert!(!child.rest().schedules);
+    let grandchild = test_agent(
+        &child.fleet,
+        TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
+    )
+    .unwrap();
+    let handle = (*grandchild).clone();
+    child.body.state.nursery.adopt(
+        handle,
+        crate::agent::nursery::Joined::new(std::thread::spawn(move || {
+            drop(grandchild);
+            Teardown { failures: vec![] }
+        })),
+    );
+    assert!(child.rest().pending());
+    let failures = child.body.state.nursery.dismiss_all();
+    assert_eq!(failures, Vec::<String>::new());
+    assert!(!child.rest().pending());
 }
 
 mod lifecycle;

@@ -1,14 +1,11 @@
 use crate::agent::Agent;
-use crate::agent::testkit::{
-    TestAgentSpec, close_exchange, pop, ral_call, scripted, set_provider, test_agent,
-    wait_for_settle,
-};
-use crate::bus::{Emitter, Item, Next, channel};
+use crate::agent::testkit::{close_exchange, ral_call, scripted, set_provider};
+use crate::bus::{Drained, Emitter, Input, channel};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Settlement, Voice};
+use crate::record::{ChildStatus, Voice};
 use ral_core::process::DurableRoot;
 
-fn run(session: &Agent, source: &str, budget: u64) -> String {
+fn run(session: &mut Agent, source: &str, budget: u64) -> String {
     let (tx, _rx) = channel();
     session
         .ral(
@@ -20,7 +17,7 @@ fn run(session: &Agent, source: &str, budget: u64) -> String {
         .text
 }
 
-fn eval(session: &Agent, source: &str) -> String {
+fn eval(session: &mut Agent, source: &str) -> String {
     run(session, source, 5)
 }
 
@@ -28,10 +25,8 @@ fn trunk() -> Agent {
     Agent::for_test("system").unwrap()
 }
 
-fn schedules(session: &Agent) -> crate::schedule::ScheduleRegistry {
-    session
-        .host_services(&crate::bus::dummy_emitter().0)
-        .schedules
+fn schedules(session: &Agent) -> &crate::schedule::ScheduleRegistry {
+    &session.body.state.schedules
 }
 
 fn no_children(session: &Agent) {
@@ -47,9 +42,9 @@ fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
 
 #[test]
 fn unknown_grant_label_errors_before_any_enquiry_crosses() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, model: `inherit]",
     );
     for label in bare_grant_tags() {
@@ -60,9 +55,9 @@ fn unknown_grant_label_errors_before_any_enquiry_crosses() {
 
 #[test]
 fn dangerous_is_no_longer_a_spawn_grant_and_the_refusal_points_at_inherit() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, model: `inherit]",
     );
     assert!(
@@ -74,9 +69,9 @@ fn dangerous_is_no_longer_a_spawn_grant_and_the_refusal_points_at_inherit() {
 
 #[test]
 fn a_bare_restrict_errors_before_any_enquiry_crosses() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, model: `inherit]",
     );
     assert!(result.contains("capability record"), "{result}");
@@ -85,10 +80,10 @@ fn a_bare_restrict_errors_before_any_enquiry_crosses() {
 
 #[test]
 fn inherit_and_restrict_pass_the_grant_door() {
-    let session = trunk();
+    let mut session = trunk();
     for grant in ["`inherit", "`restrict [net: `offline]"] {
         let result = eval(
-            &session,
+            &mut session,
             &format!(
                 r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: {grant}, model: `guess]"
             ),
@@ -103,9 +98,9 @@ fn inherit_and_restrict_pass_the_grant_door() {
 
 #[test]
 fn unknown_type_tag_errors_before_any_enquiry_crosses() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, model: `inherit]",
     );
     assert!(result.contains("amnemon"), "{result}");
@@ -115,9 +110,9 @@ fn unknown_type_tag_errors_before_any_enquiry_crosses() {
 
 #[test]
 fn unknown_selection_tag_errors_naming_both_arms() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `guess]",
     );
     for arm in ["inherit", "role"] {
@@ -128,9 +123,9 @@ fn unknown_selection_tag_errors_naming_both_arms() {
 
 #[test]
 fn an_empty_role_name_is_refused() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `role '']",
     );
     assert!(result.contains("non-empty"), "{result}");
@@ -139,9 +134,9 @@ fn an_empty_role_name_is_refused() {
 
 #[test]
 fn invalid_name_errors_before_any_enquiry_crosses() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, model: `inherit]"#,
     );
     assert!(result.contains("name"), "{result}");
@@ -150,17 +145,19 @@ fn invalid_name_errors_before_any_enquiry_crosses() {
 
 #[test]
 fn unknown_outer_tag_reaches_the_door_naming_every_legal_label() {
-    let result = eval(&trunk(), "exarch-agents `stop 'x'");
-    for tag in ["list", "start", "message", "cancel", "reply", "read"] {
+    let result = eval(&mut trunk(), "exarch-agents `cancel 'x'");
+    for tag in [
+        "list", "start", "message", "stop", "dismiss", "reply", "read",
+    ] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
 }
 
 #[test]
 fn missing_agent_field_errors_statically_naming_the_field() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, model: `inherit]",
     );
     assert!(result.contains("field named 'grant'"), "{result}");
@@ -169,16 +166,16 @@ fn missing_agent_field_errors_statically_naming_the_field() {
 
 #[test]
 fn misspelled_start_field_errors_statically_naming_the_field() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, model: `inherit]",
     );
     assert!(result.contains("no field named 'grnat'"), "{result}");
     no_children(&session);
 }
 
-fn start_child(session: &Agent, name: &str, prompt: &str, command: &str) -> Item {
+fn start_child(session: &mut Agent, name: &str, prompt: &str, command: &str) -> ChildStatus {
     set_provider(
         session,
         scripted(
@@ -196,50 +193,77 @@ fn start_child(session: &Agent, name: &str, prompt: &str, command: &str) -> Item
         result.contains("live: 1"),
         "the summary must count the child: {result}"
     );
-    match wait_for_settle(crate::agent::testkit::inbox(session)) {
-        Next::Item(item @ Item::Agent { .. }) => item,
-        other => panic!("expected an Agent result item, got: {other:?}"),
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        for input in session.mailbox.drain() {
+            if let Drained::Input(Input::Child {
+                name: from, status, ..
+            }) = input
+            {
+                assert_eq!(&*from, name);
+                let helper = session
+                    .fleet
+                    .resolve(name)
+                    .expect("the replying helper is live");
+                while helper.status().working() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the helper never rested"
+                    );
+                    assert!(helper.is_live(), "the helper ended before resting");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                return status;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the helper never reported"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
 
 #[test]
 fn agent_full_stack_round_trip_answers_the_summary_and_parks_a_reply() {
-    let session = trunk();
+    let mut session = trunk();
     let item = start_child(
-        &session,
+        &mut session,
         "helper",
         "say hi",
         "exarch-agents `reply 'say hi'",
     );
-    let notice = item.text();
+    let notice = crate::bus::notice("helper", &item.settlement(), std::time::Duration::ZERO);
     assert!(notice.contains("exarch-agents `read 'helper'"), "{notice}");
-    let read = eval(&session, "exarch-agents `read 'helper'");
+    let read = eval(&mut session, "exarch-agents `read 'helper'");
     assert!(read.contains("say hi"), "{read}");
-    let roster = eval(&session, "exarch-agents `list");
+    let roster = eval(&mut session, "exarch-agents `list");
     assert!(roster.contains("replied"), "{roster}");
 }
 
 #[test]
-fn agents_cancel_answer_excludes_the_ended_agent_before_teardown() {
-    let session = trunk();
-    let mailbox = session
-        .host_services(&crate::bus::dummy_emitter().0)
-        .mailbox;
-    let doomed = TestAgentSpec::child("doomed", &session.handle(), mailbox);
-    let _doomed = test_agent(&session.fleet, doomed).expect("a fresh child of a live parent");
-    let result = eval(&session, "exarch-agents `cancel 'doomed'");
-    assert!(result.contains("EXIT: 0"), "{result}");
-    assert!(
-        result.contains("live: 0"),
-        "cancelled life is no longer live: {result}"
+fn agents_dismiss_joins_before_its_summary_excludes_the_helper() {
+    let mut session = trunk();
+    start_child(
+        &mut session,
+        "doomed",
+        "reply",
+        "exarch-agents `reply 'done'",
     );
+    let helper = session.fleet.resolve("doomed").unwrap();
+    let result = eval(&mut session, "exarch-agents `dismiss 'doomed'");
+    assert!(result.contains("EXIT: 0"), "{result}");
+    assert!(result.contains("live: 0"), "{result}");
+    assert!(!helper.is_live());
+    assert!(session.body.state.nursery.is_joined(helper.id()));
+    assert!(session.fleet.resolve("doomed").is_none());
 }
 
 #[test]
 fn bad_cron_expr_errors_before_any_enquiry_crosses() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         "exarch-schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
     );
     assert!(result.contains("five fields"), "{result}");
@@ -248,9 +272,9 @@ fn bad_cron_expr_errors_before_any_enquiry_crosses() {
 
 #[test]
 fn bad_duration_errors_before_any_enquiry_crosses() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         "exarch-schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
     );
     assert!(result.contains("duration"), "{result}");
@@ -259,9 +283,9 @@ fn bad_duration_errors_before_any_enquiry_crosses() {
 
 #[test]
 fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         "exarch-schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
     );
     assert!(result.contains("cron"), "{result}");
@@ -271,9 +295,9 @@ fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
 
 #[test]
 fn missing_spec_field_errors_statically_naming_the_field() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         "exarch-schedules `add [trigger: `after '1s', label: 'nightly']",
     );
     assert!(
@@ -285,9 +309,9 @@ fn missing_spec_field_errors_statically_naming_the_field() {
 
 #[test]
 fn unknown_extra_spec_field_errors_statically_naming_the_field() {
-    let session = trunk();
+    let mut session = trunk();
     let result = eval(
-        &session,
+        &mut session,
         "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
     );
     assert!(result.contains("no field named 'extra'"), "{result}");
@@ -307,15 +331,15 @@ const NIGHTLY: &str =
 
 #[test]
 fn schedule_add_answer_carries_the_new_row() {
-    let result = eval(&granted_trunk(), NIGHTLY);
+    let result = eval(&mut granted_trunk(), NIGHTLY);
     assert!(result.contains("nightly"), "{result}");
 }
 
 #[test]
-fn schedule_full_stack_round_trip_answers_the_table_and_fires_into_inbox() {
-    let session = granted_trunk();
+fn schedule_full_stack_round_trip_answers_the_table_and_posts_a_wakeup() {
+    let mut session = granted_trunk();
     let result = eval(
-        &session,
+        &mut session,
         "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#]",
     );
     assert!(result.contains("EXIT: 0"), "{result}");
@@ -326,60 +350,59 @@ fn schedule_full_stack_round_trip_answers_the_table_and_fires_into_inbox() {
     assert!(result.contains("nightly"), "{result}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match pop(crate::agent::testkit::inbox(&session)) {
-            Some(Next::Item(Item::Wakeup(text))) => {
+        if let Some(input) = session.mailbox.drain().into_iter().next() {
+            if let Drained::Input(Input::Wakeup { text, epoch, .. }) = input {
                 assert!(text.contains("wake"), "{text}");
-                break;
+                assert_eq!(epoch, schedules(&session).epoch());
+                return;
             }
-            Some(other) => panic!("expected a Wakeup item, got: {other:?}"),
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the schedule did not fire within the timeout"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            panic!("expected a scheduled wakeup");
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the schedule did not fire within the timeout"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
 #[test]
 fn schedule_remove_full_stack_disarms_by_label() {
-    let session = granted_trunk();
-    let result = eval(&session, NIGHTLY);
+    let mut session = granted_trunk();
+    let result = eval(&mut session, NIGHTLY);
     assert!(result.contains("EXIT: 0"), "{result}");
     assert_eq!(schedules(&session).list().len(), 1);
-    let result = eval(&session, "exarch-schedules `remove 'nightly'");
+    let result = eval(&mut session, "exarch-schedules `remove 'nightly'");
     assert!(result.contains("EXIT: 0"), "{result}");
     assert!(!result.contains("nightly"), "{result}");
     assert!(schedules(&session).list().is_empty());
-    let miss = eval(&session, "exarch-schedules `remove 'nightly'");
+    let miss = eval(&mut session, "exarch-schedules `remove 'nightly'");
     assert!(miss.contains("EXIT: 0"), "{miss}");
 }
 
 #[test]
 fn schedule_remove_answer_omits_the_removed_row_but_keeps_the_other() {
-    let session = granted_trunk();
-    eval(&session, NIGHTLY);
+    let mut session = granted_trunk();
+    eval(&mut session, NIGHTLY);
     eval(
-        &session,
+        &mut session,
         "exarch-schedules `add [trigger: `after '10m', label: 'daily', prompt: #'wake'#]",
     );
-    let result = eval(&session, "exarch-schedules `remove 'nightly'");
+    let result = eval(&mut session, "exarch-schedules `remove 'nightly'");
     assert!(!result.contains("nightly"), "{result}");
     assert!(result.contains("daily"), "{result}");
 }
 
 #[test]
-fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
-    let session = trunk();
+fn reply_full_stack_round_trip_delivers_a_structured_record_to_the_parent() {
+    let mut session = trunk();
     start_child(
-        &session,
+        &mut session,
         "finder",
         "find files",
         r#"let found = ["a.rs", "b.rs"]; exarch-agents `reply [files: $found]"#,
     );
-    let read = eval(&session, "exarch-agents `read 'finder'");
+    let read = eval(&mut session, "exarch-agents `read 'finder'");
     assert!(
         read.contains("files:") && read.contains("a.rs") && read.contains("b.rs"),
         "{read}"
@@ -388,13 +411,13 @@ fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
 
 #[test]
 fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
-    let session = trunk();
-    let result = eval(&session, "exarch-agents `reply { echo hi }");
+    let mut session = trunk();
+    let result = eval(&mut session, "exarch-agents `reply { echo hi }");
     assert!(
         result.contains("T0074") && result.contains("data"),
         "{result}"
     );
-    let ok = eval(&session, "exarch-agents `reply 42");
+    let ok = eval(&mut session, "exarch-agents `reply 42");
     assert!(ok.contains("EXIT: 0"), "{ok}");
 }
 
@@ -424,10 +447,10 @@ fn double_reply_in_one_exchange_is_last_wins() {
     match outcome {
         Ok(crate::agent::outcome::Outcome::Replied) => {
             assert_eq!(
-                session.handle().reply(),
-                Some(ral_core::data::FOValue::String {
+                session.handle().status().report,
+                Some(ChildStatus::Replied(ral_core::data::FOValue::String {
                     value: "second".into()
-                }),
+                })),
             );
         }
         other => panic!("expected Replied, got {other:?}"),
@@ -436,24 +459,15 @@ fn double_reply_in_one_exchange_is_last_wins() {
 
 #[test]
 fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
-    let session = trunk();
+    let mut session = trunk();
     let item = start_child(
-        &session,
+        &mut session,
         "pinner",
         "pin and read back",
         r#"exarch-pins `set [key: "note", body: `card ["hi there"]]; exarch-agents `reply !{exarch-pins `read "note"}"#,
     );
-    assert!(
-        matches!(
-            item,
-            Item::Agent {
-                settled: Settlement::Replied,
-                ..
-            }
-        ),
-        "{item:?}"
-    );
-    let read = eval(&session, "exarch-agents `read 'pinner'");
+    assert!(matches!(item, ChildStatus::Replied(_)), "{item:?}");
+    let read = eval(&mut session, "exarch-agents `read 'pinner'");
     assert!(
         read.contains("`card") && read.contains("`text [spans:"),
         "{read}"
@@ -462,15 +476,15 @@ fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
 
 #[test]
 fn a_reply_missing_a_projected_field_is_refused_at_the_read() {
-    let session = trunk();
+    let mut session = trunk();
     start_child(
-        &session,
+        &mut session,
         "lazy",
         "reply without a verdict",
         "exarch-agents `reply [note: 'all fine']",
     );
     let result = eval(
-        &session,
+        &mut session,
         "let r = exarch-agents `read 'lazy'\necho $r[reply][verdict]",
     );
     assert!(
@@ -481,31 +495,22 @@ fn a_reply_missing_a_projected_field_is_refused_at_the_read() {
 
 #[test]
 fn pin_read_full_stack_absent_key_replies_none() {
-    let session = trunk();
+    let mut session = trunk();
     let item = start_child(
-        &session,
+        &mut session,
         "reader",
         "read an absent key",
         r#"exarch-agents `reply !{exarch-pins `read "nope"}"#,
     );
-    assert!(
-        matches!(
-            item,
-            Item::Agent {
-                settled: Settlement::Replied,
-                ..
-            }
-        ),
-        "{item:?}"
-    );
-    let read = eval(&session, "exarch-agents `read 'reader'");
+    assert!(matches!(item, ChildStatus::Replied(_)), "{item:?}");
+    let read = eval(&mut session, "exarch-agents `read 'reader'");
     assert!(read.contains("reply: `none"), "{read}");
 }
 
 #[test]
 fn kit_round_trip_holds_every_field_including_tags_and_notes() {
     const BUDGET: u64 = 60;
-    let session = trunk();
+    let mut session = trunk();
     for source in [
         r#"exarch-tasks `add "fix the parser""#,
         r#"exarch-tasks `add "write docs""#,
@@ -513,9 +518,9 @@ fn kit_round_trip_holds_every_field_including_tags_and_notes() {
         r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#,
         r#"exarch-tasks `note [id: 1, note: "blocked on review"]"#,
     ] {
-        run(&session, source, BUDGET);
+        run(&mut session, source, BUDGET);
     }
-    let listed = run(&session, "exarch-tasks `list", BUDGET);
+    let listed = run(&mut session, "exarch-tasks `list", BUDGET);
     for field in [
         "fix the parser",
         "`doing",
@@ -526,7 +531,7 @@ fn kit_round_trip_holds_every_field_including_tags_and_notes() {
         assert!(listed.contains(field), "missing {field}: {listed}");
     }
     let read = run(
-        &session,
+        &mut session,
         r#"let [decoded-task, _] = !{tasks-decode !{exarch-pins `read "tasks"}}
            echo $decoded-task[desc]
            echo $decoded-task[status]
@@ -541,44 +546,44 @@ fn kit_round_trip_holds_every_field_including_tags_and_notes() {
 
 #[test]
 fn add_task_inside_a_function_body_survives_the_block_and_the_call() {
-    let session = trunk();
+    let mut session = trunk();
     eval(
-        &session,
+        &mut session,
         r#"let f = { exarch-tasks `add "inside a block" }; !{f}"#,
     );
-    let listed = eval(&session, "exarch-tasks `list");
+    let listed = eval(&mut session, "exarch-tasks `list");
     assert!(listed.contains("inside a block"), "{listed}");
 }
 
 #[test]
 fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
-    let session = trunk();
-    eval(&session, r#"exarch-tasks `add "parent task""#);
+    let mut session = trunk();
+    eval(&mut session, r#"exarch-tasks `add "parent task""#);
     start_child(
-        &session,
+        &mut session,
         "tasker",
         "add a task",
         r#"exarch-tasks `add "child task"; exarch-agents `reply "done""#,
     );
-    let listed = eval(&session, "exarch-tasks `list");
+    let listed = eval(&mut session, "exarch-tasks `list");
     assert!(listed.contains("parent task"), "{listed}");
     assert!(!listed.contains("child task"), "{listed}");
 }
 
 #[test]
 fn an_all_done_list_stays_pinned_until_cleared() {
-    let session = trunk();
-    eval(&session, r#"exarch-tasks `add "only task""#);
-    eval(&session, "exarch-tasks `status [id: 1, status: `done]");
-    let listed = eval(&session, "exarch-tasks `list");
+    let mut session = trunk();
+    eval(&mut session, r#"exarch-tasks `add "only task""#);
+    eval(&mut session, "exarch-tasks `status [id: 1, status: `done]");
+    let listed = eval(&mut session, "exarch-tasks `list");
     for field in ["only task", "`done"] {
         assert!(listed.contains(field), "missing {field}: {listed}");
     }
-    eval(&session, "exarch-tasks `clear");
-    let read = eval(&session, r#"exarch-pins `read "tasks""#);
+    eval(&mut session, "exarch-tasks `clear");
+    let read = eval(&mut session, r#"exarch-pins `read "tasks""#);
     assert!(read.contains("`none") && !read.contains("`some"), "{read}");
-    eval(&session, r#"exarch-tasks `add "fresh""#);
-    let listed = eval(&session, "exarch-tasks `list");
+    eval(&mut session, r#"exarch-tasks `add "fresh""#);
+    let listed = eval(&mut session, "exarch-tasks `list");
     for field in ["id: 1", "fresh", "`open"] {
         assert!(listed.contains(field), "missing {field}: {listed}");
     }
@@ -586,12 +591,12 @@ fn an_all_done_list_stays_pinned_until_cleared() {
 
 #[test]
 fn a_foreign_card_under_tasks_fails_the_kit_didactically() {
-    let session = trunk();
+    let mut session = trunk();
     eval(
-        &session,
+        &mut session,
         r#"exarch-pins `set [key: "tasks", body: `card [`text [spans: [[text: "not task shaped"]]]]]"#,
     );
-    let result = eval(&session, r#"exarch-tasks `add "x""#);
+    let result = eval(&mut session, r#"exarch-tasks `add "x""#);
     assert!(
         result.contains("tasks: the card under the 'tasks' pin is not task-shaped"),
         "{result}"
@@ -599,14 +604,14 @@ fn a_foreign_card_under_tasks_fails_the_kit_didactically() {
 }
 
 fn trunk_with_an_answered_prompt() -> Agent {
-    let session = trunk();
-    close_exchange(&session, "first prompt", "first answer");
+    let mut session = trunk();
+    close_exchange(&mut session, "first prompt", "first answer");
     session
 }
 
 #[test]
 fn unknown_context_tag_reaches_the_door_naming_every_legal_tag() {
-    let result = eval(&trunk(), "exarch-context `rewind [3]");
+    let result = eval(&mut trunk(), "exarch-context `rewind [3]");
     for tag in ["survey", "evict"] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
@@ -615,7 +620,7 @@ fn unknown_context_tag_reaches_the_door_naming_every_legal_tag() {
 #[test]
 fn misspelled_evict_field_errors_statically_naming_the_field() {
     let result = eval(
-        &trunk(),
+        &mut trunk(),
         "exarch-context `evict [form: 1, to: 1, note: 'x']",
     );
     assert!(
@@ -626,7 +631,7 @@ fn misspelled_evict_field_errors_statically_naming_the_field() {
 
 #[test]
 fn a_missing_or_foreign_key_is_a_type_error_naming_it() {
-    let session = trunk();
+    let mut session = trunk();
     for (call, key) in [
         ("exarch-context `evict [from: 1, to: 1]", "note"),
         ("exarch-context `evict [turns: [1], note: 'x']", "from"),
@@ -636,7 +641,7 @@ fn a_missing_or_foreign_key_is_a_type_error_naming_it() {
             "turns",
         ),
     ] {
-        let result = eval(&session, call);
+        let result = eval(&mut session, call);
         assert!(
             !result.contains("EXIT: 0") && result.contains(key),
             "`{call}` must name `{key}`: {result}"
@@ -646,10 +651,10 @@ fn a_missing_or_foreign_key_is_a_type_error_naming_it() {
 
 #[test]
 fn an_eviction_answers_the_survey_it_leaves_behind() {
-    let session = trunk_with_an_answered_prompt();
-    close_exchange(&session, "second prompt", "second answer");
+    let mut session = trunk_with_an_answered_prompt();
+    close_exchange(&mut session, "second prompt", "second answer");
     let result = eval(
-        &session,
+        &mut session,
         "exarch-context `evict [from: 1, to: 2, note: 'the old work is done']",
     );
     assert!(result.contains("EXIT: 0"), "{result}");
@@ -659,9 +664,9 @@ fn an_eviction_answers_the_survey_it_leaves_behind() {
 
 #[test]
 fn transcript_answers_turn_records_with_variant_parts() {
-    let session = trunk_with_an_answered_prompt();
+    let mut session = trunk_with_an_answered_prompt();
     let result = eval(
-        &session,
+        &mut session,
         r#"let material = exarch-transcript `read [turns: [1, 2]]
            echo !{length $material}
            echo $material[0][turn] $material[0][role]
@@ -700,10 +705,10 @@ fn transcript_answers_turn_records_with_variant_parts() {
 
 #[test]
 fn transcript_read_addresses_turns_wherever_they_lie() {
-    let session = trunk_with_an_answered_prompt();
-    close_exchange(&session, "second prompt", "second answer");
+    let mut session = trunk_with_an_answered_prompt();
+    close_exchange(&mut session, "second prompt", "second answer");
     let result = eval(
-        &session,
+        &mut session,
         r"let spanning = exarch-transcript `read [turns: [2, 3]]
            echo !{length $spanning}
            echo $spanning[0][turn] $spanning[0][role] !{length $spanning[0][messages]}
@@ -718,7 +723,7 @@ fn transcript_read_addresses_turns_wherever_they_lie() {
 
 #[test]
 fn unknown_transcript_tag_reaches_the_door_naming_every_legal_tag() {
-    let result = eval(&trunk(), "exarch-transcript `search 'x'");
+    let result = eval(&mut trunk(), "exarch-transcript `search 'x'");
     for tag in ["index", "read", "grep"] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
@@ -726,9 +731,9 @@ fn unknown_transcript_tag_reaches_the_door_naming_every_legal_tag() {
 
 #[test]
 fn index_and_grep_answer_their_own_shapes() {
-    let session = trunk_with_an_answered_prompt();
+    let mut session = trunk_with_an_answered_prompt();
     let result = eval(
-        &session,
+        &mut session,
         r"let listed = exarch-transcript `index
            echo $listed[0][from] $listed[0][to] $listed[0][role] $listed[0][kind]
            case $listed[0][location] [

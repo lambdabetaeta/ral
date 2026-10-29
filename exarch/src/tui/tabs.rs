@@ -10,7 +10,9 @@ use super::resources::ViewFigures;
 use crate::agent::AgentHandle;
 use crate::agent::fleet::Fleet;
 use crate::card::Card;
-use crate::record::{AgentId, AgentState, Born, Emitter as Recorder};
+use crate::record::{
+    AgentId, AgentState, Born, Commit, Emitter as Recorder, Forensic, JobId, Record,
+};
 use ral_core::own::OwnDir;
 
 use super::dial::Detail;
@@ -92,6 +94,7 @@ pub(super) struct Tab {
     /// ends.  `None` for a root.
     parent: Option<AgentId>,
     status: Status,
+    job: Option<JobId>,
     /// The session's directory, kept past death and bar expiry so
     /// [`Tabs::log_dirs`] can still name it.
     log_dir: OwnDir,
@@ -112,6 +115,7 @@ impl Tab {
             name: born.name.clone(),
             parent: born.parent,
             status: Status::new(),
+            job: None,
             log_dir: born.log_dir.clone(),
             life: Life::Live(Scrollback::new(
                 slot,
@@ -178,8 +182,9 @@ impl Tab {
             return None;
         }
         let agent = self.live(fleet)?;
-        let idle = agent.idle();
-        (agent.waiting_for_input() && idle >= DEMOTE_IDLE).then_some(idle)
+        let status = agent.status();
+        let idle = status.last_exchange.unwrap_or(agent.0.started).elapsed();
+        (status.waiting_for_input && idle >= DEMOTE_IDLE).then_some(idle)
     }
 }
 
@@ -283,6 +288,25 @@ impl Tabs {
         self.agent(self.focused())
     }
 
+    pub(super) fn focused_job(&self) -> Option<JobId> {
+        self.focused_tab().job
+    }
+
+    pub(super) fn commit_job(&mut self, id: AgentId, commit: &Commit) {
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        for record in commit.records() {
+            match record.value() {
+                Record::Forensic(Forensic::JobOpened) => {
+                    tab.job = Some(JobId::from(commit.number()));
+                }
+                Record::Forensic(Forensic::JobSettled { .. }) => tab.job = None,
+                _ => {}
+            }
+        }
+    }
+
     /// The focused tab's own record seam.
     pub(super) fn focused_recorder(&self) -> &Recorder {
         self.focused_tab()
@@ -291,7 +315,7 @@ impl Tabs {
             .recorder()
     }
 
-    /// The live tab named `name` — `/focus`'s target. `Fleet::claim` keeps
+    /// The live tab named `name` — `/focus`'s target. `Fleet::name` keeps
     /// names unique among the live, so a lingering tab sharing its name with
     /// a newborn is ruled out by the liveness test rather than by luck.
     pub(super) fn by_name(&self, name: &str) -> Option<AgentId> {

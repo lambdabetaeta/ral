@@ -418,3 +418,159 @@ fn a_reminder_spends_no_budget() {
     );
     assert_eq!(nudges.used, 0);
 }
+
+#[test]
+fn cancellation_never_nudges_or_spends_budget() {
+    let mut nudges = Nudges::new(true);
+    let log = fresh_log();
+    let facts = Facts {
+        must_reply: true,
+        pinned: Some("unfinished".into()),
+        ..facts()
+    };
+    assert!(
+        nudges
+            .react(Ok(&Outcome::Cancelled), &facts, &log)
+            .is_none()
+    );
+    assert_eq!(nudges.used, 0);
+    assert!(nudges.react(COMPLETE, &facts, &log).is_some());
+}
+
+#[test]
+fn pending_helpers_suppress_repairs_without_spending_or_consuming_pin_edges() {
+    let mut nudges = Nudges::new(true);
+    let log = fresh_log();
+    let mut facts = Facts {
+        must_reply: true,
+        pinned: Some("unfinished".into()),
+        quiet: false,
+    };
+    for outcome in [
+        Outcome::Empty,
+        Outcome::Stopped {
+            reason: "early".into(),
+        },
+        Outcome::Complete,
+    ] {
+        assert!(nudges.react(Ok(&outcome), &facts, &log).is_none());
+    }
+    assert_eq!(nudges.used, 0);
+    facts.quiet = true;
+    let nudge = nudges.react(COMPLETE, &facts, &log).unwrap();
+    assert!(
+        nudge.contains("unfinished") && nudge.contains("`reply`"),
+        "{nudge}"
+    );
+    assert_eq!(nudges.used, 1);
+}
+
+#[test]
+fn a_self_nudge_continues_one_prompt_inside_one_job() {
+    use crate::agent::Trunk;
+    use crate::agent::testkit::{host, ral_call, scripted, set_provider, trunk};
+    use crate::provider::scripted::{Reply, Script};
+    use crate::record::{ChildStatus, Protocol, Record, Voice};
+    use std::time::{Duration, Instant};
+
+    let root = trunk(Trunk::Returns);
+    set_provider(
+        &root,
+        scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::empty())
+                .then(Reply::tool_calls(vec![ral_call(
+                    "answer",
+                    "exarch-agents `reply 'done'",
+                )])),
+        ),
+    );
+    root.handle().steer("one prompt".into()).unwrap();
+    let host = host(root);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut records = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let signal = host
+            .feed()
+            .recv_timeout(remaining)
+            .expect("the nudged job settles within five seconds");
+        if let crate::bus::Signal::Commit(_, commit) = signal {
+            records.extend(
+                commit
+                    .records()
+                    .iter()
+                    .map(|recorded| recorded.value().clone()),
+            );
+            if records
+                .iter()
+                .any(|r| matches!(r, Record::Forensic(Forensic::JobSettled { .. })))
+            {
+                break;
+            }
+        }
+        assert!(Instant::now() < deadline, "the nudged job must settle");
+    }
+    assert_eq!(host.end(), Vec::<String>::new());
+    let opening = records
+        .iter()
+        .position(|r| matches!(r, Record::Forensic(Forensic::JobOpened)))
+        .unwrap();
+    let prompt = records
+        .iter()
+        .position(|r| matches!(r, Record::Protocol(Protocol::UserPrompt { .. })))
+        .unwrap();
+    assert!(
+        opening < prompt,
+        "the job is recorded before its first exchange record"
+    );
+    let count = |predicate: fn(&Record) -> bool| records.iter().filter(|r| predicate(r)).count();
+    assert_eq!(
+        count(|r| matches!(r, Record::Forensic(Forensic::JobOpened))),
+        1
+    );
+    assert_eq!(
+        count(|r| matches!(r, Record::Forensic(Forensic::JobSettled { .. }))),
+        1
+    );
+    assert_eq!(
+        count(|r| matches!(r, Record::Forensic(Forensic::TurnStarted { .. }))),
+        2
+    );
+    assert_eq!(
+        count(|r| matches!(
+            r,
+            Record::Protocol(Protocol::UserPrompt {
+                voice: Voice::Human,
+                ..
+            })
+        )),
+        1
+    );
+    assert_eq!(
+        count(|r| matches!(
+            r,
+            Record::Protocol(Protocol::UserPrompt {
+                voice: Voice::Harness,
+                ..
+            })
+        )),
+        0
+    );
+    assert_eq!(
+        count(
+            |r| matches!(r, Record::Protocol(Protocol::Steering { text, voice: Voice::Harness }) if text.contains("no text and no tool calls"))
+        ),
+        1
+    );
+    assert_eq!(
+        count(|r| matches!(
+            r,
+            Record::Forensic(Forensic::Status {
+                status: ChildStatus::Replied(_)
+            })
+        )),
+        1
+    );
+}

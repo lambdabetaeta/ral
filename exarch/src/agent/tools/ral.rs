@@ -103,7 +103,7 @@ fn record_result(session: &Agent, content: &str, failed: bool, call: BlockId) {
 pub(crate) fn dispatch(
     id: String,
     input: &Value,
-    session: &Agent,
+    session: &mut Agent,
     exchange: &Scope,
     emit: &Emitter,
 ) -> SessionToolResult {

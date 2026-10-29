@@ -18,7 +18,7 @@ use super::tabs::{Status, TabRow, Tabs};
 use crate::SessionInfo;
 use crate::agent::AgentHandle;
 use crate::agent::fleet::Fleet;
-use crate::bus::{BusReceiver, Read, Rewrite, UsageMeter};
+use crate::bus::{BusReceiver, Command, Read, Rewrite, UsageMeter};
 use crate::card::Card;
 use crate::provider::{Bureau, Usage};
 use crate::record::{AgentId, Born, Commit, Resumed, Transient};
@@ -97,17 +97,17 @@ pub enum KeyAction {
     Submit,
     /// Esc — cancels, but an open overlay may claim it first to dismiss itself.
     Cancel,
-    /// Ctrl-C — the interrupt; inside an overlay it closes the overlay instead.
-    Interrupt,
+    /// Ctrl-C — Stop; inside an overlay it closes the overlay instead.
+    Stop,
 }
 
-/// Classify one key press in the running UI loop: Ctrl-C interrupts, Esc
+/// Classify one key press in the running UI loop: Ctrl-C stops, Esc
 /// cancels, a bare Enter submits when the focused tab is steerable, everything
 /// else edits.  The modal overlays bypass this and read their chord from
 /// [`input_of`].
 pub(super) fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
     if ctrl_key(k, 'c') {
-        return KeyAction::Interrupt;
+        return KeyAction::Stop;
     }
     if k.code == KeyCode::Esc {
         return KeyAction::Cancel;
@@ -233,7 +233,7 @@ impl App {
     pub(super) fn focused_waiting(&self) -> bool {
         self.tabs
             .focused_agent()
-            .is_none_or(|agent| agent.waiting_for_input())
+            .is_none_or(|agent| agent.status().waiting_for_input)
     }
 
     /// Whether matrix navigation owns the keyboard.
@@ -331,6 +331,7 @@ impl App {
         if self.tabs.lingering(id) {
             return;
         }
+        self.tabs.commit_job(id, commit);
         if self.with_scrollback(id, |sb| sb.commit(commit)) == Some(true) {
             if let Some(status) = self.tabs.status_mut(id) {
                 *status = Status::new();
@@ -376,7 +377,7 @@ impl App {
             return;
         }
         match t {
-            Transient::Died => self.tabs.died(id),
+            Transient::Died { .. } => self.tabs.died(id),
             Transient::Resources { card, .. } => self.frontend_resources(id, card, bus),
             Transient::State(state) => {
                 if let Some(status) = self.tabs.status_mut(id) {
@@ -406,7 +407,9 @@ impl App {
                 self.with_scrollback(id, |sb| sb.push_thinking(&text));
             }
             Transient::StopReason(raw) => self.push_chrome(id, Chrome::StopReason(raw)),
-            Transient::Fault { text } => self.push_chrome(id, Chrome::Error(text)),
+            Transient::Fault { text } | Transient::Elided { text } => {
+                self.push_chrome(id, Chrome::Error(text));
+            }
             Transient::Boundary => {
                 self.with_scrollback(id, Scrollback::close_lanes);
             }
@@ -484,11 +487,11 @@ impl App {
     }
 
     pub(super) fn post_read(&mut self, read: Read) {
-        self.session(|agent| agent.post_read(read));
+        self.session(|agent| agent.post_command(Command::Read(read)));
     }
 
     pub(super) fn post_rewrite(&mut self, rewrite: Rewrite) {
-        self.session(|agent| agent.post_rewrite(rewrite));
+        self.session(|agent| agent.post_command(Command::Rewrite(rewrite)));
     }
 
     /// Route one key press — the loop drops releases — to its one owner, in
@@ -508,14 +511,14 @@ impl App {
         }
         let can_edit = self.is_steerable();
         let action = key_action(&k, can_edit);
-        if action != KeyAction::Interrupt && self.matrix_navigating() {
+        if action != KeyAction::Stop && self.matrix_navigating() {
             self.matrix_key(&k);
             return false;
         }
         if can_edit && self.prompt_state.search_key(k) {
             return false;
         }
-        if action != KeyAction::Interrupt
+        if action != KeyAction::Stop
             && (can_edit && self.prompt_state.menu_key(k) || self.matrix_key(&k))
         {
             return false;
@@ -532,13 +535,13 @@ impl App {
             }
         }
         match action {
-            // Interrupt only the exchange; helpers remain under the work.
-            KeyAction::Interrupt | KeyAction::Cancel => {
-                if let Some(agent) = self.tabs.focused_agent() {
-                    agent.interrupt();
-                }
-                // Escape also leaves Vi Insert; Ctrl-C never edits the draft.
-                if action == KeyAction::Cancel && can_edit {
+            KeyAction::Stop | KeyAction::Cancel => {
+                if let Some(job) = self.tabs.focused_job()
+                    && let Some(agent) = self.tabs.focused_agent()
+                    && let Some(prompts) = agent.stop(job)
+                {
+                    self.prompt_state.restore_stopped_prompts(prompts);
+                } else if action == KeyAction::Cancel && can_edit {
                     self.prompt_state.edit_input(k);
                 }
             }
@@ -555,8 +558,8 @@ impl App {
         false
     }
 
-    /// Matrix navigation is modal: while it owns the keyboard every key but the
-    /// interrupt is a matrix gesture or is swallowed, so Esc leaves the surface
+    /// Matrix navigation is modal: while it owns the keyboard every key but
+    /// Ctrl-C is a matrix gesture or is swallowed, so Esc leaves the surface
     /// instead of cancelling the focused turn, and nothing reaches the draft.
     /// Tab is global, so it enters and leaves even with an editor prefix armed.
     fn matrix_key(&mut self, k: &KeyEvent) -> bool {

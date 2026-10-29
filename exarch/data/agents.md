@@ -18,13 +18,13 @@ Do independent work while the child runs. Do not poll: if nothing remains, end y
     let review = exarch-agents `read #'plan-review'#
     [verdict: $review[reply][verdict], issues: $review[reply][issues]]
 
-Message a running agent to correct its direction, supply a discovery, or change its scope. You can also message another live agent in your tree, including your parent or siblings:
+Message a running agent to correct its direction, supply a discovery, or change its scope. You can also message another working agent in your tree, including your parent or siblings. A resting helper accepts messages only from its parent or the human:
 
     exarch-agents `message [
       to: #'plan-review'#, text: #'The empty-input behavior is intentional. Focus on whether the new duplicate check changes error precedence.'#
     ]
 
-Reuse a replied child for related work: it retains its context and shell. Each reply starts a one-hour follow-up window; a new message resumes work, and its next reply starts a fresh window. Wait for its next notice before reading again: `read` refuses while it works:
+Reuse a replied child for related work: it retains its context and shell. A helper rests for five hours by default (`--helper-idle` sets the limit), then ends if it has nothing it may take up. A new message from you resumes work. Wait for its next notice before reading again: `read` refuses while it works:
 
     exarch-agents `message [
       to: #'plan-review'#, text: #'Check src/parser/ for the same error-precedence issue. Return the same shape.'#
@@ -43,9 +43,15 @@ Inspect the changes after the editors reply:
 
     git diff -- src/solver/ src/parser/
 
-Cancel a child whose work is no longer needed. Cancellation also reaches its descendants:
+Stop a descendant's current exchange without ending it or its helpers:
 
-    exarch-agents `cancel #'plan-review'#
+    exarch-agents `stop #'plan-review'#
+
+Dismiss one of your own helpers when its life is no longer needed. This ends and joins it and its descendants before returning:
+
+    exarch-agents `dismiss #'plan-review'#
+
+Reply and Stop preserve your helpers. A human may resume a resting helper quietly: you see its published status, but receive no model notice for that work.
 
 For permissions, fan-out, and result schemas, consult the command guide:
 

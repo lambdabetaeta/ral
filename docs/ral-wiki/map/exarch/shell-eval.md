@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7f817bbe845406e5f1d678c741afcc477e9ef8f2
-generated_at_date: 2026-10-28
+generated_at_commit: e5a23909
+generated_at_date: 2026-10-29
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -159,30 +159,15 @@ order, and exits 124:
    remedy the ending offered, because the record is owed by the failure and not
    by the deadline (a call that staged its `reply` and then died on a command's
    non-zero exit, or chose `exit 2`, made that reply stand just as surely).
-   This
-   is the one exception to core's own trail: the desk authors the shared
-   `Observation` vocabulary from the *host* side, into a per-call fragment
-   joined at render — never into the engine's trail, because a wire engine's
-   cancel can land while the engine sits parked in `enquire`, mid-unwind of a
-   builtin whose act the desk already committed, and engine-side recording
-   alone would then report a standing act as failed. `HostServices::commit_act`
-   is the one door every acting handler funnels through — minted in
-   `Agent::host_services`, the one place a call's whole desk capture is
-   assembled, so the fragment's extent *is* the call's — and it builds one
-   `Observed::Act` per attempt, at the arm where the outcome is known, and fans
-   it out itself: the rail's `Display::HarnessCall` row *always*, off the very
-   `verb`/`subject`/`payload`/`refused` the observation carries, and the
-   fragment *only* when `refused` is `false`. A refused attempt leaves no
-   fragment entry: it answers one question — what stands — and an entry for
-   work that never happened would blunt it. Because one datum feeds both
-   readers, an eighth act cannot reach one and miss the other by construction,
-   with no enum-adjacency discipline to maintain
-   ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]). A
-   `schedule` call's subject is always the caller's own label — `schedule`
-   requires one, so there is no minted default that could ever disagree with
-   it. `DeskAct` still names the seven acts and yields both spellings, the
-   rail's `verb` column — one word per act, so `evict` and not the family and
-   tag it is reached by — and the audit's past tense.
+   The desk keeps the audit on the host side, so cancellation while the
+   engine is parked in `enquire` cannot erase an already committed act.
+   `Call::commit_act` writes `Display::HarnessCall` for every attempt and
+   adds only successful acts to the call-local `AtomicRefCell` vector.
+   `Call::audit` renders it after dispatch, using `DeskAct` for both rail
+   verbs and audit prose. `Agent::ral` creates the call beside the body's
+   foreground loan; there is no persistent shared agent register.
+   See [[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]].
+
 4. **the workers that outlived the call**, named. A `spawn`ed worker is
    moored by `Mooring::for_thread` onto the session root precisely so a
    foreground cancel cannot reach it, so a raise, the wall, or an `exit`
@@ -219,13 +204,14 @@ becomes in the record. `decode_surface` is the single decoder both delivery
 regimes share: the live path — `dispatch_to_report`'s drain loop calling
 `host.surface(val)` for every `Event::Surface`, which `SurfaceApplier`
 decodes and records — and the deferred sink (`deferred_sink`, installed on
-the transport before each dispatch), whose batch is posted through a
-`Mailbox` vouched by the engine incarnation when a worker flushes and recorded
-by `surface::replay` as the item arrives. This provenance preserves engine-owned
-batches across Stop and `reply`; `/clear` discards the queue and cancels and
-replaces the incarnation even if boot fails, fencing old workers' late batches.
-Identity workers retain their birth sink, while wire batches use the sink
-installed when they arrive. Both obey the same pop-time scope fence; both
+the transport before each dispatch), whose batch is posted as
+`Input::Surface { generation, values }` through `AgentAddress` and recorded
+by `surface::replay` on uptake. Stop and reply preserve engine-owned workers
+and batches. Clear prepares before mutation, joins helpers, commits and
+replaces the engine, then advances generation and drops queued batches.
+Preparation failure changes nothing. Old-generation batches arriving later
+are declined. Identity workers retain their birth sink; wire batches use
+the sink installed when they arrive. Both
 go through one private `decode_loudly` and one `surface::record`, with no
 guard layered over them. The
 codomain is `Surface`, the shell's own closed vocabulary, wrapped in

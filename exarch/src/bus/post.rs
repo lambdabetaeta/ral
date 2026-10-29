@@ -1,9 +1,9 @@
-//! Deliveries and commands yielded by the inbox.
+//! Message payloads, commands and model notices.
 
 use crate::card::elapsed_phrase;
-use crate::record::{AgentId, Memory, Settlement, Voice};
+use crate::record::{AgentId, Memory, Settlement};
 use ral_core::data::FOValue;
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, time::Duration};
 
 /// Monotonic and never reused, including across `/clear`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -65,8 +65,6 @@ impl fmt::Display for Rewrite {
 }
 /// A working child's life ended with no report.
 pub(crate) const ENDED_BEFORE_REPORTING: &str = "ended before reporting";
-/// A replied child's life ended with a follow-up unanswered.
-pub(crate) const ENDED_BEFORE_ANSWERING: &str = "ended before answering its follow-up";
 /// A working child, or a headless root, was cancelled.
 pub(crate) const CANCELLED: &str = "cancelled";
 
@@ -81,14 +79,13 @@ impl AgentOutcome {
     /// Why a child still working ends with this outcome.
     pub(crate) fn reason(self) -> String {
         match self {
-            // Only a follow-up crossing or following its reply leaves it working.
-            Self::Replied => ENDED_BEFORE_ANSWERING.into(),
+            Self::Replied => ENDED_BEFORE_REPORTING.into(),
             Self::Cancelled => CANCELLED.into(),
             Self::Stopped(reason) | Self::Failed(reason) => reason,
         }
     }
 }
-fn notice(name: &str, settled: &Settlement, elapsed: Duration) -> String {
+pub(crate) fn notice(name: &str, settled: &Settlement, elapsed: Duration) -> String {
     let took = elapsed_phrase(elapsed);
     match settled {
         Settlement::Replied => format!(
@@ -97,6 +94,9 @@ fn notice(name: &str, settled: &Settlement, elapsed: Duration) -> String {
         Settlement::Failed { reason } => {
             format!("[agent '{name}' failed after {took}: {reason}]")
         }
+        Settlement::Stopped => {
+            format!("[agent '{name}' stopped after {took}: message it to continue]")
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -104,9 +104,10 @@ pub(crate) struct AgentMessage {
     pub from: AgentId,
     pub from_name: String,
     pub text: String,
+    pub from_parent: bool,
 }
 impl AgentMessage {
-    pub(super) fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         format!(
             "[EXARCH AGENT {} MESSAGE: {}]\n{}\n[/EXARCH]",
             self.from, self.from_name, self.text
@@ -119,24 +120,22 @@ pub(crate) enum Source {
     Schedule,
     Agent,
     Message,
-    Nudge,
     Read,
     Rewrite,
     Surface,
 }
 impl Source {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::User,
         Self::Schedule,
         Self::Agent,
         Self::Message,
-        Self::Nudge,
         Self::Read,
         Self::Rewrite,
         Self::Surface,
     ];
     pub(crate) fn coalesces(self) -> bool {
-        matches!(self, Self::User | Self::Schedule | Self::Nudge)
+        matches!(self, Self::User | Self::Schedule)
     }
 }
 impl fmt::Display for Source {
@@ -146,14 +145,13 @@ impl fmt::Display for Source {
             Self::Schedule => "schedule",
             Self::Agent => "agent",
             Self::Message => "message",
-            Self::Nudge => "nudge",
             Self::Read => "read",
             Self::Rewrite => "rewrite",
             Self::Surface => "surface",
         })
     }
 }
-fn surface_notice(values: &[FOValue]) -> String {
+pub(crate) fn surface_notice(values: &[FOValue]) -> String {
     values
         .iter()
         .rev()
@@ -169,63 +167,6 @@ fn surface_notice(values: &[FOValue]) -> String {
                 )
             },
         )
-}
-#[derive(Clone, Debug)]
-pub(crate) enum Next {
-    Item(Item),
-    Read(Read),
-    Rewrite(Rewrite),
-}
-#[derive(Clone, Debug)]
-pub(crate) enum Item {
-    Human(String),
-    Wakeup(String),
-    Agent {
-        name: Arc<str>,
-        settled: Settlement,
-        elapsed: Duration,
-    },
-    Message(AgentMessage),
-    Nudge {
-        prompt: u64,
-        text: String,
-    },
-    Surface {
-        id: AgentId,
-        values: Vec<FOValue>,
-    },
-}
-impl Item {
-    pub(crate) fn text(&self) -> String {
-        match self {
-            Self::Human(s) | Self::Wakeup(s) => s.clone(),
-            Self::Nudge { text, .. } => text.clone(),
-            Self::Agent {
-                name,
-                settled,
-                elapsed,
-            } => notice(name, settled, *elapsed),
-            Self::Message(m) => m.render(),
-            Self::Surface { values, .. } => surface_notice(values),
-        }
-    }
-    pub(crate) fn voice(&self) -> Voice {
-        match self {
-            Self::Human(_) => Voice::Human,
-            Self::Wakeup(_) => Voice::Wakeup,
-            Self::Message(_) => Voice::Peer,
-            Self::Agent { .. } | Self::Nudge { .. } | Self::Surface { .. } => Voice::Harness,
-        }
-    }
-    pub(crate) fn opens_exchange(&self) -> bool {
-        !matches!(self, Self::Nudge { .. })
-    }
-    pub(crate) fn continues(&self) -> Option<u64> {
-        match self {
-            Self::Nudge { prompt, .. } => Some(*prompt),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]

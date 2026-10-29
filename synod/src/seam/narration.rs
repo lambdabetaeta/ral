@@ -140,6 +140,10 @@ fn forensic(role: Role, forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
         | Forensic::SessionClosed
+        | Forensic::JobOpened
+        | Forensic::JobSettled { .. }
+        | Forensic::EngineSevered { .. }
+        | Forensic::TeardownFailed { .. }
         | Forensic::Status { .. }
         | Forensic::Retried { .. }
         | Forensic::UsageDelta { .. }
@@ -174,14 +178,14 @@ fn transient(role: Role, t: &Transient) -> Option<SynodEvent> {
         }),
         Transient::Resources { card, .. } => Some(process_card(card.clone())),
         // Plumbing faults have no durable copy.
-        Transient::Fault { text } => Some(SynodEvent::Error {
+        Transient::Fault { text } | Transient::Elided { text } => Some(SynodEvent::Error {
             message: text.clone(),
         }),
         Transient::Boundary => Some(SynodEvent::Boundary),
         Transient::Thinking(_)
         | Transient::Pin { .. }
         | Transient::Unpin { .. }
-        | Transient::Died => None,
+        | Transient::Died { .. } => None,
     }
 }
 
@@ -238,7 +242,7 @@ impl Router {
         if role == Role::Helper {
             match t {
                 Transient::State(state) => return self.set_busy(id, state.pending()),
-                Transient::Died => return self.set_busy(id, false),
+                Transient::Died { .. } => return self.set_busy(id, false),
                 Transient::Token(_)
                 | Transient::Thinking(_)
                 | Transient::Boundary
@@ -246,7 +250,8 @@ impl Router {
                 | Transient::Resources { .. }
                 | Transient::Pin { .. }
                 | Transient::Unpin { .. }
-                | Transient::Fault { .. } => {}
+                | Transient::Fault { .. }
+                | Transient::Elided { .. } => {}
             }
         }
         transient(role, t)
@@ -581,17 +586,21 @@ mod tests {
         assert!(router.route_born(first).is_none());
         assert_eq!(busy_count(router.route_born(second)), Some(2));
         assert_eq!(
-            busy_count(router.route_transient(first, &Transient::Died)),
+            busy_count(router.route_transient(first, &Transient::Died { failures: vec![] })),
             Some(1)
         );
-        assert!(router.route_transient(first, &Transient::Died).is_none());
+        assert!(
+            router
+                .route_transient(first, &Transient::Died { failures: vec![] })
+                .is_none()
+        );
         assert_eq!(
-            busy_count(router.route_transient(second, &Transient::Died)),
+            busy_count(router.route_transient(second, &Transient::Died { failures: vec![] })),
             Some(0)
         );
         assert!(
             router
-                .route_transient(AgentId::new(7), &Transient::Died)
+                .route_transient(AgentId::new(7), &Transient::Died { failures: vec![] })
                 .is_none()
         );
     }
@@ -605,7 +614,11 @@ mod tests {
             busy_count(router.route_transient(helper, &Transient::State(AgentState::Ready))),
             Some(0)
         );
-        assert!(router.route_transient(helper, &Transient::Died).is_none());
+        assert!(
+            router
+                .route_transient(helper, &Transient::Died { failures: vec![] })
+                .is_none()
+        );
     }
 
     #[test]
@@ -660,7 +673,7 @@ mod tests {
                 );
                 assert!(
                     router
-                        .route_transient(AgentId::new(id), &Transient::Died)
+                        .route_transient(AgentId::new(id), &Transient::Died { failures: vec![] })
                         .is_none()
                 );
             }

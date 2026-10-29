@@ -4,9 +4,8 @@
 mod tests;
 
 use super::{ProviderHandle, Role};
-use crate::bus::{AgentMessage, JobId, Lease, Mailbox, Read, Rewrite, Scoped, Status};
-use crate::record::AgentId;
-use ral_core::data::FOValue;
+use crate::bus::{AgentAddress, AgentMessage, Command, Input, Refused, Status};
+use crate::record::{AgentId, ChildStatus, JobId};
 use ral_core::own::OwnDir;
 use ral_core::process::{CancelCause, Scope};
 use std::{
@@ -28,8 +27,7 @@ pub(crate) struct Shared {
     pub(crate) fuel: u32,
     pub(crate) search: bool,
     pub(crate) provider: ProviderHandle,
-    pub(crate) under: Scope,
-    pub(crate) mailbox: Mailbox,
+    pub(crate) address: AgentAddress,
 }
 /// Steering was refused because the agent's life has ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,58 +45,67 @@ impl AgentHandle {
     /// # Errors
     /// Refuses steering once the agent has ended.
     pub fn steer(&self, text: String) -> Result<(), Ended> {
-        self.0.mailbox.steer(text).then_some(()).ok_or(Ended)
+        self.0.address.steer(text).map_err(|_| Ended)
     }
     pub fn queued(&self) -> Vec<String> {
-        self.0.mailbox.queued()
+        self.0.address.queued()
     }
     pub fn recall(&self) -> Vec<String> {
-        self.0.mailbox.recall()
+        self.0.address.recall()
     }
-    /// Stop only the matching running job and recall its queued prompts.
-    pub fn stop(&self, id: JobId) -> Option<Vec<String>> {
-        self.0.mailbox.stop(id)
+    /// Stop `job` if it is open, taking back its queued human prompts.
+    pub fn stop(&self, job: JobId) -> Option<Vec<String>> {
+        self.0.address.stop(job)
     }
     /// End this life and every descendant; teardown remains the owner's work.
     pub fn end(&self) {
-        self.0.mailbox.end(CancelCause::Cancelled);
+        self.0.address.end(CancelCause::Cancelled);
     }
-    pub(crate) fn interrupt(&self) {
-        self.0.mailbox.interrupt();
+    /// Admit one job on a gated root.
+    pub fn release(&self) -> bool {
+        self.0.address.release()
     }
-    pub(crate) fn post_read(&self, read: Read) {
-        self.0.mailbox.post_read(read);
+    /// Stop the open job, leaving queued prompts in place.
+    pub(crate) fn stop_current(&self) -> bool {
+        self.0.address.stop_current()
     }
-    pub(crate) fn post_rewrite(&self, rewrite: Rewrite) {
-        self.0.mailbox.post_rewrite(rewrite);
+    pub(crate) fn post_command(&self, command: Command) {
+        let _ = self.0.address.command(command);
     }
-    pub(crate) fn message(&self, from: &Self, text: String) -> Result<(), Ended> {
+    pub(crate) fn message(&self, from: &Self, text: String) -> Result<(), Refused> {
         let message = AgentMessage {
             from: from.id(),
             from_name: from.0.name.clone(),
             text,
+            from_parent: self.parent().is_some_and(|parent| parent.id() == from.id()),
         };
-        let mailbox = self.0.mailbox.vouched_by(from.0.under.clone());
-        let delivered = if self
-            .0
-            .role
-            .parent()
-            .is_some_and(|parent| parent.id() == from.id())
-        {
-            mailbox.follow_up(message)
-        } else {
-            mailbox.post(Scoped::Message(message))
-        };
-        delivered.then_some(()).ok_or(Ended)
+        self.0.address.post(Input::Message(message))
     }
-    pub(crate) fn lapse(&self, lease: &Lease) {
-        self.0.mailbox.lapse(lease);
+    pub(crate) fn report(&self, status: ChildStatus) {
+        let parent = self.parent().map(|parent| {
+            (
+                &parent.0.address,
+                Input::Child {
+                    id: self.id(),
+                    name: Arc::from(self.0.name.as_str()),
+                    status: status.clone(),
+                    elapsed: self.elapsed(),
+                },
+            )
+        });
+        self.0.address.report(status, parent);
     }
     pub(crate) fn status(&self) -> Status {
-        self.0.mailbox.status()
+        self.0.address.status()
     }
-    pub(crate) fn reply(&self) -> Option<FOValue> {
-        self.0.mailbox.reply()
+    pub(crate) fn parent(&self) -> Option<&Self> {
+        self.0.role.parent()
+    }
+    pub(crate) fn is_root(&self) -> bool {
+        self.parent().is_none()
+    }
+    pub(crate) fn log_dir(&self) -> &OwnDir {
+        &self.0.log_dir
     }
     pub(crate) fn descendant(&self, target: &Self) -> Option<Self> {
         let mut above = target.0.role.parent();
@@ -118,7 +125,10 @@ impl AgentHandle {
         here
     }
     pub fn is_live(&self) -> bool {
-        self.0.mailbox.is_live()
+        self.0.address.is_live()
+    }
+    pub(crate) fn life(&self) -> Scope {
+        self.0.address.life()
     }
     pub(crate) fn current_provider(&self) -> Arc<crate::provider::Provider> {
         self.0.provider.current()
@@ -128,23 +138,5 @@ impl AgentHandle {
     }
     pub(crate) fn elapsed(&self) -> Duration {
         self.0.started.elapsed()
-    }
-    pub(crate) fn has_reply(&self) -> bool {
-        self.status().replied
-    }
-    pub(crate) fn reply_since(&self) -> Option<Instant> {
-        self.status().reply_since
-    }
-    pub(crate) fn has_busy_children(&self) -> bool {
-        self.status().busy
-    }
-    pub(crate) fn waiting_for_input(&self) -> bool {
-        self.status().waiting_for_input
-    }
-    pub(crate) fn idle(&self) -> Duration {
-        self.status()
-            .last_exchange
-            .unwrap_or(self.0.started)
-            .elapsed()
     }
 }

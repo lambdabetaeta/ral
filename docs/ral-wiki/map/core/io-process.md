@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e82dee76
+generated_at_commit: e5a23909
 generated_at_date: 2026-10-29
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -149,8 +149,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `Instant`. *Deadlines are data*, not a thread per worker: `arm_lifetime` /
   `arm_callback` push an entry and return a `#[must_use]` `Deadline` guard —
   dropped, the entry disarms; `keep`-consumed, it fires regardless (the
-  fire-and-forget mode a replied agent's follow-up lease needs, since the
-  lease outlives the call that armed it).
+  fire-and-forget mode for actions that outlive their arming call).
   The fired action is `Cancel(scope) | Run(closure)`: `Cancel` cancels a
   `ScopeNode` with `CancelCause::TimedOut` (the foreground wall); `Run`
   invokes an opaque host closure once, the shape a scheduled

@@ -235,6 +235,11 @@ impl Stop {
         self.0.cancel(CancelCause::Interrupted);
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
     fn scope(&self) -> Scope {
         Scope::clone(&self.0)
     }

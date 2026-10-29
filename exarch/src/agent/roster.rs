@@ -1,17 +1,23 @@
-//! Fresh projections of fleet identity and inbox status.
+//! Fresh projections of fleet identity and mailbox status.
 
 use crate::agent::{AgentHandle, fleet::Fleet};
 use crate::enquiry::{AgentInfo, RosterState, Spawner, Summary};
+use crate::record::ChildStatus;
 use std::time::Duration;
 
 impl AgentInfo {
     fn of(agent: &AgentHandle) -> Self {
         let status = agent.status();
-        let state = match (status.rest, status.replied) {
-            (None, _) if status.busy => RosterState::WaitingOnAgents,
-            (None, _) => RosterState::Busy,
-            (Some(_), true) => RosterState::Replied,
-            (Some(_), false) => RosterState::Waiting,
+        let state = if status.working() {
+            if status.busy {
+                RosterState::WaitingOnAgents
+            } else {
+                RosterState::Busy
+            }
+        } else if matches!(status.report, Some(ChildStatus::Replied(_))) {
+            RosterState::Replied
+        } else {
+            RosterState::Waiting
         };
         Self {
             name: agent.0.name.clone(),
@@ -48,11 +54,11 @@ pub(crate) fn summary(reader: &AgentHandle, fleet: &Fleet) -> Summary {
         replied: live
             .iter()
             .filter(|node| {
-                node.0
-                    .role
-                    .parent()
+                let status = node.status();
+                node.parent()
                     .is_some_and(|parent| parent.id() == reader.id())
-                    && node.has_reply()
+                    && !status.working()
+                    && matches!(status.report, Some(ChildStatus::Replied(_)))
             })
             .count(),
     }

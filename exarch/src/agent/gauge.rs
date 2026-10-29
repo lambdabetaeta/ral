@@ -185,7 +185,7 @@ impl Agent {
     /// the measure the gauges weigh.
     pub(super) fn measure(&mut self, usage: Usage, served: Served) -> Result<(), Unavailable> {
         let at = {
-            let log = self.log.borrow();
+            let log = &self.body.log;
             log.record_emitter()
                 .emit(Forensic::UsageDelta {
                     usage,
@@ -196,7 +196,7 @@ impl Agent {
             log.context().log_len()
         };
         if let Some(tokens) = usage.measured_input() {
-            self.readings.measure = Some(Measure { tokens, at });
+            self.body.state.readings.measure = Some(Measure { tokens, at });
         }
         Ok(())
     }
@@ -205,8 +205,8 @@ impl Agent {
     /// reported for the context as it now stands: a count measured before an
     /// edit says nothing about what is left.
     pub(crate) fn measured_input(&self) -> Option<u64> {
-        let Measure { tokens, at } = self.readings.measure?;
-        (!self.log.borrow().context().token_measure_is_stale(at)).then_some(tokens)
+        let Measure { tokens, at } = self.body.state.readings.measure?;
+        (!self.body.log.context().token_measure_is_stale(at)).then_some(tokens)
     }
 
     /// Forced eviction tracks real context pressure: the tokens the model last
@@ -217,7 +217,7 @@ impl Agent {
             Some(window) => self
                 .measured_input()
                 .is_some_and(|tokens| forced_eviction_due(tokens, window)),
-            None => self.log.borrow().context().history_bytes() >= EVICT_THRESHOLD,
+            None => self.body.log.context().history_bytes() >= EVICT_THRESHOLD,
         }
     }
 
@@ -226,7 +226,7 @@ impl Agent {
     /// [`crate::record::model::Context::plan_forced_eviction`] never names the
     /// newest item, so neither does this.
     pub(super) fn planned_forced_eviction(&self) -> Option<Span> {
-        let log = self.log.borrow();
+        let log = &self.body.log;
         let context = log.context();
         context
             .can_evict()
@@ -239,11 +239,11 @@ impl Agent {
     /// # Errors
     /// The engine's severance.
     pub(super) fn scratch_bytes(&self) -> Result<Option<(String, u64)>, Severed> {
-        let Some(scratch) = self.engine.read(|t| t.env_var(crate::app::SCRATCH_VAR))? else {
+        let Some(scratch) = self.engine().read(|t| t.env_var(crate::app::SCRATCH_VAR))? else {
             return Ok(None);
         };
         let bytes = self
-            .engine
+            .engine()
             .read(|t| t.path_bytes(site!(Silent::ScratchPath, Path::new(&scratch))))?;
         Ok(Some((scratch, bytes)))
     }
@@ -255,6 +255,8 @@ impl Agent {
     pub(super) fn climbed(&mut self, provider: &Provider) -> Result<Vec<Warning>, Severed> {
         let pressure = self.pressure(provider);
         let mut climbed: Vec<Warning> = self
+            .body
+            .state
             .readings
             .gauges
             .pressure(pressure)
@@ -267,12 +269,11 @@ impl Agent {
             &provider.climb_allowances(ration::USER_HEARS),
         ));
         let resumes = self.resumes_at_reset();
-        climbed.extend(
-            self.readings
-                .gauges
-                .ration
-                .climb(account, &provider.allowances(), resumes),
-        );
+        climbed.extend(self.body.state.readings.gauges.ration.climb(
+            account,
+            &provider.allowances(),
+            resumes,
+        ));
         Ok(climbed)
     }
 
@@ -293,7 +294,7 @@ impl Agent {
                 (tokens, Some(window), eviction_trigger(window), Unit::Tokens)
             }
             _ => {
-                let bytes = self.log.borrow().context().history_bytes();
+                let bytes = self.body.log.context().history_bytes();
                 if bytes < PRESSURE_THRESHOLD_FALLBACK {
                     return Pressure::Under;
                 }
@@ -319,14 +320,14 @@ impl Agent {
         let Some(ceiling) = self.fleet.launch.disk_warn_bytes else {
             return Ok(None);
         };
-        if !self.readings.gauges.disk_due() {
+        if !self.body.state.readings.gauges.disk_due() {
             return Ok(None);
         }
-        let mut total = ral_core::path::tree::bytes(self.log.borrow().dir().path());
+        let mut total = ral_core::path::tree::bytes(self.body.log.dir().path());
         if let Some((_, bytes)) = self.scratch_bytes()? {
             total += bytes;
         }
-        Ok(self.readings.gauges.disk(total, ceiling))
+        Ok(self.body.state.readings.gauges.disk(total, ceiling))
     }
 }
 

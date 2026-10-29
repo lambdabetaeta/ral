@@ -47,12 +47,19 @@ fn argless_command_matches_alone_but_not_with_trailing_text() {
 }
 
 #[test]
+fn stop_is_a_key_and_not_a_command() {
+    assert_eq!(dispatch("/stop"), None);
+}
+
+#[test]
 fn quit_ends_every_root_and_descendant_without_queuing() {
+    use crate::agent::Trunk;
     use crate::agent::spawn::hatch_root;
     use crate::agent::testkit::trunk;
     use crate::record::AgentLog;
+    use ral_core::process::CancelCause;
 
-    let main = trunk(true);
+    let main = trunk(Trunk::Converses);
     let other = hatch_root(&main, crate::record::Memory::Amnemon, Some("other".into()))
         .expect("a second root");
     let child = main.fork_named("child").expect("a child");
@@ -65,98 +72,85 @@ fn quit_ends_every_root_and_descendant_without_queuing() {
         let handle = agent.handle();
         assert!(
             !handle.is_live(),
-            "quit must end {} without an attend loop",
+            "quit ends {} without a command consumer",
             handle.0.name
         );
-        assert_eq!(
-            handle.0.mailbox.scope().cause(),
-            Some(ral_core::process::CancelCause::Cancelled)
-        );
+        assert_eq!(agent.mailbox.life().cause(), Some(CancelCause::Cancelled));
         assert!(
-            agent.engine.read(|t| t.session_ended()).unwrap().is_none(),
-            "quit cancels scopes; the owner's drop tears down {}'s engine",
-            handle.0.name
+            agent
+                .engine()
+                .read(|t| t.session_ended())
+                .unwrap()
+                .is_none(),
+            "quit cancels lives; the owner retires its engine"
         );
         assert!(
             handle.queued().is_empty(),
-            "quit is a shutdown, not a queued command"
+            "quit is shutdown, not queued input"
         );
     }
     assert_eq!(
         AgentLog::live_roots(&main.fleet.launch.sessions_root)
-            .expect("resumable sessions")
+            .unwrap()
             .len(),
         2,
-        "quit must leave both root sessions resumable"
+        "quit leaves both root sessions resumable"
     );
 }
 
 #[test]
-fn quit_finishes_a_parked_child_without_a_parent_attend_loop() {
-    use crate::agent::outcome::Outcome;
-    use crate::agent::spawn::{AsyncSpawn, spawn_async};
-    use crate::agent::testkit::{ral_call, scripted, trunk};
+fn quit_joins_a_resting_helper_even_when_its_parent_has_not_run() {
+    use crate::agent::Trunk;
+    use crate::agent::testkit::{launch_child, ral_call, scripted, set_provider, trunk};
     use crate::bus::{FleetBus, Signal};
     use crate::provider::scripted::{Reply, Script};
-    use crate::record::{AgentState, Transient, Voice};
-    use ral_core::process::DurableRoot;
+    use crate::record::{AgentState, ChildStatus, Transient};
     use ral_core::test_helper::eventually;
-    use std::sync::Arc;
 
-    let main = trunk(true);
-    let fleet = Arc::clone(&main.fleet);
-    let mut child = main.fork_named("child").expect("a child");
+    let mut main = trunk(Trunk::Converses);
+    let fleet = main.fleet.clone();
+    let child = main.fork_named("child").unwrap();
     let id = child.id();
-    let handle = child.handle();
-    let bus = FleetBus::session();
-    let emit = bus.emitter(id);
-    let provider = scripted(
-        "test-model",
-        Script::new().then(Reply::tool_calls(vec![ral_call(
-            "reply",
-            "exarch-agents `reply ()",
-        )])),
-    );
-    assert!(matches!(
-        child.deliberate(
-            &DurableRoot::default().child(),
-            &provider,
-            Some(("work".into(), Voice::Human)),
-            None,
-            &emit,
+    set_provider(
+        &child,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "reply",
+                "exarch-agents `reply ()",
+            )])),
         ),
-        Ok(Outcome::Replied)
-    ));
-    spawn_async(
-        child,
-        AsyncSpawn {
-            name: "child".into(),
-            prompt: None,
-            resumed: None,
-        },
-        &emit,
-    )
-    .expect("the child starts");
+    );
+    let bus = FleetBus::session();
+    let emit = bus.emitter(main.id());
+    let handle = launch_child(&mut main, child, Some("work".into()), &emit);
     assert!(
         eventually(Duration::from_secs(5), || {
-            handle.waiting_for_input().then_some(())
+            let status = handle.status();
+            (status.waiting_for_input
+                && status.job.is_none()
+                && matches!(status.report, Some(ChildStatus::Replied(_))))
+            .then_some(())
         })
         .is_some(),
-        "the replied child must park for a follow-up"
+        "the replied helper rests for follow-up"
     );
-    assert!(
-        std::iter::from_fn(|| bus.rx().try_recv().ok()).any(|signal| {
-            matches!(signal, Signal::Transient(agent, Transient::State(AgentState::Ready)) if agent == id)
-        }),
-        "the parked child must announce readiness"
-    );
+    assert!(std::iter::from_fn(|| bus.rx().try_recv().ok()).any(|signal| {
+        matches!(signal, Signal::Transient(agent, Transient::State(AgentState::Ready)) if agent == id)
+    }));
     super::quit(&fleet);
     drop(main);
 
-    let finished = eventually(Duration::from_secs(5), || fleet.is_empty().then_some(()));
-    assert!(
-        finished.is_some(),
-        "quit must finish the fleet even when the parent has no command consumer"
+    assert!(fleet.is_empty(), "dropping the owner joins its helper");
+    assert!(!handle.is_live());
+    assert_eq!(
+        std::iter::from_fn(|| bus.rx().try_recv().ok())
+            .filter(|signal| {
+                matches!(signal, Signal::Transient(agent, Transient::Died { .. }) if *agent == id)
+            })
+            .count(),
+        1,
+        "the helper's final cue precedes its owner's completed drop"
     );
 }
 

@@ -4,7 +4,7 @@ use crate::agent::testkit::{
 };
 use crate::bus::Emitter;
 use crate::card::testkit::card_value;
-use crate::record::{Display, Record, Settlement};
+use crate::record::{AgentId, ChildStatus, Display, Record};
 use ral_core::carrier::Severed;
 use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{
@@ -80,19 +80,19 @@ fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
 /// since its `Protocol` record is the one fact of it.
 #[test]
 fn arrival_records_display_facts() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
 
-    assert_eq!(session.arrive(&Item::Human("hello".into())), Ok(true));
-    assert_eq!(
-        session.arrive(&Item::Agent {
-            name: "helper".into(),
-            settled: Settlement::Failed {
-                reason: "boom".into(),
-            },
-            elapsed: Duration::from_millis(1500),
-        }),
-        Ok(true)
+    assert!(session.admit(Input::Human("hello".into())).is_some());
+    assert!(
+        session
+            .admit(Input::Child {
+                id: AgentId::new(99),
+                name: "helper".into(),
+                status: ChildStatus::Failed("boom".into()),
+                elapsed: Duration::from_millis(1500),
+            })
+            .is_some()
     );
 
     let mut facts = display_facts(&rx).into_iter();
@@ -119,14 +119,14 @@ fn arrival_records_display_facts() {
 /// model context without probing for a worker row.
 #[test]
 fn surface_batch_without_done_event_replays_cards_and_wakes_model() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
 
-    let item = Item::Surface {
-        id: session.id(),
+    let item = Input::Surface {
+        generation: session.generation,
         values: vec![card_value(vec![])],
     };
-    assert_eq!(session.arrive(&item), Ok(true));
+    assert!(session.admit(item).is_some());
 
     let facts = display_facts(&rx);
     assert!(
@@ -136,11 +136,11 @@ fn surface_batch_without_done_event_replays_cards_and_wakes_model() {
 }
 
 /// When a worker's result was already claimed by `await` (or its row is
-/// absent), `arrive` suppresses the redundant model wakeup while still
+/// absent), `admit` suppresses the redundant model wakeup while still
 /// replaying historical cards and the done breadcrumb.
 #[test]
 fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
-    let session = Agent::for_test("system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     session.couple(&emit);
@@ -153,13 +153,12 @@ fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
     );
     let _ = display_facts(&rx);
 
-    let item = Item::Surface {
-        id: session.id(),
+    let item = Input::Surface {
+        generation: session.generation,
         values: vec![card_value(vec![]), done_surface(1, "claimed")],
     };
-    assert_eq!(
-        session.arrive(&item),
-        Ok(false),
+    assert!(
+        session.admit(item).is_none(),
         "an already-claimed worker must not wake the model a second time"
     );
 
@@ -183,7 +182,7 @@ fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
 fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     ARRIVAL_STOP_ENTERED.store(false, Ordering::Release);
     ARRIVAL_STOP_RELEASE.store(false, Ordering::Release);
-    let session = dressed_trunk(|runtime| {
+    let mut session = dressed_trunk(|runtime| {
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         runtime.install_builtins(&ARRIVAL_TEST_BUILTINS);
     });
@@ -208,7 +207,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (run_id, stop_id, ready_id) = loop {
-        let rows = session.engine.read(|t| t.workers()).unwrap();
+        let rows = session.engine().read(|t| t.workers()).unwrap();
         let run = rows
             .iter()
             .find(|r| r.title == "running" && matches!(r.state, WorkerState::Running))
@@ -232,13 +231,12 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     };
     let _ = display_facts(&rx);
 
-    let stopping_item = Item::Surface {
-        id: session.id(),
+    let stopping_item = Input::Surface {
+        generation: session.generation,
         values: vec![card_value(vec![]), done_surface(stop_id, "stopping")],
     };
-    assert_eq!(
-        session.arrive(&stopping_item),
-        Ok(false),
+    assert!(
+        session.admit(stopping_item).is_none(),
         "a stopping worker's result is already claimed by cancel"
     );
     let stopping_facts = display_facts(&rx);
@@ -249,23 +247,21 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
         "cards still replay when stopping suppresses model wakeup"
     );
 
-    let ready_item = Item::Surface {
-        id: session.id(),
+    let ready_item = Input::Surface {
+        generation: session.generation,
         values: vec![done_surface(ready_id, "ready")],
     };
-    assert_eq!(
-        session.arrive(&ready_item),
-        Ok(true),
+    assert!(
+        session.admit(ready_item).is_some(),
         "an unclaimed ready worker must wake the model"
     );
 
-    let running_item = Item::Surface {
-        id: session.id(),
+    let running_item = Input::Surface {
+        generation: session.generation,
         values: vec![done_surface(run_id, "running")],
     };
-    assert_eq!(
-        session.arrive(&running_item),
-        Ok(true),
+    assert!(
+        session.admit(running_item).is_some(),
         "a running row must not panic and delivers the conditional notice"
     );
 
@@ -277,24 +273,142 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     }
 }
 
-/// A severed `workers()` probe during `arrive` still replays the surface cards
-/// first and then propagates `Severed`.
+/// A severed `workers()` probe during `admit` still replays the surface cards
+/// first, then declines the input and leaves the engine loss observable.
 #[test]
-fn severed_worker_probe_propagates_after_replaying_cards() {
-    let session = Agent::for_test("system").unwrap();
+fn severed_worker_probe_declines_after_replaying_cards() {
+    let mut session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
     let cause = Severed::Closed("engine gone".into());
-    session.engine.transport().sever(cause.clone());
+    session.engine().transport().sever(cause.clone());
 
-    let item = Item::Surface {
-        id: session.id(),
+    let item = Input::Surface {
+        generation: session.generation,
         values: vec![card_value(vec![]), done_surface(9, "orphaned")],
     };
-    assert_eq!(session.arrive(&item), Err(cause));
+    assert!(session.admit(item).is_none());
+    assert_eq!(session.severance(), Some(cause));
 
     let facts = display_facts(&rx);
     assert!(
         facts.iter().any(|d| matches!(d, Display::Card { .. })),
         "cards replay before the worker probe fails: {facts:?}"
     );
+}
+
+#[test]
+fn admission_marks_only_returning_human_and_parent_messages_as_owed() {
+    use crate::agent::Trunk;
+    use crate::agent::testkit::{forked_child, trunk};
+    use crate::bus::AgentMessage;
+
+    for kind in [Trunk::Converses, Trunk::Returns] {
+        let mut root = trunk(kind);
+        assert!(!root.body.state.owed);
+        let prompt = root.admit(Input::Human("human task".into())).unwrap();
+        assert_eq!(prompt.text, "human task");
+        assert_eq!(prompt.voice, crate::record::Voice::Human);
+        assert_eq!(root.body.state.owed, kind == Trunk::Returns);
+    }
+    let parent = trunk(Trunk::Converses);
+    let mut helper = forked_child(&parent, "helper", "`inherit");
+    for from_parent in [false, true] {
+        helper.body.state.owed = false;
+        let prompt = helper
+            .admit(Input::Message(AgentMessage {
+                from: parent.id(),
+                from_name: "parent".into(),
+                text: "follow-up".into(),
+                from_parent,
+            }))
+            .unwrap();
+        assert_eq!(prompt.voice, crate::record::Voice::Peer);
+        assert!(prompt.text.contains("follow-up"));
+        assert_eq!(helper.body.state.owed, from_parent);
+    }
+}
+
+#[test]
+fn stale_surface_generation_and_wakeup_epoch_are_quiet() {
+    let mut session = Agent::for_test("system").unwrap();
+    let rx = attach_sink(&session);
+    let generation = session.generation;
+    assert!(
+        session
+            .admit(Input::Surface {
+                generation: generation + 1,
+                values: vec![card_value(vec![])],
+            })
+            .is_none()
+    );
+    assert!(display_facts(&rx).is_empty(), "stale cards must not replay");
+    let epoch = session.body.state.schedules.epoch();
+    session.body.state.schedules.clear();
+    assert!(
+        session
+            .admit(Input::Wakeup {
+                id: crate::bus::ScheduleId::new(1),
+                epoch,
+                text: "old wakeup".into(),
+            })
+            .is_none()
+    );
+    let epoch = session.body.state.schedules.epoch();
+    let prompt = session
+        .admit(Input::Wakeup {
+            id: crate::bus::ScheduleId::new(2),
+            epoch,
+            text: "current wakeup".into(),
+        })
+        .unwrap();
+    assert_eq!(prompt.text, "current wakeup");
+    assert_eq!(prompt.voice, crate::record::Voice::Wakeup);
+    assert!(
+        session.handle().status().job.is_none(),
+        "admission alone opens no job"
+    );
+}
+
+#[test]
+fn gone_joins_and_collects_failures_without_a_model_prompt() {
+    use crate::agent::nursery::{Joined, Teardown};
+    use crate::agent::testkit::{TestAgentSpec, test_agent};
+
+    let mut session = Agent::for_test("system").unwrap();
+    let helper = test_agent(
+        &session.fleet,
+        TestAgentSpec::child("helper", &session.handle(), session.mailbox.life().child()),
+    )
+    .unwrap();
+    let joined = Joined::new(std::thread::spawn(|| Teardown {
+        failures: vec!["helper teardown".into()],
+    }));
+    session.body.state.nursery.adopt((*helper).clone(), joined);
+    helper.end();
+    assert!(
+        session.rest().pending(),
+        "an ended but unjoined helper is pending"
+    );
+    assert!(session.admit(Input::Gone(helper.id())).is_none());
+    assert!(session.body.state.nursery.is_joined(helper.id()));
+    assert!(!session.rest().pending());
+    assert_eq!(session.body.state.failures, ["helper teardown"]);
+    assert!(session.admit(Input::Gone(helper.id())).is_none());
+    assert_eq!(
+        session.body.state.failures.len(),
+        1,
+        "a failure is collected once"
+    );
+    assert!(
+        session
+            .admit(Input::Child {
+                id: helper.id(),
+                name: "helper".into(),
+                status: ChildStatus::Stopped,
+                elapsed: Duration::ZERO,
+            })
+            .is_none(),
+        "joined helpers' late reports stay quiet"
+    );
+    session.body.state.failures.clear();
 }

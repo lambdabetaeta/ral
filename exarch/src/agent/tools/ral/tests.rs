@@ -167,3 +167,39 @@ fn parse_timeout_rejects_string() {
     assert!(e.contains("`timeout_secs`"));
     assert!(e.contains("positive integer"));
 }
+
+#[test]
+fn dispatch_stages_a_reply_through_the_loan_and_returns_the_body() {
+    use crate::agent::Agent;
+    use crate::bus::Emitter;
+    use ral_core::data::FOValue;
+
+    let mut session = Agent::for_test("system").unwrap();
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    let result = dispatch(
+        "reply".into(),
+        &json!({
+            "command": "exarch-agents `reply 'loaned'", "description": "Stage the answer.",
+        }),
+        &mut session,
+        &ral_core::process::DurableRoot::default().child(),
+        &emit,
+    );
+    assert_eq!(result.id, "reply");
+    assert!(result.content.contains("EXIT: 0"), "{}", result.content);
+    assert_eq!(
+        session.body.state.reply,
+        Some(FOValue::String {
+            value: "loaned".into()
+        })
+    );
+    assert!(
+        session.handle().status().report.is_none(),
+        "only the batch boundary publishes a reply"
+    );
+    assert!(crate::bus::drain_records(&rx).iter().any(|record| matches!(
+        record,
+        crate::record::Record::Display(Display::Verdict { .. })
+    )));
+}

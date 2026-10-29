@@ -1,9 +1,10 @@
 # An exchange ends ready or explicitly unavailable
 
-An **exchange** here is a human round — a prompt and all the work it draws,
-the same unit the fleet's clock counts. It is not a unit of the context, which
-has only turns, each with a role
-([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+An **exchange** takes up one input through its nudge continuations; a job
+is the recorded busy period that may contain several exchanges. Neither is
+a unit of context, whose atoms are turns
+([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]],
+[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
 The session protocol is a state machine over the
 [[internals/session-record|record-backed model projection]] (`AgentLog`) with
@@ -41,12 +42,11 @@ once and makes it the outcome. Other sessions remain independent.
 `Agent::deliberate` commits a prompt (or a tool-result batch) before the
 round-trip it drives, so a failure between that commit and the next assistant
 reply leaves the machine in an `AwaitingAssistant*` phase with no reply
-recorded. That phase is a legal resting place. `replied`/`cancelled` call
+recorded. That phase is a legal resting place. `replied`/`halted` call
 `AgentLog::quiesce` with `QuiesceReason::Replied`/`Cancelled`.
 `deliberate` repairs on every return with `quiesce(QuiesceReason::Aborted)`
-when needed; `attempt` repairs after an unwind. `attend` only asserts that
-a live owner's exchange ends prompt-admissible. A recording failure ends
-life, so an owner that leaves `attend` unready is never live.
+when needed; `attempt` repairs after an unwind. A recording failure ends
+life; no subsequent provider work starts from an unavailable session.
 
 `quiesce` records only what the log still owes, and never a turn the model did
 not take:
@@ -65,8 +65,8 @@ answer above is what keeps this legal: a closed exchange can never hold a
 dangling tool-call block, because exchange-boundary repair precedes the next
 prompt.
 
-The content must stay because an exchange in exarch is *all the work since the
-last human prompt*. One recorded session had a single exchange run fifty-seven
+The content must stay because an exchange includes *all the turns driven by
+its input*. One recorded session had a single exchange run fifty-seven
 tool turns; an Esc there, followed by "what are you struggling with", left the
 model — its whole session replaced by a one-line "its content is not in your
 context" note — running `git status` and then reading its own `record.jsonl`
@@ -110,4 +110,4 @@ supplies an unavailable session's authority. Eviction reads `is_ready` too
 
 See also [[internals/session-record|session-record]] (the durable protocol and
 its model fold),
-[[map/exarch/agent|agent]] (`attend`, `take_up`, `deliberate`).
+[[map/exarch/agent|agent]] (`run`, `admit`, `deliberate`).

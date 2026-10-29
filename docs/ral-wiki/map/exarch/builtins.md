@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0e83863c
+generated_at_commit: e5a23909
 generated_at_date: 2026-10-29
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -166,10 +166,11 @@ surface for the boot install and the prompt's `builtin_index` alike), landed by
 over the rail [[map/core/engine-protocol|engine-protocol]] built. A verb's
 body reads the model's argument, as first-order data, into a `Request` and
 calls `shell.enquire` with it; `exarch/src/agent/desk.rs`'s `ExarchDesk`
-decodes the same `Request` and matches it exhaustively, answering from shared
-handles (`HostServices`) captured at install — never `&mut Agent` — installed
-per `ral` call in `Agent::run_shell` and swapped back to an absent desk
-immediately after. The door then admits the host's answer only in the shape
+decodes the same `Request` and matches it exhaustively, borrowing the
+owner's `Body` through a foreground call's `Loan`. `Agent::ral` constructs
+`RunHost { desk, apply }` once per call; the body returns after dispatch or
+unwind, and later enquiries answer `no desk`. `Call` holds per-call values
+and an `AtomicRefCell` act vector. The door admits the answer only in the shape
 the request owes (`Request::owed`). A closed label set is an open row checked
 at the door instead of a closed variant type: an unknown label errors before
 any enquiry crosses, naming the legal set, rather than a static
@@ -346,33 +347,30 @@ The `exarch-agents` guide documents its operations, grant profiles,
 write restrictions with inherited execution, role selection, and fan-out
 with literal binding references. `data/agents.md`
 keeps point/call guidance for delegation, disjoint write grants, waiting,
-reading, follow-ups, and cancellation. Each child's system prompt renders its
-own grant, including the parent's restriction. Replying parks a child and starts
-its one-hour follow-up lease; working time is outside that lease
+reading, follow-ups, exchange Stop and own-helper dismissal. Each child's
+system prompt renders its own grant, including the parent's restriction. A helper rests after reporting
+and ends itself after its idle interval (five hours by default)
 ([[map/exarch/agent|agent]]).
 
 - **`exarch-agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
-  of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,
+  of seven tags — `` `list ``, `` `start ``, `` `message ``, `` `stop ``,
+  `` `dismiss ``,
   `` `reply <value> ``,
   `` `read <name> ``. The acting tags answer `[live: Int, replied: Int]` *afterwards* — other live agents in the reader's tree, and how many of
-  its own children hold a deposited reply (reading does not consume it) — rather than a
-  receipt of its own. The rule is unchanged (the answer is the world after the
-  transition); what changed is its cost, since a roster on every spawn of a
-  fan-out is O(fleet) restating what the caller mostly chose, while `replied` is
-  the one count it could not derive and the one asking for an action.
+  its own live helpers have a readable reply. Reading consumes nothing.
   `` `list `` answers the roster rows,
   `[[name: Str, spawner: <root|agent Str>, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`
   — the reader's whole tree, itself among them, since what it may *message* is
   wider than what it spawned. The climb stops at a root, so one root session
   never lists another's. `` `read `` answers `[name: Str, reply: α]`,
-  the value deposited by the newest own child of that name in the reader's
-  current work, live or ended. It refuses Working and Failed; a follow-up
-  makes a replied child Working, and the reader's reply, Stop or clear
-  forgets earlier children. Reading consumes nothing and reaches no
-  grandchildren. The family's answer type is a bare `α` (the
-  `` exarch-pins `read `` precedent) rather than a roster
-  ([[decisions/260826_reply-parks|reply-parks]],
-  [[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
+  the value published by the newest own helper of that name in the nursery,
+  live or ended. It refuses a live working helper, Failed, Stopped or no
+  report. Parent follow-up makes it pending again; Stop and reply preserve
+  the nursery, while clear forgets earlier helpers. Reading consumes nothing
+  and reaches no grandchildren. The family's answer type is a bare `α`
+  (the `` exarch-pins `read `` precedent), not a roster
+  ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
+
   `` `reply `` is the sole return path of a returning agent — first-orderness
   checked at the door,
   refused on every non-returning agent with the desk's own didactic text, last
@@ -386,12 +384,11 @@ its one-hour follow-up lease; working time is outside that lease
   mentions are `data` and its row variables deep (`door` in `harness.rs`;
   [[decisions/260930_operators-are-kinded|operators-are-kinded]]).
   `` `start [prompt: …, name: …, type: …, grant: …, model: …] `` is the one
-  spawn: launch-only and always asynchronous, a one-line notice arriving
-  through the inbox when the child replies, and the child's row in the answer carrying the `name` and
-  `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
-  contract (`check_name`, in `enquiry.rs` beside the rule it belongs
-  with), unique among live agents or the call is refused; this door refuses a
-  malformed one early and in the model's own words, and `Fleet::enrol` refuses it
+  spawn: launch-only and always asynchronous, with an owed report notice
+  delivered through the parent's mailbox. `name` is the child's identity —
+  the tab-bar contract (`check_name`, in `enquiry.rs` beside the rule it belongs
+  with), reserved through teardown or the call is refused; this door refuses a
+  malformed one early and in the model's own words, and `Fleet::name` refuses it
   again for peers that never came through a door
   ([[map/exarch/agent|agent]]);
   `type` is `` `amnemon `` (blank context) or `` `mnemon `` (imports the
@@ -418,21 +415,14 @@ its one-hour follow-up lease; working time is outside that lease
   refused when none is configured or none bears the name. The agent never
   names a provider or a model, so it cannot discover one. Fuel bounds delegation depth,
   not fan-out — refused only once the caller's own `fuel` reaches zero.
-  `` `cancel <name> `` is descendant-only, resolved by name and enforced at
-  the desk; a scope violation raises. `` `message [to: …, text: …] `` is not:
-  the fleet is one mailbox space, so a note runs in any direction across the
-  tree and only a note to oneself refuses. The roster is the fleet to match —
-  every live agent, the reader included — so what a model may list and what it
-  may message are one set rather than two that drift. Each row's `spawner`
-  (`` `root `` for one a human started, `` `agent <name> `` otherwise) names
-  ancestry: `` `cancel `` reaches descendants, while `` `read `` reaches only
-  the reader's own current-work children. The listing states the relation
-  without restricting messages to it. Where a
-  removed schedule is simply gone from its answer, a cancelled agent is not:
-  `Agent::cancel_tree` only sets the cooperative token (and stamps the eval
-  reach), so **a successful
-  cancel answers with a roster that still lists the target** — a request, not a
-  transaction, and the one place the rule needs a sentence of its own.
+  `` `stop <name> `` is descendant-only: it cancels the latest exchange
+  and preserves the helper's own helpers. `` `dismiss <name> `` ends and
+  joins only an own helper. Both are checked at the desk.
+  `` `message [to: …, text: …] `` reaches any other live agent; a resting
+  helper accepts only its parent (or human steering), while a working one
+  accepts peers. The roster exposes live agents; ancestry controls Stop,
+  the nursery controls dismissal and `read`, not the message namespace.
+
 - **`exarch-schedules <tag>`** → `F [[label: Str, trigger: Str, next-s: Int,
   fires: Int]]`. The same shape over `` `list ``, `` `add ``, `` `remove ``.
   `` `add [trigger: …, label: …, prompt: …] `` takes a closed record — a record
@@ -444,7 +434,7 @@ its one-hour follow-up lease; working time is outside that lease
   lost but recomputed: the new schedule's row in the answer carries it, which
   is still how a mis-meant cron is caught at arm time. `` `remove <label> ``
   really does answer by absence, since `ScheduleRegistry::unschedule` removes
-  the entry under the lock — the half of the rule the fleet cannot honour.
+  the entry under the lock.
   `next-s` saturates to `i64::MAX` for a cron with no next occurrence. Every
   tag is gated on the `--allow-schedule` grant, refused with a didactic text
   that names the tag the model actually typed — never a spelling it was never
@@ -492,7 +482,7 @@ is a second, narration-only tool outside this harness/tool boundary
   `HARNESS_BUILTINS`.
 - `exarch/src/skill.rs` — the skill scan behind
   `skill-list`/`skill`.
-- `exarch/src/agent/desk.rs` and `agent/desk/` — `HostServices`, `ExarchDesk`, and the handler
+- `exarch/src/agent/desk.rs` and `agent/desk/` — `Call`, `ExarchDesk`, and the handler
   for each enquiry class.
 - `exarch/data/agent.ral` — the helper library; installed by `library::install_agent_library`, which `boot::engine_root` calls
   ([[map/exarch|exarch]] hub).
