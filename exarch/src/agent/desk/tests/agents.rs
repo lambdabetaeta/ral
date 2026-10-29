@@ -16,7 +16,7 @@ fn agent_start_reports_to_the_parent_mailbox_and_publishes_the_read_value() {
                 "exarch-agents `reply 'hi from child'",
             )])),
         ));
-        desk.call.handle.0.provider.swap(provider);
+        desk.loan.get().unwrap().state.provider = provider;
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "say hi", "helper"))
@@ -35,7 +35,7 @@ fn agent_start_reports_to_the_parent_mailbox_and_publishes_the_read_value() {
             }
             _ => panic!("the helper must report its reply to its parent"),
         }
-        wait_at_rest(&desk.call.fleet.resolve("helper").unwrap());
+        wait_at_rest(&desk.call.fleet.registry.resolve("helper").unwrap());
         let answer = desk
             .ask(Request::Agents(Agents::Read("helper".into())))
             .expect("a descendant that has replied must answer its reply");
@@ -77,7 +77,7 @@ fn read_answers_the_published_reply_even_after_the_helper_ends() {
             assert_eq!(str_field(&answer, "reply"), Some("hi from child"));
         }
         drop(child);
-        assert!(fleet.resolve("helper").is_none());
+        assert!(fleet.registry.resolve("helper").is_none());
         assert_eq!(
             str_field(
                 &desk
@@ -175,17 +175,13 @@ fn read_refuses_an_old_reply_while_a_follow_up_is_working() {
 fn start_answers_the_fleets_state_not_a_receipt() {
     with_spawnable_desk(3, |desk, fleet, agent| {
         let parent_mailbox = &agent.mailbox;
-        desk.call
-            .handle
-            .0
-            .provider
-            .swap(Arc::new(Provider::scripted(
-                "test-model",
-                Script::new().then(Reply::tool_calls(vec![ral_call(
-                    "r1",
-                    "exarch-agents `reply 'a'",
-                )])),
-            )));
+        desk.loan.get().unwrap().state.provider = Arc::new(Provider::scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "exarch-agents `reply 'a'",
+            )])),
+        ));
         // Held for the whole test, and with no worker behind it, so it never
         // settles out from under the assertion below.
         let sibling = crate::agent::testkit::TestAgentSpec::child(
@@ -239,11 +235,12 @@ fn inherit_is_the_parents_provider_and_a_role_the_bound_one() {
         ..crate::agent::fleet::Launch::for_test()
     };
     with_fleet_desk(3, launch, |desk, _, _agent| {
-        let parent = desk.call.handle.current_provider();
-        let inherited = desk.child_provider(&Selection::Inherit).unwrap();
+        let body = desk.loan.get().unwrap();
+        let parent = body.state.provider.clone();
+        let inherited = desk.child_provider(&body, &Selection::Inherit).unwrap();
         assert!(Arc::ptr_eq(&parent, &inherited));
         let child = desk
-            .child_provider(&Selection::Role("cheap".into()))
+            .child_provider(&body, &Selection::Role("cheap".into()))
             .unwrap();
         assert!(Arc::ptr_eq(&bound, &child));
     });
@@ -381,7 +378,7 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
                 "exarch-agents `reply 'a'",
             )])),
         ));
-        desk.call.handle.0.provider.swap(provider);
+        desk.loan.get().unwrap().state.provider = provider;
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "go", "helper"))
@@ -463,7 +460,7 @@ fn fuel_bounds_depth_not_fanout() {
                     "exarch-agents `reply 'c'",
                 )])),
         ));
-        desk.call.handle.0.provider.swap(provider);
+        desk.loan.get().unwrap().state.provider = provider;
 
         for i in 0..3 {
             let answer = with_parked(&desk, move |desk, session| {
@@ -690,7 +687,7 @@ fn dismiss_propagates_the_helpers_teardown_failures_to_its_parent() {
             ["helper's teardown failure"]
         );
         assert!(!helper.is_live());
-        assert!(fleet.resolve("helper").is_none());
+        assert!(fleet.registry.resolve("helper").is_none());
     });
 }
 
@@ -754,22 +751,18 @@ fn message_reaches_a_working_peer_but_a_resting_helper_admits_only_its_parent() 
 #[test]
 fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
     with_spawnable_desk(3, |desk, fleet, agent| {
-        desk.call
-            .handle
-            .0
-            .provider
-            .swap(Arc::new(Provider::scripted(
-                "test-model",
-                Script::new()
-                    .then(Reply::tool_calls(vec![ral_call(
-                        "first",
-                        "exarch-agents `reply 'one'",
-                    )]))
-                    .then(Reply::tool_calls(vec![ral_call(
-                        "second",
-                        "exarch-agents `reply 'two'",
-                    )])),
-            )));
+        desk.loan.get().unwrap().state.provider = Arc::new(Provider::scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![ral_call(
+                    "first",
+                    "exarch-agents `reply 'one'",
+                )]))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "second",
+                    "exarch-agents `reply 'two'",
+                )])),
+        ));
         with_parked(&desk, |desk, id| desk.ask(start_req(id, "go", "helper"))).unwrap();
         assert!(matches!(
             next_input(&agent.mailbox),
@@ -778,18 +771,18 @@ fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
                 ..
             }
         ));
-        let old = fleet.resolve("helper").unwrap();
+        let old = fleet.registry.resolve("helper").unwrap();
         wait_at_rest(&old);
         desk.ask(Request::Agents(Agents::Dismiss("helper".into())))
             .unwrap();
         assert!(!old.is_live());
         assert!(!desk.loan.get().unwrap().state.nursery.holds(old.id()));
         assert!(
-            fleet.resolve("helper").is_none(),
+            fleet.registry.resolve("helper").is_none(),
             "dismiss returns only after the name is released"
         );
         with_parked(&desk, |desk, id| desk.ask(start_req(id, "again", "helper"))).unwrap();
-        let newest = fleet.resolve("helper").unwrap();
+        let newest = fleet.registry.resolve("helper").unwrap();
         assert_ne!(old.id(), newest.id());
         assert!(matches!(next_input(&agent.mailbox), Input::Gone(id) if id == old.id()));
         assert!(matches!(
@@ -928,4 +921,77 @@ fn reply_stages_the_payload_last_write_wins() {
             "each reply emits its own act row, carrying the value it staged"
         );
     });
+}
+
+#[test]
+fn a_helper_started_with_inherit_after_a_model_switch_runs_on_the_switched_provider() {
+    use crate::agent::Agent;
+    use crate::provider::{Account, Bureau, Choice, Pick, Tuning, Via};
+    use crate::record::Forensic;
+
+    let mut parent = Agent::for_test("system").unwrap();
+    let pick = Pick {
+        choice: Choice {
+            account: Account::built_in("openrouter"),
+            model: "inherited-switch".into(),
+            via: Some(Via::parse("deepinfra").unwrap()),
+        },
+        tuning: Tuning {
+            temperature: Some(0.6),
+            ..Tuning::default()
+        },
+    };
+    let script = Script::new()
+        .then(Reply::tool_calls(vec![ral_call("spawn-and-reply", "exarch-agents `start [prompt: #'say hi'#, name: 'switched-helper', type: `amnemon, grant: `confined, model: `inherit]; exarch-agents `reply 'parent done'")]))
+        .then(Reply::tool_calls(vec![ral_call("child-reply", "exarch-agents `reply 'switched child'")]))
+        .then(Reply::text("helper acknowledged"));
+    Arc::get_mut(&mut parent.fleet)
+        .expect("the unlaunched parent alone owns its fleet")
+        .launch
+        .bureau = Arc::new(Bureau::scripted([script]));
+    let host = crate::agent::testkit::host(parent);
+    let root = host.roots()[0];
+    let port = host.port();
+    port.command(root, crate::bus::Command::Model(pick.clone()))
+        .unwrap();
+    // FIFO puts the switch before the prompt, without polling the shared state.
+    port.submit(root, "start an inheriting helper".into())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut helper = None;
+    let mut child_replied = false;
+    let mut child_requested = false;
+    while !child_replied || !child_requested {
+        let signal = host
+            .feed()
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("the inheriting helper requests and replies");
+        match signal {
+            Signal::Born(id, born) if born.name == "switched-helper" => {
+                assert_eq!(born.parent, Some(root));
+                assert_eq!(port.row(id).unwrap().pick, pick);
+                helper = Some(id);
+            }
+            Signal::Commit(id, commit) if Some(id) == helper => {
+                for record in commit.records() {
+                    match record.value() {
+                        Record::Forensic(Forensic::TurnStarted { tuning, via, .. }) => {
+                            assert_eq!(tuning, &pick.tuning);
+                            assert_eq!(via, &pick.choice.via);
+                            child_requested = true;
+                        }
+                        Record::Forensic(Forensic::Status {
+                            status: ChildStatus::Replied(value),
+                        }) => {
+                            assert_eq!(value, &text("switched child"));
+                            child_replied = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(host.end(), [] as [String; 0]);
 }

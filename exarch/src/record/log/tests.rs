@@ -209,7 +209,7 @@ fn deep_record_round_trips() {
             .unwrap()
             .collect::<io::Result<Vec<_>>>()
             .unwrap();
-        let mut reader = Reader::new(File::open(&path).unwrap());
+        let mut reader = LocusReader::new(File::open(&path).unwrap());
         let _record = reader.record(commit.records().first.locus()).unwrap();
         (back, reader.line.take().unwrap())
     });
@@ -470,7 +470,7 @@ fn a_reader_reads_each_record_of_each_commit_and_refuses_a_stale_locus() {
     let commit = log.append(several()).unwrap();
     let next = log.append(NonEmpty::one(error("delta"))).unwrap();
     drop(log);
-    let mut reader = Reader::new(File::open(&path).unwrap());
+    let mut reader = LocusReader::new(File::open(&path).unwrap());
     let loci = commit
         .records()
         .iter()
@@ -494,7 +494,7 @@ fn a_reader_reads_each_record_of_each_commit_and_refuses_a_stale_locus() {
     let mut bytes = terminated(commit_line(&[error("prepended")]));
     bytes.extend(std::fs::read(&path).unwrap());
     std::fs::write(&path, bytes).unwrap();
-    let refusal = Reader::new(File::open(&path).unwrap())
+    let refusal = LocusReader::new(File::open(&path).unwrap())
         .record(commit.records().rest[0].locus())
         .unwrap_err();
     assert!(
@@ -518,7 +518,7 @@ fn a_reader_refuses_a_stale_range_before_parsing_its_records() {
     })
     .unwrap();
     std::fs::write(&path, terminated(line)).unwrap();
-    let refusal = Reader::new(File::open(&path).unwrap())
+    let refusal = LocusReader::new(File::open(&path).unwrap())
         .record(commit.records().first.locus())
         .unwrap_err();
     assert!(

@@ -74,12 +74,12 @@ fn clear_dismisses_and_joins_helpers_drops_reports_and_keeps_human_and_peer_inpu
     assert!(!helper.is_live());
     assert_eq!(child_engine.session_ended().unwrap(), Some(143));
     assert!(
-        parent.fleet.resolve("helper").is_none(),
+        parent.fleet.registry.resolve("helper").is_none(),
         "clear joined the helper and released its name"
     );
     assert!(!parent.rest().pending);
     assert!(parent.body.state.nursery.named("helper").is_none());
-    assert!(parent.fleet.name("helper").is_ok());
+    assert!(parent.fleet.registry.name("helper").is_ok());
     let inputs = parent.mailbox.drain();
     assert!(
         matches!(&inputs[..], [Drained::Input(Input::Human(text)), Drained::Input(Input::Message(message))]

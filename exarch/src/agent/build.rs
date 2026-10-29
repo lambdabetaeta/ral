@@ -1,18 +1,18 @@
 //! Construction, in-place rebuilding, and owner teardown.
 
 use crate::agent::EngineLost;
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(test)]
 use crate::agent::SPAWN_FUEL;
 use crate::agent::engine::Engine;
 use crate::agent::factory::Factory;
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(test)]
 use crate::agent::fleet::HELPER_IDLE;
 use crate::agent::fleet::{Fleet, Launch, Name};
 use crate::agent::handle::Shared;
 use crate::agent::index::BuiltinIndex;
 use crate::agent::loan::Loanable;
 use crate::agent::nursery::Nursery;
-use crate::agent::{Admission, Agent, AgentHandle, Body, ProviderHandle, Readings, Role, State};
+use crate::agent::{Admission, Agent, AgentHandle, Body, Readings, Role, State};
 use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
 use crate::bus::{AgentMailbox, Emitter};
 use crate::provider::{Provider, Toolset};
@@ -215,7 +215,7 @@ impl Agent {
         log: AgentLog,
         role: Role,
         life: ScopeNode,
-        provider: ProviderHandle,
+        provider: Arc<Provider>,
         fleet: Arc<Fleet>,
     ) -> Self {
         let (fuel, search, admission) = match &role {
@@ -234,7 +234,12 @@ impl Agent {
         };
         log.record_emitter().bind(life.clone());
         engine.transport().bind(life.clone());
-        let mailbox = AgentMailbox::new(life, log.record_emitter(), admission);
+        let mailbox = AgentMailbox::new(
+            life,
+            log.record_emitter(),
+            admission,
+            crate::provider::Pick::of(&provider),
+        );
         engine.install(&mailbox.address(), 0);
         let owed = role.parent().is_some();
         let handle = AgentHandle(Arc::new(Shared {
@@ -245,11 +250,10 @@ impl Agent {
             started: Instant::now(),
             role,
             fuel,
-            provider,
             search,
             address: mailbox.address(),
         }));
-        fleet.bind(&name, &handle);
+        fleet.registry.bind(&name, &handle);
         let readings = Readings::new(!fleet.launch.tools.is_empty());
         Self {
             handle,
@@ -257,6 +261,7 @@ impl Agent {
             body: Loanable::new(Body {
                 log,
                 state: State {
+                    provider,
                     nursery: Nursery::default(),
                     reply: None,
                     owed,
@@ -315,6 +320,7 @@ impl Agent {
         for (id, name) in std::iter::once(first).chain(live) {
             let reopened = (|| {
                 let name = fleet
+                    .registry
                     .name(&name)
                     .map_err(|why| io::Error::other(why.to_string()))?;
                 let engine = founding.take().map_or_else(|| fleet.launch.engine(), Ok)?;
@@ -385,6 +391,7 @@ impl Agent {
     ) -> io::Result<Self> {
         let (fleet, engine) = Fleet::found(cfg, engine, installers)?;
         let name = fleet
+            .registry
             .name(TRUNK_NAME)
             .map_err(|why| io::Error::other(why.to_string()))?;
         Self::hatch(
@@ -418,16 +425,8 @@ impl Agent {
             &account,
             &system,
         )?;
-        let life = fleet.root.child();
-        let agent = Self::assemble(
-            name,
-            engine,
-            log,
-            role,
-            life,
-            ProviderHandle::new(provider),
-            fleet.clone(),
-        );
+        let life = fleet.registry.root.child();
+        let agent = Self::assemble(name, engine, log, role, life, provider, fleet.clone());
         Ok((agent, opened))
     }
     pub(crate) fn child_of(
@@ -464,7 +463,7 @@ impl Agent {
             log,
             role,
             life,
-            ProviderHandle::new(provider),
+            provider,
             fleet.clone(),
         ))
     }
@@ -516,7 +515,11 @@ impl Agent {
     }
     #[cfg(test)]
     pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
-        let name = self.fleet.name(name).map_err(|error| error.to_string())?;
+        let name = self
+            .fleet
+            .registry
+            .name(name)
+            .map_err(|error| error.to_string())?;
         let engine = self
             .fleet
             .launch
@@ -528,13 +531,13 @@ impl Agent {
             &self.fleet,
             name,
             engine,
-            self.handle.current_provider(),
+            self.body.state.provider.clone(),
             Memory::Amnemon,
         )
     }
     /// # Errors
     /// Refuses an engine or session log that cannot be opened.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(test)]
     pub fn root_for_test(
         cfg: RootConfig,
         engine: RootEngine,
@@ -544,7 +547,7 @@ impl Agent {
     }
     /// # Errors
     /// Refuses chat, wire engines, missing sessions, or failed construction.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(test)]
     pub fn resume_for_test(
         cfg: RootConfig,
         engine: RootEngine,
@@ -554,7 +557,7 @@ impl Agent {
     }
     /// # Errors
     /// Refuses a scratch directory or session log that cannot be created.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(test)]
     pub fn for_test(system: &str) -> io::Result<Self> {
         Self::for_test_with(TestTrunk::new(system))
     }
@@ -562,7 +565,7 @@ impl Agent {
     /// Refuses a scratch directory or session log that cannot be created.
     /// # Panics
     /// If the test process has no cwd.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(test)]
     pub(crate) fn for_test_with(cfg: TestTrunk) -> io::Result<Self> {
         let TestTrunk {
             system,
@@ -597,7 +600,7 @@ impl Agent {
             fuel,
             search,
             factory: None,
-            bureau: Arc::new(crate::provider::Bureau::Scripted),
+            bureau: Arc::new(crate::provider::Bureau::scripted([])),
             roles: crate::provider::roles::Roles::default(),
         };
         let engine = RootEngine::Identity {
@@ -613,7 +616,7 @@ impl Agent {
         Self::first(id, config, engine, provider, installers)
     }
 }
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(test)]
 pub(crate) struct TestTrunk {
     pub(crate) system: String,
     pub(crate) grants: GrantStack,
@@ -628,7 +631,7 @@ pub(crate) struct TestTrunk {
     pub(crate) fuel: u32,
     pub(crate) installers: &'static [EngineInstaller],
 }
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(test)]
 impl TestTrunk {
     pub(crate) fn new(system: &str) -> Self {
         Self {

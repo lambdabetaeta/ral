@@ -588,7 +588,15 @@ mod tests {
         let life = DurableRoot::default().child();
         let record = crate::record::Emitter::none();
         record.bind(life.clone());
-        AgentMailbox::new(life, record, crate::agent::Admission::Free)
+        AgentMailbox::new(
+            life,
+            record,
+            crate::agent::Admission::Free,
+            crate::provider::Pick::of(&crate::provider::Provider::scripted(
+                "test-model",
+                crate::provider::scripted::Script::new(),
+            )),
+        )
     }
 
     fn sched(expr: &str) -> CronSchedule {
@@ -1213,7 +1221,7 @@ mod tests {
 
     #[test]
     fn a_conversing_roots_schedule_survives_settlement_and_opens_a_job_at_rest() {
-        let agent = trunk(Trunk::Converses);
+        let mut agent = trunk(Trunk::Converses);
         let registry = agent.body.state.schedules.clone();
         registry
             .schedule(
@@ -1224,7 +1232,7 @@ mod tests {
             )
             .unwrap();
         set_provider(
-            &agent,
+            &mut agent,
             scripted(
                 "test-model",
                 Script::new()
@@ -1234,10 +1242,15 @@ mod tests {
         );
         agent.handle().steer("first prompt".into()).unwrap();
         let host = host(agent);
+        let handle = host
+            .fleet()
+            .registry
+            .get(host.roots()[0])
+            .expect("a live root");
         let first = job_records(&host);
         let first_job = settled_job(&first);
         assert!(registry.armed(), "conversation schedules outlive their job");
-        assert!(host.roots()[0].status().job.is_none());
+        assert!(handle.status().job.is_none());
         let next = registry.lock().entries[&ScheduleId::new(0)].next;
         registry.fire_at(ScheduleId::new(0), next);
         let second = job_records(&host);
@@ -1296,7 +1309,7 @@ mod tests {
 
     #[test]
     fn a_returning_agents_schedule_holds_its_job_and_its_report_clears_all_schedules() {
-        let agent = trunk(Trunk::Returns);
+        let mut agent = trunk(Trunk::Returns);
         let registry = agent.body.state.schedules.clone();
         for label in ["wake", "still armed"] {
             registry
@@ -1318,15 +1331,20 @@ mod tests {
                 "fresh",
                 "exarch-agents `reply 'fresh'",
             )]));
-        set_provider(&agent, scripted("test-model", script));
+        set_provider(&mut agent, scripted("test-model", script));
         agent.handle().steer("start".into()).unwrap();
         let host = host(agent);
+        let handle = host
+            .fleet()
+            .registry
+            .get(host.roots()[0])
+            .expect("a live root");
         let first_job = wait_for_scheduled_rest(&host);
-        assert_eq!(host.roots()[0].status().job, Some(first_job));
+        assert_eq!(handle.status().job, Some(first_job));
         assert_eq!(registry.list().len(), 2);
         let next = registry.lock().entries[&ScheduleId::new(0)].next;
         let (producer, release) = paused_fire(&registry, next);
-        assert_eq!(host.roots()[0].status().job, Some(first_job));
+        assert_eq!(handle.status().job, Some(first_job));
         release.send(()).unwrap();
         producer.join().unwrap();
         let records = job_records(&host);
@@ -1351,7 +1369,9 @@ mod tests {
             Record::Protocol(Protocol::UserPrompt { voice: Voice::Wakeup, text, .. })
                 if text.contains("last wakeup")
         )));
-        host.roots()[0].steer("fresh prompt".into()).unwrap();
+        host.port()
+            .submit(host.roots()[0], "fresh prompt".into())
+            .unwrap();
         let fresh = job_records(&host);
         assert_ne!(settled_job(&fresh), first_job);
         assert!(fresh.iter().any(|record| matches!(record,
@@ -1385,7 +1405,7 @@ mod tests {
         agent.mailbox.address().post(old).unwrap();
         agent.handle().steer("fresh prompt".into()).unwrap();
         set_provider(
-            &agent,
+            &mut agent,
             scripted(
                 "test-model",
                 Script::new().then(Reply::text("fresh answer")),

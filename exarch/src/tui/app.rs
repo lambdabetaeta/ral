@@ -1,5 +1,5 @@
 //! One [`App`] owns the tabs, scrollbacks, prompt, and gesture state, and folds
-//! the [`crate::bus::Signal`] stream — `Commit` through [`App::commit`], `Born`
+//! the [`crate::port::Signal`] stream — `Commit` through [`App::commit`], `Born`
 //! through [`App::born`], `Transient` through [`App::transient`] — into
 //! scrollback blocks.
 
@@ -16,21 +16,17 @@ use super::rewind::{self, RewindOverlay};
 use super::scrollback::Scrollback;
 use super::tabs::{Status, TabRow, Tabs};
 use crate::SessionInfo;
-use crate::agent::AgentHandle;
-use crate::agent::fleet::Fleet;
-use crate::bus::{BusReceiver, Command, Read, Rewrite, UsageMeter};
 use crate::card::Card;
+use crate::port::{BusReceiver, Command, Port, Read, Rewrite};
 use crate::provider::{Bureau, Usage};
 use crate::record::{AgentId, Born, Commit, Resumed, Transient};
 use clipboard::Clipboard;
+use ral_core::own::OwnDir;
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use std::{
-    sync::{Arc, mpsc},
-    time::Duration,
-};
+use std::{sync::mpsc, time::Duration};
 
 /// Rows one wheel notch, or one edge-drag step, scrolls; paging keys instead
 /// move a frame height, measured per-keystroke off the last drawn content.
@@ -42,6 +38,15 @@ const SCROLL_STEP: isize = 3;
 pub struct CommandCtx<'a> {
     pub(super) bureau: &'a Bureau,
     pub(super) info: &'a SessionInfo<'a>,
+}
+
+/// What a key asks of the UI loop, which alone owns the terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Handoff {
+    /// Compose the draft in `$EDITOR`.
+    Compose,
+    /// Leave the frontend; the host then ends the agents.
+    Quit,
 }
 
 /// Work finished off the UI thread, applied on it.
@@ -148,8 +153,8 @@ pub(crate) struct App {
     pub(super) prompt_state: PromptState,
     /// What opens every root's view, born or cleared.
     opening: Card,
-    /// This run's spend, metered at the seam whatever any view shows.
-    meter: UsageMeter,
+    /// Where a landed model switch is saved.
+    pub(super) project: Result<OwnDir, String>,
     /// What the resumed sessions' histories had spent.
     recalled: Usage,
     /// Modal in behaviour — [`Self::key`] hands it every key — and in
@@ -182,8 +187,8 @@ impl App {
     pub(super) fn new(
         first: AgentId,
         born: &Born,
-        fleet: Arc<Fleet>,
-        meter: UsageMeter,
+        port: Port,
+        project: Result<OwnDir, String>,
         prompt: PromptState,
         opening: Card,
         jobs: mpsc::Sender<Job>,
@@ -194,8 +199,8 @@ impl App {
             .and_then(|p| p.as_path().file_name().map(ral_core::path::shown))
             .unwrap_or_else(|| "?".into());
         let mut app = Self {
-            tabs: Tabs::new(first, born, fleet, Some(opening.clone())),
-            meter,
+            tabs: Tabs::new(first, born, port, Some(opening.clone())),
+            project,
             recalled: Usage::default(),
             prompt_state: prompt,
             opening,
@@ -218,22 +223,24 @@ impl App {
     }
 
     pub fn total_usage(&self) -> Usage {
-        self.recalled + self.meter.total()
+        self.recalled + self.tabs.port().usage()
     }
 
-    /// Whether the focused tab has an agent to steer: its handle upgrades for
-    /// exactly as long as the agent lives, which is exactly as long as
-    /// steering means anything.
+    pub(super) fn recalled(&self) -> Usage {
+        self.recalled
+    }
+
+    /// Whether the focused tab still has a live mailbox.
     pub(super) fn is_steerable(&self) -> bool {
-        self.tabs.focused_agent().is_some()
+        self.tabs.port().is_live(self.tabs.focused())
     }
 
     /// A dead or lingering tab has no mailbox to be busy on, so it reads as
     /// waiting.
     pub(super) fn focused_waiting(&self) -> bool {
         self.tabs
-            .focused_agent()
-            .is_none_or(|agent| agent.status().waiting_for_input)
+            .focused_row()
+            .is_none_or(|row| row.waiting_for_input)
     }
 
     /// Whether matrix navigation owns the keyboard.
@@ -328,6 +335,7 @@ impl App {
     /// tab in the linger window is frozen: it still renders its final frame
     /// and ages out, but no further event belongs in it.
     pub fn commit(&mut self, id: AgentId, commit: &Commit) {
+        model_picker::persist_landed(self, commit);
         if self.tabs.lingering(id) {
             return;
         }
@@ -369,7 +377,7 @@ impl App {
     }
 
     /// Draw one live-only transient directly, with no log-backed fold: the
-    /// mirror of [`Self::commit`] for [`crate::bus::Signal::Transient`].
+    /// mirror of [`Self::commit`] for [`crate::port::Signal::Transient`].
     /// Every variant is routed here: to the tabs, the tab's [`Status`], or its
     /// scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
@@ -439,7 +447,7 @@ impl App {
             },
         );
         card.0.push(crate::card::Mark::heading("frontend"));
-        card.0.push(crate::agent::resources::rows_mark(&frontend));
+        card.0.push(crate::card::resources::rows_mark(&frontend));
         self.push_chrome(id, Chrome::Framed(card));
     }
 
@@ -476,60 +484,55 @@ impl App {
         self.push_chrome(id, Chrome::Error(message.to_owned()));
     }
 
-    /// Run `f` on the focused tab's agent, or say it has ended.
-    pub(super) fn session(&mut self, f: impl FnOnce(&AgentHandle)) {
-        if let Some(agent) = self.tabs.focused_agent() {
-            f(&agent);
-        } else {
-            let focused = self.tabs.focused();
+    pub(super) fn post(&mut self, command: Command) {
+        let focused = self.tabs.focused();
+        if self.tabs.port().command(focused, command).is_err() {
             self.push_error(focused, "this tab's agent has ended");
         }
     }
 
     pub(super) fn post_read(&mut self, read: Read) {
-        self.session(|agent| agent.post_command(Command::Read(read)));
+        self.post(Command::Read(read));
     }
 
     pub(super) fn post_rewrite(&mut self, rewrite: Rewrite) {
-        self.session(|agent| agent.post_command(Command::Rewrite(rewrite)));
+        self.post(Command::Rewrite(rewrite));
     }
 
     /// Route one key press — the loop drops releases — to its one owner, in
     /// order: overlay, selection copy, matrix, search, popup, chords, draft.
-    /// `true` when the user asked to compose the draft in `$EDITOR`, which
-    /// only the UI loop, owning the terminal, can do.
-    pub fn key(&mut self, k: KeyEvent, ctx: &CommandCtx<'_>) -> bool {
+    pub(super) fn key(&mut self, k: KeyEvent, ctx: &CommandCtx<'_>) -> Option<Handoff> {
         self.reconcile_input_focus();
         self.release_prompt_grip();
         let prefix = self.prefix.take();
         if self.overlay.is_some() {
             self.overlay_input(&input_of(&k), ctx);
-            return false;
+            return None;
         }
         if copy_key(&k) && self.copy_prompt_selection() {
-            return false;
+            return None;
         }
         let can_edit = self.is_steerable();
         let action = key_action(&k, can_edit);
         if action != KeyAction::Stop && self.matrix_navigating() {
             self.matrix_key(&k);
-            return false;
+            return None;
         }
         if can_edit && self.prompt_state.search_key(k) {
-            return false;
+            return None;
         }
         if action != KeyAction::Stop
             && (can_edit && self.prompt_state.menu_key(k) || self.matrix_key(&k))
         {
-            return false;
+            return None;
         }
         if can_edit && action == KeyAction::Edit {
             match prefix {
-                Some(Prefix::CtrlX) => return ctrl_key(&k, 'e'),
-                None if ctrl_key(&k, 'g') => return true,
+                Some(Prefix::CtrlX) => return ctrl_key(&k, 'e').then_some(Handoff::Compose),
+                None if ctrl_key(&k, 'g') => return Some(Handoff::Compose),
                 None if ctrl_key(&k, 'x') => {
                     self.prefix = Some(Prefix::CtrlX);
-                    return false;
+                    return None;
                 }
                 None => {}
             }
@@ -537,8 +540,7 @@ impl App {
         match action {
             KeyAction::Stop | KeyAction::Cancel => {
                 if let Some(job) = self.tabs.focused_job()
-                    && let Some(agent) = self.tabs.focused_agent()
-                    && let Some(prompts) = agent.stop(job)
+                    && let Ok(Some(prompts)) = self.tabs.port().stop(self.tabs.focused(), job)
                 {
                     self.prompt_state.restore_stopped_prompts(prompts);
                 } else if action == KeyAction::Cancel && can_edit {
@@ -546,16 +548,18 @@ impl App {
                 }
             }
             KeyAction::Submit => {
-                if let Some(text) = self.prompt_state.submit() {
-                    // Every tab funnels through the one path, which parses
-                    // before it forks on the focused tab — so no slash line can
-                    // be mailed to the model.
-                    commands::route_submit(text, self, ctx);
+                // Every tab funnels through the one path, which parses
+                // before it forks on the focused tab — so no slash line can
+                // be mailed to the model.
+                if let Some(text) = self.prompt_state.submit()
+                    && commands::route_submit(text, self, ctx).is_break()
+                {
+                    return Some(Handoff::Quit);
                 }
             }
             KeyAction::Edit => self.edit(k),
         }
-        false
+        None
     }
 
     /// Matrix navigation is modal: while it owns the keyboard every key but
@@ -592,10 +596,10 @@ impl App {
             // Up/Down walk history only at the buffer's start/end; elsewhere they
             // move the cursor. Up on an empty prompt dequeues the queued run.
             KeyCode::Up if can_edit && k.modifiers.is_empty() => {
+                let (port, focused) = (self.tabs.port(), self.tabs.focused());
                 let recalled = self
-                    .tabs
-                    .focused_agent()
-                    .is_some_and(|agent| self.prompt_state.edit_queued_prompt(|| agent.recall()));
+                    .prompt_state
+                    .edit_queued_prompt(|| port.recall(focused).unwrap_or_default());
                 if !recalled && !self.prompt_state.history_prev() {
                     self.prompt_state.edit_input(k);
                 }

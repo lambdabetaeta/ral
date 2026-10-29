@@ -12,12 +12,17 @@ fn headless_recording_failure_ends_the_run_in_both_formats() {
         let root = frontend_root(Script::new(), Trunk::Returns);
         let recorder = root.recorder();
         let host = testkit::host(root);
+        let root_handle = host
+            .fleet()
+            .registry
+            .get(host.roots()[0])
+            .expect("a live root");
         wait_ready(&host);
         recorder.fail_after(0);
         let why = run_frontend(&host, format).expect_err("a failed writer is not a clean finish");
         assert_eq!(why, recorder.check_available().unwrap_err().to_string());
-        assert!(!host.roots()[0].is_live());
-        assert!(host.roots()[0].steer("later".into()).is_err());
+        assert!(!root_handle.is_live());
+        assert!(root_handle.steer("later".into()).is_err());
         assert_eq!(
             host.end(),
             [recorder.check_available().unwrap_err().to_string()],
@@ -31,23 +36,28 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
     for script in [reply_script("42"), no_reply_script()] {
         let root = frontend_root(script, Trunk::Returns);
         let recorder = root.recorder();
-        let other = crate::agent::spawn::hatch_root(
+        let mut other = crate::agent::spawn::hatch_root(
             &root,
             crate::record::Memory::Amnemon,
             Some("independent".into()),
         )
         .unwrap();
         set_provider(
-            &other,
+            &mut other,
             scripted("test-model", reply_script("'independent work completed'")),
         );
         let independent = other.handle();
         let host = Host::adopt(vec![(root, None), (other, None)]).unwrap();
-        let root_id = host.roots()[0].id();
+        let root_handle = host
+            .fleet()
+            .registry
+            .get(host.roots()[0])
+            .expect("a live root");
+        let root_id = root_handle.id();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let mut headless = Headless::new(root_id, &mut out, &mut err);
-        host.roots()[0].steer("finish first".into()).unwrap();
+        root_handle.steer("finish first".into()).unwrap();
         let signals = receive_until(&host, |signal| {
             has_fact(signal, root_id, |record| {
                 matches!(record, Record::Forensic(Forensic::Status { .. }))
@@ -77,7 +87,7 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
             Some(failure.to_string().as_str())
         );
         assert!(recorder.check_available().is_err());
-        assert!(host.roots()[0].steer("no next job".into()).is_err());
+        assert!(root_handle.steer("no next job".into()).is_err());
         assert!(
             independent.is_live(),
             "a writer fault ends only its owner's life"
@@ -133,7 +143,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
         ..crate::agent::TestTrunk::new("system")
     })
     .unwrap();
-    set_provider(&root, scripted("test-model", reply_script("42")));
+    set_provider(&mut root, scripted("test-model", reply_script("42")));
     let mut child = testkit::forked_child(&root, "helper", "`inherit");
     let child_recorder = child.recorder();
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
@@ -158,7 +168,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
     let failures = host.end();
     release.send(()).unwrap();
     assert!(!helper.is_live());
-    assert!(fleet.is_empty(), "end joins both owner and helper");
+    assert!(fleet.registry.is_empty(), "end joins both owner and helper");
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(
         failures[0].contains("agent 'helper' ended without certified engine teardown"),
@@ -168,7 +178,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
         failures[0].contains("1 ral worker thread(s)"),
         "{failures:?}"
     );
-    let (_, commits) = child_recorder.since(None).unwrap();
+    let (_, commits) = child_recorder.reader().since(None).unwrap();
     let recorded: Vec<_> = commits
         .map(Result::unwrap)
         .flat_map(Commit::into_records)

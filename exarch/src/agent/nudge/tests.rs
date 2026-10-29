@@ -473,9 +473,9 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
     use crate::record::{ChildStatus, Protocol, Record, Voice};
     use std::time::{Duration, Instant};
 
-    let root = trunk(Trunk::Returns);
+    let mut root = trunk(Trunk::Returns);
     set_provider(
-        &root,
+        &mut root,
         scripted(
             "test-model",
             Script::new()

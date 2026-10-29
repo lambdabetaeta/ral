@@ -1,12 +1,15 @@
 use super::*;
+use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
 use crate::bus::Signal;
+use crate::bus::UsageMeter;
 use crate::card::Mark;
 use crate::record::AgentState;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
 use crate::tui::status::StateSpan;
 use ral_core::shell::runtime::{Observation, Observed};
+use std::sync::Arc;
 
 fn prompt(vi: bool) -> PromptState {
     PromptState::new(vi, crate::tui::prompt::History::default())
@@ -32,14 +35,29 @@ fn app_in_fleet(born: &Born) -> (App, BusReceiver, TestAgent, Arc<Fleet>) {
     let mut app = App::new(
         root.id(),
         born,
-        fleet.clone(),
-        UsageMeter::default(),
+        Port::new(fleet.registry.clone(), UsageMeter::default()),
+        Err("no project in this fixture".into()),
         prompt(false),
         Card(Vec::new()),
         mpsc::channel().0,
     );
     app.copy_sink = Some(Box::new(|_| Ok(clipboard::Copied::Whole)));
     (app, rx, root, fleet)
+}
+
+pub(in crate::tui) fn app_for_host(host: &crate::host::Host) -> App {
+    let Signal::Born(id, born) = host.feed().recv().expect("the host announces its root") else {
+        panic!("the first signal is the root's birth")
+    };
+    App::new(
+        id,
+        &born,
+        host.port(),
+        Err("no project in this fixture".into()),
+        prompt(false),
+        Card(Vec::new()),
+        mpsc::channel().0,
+    )
 }
 
 const REST: crate::bus::Rest = crate::bus::Rest {
@@ -74,7 +92,7 @@ fn open_exchange(app: &mut App, root: &TestAgent) -> crate::bus::Lease {
     exchange
 }
 
-fn apply_signal(app: &mut App, rx: &BusReceiver, signal: Signal) {
+pub(in crate::tui) fn apply_signal(app: &mut App, rx: &BusReceiver, signal: Signal) {
     match signal {
         Signal::Born(id, born) => app.born(id, &born),
         Signal::Commit(id, commit) => app.commit(id, &commit),
@@ -84,7 +102,8 @@ fn apply_signal(app: &mut App, rx: &BusReceiver, signal: Signal) {
 
 /// A scripted bureau and a bare session: the handles a command is serviced against.
 pub(in crate::tui) fn ctx() -> CommandCtx<'static> {
-    static BUREAU: Bureau = Bureau::Scripted;
+    static BUREAU: Bureau =
+        Bureau::Scripted(std::sync::Mutex::new(std::collections::VecDeque::new()));
     static CWD: std::sync::LazyLock<ral_core::path::CwdPath> =
         std::sync::LazyLock::new(|| ral_core::host::cwd().expect("test process has a cwd"));
     static INFO: std::sync::LazyLock<SessionInfo<'static>> =
@@ -182,20 +201,21 @@ fn recording_failure_with_independent_root(poison: bool) {
         name: "main".into(),
         parent: None,
         resumed: None,
-        recorder: root.recorder(),
+        reader: root.recorder().reader(),
     };
     let other_born = Born {
         log_dir: other.log_dir().clone(),
         name: other.handle().0.name.clone(),
         parent: None,
         resumed: None,
-        recorder: other.recorder(),
+        reader: other.recorder().reader(),
     };
     if poison {
         root.recorder().poison_append();
     } else {
         root.recorder().fail_after(7);
     }
+    let recorder = root.recorder();
     let thread = root
         .launch(born, Some("must be recorded before sending".into()), &emit)
         .expect("the owner thread starts");
@@ -207,8 +227,8 @@ fn recording_failure_with_independent_root(poison: bool) {
     let mut app = App::new(
         id,
         &born,
-        fleet.clone(),
-        bus.meter(),
+        Port::new(fleet.registry.clone(), bus.meter()),
+        Err("no project in this fixture".into()),
         prompt(false),
         Card(Vec::new()),
         mpsc::channel().0,
@@ -230,7 +250,7 @@ fn recording_failure_with_independent_root(poison: bool) {
         }
         if died {
             assert!(
-                fleet.resolve("main").is_none(),
+                fleet.registry.resolve("main").is_none(),
                 "the name leaves before Died"
             );
             assert_fault_visible(&mut app, id, fault.as_deref().expect("fault precedes Died"));
@@ -241,7 +261,7 @@ fn recording_failure_with_independent_root(poison: bool) {
         }
     }
     thread.join().unwrap();
-    assert!(born.recorder.check_available().is_err());
+    assert!(recorder.check_available().is_err());
     assert_eq!(faults, 1);
     assert_fault_visible(&mut app, id, &fault.unwrap());
     assert!(matches!(
@@ -271,7 +291,7 @@ fn recording_failure_with_independent_root(poison: bool) {
         .expect("the independent writer remains usable");
     assert!(format!("{:?}", other.rendered_messages()).contains("still usable"));
     drop(other);
-    assert!(fleet.is_empty());
+    assert!(fleet.registry.is_empty());
 }
 
 #[test]
@@ -288,13 +308,13 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
     for poison in [false, true] {
         let mut parent = trunk(Trunk::Converses);
         let fleet = parent.fleet.clone();
-        let child = parent.fork_named("failing").unwrap();
+        let mut child = parent.fork_named("failing").unwrap();
         let id = child.id();
         let recorder = child.recorder();
         let handle = child.handle();
         let path = child.log_dir().path().join("record.jsonl");
         set_provider(
-            &child,
+            &mut child,
             scripted(
                 "test-model",
                 Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -309,13 +329,13 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
             name: parent.handle().0.name.clone(),
             parent: None,
             resumed: None,
-            recorder: parent.recorder(),
+            reader: parent.recorder().reader(),
         };
         let mut app = App::new(
             parent.id(),
             &parent_born,
-            fleet.clone(),
-            bus.meter(),
+            Port::new(fleet.registry.clone(), bus.meter()),
+            Err("no project in this fixture".into()),
             prompt(false),
             Card(Vec::new()),
             mpsc::channel().0,
@@ -325,7 +345,7 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
             name: "failing".into(),
             parent: Some(parent.id()),
             resumed: None,
-            recorder: recorder.clone(),
+            reader: recorder.reader(),
         };
         let thread = child
             .launch(born, Some("reply then rest".into()), &bus.emitter(id))
@@ -432,132 +452,7 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
         assert!(parent.check_available().is_ok());
         assert!(format!("{:?}", parent.rendered_messages()).contains("still usable"));
         drop(parent);
-        assert!(fleet.is_empty());
-    }
-}
-
-#[test]
-fn root_completion_not_directory_emptiness_certifies_the_tui_final_drain() {
-    use crate::agent::Trunk;
-    use crate::agent::nursery::Joined;
-    use crate::agent::spawn::hatch_root;
-    use crate::agent::testkit::{host, trunk};
-    use crate::bus::FleetBus;
-    use crate::record::Memory;
-    use ral_core::test_helper::eventually;
-
-    for poison in [false, true] {
-        let control = trunk(Trunk::Converses);
-        let root = hatch_root(&control, Memory::Amnemon, Some("last".into())).unwrap();
-        let host = host(control);
-        host.roots()[0].end();
-        let fleet = host.fleet().clone();
-        let id = root.id();
-        let handle = root.handle();
-        let recorder = root.recorder();
-        let bus = FleetBus::session();
-        let born = Born {
-            log_dir: root.log_dir().clone(),
-            name: "last".into(),
-            parent: None,
-            resumed: None,
-            recorder: recorder.clone(),
-        };
-        let emit = bus.emitter(id).child(id, born.clone());
-        let mut app = App::new(
-            id,
-            &born,
-            fleet.clone(),
-            bus.meter(),
-            prompt(false),
-            Card(Vec::new()),
-            mpsc::channel().0,
-        );
-        // Pause the root producer at the name-removal / terminal-publication seam.
-        let (arrived, before_terminal) = mpsc::channel();
-        let (release, wait) = mpsc::channel();
-        handle
-            .steer("recording fails before provider work".into())
-            .unwrap();
-        if poison {
-            recorder.poison_append();
-        } else {
-            recorder.fail_after(7);
-        }
-        let terminal_recorder = recorder.clone();
-        fleet.adopt_root(Joined::new(std::thread::spawn(move || {
-            let mut teardown = root.run(&emit);
-            let failure = terminal_recorder.check_available().unwrap_err();
-            crate::agent::spawn::announce(&failure, &emit);
-            teardown.failures.push(failure.to_string());
-            arrived.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(5)).unwrap();
-            emit.fleet_sink().transient(Transient::Died {
-                failures: teardown.failures.clone(),
-            });
-            teardown
-        })));
-        before_terminal
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
-        assert!(eventually(Duration::from_secs(5), || fleet.is_empty().then_some(())).is_some());
-        assert!(!handle.is_live());
-        assert!(
-            !host.is_finished(),
-            "an empty directory does not certify the final cue"
-        );
-        let rx = bus.rx();
-        let mut signals = Vec::new();
-        while let Ok(signal) = rx.try_recv() {
-            assert!(!matches!(
-                &signal,
-                Signal::Transient(_, Transient::Died { .. })
-            ));
-            signals.push(signal);
-        }
-        release.send(()).unwrap();
-        assert!(eventually(Duration::from_secs(5), || host.is_finished().then_some(())).is_some());
-        while let Ok(signal) = rx.try_recv() {
-            signals.push(signal);
-        }
-        let mut deaths = 0;
-        let mut faults = 0;
-        let mut fault = None;
-        for signal in signals {
-            if matches!(&signal, Signal::Born(..)) {
-                continue;
-            }
-            match &signal {
-                Signal::Transient(_, Transient::Fault { text }) => {
-                    faults += 1;
-                    fault = Some(text.clone());
-                }
-                Signal::Transient(_, Transient::Died { .. }) => {
-                    deaths += 1;
-                    assert_fault_visible(
-                        &mut app,
-                        id,
-                        fault.as_deref().expect("fault precedes Died"),
-                    );
-                }
-                _ => {}
-            }
-            apply_signal(&mut app, rx, signal);
-        }
-        assert_eq!(deaths, 1);
-        assert_eq!(faults, 1);
-        assert!(recorder.check_available().is_err());
-        assert!(matches!(
-            app.tabs.status(id).unwrap().state,
-            StateSpan::Ended
-        ));
-        assert!(app.tabs.lingering(id));
-        assert!(!app.is_steerable());
-        assert_fault_visible(&mut app, id, fault.as_deref().unwrap());
-        assert_eq!(
-            host.end(),
-            [recorder.check_available().unwrap_err().to_string()]
-        );
+        assert!(fleet.registry.is_empty());
     }
 }
 
@@ -597,8 +492,8 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
             let mut app = App::new(
                 root.id(),
                 &Born::for_test("main", None),
-                fleet.clone(),
-                UsageMeter::default(),
+                Port::new(fleet.registry.clone(), UsageMeter::default()),
+                Err("no project in this fixture".into()),
                 prompt(false),
                 Card(Vec::new()),
                 mpsc::channel().0,
@@ -619,7 +514,7 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
             app.tabs.set_focus(focused.id());
             let job = app.tabs.focused_job().expect("JobOpened addresses Stop");
             focused.steer("one".into()).unwrap();
-            focused.post_command(Command::Read(Read::Resources));
+            focused.command(Command::Read(Read::Resources)).unwrap();
             focused.steer("two\n界\n".into()).unwrap();
             app.prompt_state.set_prompt("unfinished draft");
 
@@ -843,7 +738,7 @@ fn unbracketed_burst_controls_reach_the_draft_without_accepting_completion() {
     }
     for input in burst.flush_due(burst.deadline().expect("pending burst")) {
         match input {
-            Input::Key(key) => assert!(!app.key(key, &ctx())),
+            Input::Key(key) => assert_eq!(app.key(key, &ctx()), None),
             Input::Paste(text) => app.paste(&text, &ctx()),
         }
     }
@@ -905,7 +800,7 @@ fn routing_boundaries_disarm_the_external_editor_prefix() {
         } else {
             KeyModifiers::NONE
         };
-        assert!(!app.key(KeyEvent::new(code, modifiers), &ctx()));
+        assert_eq!(app.key(KeyEvent::new(code, modifiers), &ctx()), None);
         assert_eq!(app.prefix, None, "{code:?} must disarm C-x");
     }
 }
@@ -916,9 +811,9 @@ fn external_editor_chords_return_to_the_loop_without_submitting() {
     let exchange = open_exchange(&mut app, &root);
     app.prompt_state.set_prompt("draft");
     let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
-    assert!(app.key(ctrl('g'), &ctx()));
-    assert!(!app.key(ctrl('x'), &ctx()));
-    assert!(app.key(ctrl('e'), &ctx()));
+    assert_eq!(app.key(ctrl('g'), &ctx()), Some(Handoff::Compose));
+    assert_eq!(app.key(ctrl('x'), &ctx()), None);
+    assert_eq!(app.key(ctrl('e'), &ctx()), Some(Handoff::Compose));
     assert_eq!(app.prefix, None);
     assert!(!exchange.is_cancelled());
     assert_eq!(app.prompt_state.prompt_text(), "draft");
@@ -1131,7 +1026,7 @@ fn history_search_cancel_preserves_the_draft_without_interrupting() {
             &ctx(),
         );
         assert!(app.prompt_state.is_searching());
-        assert!(!app.key(cancel, &ctx()));
+        assert_eq!(app.key(cancel, &ctx()), None);
         assert!(!app.prompt_state.is_searching());
         assert_eq!(app.prompt_state.prompt_text(), "unfinished draft");
         assert!(!exchange.is_cancelled());
@@ -1375,14 +1270,14 @@ fn a_clear_wipes_the_pins_and_the_state() {
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     let born = Born {
         log_dir: ral_core::own::OwnDir::clone(&dir),
-        recorder: recorder.clone(),
+        reader: recorder.reader(),
         ..Born::for_test("main", None)
     };
     let mut app = App::new(
         root.id(),
         &born,
-        fleet,
-        UsageMeter::default(),
+        Port::new(fleet.registry.clone(), UsageMeter::default()),
+        Err("no project in this fixture".into()),
         prompt(false),
         Card(Vec::new()),
         mpsc::channel().0,
@@ -1449,8 +1344,8 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
     let mut app = App::new(
         root.id(),
         &Born::for_test("main", None),
-        fleet,
-        UsageMeter::default(),
+        Port::new(fleet.registry.clone(), UsageMeter::default()),
+        Err("no project in this fixture".into()),
         prompt(false),
         Card(Vec::new()),
         mpsc::channel().0,
@@ -1698,12 +1593,15 @@ fn editor_search_owns_enter_escape_and_external_editor_shortcuts() {
         for ch in "draft".chars() {
             app.key(key(KeyCode::Char(ch)), &ctx());
         }
-        assert!(!app.key(
-            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
-            &ctx(),
-        ));
+        assert_eq!(
+            app.key(
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                &ctx(),
+            ),
+            None
+        );
         assert!(app.prompt_state.editor_is_searching());
-        assert!(!app.key(key(finish), &ctx()));
+        assert_eq!(app.key(key(finish), &ctx()), None);
         assert!(!app.prompt_state.editor_is_searching());
         assert!(!app.prompt_state.is_searching());
         assert!(!exchange.is_cancelled());

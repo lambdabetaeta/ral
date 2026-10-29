@@ -65,9 +65,9 @@ fn reply(value: &str) -> Reply {
 #[test]
 fn an_ended_life_takes_nothing_and_announces_no_idle_state() {
     let session = Agent::for_test("system").unwrap();
-    session
+    let _posted = session
         .handle()
-        .post_command(crate::bus::Command::Read(crate::bus::Read::Context));
+        .command(crate::bus::Command::Read(crate::bus::Read::Context));
     session.recorder().fail_after(0);
     session.recorder().emit_or_end(Forensic::Error {
         text: "fail".into(),
@@ -187,7 +187,7 @@ fn ordinary_log_refusal_repairs_and_remains_usable() {
     assert!(session.handle().is_live());
     settle(&mut session, outcome);
     set_provider(
-        &session,
+        &mut session,
         scripted("test-model", Script::new().then(reply("42"))),
     );
     assert!(matches!(
@@ -268,7 +268,7 @@ fn a_child_without_reply_is_renudged_then_publishes_failure_at_rest() {
     let script = (0..4).fold(Script::new(), |script, _| {
         script.then(Reply::text("prose, no reply"))
     });
-    set_provider(&child, scripted("test-model", script));
+    set_provider(&mut child, scripted("test-model", script));
     let (emit, rx) = emitter(&child);
     let outcome = human_exchange(&mut child, "do the thing", &emit);
     assert!(matches!(&outcome, AgentOutcome::Failed(reason) if reason == NO_REPLY_REASON));
@@ -290,7 +290,7 @@ fn a_child_without_reply_is_renudged_then_publishes_failure_at_rest() {
 fn provider_panic_is_recorded_and_the_next_prompt_still_deliberates() {
     let mut session = Agent::for_test("system").unwrap();
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new().then(Reply::panicking()).then(reply("42")),
@@ -338,7 +338,7 @@ fn pinned_state_reminder_reads_the_live_register_and_continues_the_prompt() {
             .contains("ship the reminder")
     );
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new().then(Reply::text("done")).then(reply("'x'")),
@@ -373,7 +373,7 @@ fn pin_reminder_does_not_relivelock_a_conversing_root() {
         &emit,
     );
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new()
@@ -400,7 +400,7 @@ fn chat_trunk_never_nudges() {
     let mut session = chat_trunk();
     let (emit, rx) = emitter(&session);
     set_provider(
-        &session,
+        &mut session,
         scripted("test-model", Script::new().then(Reply::empty())),
     );
     let outcome = human_exchange(&mut session, "hello", &emit);
@@ -598,7 +598,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     });
     let (emit, rx) = emitter(&child);
     set_provider(
-        &child,
+        &mut child,
         scripted(
             "test-model",
             Script::new().then(Reply::text("wait for the schedule")),
@@ -669,7 +669,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     assert!(!child.body.state.owed);
     assert!(!child.handle().status().owes_parent);
     set_provider(
-        &child,
+        &mut child,
         scripted(
             "test-model",
             Script::new().then(Reply::text("noted the helper report")),

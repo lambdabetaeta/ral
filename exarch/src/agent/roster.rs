@@ -36,6 +36,7 @@ impl AgentInfo {
 pub(crate) fn listing(reader: &AgentHandle, fleet: &Fleet) -> Vec<AgentInfo> {
     let root = reader.root().id();
     fleet
+        .registry
         .live()
         .iter()
         .filter(|node| node.root().id() == root)
@@ -43,7 +44,7 @@ pub(crate) fn listing(reader: &AgentHandle, fleet: &Fleet) -> Vec<AgentInfo> {
         .collect()
 }
 pub(crate) fn summary(reader: &AgentHandle, fleet: &Fleet) -> Summary {
-    let live = fleet.live();
+    let live = fleet.registry.live();
     let root = reader.root().id();
     Summary {
         live: live

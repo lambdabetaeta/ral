@@ -2,9 +2,10 @@
 status: active
 generated_at_commit: 7eab51c3
 generated_at_date: 2026-10-29
-verified_at_commit: e5a23909
+verified_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
 verified_at_date: 2026-10-29
-anchors: [Agent, AgentMailbox, AgentAddress, WeakAgentAddress, Admission, JobId, Loanable, Loan, Nursery, Joined, Host, Host::is_finished, LaunchError, Body::retire_engine, AgentAddress::post_wakeup_with]
+anchors: [Agent, AgentMailbox, AgentAddress, WeakAgentAddress, Admission, JobId, Loanable, Loan, Nursery, Joined, Host, Port, Registry, LaunchError, Body::retire_engine, AgentAddress::post_wakeup_with]
+amended_by: [261029_a-frontend-holds-a-port]
 supersedes: [261028_one-scope-tree-one-inbox, 260806_exchange-ends-at-fleet-quiescence, 260826_reply-parks]
 amends: [261027_a-host-holds-a-helm, 261029_a-child-is-a-status]
 ---
@@ -134,14 +135,25 @@ without holding the parent's mailbox.
   reports are messages posted only while the helper mailbox owes its parent.
   Published mailbox status serves `read` and views.
 
+## Amendment — 2026-10-29: a frontend holds a port
+
+[[261029_a-frontend-holds-a-port]] amends the boundary without changing the
+thread and join laws. The provider is owned `State.provider`; frontends read
+the mailbox's published `Pick` through `Port`, not a shared provider register.
+Its P5 replaces A8's completion criterion: after a drain to empty, every known
+root tab must have received `Died`. `Host::is_finished` is removed;
+`Host::end` still joins and collects failures. The laws above retain the
+original decision's wording.
+
 ## Where
 
 - `exarch/src/agent.rs`, `agent/{attend,build,spawn,engine,loan,nursery}.rs`:
   ownership, loop, consumptive retirement, launch and loans.
 - `exarch/src/bus/{mailbox,lease}.rs`, `schedule.rs`: admission, observed
   jobs, Stop, reports and scheduled-firing transactions.
-- `exarch/src/host.rs`, `headless.rs`, `tui/{app,prompt,tabs}.rs`: joined
-  roots and frontend observation, including lossless Stop restoration.
+- `exarch/src/{host,port}.rs`, `agent/fleet.rs`, `headless.rs`,
+  `tui/{app,prompt,tabs,tui_loop}.rs`: joined roots, registry-backed ports and
+  observed root deaths, including lossless Stop restoration.
 - `synod/src/assistant/{guest,conversation}.rs`, `window/conversation.rs`:
   gated jobs, folder walks and machine recovery after joins.
 

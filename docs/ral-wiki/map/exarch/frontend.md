@@ -1,18 +1,19 @@
 ---
-generated_at_commit: e5a23909
+generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
 generated_at_date: 2026-10-29
-verified_at_commit: e5a23909
+verified_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
 verified_at_date: 2026-10-29
-covers_paths: [exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/host.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
+covers_paths: [exarch/src/port.rs, exarch/src/lib.rs, exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/host.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
 
 # Map: exarch / frontend
 
-**The agent and its frontend meet at one outbound event stream and one
-inbound mailbox.** The owner is `Agent`; every frontend addresses it through
-`AgentHandle`, never a retained owner or direct mailbox
+**A frontend addresses agents by id through `Port` and observes the host's
+feed.** The port reads published mailbox status, never owner state, and holds
+only the fleet's `Registry` and usage meter, not its launch. The owner is
+`Agent`; `Host` owns launch and joined end
 ([[map/exarch/agent|agent]],
-[[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
+[[decisions/261029_a-frontend-holds-a-port|a-frontend-holds-a-port]]).
 
 ## Inbound: one mailbox
 
@@ -42,14 +43,22 @@ inbound mailbox.** The owner is `Agent`; every frontend addresses it through
 
 `tui/commands.rs::route_submit` classifies input once:
 
-- Immediate UI commands (`/help`, `/copy`, `/model`, …) act on the UI thread.
-  `/quit` directly ends the fleet root without requiring a mailbox consumer.
+- Immediate UI commands (`/help`, `/copy`, overlays, …) act on the UI thread.
+  `/quit` and `/exit` return `Break`; `App::key` hands the loop `Handoff::Quit`,
+  which `?` carries out of it as `Exit::Quit`, without ending agents.
 - Reads (`/new`, `/branch`, `/context`, `/resources`) enter through
-  `AgentHandle::post_command(Command::Read)` and run at the next tool or exchange boundary.
+  `Port::command(agent, Command::Read)` and run at the next tool or exchange
+  boundary.
 - Rewrites (`/clear`, `/close`, `/evict`, `/rewind`) enter through
-  `post_command(Command::Rewrite)` and hold subsequent input until the exchange boundary.
-- Other text, including unknown slash-shaped lines, enters through `steer`.
-  Queue observation and recall use `queued` / `recall`.
+  `Port::command(agent, Command::Rewrite)` and hold subsequent input until
+  the exchange boundary.
+- `/model` posts `Command::Model(Pick)` to the tab that opened the picker.
+  The owner builds, records and publishes the normalized selection.
+  `model_picker::persist_landed`, called by `App::commit`, saves project
+  selection from live `ModelChanged` records alone, including `via`.
+  Asking and catch-up save nothing; login/provider notes are view chrome.
+- Other text, including unknown slash-shaped lines, enters through `Port::submit`.
+  Queue observation and recall use `Port::{queued, recall}`.
   `PromptState::edit_queued_prompt` checks draft/history state before invoking
   recall, so Up withdraws only text it can display. `AgentAddress::recall`
   withdraws every queued human post under the mailbox lock, across
@@ -100,16 +109,19 @@ elapsed time, actual ending and how to use `await` / `workers`.
 
 **`Host` owns roots and their bus; hosts gate, never drive.**
 
-- `Host::{found, resume}` constructs and launches roots. `roots`, `feed`,
-  `usage` and `run_dir` expose addresses, signals and accounting. `end` and
-  `Drop` end the fleet and join every root, whose teardown joins helpers.
+- `Host::{found, resume}` constructs and launches roots. `roots` exposes
+  launch-order ids; `port`, `feed` and `run_dir` expose reach, signals and
+  logs. `Port::usage` reads run accounting. `end` and `Drop` end the fleet
+  and join every root, whose teardown joins helpers. The feed stays with the
+  host; `Port` has no subscription operation.
 - Every agent records a busy period: `JobOpened`'s commit number is `JobId`;
   `JobSettled { job, stopped }` closes it. Opening/registration, settlement
   and addressed Stop share the mailbox lock.
-- `AgentHandle::stop(JobId)` marks the matching open job and cancels its latest
-  exchange with `Interrupted`; `stop(job)` also recalls human text oldest first. Stale ids
-  and rest are no-ops. Helpers keep working; reports and subsequent input
-  can continue the same job, whose stopped mark persists.
+- `Port::stop(agent, JobId)` marks the matching open job and cancels its latest
+  exchange with `Interrupted`, recalling human text oldest first. Stale job ids
+  and rest are no-ops; an ended agent returns `Ended(agent)`. Helpers keep
+  working; reports and subsequent input can continue the same job, whose
+  stopped mark persists.
 - Settlement requires an empty queue and no pending helper; a helper whose
   life ended before settlement is joined first. A helper ending after it can
   fail Synod's walk and report. A returning agent also waits for armed
@@ -133,9 +145,11 @@ elapsed time, actual ending and how to use `await` / `workers`.
   explicitly unavailable and reaches the host as a failed session
   ([[internals/session-record|session-record]],
   [[invariants/turn-ends-ready|exchange-ends-ready]]).
-- `record/log.rs::Log::since` fixes extent and read handle under the writer
-  mutex, then streams commits beyond a `Cursor` outside it. Commits arriving
-  after that extent take the channel. `record/replay.rs` owns replay/refusal.
+- `Born.reader` gives `Scrollback` a `record::Reader`, never an append handle.
+  Its crate-private `since` delegates to `record/log.rs::Log::since`, fixing
+  extent and read handle under the writer mutex, then streaming commits beyond
+  a `Cursor` outside it. Commits arriving after that extent take the channel.
+  `record/replay.rs` owns replay/refusal; `Emitter` and `AgentLog` are crate-private.
 - `record/view.rs::Blocks` folds each witnessed fact; `Delta` reports
   `Opened`, `Grew`, `Patched`, `Rewound`, `Cleared`, or `Quiet`.
   `tui/mirror.rs::Mirror` maintains one rendered block per retained incident;
@@ -155,16 +169,21 @@ elapsed time, actual ending and how to use `await` / `workers`.
 
 **The TUI owns presentation, never agent liveness.**
 
-- `tui/tui_loop.rs` drains the session-lived bus and UI jobs, polls overlays
-  and routes input through `App::key` / `paste`. Producer completion is
-  `Host::is_finished`: the directory is empty and every retained root thread
-  is finished. It performs an uncapped final drain and final frame;
-  `Host::end` still owns joins and failure collection. `terminal.rs` owns raw
-  mode, alternate screen, bracketed paste, mouse capture and panic restoration.
+- `tui/tui_loop.rs` drains the feed and UI jobs, polls overlays and routes
+  input through `App::key` / `paste`. After a drain to empty,
+  `Tabs::settled` requires every known root's `Died`; queued births are
+  dispatched before this check. Initial births precede `run`, later root
+  births precede their creator's death, and helper deaths precede root death.
+  Natural completion gets an uncapped final drain/frame; `App::leaving`
+  returns immediately without that frame. `terminal.rs` owns raw mode,
+  alternate screen, bracketed paste, mouse capture and panic restoration.
+- `tui::run` restores the terminal and returns `Leaving` (log directories
+  and recalled usage). `lib::run` ends and joins the host, then reports with
+  final `Port::usage`, including exchanges cut short by quitting.
 - `tui/tabs.rs::Tabs` is an id-ordered forest of birth facts and
-  `Status` / `Life`; there is no special root tab. `Tabs::agent` resolves an
-  `AgentHandle` through fleet names and checks id. Retained addresses hold
-  no engine and cannot prolong teardown.
+  `Status` / `Life`; there is no special root tab. It holds a `Port`;
+  `row` / `focused_row` read published `AgentRow`s and `rows` takes one
+  roster per call. Model/effort/account chrome reads the published `pick`.
 - `Transient::Died` is the final owner presentation cue, after availability
   classification, failure reporting and retirement. Terminal delivery uses
   the owner's fleet sink even when append state is poisoned; the poisoned
@@ -297,7 +316,7 @@ elapsed time, actual ending and how to use `await` / `workers`.
 **Stop cancels the exchange; end cancels life.**
 
 - A TUI tab tracks `JobOpened` / `JobSettled`. Esc / Ctrl-C on an active
-  tab calls `AgentHandle::stop(job)`; with no matching job no Stop occurs.
+  tab calls `Port::stop(agent, job)`; with no matching job no Stop occurs.
   An unclaimed Esc reaches the editable prompt, including Vi's mode change;
   Ctrl-C never edits. Helpers and loose shell workers survive. The TUI has
   no `/stop` command.
@@ -308,13 +327,14 @@ elapsed time, actual ending and how to use `await` / `workers`.
   their gestures first. A successful Ctrl-C copy retains the draft; only an
   unclaimed key reaches Stop. Raw-mode keys are local, not process signals.
 - `signals::face` forwards SIGINT to each root's `stop_current`, shutdown to
-  `Fleet::end`. Windows handles Ctrl-C/Ctrl-Break before ral's escalating
+  `Registry::end`. Windows handles Ctrl-C/Ctrl-Break before ral's escalating
   handler; repeated interactive gestures never tick the force-exit ladder.
 - Provider waits poll the exchange; ral dispatchers strike their own id.
   Cancelling threads never write to a transport.
-- `end`, `/close`, helper idle timeout and owner drop end life; `/quit` ends
-  the fleet. Clear prepares first, joins helpers, commits and replaces the
-  engine, preserving human/message input. Failed preparation changes nothing;
+- `Port::end(agent)`, `/close`, helper idle timeout and owner drop end life;
+  `/quit` returns to `lib::run`, whose `Host::end` ends and joins the fleet.
+  Clear prepares first, joins helpers, commits and replaces the engine,
+  preserving human/message input. Failed preparation changes nothing;
   failed commit ends life and retires the unused prepared engine.
 
 See [[internals/cancellation|cancellation]] for scope propagation.
@@ -322,7 +342,9 @@ See [[internals/cancellation|cancellation]] for scope propagation.
 ## One-shot headless
 
 **`headless.rs::run` observes a returning root through `Host::feed`.** It
-steers the seed, folds only the root's records into one `Blocks` memo, and
+checks the first `Born` against `host.roots()[0]`, retaining that root's log
+directory for “Agent log:”. It submits the seed and reads usage through a
+port, folds only the root's records into one `Blocks` memo, and
 finishes on root `Forensic::Status` or `Died`. Helper facts do not print;
 helper faults remain visible and usage includes the fleet. `Replied(v)`
 writes faithful ral text or JSON to stdout; Failed, Stopped or death without

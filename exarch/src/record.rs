@@ -35,12 +35,13 @@ pub(crate) use log::{commit_line, parse_line};
 pub use model::{ItemKind, Linked, Location, Pointer, Residue, Span, SpanRow, TurnRow};
 pub use non_empty::NonEmpty;
 pub use replay::{Refusal, replay};
-pub use seam::Emitter;
+pub(crate) use seam::Emitter;
+pub use seam::Reader;
 pub use selection::Selection;
-pub(crate) use session::role_label;
+pub(crate) use session::{AgentLog, role_label};
 pub use session::{
-    AgentLog, GrepAnswer, GrepHit, Inherited, Resumed, TranscriptMessage, TranscriptPart,
-    TranscriptTurn, Uncommitted,
+    GrepAnswer, GrepHit, Inherited, Resumed, TranscriptMessage, TranscriptPart, TranscriptTurn,
+    Uncommitted,
 };
 pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View, context_rows_card};
 
@@ -57,6 +58,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
+
+/// The `cmd` recorded for an unparseable tool call.
+pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 
 /// The identity of an agent node — the trunk and every forked child alike.
 ///
@@ -105,7 +109,7 @@ impl From<u64> for JobId {
 
 /// Whether a child starts blank or inherits its parent's conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Memory {
+pub enum Memory {
     Amnemon,
     Mnemon,
 }
@@ -191,6 +195,28 @@ impl From<Display> for Record {
 impl From<Forensic> for Record {
     fn from(f: Forensic) -> Self {
         Self::Forensic(f)
+    }
+}
+
+impl Forensic {
+    /// The selection a landed model switch saves for the next launch.
+    pub(crate) fn switched_to(&self) -> Option<crate::provider::state::State> {
+        let Self::ModelChanged {
+            model,
+            label,
+            account,
+            via,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(crate::provider::state::State {
+            provider: account.clone(),
+            provider_name: label.clone(),
+            model: model.clone(),
+            via: via.clone(),
+        })
     }
 }
 
@@ -516,6 +542,8 @@ pub enum Forensic {
         label: String,
         service: String,
         account: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<Via>,
     },
     /// An overflow taught the selection a tighter window than its catalog
     /// listed.
@@ -536,9 +564,8 @@ pub struct Born {
     pub parent: Option<AgentId>,
     /// What a resumed root picked up, for the frontend to note.
     pub resumed: Option<Resumed>,
-    /// The born agent's own record seam: the frontend records into it, and
-    /// catches up from it ([`Emitter::since`]).
-    pub recorder: Emitter,
+    /// The born agent's log, for a frontend to catch up from.
+    pub reader: Reader,
 }
 
 /// The channel's other passenger: content that dies with the channel and
@@ -1009,7 +1036,7 @@ mod testkit {
                 name: name.into(),
                 parent,
                 resumed: None,
-                recorder: Emitter::none(),
+                reader: Emitter::none().reader(),
             }
         }
     }

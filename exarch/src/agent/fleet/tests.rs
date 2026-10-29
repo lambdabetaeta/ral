@@ -47,11 +47,11 @@ fn configured_helper_idle_reaches_the_child_mailbox() {
     assert!(matches!(helper.mailbox.next(rest), Next::Ended));
     assert_eq!(helper.mailbox.life().cause(), Some(CancelCause::TimedOut));
     assert!(parent.handle().is_live());
-    assert!(parent.fleet.resolve("short-lived").is_none());
+    assert!(parent.fleet.registry.resolve("short-lived").is_none());
     assert!(matches!(
-        parent.fleet.name("short-lived"),
+        parent.fleet.registry.name("short-lived"),
         Err(Unborn::NameTaken(_))
     ));
     drop(helper);
-    assert!(parent.fleet.name("short-lived").is_ok());
+    assert!(parent.fleet.registry.name("short-lived").is_ok());
 }

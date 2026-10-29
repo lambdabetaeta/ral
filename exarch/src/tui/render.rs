@@ -207,12 +207,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Resul
     // The focused agent's provider, labelled relative to the accounts so two
     // logins on one email still read apart; the rung in force is the picker's
     // own ladder label, a model with no reasoning control reading `auto`.
-    let status_model = app.tabs.focused_agent().map_or_else(String::new, |agent| {
-        let p = agent.current_provider();
-        let label = identity::label(p.account(), &bureau.available());
-        let effort = effort_label(&p.tuning().effort).unwrap_or("custom");
-        format!("{label}/{} ({effort})", p.model())
-    });
+    let status_model = status_model(app, bureau);
     // Field-wise from here: the editor draws through `&mut prompt_state` while
     // the rest of the frame reads its siblings.
     let App {
@@ -324,6 +319,15 @@ pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Resul
     Ok(())
 }
 
+pub(super) fn status_model(app: &App, bureau: &Bureau) -> String {
+    app.tabs.focused_row().map_or_else(String::new, |row| {
+        let pick = row.pick;
+        let label = identity::label(&pick.choice.account, &bureau.available());
+        let effort = effort_label(&pick.tuning.effort).unwrap_or("custom");
+        format!("{label}/{} ({effort})", pick.choice.model)
+    })
+}
+
 fn prompt_height(app: &App, area: Rect) -> u16 {
     let prompt_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
     app.prompt_state.height_hint(prompt_w, area.height)
@@ -357,8 +361,8 @@ fn matrix_height(app: &App, area: Rect, queued_h: usize, row_count: usize) -> u1
 fn queued_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     let queued = app
         .tabs
-        .focused_agent()
-        .map(|agent| agent.queued())
+        .port()
+        .queued(app.tabs.focused())
         .unwrap_or_default();
     if queued.is_empty() {
         return Vec::new();

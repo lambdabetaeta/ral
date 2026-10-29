@@ -1,6 +1,7 @@
 use crate::wire::WindowReport;
-use exarch::agent::AgentHandle;
+use exarch::port::Port;
 use exarch::provider::Holdings;
+use exarch::record::AgentId;
 use ral_core::sync::LockExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -90,7 +91,7 @@ impl Running {
 /// Where a message goes: held while the machine boots, then steered.
 pub(crate) enum Inlet {
     Booting(Vec<String>),
-    Live(AgentHandle),
+    Live { port: Port, agent: AgentId },
 }
 
 impl Inlet {
@@ -100,8 +101,8 @@ impl Inlet {
                 messages.push(text);
                 Ok(())
             }
-            Self::Live(agent) => agent
-                .steer(text)
+            Self::Live { port, agent } => port
+                .submit(*agent, text)
                 .map_err(|_| "The assistant has already finished; nothing was sent.".to_string()),
         }
     }
@@ -109,27 +110,27 @@ impl Inlet {
     pub(crate) fn queued(&self) -> Vec<String> {
         match self {
             Self::Booting(messages) => messages.clone(),
-            Self::Live(agent) => agent.queued(),
+            Self::Live { port, agent } => port.queued(*agent).unwrap_or_default(),
         }
     }
 
     pub(crate) fn recall(&mut self) -> Vec<String> {
         match self {
             Self::Booting(messages) => std::mem::take(messages),
-            Self::Live(agent) => agent.recall(),
+            Self::Live { port, agent } => port.recall(*agent).unwrap_or_default(),
         }
     }
 
-    pub(crate) fn install(&mut self, agent: AgentHandle) -> Vec<String> {
-        match std::mem::replace(self, Self::Live(agent)) {
+    pub(crate) fn install(&mut self, port: Port, agent: AgentId) -> Vec<String> {
+        match std::mem::replace(self, Self::Live { port, agent }) {
             Self::Booting(messages) => messages,
-            Self::Live(_) => Vec::new(),
+            Self::Live { .. } => Vec::new(),
         }
     }
 
     pub(crate) fn end(self) {
-        if let Self::Live(agent) = self {
-            agent.end();
+        if let Self::Live { port, agent } = self {
+            let _ended = port.end(agent);
         }
     }
 }

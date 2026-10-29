@@ -9,7 +9,7 @@ fn tree() -> (TestAgent, super::super::tabs::Tabs) {
     let mut tabs = super::super::tabs::Tabs::new(
         root.id(),
         &crate::record::Born::for_test("main", None),
-        fleet,
+        crate::port::Port::new(fleet.registry.clone(), crate::bus::UsageMeter::default()),
         None,
     );
     let a = AgentId::new(root.id().get() + 1);

@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod scripted;
+
 use super::*;
 use crate::agent::gauge::{EVICT_THRESHOLD, Measure};
 use crate::agent::nursery::{Joined, Teardown};
@@ -225,7 +229,7 @@ fn builtin_t2_queue_read(
 ) -> Settled<Value> {
     T2_QUEUE.with(|cell| {
         if let Some(handle) = cell.borrow().as_ref() {
-            handle.post_command(Command::Read(crate::bus::Read::Resources));
+            let _posted = handle.command(Command::Read(crate::bus::Read::Resources));
         }
     });
     Ok(Value::Unit)
@@ -305,7 +309,7 @@ fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_reque
     };
     T2_ARRIVAL.set(Some(Box::new(move || {
         handle.steer("first".into()).unwrap();
-        handle.post_command(Command::Read(crate::bus::Read::Resources));
+        let _posted = handle.command(Command::Read(crate::bus::Read::Resources));
         handle.steer("second".into()).unwrap();
         recorder.attach(Box::new(sink));
     })));
@@ -832,7 +836,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.handle()));
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new()
@@ -849,7 +853,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
     let exchange = open_for_drain(&session);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.handle().current_provider();
+    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &exchange,
         &provider,
@@ -893,7 +897,7 @@ fn a_read_queued_after_a_prompt_runs_after_it_lands() {
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.handle()));
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new()
@@ -910,7 +914,7 @@ fn a_read_queued_after_a_prompt_runs_after_it_lands() {
     let exchange = open_for_drain(&session);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.handle().current_provider();
+    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &exchange,
         &provider,
@@ -1488,7 +1492,7 @@ fn a_rewrite_queued_before_reply_boundary_input_runs_before_admission() {
     let mut child = forked_child(&parent, "helper", "`inherit");
     let handle = child.handle();
     T2_ARRIVAL.set(Some(Box::new(move || {
-        handle.post_command(Command::Rewrite(crate::bus::Rewrite::Rewind(1)));
+        let _posted = handle.command(Command::Rewrite(crate::bus::Rewrite::Rewind(1)));
         handle.steer("after rewind".into()).unwrap();
     })));
     let provider = scripted(

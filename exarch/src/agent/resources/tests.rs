@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::testkit::*;
 use crate::bus::{Emitter, Input};
+use crate::card::FieldVal;
 use crate::record::Voice;
 use ral_core::process::DurableRoot;
 

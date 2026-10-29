@@ -43,6 +43,7 @@ impl ConsoleMode {
 pub(crate) struct PreparedTerminalLoan(TerminalLoan);
 
 impl PreparedTerminalLoan {
+    #[expect(clippy::unnecessary_wraps, reason = "matches the Unix foreground API")]
     pub(crate) fn lend(self, _target: i32) -> Option<TerminalLoan> {
         Some(self.0)
     }
@@ -61,11 +62,14 @@ impl TerminalLoan {
             .then_some(PreparedTerminalLoan(Self { modes }))
     }
 
+    #[expect(clippy::unused_self, reason = "matches the Unix foreground API")]
     pub(crate) fn pressed(&self) -> Option<CancelCause> {
         None
     }
 
-    pub(crate) fn reclaim(self, _: Option<Signal>) {}
+    pub(crate) fn reclaim(self, _: Option<Signal>) {
+        drop(self);
+    }
 }
 
 impl Drop for TerminalLoan {

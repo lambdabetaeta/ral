@@ -36,7 +36,7 @@ fn accept_routes_birth_commit_records_and_transient_in_feed_order() {
             name: "helper".into(),
             parent: Some(AgentId::new(0)),
             resumed: None,
-            recorder: recorder.clone(),
+            reader: recorder.reader(),
         },
     );
     recorder.attach(child.fleet_sink());

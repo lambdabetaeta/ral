@@ -29,21 +29,21 @@
 //! On both, [`crate::boot::face_process_signals`] owns the install
 //! ceremony, once per process.
 
-use crate::agent::fleet::Fleet;
+use crate::agent::fleet::Registry;
 use ral_core::process::{Ambient, AmbientForward};
 use std::sync::Arc;
 
-/// Forward this process's signals to every live root of `fleet` for as long
+/// Forward this process's signals to every live root of `registry` for as long
 /// as the guard lives: an interrupt stops each root, a shutdown ends the fleet.
-pub(crate) fn face(fleet: &Arc<Fleet>) -> AmbientForward {
-    let fleet = Arc::clone(fleet);
+pub(crate) fn face(registry: &Arc<Registry>) -> AmbientForward {
+    let registry = Arc::clone(registry);
     ral_core::process::forward_ambient(move |ambient| match ambient {
         Ambient::Interrupt => {
-            for root in fleet.roots() {
+            for root in registry.roots() {
                 let _ = root.stop_current();
             }
         }
-        Ambient::Root(cause) => fleet.end(cause),
+        Ambient::Root(cause) => registry.end(cause),
     })
 }
 
@@ -172,7 +172,7 @@ mod tests {
         };
         assert!(trunk.mailbox.begin());
         trunk.steer("queued human text".into()).unwrap();
-        let _signals = face(&fleet);
+        let _signals = face(&fleet.registry);
 
         assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "raise SIGINT");
         assert!(

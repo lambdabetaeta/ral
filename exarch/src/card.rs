@@ -28,6 +28,7 @@ mod diff;
 mod done;
 mod encode;
 mod observation;
+pub(crate) mod resources;
 #[cfg(test)]
 pub(crate) mod testkit;
 mod value;

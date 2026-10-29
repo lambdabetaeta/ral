@@ -132,7 +132,7 @@ impl Agent {
         prompt: Prompt,
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
-        let active = self.handle.current_provider();
+        let active = self.body.state.provider.clone();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.deliberate(
                 exchange,

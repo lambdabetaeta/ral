@@ -2,17 +2,13 @@
 //! in id order.  [`super::App`]'s `tabs` field.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::palette::{AGENT_HUES, AgentSlot};
 use super::resources::ViewFigures;
-use crate::agent::AgentHandle;
-use crate::agent::fleet::Fleet;
 use crate::card::Card;
-use crate::record::{
-    AgentId, AgentState, Born, Commit, Emitter as Recorder, Forensic, JobId, Record,
-};
+use crate::port::{AgentRow, Port};
+use crate::record::{AgentId, AgentState, Born, Commit, Forensic, JobId, Record};
 use ral_core::own::OwnDir;
 
 use super::dial::Detail;
@@ -120,7 +116,7 @@ impl Tab {
             life: Life::Live(Scrollback::new(
                 slot,
                 thinking,
-                born.recorder.clone(),
+                born.reader.clone(),
                 opening,
             )),
         }
@@ -167,24 +163,14 @@ impl Tab {
         };
     }
 
-    /// Resolved afresh each time and never stored: the frontend must not hold
-    /// an ended agent. The id test rules out a namesake born later.
-    fn live(&self, fleet: &Fleet) -> Option<AgentHandle> {
-        fleet
-            .resolve(&self.name)
-            .filter(|agent| agent.id() == self.id)
-    }
-
     /// Idle span if this tab is parked past the compact-row threshold. The
     /// focused tab never demotes.
-    fn demotion(&self, fleet: &Fleet, focused: AgentId) -> Option<Duration> {
+    fn demotion(&self, row: Option<&AgentRow>, focused: AgentId) -> Option<Duration> {
         if self.id == focused {
             return None;
         }
-        let agent = self.live(fleet)?;
-        let status = agent.status();
-        let idle = status.last_exchange.unwrap_or(agent.0.started).elapsed();
-        (status.waiting_for_input && idle >= DEMOTE_IDLE).then_some(idle)
+        let row = row?;
+        (row.waiting_for_input && row.idle >= DEMOTE_IDLE).then_some(row.idle)
     }
 }
 
@@ -215,13 +201,12 @@ pub(super) struct Tabs {
     /// `/thinking`'s datum, kept here because it outlives any one scrollback: a
     /// tab born after the command was typed inherits it.
     thinking: Detail,
-    /// Resolves a tab's name to its live agent.
-    fleet: Arc<Fleet>,
+    port: Port,
 }
 
 impl Tabs {
     /// One tab, `first`'s, born as `born` says, and focused.
-    pub fn new(first: AgentId, born: &Born, fleet: Arc<Fleet>, opening: Option<Card>) -> Self {
+    pub fn new(first: AgentId, born: &Born, port: Port, opening: Option<Card>) -> Self {
         // Born collapsed: deliberation reads as its grain and bulk, and
         // `/thinking` opens the text for whoever wants it.
         let thinking = Detail::Summary;
@@ -229,7 +214,7 @@ impl Tabs {
             tabs: vec![Tab::new(first, born, 0, thinking, opening)],
             focus: first,
             thinking,
-            fleet,
+            port,
         }
     }
 
@@ -269,8 +254,8 @@ impl Tabs {
         })
     }
 
-    pub(super) fn fleet(&self) -> &Fleet {
-        &self.fleet
+    pub(super) fn port(&self) -> &Port {
+        &self.port
     }
 
     /// The focused tab's label, for the watch-only prompt hint.
@@ -278,14 +263,17 @@ impl Tabs {
         &self.focused_tab().name
     }
 
-    /// The live agent behind `id`, for one handler's duration — the frontend's
-    /// one way onto an agent, and never held past the statement that opens it.
-    pub(super) fn agent(&self, id: AgentId) -> Option<AgentHandle> {
-        self.tab(id)?.live(&self.fleet)
+    pub(super) fn row(&self, id: AgentId) -> Option<AgentRow> {
+        self.tab(id)?;
+        self.port.row(id)
     }
 
-    pub(super) fn focused_agent(&self) -> Option<AgentHandle> {
-        self.agent(self.focused())
+    pub(super) fn focused_row(&self) -> Option<AgentRow> {
+        self.row(self.focused())
+    }
+
+    pub(super) fn settled(&self) -> bool {
+        !self.tabs.iter().any(|t| t.parent.is_none() && t.attended())
     }
 
     pub(super) fn focused_job(&self) -> Option<JobId> {
@@ -307,21 +295,11 @@ impl Tabs {
         }
     }
 
-    /// The focused tab's own record seam.
-    pub(super) fn focused_recorder(&self) -> &Recorder {
-        self.focused_tab()
-            .scrollback()
-            .expect("the focused tab is in the bar")
-            .recorder()
-    }
-
-    /// The live tab named `name` — `/focus`'s target. `Fleet::name` keeps
-    /// names unique among the live, so a lingering tab sharing its name with
-    /// a newborn is ruled out by the liveness test rather than by luck.
+    /// The live tab named `name`, excluding lingering namesakes.
     pub(super) fn by_name(&self, name: &str) -> Option<AgentId> {
         self.tabs
             .iter()
-            .find(|t| t.name == name && t.in_bar() && t.live(&self.fleet).is_some())
+            .find(|t| t.name == name && t.in_bar() && self.port.is_live(t.id))
             .map(|t| t.id)
     }
 
@@ -469,6 +447,7 @@ impl Tabs {
     /// This frame's bar rows, each tab projected as the matrix reads it.
     pub(super) fn rows(&self) -> Vec<TabRow<'_>> {
         let focused = self.focused();
+        let roster = self.port.roster();
         self.tabs
             .iter()
             .filter_map(|t| {
@@ -478,7 +457,7 @@ impl Tabs {
                     parent: t.parent,
                     sb: t.scrollback()?,
                     lingering: t.lingering(),
-                    demoted: t.demotion(&self.fleet, focused),
+                    demoted: t.demotion(roster.iter().find(|r| r.id == t.id), focused),
                 })
             })
             .collect()

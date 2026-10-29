@@ -2394,6 +2394,7 @@ fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
         label: "provider".into(),
         service: "provider".into(),
         account: "provider".into(),
+        via: None,
     });
     assert_eq!(learned(&sessions), None);
 }

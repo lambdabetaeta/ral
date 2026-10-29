@@ -720,15 +720,16 @@ mod tests {
     }
 
     #[test]
-    fn the_grace_runs_from_the_strike() {
+    fn a_grace_counts_from_the_strike_not_the_shield() {
+        // Sleeps only overshoot, so only the unexpired check needs slack.
         let (parent, node) = pair();
         parent.cancel(CancelCause::Interrupted);
         std::thread::sleep(Duration::from_millis(100));
         let s = node.shielded(Duration::from_millis(60));
         assert_eq!(s.cause(), Some(CancelCause::Interrupted));
-        let t = node.shielded(Duration::from_millis(600));
+        let t = node.shielded(Duration::from_secs(2));
         assert_eq!(t.cause(), None);
-        std::thread::sleep(Duration::from_millis(600));
+        std::thread::sleep(Duration::from_secs(2));
         assert_eq!(t.cause(), Some(CancelCause::Interrupted));
     }
 

@@ -25,7 +25,15 @@ fn mailbox(admission: Admission) -> AgentMailbox {
 fn recorded_mailbox(admission: Admission, record: Recorder) -> AgentMailbox {
     let life = DurableRoot::default().child();
     record.bind(life.clone());
-    AgentMailbox::new(life, record, admission)
+    AgentMailbox::new(
+        life,
+        record,
+        admission,
+        crate::provider::Pick::of(&crate::provider::Provider::scripted(
+            "test-model",
+            crate::provider::scripted::Script::new(),
+        )),
+    )
 }
 
 fn helper() -> AgentMailbox {

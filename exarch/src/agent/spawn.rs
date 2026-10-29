@@ -145,6 +145,7 @@ pub(crate) fn hatch_root(
         name.unwrap_or_else(|| format!("root-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)));
     let reserved = session
         .fleet
+        .registry
         .name(&name)
         .map_err(|error| error.to_string())?;
     let engine = session
@@ -157,7 +158,7 @@ pub(crate) fn hatch_root(
         &session.fleet,
         reserved,
         engine,
-        session.handle.current_provider(),
+        session.body.state.provider.clone(),
         |sessions, model, account, system| {
             let id = crate::agent::fresh_id();
             AgentLog::root(sessions, id, &name, model, account, system, inherited)
@@ -196,7 +197,7 @@ pub(crate) fn spawn_root(
         name,
         parent: None,
         resumed: None,
-        recorder: root.recorder(),
+        reader: root.recorder().reader(),
     };
     let thread = match root.launch(born, None, emit) {
         Ok(thread) => thread,

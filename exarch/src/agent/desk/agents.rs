@@ -31,9 +31,10 @@ impl ExarchDesk {
         }
         let reserved = call
             .fleet
+            .registry
             .name(&name)
             .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}")))?;
-        let provider = self.child_provider(&spec.model)?;
+        let provider = self.child_provider(&body, &spec.model)?;
         let child = Agent::child_of(
             (&call.handle, call.life.child()),
             &body.log,
@@ -49,10 +50,14 @@ impl ExarchDesk {
 
     /// The child's provider: the parent's own `Arc` for `Inherit`, else the
     /// one the human bound to the named role at launch.
-    pub(super) fn child_provider(&self, model: &Selection) -> Result<Arc<Provider>, Error> {
+    pub(super) fn child_provider(
+        &self,
+        body: &Body,
+        model: &Selection,
+    ) -> Result<Arc<Provider>, Error> {
         let s = &self.call;
         match model {
-            Selection::Inherit => Ok(s.handle.current_provider()),
+            Selection::Inherit => Ok(body.state.provider.clone()),
             Selection::Role(name) => s
                 .fleet
                 .launch
@@ -133,7 +138,7 @@ impl ExarchDesk {
             name: name.to_string(),
             parent: Some(call.handle.id()),
             resumed: None,
-            recorder: child.recorder(),
+            reader: child.recorder().reader(),
         };
         let thread = child.launch(born, Some(prompt.clone()), &call.emit);
         call.commit_act(body, DeskAct::Spawn, Some(name), prompt, thread.is_err());
@@ -156,7 +161,7 @@ impl ExarchDesk {
     pub(super) fn agent_stop(&self, name: &str) -> Result<FOValue, Error> {
         let body = self.loan.get().ok_or_else(super::no_desk)?;
         let call = &self.call;
-        let verdict = match call.fleet.resolve(name) {
+        let verdict = match call.fleet.registry.resolve(name) {
             None => Ok(Said::new(
                 "no live agent by that name",
                 format!("no live agent named '{name}'"),
@@ -210,7 +215,7 @@ impl ExarchDesk {
     pub(super) fn message(&self, Message { to: name, text }: Message) -> Result<FOValue, Error> {
         let body = self.loan.get().ok_or_else(super::no_desk)?;
         let call = &self.call;
-        let verdict = match call.fleet.resolve(&name) {
+        let verdict = match call.fleet.registry.resolve(&name) {
             None => Err(Said::new(
                 "refused: no live agent by that name",
                 format!("no live agent named '{name}'; did it finish already?"),

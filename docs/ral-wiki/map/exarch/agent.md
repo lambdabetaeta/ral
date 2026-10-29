@@ -1,13 +1,15 @@
 ---
-generated_at_commit: 7eab51c3
+generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
 generated_at_date: 2026-10-29
-covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
+covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
 # Map: exarch / agent
 
-**Every `Agent` attends on its own joined thread; `AgentHandle` is its
-address.** The laws are [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]];
+**Every `Agent` attends on its own joined thread; frontends address it by id
+through `Port`.** `AgentHandle` is the crate-private address. The laws are
+[[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] and
+[[decisions/261029_a-frontend-holds-a-port|a-frontend-holds-a-port]];
 roles, snapshots and authority are [[design/agents|agents]]'s.
 
 ## Owner, address and loan
@@ -15,15 +17,16 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
 - `agent.rs::Agent` owns `AgentMailbox`, `Loanable<Body>`, `Option<Engine>`,
   engine generation, fleet and reserved `Name`, in teardown-safe field order.
   `Body` holds `AgentLog` and `State`: nursery, staged reply, report obligation,
-  failures, pins, schedules and readings.
+  failures, pins, schedules, readings and the owned `Arc<Provider>`.
 - `agent/handle.rs::AgentHandle(Arc<Shared>)` holds identity, directories,
-  start time, fixed role/ancestry, fuel, search, provider handle and
+  start time, fixed role/ancestry, fuel, search and
   `AgentAddress`. It retains no engine or attending owner.
 - `Role::{Converses, Returns, Child { parent }}` fixes whom the agent answers.
   `Trunk::{Converses, Returns}` chooses a root's role; `Admission` separately
   chooses which inputs may open a job at rest.
-- `ProviderHandle::{current, swap}` shares model selection. Each attempt
-  snapshots it once; children inherit that selection or a launch-bound role.
+- `State.provider` owns model selection. Each attempt clones it once;
+  `Status.pick` publishes `Pick::of(&provider)` at birth and each switch.
+  Helpers inherit the current state provider or use a launch-bound role.
 - `agent/loan.rs::Loanable::lend` moves the body into `Arc<Loan<Body>>` for
   one foreground dispatch, returning it on success or unwind. `Loan::get`
   refuses after return. Workers and pipeline stages have no desk.
@@ -41,10 +44,10 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
 - `Input` is human text, message, child report, departure, wakeup or
   deferred surface batch; a `Command` is queued beside it, in order. `next`
   yields an `Input` as `Take` and a command as `Command`; the mid-exchange
-  `drain` yields `Drained` (an input or a read) and holds at a rewrite. The
-  queue's `Phase` is `Resting { since, released }` or `Working(job)`.
+  `drain` yields `Drained` (input, read or model switch) and holds at a rewrite.
+  The queue's `Phase` is `Resting { since, released }` or `Working(job)`.
   `Status` snapshots rest time, job, waiting/busy, latest report, parent
-  obligation and exchange clock, stamped by `begin`.
+  obligation, published pick and exchange clock, stamped by `begin`.
 - `AgentMailbox::next` selects admissible input and mints an exchange
   `Lease` under life. Commands run without an exchange. `Agent::admit`
   rejects stale epochs/generations and already-claimed completions before
@@ -119,16 +122,16 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
   Root life is under the fleet root; helper life is under its parent's life.
   `RootEngine::{Identity, Wire}` selects construction; `RootEngine::guest`
   adopts guest control with guest paths and unresolved grants.
-- `agent/fleet.rs::Fleet` owns launch settings, the `DurableRoot`, name
-  directory and joined root threads. `Name` reserves before construction and
-  removes on drop. `Launch::engine` uses the optional identity `Rebirth`.
-  `resolve`, `live` and `roots` project live addresses; `is_empty` tests names.
-  `is_finished` additionally requires every retained root thread finished;
-  it observes without consuming join guards.
+- `agent/fleet.rs::Fleet` owns `Launch`, `Arc<Registry>` and joined root
+  threads. `Registry` owns `DurableRoot` and the name directory; `Name`
+  reserves before construction and removes on drop through a weak registry.
+  `get`, `resolve`, `live` and `roots` project live addresses; `live` is in
+  id order. `Launch::engine` uses the optional identity `Rebirth`.
 - `host.rs::Host::{found, resume, adopt}` launches roots, owns the session bus
-  and ambient-signal guard, and exposes handles/feed/usage. `finish`, shared
-  by `end` and `Drop`, ends the fleet and joins roots, draining repeatedly
-  to include racing `/new` launches. Retained addresses cannot delay joins.
+  and ambient-signal guard, and exposes root ids, a port, feed and run directory.
+  `finish`, shared by `end` and `Drop`, ends the registry root and joins roots,
+  draining repeatedly to include racing `/new` launches. A retained `Port`
+  holds registry and usage meter, never the fleet or its engine factory.
 - `/new` and `/branch` launch fresh root engines; branch imports context, not
   shell state. Resume replays open root logs with fresh engines and registers.
   Headless requires one open root; the run lock belongs to the launcher.
@@ -153,8 +156,15 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
   binding, replaces/retires the outgoing engine, advances generation, resets
   registers and drops queued reports/wakeups/batches. Human text, messages
   and commands survive; preparation failure changes nothing.
+- `agent/command.rs::Agent::switch_model` handles `Command::Model(Pick)`
+  at rest or a mid-exchange drain. It builds through `Bureau`, records
+  `ModelChanged` with `via`, then replaces state and publishes the built
+  pick. Build failure records an error without switching; recording failure
+  ends life without switching. The current attempt keeps its provider;
+  `attend.rs::attempt` reads the new state on the next attempt, nudges included.
 - `/rewind` withdraws context and rebirths nudges, not shell effects.
-  `/close` records `SessionClosed` and ends life; `/quit` ends the fleet.
+  `/close` records `SessionClosed` and ends life; `/quit` returns from the TUI
+  before `lib::run` ends and joins the host.
 - A resting helper ends itself under the mailbox lock after `launch.idle`
   with no admissible input. `HELPER_IDLE` is five hours; `--helper-idle`
   overrides it. Views, reads and probes renew nothing.

@@ -1,18 +1,22 @@
 //! The fleet's owner: launch its roots, carry their signals, and join them.
 
 use crate::agent::fleet::Fleet;
+pub use crate::agent::fleet::HELPER_IDLE;
 use crate::agent::spawn::LaunchError;
-use crate::agent::{Agent, AgentHandle, RootConfig, RootEngine};
-use crate::bus::{BusReceiver, FleetBus, UsageMeter};
-use crate::provider::{Provider, Usage};
-use crate::record::{Born, Resumed};
+pub use crate::agent::{Admission, EngineLost, Factory, RootConfig, RootEngine, SPAWN_FUEL, Trunk};
+
+use crate::agent::Agent;
+use crate::bus::{BusReceiver, FleetBus};
+use crate::port::Port;
+use crate::provider::Provider;
+use crate::record::{AgentId, Born, Resumed};
 use ral_core::own::OwnDir;
 use ral_core::process::{AmbientForward, CancelCause};
 use std::{io, sync::Arc};
 
 /// Owns a fleet whose roots attend on their own threads.
 pub struct Host {
-    roots: Vec<AgentHandle>,
+    roots: Vec<AgentId>,
     bus: FleetBus,
     signals: Option<AmbientForward>,
     fleet: Arc<Fleet>,
@@ -53,9 +57,9 @@ impl Host {
                 .fleet,
         );
         let mut host = Self {
-            roots: roots.iter().map(|(root, _)| root.handle()).collect(),
+            roots: roots.iter().map(|(root, _)| root.id()).collect(),
             bus: FleetBus::session(),
-            signals: Some(crate::signals::face(&fleet)),
+            signals: Some(crate::signals::face(&fleet.registry)),
             fleet,
         };
         let mut roots = roots.into_iter();
@@ -66,7 +70,7 @@ impl Host {
                 name: root.handle().0.name.clone(),
                 parent: None,
                 resumed,
-                recorder: root.recorder(),
+                reader: root.recorder().reader(),
             };
             match root.launch(born, None, &host.bus.emitter(id)) {
                 Ok(thread) => host.fleet.adopt_root(thread),
@@ -84,7 +88,8 @@ impl Host {
         Ok(host)
     }
 
-    pub fn roots(&self) -> &[AgentHandle] {
+    /// The roots it launched, in launch order.
+    pub fn roots(&self) -> &[AgentId] {
         &self.roots
     }
 
@@ -92,8 +97,16 @@ impl Host {
         self.bus.rx()
     }
 
-    pub fn usage(&self) -> Usage {
-        self.bus.usage_total()
+    pub fn port(&self) -> Port {
+        Port::new(self.fleet.registry.clone(), self.bus.meter())
+    }
+
+    /// Admit one job on a gated root; `false` once it has ended.
+    pub fn release(&self, root: AgentId) -> bool {
+        self.fleet
+            .registry
+            .get(root)
+            .is_some_and(|handle| handle.release())
     }
 
     pub fn run_dir(&self) -> &OwnDir {
@@ -105,20 +118,13 @@ impl Host {
         self.finish()
     }
 
-    pub(crate) fn is_finished(&self) -> bool {
-        self.fleet.is_finished()
-    }
-
+    #[cfg(test)]
     pub(crate) fn fleet(&self) -> &Arc<Fleet> {
         &self.fleet
     }
 
-    pub(crate) fn meter(&self) -> UsageMeter {
-        self.bus.meter()
-    }
-
     fn finish(&mut self) -> Vec<String> {
-        self.fleet.end(CancelCause::Cancelled);
+        self.fleet.registry.end(CancelCause::Cancelled);
         drop(self.signals.take());
         self.fleet.join_roots()
     }

@@ -7,6 +7,7 @@ fn started(model: &str, window: Option<u64>) -> Forensic {
         label: "p".into(),
         service: "s".into(),
         account: "a".into(),
+        via: None,
     }
 }
 

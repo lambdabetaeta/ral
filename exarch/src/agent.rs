@@ -32,7 +32,7 @@ pub use crate::bus::Admission;
 pub(crate) use build::TestTrunk;
 pub(crate) use build::fresh_id;
 pub use build::{RootConfig, RootEngine, Trunk};
-pub use engine_lost::{EngineLost, EnginePhase};
+pub use engine_lost::EngineLost;
 pub use factory::Factory;
 pub use handle::{AgentHandle, Ended};
 pub(crate) use shell::Evaluated;
@@ -43,14 +43,15 @@ use crate::agent::loan::Loanable;
 use crate::agent::nursery::Nursery;
 use crate::bus::AgentMailbox;
 use crate::provider::Provider;
-use crate::record::{AgentId, AgentLog, Unavailable};
+#[cfg(test)]
+use crate::record::Unavailable;
+use crate::record::{AgentId, AgentLog};
 use crate::schedule::ScheduleRegistry;
 use crate::shell_eval::PinDigest;
 use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
-use ral_core::sync::LockExt;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// An agent, owned by the one thread that attends it.
 pub struct Agent {
@@ -71,6 +72,7 @@ pub(crate) struct Body {
 
 pub(crate) type Pins = BTreeMap<String, PinDigest>;
 pub(crate) struct State {
+    pub(crate) provider: Arc<Provider>,
     pub(crate) nursery: Nursery,
     pub(crate) reply: Option<FOValue>,
     /// A5: a reply is owed to the parent, or to a headless root's human.
@@ -116,19 +118,6 @@ impl Readings {
 }
 pub const SPAWN_FUEL: u32 = 3;
 
-#[derive(Clone)]
-pub struct ProviderHandle(Arc<Mutex<Arc<Provider>>>);
-impl ProviderHandle {
-    pub fn new(provider: Arc<Provider>) -> Self {
-        Self(Arc::new(Mutex::new(provider)))
-    }
-    pub fn current(&self) -> Arc<Provider> {
-        self.0.lock_ignore_poison().clone()
-    }
-    pub fn swap(&self, provider: Arc<Provider>) {
-        *self.0.lock_ignore_poison() = provider;
-    }
-}
 impl Agent {
     pub fn handle(&self) -> AgentHandle {
         self.handle.clone()
@@ -142,7 +131,8 @@ impl Agent {
     pub fn run_dir(&self) -> &OwnDir {
         self.handle.run_dir()
     }
-    pub fn severance(&self) -> Option<ral_core::carrier::Severed> {
+    #[cfg(test)]
+    pub(crate) fn severance(&self) -> Option<ral_core::carrier::Severed> {
         self.engine.as_ref().and_then(Engine::severed)
     }
     pub(crate) fn engine(&self) -> &Engine {
@@ -153,15 +143,18 @@ impl Agent {
     pub(crate) fn resumes_at_reset(&self) -> bool {
         self.handle.0.role.parent().is_none() && self.fleet.launch.resume_on_reset
     }
-    pub fn is_ready(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_ready(&self) -> bool {
         self.check_available().is_ok() && self.body.log.context().is_ready()
     }
     /// # Errors
     /// Recording failed: this session has ended; resuming the run reconstructs what was recorded.
-    pub fn check_available(&self) -> Result<(), Unavailable> {
+    #[cfg(test)]
+    pub(crate) fn check_available(&self) -> Result<(), Unavailable> {
         self.body.log.record_emitter().check_available()
     }
-    pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
+    #[cfg(test)]
+    pub(crate) fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
         self.body.log.context().rendered()
     }
 }

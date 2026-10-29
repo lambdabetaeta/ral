@@ -31,7 +31,8 @@ pub(crate) const LIVE_WORKER_CAP: usize = 64;
 /// counting live work cannot bound it, and it needs a bound of its own
 /// precisely because nothing later reclaims it.  Reset by `/clear`, which
 /// reboots the shell.
-pub const DETACH_BIRTH_BUDGET: u64 = 16;
+#[cfg(unix)]
+pub(crate) const DETACH_BIRTH_BUDGET: u64 = 16;
 
 /// Retention bound, in ral calls, on a settled worker's unclaimed result,
 /// counted from the per-call sweep in `Agent::ral` that first

@@ -1,6 +1,6 @@
 //! The handle on `sessions/<n>/record.jsonl`: the only writer in the tree for
 //! this log. This module alone knows the line format: `read` serves replay
-//! and resume, `since` a mirror, [`Reader`] the transcript reader.
+//! and resume, `since` a mirror, [`LocusReader`] the transcript reader.
 //!
 //! The fleet publisher lives inside the same mutex as the writer ([`Inner`]),
 //! so a record can only be published while its append is held: no code path
@@ -667,13 +667,13 @@ const STALE: &str = "the log at this path is no longer the file those byte range
 /// Records read back by [`Locus`] from one log file, each line read once while
 /// consecutive loci lie on it. Messages name the line; the caller names the
 /// file.
-pub(super) struct Reader {
+pub(super) struct LocusReader {
     file: File,
     /// The line last read.
     line: Option<Commit>,
 }
 
-impl Reader {
+impl LocusReader {
     pub(super) fn new(file: File) -> Self {
         Self { file, line: None }
     }

@@ -7,9 +7,9 @@ use crate::record::{Display, Protocol};
 
 #[test]
 fn run_commits_job_opened_before_the_first_prompt_record() {
-    let root = trunk(Trunk::Converses);
+    let mut root = trunk(Trunk::Converses);
     set_provider(
-        &root,
+        &mut root,
         scripted("test-model", Script::new().then(Reply::text("done"))),
     );
     let handle = root.handle();
@@ -72,7 +72,7 @@ fn run_declines_a_stale_worker_batch_at_rest_without_opening_a_job() {
             values: vec![FOValue::Unit],
         })
         .unwrap();
-    handle.post_command(Command::Read(Read::Context));
+    let _posted = handle.command(Command::Read(Read::Context));
     let host = host(root);
     // Keep the test log's scratch alive after joining.
     let _fleet = host.fleet().clone();

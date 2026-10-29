@@ -31,9 +31,9 @@ fn a_helper_severed_mid_work_reports_failed_then_gone_and_records_the_cause() {
         ..TestTrunk::new("system")
     })
     .unwrap();
-    let child = forked_child(&parent, "helper", "`inherit");
+    let mut child = forked_child(&parent, "helper", "`inherit");
     set_provider(
-        &child,
+        &mut child,
         scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -69,7 +69,7 @@ fn a_helper_severed_mid_work_reports_failed_then_gone_and_records_the_cause() {
     assert!(signals.iter().any(
         |signal| matches!(signal, Signal::Transient(id, Transient::Died { .. }) if *id == helper.id())
     ));
-    assert!(parent.fleet.resolve("helper").is_none());
+    assert!(parent.fleet.registry.resolve("helper").is_none());
     assert!(matches!(
         helper.status().report,
         Some(ChildStatus::Failed(_))
@@ -84,9 +84,9 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
     })
     .unwrap();
     let mut child = forked_child(&parent, "helper", "`inherit");
-    let grandchild = forked_child(&child, "grandchild", "`inherit");
+    let mut grandchild = forked_child(&child, "grandchild", "`inherit");
     set_provider(
-        &grandchild,
+        &mut grandchild,
         scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -109,7 +109,7 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
     assert!(failures[0].starts_with(WORKER_PANIC_PREFIX));
     assert!(!grandchild.is_live());
     assert!(
-        parent.fleet.resolve("grandchild").is_none(),
+        parent.fleet.registry.resolve("grandchild").is_none(),
         "unwind joined the working helper before returning"
     );
     assert!(
@@ -166,7 +166,7 @@ fn the_name_leaves_the_directory_before_died_is_published() {
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("Died is bounded");
         if matches!(signal, Signal::Transient(id, Transient::Died { .. }) if id == helper.id()) {
-            assert!(parent.fleet.resolve("helper").is_none());
+            assert!(parent.fleet.registry.resolve("helper").is_none());
             break;
         }
     }

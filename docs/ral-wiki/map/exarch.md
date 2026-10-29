@@ -1,7 +1,7 @@
 ---
-generated_at_commit: e5a23909
+generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
 generated_at_date: 2026-10-29
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
+covers_paths: [exarch/src/port.rs, exarch/src/record.rs, exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
 # Map: exarch
@@ -20,6 +20,24 @@ host-installed layers — the design argument lives in
 [[design/exarch-architecture|exarch-architecture]]. This page maps the
 binary's *entry point*: what runs at startup, and how the system prompt is
 assembled.
+
+## Public boundary
+
+**Other crates reach agents through `host` and `port` only.**
+
+- `host` exports `Host`, launch/admission types and engine construction.
+  The host owns the feed and joined fleet end; `roots` returns launch-order ids.
+- `port` exports `Port`, published `AgentRow`s and command/signal types.
+  Operations address an `AgentId`; `end` ends only that agent's subtree.
+  A retained port keeps registry and usage, not the launch or engine factory.
+- Public launch support is `app`, `card`, `clock`, `config`, `net_policy`,
+  `policy`, `prompt`, `provider`, `record` and `wallet`. Record write handles
+  (`Emitter`, `AgentLog`) are crate-private; `Born.reader` cannot append.
+- `agent`, `bus`, `boot`, `cli`, `enquiry`, `headless`, `library`, `schedule`,
+  `shell_eval`, `skill` and `tui` are crate-private.
+
+The boundary is [[decisions/261029_a-frontend-holds-a-port|a-frontend-holds-a-port]]'s;
+[[map/exarch/frontend|frontend]] maps its operations and observations.
 
 ## Entry and dispatch
 
@@ -88,7 +106,9 @@ exit code.
   open session) — which observes the host's feed. Roots use `Admission::Free`; `Trunk::Returns`
   selects headless, `Converses` the TUI. `--helper-idle` sets helpers' rest
   timeout (default five hours). After the frontend returns, `Host::end` joins
-  the fleet and contributes teardown failures to the result.
+  the fleet and contributes teardown failures to the result. A successful
+  TUI return carries `Leaving`; its closing report prints after that join,
+  reading final run spend from a port retained across the end.
 
 ## Accounts
 

@@ -8,13 +8,15 @@ use std::sync::{Arc, Mutex};
 
 use super::state::{Accounts, Handle, Held, Inlet, Owner, Review, Running};
 use crate::assistant::conversation::Conversation;
-use crate::assistant::gate::{self, Seat as _, Stage};
+use crate::assistant::gate::{self, Seat, Stage};
 use crate::folder::manifest::Stop;
 use crate::wire::{
     AgentStateDto, Choice, ConversationEvent, ConversationUpdate, JobId, ModelMenu, Opening,
     PickedFolder, Preparation, SynodEvent, WindowReport,
 };
+use exarch::port::Port;
 use exarch::provider::Holdings;
+use exarch::record::AgentId;
 use ral_core::sync::LockExt;
 use tauri::{AppHandle, Emitter as _, Manager, State};
 
@@ -135,13 +137,13 @@ impl Emitter {
         clippy::significant_drop_tightening,
         reason = "installation and queue publication must be atomic"
     )]
-    fn install(&self, agent: exarch::agent::AgentHandle) -> bool {
+    fn install(&self, port: Port, agent: AgentId) -> bool {
         let mut held = self.slot.lock_ignore_poison();
         let Some(handle) = held.owned_by_mut(self.generation) else {
             return false;
         };
-        for message in handle.inlet.install(agent.clone()) {
-            let _ = agent.steer(message);
+        for message in handle.inlet.install(port.clone(), agent) {
+            let _ = port.submit(agent, message);
         }
         publish(
             &self.app,
@@ -265,6 +267,7 @@ pub(crate) fn send_message(
 }
 
 #[tauri::command]
+#[allow(clippy::unnecessary_wraps, reason = "preserve the IPC result contract")]
 #[allow(
     clippy::significant_drop_tightening,
     reason = "stop and queue publication require generation ownership"
@@ -280,7 +283,11 @@ pub(crate) fn stop_job(
         return Ok(Vec::new());
     };
     let recalled = match &handle.inlet {
-        Inlet::Live(agent) => agent.stop(job.into()).unwrap_or_default(),
+        Inlet::Live { port, agent } => port
+            .stop(*agent, job.into())
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
         Inlet::Booting(_) => Vec::new(),
     };
     publish(
@@ -448,7 +455,7 @@ fn drive(
         };
 
     emitter.opening(opening);
-    if !emitter.install(conversation.handle()) {
+    if !emitter.install(conversation.port(), Seat::root(&conversation)) {
         return finish_conversation(emitter, conversation, Ok(()));
     }
     if let Err(e) = conversation.settle_baseline() {

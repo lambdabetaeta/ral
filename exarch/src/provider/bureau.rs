@@ -7,10 +7,13 @@
 //! [`Provider`] is minted.
 //!
 //! Two arms, mirroring [`Provider`]'s own backends: [`Pool::new`] primes the
-//! pricing catalog over the network, so a unit test holds
-//! [`Bureau::Scripted`], which mints nothing and says so.
+//! pricing catalog over the network, so a test holds [`Bureau::Scripted`],
+//! which mints each provider from its next script.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+
+use super::scripted::Script;
 
 use ral_core::sync::LockExt;
 
@@ -111,6 +114,23 @@ pub struct Choice {
     pub via: Option<Via>,
 }
 
+/// A model and its tuning: what a human picks and an agent runs on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pick {
+    pub choice: Choice,
+    pub tuning: Tuning,
+}
+
+impl Pick {
+    /// What `provider` runs: its choice and its tuning.
+    pub fn of(provider: &Provider) -> Self {
+        Self {
+            choice: provider.choice(),
+            tuning: provider.tuning().clone(),
+        }
+    }
+}
+
 /// Where a session's providers come from.
 pub enum Bureau {
     /// A live session: the engine its requests run on, over the application's
@@ -119,8 +139,9 @@ pub enum Bureau {
         engine: Arc<Pool>,
         holdings: Holdings,
     },
-    /// A scripted session mints nothing.
-    Scripted,
+    /// A scripted session: each mint takes the next script, and none is left
+    /// unless given.
+    Scripted(Mutex<VecDeque<Script>>),
 }
 
 /// `model`'s context window, refusing it unless `listed`, the serving
@@ -189,17 +210,17 @@ fn selection(
     }
 }
 
-/// What a scripted bureau answers every request for a provider with.
-fn mints_nothing() -> String {
-    "this session replays a scripted provider and mints no others".into()
-}
-
 impl Bureau {
+    /// A scripted bureau minting `scripts`, in order.
+    pub fn scripted(scripts: impl IntoIterator<Item = Script>) -> Self {
+        Self::Scripted(Mutex::new(scripts.into_iter().collect()))
+    }
+
     /// Every account this session can authenticate as.
     pub fn available(&self) -> Vec<Account> {
         match self {
             Self::Live { holdings, .. } => holdings.store.lock_ignore_poison().available(),
-            Self::Scripted => Vec::new(),
+            Self::Scripted(_) => Vec::new(),
         }
     }
 
@@ -208,24 +229,35 @@ impl Bureau {
     /// account must list its model, and serve it via its upstreams.
     ///
     /// # Errors
-    /// If the bureau is scripted, if the account has no resolved credential,
-    /// if its listing cannot be had or does not name the model, or if the via
-    /// is refused: on a service that does not route, or naming an upstream
-    /// the model's endpoints do not list.
+    /// If a scripted bureau has no script left, if the account has no
+    /// resolved credential, if its listing cannot be had or does not name the
+    /// model, or if the via is refused: on a service that does not route, or
+    /// naming an upstream the model's endpoints do not list.
     pub fn build(
         &self,
         choice: Choice,
         tuning: &Tuning,
         max_tokens: Option<u32>,
     ) -> Result<Arc<Provider>, String> {
-        let Self::Live { engine, holdings } = self else {
-            return Err(mints_nothing());
-        };
         let Choice {
             account,
             model,
             via,
         } = choice;
+        let (engine, holdings) = match self {
+            Self::Live { engine, holdings } => (engine, holdings),
+            Self::Scripted(scripts) => {
+                let script = scripts.lock_ignore_poison().pop_front().ok_or_else(|| {
+                    format!("this scripted session has no script left to mint {model}")
+                })?;
+                return Ok(Arc::new(Provider::build(
+                    Backend::Scripted(script),
+                    &account,
+                    selection(&account, model, tuning, via, max_tokens),
+                    None,
+                )));
+            }
+        };
         // Locked only long enough to clone the roster out; the reads the meter
         // later runs have the lock long released.
         let roster = holdings.store.lock_ignore_poison().roster();
@@ -268,7 +300,7 @@ impl Bureau {
         login: &oauth::CredentialHandle,
     ) -> Result<(super::AccountId, String), String> {
         let Self::Live { holdings, .. } = self else {
-            return Err(mints_nothing());
+            return Err("a scripted session keeps no credentials to admit a login into".into());
         };
         super::admit_login(holdings, login)
     }
@@ -278,7 +310,7 @@ impl Bureau {
     pub fn holdings(&self) -> Option<&Holdings> {
         match self {
             Self::Live { holdings, .. } => Some(holdings),
-            Self::Scripted => None,
+            Self::Scripted(_) => None,
         }
     }
 
@@ -287,7 +319,7 @@ impl Bureau {
     pub fn with_catalog<R>(&self, f: impl FnOnce(&mut ModelCatalog<LiveSource>) -> R) -> Option<R> {
         match self {
             Self::Live { holdings, .. } => Some(f(&mut holdings.catalog.lock_ignore_poison())),
-            Self::Scripted => None,
+            Self::Scripted(_) => None,
         }
     }
 

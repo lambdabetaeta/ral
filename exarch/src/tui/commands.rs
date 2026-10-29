@@ -1,6 +1,7 @@
 //! Prompt-box slash commands — registry, routing, and handlers.
 
 use std::fmt::Write;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use super::App;
@@ -14,9 +15,8 @@ use super::prompt::editor::completion::Candidate;
 use super::providers;
 use super::rewind;
 use crate::SessionInfo;
-use crate::agent::fleet::Fleet;
-use crate::bus::{Read, Rewrite};
 use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
+use crate::port::{Read, Rewrite};
 use crate::provider::allowance::{Allowance, Consumption, Reading, Scope};
 use crate::record::{Memory, RECORD};
 use jiff::Timestamp;
@@ -470,8 +470,8 @@ fn allowance_field(a: &Allowance, now: Timestamp) -> Field {
 
 /// The one submit path for every tab: parse once, then act on the parse and the
 /// focused tab.  A plain line steers the focused tab's agent.  Errors land on
-/// the focused tab, where the user typed.
-pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
+/// the focused tab, where the user typed.  `Break` leaves the frontend.
+pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) -> ControlFlow<()> {
     let trimmed = text.trim();
     let focused = app.tabs.focused();
     match lookup_command(trimmed) {
@@ -479,7 +479,7 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
             Arg::Required(hint) if arg.is_empty() => {
                 app.push_error(focused, &format!("usage: {} {hint}", spec.name));
             }
-            _ => run((spec.command)(arg), app, ctx),
+            _ => return run((spec.command)(arg), app, ctx),
         },
         // A typo is not a prompt in disguise: say so rather than mail it to the
         // model as one.
@@ -487,27 +487,23 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
             Some(head) => app.push_error(focused, &format!("unknown command: {head} (see /help)")),
             // A line is refused if its focused agent has ended.
             None => {
-                if let Some(agent) = app.tabs.agent(focused) {
-                    let _ = agent.steer(text);
+                if app.tabs.port().submit(focused, text).is_err() {
+                    app.push_error(focused, "this tab's agent has ended");
                 }
             }
         },
     }
-}
-
-/// A retained parent identity need not have a mailbox consumer.
-pub(super) fn quit(fleet: &Fleet) {
-    fleet.end(ral_core::process::CancelCause::Cancelled);
+    ControlFlow::Continue(())
 }
 
 /// Act on a well-formed command.  A view command (`/help`, `/legend`, `/copy`,
 /// `/export`, `/model`, `/login`, `/limits`, `/thinking`) touches only the App,
 /// clipboard, file, or picker, so it runs here on the UI thread; `/quit`
-/// cancels the fleet directly. A session command becomes its [`Read`] or
+/// returns from the frontend. A session command becomes its [`Read`] or
 /// [`Rewrite`] and rides the focused agent's
 /// mailbox to its attend thread, which owns the context.  `/rewind` is both: its
 /// picker runs here, and the choice rides the mailbox.
-fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
+fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) -> ControlFlow<()> {
     match command {
         Command::Focus(name) => cmd_focus(app, &name),
         Command::Thinking => cmd_thinking(app),
@@ -521,13 +517,14 @@ fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
         Command::Limits => cmd_limits(app, ctx),
         Command::Clear => app.post_rewrite(Rewrite::Clear),
         Command::Close => app.post_rewrite(Rewrite::Close),
-        Command::Quit => quit(app.tabs.fleet()),
+        Command::Quit => return ControlFlow::Break(()),
         Command::Evict => app.post_rewrite(Rewrite::Evict),
         Command::Rewind => rewind::rewind(app),
         Command::Hatch(memory, name) => app.post_read(Read::Hatch { memory, name }),
         Command::Context => app.post_read(Read::Context),
         Command::Resources => app.post_read(Read::Resources),
     }
+    ControlFlow::Continue(())
 }
 
 #[cfg(test)]

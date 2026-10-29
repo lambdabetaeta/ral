@@ -3,7 +3,7 @@
 
 use crate::agent::fleet::{Fleet, Name, Unborn};
 use crate::agent::handle::Shared;
-use crate::agent::{Admission, Agent, AgentHandle, ProviderHandle, Role, TestTrunk, Trunk};
+use crate::agent::{Admission, Agent, AgentHandle, Role, TestTrunk, Trunk};
 use crate::bus::{AgentMailbox, Emitter};
 use crate::host::Host;
 use crate::provider::Toolset;
@@ -172,15 +172,20 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         fuel,
         search,
     } = spec;
-    let reserved = fleet.name(&name)?;
+    let reserved = fleet.registry.name(&name)?;
     let id = crate::agent::fresh_id();
     let started = Instant::now()
         .checked_sub(elapsed)
         .expect("test birth fits the clock");
-    let life = life.unwrap_or_else(|| fleet.root.child());
+    let life = life.unwrap_or_else(|| fleet.registry.root.child());
     let recorder = crate::record::Emitter::none();
     recorder.bind(life.clone());
-    let mailbox = AgentMailbox::new(life, recorder, admission);
+    let mailbox = AgentMailbox::new(
+        life,
+        recorder,
+        admission,
+        crate::provider::Pick::of(&scripted("test-model", Script::new())),
+    );
     let handle = AgentHandle(Arc::new(Shared {
         id,
         name,
@@ -190,10 +195,9 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         role,
         fuel,
         search,
-        provider: ProviderHandle::new(scripted("test-model", Script::new())),
         address: mailbox.address(),
     }));
-    fleet.bind(&reserved, &handle);
+    fleet.registry.bind(&reserved, &handle);
     Ok(TestAgent {
         handle,
         mailbox,
@@ -257,11 +261,11 @@ pub(crate) fn tmp(tag: &str) -> TestDir {
     OwnDir::for_test(&format!("a4-{tag}")).expect("test scratch dir")
 }
 
-/// Swap `session`'s live provider — what `/model` mutates in production — so
-/// a forked child can run its own independent script rather than share its
-/// spawner's, the way a real `` exarch-agents `start `` does.
-pub(crate) fn set_provider(session: &Agent, provider: Arc<Provider>) {
-    session.handle.0.provider.swap(provider);
+/// Set a fixture's provider before launch and publish its pick.
+pub(crate) fn set_provider(session: &mut Agent, provider: Arc<Provider>) {
+    let pick = crate::provider::Pick::of(&provider);
+    session.body.state.provider = provider;
+    session.mailbox.publish_pick(pick);
 }
 
 pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
@@ -346,7 +350,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         }
     }
 
-    let reserved = parent.fleet.name(name).expect("a free child name");
+    let reserved = parent.fleet.registry.name(name).expect("a free child name");
     let EngineKind::Identity(transport) = parent.engine().kind() else {
         panic!("a test parent runs an identity engine")
     };
@@ -377,7 +381,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         &parent.fleet,
         reserved,
         engine,
-        parent.handle.current_provider(),
+        parent.body.state.provider.clone(),
         memory,
     )
     .expect("an adopted child is born")
@@ -403,7 +407,7 @@ pub(crate) fn launch_child(
         name: handle.0.name.clone(),
         parent: Some(parent.id()),
         resumed: None,
-        recorder: child.recorder(),
+        reader: child.recorder().reader(),
     };
     let thread = child.launch(born, first, emit).unwrap_or_else(|error| {
         parent.body.state.failures.extend(error.failures);

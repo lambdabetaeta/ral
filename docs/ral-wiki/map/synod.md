@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e5a23909
+generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
 generated_at_date: 2026-10-29
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
@@ -322,11 +322,15 @@ is judged; shared machinery stays with exarch and vm-manager.
   implements exarch's `Factory` through `Machine::dial_engine`; the mutex
   supplies `Sync`. `exarch::app::SCRATCH_VAR` names the guest scratch variable.
 - `Guest` holds `factory`, `host: Host` and `net`. `Host::found` launches
-  its conversing root with `Admission::Gated`; `handle` and `feed` expose
-  address and signals, never an attending owner. Helper idle is `HELPER_IDLE`.
+  its conversing root with `Admission::Gated`; `root`, `port` and `feed`
+  expose id, frontend reach and signals. Launch types come from
+  `exarch::host`; commands/signals come from `exarch::port`. Helper idle is
+  `HELPER_IDLE`.
 - `Conversation::settle_baseline` joins the opening walk before Ready.
-  `release` checks that baseline and admits one job. Scheduling and
-  reset-resume are off by launch policy, not refused by host construction.
+  `release` checks that baseline and calls the guest's host release to admit
+  one job. `Seat::invalidate` clears the report and calls `Port::end(root)`,
+  ending that root's subtree, not the whole fleet. Scheduling and reset-resume
+  are off by launch policy, not refused by host construction.
 - Every agent records jobs. Root `JobOpened` announces the commit-number
   `JobId`; `JobSettled` follows an empty queue and no pending helper. Owed
   reports are heard and retirement announced before settlement is joined; resting
@@ -339,8 +343,10 @@ is judged; shared machinery stays with exarch and vm-manager.
   exists. `Guest::capture` reads the loss and run directory without borrowing
   the root. Capture failure is secondary to the original loss.
 - `Guest::end` calls `Host::end`, ending and joining all roots and their
-  helpers before uniquely recovering `MachineFactory`. It stops/joins
-  netgate and shuts down the machine afterwards. `Conversation::end` drops
+  helpers before uniquely recovering `MachineFactory`. A retained port holds
+  the registry, not the factory-bearing launch, so cannot prevent recovery
+  ([[decisions/261029_a-frontend-holds-a-port|a-frontend-holds-a-port]]).
+  It stops/joins netgate and shuts down the machine afterwards. `Conversation::end` drops
   the baseline after guest teardown. Wire `Detach → Ended` certifies engine
   and worker teardown; EOF alone does not. Teardown failures propagate from
   engines through thread joins.
@@ -372,26 +378,27 @@ Publication and ownership agree at one generation boundary.
 - `window/state.rs` owns `Accounts`, `Running`, `Owner`, `Handle`, `Close`,
   `Review` and `SignIn`. `Owner::{Open, Closing}` admits one close owner;
   its five-second grace bounds the wait for teardown. `Handle` holds an
-  `Inlet`: `Booting(Vec<String>)` buffers human messages, then `Live(AgentHandle)`
-  steers them. Queue observation and recall work in both states; Stop names
-  the live root's matching running `JobId`.
+  `Inlet`: `Booting(Vec<String>)` buffers human messages, then
+  `Live { port: Port, agent: AgentId }` submits them through the port.
+  Queue observation and recall work in both states; ending a live inlet calls
+  `Port::end(agent)`. Stop names the live root's matching running `JobId`.
   Supersession ends the old inlet and stops its baseline, then joins outside
   the owner lock before opening the next conversation.
 - `window/conversation.rs::Emitter` publishes only while its generation owns
-  the slot. `install` transfers buffered messages to the root's address
-  under the slot lock. Every update carries the window's attempt.
+  the slot. `install(port, agent)` transfers buffered messages through the
+  port under the slot lock. Every update carries the window's attempt.
   `registered` checks that attempt for `send_message` and `recall_queued`.
   `stop_job(attempt, job)` is synchronous: under the slot lock it calls
-  `AgentHandle::stop(job)`, which stops and recalls, then publishes the queue. A missing/different attempt,
-  booting inlet or stale id returns no prompts. Stop and recall
+  `Port::stop(agent, job)`, which stops and recalls, then publishes the queue.
+  A missing/different attempt, booting inlet or stale id returns no prompts. Stop and recall
   withdraw human text oldest first. Job identity and Stop/close arbitration
   belong to exarch's root mailbox, not a second window state machine.
 - **Queue snapshots are read and published under the same slot lock.**
   `ConversationUpdate::Queue { messages }` replaces the strip, oldest first.
   Commands, installation, human uptake and job completion refresh it;
   an older snapshot cannot publish after a newer one.
-- `drive` installs the address, settles the baseline, publishes Ready, and
-  hands over to `assistant/gate.rs::run(seat, stage, sink)`, which releases and
+- `drive` installs the port and root id, settles the baseline, publishes Ready,
+  and hands over to `assistant/gate.rs::run(seat, stage, sink)`, which releases and
   receives the host feed. `Seat` is what the loop needs of the conversation,
   `Stage` what it publishes to the window, so the loop is tested off-window
   (`window/` builds only where tauri does). Root `JobOpened` publishes `JobBegan`;

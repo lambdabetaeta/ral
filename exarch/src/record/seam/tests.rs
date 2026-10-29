@@ -145,7 +145,7 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
         assert_eq!(unavailable.to_string(), detail);
         assert_eq!(fs::read(&path).unwrap(), failed);
 
-        let (from, records) = emit.since(None).unwrap();
+        let (from, records) = emit.reader().since(None).unwrap();
         assert_eq!(from, Cursor::start());
         let records = records.collect::<io::Result<Vec<_>>>().unwrap();
         assert_eq!(records.len(), 2);
@@ -156,7 +156,7 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
             assert_eq!(record.records().first.locus(), expected);
             assert_locus(&failed, record.records().first.locus());
         }
-        let (from, records) = emit.since(Some(cursor)).unwrap();
+        let (from, records) = emit.reader().since(Some(cursor)).unwrap();
         assert_eq!(from, cursor);
         assert_eq!(from.next(), 3);
         assert_eq!(records.count(), 0);
@@ -407,7 +407,7 @@ fn a_serialization_failure_latches_the_writer_without_writing() {
         failure.to_string()
     );
     assert_eq!(fs::read(&path).unwrap(), [] as [u8; 0]);
-    let (_, records) = emit.since(None).unwrap();
+    let (_, records) = emit.reader().since(None).unwrap();
     assert_eq!(records.count(), 0);
     let refused = emit.emit(Forensic::Cancelled).unwrap_err();
     assert_eq!(refused.kind(), failure.kind());

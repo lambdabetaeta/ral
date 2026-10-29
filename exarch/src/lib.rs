@@ -12,33 +12,34 @@
         reason = "[test] libtest captures print macros"
     )
 )]
-pub mod agent;
+pub(crate) mod agent;
 pub mod app;
-pub mod boot;
-pub mod bus;
+pub(crate) mod boot;
+pub(crate) mod bus;
 pub mod card;
-pub mod cli;
+pub(crate) mod cli;
 pub mod clock;
 pub mod config;
-pub mod enquiry;
-pub mod headless;
+pub(crate) mod enquiry;
+pub(crate) mod headless;
 pub mod host;
 pub(crate) mod latch;
-pub mod library;
+pub(crate) mod library;
 pub mod net_policy;
 pub mod policy;
+pub mod port;
 pub mod prompt;
 pub mod provider;
 pub mod record;
-pub mod schedule;
-pub mod shell_eval;
+pub(crate) mod schedule;
+pub(crate) mod shell_eval;
 pub(crate) mod signals;
 mod site;
-pub mod skill;
+pub(crate) mod skill;
 #[cfg(all(unix, test))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod test_helper;
-pub mod tui;
+pub(crate) mod tui;
 pub mod wallet;
 
 use crate::site::{Silent, site};
@@ -308,20 +309,38 @@ pub fn run() -> Result<(), String> {
         restrict_files: &invocation.restricts,
         cwd: &launch_cwd,
     };
+    let port = host.port();
     let result = if headless {
         if host.roots().len() == 1 {
             headless::run(&host, &info, &provider, seed, c.output_format)
         } else {
             Err("a headless run holds exactly one root".into())
         }
+        .map(|()| None)
     } else {
         let screen = match screen {
             Some(screen) => Ok(screen),
             None => tui::enter(&run),
         };
-        screen.and_then(|screen| tui::run(screen, &host, &info, &bureau, seed, c.vi))
+        screen
+            .and_then(|screen| {
+                tui::run(
+                    screen,
+                    port.clone(),
+                    host.feed(),
+                    &info,
+                    &bureau,
+                    seed,
+                    c.vi,
+                )
+            })
+            .map(Some)
     };
-    combine_failures(result, &host.end())
+    let failures = host.end();
+    if let Ok(Some(leaving)) = &result {
+        leaving.report(port.usage());
+    }
+    combine_failures(result.map(drop), &failures)
 }
 
 /// The root's configuration under the parsed command line.
@@ -531,7 +550,7 @@ mod tests {
                 (*dir).clone(),
                 None,
                 false,
-                &Arc::new(Bureau::Scripted),
+                &Arc::new(Bureau::scripted([])),
                 Roles::default(),
             );
             let engine = RootEngine::Identity {

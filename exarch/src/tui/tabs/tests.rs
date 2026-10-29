@@ -2,6 +2,8 @@ use super::super::block::Chrome;
 use super::*;
 use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent};
+use crate::bus::UsageMeter;
+use std::sync::Arc;
 
 /// A root that stays resolvable while its fixture lives.
 fn root() -> (Arc<Fleet>, TestAgent) {
@@ -19,7 +21,12 @@ fn born(tabs: &mut Tabs, id: AgentId, name: &str, parent: Option<AgentId>) {
 #[test]
 fn parent_focus_climbs_past_a_lingering_ancestor() {
     let (fleet, root) = root();
-    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
+    let mut tabs = Tabs::new(
+        root.id(),
+        &Born::for_test("main", None),
+        Port::new(fleet.registry.clone(), UsageMeter::default()),
+        None,
+    );
     let (child, grandchild) = (
         AgentId::new(root.id().get() + 1),
         AgentId::new(root.id().get() + 2),
@@ -40,7 +47,12 @@ fn parent_focus_climbs_past_a_lingering_ancestor() {
 #[test]
 fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
     let (fleet, root) = root();
-    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
+    let mut tabs = Tabs::new(
+        root.id(),
+        &Born::for_test("main", None),
+        Port::new(fleet.registry.clone(), UsageMeter::default()),
+        None,
+    );
     let child = AgentId::new(root.id().get() + 1);
     born(&mut tabs, child, "child", Some(root.id()));
     for (id, text) in [(child, "child says hi"), (root.id(), "root says hi")] {
@@ -77,7 +89,12 @@ fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
 #[test]
 fn the_first_retirement_stamp_wins() {
     let (fleet, root) = root();
-    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
+    let mut tabs = Tabs::new(
+        root.id(),
+        &Born::for_test("main", None),
+        Port::new(fleet.registry.clone(), UsageMeter::default()),
+        None,
+    );
     let child = AgentId::new(root.id().get() + 1);
     born(&mut tabs, child, "child", Some(root.id()));
     tabs.retire_subtree(root.id());
@@ -116,7 +133,12 @@ fn job_opened_and_settled_update_only_the_named_tab() {
     use crate::record::NonEmpty;
 
     let (fleet, root) = root();
-    let mut tabs = Tabs::new(root.id(), &Born::for_test("main", None), fleet, None);
+    let mut tabs = Tabs::new(
+        root.id(),
+        &Born::for_test("main", None),
+        Port::new(fleet.registry.clone(), UsageMeter::default()),
+        None,
+    );
     let child = AgentId::new(root.id().get() + 1);
     born(&mut tabs, child, "child", Some(root.id()));
     let fact =

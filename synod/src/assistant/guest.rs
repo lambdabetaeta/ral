@@ -3,10 +3,10 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use exarch::agent::{AgentHandle, EngineLost, Factory, RootConfig, RootEngine};
-use exarch::bus::BusReceiver;
-use exarch::host::Host;
+use exarch::host::{EngineLost, Factory, Host, RootConfig, RootEngine};
+use exarch::port::{BusReceiver, Port};
 use exarch::provider::Provider;
+use exarch::record::AgentId;
 use ral_core::authority::policy::Capabilities;
 use ral_core::own::OwnDir;
 use ral_core::path::{GuestPath, shown};
@@ -63,8 +63,16 @@ impl Guest {
         Ok(Self { factory, host, net })
     }
 
-    pub(crate) fn handle(&self) -> AgentHandle {
-        self.host.roots()[0].clone()
+    pub(crate) fn root(&self) -> AgentId {
+        self.host.roots()[0]
+    }
+
+    pub(crate) fn port(&self) -> Port {
+        self.host.port()
+    }
+
+    pub(crate) fn release(&self) -> bool {
+        self.host.release(self.root())
     }
 
     pub(crate) fn feed(&self) -> &BusReceiver {
@@ -111,7 +119,7 @@ impl Guest {
 fn start_failed(factory: &MachineFactory, why: &std::io::Error) -> String {
     let Some(lost) = why
         .get_ref()
-        .and_then(|source| source.downcast_ref::<exarch::agent::EngineLost>())
+        .and_then(|source| source.downcast_ref::<EngineLost>())
     else {
         return format!("the assistant could not be set up: {why}");
     };
@@ -133,7 +141,7 @@ fn capture(run_dir: &OwnDir, why: &str, console: &GuestConsole) -> Option<()> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use exarch::bus::Signal;
+    use exarch::port::{Ended, Signal};
     use exarch::provider::scripted::{Reply, Script};
     use exarch::record::{Forensic, JobId, Record};
     use std::io::{Read, Write};
@@ -205,12 +213,12 @@ mod tests {
         let run_dir = OwnDir::for_test("guest-factory-join").expect("run directory");
         let (factory, shutdown) = machine_factory();
         let host = host_with_factory(&factory, &run_dir);
-        let root = host.roots()[0].clone();
-        assert!(root.is_live());
+        let (port, root) = (host.port(), host.roots()[0]);
+        assert!(port.is_live(root));
         assert!(Arc::strong_count(&factory) > 1);
 
         assert_eq!(host.end(), Vec::<String>::new());
-        assert!(!root.is_live());
+        assert_eq!(port.queued(root), Err(Ended(root)));
         let machine = Arc::into_inner(factory)
             .expect("joined agents and signal forwarding release every factory owner")
             .0
@@ -239,14 +247,15 @@ mod tests {
         )
         .expect("network session");
         let guest = Guest { factory, host, net };
-        let root = guest.handle();
-        assert_eq!(root.id(), guest.host.roots()[0].id());
+        let (port, root) = (guest.port(), guest.root());
+        assert_eq!(root, guest.host.roots()[0]);
         assert!(std::ptr::eq(guest.feed(), guest.host.feed()));
         assert_eq!(guest.run_dir().path(), run_dir.path());
 
-        root.steer("go".into()).expect("live root accepts input");
-        assert_eq!(root.queued(), ["go"]);
-        assert!(root.release());
+        port.submit(root, "go".into())
+            .expect("live root accepts input");
+        assert_eq!(port.queued(root).unwrap(), ["go"]);
+        assert!(guest.release());
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut opened = None;
         'job: loop {
@@ -255,7 +264,7 @@ mod tests {
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .expect("the host publishes a settled job");
             if let Signal::Commit(id, commit) = signal
-                && id == root.id()
+                && id == root
             {
                 for recorded in commit.records() {
                     match recorded.value() {
@@ -281,7 +290,7 @@ mod tests {
         assert!(!shutdown.load(Ordering::SeqCst));
 
         guest.end().expect("joined host permits machine recovery");
-        assert!(!root.is_live());
+        assert_eq!(port.queued(root), Err(Ended(root)));
         assert!(weak_factory.upgrade().is_none());
         assert!(shutdown.load(Ordering::SeqCst));
         drop(net_peer);

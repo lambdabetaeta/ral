@@ -15,33 +15,33 @@ const REST: Rest = Rest {
 #[test]
 fn a_reserved_name_counts_construction_until_it_is_dropped() {
     let fleet = Fleet::for_test();
-    assert!(fleet.is_empty());
-    let name = fleet.name("building").unwrap();
+    assert!(fleet.registry.is_empty());
+    let name = fleet.registry.name("building").unwrap();
     assert_eq!(name.name(), "building");
-    assert!(!fleet.is_empty());
-    assert!(fleet.live().is_empty());
-    assert!(fleet.roots().is_empty());
-    assert!(fleet.resolve("building").is_none());
+    assert!(!fleet.registry.is_empty());
+    assert!(fleet.registry.live().is_empty());
+    assert!(fleet.registry.roots().is_empty());
+    assert!(fleet.registry.resolve("building").is_none());
     assert_eq!(
-        fleet.name("building").err(),
+        fleet.registry.name("building").err(),
         Some(Unborn::NameTaken("building".into()))
     );
     drop(name);
-    assert!(fleet.is_empty());
-    assert!(fleet.name("building").is_ok());
+    assert!(fleet.registry.is_empty());
+    assert!(fleet.registry.name("building").is_ok());
 }
 
 #[test]
 fn malformed_names_leave_no_reservation() {
     let fleet = Fleet::for_test();
     for name in ["", "two words", "a/b", "é", "abcdefghijklmnopqrstuvwxy"] {
-        let Some(Unborn::NameMalformed(why)) = fleet.name(name).err() else {
+        let Some(Unborn::NameMalformed(why)) = fleet.registry.name(name).err() else {
             panic!("invalid name {name:?} must be refused");
         };
         assert!(why.contains("ASCII"), "{why}");
-        assert!(fleet.is_empty());
+        assert!(fleet.registry.is_empty());
     }
-    let name = fleet.name("Ab_9-abcdefghijklmnopqrs").unwrap();
+    let name = fleet.registry.name("Ab_9-abcdefghijklmnopqrs").unwrap();
     assert_eq!(name.name().len(), 24);
 }
 
@@ -52,7 +52,7 @@ fn racing_reservations_have_exactly_one_owner() {
     let names = std::thread::scope(|scope| {
         let reserve = || {
             start.wait();
-            fleet.name("contended")
+            fleet.registry.name("contended")
         };
         let first = scope.spawn(reserve);
         let second = scope.spawn(reserve);
@@ -64,13 +64,13 @@ fn racing_reservations_have_exactly_one_owner() {
         Some(&Unborn::NameTaken("contended".into()))
     );
     drop(names);
-    assert!(fleet.name("contended").is_ok());
+    assert!(fleet.registry.name("contended").is_ok());
 }
 
 #[test]
 fn a_name_does_not_retain_its_fleet() {
     let fleet = Fleet::for_test();
-    let name = fleet.name("reserved").unwrap();
+    let name = fleet.registry.name("reserved").unwrap();
     let weak = Arc::downgrade(&fleet);
     drop(fleet);
     assert!(weak.upgrade().is_none());
@@ -90,8 +90,8 @@ fn a_bound_name_refuses_a_second_owner() {
         .err(),
         Some(Unborn::NameTaken("helper".into()))
     );
-    assert_eq!(fleet.resolve("helper").unwrap().id(), helper.id());
-    assert_eq!(fleet.live().len(), 2);
+    assert_eq!(fleet.registry.resolve("helper").unwrap().id(), helper.id());
+    assert_eq!(fleet.registry.live().len(), 2);
 }
 
 #[test]
@@ -101,16 +101,16 @@ fn ended_agents_leave_the_directory_views_but_reserve_their_names_until_drop() {
     let child = agent(&fleet, "child", Some(&root));
     assert_eq!(roster::listing(&root, &fleet).len(), 2);
     child.end();
-    assert!(fleet.resolve("child").is_none());
+    assert!(fleet.registry.resolve("child").is_none());
     assert_eq!(roster::listing(&root, &fleet).len(), 1);
-    assert_eq!(fleet.live().len(), 1);
-    assert!(!fleet.is_empty());
+    assert_eq!(fleet.registry.live().len(), 1);
+    assert!(!fleet.registry.is_empty());
     assert_eq!(
-        fleet.name("child").err(),
+        fleet.registry.name("child").err(),
         Some(Unborn::NameTaken("child".into()))
     );
     drop(child);
-    assert!(fleet.name("child").is_ok());
+    assert!(fleet.registry.name("child").is_ok());
 }
 
 #[test]
@@ -120,12 +120,18 @@ fn retained_handles_do_not_reserve_a_dropped_owners_name() {
     let retained = AgentHandle::clone(&owner);
     drop(owner);
     assert!(!retained.is_live());
-    assert!(fleet.is_empty());
+    assert!(fleet.registry.is_empty());
     let replacement = agent(&fleet, "reused", None);
     assert_ne!(retained.id(), replacement.id());
     drop(retained);
-    assert_eq!(fleet.resolve("reused").unwrap().id(), replacement.id());
-    assert!(matches!(fleet.name("reused"), Err(Unborn::NameTaken(_))));
+    assert_eq!(
+        fleet.registry.resolve("reused").unwrap().id(),
+        replacement.id()
+    );
+    assert!(matches!(
+        fleet.registry.name("reused"),
+        Err(Unborn::NameTaken(_))
+    ));
 }
 
 #[test]
@@ -139,11 +145,14 @@ fn owner_drop_ends_descendants_and_releases_only_its_own_name() {
     assert!(!retained.is_live());
     assert!(!child.is_live());
     assert!(!grandchild.is_live());
-    assert!(fleet.name("root").is_ok());
-    assert!(matches!(fleet.name("child"), Err(Unborn::NameTaken(_))));
-    assert!(!fleet.is_empty());
+    assert!(fleet.registry.name("root").is_ok());
+    assert!(matches!(
+        fleet.registry.name("child"),
+        Err(Unborn::NameTaken(_))
+    ));
+    assert!(!fleet.registry.is_empty());
     drop((child, grandchild));
-    assert!(fleet.is_empty());
+    assert!(fleet.registry.is_empty());
 }
 
 #[test]
@@ -167,10 +176,10 @@ fn a_child_constructed_beneath_an_ended_parent_is_born_cancelled() {
     root.end();
     let late = agent(&fleet, "late", Some(&root));
     assert!(!late.is_live());
-    assert!(fleet.resolve("late").is_none());
+    assert!(fleet.registry.resolve("late").is_none());
     assert_eq!(late.mailbox.life().cause(), Some(CancelCause::Cancelled));
     drop(late);
-    assert!(fleet.name("late").is_ok());
+    assert!(fleet.registry.name("late").is_ok());
 }
 
 #[test]
@@ -267,11 +276,17 @@ fn a_second_root_is_outside_the_first_roots_tree_and_roots_are_sorted() {
     assert_eq!(names, ["root", "child"]);
     assert!(root.descendant(&branch).is_none());
     assert_eq!(
-        fleet.live().iter().map(AgentHandle::id).collect::<Vec<_>>(),
+        fleet
+            .registry
+            .live()
+            .iter()
+            .map(AgentHandle::id)
+            .collect::<Vec<_>>(),
         [root.id(), child.id(), branch.id()]
     );
     assert_eq!(
         fleet
+            .registry
             .roots()
             .iter()
             .map(AgentHandle::id)
@@ -279,7 +294,7 @@ fn a_second_root_is_outside_the_first_roots_tree_and_roots_are_sorted() {
         [root.id(), branch.id()]
     );
     branch.end();
-    assert_eq!(fleet.roots().len(), 1);
+    assert_eq!(fleet.registry.roots().len(), 1);
 }
 
 #[test]

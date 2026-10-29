@@ -179,6 +179,10 @@ pub struct Cli {
     /// `sessions/0` directory. A headless resume still needs a new opening
     /// prompt. You cannot resume in chat mode.
     #[arg(long, value_name = "TARGET", num_args = 0..=1, conflicts_with = "chat")]
+    #[allow(
+        clippy::option_option,
+        reason = "clap distinguishes absent, bare, and targeted resume"
+    )]
     pub resume: Option<Option<std::path::PathBuf>>,
     /// Choose the format written to standard output in headless mode.
     ///

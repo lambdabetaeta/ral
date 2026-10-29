@@ -660,7 +660,7 @@ pub(super) fn derive(
 
 /// Held, actual parents through a protected inheritance boundary. No-delete
 /// sharing fixes their identities, not their ACLs: prove safety top-down.
-/// As with any ACL check, previously granted attacker WRITE_DAC/WRITE_OWNER
+/// As with any ACL check, previously granted attacker `WRITE_DAC/WRITE_OWNER`
 /// handles are outside this proof: changing a DACL does not revoke handles.
 pub(super) fn validate_scoped_parents<'a>(
     directories: impl IntoIterator<Item = &'a File>,

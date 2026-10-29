@@ -2,8 +2,8 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use crate::wire::{ReadoutDto, Severity, SynodEvent, marks_dto};
-use exarch::bus::Sink;
 use exarch::card::{Card, change_card, observation_display_card};
+use exarch::port::Sink;
 use exarch::provider::ProviderError;
 use exarch::record::fault::Readout;
 use exarch::record::{AgentId, Born};

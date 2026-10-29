@@ -14,11 +14,11 @@ fn until(mut ready: impl FnMut() -> bool) {
 }
 
 fn blocking_root() -> Agent {
-    let root = testkit::dressed_trunk(|runtime| {
+    let mut root = testkit::dressed_trunk(|runtime| {
         runtime.install_builtins(testkit::WORKER_REGISTRY_TEST_BUILTINS);
     });
     set_provider(
-        &root,
+        &mut root,
         scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -32,11 +32,45 @@ fn blocking_root() -> Agent {
 
 #[test]
 fn headless_reply_runs_through_the_host_feed_in_both_formats() {
+    const CHILD: &str = "EXARCH_HEADLESS_REPLY_CHILD";
+    const EXPECTED_LOG: &str = "Expected root log: ";
+    if std::env::var_os(CHILD).is_none() {
+        // Capture process stdio without redirecting parallel tests' writers.
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "headless::tests::host::headless_reply_runs_through_the_host_feed_in_both_formats",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run the headless reply test in isolation");
+        let stdout = String::from_utf8(output.stdout).expect("test stdout is UTF-8");
+        let stderr = String::from_utf8(output.stderr).expect("headless stderr is UTF-8");
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        let expected: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix(EXPECTED_LOG))
+            .collect();
+        let actual: Vec<_> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("Agent log: "))
+            .collect();
+        assert_eq!(expected.len(), 2, "one root directory per format: {stdout}");
+        assert_eq!(actual, expected, "{stderr}");
+        return;
+    }
     for format in [OutputFormat::Text, OutputFormat::Json] {
         let host = frontend_host(reply_script("[answer: 42]"), Trunk::Returns);
+        let root_handle = host
+            .fleet()
+            .registry
+            .get(host.roots()[0])
+            .expect("a live root");
+        println!("\n{EXPECTED_LOG}{}", root_handle.log_dir());
         run_frontend(&host, format).expect("a deliberate reply succeeds");
         assert!(matches!(
-            host.roots()[0].status().report,
+            root_handle.status().report,
             Some(ChildStatus::Replied(FOValue::Map { .. }))
         ));
         assert_eq!(host.end(), [] as [String; 0]);
@@ -47,12 +81,17 @@ fn headless_reply_runs_through_the_host_feed_in_both_formats() {
 fn headless_no_reply_runs_through_the_host_feed_in_both_formats() {
     for format in [OutputFormat::Text, OutputFormat::Json] {
         let host = frontend_host(no_reply_script(), Trunk::Returns);
+        let root_handle = host
+            .fleet()
+            .registry
+            .get(host.roots()[0])
+            .expect("a live root");
         assert_eq!(
             run_frontend(&host, format),
             Err("ended without calling `reply`".into())
         );
         assert_eq!(
-            host.roots()[0].status().report,
+            root_handle.status().report,
             Some(ChildStatus::Failed("ended without calling `reply`".into()))
         );
         assert_eq!(host.end(), [] as [String; 0]);
@@ -63,7 +102,12 @@ fn headless_no_reply_runs_through_the_host_feed_in_both_formats() {
 fn headless_stopped_runs_through_the_host_feed_in_both_formats() {
     for format in [OutputFormat::Text, OutputFormat::Json] {
         let host = testkit::host(blocking_root());
-        let handle = host.roots()[0].clone();
+        let root_handle = host
+            .fleet()
+            .registry
+            .get(host.roots()[0])
+            .expect("a live root");
+        let handle = root_handle.clone();
         let watchdog = ral_core::process::arm_callback(WAIT, {
             let handle = handle.clone();
             move || handle.end()
@@ -82,11 +126,8 @@ fn headless_stopped_runs_through_the_host_feed_in_both_formats() {
         );
         stopper.join().unwrap();
         drop(watchdog);
-        assert_eq!(host.roots()[0].status().report, Some(ChildStatus::Stopped));
-        assert!(
-            host.roots()[0].is_live(),
-            "Stop does not end the root's life"
-        );
+        assert_eq!(root_handle.status().report, Some(ChildStatus::Stopped));
+        assert!(root_handle.is_live(), "Stop does not end the root's life");
         assert_eq!(host.end(), [] as [String; 0]);
     }
 }
@@ -100,11 +141,16 @@ fn verdict_after_fault(
 ) -> Result<(), String> {
     let recorder = root.recorder();
     let host = testkit::host(root);
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
     wait_ready(&host);
     if let Some(text) = fault {
         recorder.transient(Transient::Fault { text: text.into() });
     }
-    let handle = host.roots()[0].clone();
+    let handle = root_handle;
     let watchdog = ral_core::process::arm_callback(WAIT, {
         let handle = handle.clone();
         move || handle.end()
@@ -182,16 +228,21 @@ fn converse_carries_context_from_one_job_into_the_next() {
             .then(Reply::text("and again")),
         Trunk::Converses,
     );
-    host.roots()[0].steer("first message".into()).unwrap();
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
+    root_handle.steer("first message".into()).unwrap();
     let first = wait_settled(&host);
-    assert_eq!(host.roots()[0].status().report, None);
-    assert!(host.roots()[0].is_live());
+    assert_eq!(root_handle.status().report, None);
+    assert!(root_handle.is_live());
     assert!(!first.iter().any(|signal| {
-        has_fact(signal, host.roots()[0].id(), |record| {
+        has_fact(signal, root_handle.id(), |record| {
             matches!(record, Record::Forensic(Forensic::Status { .. }))
         })
     }));
-    host.roots()[0].steer("second message".into()).unwrap();
+    root_handle.steer("second message".into()).unwrap();
     let second = wait_settled(&host);
     let context = second
         .iter()
@@ -223,13 +274,18 @@ fn ordinary_failed_conversation_remains_usable_for_the_next_job() {
             .then(Reply::text("next job succeeds")),
         Trunk::Converses,
     );
-    host.roots()[0].steer("first".into()).unwrap();
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
+    root_handle.steer("first".into()).unwrap();
     wait_settled(&host);
-    assert!(host.roots()[0].is_live());
-    host.roots()[0].steer("next".into()).unwrap();
+    assert!(root_handle.is_live());
+    root_handle.steer("next".into()).unwrap();
     let next = wait_settled(&host);
     assert!(next.iter().any(|signal| {
-        has_fact(signal, host.roots()[0].id(), |record| {
+        has_fact(signal, root_handle.id(), |record| {
             matches!(record, Record::Display(Display::Answer { text }) if text == "next job succeeds")
         })
     }));
@@ -239,7 +295,12 @@ fn ordinary_failed_conversation_remains_usable_for_the_next_job() {
 #[test]
 fn an_ended_root_refuses_the_headless_prompt() {
     let host = frontend_host(Script::new(), Trunk::Returns);
-    host.roots()[0].end();
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
+    root_handle.end();
     assert_eq!(
         run_frontend(&host, OutputFormat::Text),
         Err("the agent ended before it could take the prompt".into())
@@ -255,13 +316,18 @@ fn a_helper_without_a_reply_reports_failure_before_the_parent_settles() {
             .then(Reply::text("thanks for the update")),
         Trunk::Converses,
     );
-    let child = testkit::forked_child(&root, "flaky", "`inherit");
-    set_provider(&child, scripted("test-model", no_reply_script()));
+    let mut child = testkit::forked_child(&root, "flaky", "`inherit");
+    set_provider(&mut child, scripted("test-model", no_reply_script()));
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     let host = testkit::host(root);
-    let root_id = host.roots()[0].id();
-    host.roots()[0].steer("please help".into()).unwrap();
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
+    let root_id = root_handle.id();
+    root_handle.steer("please help".into()).unwrap();
     receive_until(&host, |signal| {
         matches!(signal, Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents))
             if *id == root_id)
@@ -291,12 +357,17 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
             .then(Reply::text("thanks for the update")),
         Trunk::Converses,
     );
-    let child = testkit::forked_child(&root, "helper", "`inherit");
-    set_provider(&child, scripted("test-model", reply_script("42")));
+    let mut child = testkit::forked_child(&root, "helper", "`inherit");
+    set_provider(&mut child, scripted("test-model", reply_script("42")));
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     let host = testkit::host(root);
-    let root = &host.roots()[0];
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
+    let root = root_handle;
     root.steer("please help".into()).unwrap();
     let opened = receive_until(&host, |signal| {
         matches!(signal, Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents))
@@ -364,7 +435,10 @@ fn host_end_joins_other_roots_and_helpers_and_releases_their_names() {
     let host = Host::adopt(vec![(root, None), (other, None)]).unwrap();
     assert_eq!(host.end(), [] as [String; 0]);
     assert!(handles.iter().all(|handle| !handle.is_live()));
-    assert!(fleet.is_empty(), "end returns only after every name leaves");
+    assert!(
+        fleet.registry.is_empty(),
+        "end returns only after every name leaves"
+    );
     for handle in handles {
         assert!(handle.steer("too late".into()).is_err());
     }
@@ -372,14 +446,14 @@ fn host_end_joins_other_roots_and_helpers_and_releases_their_names() {
 
 #[test]
 fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
-    let root = Agent::for_test_with(TestTrunk {
+    let mut root = Agent::for_test_with(TestTrunk {
         trunk: Trunk::Converses,
         admission: Admission::Gated,
         ..TestTrunk::new("system")
     })
     .unwrap();
     set_provider(
-        &root,
+        &mut root,
         scripted(
             "test-model",
             Script::new()
@@ -388,7 +462,12 @@ fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
         ),
     );
     let host = testkit::host(root);
-    let handle = &host.roots()[0];
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
+    let handle = root_handle;
     handle.steer("first".into()).unwrap();
     assert!(handle.release());
     let first = wait_settled(&host);
@@ -433,9 +512,9 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
         parent_script = parent_script.then(Reply::text("thanks for the second reply"));
     }
     let mut root = frontend_root(parent_script, Trunk::Converses);
-    let child = testkit::forked_child(&root, "helper", "`inherit");
+    let mut child = testkit::forked_child(&root, "helper", "`inherit");
     set_provider(
-        &child,
+        &mut child,
         scripted(
             "test-model",
             Script::new()
@@ -452,8 +531,13 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
     let (emit, child_feed) = crate::bus::dummy_emitter();
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     let host = testkit::host(root);
-    let root_id = host.roots()[0].id();
-    host.roots()[0].steer("first".into()).unwrap();
+    let root_handle = host
+        .fleet()
+        .registry
+        .get(host.roots()[0])
+        .expect("a live root");
+    let root_id = root_handle.id();
+    root_handle.steer("first".into()).unwrap();
     receive_until(&host, |signal| {
         matches!(signal,
             Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents)) if *id == root_id
@@ -465,7 +549,7 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
         helper.status().report,
         Some(ChildStatus::Replied(FOValue::Int { value: 1 }))
     );
-    host.roots()[0].steer("follow up".into()).unwrap();
+    root_handle.steer("follow up".into()).unwrap();
     wait_settled(&host);
     assert_eq!(
         helper.status().report,

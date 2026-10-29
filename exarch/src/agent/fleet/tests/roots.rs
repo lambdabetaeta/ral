@@ -17,7 +17,7 @@ fn fleet_end_ends_every_agent_and_future_roots_are_born_cancelled() {
     let root = agent(&fleet, "root", None);
     let child = agent(&fleet, "child", Some(&root));
     let other = agent(&fleet, "other", None);
-    fleet.end(CancelCause::Terminated);
+    fleet.registry.end(CancelCause::Terminated);
     for owner in [&root, &child, &other] {
         assert!(!owner.is_live());
         assert_eq!(owner.mailbox.life().cause(), Some(CancelCause::Terminated));
@@ -25,12 +25,12 @@ fn fleet_end_ends_every_agent_and_future_roots_are_born_cancelled() {
     let late = agent(&fleet, "late", None);
     assert!(!late.is_live());
     assert_eq!(late.mailbox.life().cause(), Some(CancelCause::Terminated));
-    assert!(fleet.live().is_empty());
-    assert!(fleet.roots().is_empty());
-    assert!(fleet.resolve("late").is_none());
-    assert!(!fleet.is_empty(), "ending is not teardown");
+    assert!(fleet.registry.live().is_empty());
+    assert!(fleet.registry.roots().is_empty());
+    assert!(fleet.registry.resolve("late").is_none());
+    assert!(!fleet.registry.is_empty(), "ending is not teardown");
     drop((root, child, other, late));
-    assert!(fleet.is_empty());
+    assert!(fleet.registry.is_empty());
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn joining_roots_collects_each_failure_and_drains_only_once() {
     fleet.adopt_root(Joined::new(std::thread::spawn(|| {
         panic!("root panic");
     })));
-    fleet.end(CancelCause::Cancelled);
+    fleet.registry.end(CancelCause::Cancelled);
     assert_eq!(
         fleet.join_roots(),
         [
@@ -73,10 +73,9 @@ fn joining_waits_for_a_root_after_its_last_name_leaves() {
         }
     })));
     departed.recv_timeout(TIMEOUT).unwrap();
-    assert!(fleet.is_empty());
+    assert!(fleet.registry.is_empty());
     assert!(!retained.is_live());
-    assert!(!fleet.is_finished());
-    fleet.end(CancelCause::Cancelled);
+    fleet.registry.end(CancelCause::Cancelled);
     let (done, finished) = mpsc::channel();
     std::thread::scope(|scope| {
         let joining = scope.spawn(|| {
@@ -99,7 +98,7 @@ fn joining_waits_for_a_root_after_its_last_name_leaves() {
         assert_eq!(finished.recv_timeout(TIMEOUT).unwrap(), ["late teardown"]);
         joining.join().unwrap();
     });
-    assert!(fleet.is_finished());
+    assert_eq!(Arc::strong_count(&fleet), 1);
 }
 
 #[test]
@@ -116,7 +115,7 @@ fn joining_roots_also_joins_a_root_adopted_during_the_join() {
             failures: vec!["initial root".into()],
         }
     })));
-    fleet.end(CancelCause::Cancelled);
+    fleet.registry.end(CancelCause::Cancelled);
     std::thread::scope(|scope| {
         let joining = scope.spawn(|| fleet.join_roots());
         assert!(
@@ -135,19 +134,14 @@ fn joining_roots_also_joins_a_root_adopted_during_the_join() {
 }
 
 #[test]
-fn finished_observation_retains_root_teardown_failures_for_the_joiner() {
+fn joining_roots_preserves_teardown_failures() {
     let fleet = Fleet::for_test();
-    let name = fleet.name("building").unwrap();
-    assert!(!fleet.is_finished());
-    drop(name);
     fleet.adopt_root(Joined::new(std::thread::spawn(|| Teardown {
         failures: vec!["retained failure".into()],
     })));
-    assert!(eventually(TIMEOUT, || fleet.is_finished().then_some(())).is_some());
-    assert!(fleet.is_finished());
-    assert_eq!(fleet.roots.lock_ignore_poison().len(), 1);
-    fleet.end(CancelCause::Cancelled);
+    fleet.registry.end(CancelCause::Cancelled);
     assert_eq!(fleet.join_roots(), ["retained failure"]);
+    assert_eq!(Arc::strong_count(&fleet), 1);
 }
 
 #[test]
@@ -160,17 +154,17 @@ fn a_launched_root_releases_its_name_and_announces_death_once() {
         name: handle.0.name.clone(),
         parent: None,
         resumed: None,
-        recorder: root.recorder(),
+        reader: root.recorder().reader(),
     };
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, handle.id());
     let thread = root.launch(born, None, &emit).expect("a root thread");
     fleet.adopt_root(thread);
-    fleet.end(CancelCause::Cancelled);
+    fleet.registry.end(CancelCause::Cancelled);
     assert_eq!(fleet.join_roots(), Vec::<String>::new());
-    assert!(fleet.is_empty());
-    assert!(fleet.resolve(&handle.0.name).is_none());
-    assert!(fleet.name(&handle.0.name).is_ok());
+    assert!(fleet.registry.is_empty());
+    assert!(fleet.registry.resolve(&handle.0.name).is_none());
+    assert!(fleet.registry.name(&handle.0.name).is_ok());
     let mut deaths = 0;
     while let Ok(signal) = rx.try_recv() {
         if matches!(signal, Signal::Transient(id, Transient::Died { .. }) if id == handle.id()) {

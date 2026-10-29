@@ -53,6 +53,7 @@ fn with_fleet_desk<R>(
     let mut owner = Loanable::new(Body {
         log: fresh_log(),
         state: State {
+            provider: Arc::new(Provider::scripted("test-model", Script::new())),
             nursery: Nursery::default(),
             reply: None,
             owed: false,

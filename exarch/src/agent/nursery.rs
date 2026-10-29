@@ -65,13 +65,6 @@ impl<T> Joined<T> {
         Self(Some(thread))
     }
 
-    pub(crate) fn is_finished(&self) -> bool {
-        self.0
-            .as_ref()
-            .expect("a thread is joined once")
-            .is_finished()
-    }
-
     pub(crate) fn join(mut self) -> std::thread::Result<T> {
         self.0.take().expect("a thread is joined once").join()
     }

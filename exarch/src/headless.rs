@@ -7,9 +7,9 @@
 //! record at the seam, through [`crate::record`].
 
 use crate::SessionInfo;
-use crate::bus::Sink;
 use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::host::Host;
+use crate::port::{Signal, Sink, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
 use crate::record::fault::Remedy;
@@ -41,7 +41,7 @@ pub enum OutputFormat {
 pub struct Headless<'a> {
     out: &'a mut (dyn Write + Send),
     err: &'a mut (dyn Write + Send),
-    /// Fleet usage is read once from the host, never added by the sink.
+    /// Fleet usage is read once from the port, never added by the sink.
     usage: Usage,
     root_id: AgentId,
     started: Instant,
@@ -245,7 +245,7 @@ impl Sink for Headless<'_> {
             Transient::Died { failures } => {
                 self.panicked |= failures
                     .iter()
-                    .any(|failure| failure.starts_with(crate::bus::WORKER_PANIC_PREFIX));
+                    .any(|failure| failure.starts_with(WORKER_PANIC_PREFIX));
                 if id == self.root_id {
                     self.terminal_failures.clone_from(failures);
                     self.ended = true;
@@ -341,7 +341,7 @@ impl Headless<'_> {
                 };
             }
             K::Error { text } => {
-                if text.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
+                if text.starts_with(WORKER_PANIC_PREFIX) {
                     self.panicked = true;
                 }
                 let _ = writeln!(self.err, "error: {text}");
@@ -480,9 +480,14 @@ pub fn run(
         p.model(),
         info.base
     );
-    let root = &host.roots()[0];
-    let mut headless = Headless::new(root.id(), &mut stdout, &mut stderr);
-    root.steer(prompt)
+    let root = host.roots()[0];
+    let log_dir = match host.feed().recv() {
+        Ok(Signal::Born(id, born)) if id == root => born.log_dir,
+        _ => return Err("the first signal of a run was not its root's birth".into()),
+    };
+    let port = host.port();
+    let mut headless = Headless::new(root, &mut stdout, &mut stderr);
+    port.submit(root, prompt)
         .map_err(|_| "the agent ended before it could take the prompt")?;
     while !headless.finished() {
         match host.feed().recv_timeout(POLL) {
@@ -492,7 +497,7 @@ pub fn run(
         }
     }
     let mut r = headless.verdict();
-    headless.usage = host.usage();
+    headless.usage = port.usage();
     let elapsed = headless.started.elapsed();
     // A write failure here (e.g. a closed pipe) must not report as the clean
     // success `r` would otherwise carry — text and JSON both project the same
@@ -516,7 +521,7 @@ pub fn run(
     {
         r = Err(format!("writing reply: {e}"));
     }
-    let _ = writeln!(headless.err, "Agent log: {}", root.log_dir());
+    let _ = writeln!(headless.err, "Agent log: {log_dir}");
     let _ = writeln!(
         headless.err,
         "[done] {} turns · {:.1}s · {}",

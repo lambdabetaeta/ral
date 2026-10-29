@@ -59,14 +59,10 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     })
 }
 
-/// Sentinel `cmd` for a call that did not parse.  `tui::app` renders no
-/// block for it — it exists only as the boundary its error result attaches to.
-pub(crate) const INVALID_INPUT: &str = "<invalid input>";
-
 /// Rail header and error block for a malformed call, and the result to commit.
 fn invalid_input(id: String, reason: &str, session: &Agent) -> SessionToolResult {
     let msg = input_error(reason);
-    if let Ok(call) = record_call(session, INVALID_INPUT.to_string(), None) {
+    if let Ok(call) = record_call(session, crate::record::INVALID_INPUT.to_string(), None) {
         record_result(session, &msg, true, call);
     }
     SessionToolResult { id, content: msg }

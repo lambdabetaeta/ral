@@ -1,7 +1,6 @@
 use super::*;
 use crate::agent::testkit::{self, ral_call, scripted, set_provider};
 use crate::agent::{Agent, Trunk};
-use crate::bus::Signal;
 use crate::provider::scripted::{Reply, Script};
 use crate::record::{Commit, Display, NonEmpty, Protocol};
 use std::time::Duration;
@@ -12,8 +11,8 @@ mod late_failure;
 const WAIT: Duration = Duration::from_secs(5);
 
 fn frontend_root(script: Script, trunk: Trunk) -> Agent {
-    let root = testkit::trunk(trunk);
-    set_provider(&root, scripted("test-model", script));
+    let mut root = testkit::trunk(trunk);
+    set_provider(&mut root, scripted("test-model", script));
     root
 }
 
@@ -73,7 +72,7 @@ fn has_fact(signal: &Signal, id: AgentId, predicate: impl Fn(&Record) -> bool) -
 }
 
 fn wait_settled(host: &Host) -> Vec<Signal> {
-    let root = host.roots()[0].id();
+    let root = host.roots()[0];
     receive_until(host, |signal| {
         has_fact(signal, root, |record| {
             matches!(record, Record::Forensic(Forensic::JobSettled { .. }))
@@ -82,11 +81,12 @@ fn wait_settled(host: &Host) -> Vec<Signal> {
 }
 
 fn wait_ready(host: &Host) {
-    let root = host.roots()[0].id();
-    receive_until(host, |signal| {
-        matches!(signal, Signal::Transient(id, Transient::State(crate::record::AgentState::Ready))
-            if *id == root)
-    });
+    let deadline = Instant::now() + WAIT;
+    // Leave both Born and Ready for the frontend.
+    while host.feed().depth() < 2 {
+        assert!(Instant::now() < deadline, "root did not announce readiness");
+        std::thread::yield_now();
+    }
 }
 
 fn status_signal(id: AgentId, status: ChildStatus) -> Signal {
@@ -112,7 +112,7 @@ fn recovered_worker_panic_reports_error_not_success() {
         Commit::placeholder(
             1,
             NonEmpty::one(Record::Forensic(Forensic::Error {
-                text: format!("{}boom", crate::bus::WORKER_PANIC_PREFIX),
+                text: format!("{WORKER_PANIC_PREFIX}boom"),
             })),
         ),
     ));
@@ -343,7 +343,7 @@ fn helper_signals_never_finish_the_frontend() {
     let root = AgentId::new(1);
     let helper = AgentId::new(2);
     let fact = |record| Signal::Commit(helper, Commit::placeholder(1, NonEmpty::one(record)));
-    let panic_text = format!("{}helper panic", crate::bus::WORKER_PANIC_PREFIX);
+    let panic_text = format!("{WORKER_PANIC_PREFIX}helper panic");
     let cases = [
         (
             fact(Record::Display(Display::Card {
@@ -425,7 +425,7 @@ fn root_terminal_panic_is_the_verdict_and_json_panic_reason() {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut headless = Headless::new(root, &mut out, &mut err);
-    let failure = format!("{}whole owner", crate::bus::WORKER_PANIC_PREFIX);
+    let failure = format!("{WORKER_PANIC_PREFIX}whole owner");
     headless.accept(Signal::Transient(
         root,
         Transient::Died {

@@ -13,11 +13,11 @@ pub(crate) fn workshop(tag: &str) -> tempfile::TempDir {
 /// A gated root over the identity engine; the factory is the machine's, when it has one.
 pub(crate) fn scripted_host(
     run_dir: &ral_core::own::OwnDir,
-    factory: Option<std::sync::Arc<dyn exarch::agent::Factory>>,
+    factory: Option<std::sync::Arc<dyn exarch::host::Factory>>,
     script: exarch::provider::scripted::Script,
 ) -> exarch::host::Host {
-    use exarch::agent::{Admission, RootConfig, RootEngine, Trunk, fleet::HELPER_IDLE};
     use exarch::app::{SYNOD, Scratch};
+    use exarch::host::{Admission, HELPER_IDLE, RootConfig, RootEngine, Trunk};
     use exarch::provider::{Bureau, Provider, Toolset};
     use std::sync::Arc;
 
@@ -34,7 +34,7 @@ pub(crate) fn scripted_host(
         fuel: 0,
         search: false,
         factory,
-        bureau: Arc::new(Bureau::Scripted),
+        bureau: Arc::new(Bureau::scripted([])),
         roles: exarch::provider::roles::Roles::default(),
     };
     let engine = RootEngine::Identity {

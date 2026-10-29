@@ -123,9 +123,10 @@ pub(crate) enum Source {
     Read,
     Rewrite,
     Surface,
+    Model,
 }
 impl Source {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::User,
         Self::Schedule,
         Self::Agent,
@@ -133,6 +134,7 @@ impl Source {
         Self::Read,
         Self::Rewrite,
         Self::Surface,
+        Self::Model,
     ];
     pub(crate) fn coalesces(self) -> bool {
         matches!(self, Self::User | Self::Schedule)
@@ -148,6 +150,7 @@ impl fmt::Display for Source {
             Self::Read => "read",
             Self::Rewrite => "rewrite",
             Self::Surface => "surface",
+            Self::Model => "model",
         })
     }
 }

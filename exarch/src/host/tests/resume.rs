@@ -1,18 +1,16 @@
-#![allow(clippy::disallowed_methods, reason = "test code")]
-
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
-use exarch::agent::fleet::HELPER_IDLE;
-use exarch::agent::outcome::Outcome;
-use exarch::agent::{Admission, Agent, RootConfig, RootEngine, Trunk};
-use exarch::app::{EXARCH, Scratch};
-use exarch::bus::{Emitter, Signal, channel};
-use exarch::host::Host;
-use exarch::provider::Provider;
-use exarch::provider::Toolset;
-use exarch::provider::scripted::{Reply, Script};
-use exarch::record::{self, Blocks, RECORD, Refusal, View, Voice};
+use crate::agent::fleet::HELPER_IDLE;
+use crate::agent::outcome::Outcome;
+use crate::agent::{Admission, Agent, RootConfig, RootEngine, Trunk};
+use crate::app::{EXARCH, Scratch};
+use crate::bus::{Emitter, Signal, channel};
+use crate::host::Host;
+use crate::provider::Provider;
+use crate::provider::Toolset;
+use crate::provider::scripted::{Reply, Script};
+use crate::record::{self, Blocks, RECORD, Refusal, View, Voice};
 use ral_core::own::OwnDir;
 use ral_core::path::XdgKind;
 use ral_core::process::DurableRoot;
@@ -20,8 +18,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-
-exarch::pre_main_ctor!();
 
 /// Set in the scripted child's environment, which is what makes
 /// `resume_child` act: run bare, it does nothing.
@@ -79,8 +75,8 @@ fn root_config(run_dir: &OwnDir) -> RootConfig {
         fuel: 0,
         search: true,
         factory: None,
-        bureau: Arc::new(exarch::provider::Bureau::Scripted),
-        roles: exarch::provider::roles::Roles::default(),
+        bureau: Arc::new(crate::provider::Bureau::scripted([])),
+        roles: crate::provider::roles::Roles::default(),
     }
 }
 
@@ -106,7 +102,7 @@ fn crashed_run() -> (ral_core::own::TestDir, OwnDir) {
         .expect("the child's run directory");
     let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .arg("--exact")
-        .arg("resume_child")
+        .arg("host::tests::resume::resume_child")
         .arg("--nocapture")
         .env("XDG_STATE_HOME", state.path())
         .env(CHILD_VAR, "1")
@@ -210,7 +206,9 @@ fn the_host_resumes_a_crashed_run_and_carries_on() {
     let [root] = host.roots() else {
         panic!("one open session, got {}", host.roots().len())
     };
-    root.steer("continue after the crash".into()).unwrap();
+    host.port()
+        .submit(*root, "continue after the crash".into())
+        .unwrap();
 
     let (mut resumed, mut answered) = (None, false);
     while !answered {
@@ -219,8 +217,8 @@ fn the_host_resumes_a_crashed_run_and_carries_on() {
             .recv_timeout(Duration::from_secs(10))
             .expect("the resumed root settles its job")
         {
-            Signal::Born(id, born) if id == root.id() => resumed = born.resumed,
-            Signal::Commit(id, commit) if id == root.id() => {
+            Signal::Born(id, born) if id == *root => resumed = born.resumed,
+            Signal::Commit(id, commit) if id == *root => {
                 answered = commit.records().iter().any(|record| {
                     matches!(record.value(), record::Record::Display(record::Display::Answer { text })
                         if text == "continued")
@@ -298,7 +296,7 @@ fn resume_child() {
     drive(&mut session, &provider, "before the kill");
 
     // The first exchange spent ids 1 and 2, so the next prompt is 3.
-    let record = exarch::record::Record::Protocol(exarch::record::Protocol::UserPrompt {
+    let record = crate::record::Record::Protocol(crate::record::Protocol::UserPrompt {
         turn: 3,
         text: "crash prompt".into(),
         voice: Voice::Human,

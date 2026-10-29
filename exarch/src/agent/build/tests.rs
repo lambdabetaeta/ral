@@ -24,7 +24,7 @@ fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
         fuel,
         search: true,
         factory: None,
-        bureau: Arc::new(crate::provider::Bureau::Scripted),
+        bureau: Arc::new(crate::provider::Bureau::scripted([])),
         roles: crate::provider::roles::Roles::default(),
     }
 }
@@ -79,14 +79,14 @@ fn fork_inherits_its_parents_search_reach() {
 }
 
 #[test]
-fn fork_seeds_its_own_provider_handle() {
-    let parent = Agent::for_test("system").unwrap();
-    set_provider(&parent, scripted("p-a", Script::new()));
+fn fork_inherits_its_provider_independently_of_later_parent_changes() {
+    let mut parent = Agent::for_test("system").unwrap();
+    set_provider(&mut parent, scripted("p-a", Script::new()));
     let child = parent.fork().unwrap();
-    assert_eq!(child.handle.current_provider().model(), "p-a");
-    set_provider(&parent, scripted("p-b", Script::new()));
-    assert_eq!(parent.handle.current_provider().model(), "p-b");
-    assert_eq!(child.handle.current_provider().model(), "p-a");
+    assert_eq!(child.body.state.provider.model(), "p-a");
+    set_provider(&mut parent, scripted("p-b", Script::new()));
+    assert_eq!(parent.body.state.provider.model(), "p-b");
+    assert_eq!(child.body.state.provider.model(), "p-a");
 }
 
 #[test]

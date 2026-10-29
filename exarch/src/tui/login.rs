@@ -502,10 +502,14 @@ fn apply_login(
             return;
         }
     };
+    note_login(app, &id, &label, replaced);
+}
+
+fn note_login(app: &mut App, id: &identity::AccountId, label: &str, replaced: bool) {
     let already_active = app
         .tabs
-        .focused_agent()
-        .is_some_and(|agent| agent.current_provider().account().id == id);
+        .focused_row()
+        .is_some_and(|row| row.pick.choice.account.id == *id);
     let action = if replaced {
         "Updated the login for"
     } else {
@@ -517,9 +521,7 @@ fn apply_login(
         "; run /model to use it"
     };
     let text = format!("[{action} {label}{next}]");
-    app.tabs
-        .focused_recorder()
-        .emit_or_end(crate::record::Forensic::SystemNote { text });
+    app.push_note(app.tabs.focused(), &text);
 }
 
 #[cfg(test)]
@@ -591,6 +593,48 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn an_admitted_login_is_visible_chrome_without_appending_to_the_agents_record() {
+        use crate::agent::testkit;
+        use crate::host::Trunk;
+        use crate::record::RECORD;
+        use crate::tui::app::tests::{app_for_host, ctx, text};
+        use crossterm::event::{KeyEvent, KeyModifiers};
+
+        let admitted = identity::Account::login(Login::Codex, "tui-login", "person@example.test");
+        let label = identity::label(&admitted, &[]);
+        let host = testkit::host(testkit::trunk(Trunk::Converses));
+        let mut app = app_for_host(&host);
+        let id = app.tabs.focused();
+        let log = host
+            .run_dir()
+            .dir("sessions")
+            .unwrap()
+            .dir(&id.to_string())
+            .unwrap();
+        let before = log.read(RECORD).unwrap();
+        app.prompt_state.set_prompt("/login");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx());
+        assert!(matches!(app.overlay.take(), Some(Overlay::Login(_))));
+
+        // Admission is provider-owned; exercise its successful frontend continuation.
+        note_login(&mut app, &admitted.id, &label, false);
+
+        let visible = text(&mut app, id)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(visible.contains("Signed in to openai-codex"), "{visible}");
+        assert!(visible.contains("person@example.test"), "{visible}");
+        assert!(visible.contains("run /model to use it"), "{visible}");
+        assert_eq!(
+            log.read(RECORD).unwrap(),
+            before,
+            "login notes are not agent-authored history"
+        );
+        assert_eq!(host.end(), [] as [String; 0]);
     }
 
     #[test]

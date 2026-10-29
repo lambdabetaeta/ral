@@ -352,6 +352,7 @@ fn a_model_change_carries_its_window_and_a_bare_one_clears_it() {
         label: "p".into(),
         service: "s".into(),
         account: "a".into(),
+        via: None,
     };
     let mut memo = Blocks::default();
     let _ = memo.step_forensic(Seq::new(1, 0), &change(Some(200_000)));

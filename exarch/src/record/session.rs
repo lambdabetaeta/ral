@@ -580,13 +580,6 @@ impl AgentLog {
         Ok(())
     }
 
-    /// The span a forced eviction would take to spend no more
-    /// than `keep_budget_bytes` on what stays; `None` when nothing is old
-    /// enough to shed.
-    pub fn plan_forced_eviction(&self, keep_budget_bytes: usize) -> Option<Span> {
-        self.context.plan_forced_eviction(keep_budget_bytes)
-    }
-
     /// Take the run `span` out of the context, leaving one residue standing
     /// for it with `note`. Its row on screen is the caller's to author.
     ///

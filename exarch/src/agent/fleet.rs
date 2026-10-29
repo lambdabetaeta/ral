@@ -6,6 +6,7 @@ use crate::agent::nursery::{Joined, Teardown};
 use crate::agent::{Admission, AgentHandle, EngineLost, Factory, Role, Trunk};
 use crate::enquiry::check_name;
 use crate::provider::{Bureau, Toolset, roles::Roles};
+use crate::record::AgentId;
 use ral_core::carrier::Severed;
 use ral_core::own::OwnDir;
 #[cfg(test)]
@@ -13,7 +14,7 @@ use ral_core::own::TestDir;
 use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::sync::LockExt;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt, io, mem,
     sync::{Arc, Mutex, Weak},
     time::Duration,
@@ -93,7 +94,7 @@ impl Launch {
             tools: Toolset::offered(false),
             disk_warn_bytes: None,
             factory: None,
-            bureau: Arc::new(Bureau::Scripted),
+            bureau: Arc::new(Bureau::scripted([])),
             roles: Roles::default(),
             system: Arc::from(""),
             index: BuiltinIndex::resolve(
@@ -111,17 +112,29 @@ impl Launch {
         }
     }
 }
-pub struct Fleet {
+/// The fleet's root scope and its named agents: all a port may reach (P4).
+pub(crate) struct Registry {
     pub(crate) root: DurableRoot,
+    directory: Mutex<Directory>,
+}
+
+/// Reserved names, each bound to its agent's id once born; agents by id.
+#[derive(Default)]
+struct Directory {
+    names: HashMap<Arc<str>, Option<AgentId>>,
+    agents: BTreeMap<AgentId, AgentHandle>,
+}
+
+pub(crate) struct Fleet {
+    pub(crate) registry: Arc<Registry>,
     pub(crate) launch: Launch,
-    names: Mutex<HashMap<Arc<str>, Option<AgentHandle>>>,
     roots: Mutex<Vec<Joined<Teardown>>>,
 }
 
 /// A reserved directory name, removed when its owner drops.
 #[must_use = "a name is reserved only until it is dropped"]
 pub(crate) struct Name {
-    fleet: Weak<Fleet>,
+    registry: Weak<Registry>,
     name: Arc<str>,
 }
 impl Name {
@@ -131,17 +144,22 @@ impl Name {
 }
 impl Drop for Name {
     fn drop(&mut self) {
-        if let Some(fleet) = self.fleet.upgrade() {
-            fleet.names.lock_ignore_poison().remove(&self.name);
+        if let Some(registry) = self.registry.upgrade() {
+            let mut directory = registry.directory.lock_ignore_poison();
+            if let Some(Some(id)) = directory.names.remove(&self.name) {
+                directory.agents.remove(&id);
+            }
         }
     }
 }
 impl Fleet {
     pub(crate) fn new(launch: Launch) -> Arc<Self> {
         Arc::new(Self {
-            root: DurableRoot::default(),
+            registry: Arc::new(Registry {
+                root: DurableRoot::default(),
+                directory: Mutex::default(),
+            }),
             launch,
-            names: Mutex::default(),
             roots: Mutex::default(),
         })
     }
@@ -149,61 +167,8 @@ impl Fleet {
     pub(crate) fn for_test() -> Arc<Self> {
         Self::new(Launch::for_test())
     }
-    pub(crate) fn name(self: &Arc<Self>, name: &str) -> Result<Name, Unborn> {
-        check_name(name).map_err(Unborn::NameMalformed)?;
-        let mut names = self.names.lock_ignore_poison();
-        if names.contains_key(name) {
-            return Err(Unborn::NameTaken(name.to_string()));
-        }
-        let name: Arc<str> = name.into();
-        names.insert(name.clone(), None);
-        drop(names);
-        Ok(Name {
-            fleet: Arc::downgrade(self),
-            name,
-        })
-    }
-    pub(crate) fn bind(&self, name: &Name, handle: &AgentHandle) {
-        let mut names = self.names.lock_ignore_poison();
-        let reserved = names
-            .get_mut(&name.name)
-            .expect("a name is reserved before binding");
-        assert!(reserved.is_none(), "a reserved name is bound once");
-        *reserved = Some(handle.clone());
-        drop(names);
-    }
-    pub fn resolve(&self, name: &str) -> Option<AgentHandle> {
-        let handle = self.names.lock_ignore_poison().get(name)?.clone()?;
-        handle.is_live().then_some(handle)
-    }
-    pub(crate) fn live(&self) -> Vec<AgentHandle> {
-        let mut handles = self.handles();
-        handles.retain(AgentHandle::is_live);
-        handles.sort_by_key(AgentHandle::id);
-        handles
-    }
-    fn handles(&self) -> Vec<AgentHandle> {
-        self.names
-            .lock_ignore_poison()
-            .values()
-            .flatten()
-            .cloned()
-            .collect()
-    }
-    pub(crate) fn roots(&self) -> Vec<AgentHandle> {
-        self.live()
-            .into_iter()
-            .filter(AgentHandle::is_root)
-            .collect()
-    }
     pub(crate) fn adopt_root(&self, thread: Joined<Teardown>) {
         self.roots.lock_ignore_poison().push(thread);
-    }
-    pub fn end(&self, cause: CancelCause) {
-        self.root.cancel(cause);
-        for handle in self.handles() {
-            handle.0.address.end(cause);
-        }
     }
     pub(crate) fn join_roots(&self) -> Vec<String> {
         let mut failures = Vec::new();
@@ -217,16 +182,75 @@ impl Fleet {
             }
         }
     }
-    pub fn is_empty(&self) -> bool {
-        self.names.lock_ignore_poison().is_empty()
+}
+impl Registry {
+    pub(crate) fn name(self: &Arc<Self>, name: &str) -> Result<Name, Unborn> {
+        check_name(name).map_err(Unborn::NameMalformed)?;
+        let mut directory = self.directory.lock_ignore_poison();
+        if directory.names.contains_key(name) {
+            return Err(Unborn::NameTaken(name.to_string()));
+        }
+        let name: Arc<str> = name.into();
+        directory.names.insert(name.clone(), None);
+        drop(directory);
+        Ok(Name {
+            registry: Arc::downgrade(self),
+            name,
+        })
     }
-    pub(crate) fn is_finished(&self) -> bool {
-        self.is_empty()
-            && self
-                .roots
-                .lock_ignore_poison()
-                .iter()
-                .all(Joined::is_finished)
+    pub(crate) fn bind(&self, name: &Name, handle: &AgentHandle) {
+        let mut directory = self.directory.lock_ignore_poison();
+        let reserved = directory
+            .names
+            .get_mut(&name.name)
+            .expect("a name is reserved before binding");
+        assert!(reserved.is_none(), "a reserved name is bound once");
+        *reserved = Some(handle.id());
+        directory.agents.insert(handle.id(), handle.clone());
+        drop(directory);
+    }
+    pub(crate) fn resolve(&self, name: &str) -> Option<AgentHandle> {
+        let directory = self.directory.lock_ignore_poison();
+        let id = (*directory.names.get(name)?)?;
+        directory.agents.get(&id).filter(|h| h.is_live()).cloned()
+    }
+    pub(crate) fn get(&self, id: AgentId) -> Option<AgentHandle> {
+        self.directory
+            .lock_ignore_poison()
+            .agents
+            .get(&id)
+            .filter(|h| h.is_live())
+            .cloned()
+    }
+    /// The live agents, in id order.
+    pub(crate) fn live(&self) -> Vec<AgentHandle> {
+        let mut handles = self.handles();
+        handles.retain(AgentHandle::is_live);
+        handles
+    }
+    fn handles(&self) -> Vec<AgentHandle> {
+        self.directory
+            .lock_ignore_poison()
+            .agents
+            .values()
+            .cloned()
+            .collect()
+    }
+    pub(crate) fn roots(&self) -> Vec<AgentHandle> {
+        self.live()
+            .into_iter()
+            .filter(AgentHandle::is_root)
+            .collect()
+    }
+    pub(crate) fn end(&self, cause: CancelCause) {
+        self.root.cancel(cause);
+        for handle in self.handles() {
+            handle.0.address.end(cause);
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.directory.lock_ignore_poison().names.is_empty()
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

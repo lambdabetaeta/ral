@@ -3,7 +3,7 @@
 //! since only this thread may read them.
 
 use super::DEMOTE_IDLE;
-use crate::agent::resources::{Policy, ProbeRow};
+use crate::card::resources::{Policy, ProbeRow};
 
 /// The probed agent's scrollback: its figures beside the one window that bounds
 /// them all, in one struct so a figure cannot drift from its bound.
@@ -35,7 +35,7 @@ pub(super) struct ViewFigures {
 /// The presentation bus's two probe figures.
 ///
 /// Neither carries a cap: the transport's one enforced number is a
-/// *per-entry* text cap (`bus::MERGE_TEXT_CAP`), a different axis from either
+/// *per-entry* text cap (`port::MERGE_TEXT_CAP`), a different axis from either
 /// aggregate, so it is named in `bus.bytes`'s note rather than faked into
 /// `cap`.
 #[derive(Clone, Copy)]
@@ -107,7 +107,7 @@ pub(super) fn frontend_rows(
             Policy::Evict,
             Some(format!(
                 "resident merged token/thinking/phase text; each run elides past {} KiB",
-                crate::bus::MERGE_TEXT_CAP / 1024
+                crate::port::MERGE_TEXT_CAP / 1024
             )),
         ),
         ProbeRow::new(

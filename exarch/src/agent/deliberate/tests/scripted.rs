@@ -1,7 +1,5 @@
-#![allow(clippy::disallowed_methods, reason = "test code")]
-
-//! End-to-end tests for [`exarch::agent::Agent::deliberate`] driven through
-//! a scripted provider backend (`exarch::provider::Provider::scripted`).
+//! End-to-end tests for [`crate::agent::Agent::deliberate`] driven through
+//! a scripted provider backend (`crate::provider::Provider::scripted`).
 //! This is the composition the protocol machine (`event.rs`) is exercised
 //! on an agent's own thread: `deliberate` renders the transcript, calls the
 //! provider, commits the reply, runs the tool batch, drains tool-boundary
@@ -13,15 +11,15 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::Agent;
-use exarch::agent::outcome::{Fault, Outcome};
-use exarch::bus::{Emitter, channel};
-use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{CutShort, Provider, ProviderError};
-use exarch::record::Recorded;
-use exarch::record::{AgentId, AgentState};
-use exarch::record::{Display, Forensic, Protocol, Record, Transient, Voice};
-use exarch::record::{EditAuthority, Residue};
+use crate::agent::Agent;
+use crate::agent::outcome::{Fault, Outcome};
+use crate::bus::{Emitter, channel};
+use crate::provider::scripted::{Reply, Script};
+use crate::provider::{CutShort, Provider, ProviderError};
+use crate::record::Recorded;
+use crate::record::{AgentId, AgentState};
+use crate::record::{Display, Forensic, Protocol, Record, Transient, Voice};
+use crate::record::{EditAuthority, Residue};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use ral_core::process::DurableRoot;
 use std::sync::Arc;
@@ -30,11 +28,6 @@ use std::sync::Arc;
 fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
 }
-
-// Mirror the binary's pre-`main` re-exec dispatch — helper re-exec dispatch,
-// then the OS-sandbox stage — before libtest sees the flags either would
-// reject; see [`exarch::pre_main_ctor!`].
-exarch::pre_main_ctor!();
 
 /// The drained result of one `deliberate` run: the outcome, every durable
 /// fact recorded, and every transient the worker emitted.
@@ -62,11 +55,11 @@ fn drive_deliberate(session: &mut Agent, provider: &Arc<Provider>, prompt: Optio
     let mut transients = Vec::new();
     for sig in rx {
         match sig {
-            exarch::bus::Signal::Commit(_, commit) => {
+            crate::bus::Signal::Commit(_, commit) => {
                 facts.extend(commit.into_records().into_iter().map(Recorded::into_value));
             }
-            exarch::bus::Signal::Transient(_, transient) => transients.push(transient),
-            exarch::bus::Signal::Born(..) => {}
+            crate::bus::Signal::Transient(_, transient) => transients.push(transient),
+            crate::bus::Signal::Born(..) => {}
         }
     }
     Drive {

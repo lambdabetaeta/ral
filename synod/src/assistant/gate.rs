@@ -1,7 +1,7 @@
 //! The gated job loop: each settled job is walked and certified before the next is released.
 
 use crate::wire::{JobId, WindowReport};
-use exarch::bus::{BusReceiver, Signal, Sink};
+use exarch::port::{BusReceiver, Signal, Sink};
 use exarch::record::{AgentId, Forensic, Record, Transient};
 use ral_core::carrier::Severed;
 use std::sync::mpsc::RecvTimeoutError;
@@ -291,18 +291,18 @@ mod tests {
                 .then(Reply::text("one"))
                 .then(Reply::text("two")),
         );
-        let root = host.roots()[0].clone();
-        root.steer("first".into()).expect("live root");
+        let (port, root) = (host.port(), host.roots()[0]);
+        port.submit(root, "first".into()).expect("live root");
         let log = Log::default();
-        let mut seat = FakeSeat::new(host.feed(), &log, || root.release());
-        seat.root = root.id();
+        let mut seat = FakeSeat::new(host.feed(), &log, || host.release(root));
+        seat.root = root;
         let mut stage = FakeStage::new(&log);
         let current = stage.current.clone();
-        let prompter = root.clone();
+        let prompter = port;
         // The second prompt arrives once the first job is reported; the second report ends the run.
         stage.after_done = Box::new(move |done| match done {
             1 => prompter
-                .steer("second".into())
+                .submit(root, "second".into())
                 .expect("a settled root takes a prompt"),
             _ => current.set(false),
         });
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn a_refused_first_release_fails_before_any_job_begins() {
-        let (_tx, rx) = exarch::bus::channel();
+        let (_tx, rx) = exarch::port::channel();
         let log = Log::default();
         let mut seat = FakeSeat::new(&rx, &log, || false);
         assert_eq!(
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn a_root_death_ends_quietly_only_when_the_window_has_moved_on() {
         for (current, expected) in [(true, Err(false)), (false, Ok(()))] {
-            let (tx, rx) = exarch::bus::channel();
+            let (tx, rx) = exarch::port::channel();
             let log = Log::default();
             let mut seat = FakeSeat::new(&rx, &log, || true);
             let stage = FakeStage::new(&log);
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn a_disconnected_feed_is_a_failure_while_the_window_is_current() {
-        let (tx, rx) = exarch::bus::channel();
+        let (tx, rx) = exarch::port::channel();
         drop(tx);
         let log = Log::default();
         let mut seat = FakeSeat::new(&rx, &log, || true);
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn failure_during_a_blocked_walk_is_seen_by_the_post_walk_snapshot() {
-        let (tx, rx) = exarch::bus::channel();
+        let (tx, rx) = exarch::port::channel();
         let root = AgentId::new(1);
         let helper = AgentId::new(2);
         assert!(

@@ -126,9 +126,9 @@ fn owner_drop_ends_the_tree_and_releases_names_without_handles_retaining_it() {
     assert!(!handle.is_live());
     assert!(!child.handle().is_live());
     assert!(!grandchild.handle().is_live());
-    assert!(fleet.name("main").is_ok());
+    assert!(fleet.registry.name("main").is_ok());
     drop((child, grandchild));
-    assert!(fleet.is_empty());
+    assert!(fleet.registry.is_empty());
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
         Some(Vec::new())
     );
     let (emit, rx) = crate::bus::dummy_emitter();
-    let provider = owner.handle().current_provider();
+    let provider = owner.body.state.provider.clone();
     let outcome = owner
         .deliberate(
             &exchange,

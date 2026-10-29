@@ -149,6 +149,10 @@ fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
         DurableRoot::default().child(),
         crate::record::Emitter::none(),
         Admission::Free,
+        crate::provider::Pick::of(&crate::provider::Provider::scripted(
+            "test-model",
+            crate::provider::scripted::Script::new(),
+        )),
     );
     engine.install(&mailbox.address(), 17);
     let host: Arc<dyn Host> = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
@@ -287,7 +291,7 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
             fuel: 0,
             search: true,
             factory: None,
-            bureau: Arc::new(Bureau::Scripted),
+            bureau: Arc::new(Bureau::scripted([])),
             roles: crate::provider::roles::Roles::default(),
         },
         RootEngine::Wire {

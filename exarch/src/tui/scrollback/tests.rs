@@ -1,11 +1,12 @@
 use super::*;
 use crate::card::{Card, Mark};
 use crate::record::{
-    BlockId, Display, Forensic, Locus, NonEmpty, Protocol, Record, Recorded, Seq, Verdict, Voice,
+    BlockId, Display, Emitter as Recorder, Forensic, Locus, NonEmpty, Protocol, Record, Recorded,
+    Seq, Verdict, Voice,
 };
 
 fn scrollback() -> Scrollback {
-    Scrollback::new(AgentSlot(0), Detail::Full, Recorder::none(), None)
+    Scrollback::new(AgentSlot(0), Detail::Full, Recorder::none().reader(), None)
 }
 
 fn rail_rows(rows: &[Row], glyph: &str) -> Vec<usize> {
@@ -515,7 +516,7 @@ fn a_late_mirror_catches_up_hears_nothing_twice_and_reads_past_a_gap() {
     emit("alpha");
     let rx = on_air(&recorder);
     emit("bravo");
-    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.clone(), None);
+    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.reader(), None);
     sb.catch_up();
     for rec in heard(&rx) {
         sb.commit(&rec);
@@ -546,7 +547,7 @@ fn a_late_mirror_catches_up_across_multi_record_commits() {
     let first = emit("alpha", &["bravo"]);
     let rx = on_air(&recorder);
     let second = emit("charlie", &["delta", "echo"]);
-    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.clone(), None);
+    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.reader(), None);
     sb.catch_up();
     sb.commit(&first);
     sb.commit(&second);
@@ -569,7 +570,7 @@ fn a_late_mirror_catches_up_across_multi_record_commits() {
     assert_eq!(sb.cursor.map(Cursor::next), Some(5));
     assert_eq!(heard(&rx).len(), 3);
 
-    let mut recalled = Scrollback::new(AgentSlot(0), Detail::Full, recorder, None);
+    let mut recalled = Scrollback::new(AgentSlot(0), Detail::Full, recorder.reader(), None);
     recalled.recall(first.bytes().end);
     let prefix = text(&mut recalled);
     assert!(
@@ -588,7 +589,7 @@ fn a_cleared_record_starts_the_mirror_over_and_keeps_the_cursor() {
     let rx = on_air(&recorder);
     let _recorded = recorder.emit(prompt("before")).expect("the log appends");
     let opening = Card(vec![Mark::heading("the session card")]);
-    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.clone(), Some(opening));
+    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.reader(), Some(opening));
     sb.catch_up();
     assert!(text(&mut sb).contains("before"));
     let _recorded = recorder.emit(Protocol::Cleared).expect("the log appends");

@@ -69,7 +69,7 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(PANIC_BUILTINS));
     let baseline_grant_depth = probe_count(&session, ral_core::test_access::grant_depth);
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new()
@@ -80,7 +80,7 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     );
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.handle().current_provider();
+    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &session.mailbox.life().child(),
         &provider,
@@ -246,7 +246,7 @@ fn panic_after_prune_does_not_resurrect_binding() {
     }
     assert!(!scope_has(&mut session, "panic_prune_x"));
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new()
@@ -258,7 +258,7 @@ fn panic_after_prune_does_not_resurrect_binding() {
                 .then(Reply::text("recovered")),
         ),
     );
-    let provider = session.handle().current_provider();
+    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &session.mailbox.life().child(),
         &provider,

@@ -147,34 +147,48 @@ fn external_editor_adoption_ends_browsing_and_discards_old_undo() {
 
 #[test]
 fn queued_recall_is_fresh_and_keeps_history_bookkeeping() {
-    let mut prompt = new(true);
-    let fleet = Fleet::for_test();
-    let agent = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
-    prompt.paste("submitted");
-    prompt.submit();
-    agent.steer("one".into()).unwrap();
-    // A non-user entry keeps the steering messages separate.
-    agent.post_command(Command::Read(Read::Resources));
-    agent.steer("two".into()).unwrap();
-    assert_eq!(agent.queued(), ["one", "/resources", "two"]);
-    assert!(prompt.edit_queued_prompt(|| agent.recall()));
-    assert_eq!(agent.queued(), ["/resources"]);
+    use crate::tui::app::tests::{app, ctx};
+
+    let (mut app, _rx, agent) = app();
+    app.prompt_state = new(true);
+    app.prompt_state.paste("submitted");
+    app.prompt_state.submit();
+    let port = app.tabs.port().clone();
+    port.submit(agent.id(), "one".into()).unwrap();
+    port.command(agent.id(), Command::Read(Read::Resources))
+        .unwrap();
+    port.submit(agent.id(), "two".into()).unwrap();
+    assert_eq!(
+        port.queued(agent.id()).unwrap(),
+        ["one", "/resources", "two"]
+    );
+
+    app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &ctx());
+
+    assert_eq!(port.queued(agent.id()).unwrap(), ["/resources"]);
+    let prompt = &mut app.prompt_state;
     assert_eq!(prompt.prompt_text(), "one\n\ntwo");
     assert!(prompt.editor.is_insert_mode());
     assert!(prompt.editor.at_end());
-    undo(&mut prompt);
+    undo(prompt);
     assert_eq!(prompt.prompt_text(), "one\n\ntwo");
     assert!(!prompt.history.is_browsing());
     assert_eq!(prompt.history.entries(), ["submitted"]);
-    agent.steer("waiting".into()).unwrap();
-    assert!(!prompt.edit_queued_prompt(|| panic!("a draft must guard recall")));
-    assert_eq!(agent.queued(), ["/resources", "waiting"]);
-    prompt.set_prompt("");
-    assert!(prompt.history_prev());
-    key(&mut prompt, KeyCode::Char('u'), KeyModifiers::CONTROL);
-    assert_eq!(prompt.prompt_text(), "");
-    assert!(!prompt.edit_queued_prompt(|| panic!("history must guard recall")));
-    assert_eq!(agent.queued(), ["/resources", "waiting"]);
+    // Undo left vi normal mode; return to insertion before testing draft guards.
+    key(prompt, KeyCode::Char('i'), KeyModifiers::NONE);
+    port.submit(agent.id(), "waiting".into()).unwrap();
+    app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &ctx());
+    assert_eq!(port.queued(agent.id()).unwrap(), ["/resources", "waiting"]);
+    app.prompt_state.set_prompt("");
+    assert!(app.prompt_state.history_prev());
+    key(
+        &mut app.prompt_state,
+        KeyCode::Char('u'),
+        KeyModifiers::CONTROL,
+    );
+    assert_eq!(app.prompt_state.prompt_text(), "");
+    app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &ctx());
+    assert_eq!(port.queued(agent.id()).unwrap(), ["/resources", "waiting"]);
 }
 
 #[test]

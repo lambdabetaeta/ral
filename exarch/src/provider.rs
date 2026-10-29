@@ -32,7 +32,7 @@ mod usage;
 pub mod via;
 mod wire;
 
-pub use bureau::{Bureau, Choice, Holdings};
+pub use bureau::{Bureau, Choice, Holdings, Pick};
 pub use error::{CancelSite, CutShort, Limit, ProviderError, Refusal};
 pub(crate) use error::{error_object, extract_url};
 pub use identity::{Account, AccountId, Auth, Billing, Login, Meter, Service, ServiceName};

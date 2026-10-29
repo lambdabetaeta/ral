@@ -23,7 +23,7 @@ fn begin_records_one_job_before_its_exchange_records_and_settles_the_same_id() {
         Record::Forensic(Forensic::SystemNote { text }),
         Record::Forensic(Forensic::JobSettled { job, stopped: false }),
     ] if text == "first exchange" && *job == id));
-    let (_, mut commits) = record.since(None).unwrap();
+    let (_, mut commits) = record.reader().since(None).unwrap();
     let opened = commits.next().unwrap().unwrap();
     assert_eq!(id, JobId::from(opened.number()));
 }

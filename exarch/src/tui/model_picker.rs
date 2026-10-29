@@ -3,7 +3,7 @@
 //!
 //! [`Picker`] is display and input only; this module, its one caller, reaches
 //! the [`Bureau`] holding the credentials, the model catalog, and the network
-//! seam, and turns a [`Pick`] into a live provider swap plus a saved
+//! seam, and posts a [`Pick`] to the agent. Landed switches save a
 //! [`state::State`]. [`super::login`] mirrors the split.
 
 use std::io;
@@ -11,14 +11,15 @@ use std::time::Duration;
 
 use crossterm::event::{Event as CtEvent, KeyEventKind, poll as ct_poll, read as ct_read};
 
-use crate::provider::identity::{self, Account};
+use crate::port::Command;
+use crate::provider::identity::Account;
 use crate::provider::listing::{Fetches, Listing};
 use crate::provider::models::{ModelSource, ProviderEndpoint};
-use crate::provider::{Bureau, Tuning, pricing, state};
-use crate::record::AgentId;
+use crate::provider::{Bureau, Pick, Tuning, pricing, state};
+use crate::record::{AgentId, Commit, Record};
 
 use super::app::{App, CommandCtx, Input, Overlay, input_of};
-use super::picker::{self, Pick, Picker};
+use super::picker::{self, Picker};
 use super::terminal::TerminalGuard;
 
 /// An open picker with the listing that fills it and the endpoint fetches in
@@ -104,8 +105,8 @@ pub(super) fn pick_model(app: &mut App, ctx: &CommandCtx<'_>) {
     let tab = app.tabs.focused();
     let tuning = app
         .tabs
-        .agent(tab)
-        .map(|agent| agent.current_provider().tuning().clone())
+        .focused_row()
+        .map(|row| row.pick.tuning)
         .unwrap_or_default();
     let Some(session) = open(ctx.bureau, ctx.bureau.available(), &tuning) else {
         return;
@@ -119,13 +120,13 @@ pub(super) fn input(
     tab: AgentId,
     input: &Input,
     app: &mut App,
-    ctx: &CommandCtx<'_>,
+    _ctx: &CommandCtx<'_>,
 ) -> bool {
     match input {
         Input::Cancel => false,
         Input::Key(code) => match s.picker.key(*code) {
             Some(pick) => {
-                apply_model_switch(app, ctx, tab, &pick);
+                apply_model_switch(app, tab, pick);
                 false
             }
             None => true,
@@ -178,55 +179,36 @@ pub fn choose(
     }
 }
 
-/// Rebuild the provider for `pick` and swap it into `tab`'s agent's
-/// handle, which its next turn reads; a failed persist leaves that switch
-/// standing. The switch reaches the trace as a [`Forensic::ModelChanged`] and
-/// the screen as the status bar's live label — never as transcript chatter;
-/// its own failures are view chrome.
-///
-/// [`Forensic::ModelChanged`]: crate::record::Forensic::ModelChanged
-fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &Pick) {
-    // Every failure below answers one gesture where the user is, so it lands on
-    // the focused tab — the persist too, whose file is project-wide but whose
-    // message is not.
-    let focused = app.tabs.focused();
-    let available = ctx.bureau.available();
-    // A tab that settled while the picker was open has no handle to swap.
-    let Some(agent) = app.tabs.agent(tab) else {
-        app.push_error(focused, "the agent you picked a model for has ended");
-        return;
-    };
-    let provider = agent.0.provider.clone();
-    // The token override is no part of the selection, so it rides across by hand.
-    let built = match ctx.bureau.build(
-        pick.choice.clone(),
-        &pick.tuning,
-        provider.current().max_tokens_override(),
-    ) {
-        Ok(built) => built,
-        Err(e) => {
-            app.push_error(focused, &e);
-            return;
-        }
-    };
-    let saved = state::State::of(&built, &available);
-    let context_window = built.context_window();
-    provider.swap(built);
-    let persisted = crate::app::EXARCH
-        .project(ctx.info.cwd.as_path())
-        .map_err(String::from)
-        .and_then(|project| state::save(&project, &saved));
-    if let Err(e) = persisted {
-        app.push_error(focused, &format!("could not persist selection: {e}"));
-    }
-    if let Some(sb) = app.tabs.scrollback(tab) {
-        sb.recorder()
-            .emit_or_end(crate::record::Forensic::ModelChanged {
-                model: pick.choice.model.clone(),
-                context_window,
-                label: identity::label(&pick.choice.account, &available),
-                service: pick.choice.account.service.name.as_str().to_string(),
-                account: pick.choice.account.id.as_str().to_string(),
-            });
+/// Ask the agent to switch; only a landed record persists the selection.
+fn apply_model_switch(app: &mut App, tab: AgentId, pick: Pick) {
+    if app.tabs.port().command(tab, Command::Model(pick)).is_err() {
+        app.push_error(
+            app.tabs.focused(),
+            "the agent you picked a model for has ended",
+        );
     }
 }
+
+/// A switch that landed is the selection the next launch opens on.
+pub(super) fn persist_landed(app: &mut App, commit: &Commit) {
+    for saved in commit.records().iter().filter_map(|r| match r.value() {
+        Record::Forensic(forensic) => forensic.switched_to(),
+        _ => None,
+    }) {
+        let persisted = app
+            .project
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|project| state::save(project, &saved));
+        if let Err(e) = persisted {
+            app.push_error(
+                app.tabs.focused(),
+                &format!("could not persist selection: {e}"),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests;

@@ -275,6 +275,7 @@ impl Agent {
         for drained in self.mailbox.drain() {
             match drained {
                 Drained::Read(read) => self.read(&read, emit),
+                Drained::Model(pick) => self.switch_model(pick),
                 Drained::Input(input) => {
                     if let Some(prompt) = self.admit(input) {
                         self.body.log.append_steering(prompt.text, prompt.voice)?;

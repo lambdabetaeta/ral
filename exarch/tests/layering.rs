@@ -10,7 +10,7 @@ type Graph = BTreeMap<String, BTreeSet<String>>;
 
 const SKIPPED: [&str; 2] = ["tests.rs", "testkit.rs"];
 
-const LAYERED: [(&str, &str); 11] = [
+const LAYERED: [(&str, &str); 16] = [
     ("provider", "record"),
     ("record", "bus"),
     ("bus", "agent"),
@@ -22,6 +22,11 @@ const LAYERED: [(&str, &str); 11] = [
     ("agent", "host"),
     ("host", "tui"),
     ("host", "headless"),
+    ("agent", "port"),
+    ("bus", "port"),
+    ("port", "host"),
+    ("port", "tui"),
+    ("port", "headless"),
 ];
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -111,10 +116,7 @@ fn path<'a>(g: &'a Graph, from: &'a str, to: &str) -> Option<Vec<&'a str>> {
     go(g, from, to, &mut BTreeSet::new())
 }
 
-/// Exarch's top-level modules form a DAG, layered as the pairs in `LAYERED` say.
-/// `docs/ral-wiki/invariants/exarch-is-a-dag.md` is the prose of this invariant.
-#[test]
-fn exarch_modules_form_a_dag() {
+fn graph() -> Graph {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     sources(&src, &mut files);
@@ -132,6 +134,14 @@ fn exarch_modules_form_a_dag() {
         graph.get_mut(&module).unwrap().extend(deps);
     }
 
+    graph
+}
+
+/// Exarch's top-level modules form a DAG, layered as the pairs in `LAYERED` say.
+/// `docs/ral-wiki/invariants/exarch-is-a-dag.md` is the prose of this invariant.
+#[test]
+fn exarch_modules_form_a_dag() {
+    let graph = graph();
     for (module, deps) in &graph {
         for dep in deps {
             if let Some(back) = path(&graph, dep, module) {
@@ -149,6 +159,22 @@ fn exarch_modules_form_a_dag() {
         );
         if let Some(p) = path(&graph, below, above) {
             panic!("`{below}` must sit below `{above}`, yet {}", p.join(" -> "));
+        }
+    }
+}
+
+#[test]
+fn frontends_reach_agents_through_the_port() {
+    let graph = graph();
+    for (m, forbidden) in [
+        ("tui", &["agent", "bus", "host"][..]),
+        ("headless", &["agent", "bus"][..]),
+    ] {
+        for d in forbidden {
+            assert!(
+                !graph[m].contains(*d),
+                "`{m}` names `{d}` directly: reach agents through `port`"
+            );
         }
     }
 }

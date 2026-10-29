@@ -10,7 +10,7 @@ use super::{
     not_recorded_refusal_turn,
 };
 use crate::provider::tools::{COMMAND, RAL_TOOL};
-use crate::record::log::Reader;
+use crate::record::log::LocusReader;
 use crate::record::{
     AgentId, GrepAnswer, GrepHit, Locus, Protocol, RECORD, Record, Recorded, Refusal, Role,
     TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
@@ -24,8 +24,8 @@ use std::path::PathBuf;
 
 /// One reader of session `source`'s record log under `sessions`: the model
 /// fold's one open of it.
-fn open_log(sessions: &OwnDir, source: AgentId) -> io::Result<Reader> {
-    Ok(Reader::new(
+fn open_log(sessions: &OwnDir, source: AgentId) -> io::Result<LocusReader> {
+    Ok(LocusReader::new(
         sessions.dir(&source.to_string())?.open(RECORD)?,
     ))
 }
@@ -35,7 +35,7 @@ fn record_name(sessions: &OwnDir, source: AgentId) -> PathBuf {
     sessions.path().join(source.to_string()).join(RECORD)
 }
 
-fn read_at(reader: &mut Reader, locus: &Locus) -> io::Result<Protocol> {
+fn read_at(reader: &mut LocusReader, locus: &Locus) -> io::Result<Protocol> {
     match reader.record(locus)? {
         Record::Protocol(p) => Ok(p.clone()),
         Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
@@ -105,7 +105,7 @@ fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
 /// # Errors
 /// Names the turn and the file that will not read back.
 fn material(
-    open: &mut Option<(AgentId, Reader)>,
+    open: &mut Option<(AgentId, LocusReader)>,
     sessions: &OwnDir,
     turn: &Placed,
 ) -> Result<Vec<ChatMessage>, String> {
@@ -207,7 +207,7 @@ impl TranscriptSearch {
 /// reusing the reader already open when consecutive turns name one
 /// session — so a lineage of many files costs one descriptor, never two.
 fn read_pointer(
-    open: &mut Option<(AgentId, Reader)>,
+    open: &mut Option<(AgentId, LocusReader)>,
     sessions: &OwnDir,
     source: AgentId,
     loci: &[Locus],

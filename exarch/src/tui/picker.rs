@@ -17,7 +17,7 @@ use super::text;
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::pricing::{ModelCaps, Param};
-use crate::provider::{Choice, EFFORT_LADDER, Tuning, Via};
+use crate::provider::{Choice, EFFORT_LADDER, Pick, Tuning, Via};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -31,13 +31,6 @@ pub use crate::provider::listing::{EndpointsState, ModelsState};
 struct Upstream {
     model: String,
     tag: String,
-}
-
-/// A listed model chosen with Enter, and the tuning to run it on; its via is
-/// `None` for auto.
-pub struct Pick {
-    pub choice: Choice,
-    pub tuning: Tuning,
 }
 
 /// A rendered list row: a listed model and the account that lists it.

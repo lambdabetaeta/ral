@@ -26,7 +26,7 @@ use super::row::Row;
 use super::select::{Cell, plain_slice};
 use crate::card::Card;
 use crate::provider::Usage;
-use crate::record::{self, Commit, Cursor, Delta, Emitter as Recorder, Record, Recorded};
+use crate::record::{self, Commit, Cursor, Delta, Reader, Record, Recorded};
 
 /// Carry a lane's open line across one delta: the text after the last newline
 /// is exactly what no record holds yet, since the worker cuts its records at
@@ -64,7 +64,7 @@ pub(super) struct Scrollback {
     thinking_line: String,
     /// The log this mirrors, read back whenever the channel cannot vouch for
     /// the next record.
-    recorder: Recorder,
+    log: Reader,
     /// How far the mirror has read its log; `None` until it first does.
     cursor: Option<Cursor>,
     /// The chrome a clear, and the first read, open under: a root's session card.
@@ -106,18 +106,18 @@ struct Tail {
 impl Scrollback {
     /// `thinking` is the standing rung a view is born at — owned by the caller
     /// ([`super::tabs::Tabs`]'s own), so a new view is never told twice, nor
-    /// left disagreeing.  The mirror holds nothing until it reads `recorder`.
+    /// left disagreeing.  The mirror holds nothing until it reads `log`.
     pub(super) fn new(
         agent: AgentSlot,
         thinking: Detail,
-        recorder: Recorder,
+        log: Reader,
         opening: Option<Card>,
     ) -> Self {
         Self {
             mirror: Mirror::new(agent, thinking),
             answer: String::new(),
             thinking_line: String::new(),
-            recorder,
+            log,
             cursor: None,
             opening,
             offset: 0,
@@ -143,36 +143,28 @@ impl Scrollback {
     /// [`Self::catch_up`], stopping at the first commit `keep` refuses.
     fn read_log(&mut self, keep: impl Fn(&Commit) -> bool) -> bool {
         let mut cleared = false;
-        let read = self
-            .recorder
-            .since(self.cursor)
-            .and_then(|(from, commits)| {
-                if self.cursor.is_none() {
-                    self.cursor = Some(from);
-                    if let Some(card) = self.opening.clone() {
-                        self.mirror.push_chrome(Chrome::Opening(card));
-                    }
+        let read = self.log.since(self.cursor).and_then(|(from, commits)| {
+            if self.cursor.is_none() {
+                self.cursor = Some(from);
+                if let Some(card) = self.opening.clone() {
+                    self.mirror.push_chrome(Chrome::Opening(card));
                 }
-                for commit in commits {
-                    let commit = commit?;
-                    if !keep(&commit) {
-                        break;
-                    }
-                    cleared |= self.step(&commit);
+            }
+            for commit in commits {
+                let commit = commit?;
+                if !keep(&commit) {
+                    break;
                 }
-                Ok(())
-            });
+                cleared |= self.step(&commit);
+            }
+            Ok(())
+        });
         if let Err(e) = read {
             self.push_chrome(Chrome::Error(format!(
                 "record.jsonl did not read back: {e}; this view may be missing some of it"
             )));
         }
         cleared
-    }
-
-    /// The log this view mirrors, for a command the frontend records into it.
-    pub(super) fn recorder(&self) -> &Recorder {
-        &self.recorder
     }
 
     pub(super) fn agent(&self) -> AgentSlot {

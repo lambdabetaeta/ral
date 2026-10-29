@@ -4,8 +4,7 @@
 //! mouse capture — [`choose`] picks a model on it when a launch has none to
 //! restore, and [`run`] holds it for the REPL loop the user types into.
 //!
-//! The agent core sees only a [`crate::bus::Emitter`] channel. The frontend
-//! is deliberately not a [`crate::bus::Sink`]: it drains the same bus on its
+//! The frontend is deliberately not a [`crate::port::Sink`]: it drains the feed on its
 //! render cadence instead, and owns its scrollback rather than the host
 //! terminal's, redrawing the whole screen each tick.
 
@@ -52,9 +51,8 @@ use std::time::Duration;
 pub(super) use app::App;
 pub use export::{Format, export, export_to};
 pub use model_picker::choose;
-pub use picker::Pick;
 pub use terminal::TerminalGuard;
-pub use tui_loop::run;
+pub(crate) use tui_loop::{Leaving, run};
 
 /// Take the terminal for the TUI — raw mode, the alternate screen, and fd 2
 /// redirected to `run`'s `stderr.log` — before the first thing it shows.

@@ -30,6 +30,32 @@ impl fmt::Debug for Emitter {
     }
 }
 
+/// A handle on one session's log that can catch up but never append.
+#[derive(Clone)]
+pub struct Reader {
+    log: Arc<Log>,
+}
+
+impl fmt::Debug for Reader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reader").finish_non_exhaustive()
+    }
+}
+
+impl Reader {
+    /// A mirror's catch-up: where `after` stands, and the commits past it.
+    /// See [`super::log::Log::since`].
+    ///
+    /// # Errors
+    /// The log will not open.
+    pub(crate) fn since(
+        &self,
+        after: Option<Cursor>,
+    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Commit>> + use<>)> {
+        self.log.since(after)
+    }
+}
+
 impl Emitter {
     /// Start a fresh record log in the session directory `dir`.
     ///
@@ -70,16 +96,11 @@ impl Emitter {
         self.log.attach(sink);
     }
 
-    /// A mirror's catch-up: where `after` stands, and the commits past it.
-    /// See [`super::log::Log::since`].
-    ///
-    /// # Errors
-    /// The log will not open.
-    pub(crate) fn since(
-        &self,
-        after: Option<Cursor>,
-    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Commit>> + use<>)> {
-        self.log.since(after)
+    /// A read-only handle on this session's log.
+    pub(crate) fn reader(&self) -> Reader {
+        Reader {
+            log: Arc::clone(&self.log),
+        }
     }
 
     /// Observe without the append lock; a poisoned lock is latched here.

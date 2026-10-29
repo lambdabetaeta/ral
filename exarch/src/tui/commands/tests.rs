@@ -31,7 +31,7 @@ fn parse(input: &str) -> Option<Command> {
 /// What submitting `line` leaves on the focused tab.
 fn submitted(line: &str) -> String {
     let (mut app, _rx, root) = app();
-    route_submit(line.into(), &mut app, &ctx());
+    assert!(route_submit(line.into(), &mut app, &ctx()).is_continue());
     text(&mut app, root.id())
 }
 
@@ -49,109 +49,6 @@ fn argless_command_matches_alone_but_not_with_trailing_text() {
 #[test]
 fn stop_is_a_key_and_not_a_command() {
     assert_eq!(dispatch("/stop"), None);
-}
-
-#[test]
-fn quit_ends_every_root_and_descendant_without_queuing() {
-    use crate::agent::Trunk;
-    use crate::agent::spawn::hatch_root;
-    use crate::agent::testkit::trunk;
-    use crate::record::AgentLog;
-    use ral_core::process::CancelCause;
-
-    let main = trunk(Trunk::Converses);
-    let other = hatch_root(&main, crate::record::Memory::Amnemon, Some("other".into()))
-        .expect("a second root");
-    let child = main.fork_named("child").expect("a child");
-    let grandchild = child.fork_named("grandchild").expect("a grandchild");
-    let peer = other.fork_named("peer").expect("the other root's child");
-
-    super::quit(&main.fleet);
-
-    for agent in [&main, &other, &child, &grandchild, &peer] {
-        let handle = agent.handle();
-        assert!(
-            !handle.is_live(),
-            "quit ends {} without a command consumer",
-            handle.0.name
-        );
-        assert_eq!(agent.mailbox.life().cause(), Some(CancelCause::Cancelled));
-        assert!(
-            agent
-                .engine()
-                .read(|t| t.session_ended())
-                .unwrap()
-                .is_none(),
-            "quit cancels lives; the owner retires its engine"
-        );
-        assert!(
-            handle.queued().is_empty(),
-            "quit is shutdown, not queued input"
-        );
-    }
-    assert_eq!(
-        AgentLog::live_roots(&main.fleet.launch.sessions_root)
-            .unwrap()
-            .len(),
-        2,
-        "quit leaves both root sessions resumable"
-    );
-}
-
-#[test]
-fn quit_joins_a_resting_helper_even_when_its_parent_has_not_run() {
-    use crate::agent::Trunk;
-    use crate::agent::testkit::{launch_child, ral_call, scripted, set_provider, trunk};
-    use crate::bus::{FleetBus, Signal};
-    use crate::provider::scripted::{Reply, Script};
-    use crate::record::{AgentState, ChildStatus, Transient};
-    use ral_core::test_helper::eventually;
-
-    let mut main = trunk(Trunk::Converses);
-    let fleet = main.fleet.clone();
-    let child = main.fork_named("child").unwrap();
-    let id = child.id();
-    set_provider(
-        &child,
-        scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call(
-                "reply",
-                "exarch-agents `reply ()",
-            )])),
-        ),
-    );
-    let bus = FleetBus::session();
-    let emit = bus.emitter(main.id());
-    let handle = launch_child(&mut main, child, Some("work".into()), &emit);
-    assert!(
-        eventually(Duration::from_secs(5), || {
-            let status = handle.status();
-            (status.waiting_for_input
-                && status.job.is_none()
-                && matches!(status.report, Some(ChildStatus::Replied(_))))
-            .then_some(())
-        })
-        .is_some(),
-        "the replied helper rests for follow-up"
-    );
-    assert!(std::iter::from_fn(|| bus.rx().try_recv().ok()).any(|signal| {
-        matches!(signal, Signal::Transient(agent, Transient::State(AgentState::Ready)) if agent == id)
-    }));
-    super::quit(&fleet);
-    drop(main);
-
-    assert!(fleet.is_empty(), "dropping the owner joins its helper");
-    assert!(!handle.is_live());
-    assert_eq!(
-        std::iter::from_fn(|| bus.rx().try_recv().ok())
-            .filter(|signal| {
-                matches!(signal, Signal::Transient(agent, Transient::Died { .. }) if *agent == id)
-            })
-            .count(),
-        1,
-        "the helper's final cue precedes its owner's completed drop"
-    );
 }
 
 #[test]

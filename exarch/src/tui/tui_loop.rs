@@ -2,10 +2,7 @@
 
 use std::{
     io::{self},
-    sync::{
-        Arc,
-        mpsc::{self, Receiver},
-    },
+    sync::mpsc::{self, Receiver},
     time::{Duration, Instant},
 };
 
@@ -13,17 +10,16 @@ use crossterm::event::{Event as CtEvent, KeyEventKind, poll as ct_poll, read as 
 
 use crate::{
     SessionInfo,
-    bus::{BusReceiver, Signal},
-    host::Host,
-    provider::Bureau,
+    port::{BusReceiver, Port, Signal},
+    provider::{Bureau, Usage},
     record::{AgentId, RECORD, Transient},
 };
 use std::sync::mpsc::TryRecvError;
 
 use super::{
     App,
-    app::{CommandCtx, Job, Overlay},
-    banner, commands,
+    app::{CommandCtx, Handoff, Job, Overlay},
+    banner,
     paste_burst::{Input, PasteBurst},
     prompt::{History, PromptState},
     render::{draw, emit_tab_title},
@@ -37,24 +33,20 @@ struct Tui {
     app: App,
 }
 
-/// Show the host's agents until the last ends, steering the first with `seed`.
+/// Show the host's agents until the last ends or the user quits, steering the
+/// first with `seed`.
 ///
 /// # Errors
 /// Returns `Err` if there is no root or the terminal input/render loop fails.
-pub fn run(
+pub(crate) fn run(
     screen: TerminalGuard,
-    host: &Host,
+    port: Port,
+    rx: &BusReceiver,
     info: &SessionInfo<'_>,
     bureau: &Bureau,
     seed: Option<String>,
     vi: bool,
-) -> Result<(), String> {
-    let first = host.roots().first().ok_or("there is no session to open")?;
-    let fleet = host.fleet();
-    let rx = host.feed();
-    if let Some(seed) = seed {
-        let _ = first.steer(seed);
-    }
+) -> Result<super::Leaving, String> {
     let Signal::Born(id, born) = rx.recv().map_err(|e| e.to_string())? else {
         return Err(
             "the first signal of a run was not a root's birth: there is no tab to open".into(),
@@ -70,13 +62,21 @@ pub fn run(
         app: App::new(
             id,
             &born,
-            Arc::clone(fleet),
-            host.meter(),
+            port,
+            crate::app::EXARCH
+                .project(info.cwd.as_path())
+                .map_err(String::from),
             PromptState::new(vi, history),
             banner::session_card(info),
             jobs,
         ),
     };
+    if let Some(seed) = seed
+        && tui.app.tabs.port().submit(id, seed).is_err()
+    {
+        tui.app
+            .push_error(id, "the agent ended before it could take the prompt");
+    }
     if let Some(e) = unshared {
         tui.app.push_error(
             id,
@@ -85,23 +85,33 @@ pub fn run(
     }
 
     let ctx = CommandCtx { bureau, info };
-    let r = ui_loop(&mut tui, rx, host, &inbox, &ctx);
-    if r.is_err() {
-        commands::quit(fleet);
+    match ui_loop(&mut tui, rx, &inbox, &ctx) {
+        Ok(()) | Err(Exit::Quit) => {}
+        Err(Exit::Io(e)) => return Err(e.to_string()),
     }
-    r.map_err(|e| e.to_string())?;
-
-    let logs = tui.app.tabs.log_dirs();
-    let usage = tui.app.total_usage();
-    // Restore the terminal first, so the paths below land on the user's shell
-    // rather than the alt screen.
+    let leaving = Leaving {
+        logs: tui.app.tabs.log_dirs(),
+        recalled: tui.app.recalled(),
+    };
     drop(tui);
-    for dir in &logs {
-        ral_core::outln!("Session log: {}/{RECORD}", dir);
+    Ok(leaving)
+}
+
+/// What the TUI saw, for the report `lib` prints once the host has joined.
+pub(crate) struct Leaving {
+    logs: Vec<ral_core::own::OwnDir>,
+    recalled: Usage,
+}
+
+impl Leaving {
+    /// Report the logs and the total spend after the join.
+    pub(crate) fn report(&self, spent: Usage) {
+        for dir in &self.logs {
+            ral_core::outln!("Session log: {}/{RECORD}", dir);
+        }
+        ral_core::outln!("render one with `exarch export <dir>`");
+        ral_core::outln!("{}", self.recalled + spent);
     }
-    ral_core::outln!("render one with `exarch export <dir>`");
-    ral_core::outln!("{usage}");
-    Ok(())
 }
 
 /// Route one `Signal` to its `App` entry point.
@@ -119,18 +129,29 @@ enum Pass {
     More,
 }
 
-/// Producer completion, read before the pass, ends the drain; an empty name
-/// directory or channel does not certify that terminal signals were published.
+/// Why the loop returns early: `?` carries `/quit` out as it does a failure.
+#[derive(Debug)]
+enum Exit {
+    Quit,
+    Io(io::Error),
+}
+
+impl From<io::Error> for Exit {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// Drain before checking settlement, so queued births are always observed.
 fn drain_signals(
     rx: &BusReceiver,
-    finished: bool,
     max: Option<usize>,
-    mut handle: impl FnMut(Signal) -> io::Result<()>,
-) -> io::Result<Pass> {
+    mut handle: impl FnMut(Signal) -> Result<(), Exit>,
+) -> Result<Pass, Exit> {
     let mut n = 0usize;
     loop {
         if max.is_some_and(|m| n >= m) {
-            return Ok(if finished { Pass::Stop } else { Pass::More });
+            return Ok(Pass::More);
         }
         match rx.try_recv() {
             Ok(sig) => {
@@ -138,7 +159,7 @@ fn drain_signals(
                 n += 1;
             }
             Err(TryRecvError::Empty) => {
-                return Ok(if finished { Pass::Stop } else { Pass::Idle });
+                return Ok(Pass::Idle);
             }
             Err(TryRecvError::Disconnected) => return Ok(Pass::Stop),
         }
@@ -150,10 +171,9 @@ fn drain_signals(
 fn ui_loop(
     tui: &mut Tui,
     rx: &BusReceiver,
-    host: &Host,
     inbox: &Receiver<Job>,
     ctx: &CommandCtx<'_>,
-) -> io::Result<()> {
+) -> Result<(), Exit> {
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
     // Seeded a frame in the past so the first iteration paints at once.  Gating
@@ -169,10 +189,9 @@ fn ui_loop(
     loop {
         dirty |= flush_due_input(tui, &mut paste, Instant::now(), ctx)?;
         let prev_focus = tui.app.tabs.focused();
-        // Names leave before terminal publication; wait for the roots to finish.
         // The cap keeps a signal flood from starving input.
         let mut handled_any = false;
-        let more = match drain_signals(rx, host.is_finished(), Some(BATCH), |sig| {
+        let pass = drain_signals(rx, Some(BATCH), |sig| {
             handled_any = true;
             guard_owner(tui, &mut paste, ctx, |tui, paste| {
                 // Facts can retire a subtree; death can change the focused
@@ -186,23 +205,18 @@ fn ui_loop(
                 dispatch(tui, rx, sig);
                 Ok(())
             })
-        })? {
-            Pass::Stop => {
-                // The cap binds even a finished drain, so `Stop` can arrive with
-                // events still buffered; nothing drains after this returns, so
-                // empty the channel uncapped before the final frame.
-                deliver(tui, paste.finish(), ctx)?;
-                drain_signals(rx, true, None, |sig| {
-                    dispatch(tui, rx, sig);
-                    Ok(())
-                })?;
-                draw(&mut tui.app, tui.guard.term(), ctx.bureau)?;
-                emit_tab_title(&mut tui.app);
-                return Ok(());
-            }
-            Pass::More => true,
-            Pass::Idle => false,
-        };
+        })?;
+        if matches!(pass, Pass::Stop) || matches!(pass, Pass::Idle) && tui.app.tabs.settled() {
+            deliver(tui, paste.finish(), ctx)?;
+            drain_signals(rx, None, |sig| {
+                dispatch(tui, rx, sig);
+                Ok(())
+            })?;
+            draw(&mut tui.app, tui.guard.term(), ctx.bureau)?;
+            emit_tab_title(&mut tui.app);
+            return Ok(());
+        }
+        let more = matches!(pass, Pass::More);
         for job in inbox.try_iter() {
             guard_owner(tui, &mut paste, ctx, |tui, paste| {
                 deliver(tui, paste.flush_pending(), ctx)?;
@@ -328,8 +342,8 @@ fn guard_owner<R>(
     tui: &mut Tui,
     paste: &mut PasteBurst,
     ctx: &CommandCtx<'_>,
-    act: impl FnOnce(&mut Tui, &mut PasteBurst) -> io::Result<R>,
-) -> io::Result<R> {
+    act: impl FnOnce(&mut Tui, &mut PasteBurst) -> Result<R, Exit>,
+) -> Result<R, Exit> {
     let owner = InputOwner::of(&tui.app);
     let r = act(tui, paste)?;
     if InputOwner::of(&tui.app) != owner {
@@ -343,22 +357,22 @@ fn flush_due_input(
     paste: &mut PasteBurst,
     now: Instant,
     ctx: &CommandCtx<'_>,
-) -> io::Result<bool> {
+) -> Result<bool, Exit> {
     guard_owner(tui, paste, ctx, |tui, paste| {
         deliver(tui, paste.flush_due(now), ctx)
     })
 }
 
 /// Apply detector output through the same paths as terminal input.
-fn deliver(tui: &mut Tui, inputs: Vec<Input>, ctx: &CommandCtx<'_>) -> io::Result<bool> {
+fn deliver(tui: &mut Tui, inputs: Vec<Input>, ctx: &CommandCtx<'_>) -> Result<bool, Exit> {
     let changed = !inputs.is_empty();
     for input in inputs {
         match input {
-            Input::Key(k) => {
-                if tui.app.key(k, ctx) {
-                    compose_in_editor(tui)?;
-                }
-            }
+            Input::Key(k) => match tui.app.key(k, ctx) {
+                Some(Handoff::Compose) => compose_in_editor(tui)?,
+                Some(Handoff::Quit) => return Err(Exit::Quit),
+                None => {}
+            },
             Input::Paste(s) => tui.app.paste(&s, ctx),
         }
     }
@@ -380,3 +394,7 @@ fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
     tui.guard.term().clear()?;
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests;

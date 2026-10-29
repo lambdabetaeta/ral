@@ -22,9 +22,9 @@ fn next_child(parent: &Agent) -> (crate::record::AgentId, ChildStatus) {
 #[test]
 fn a_returned_helper_accepts_a_second_human_message_without_focus() {
     let mut parent = trunk(Trunk::Converses);
-    let child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fork_named("helper").unwrap();
     set_provider(
-        &child,
+        &mut child,
         scripted(
             "test-model",
             Script::new().then(reply("1")).then(reply("2")),
@@ -64,9 +64,9 @@ fn helper_idle_limits_rest_not_work() {
         ..TestTrunk::new("system")
     })
     .unwrap();
-    let child = forked_child(&parent, "helper", "`inherit");
+    let mut child = forked_child(&parent, "helper", "`inherit");
     set_provider(
-        &child,
+        &mut child,
         scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -96,9 +96,9 @@ fn helper_ends_after_resting_and_does_not_repeat_its_report() {
         ..TestTrunk::new("system")
     })
     .unwrap();
-    let child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fork_named("helper").unwrap();
     set_provider(
-        &child,
+        &mut child,
         scripted("test-model", Script::new().then(reply("42"))),
     );
     let id = child.id();
@@ -131,7 +131,7 @@ fn a_previous_reply_does_not_suppress_followup_repairs() {
         let mut child = parent.fork_named("helper").unwrap();
         let (emit, _rx) = emitter(&child);
         set_provider(
-            &child,
+            &mut child,
             scripted("test-model", Script::new().then(reply("1"))),
         );
         let first = human_exchange(&mut child, "first task", &emit);
@@ -141,7 +141,7 @@ fn a_previous_reply_does_not_suppress_followup_repairs() {
             (_, ChildStatus::Replied(FOValue::Int { value: 1 }))
         ));
         set_provider(
-            &child,
+            &mut child,
             scripted("test-model", Script::new().then(repair).then(reply("2"))),
         );
         child
@@ -187,13 +187,13 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
         let mut child = parent.fork_named("helper").unwrap();
         let (emit, _rx) = emitter(&child);
         set_provider(
-            &child,
+            &mut child,
             scripted("test-model", Script::new().then(reply("1"))),
         );
         let first = human_exchange(&mut child, "first task", &emit);
         settle(&mut child, first);
         let _report = next_child(&parent);
-        set_provider(&child, scripted("test-model", failure));
+        set_provider(&mut child, scripted("test-model", failure));
         child
             .handle()
             .message(&parent.handle(), "follow up".into())
@@ -340,7 +340,7 @@ fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
         assert!(!handle.status().owes_parent);
         assert!(parent.mailbox.has_input());
         set_provider(
-            &parent,
+            &mut parent,
             scripted(
                 "test-model",
                 Script::new().then(Reply::text("read the report next")),
@@ -416,7 +416,7 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
         assert!(parent.mailbox.drain().is_empty());
         assert!(parent.handle().status().job.is_none());
         set_provider(
-            &child,
+            &mut child,
             scripted("test-model", Script::new().then(reply("2"))),
         );
         let outcome = child.exchange(&exchange, prompt, &child_emit);
@@ -453,7 +453,7 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
         assert!(!child.handle().status().owes_parent);
         assert!(!parent.rest().pending);
         set_provider(
-            &child,
+            &mut child,
             scripted("test-model", Script::new().then(Reply::text("noted"))),
         );
         let outcome = child.exchange(&exchange, prompt, &child_emit);
@@ -535,7 +535,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     assert_eq!(parent.handle().status().job, Some(job));
     assert!(!resumed.is_cancelled());
     set_provider(
-        &parent,
+        &mut parent,
         scripted(
             "test-model",
             Script::new().then(Reply::text("read helper report")),
@@ -578,7 +578,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
         let (emit, _rx) = emitter(&child);
         let outcome = if followup {
             set_provider(
-                &child,
+                &mut child,
                 scripted(
                     "test-model",
                     Script::new().then(Reply::error(ProviderError::Other("no reply".into()))),
@@ -988,9 +988,9 @@ fn a_parent_messaging_at_the_idle_deadline_gets_a_report_or_a_refusal_never_sile
         ..TestTrunk::new("system")
     })
     .unwrap();
-    let child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fork_named("helper").unwrap();
     set_provider(
-        &child,
+        &mut child,
         scripted(
             "test-model",
             (0..200).fold(Script::new(), |script, _| script.then(reply("1"))),
@@ -1018,7 +1018,7 @@ fn a_parent_messaging_at_the_idle_deadline_gets_a_report_or_a_refusal_never_sile
         parent.mailbox.next(parent.rest()),
         Next::Take { input: Input::Gone(id), .. } if id == helper.id()
     ));
-    assert!(parent.fleet.resolve("helper").is_none());
+    assert!(parent.fleet.registry.resolve("helper").is_none());
 }
 
 #[test]
@@ -1029,9 +1029,9 @@ fn dropping_an_unrun_parent_joins_its_working_helper_before_ending_its_engine() 
     })
     .unwrap();
     let mut parent = forked_child(&root, "parent", "`inherit");
-    let grandchild = forked_child(&parent, "grandchild", "`inherit");
+    let mut grandchild = forked_child(&parent, "grandchild", "`inherit");
     set_provider(
-        &grandchild,
+        &mut grandchild,
         scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -1069,7 +1069,7 @@ fn dropping_an_unrun_parent_joins_its_working_helper_before_ending_its_engine() 
     };
     drop(parent);
     assert!(!grandchild.is_live());
-    assert!(root.fleet.resolve("grandchild").is_none());
+    assert!(root.fleet.registry.resolve("grandchild").is_none());
     assert!(grand_engine.session_ended().unwrap().is_some());
     assert!(engine.session_ended().unwrap().is_some());
     assert!(

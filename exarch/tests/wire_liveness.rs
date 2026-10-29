@@ -54,14 +54,12 @@ fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
 }
 
 /// Attach the session to a fresh tempdir as cwd/home, tagging the engine's
-/// builtin installer with exarch's own [`INSTALLER_TAG`].
-///
-/// [`INSTALLER_TAG`]: exarch::shell_eval::builtins::INSTALLER_TAG
+/// builtin installer with exarch's own [`exarch::INSTALLERS`] tag.
 fn attach(transport: &WireTransport) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let attach = Attach::root(
         EngineSpec::new(
-            exarch::shell_eval::builtins::INSTALLER_TAG,
+            exarch::INSTALLERS[0].tag,
             EnginePath::Host(dir.path().to_path_buf()),
         ),
         Root::new(EnginePath::Host(dir.path().to_path_buf())).with_env(vec![(

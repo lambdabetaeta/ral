@@ -203,6 +203,7 @@ fn start_child(session: &mut Agent, name: &str, prompt: &str, command: &str) -> 
                 assert_eq!(&*from, name);
                 let helper = session
                     .fleet
+                    .registry
                     .resolve(name)
                     .expect("the replying helper is live");
                 while helper.status().working() {
@@ -250,13 +251,13 @@ fn agents_dismiss_joins_before_its_summary_excludes_the_helper() {
         "reply",
         "exarch-agents `reply 'done'",
     );
-    let helper = session.fleet.resolve("doomed").unwrap();
+    let helper = session.fleet.registry.resolve("doomed").unwrap();
     let result = eval(&mut session, "exarch-agents `dismiss 'doomed'");
     assert!(result.contains("EXIT: 0"), "{result}");
     assert!(result.contains("live: 0"), "{result}");
     assert!(!helper.is_live());
     assert!(!session.body.state.nursery.holds(helper.id()));
-    assert!(session.fleet.resolve("doomed").is_none());
+    assert!(session.fleet.registry.resolve("doomed").is_none());
 }
 
 #[test]
@@ -425,7 +426,7 @@ fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
 fn double_reply_in_one_exchange_is_last_wins() {
     let mut session = trunk();
     set_provider(
-        &session,
+        &mut session,
         scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -436,7 +437,7 @@ fn double_reply_in_one_exchange_is_last_wins() {
     );
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.handle().current_provider();
+    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
         &provider,

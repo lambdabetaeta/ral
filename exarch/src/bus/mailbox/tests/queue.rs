@@ -1,5 +1,12 @@
 use super::*;
 
+fn model_pick() -> crate::provider::Pick {
+    crate::provider::Pick::of(&crate::provider::Provider::scripted(
+        "queued-model",
+        crate::provider::scripted::Script::new(),
+    ))
+}
+
 #[test]
 fn adjacent_human_fragments_coalesce_without_crossing_other_inputs() {
     let mailbox = mailbox(Admission::Free);
@@ -30,10 +37,17 @@ fn queued_shows_human_text_and_commands_in_order() {
         }))
         .unwrap();
     address.steer("second".into()).unwrap();
+    address.command(Command::Model(model_pick())).unwrap();
     address.command(Command::Rewrite(Rewrite::Evict)).unwrap();
     assert_eq!(
         address.queued(),
-        ["first", "/branch scout", "second", "/evict"]
+        [
+            "first",
+            "/branch scout",
+            "second",
+            "/model queued-model",
+            "/evict"
+        ]
     );
 }
 
@@ -73,14 +87,16 @@ fn drain_takes_messages_batches_reads_and_wakeups_until_the_first_rewrite() {
     address.post(surface()).unwrap();
     address.post(wakeup(1, "run the tests")).unwrap();
     address.command(Command::Read(Read::Resources)).unwrap();
+    let pick = model_pick();
+    address.command(Command::Model(pick.clone())).unwrap();
     address.steer("before".into()).unwrap();
     address
         .command(Command::Rewrite(Rewrite::Rewind(7)))
         .unwrap();
     address.steer("after".into()).unwrap();
     assert!(
-        matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Message(message)), Drained::Input(Input::Surface { generation: 4, .. }), Drained::Input(Input::Wakeup { epoch: 3, .. }), Drained::Read(Read::Resources), Drained::Input(Input::Human(text))]
-        if message.from == AgentId::new(7) && message.from_name == "review"
+        matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Message(message)), Drained::Input(Input::Surface { generation: 4, .. }), Drained::Input(Input::Wakeup { epoch: 3, .. }), Drained::Read(Read::Resources), Drained::Model(model), Drained::Input(Input::Human(text))]
+        if model == &pick && message.from == AgentId::new(7) && message.from_name == "review"
         && message.render() == "[EXARCH AGENT 7 MESSAGE: review]\nplease inspect the parser\n[/EXARCH]"
         && text == "before")
     );
@@ -148,6 +164,7 @@ fn source_depths_count_every_kind_without_changing_the_queue() {
     address.post(message("peer", false)).unwrap();
     address.post(surface()).unwrap();
     address.command(Command::Read(Read::Context)).unwrap();
+    address.command(Command::Model(model_pick())).unwrap();
     address.command(Command::Rewrite(Rewrite::Evict)).unwrap();
     assert_eq!(
         mailbox.source_depths(),
@@ -159,6 +176,7 @@ fn source_depths_count_every_kind_without_changing_the_queue() {
             (Source::Read, 1),
             (Source::Rewrite, 1),
             (Source::Surface, 1),
+            (Source::Model, 1),
         ]
     );
     let snapshot = mailbox.source_depths();
@@ -221,7 +239,15 @@ fn dropping_the_mailbox_ends_retained_addresses_and_their_exchange() {
 #[test]
 fn a_parked_owner_observes_ancestor_cancellation() {
     let root = DurableRoot::default();
-    let mailbox = AgentMailbox::new(root.child(), Recorder::none(), Admission::Free);
+    let mailbox = AgentMailbox::new(
+        root.child(),
+        Recorder::none(),
+        Admission::Free,
+        crate::provider::Pick::of(&crate::provider::Provider::scripted(
+            "test-model",
+            crate::provider::scripted::Script::new(),
+        )),
+    );
     let address = mailbox.address();
     let worker = std::thread::spawn(move || mailbox.next(QUIET));
     root.cancel(CancelCause::Cancelled);

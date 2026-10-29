@@ -6,6 +6,7 @@ use std::ops::ControlFlow;
 
 use crate::agent::Agent;
 use crate::bus::{Command, Emitter, Read, Rewrite};
+use crate::provider::{Pick, identity};
 use crate::record::Forensic;
 
 impl Agent {
@@ -16,7 +17,44 @@ impl Agent {
                 ControlFlow::Continue(())
             }
             Command::Rewrite(rewrite) => self.rewrite(&rewrite, emit),
+            Command::Model(pick) => {
+                self.switch_model(pick);
+                ControlFlow::Continue(())
+            }
         }
+    }
+
+    /// Build the provider, record the switch, then run on it and publish it.
+    pub(crate) fn switch_model(&mut self, pick: Pick) {
+        let bureau = &self.fleet.launch.bureau;
+        let Pick { choice, tuning } = pick;
+        let model = choice.model.clone();
+        let built = match bureau.build(
+            choice,
+            &tuning,
+            self.body.state.provider.max_tokens_override(),
+        ) {
+            Ok(built) => built,
+            Err(e) => {
+                self.note_error(&format!("could not switch to {model}: {e}"));
+                return;
+            }
+        };
+        let pick = Pick::of(&built);
+        let recorder = self.recorder();
+        recorder.emit_or_end(Forensic::ModelChanged {
+            model: pick.choice.model.clone(),
+            context_window: built.context_window(),
+            label: identity::label(&pick.choice.account, &bureau.available()),
+            service: pick.choice.account.service.name.as_str().to_string(),
+            account: pick.choice.account.id.as_str().to_string(),
+            via: pick.choice.via.clone(),
+        });
+        if recorder.check_available().is_err() {
+            return;
+        }
+        self.body.state.provider = built;
+        self.mailbox.publish_pick(pick);
     }
 
     /// Survey the context or open a session from it; it is left as it was.

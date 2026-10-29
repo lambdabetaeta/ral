@@ -332,7 +332,7 @@ impl Mirror {
                     vec![Item::Member(Member::Call(call))]
                 }
                 None => vec![Item::Barrier(BlockKind::Tool {
-                    details: (cmd != crate::agent::tools::ral::INVALID_INPUT).then(|| cmd.clone()),
+                    details: (cmd != crate::record::INVALID_INPUT).then(|| cmd.clone()),
                 })],
             },
             K::HarnessCall {

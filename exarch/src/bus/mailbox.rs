@@ -2,11 +2,13 @@
 
 use super::post::Source;
 use super::{AgentMessage, Lease, Read, Rewrite, ScheduleId};
+use crate::provider::Pick;
 use crate::record::{AgentId, ChildStatus, Emitter as Recorder, Forensic, JobId};
 use ral_core::data::FOValue;
 use ral_core::process::{CancelCause, Scope, ScopeNode};
 use ral_core::sync::{CondvarExt, LockExt};
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -37,9 +39,20 @@ pub(crate) enum Input {
     },
 }
 
-pub(crate) enum Command {
+pub enum Command {
     Read(Read),
     Rewrite(Rewrite),
+    Model(Pick),
+}
+
+impl fmt::Display for Command {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(read) => fmt::Display::fmt(read, f),
+            Self::Rewrite(rewrite) => fmt::Display::fmt(rewrite, f),
+            Self::Model(pick) => write!(f, "/model {}", pick.choice.model),
+        }
+    }
 }
 
 /// The queue's element, in the order posted.
@@ -52,6 +65,7 @@ enum Queued {
 pub(crate) enum Drained {
     Input(Input),
     Read(Read),
+    Model(Pick),
 }
 
 /// The owner's end; dropping it ends the life.
@@ -75,6 +89,7 @@ struct Shared {
 }
 
 struct Queue {
+    pick: Pick,
     items: VecDeque<Queued>,
     phase: Phase,
     exchange: Option<ScopeNode>,
@@ -100,8 +115,9 @@ struct OpenJob {
 }
 
 /// What other threads may read of an agent, built from its queue.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct Status {
+    pub(crate) pick: Pick,
     pub(crate) rest: Option<Instant>,
     pub(crate) waiting_for_input: bool,
     pub(crate) busy: bool,
@@ -164,6 +180,7 @@ impl Queued {
             Self::Input(Input::Surface { .. }) => Source::Surface,
             Self::Command(Command::Read(_)) => Source::Read,
             Self::Command(Command::Rewrite(_)) => Source::Rewrite,
+            Self::Command(Command::Model(_)) => Source::Model,
         }
     }
 
@@ -218,8 +235,7 @@ impl Queue {
         for item in &self.items {
             match item {
                 Queued::Input(Input::Human(text)) => Self::join(&mut texts, human_tail, text),
-                Queued::Command(Command::Read(read)) => texts.push(read.to_string()),
-                Queued::Command(Command::Rewrite(rewrite)) => texts.push(rewrite.to_string()),
+                Queued::Command(command) => texts.push(command.to_string()),
                 Queued::Input(_) => {}
             }
             human_tail = item.is_human();
@@ -272,12 +288,13 @@ impl Shared {
 }
 
 impl AgentMailbox {
-    pub(crate) fn new(life: ScopeNode, record: Recorder, admission: Admission) -> Self {
+    pub(crate) fn new(life: ScopeNode, record: Recorder, admission: Admission, pick: Pick) -> Self {
         Self {
             shared: Arc::new(Shared {
                 life,
                 admission,
                 queue: Mutex::new(Queue {
+                    pick,
                     items: VecDeque::new(),
                     phase: Phase::Resting {
                         since: Instant::now(),
@@ -294,6 +311,10 @@ impl AgentMailbox {
             }),
             record,
         }
+    }
+
+    pub(crate) fn publish_pick(&self, pick: Pick) {
+        self.shared.lock().pick = pick;
     }
 
     pub(crate) fn address(&self) -> AgentAddress {
@@ -395,6 +416,7 @@ impl AgentMailbox {
             drained.push(match queue.items.pop_front() {
                 Some(Queued::Input(input)) => Drained::Input(queue.coalesce(input, 0)),
                 Some(Queued::Command(Command::Read(read))) => Drained::Read(read),
+                Some(Queued::Command(Command::Model(pick))) => Drained::Model(pick),
                 Some(rewrite @ Queued::Command(Command::Rewrite(_))) => {
                     queue.items.push_front(rewrite);
                     break;
@@ -602,6 +624,7 @@ impl AgentAddress {
             Phase::Working(job) => (None, Some(job.id)),
         };
         Status {
+            pick: queue.pick.clone(),
             rest,
             waiting_for_input: queue.waiting_for_input,
             busy: queue.busy,

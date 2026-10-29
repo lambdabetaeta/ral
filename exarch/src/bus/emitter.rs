@@ -71,7 +71,8 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    pub fn new(tx: BusSender, id: AgentId) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(tx: BusSender, id: AgentId) -> Self {
         Self {
             tx,
             id,
@@ -136,11 +137,6 @@ impl FleetBus {
         }
     }
 
-    /// The run total across the root and every child — what headless reports.
-    pub(crate) fn usage_total(&self) -> Usage {
-        self.meter.total()
-    }
-
     /// The meter itself, for a frontend that reads the total as it grows.
     pub(crate) fn meter(&self) -> UsageMeter {
         self.meter.clone()
@@ -191,7 +187,7 @@ mod tests {
                 name: "helper".into(),
                 parent: Some(root_id),
                 resumed: None,
-                recorder: child_seam.clone(),
+                reader: child_seam.reader(),
             },
         );
         child_seam.attach(child.fleet_sink());
@@ -216,7 +212,7 @@ mod tests {
             Signal::Commit(committing_child, _),
         ] if *born_id == child_id && born.name == "helper" && born.parent == Some(root_id)
             && *committing_root == root_id && *committing_child == child_id));
-        let total = bus.usage_total();
+        let total = bus.meter().total();
         assert_eq!(total.input, 107);
         assert_eq!(total.output, 23);
         assert!((total.dollars - 0.625).abs() < f64::EPSILON);

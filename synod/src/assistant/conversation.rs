@@ -10,10 +10,9 @@ use crate::folder::{
     manifest::{self, Manifest},
 };
 use crate::wire::{Choice, Opening, WindowReport};
-use exarch::agent::fleet::HELPER_IDLE;
-use exarch::agent::{Admission, EngineLost, Trunk};
 use exarch::app::SYNOD;
-use exarch::bus::BusReceiver;
+use exarch::host::{Admission, EngineLost, HELPER_IDLE, Trunk};
+use exarch::port::{BusReceiver, Port};
 use exarch::provider::{self, Bureau, Holdings, Pool};
 use exarch::record::AgentId;
 use ral_core::carrier::Severed;
@@ -101,7 +100,7 @@ impl Conversation {
             None,
         )?;
 
-        let config = exarch::agent::RootConfig {
+        let config = exarch::host::RootConfig {
             system,
             run_dir,
             allow_schedule: false,
@@ -111,7 +110,7 @@ impl Conversation {
             helper_idle: HELPER_IDLE,
             tools: exarch::provider::Toolset::offered(false),
             disk_warn_bytes,
-            fuel: exarch::agent::SPAWN_FUEL,
+            fuel: exarch::host::SPAWN_FUEL,
             search: policy.search,
             // Guest::start installs the factory once its machine exists.
             factory: None,
@@ -146,8 +145,8 @@ impl Conversation {
         ))
     }
 
-    pub(crate) fn handle(&self) -> exarch::agent::AgentHandle {
-        self.guest.handle()
+    pub(crate) fn port(&self) -> Port {
+        self.guest.port()
     }
 
     pub(crate) fn settle_baseline(&mut self) -> Result<(), String> {
@@ -167,7 +166,7 @@ impl Conversation {
 
 impl Seat for Conversation {
     fn root(&self) -> AgentId {
-        self.handle().id()
+        self.guest.root()
     }
 
     fn feed(&self) -> &BusReceiver {
@@ -184,7 +183,7 @@ impl Seat for Conversation {
     /// After the baseline, and after any job's walk.
     fn release(&self) -> Result<(), String> {
         self.baseline.settled_manifest()?;
-        if self.handle().release() {
+        if self.guest.release() {
             Ok(())
         } else {
             Err("The assistant ended before it could begin the next job.".to_string())
@@ -205,7 +204,7 @@ impl Seat for Conversation {
 
     fn invalidate(&mut self) {
         self.report = None;
-        self.handle().end();
+        let _ended = self.guest.port().end(self.guest.root());
     }
 }
 

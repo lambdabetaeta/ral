@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests;
 
-use super::{ProviderHandle, Role};
+use super::Role;
 use crate::bus::{AgentAddress, AgentMessage, Command, Input, Refused, Status};
 use crate::record::{AgentId, ChildStatus, JobId};
 use ral_core::own::OwnDir;
@@ -26,51 +26,53 @@ pub(crate) struct Shared {
     pub(crate) role: Role,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
-    pub(crate) provider: ProviderHandle,
     pub(crate) address: AgentAddress,
 }
 /// Steering was refused because the agent's life has ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ended;
+pub struct Ended(pub AgentId);
 impl fmt::Display for Ended {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("the agent has ended")
+        write!(f, "agent {} has ended", self.0)
     }
 }
 impl std::error::Error for Ended {}
 impl AgentHandle {
-    pub fn id(&self) -> AgentId {
+    pub(crate) fn id(&self) -> AgentId {
         self.0.id
     }
     /// # Errors
     /// Refuses steering once the agent has ended.
-    pub fn steer(&self, text: String) -> Result<(), Ended> {
-        self.0.address.steer(text).map_err(|_| Ended)
+    pub(crate) fn steer(&self, text: String) -> Result<(), Ended> {
+        self.0.address.steer(text).map_err(|_| Ended(self.id()))
     }
-    pub fn queued(&self) -> Vec<String> {
+    pub(crate) fn queued(&self) -> Vec<String> {
         self.0.address.queued()
     }
-    pub fn recall(&self) -> Vec<String> {
+    pub(crate) fn recall(&self) -> Vec<String> {
         self.0.address.recall()
     }
     /// Stop `job` if it is open, taking back its queued human prompts.
-    pub fn stop(&self, job: JobId) -> Option<Vec<String>> {
+    pub(crate) fn stop(&self, job: JobId) -> Option<Vec<String>> {
         self.0.address.stop(job)
     }
     /// End this life and every descendant; teardown remains the owner's work.
-    pub fn end(&self) {
+    pub(crate) fn end(&self) {
         self.0.address.end(CancelCause::Cancelled);
     }
     /// Admit one job on a gated root.
-    pub fn release(&self) -> bool {
+    pub(crate) fn release(&self) -> bool {
         self.0.address.release()
     }
     /// Stop the open job, leaving queued prompts in place.
     pub(crate) fn stop_current(&self) -> bool {
         self.0.address.stop_current()
     }
-    pub(crate) fn post_command(&self, command: Command) {
-        let _ = self.0.address.command(command);
+    pub(crate) fn command(&self, command: Command) -> Result<(), Ended> {
+        self.0
+            .address
+            .command(command)
+            .map_err(|_| Ended(self.id()))
     }
     pub(crate) fn message(&self, from: &Self, text: String) -> Result<(), Refused> {
         let message = AgentMessage {
@@ -104,6 +106,7 @@ impl AgentHandle {
     pub(crate) fn is_root(&self) -> bool {
         self.parent().is_none()
     }
+    #[cfg(test)]
     pub(crate) fn log_dir(&self) -> &OwnDir {
         &self.0.log_dir
     }
@@ -124,11 +127,8 @@ impl AgentHandle {
         }
         here
     }
-    pub fn is_live(&self) -> bool {
+    pub(crate) fn is_live(&self) -> bool {
         self.0.address.is_live()
-    }
-    pub(crate) fn current_provider(&self) -> Arc<crate::provider::Provider> {
-        self.0.provider.current()
     }
     pub(crate) fn run_dir(&self) -> &OwnDir {
         &self.0.run_dir
