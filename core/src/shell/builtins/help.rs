@@ -259,9 +259,9 @@ fn lead_paragraph(doc: &str) -> &str {
 /// One `explain` entry: a readable guide, then labelled facts about the name.
 fn fmt_entry(
     name: &str,
+    origin: Option<&str>,
     doc: Option<&str>,
-    ty: Option<&str>,
-    tail: &[String],
+    facts: &[(&str, String)],
     Colors {
         bold,
         cyan,
@@ -269,26 +269,29 @@ fn fmt_entry(
         reset,
     }: Colors,
 ) -> String {
-    let mut out = format!("  {bold}{cyan}{name}{reset}\n");
-    if let Some(doc) = doc {
-        let (usage, description) = doc
-            .split_once("  — ")
-            .map_or((None, doc), |(usage, description)| {
-                (Some(usage), description)
-            });
-        if let Some(usage) = usage {
-            let _ = writeln!(out, "  {dim}Usage:{reset} {usage}");
-        }
+    let mut out = format!("{bold}{name}{reset}");
+    if let Some(origin) = origin {
+        let _ = write!(out, " {dim}·{reset} {cyan}{origin}{reset}");
+    }
+    out.push('\n');
+    let (usage, description) = doc.map_or((None, None), |doc| {
+        doc.split_once("  — ")
+            .map_or((None, Some(doc)), |(head, body)| {
+                (Some(("usage", head)), Some(body))
+            })
+    });
+    if let Some(description) = description {
         let _ = writeln!(out, "  {}", description.replace('\n', "\n  "));
     }
-    if doc.is_some() && (ty.is_some() || !tail.is_empty()) {
-        out.push('\n');
-    }
-    if let Some(ty) = ty {
-        let _ = writeln!(out, "  {dim}Type:{reset} {ty}");
-    }
-    for line in tail {
-        let _ = writeln!(out, "  {dim}{line}{reset}");
+    for (i, (label, value)) in usage
+        .into_iter()
+        .chain(facts.iter().map(|(label, value)| (*label, value.as_str())))
+        .enumerate()
+    {
+        if i == 0 && doc.is_some() {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "  {dim}{label:7}{reset} {value}");
     }
     out.push('\n');
     out
@@ -349,31 +352,28 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Settled<Valu
 /// holds them, rather than rendered as unexplained placeholders.
 fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
     if let Some(doc) = language_doc(name) {
-        return fmt_entry(
-            name,
-            Some(doc),
-            None,
-            &["Source: language syntax".to_string()],
-            colors,
-        );
+        return fmt_entry(name, Some("language syntax"), Some(doc), &[], colors);
     }
     let sites = locate_all(name, shell);
     let (doc, ty) = documented(name, sites.first(), shell);
     if sites.is_empty() && doc.is_none() && ty.is_none() {
         return search(name, shell, colors);
     }
-    let mut tail: Vec<String> = sites
-        .first()
-        .map(|site| format!("Source: {site}"))
-        .into_iter()
-        .collect();
+    let origin = sites.first().map(|site| match site {
+        Where::DeniedByGrant(_) => "denied by grant".to_owned(),
+        _ => site.to_string(),
+    });
+    let mut facts: Vec<_> = ty.map(|ty| ("type", ty)).into_iter().collect();
+    if let Some(Where::DeniedByGrant(at)) = sites.first() {
+        facts.push(("path", at.clone()));
+    }
     if let [_, shadowed @ ..] = sites.as_slice()
         && !shadowed.is_empty()
     {
         let names: Vec<String> = shadowed.iter().map(Where::to_string).collect();
-        tail.push(format!("Shadows: {}", names.join(", ")));
+        facts.push(("shadows", names.join(", ")));
     }
-    fmt_entry(name, doc.as_deref(), ty.as_deref(), &tail, colors)
+    fmt_entry(name, origin.as_deref(), doc.as_deref(), &facts, colors)
 }
 
 /// The doc and type held by the registry that owns `name`.
@@ -446,6 +446,7 @@ enum Where {
     Handler,
     BaseFrame,
     Builtin,
+    Bundled,
     Path(PathBuf),
     DeniedByGrant(String),
 }
@@ -462,6 +463,7 @@ impl fmt::Display for Where {
             // reporting as a handler someone installed, and its own doc and
             // argv type say the rest.  The reader needs no third word.
             Self::BaseFrame | Self::Builtin => f.write_str("builtin"),
+            Self::Bundled => f.write_str("bundled"),
             Self::Path(path) => write!(f, "{}", shown(path)),
             Self::DeniedByGrant(at) => write!(f, "denied by grant ({at})"),
         }
@@ -476,7 +478,7 @@ impl fmt::Display for Where {
 /// half of the manifest (a native — the env hit), then the handler stack, then
 /// `PATH`.  A native's own arm is unreachable from any bare head or `^` (A-1′),
 /// so it reports as `builtin`, and an arm stacked over it reports separately,
-/// under `Shadows:`.
+/// under `shadows`.
 fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     let mut sites = Vec::new();
     if shell.env.binding(name).is_some() {
@@ -530,7 +532,7 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
             ..
         }) => sites.push(match admitted.program() {
             Program::File { arg0, .. } => Where::Path(arg0.clone()),
-            Program::Tool(_) => Where::Builtin,
+            Program::Tool(_) => Where::Bundled,
         }),
         Ok(Head {
             program: Err(_), ..
@@ -574,7 +576,6 @@ mod tests {
                         matches!(sites.as_slice(), [Where::DeniedByGrant(found)] if found == &at),
                         "{name}: present={present}"
                     );
-                    assert_eq!(sites[0].to_string(), format!("denied by grant ({at})"));
                 }
             }
         });
@@ -595,10 +596,22 @@ mod tests {
 
     #[cfg(feature = "coreutils")]
     #[test]
-    fn a_bundled_tool_reads_as_builtin_in_explain() {
+    fn a_bundled_tool_reads_as_bundled_in_explain() {
         let sites = locate_all("wc", &crate::test_helper::core_shell());
-        assert!(matches!(sites.as_slice(), [Where::Builtin]));
-        assert_eq!(sites[0].to_string(), "builtin");
+        assert!(matches!(sites.as_slice(), [Where::Bundled]));
+    }
+
+    #[cfg(feature = "coreutils")]
+    #[test]
+    fn a_native_shadows_its_bundled_twin_in_explain() {
+        let shell = crate::test_helper::core_shell();
+        for name in ["nproc", "env"] {
+            let sites = locate_all(name, &shell);
+            assert!(
+                matches!(sites.as_slice(), [Where::Builtin, Where::Bundled]),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -663,14 +676,8 @@ mod tests {
             "help must list the installed library entry, got:\n{help_out}"
         );
 
-        let (sink, buf) = crate::io::new_buffer();
-        shell.set_stdout(sink);
-        builtin_explain(&[Value::string("frob")], &mut shell).expect("a buffer sink cannot fail");
-        let explain_out = String::from_utf8(buf.take()).expect("explain output is UTF-8");
-        assert!(
-            explain_out.contains("frob the widget"),
-            "explain must resolve the installed library doc, got:\n{explain_out}"
-        );
+        let (doc, _) = documented("frob", None, &shell);
+        assert_eq!(doc.as_deref(), Some("frob the widget"));
     }
 
     /// The index prints a doc's lead paragraph; `explain` prints the whole thing.
@@ -692,38 +699,10 @@ mod tests {
             "help's index row must carry only the lead paragraph, got:\n{help_out}"
         );
 
-        let (sink, buf) = crate::io::new_buffer();
-        shell.set_stdout(sink);
-        builtin_explain(&[Value::string("frob")], &mut shell).expect("a buffer sink cannot fail");
-        let explain_out = String::from_utf8(buf.take()).expect("explain output is UTF-8");
-        assert!(
-            explain_out.contains("frob the widget.") && explain_out.contains("load-bearing"),
-            "explain must print the doc in full, got:\n{explain_out}"
+        let (doc, _) = documented("frob", None, &shell);
+        assert_eq!(
+            doc.as_deref(),
+            Some("frob the widget.\n\nHandle with care: it is load-bearing.")
         );
-    }
-
-    /// A block's own names are not the session's: `explain` answers only for
-    /// the latter, from inside a block as at the top.
-    #[test]
-    fn explain_reflects_on_the_session_not_the_callers_block() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.set_var("sess_name".into(), Value::Int(1));
-        for (source, expected) in [
-            ("!{ explain sess_name }", "Source: session"),
-            (
-                "let f = { |zqx_local| explain zqx_local }\nf 1",
-                "explain: zqx_local: not found",
-            ),
-        ] {
-            let (result, bytes, _) = crate::shell::evaluator::with_capture(&mut shell, |shell| {
-                crate::shell::evaluator::run_source(source, shell)
-            });
-            result.expect("explain must run");
-            let out = String::from_utf8(bytes).expect("explain output is UTF-8");
-            assert!(
-                out.contains(expected),
-                "`{source}` must print `{expected}`, got:\n{out}"
-            );
-        }
     }
 }

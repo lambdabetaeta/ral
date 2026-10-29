@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+generated_at_commit: 4a4fb24c50333afaea7d036e5b4bab7450d67e8b
 verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 verified_at_date: 2026-10-28
 anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, command_candidates, failure_trace, ReadRegion::judge_file, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
@@ -23,6 +23,11 @@ launch for a direct pipeline stage and `detach`.
 - **A bundled name is its tool**, found with no walk, so the in-binary
   implementation wins over a host twin. The exec table and what running reads
   judge it through `GrantStack::admit`, which mints the launcher's `Admitted`.
+  `explain` labels this candidate `bundled`, distinct from a native or base
+  frame's `builtin`. Its compact card puts the winning origin beside the name,
+  then documentation and aligned `usage`, `type`, and `shadows` facts when
+  present. A refusal heads the card with `denied by grant`, with its path as a
+  separate fact.
 - **A bare name folds its `PATH` candidates in order**, running the first
   admitted candidate that holds a program and passing over refusals.
   `which::locate`'s memo hit is tried first: admitted and runnable, it is the
