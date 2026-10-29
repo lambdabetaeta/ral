@@ -15,6 +15,7 @@ use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::shell::runtime::{Settled, Shell};
 use ral_core::source::SourceOrigin;
+use ral_core::syntax::quote_word;
 
 /// Run one top-level run of `source` through the public `run` entry
 /// and return the body's `Settled<Value>`.  Every test below picks source
@@ -147,6 +148,32 @@ fn ral_path_candidates_are_judged_for_reading() {
     );
 
     std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_read_withheld_ral_path_candidate_is_refused_even_when_its_directory_is_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = ral_core::test_helper::real(tmp.path());
+    let here = root.as_path().join("here");
+    let lib = root.as_path().join("lib");
+    std::fs::create_dir(&here).unwrap();
+    let source = format!(
+        "within [dir: {}, env: [RAL_PATH: {}]] {{ \
+         grant [fs: [read: [`cwd .]]] {{ use 'm.ral' }} }}",
+        quote_word(here.to_str().unwrap()),
+        quote_word(lib.to_str().unwrap())
+    );
+    let mut shell = fresh_shell();
+    let absent = top_level(&mut shell, &source)
+        .expect_err("an absent RAL_PATH directory is still judged")
+        .to_string();
+    assert!(absent.contains("fs read denied by grant"), "{absent}");
+    assert!(absent.contains(&shown(lib.join("m.ral"))), "{absent}");
+
+    std::fs::create_dir(&lib).unwrap();
+    std::fs::write(lib.join("m.ral"), "let answer = 1\n").unwrap();
+    let present = top_level(&mut shell, &source).expect_err("the module is still read-withheld");
+    assert_eq!(absent, present.to_string());
 }
 
 /// The source of `use 'm.ral'` from `here` over `ral_path`, under a grant that

@@ -1,18 +1,14 @@
 //! Pre-spawn planning: an admitted [`Head`] and its argv values become a
 //! [`SpawnPlan`], or a focused refusal.
 //!
-//! [`Head::admit`] has judged the program, so the grant's refusal outranks
-//! argv shape.  Then existence (a head with no program had nothing to
-//! judge), argv shape, and whether the admitted program can be run at all: a
-//! program is judged before it is looked at, so a denied file is refused as
-//! denied, never as unexecutable.  Every launch path plans here, so the
-//! rules live in exactly one place.
+//! [`Head::admit`] has decided refusal, then 127/126, before argv shape.
+//! Every launch path reads that verdict here without probing again.
 
-use crate::authority::policy::{Admitted, Program};
+use crate::authority::policy::Admitted;
 use crate::shell::runtime::{Break, Error, Settled, Value};
 use crate::ty::RefusedArg;
 
-use super::head::{Head, Missing};
+use super::head::{Admission, Head};
 
 /// A vetted call, taken by [`super::process::build_launch`].  `shown` is the
 /// name diagnostics and audit report; `admitted` runs with `args`.
@@ -25,16 +21,10 @@ pub(crate) struct SpawnPlan {
 /// Plan an admitted head's launch, taking it: 127 when it names nothing,
 /// 126 when the walk stopped at a file lacking `+x` or the admitted file
 /// cannot be run — read off the head's own walk, never re-probed.
-pub(crate) fn vet(head: Head<Admitted>, args: &[Value]) -> Settled<SpawnPlan> {
+pub(crate) fn vet(head: Head<Admission>, args: &[Value]) -> Settled<SpawnPlan> {
     let Head { shown, program } = head;
     let admitted = program.map_err(|missing| Break::Error(missing.error(&shown)))?;
     let args = validate_argv(&shown, args)?;
-    if let Program::File { located, .. } = admitted.program()
-        && !located.is_executable()
-    {
-        let found = located.real().as_path().to_path_buf();
-        return Err(Break::Error(Missing::NotExecutable(found).error(&shown)));
-    }
     Ok(SpawnPlan {
         shown,
         admitted,
@@ -74,9 +64,13 @@ fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::authority::policy::Program;
+    use crate::authority::policy::{
+        Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, Program,
+    };
+    use crate::fact::{Check, Observed, Resource};
     use crate::ir::CommandName;
-    use crate::shell::runtime::{Mooring, Shell};
+    use crate::path::FrozenPath;
+    use crate::shell::runtime::{CapturePolicy, Mooring, Shell};
     use std::path::Path;
 
     /// A head admitted with no surface, then planned with no argv.
@@ -113,11 +107,22 @@ mod tests {
         }
     }
 
-    /// A grant layer under which no program may run.
-    fn no_exec() -> crate::authority::policy::GrantLayer {
-        use crate::authority::policy::{Capabilities, ExecGrant};
+    fn no_exec() -> GrantLayer {
         crate::test_helper::layer(Capabilities {
             exec: Some(ExecGrant::default()),
+            ..Capabilities::default()
+        })
+    }
+
+    fn run_from(dir: &Path) -> GrantLayer {
+        crate::test_helper::layer(Capabilities {
+            exec: Some(ExecGrant::of(
+                [ExecKey::Dir(FrozenPath::from_surface(
+                    crate::path::utf8(dir).unwrap(),
+                ))],
+                [],
+            )),
+            fs: Some(FsPolicy::default()),
             ..Capabilities::default()
         })
     }
@@ -188,11 +193,14 @@ mod tests {
             crate::path::CwdPath::new(tmp.path().to_path_buf())
                 .expect("a tempdir is a working directory"),
         );
-        let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context);
-        assert!(
-            matches!(&head.program, Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name))
-        );
-        plan(head, &mut shell).expect("a resolved name must vet");
+        let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context)
+            .admit(&Mooring::adrift(), &mut shell)
+            .expect("an unrestricted shell admits the head");
+        assert!(matches!(
+            head.program.as_ref().map(Admitted::program),
+            Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name)
+        ));
+        vet(head, &[]).expect("a resolved name must vet");
 
         shell.seed_cwd(
             crate::path::CwdPath::new(elsewhere.path().to_path_buf())
@@ -277,23 +285,62 @@ mod tests {
         assert!(grant.contains("grant") && !grant.contains("#'"), "{hint}");
     }
 
-    /// A bare name is no path, so its refusal offers nothing as text.
     #[test]
-    fn a_denied_bare_name_is_not_offered_as_text() {
-        crate::path::forget_located_commands();
-        let dir = tempfile::tempdir().unwrap();
-        let name = plant(dir.path(), "zzdeniedbare");
+    fn refused_and_absent_candidates_record_the_first_refusal_with_a_bare_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = plant(tmp.path(), "zzdeniedbare");
+        let dirs = ["admitted", "first-denied", "later-denied"].map(|dir| {
+            let dir = tmp.path().join(dir);
+            std::fs::create_dir(&dir).unwrap();
+            dir
+        });
         let mut shell = crate::test_helper::core_shell();
-        shell
-            .context
-            .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
-        let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
-        assert!(e.message.contains("denied by active grant"), "{e:?}");
-        assert!(
-            !e.hint.as_deref().unwrap_or_default().contains("#'"),
-            "{e:?}"
+        shell.context.set_env_var(
+            "PATH",
+            std::env::join_paths(&dirs).unwrap().into_string().unwrap(),
         );
+        for present in [false, true] {
+            if present {
+                for dir in &dirs[1..] {
+                    std::fs::copy(tmp.path().join(&name), dir.join(&name)).unwrap();
+                }
+            }
+            let (e, trail) = shell.with_layer(run_from(&dirs[0]), |shell| {
+                let scope = shell.local.audit.open(CapturePolicy::Off);
+                let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context);
+                let e = refused(head, shell);
+                (e, shell.local.audit.close(scope))
+            });
+            assert!(e.message.contains("denied by active grant"), "{e:?}");
+            let hint = e.hint.as_deref().expect("a refusal carries a hint");
+            assert_eq!(
+                hint.split_once("\n\n").expect("both hints are kept").0,
+                format!("'{name}' is no program in any PATH directory the grant runs from")
+            );
+            assert!(!hint.contains("#'"), "{hint}");
+            let [observation] = trail.as_slice() else {
+                panic!("only the first refusal is recorded: {trail:?}");
+            };
+            assert_eq!(
+                observation.what,
+                Observed::Check(Check::new(
+                    Resource::Exec,
+                    [
+                        ("name".into(), name.clone()),
+                        (
+                            "resolved".into(),
+                            crate::path::shown(
+                                crate::test_helper::trace(&dirs[1])
+                                    .real()
+                                    .as_path()
+                                    .join(&name),
+                            ),
+                        ),
+                    ]
+                    .into(),
+                ))
+            );
+        }
     }
 
     /// A path head naming no file is a missing command, and the refusal names
@@ -311,20 +358,80 @@ mod tests {
         assert!(e.message.contains("no-such-dir"), "{}", e.message);
     }
 
-    /// A bare name that is neither bundled nor on `PATH` surfaces 127.
     #[test]
-    fn missing_non_bundled_name_produces_127() {
-        let dir = tempfile::tempdir().unwrap();
+    fn all_absent_path_candidates_produce_127() {
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
         let mut shell = crate::test_helper::core_shell();
-        shell
-            .context
-            .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
-
+        shell.context.set_env_var(
+            "PATH",
+            std::env::join_paths([d1.path(), d2.path()])
+                .unwrap()
+                .into_string()
+                .unwrap(),
+        );
         let head = Head::resolve(
             &CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
             &shell.context,
         );
         assert_eq!(refused(head, &mut shell).code(), 127);
+    }
+
+    #[test]
+    fn admitted_path_failures_precede_argv_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let looping = {
+            let looping = tmp.path().join("loop");
+            std::os::unix::fs::symlink("loop", &looping).unwrap();
+            looping
+        };
+        let mut shell = crate::test_helper::core_shell();
+        shell.with_layer(run_from(tmp.path()), |shell| {
+            for (file, code) in [
+                (tmp.path().join("missing"), 127),
+                (tmp.path().join("absent/tool"), 127),
+                (tmp.path().to_path_buf(), 126),
+                #[cfg(unix)]
+                (looping, 126),
+            ] {
+                let head = Head::resolve(
+                    &CommandName::Path(file.to_string_lossy().into_owned()),
+                    &shell.context,
+                )
+                .admit(&Mooring::adrift(), shell)
+                .expect("the grant runs this directory");
+                let Err(Break::Error(e)) = vet(head, &[Value::Unit]) else {
+                    panic!("the admitted path cannot be run");
+                };
+                assert_eq!(e.code(), code, "{e:?}");
+                assert!(!e.message.contains("cannot pass"), "{e:?}");
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_admitted_non_executable_candidate_is_126_naming_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("zzplain");
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        shell
+            .context
+            .set_env_var("PATH", tmp.path().to_string_lossy().into_owned());
+        shell.with_layer(run_from(tmp.path()), |shell| {
+            let head = Head::resolve(&CommandName::Bare("zzplain".into()), &shell.context)
+                .admit(&Mooring::adrift(), shell)
+                .expect("the grant admits the non-executable file");
+            let Err(Break::Error(e)) = vet(head, &[Value::Unit]) else {
+                panic!("a non-executable candidate cannot be run");
+            };
+            assert_eq!(e.code(), 126, "{e:?}");
+            assert!(e.message.contains(&crate::path::shown(&file)), "{e:?}");
+        });
     }
 
     /// A value and its type earn one verdict: the property the shared

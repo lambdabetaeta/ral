@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-verified_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-verified_at_date: 2026-10-27
-anchors: [check_exec, Admitted, admit, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable]
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+verified_at_date: 2026-10-28
+anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable]
 ---
 
 # Capability enforcement: one model, two enforcers
@@ -63,8 +63,11 @@ fact. The doors are:
   `locate_if_admitted`), the doors every read and open goes through. Each walks
   the name, then `GrantStack::judge` takes the transcript and returns the handle
   vouched for the operation; a probe of a name the walk found nothing at is
-  judged on the name, so a denied absent name reads as denied
-  ([[internals/path-judgment|path-judgment]]).
+  judged on the name, so a denied absent name reads as denied. Heads are judged
+  the same way: each candidate's object, absent leaf or failed-walk evidence
+  (`failure_trace`) meets the exec table and what running reads before its
+  kind or error is disclosed ([[internals/path-judgment|path-judgment]],
+  [[internals/exec-judgment|exec-judgment]]).
 - the verbs of `editor` and `shell`: one `Flag`, checked by one `Shell::check(Flag, who)`.
 - on the sandbox's side, `SandboxProjection::of`, the part of the policy the OS
   can render, folded from the same tables.

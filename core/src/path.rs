@@ -72,14 +72,13 @@ pub use walk::{
     kind_of, walk, walk_dir, walk_lenient,
 };
 pub(crate) use walk::{StagedWrite, Streamed, Streaming, open_discard};
-#[cfg(windows)]
-pub(crate) use which::is_batch_image;
-pub(crate) use which::is_executable_file;
+pub(crate) use which::command_candidates;
 #[cfg(target_os = "linux")]
 pub(crate) use which::locate_in;
-pub(crate) use which::{PathSearch, search};
 pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key, names_a_path, names_a_path_for};
 pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_path_entries};
+#[cfg(windows)]
+pub(crate) use which::{is_batch_image, is_executable_file};
 
 #[cfg(target_os = "linux")]
 pub(crate) use procfs::proc_fd_path;

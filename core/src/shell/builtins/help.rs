@@ -4,6 +4,7 @@
 //! prelude function, or host-installed library entry to its documentation and
 //! place in the shell.
 
+use crate::authority::policy::Program;
 use crate::io::ansi::{BOLD, CYAN, DIM, RESET};
 use crate::io::terminal;
 use crate::ir::CommandName;
@@ -446,7 +447,7 @@ enum Where {
     BaseFrame,
     Builtin,
     Path(PathBuf),
-    DeniedByGrant(PathBuf),
+    DeniedByGrant(String),
 }
 
 impl fmt::Display for Where {
@@ -462,7 +463,7 @@ impl fmt::Display for Where {
             // argv type say the rest.  The reader needs no third word.
             Self::BaseFrame | Self::Builtin => f.write_str("builtin"),
             Self::Path(path) => write!(f, "{}", shown(path)),
-            Self::DeniedByGrant(path) => write!(f, "denied by grant ({})", shown(path)),
+            Self::DeniedByGrant(at) => write!(f, "denied by grant ({at})"),
         }
     }
 }
@@ -521,33 +522,84 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     {
         sites.push(Where::Builtin);
     }
-    if let Some(path) = shell.locate_command(name) {
-        sites.push(if grant_admits(name, shell) {
-            Where::Path(path)
-        } else {
-            Where::DeniedByGrant(path)
-        });
+    match Head::resolve(&CommandName::of(name), &shell.context)
+        .select(&shell.context.grants, shell.baseline())
+    {
+        Ok(Head {
+            program: Ok(admitted),
+            ..
+        }) => sites.push(match admitted.program() {
+            Program::File { arg0, .. } => Where::Path(arg0.clone()),
+            Program::Tool(_) => Where::Builtin,
+        }),
+        Ok(Head {
+            program: Err(_), ..
+        }) => {}
+        Err(denied) => sites.push(Where::DeniedByGrant(denied.at)),
     }
     sites
 }
 
-/// Whether a grant admits `name` as a command head — the judgment dispatch
-/// makes, made here without launching, so `explain` can say `denied by grant`
-/// rather than name a file the shell would refuse to exec.
-fn grant_admits(name: &str, shell: &Shell) -> bool {
-    let Ok(program) = Head::resolve(&CommandName::of(name), &shell.context).program else {
-        return true;
-    };
-    shell
-        .context
-        .grants
-        .admit(shell.baseline(), program)
-        .is_ok()
-}
-
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_names_a_refused_candidate_whether_or_not_it_exists() {
+        use crate::authority::policy::{Capabilities, FsPolicy};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::test_helper::real(tmp.path());
+        let dir = root.as_path().join("withheld");
+        let name = "ral-explain-probe.exe";
+        let candidate = dir.join(name);
+        let at = shown(&candidate);
+        let mut shell = crate::test_helper::core_shell();
+        shell.context.set_env_var("PATH", shown(&dir));
+        let layer = crate::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy::default()),
+            ..Capabilities::default()
+        });
+
+        shell.with_layer(layer, |shell| {
+            for present in [false, true] {
+                if present {
+                    std::fs::create_dir(&dir).unwrap();
+                    std::fs::write(&candidate, "").unwrap();
+                }
+                for name in [name, &at] {
+                    let sites = locate_all(name, shell);
+                    assert!(
+                        matches!(sites.as_slice(), [Where::DeniedByGrant(found)] if found == &at),
+                        "{name}: present={present}"
+                    );
+                    assert_eq!(sites[0].to_string(), format!("denied by grant ({at})"));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_missing_head_adds_no_explain_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::test_helper::real(tmp.path());
+        let name = "ral-explain-missing.exe";
+        let at = shown(root.as_path().join(name));
+        let mut shell = crate::test_helper::core_shell();
+        shell.context.set_env_var("PATH", shown(root.as_path()));
+        for name in [name, &at] {
+            assert!(locate_all(name, &shell).is_empty(), "{name}");
+        }
+    }
+
+    #[cfg(feature = "coreutils")]
+    #[test]
+    fn a_bundled_tool_reads_as_builtin_in_explain() {
+        let sites = locate_all("wc", &crate::test_helper::core_shell());
+        assert!(matches!(sites.as_slice(), [Where::Builtin]));
+        assert_eq!(sites[0].to_string(), "builtin");
+    }
 
     #[test]
     fn language_docs_cover_every_keyword_and_constant() {

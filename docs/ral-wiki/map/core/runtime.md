@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 578dcf04
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 generated_at_date: 2026-10-28
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -30,7 +30,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   neither the env nor the handler stack. **Grant admission is an
   external-command property**: only the `External` arm admits the head
   (`Head::admit`) before its redirects open, refusing it outright, and carries
-  the `Admitted` to the launch; the env, base, and handler arms pass through.
+  `Head<Admission>` to `vet`; the env, base, and handler arms pass through.
   Handler and alias thunks are lambdas — a unary `{ |args| … }` or a catch-all
   `{ |name args| … }` — with the calling convention fixed by surface position,
   not inferred from a value's runtime shape
@@ -56,28 +56,26 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
   `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps
   `2>&1` a `dup2` when stderr's sink is `same_destination` as stdout's.
-  Submodules: `head.rs` (`Head { shown, program }`, resolved once: a bundled
-  `Program::Tool`, a host `Program::File` with its launch path and real path,
-  or a `Missing`; `Head::admit` judges it), `vet.rs` (planning an admitted head:
-  existence → argv shape → executability, yielding a `SpawnPlan` holding
+  Submodules: `head.rs` (`Head { shown, program }`, a frozen `Target` until
+  `Head::admit` supplies `Admission = Result<Admitted, Missing>`), `vet.rs`
+  (reading the 127/126 verdict, then argv shape, yielding a `SpawnPlan` holding
   `shown`, the `Admitted`, and the caller's argv), `process.rs`, `child.rs`,
   `stdio.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
   for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once:
   `ForegroundDecision(PgidPolicy)`, `NewLeader` being exactly the foreground.
-  - **The program and the 126/127 verdict are two projections of one `PATH`
-    walk.** `Head::resolve` calls `path::search` once, anchored at
-    `Context::cwd`, the shell's one cwd cell; a miss is
-    `Missing::NotFound` (keeping the file a path looked for, so the refusal
-    can offer the extension it lacks), a hit lacking `+x`
-    `Missing::NotExecutable`, and
-    `vet` reads that rather than probing the disk, so walk and verdict cannot
-    disagree and a missing command never reaches the in-process guard
-    ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]). A path
-    head's native target — as written, or a `~` head expanded by
-    `TildePath::expand`, never re-read for a sigil — is anchored at the launch
-    cwd with only `.` folded, so the guard judges the file the kernel will
-    reach and the launcher runs that very file, by its real path, under the
-    shown spelling as `argv[0]`
+  - **The program and the 126/127 verdict come from the judged candidate
+    fold's walk.** `Head::resolve` freezes a `Target` without I/O: a bundled
+    tool, a launch path, or a bare name with its effective `PATH` and
+    `Context::cwd`. For a bare name, `Head::select` tries the `which::locate`
+    memo hit first, then folds `command_candidates` in `PATH` order unless
+    that probe is admitted and runnable. Each candidate's object, absent leaf or
+    `failure_trace` is judged before its kind or error is disclosed. The first
+    admitted program runs; otherwise the first refusal or 126 says why, and
+    only absence yields 127. `Head::admit` records a selected refusal through
+    `Shell::exec_refused`; `vet` reads `Missing` without probing again. A path
+    head's native target — as written, or expanded by `TildePath::expand` —
+    is anchored at the launch cwd with only `.` folded; the launcher runs the
+    judged program by its real path, the shown spelling as `argv[0]`
     ([[internals/exec-judgment|exec-judgment]]).
   - **The argv-shape step is one refused set read at two moments.**
     `vet::reject_exec_arg` maps each argument's head (`Value::heads`) through

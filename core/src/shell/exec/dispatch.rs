@@ -6,7 +6,6 @@
 //! every arm; pipeline staging reaches
 //! `resolve_command_word`/`classify_command` directly.
 
-use crate::authority::policy::{Admitted, Program};
 use crate::fact::{AuditIo, Command};
 use crate::ir::{CommandName, CommandWord};
 use crate::shell::runtime::{
@@ -15,7 +14,7 @@ use crate::shell::runtime::{
 };
 
 use super::capture::with_audit_capture;
-use super::command::{self, Head};
+use super::command::{self, Admission, Head, Target};
 use super::redirect::scope::with_redirects;
 use crate::ir::Redirects;
 use crate::source::Span;
@@ -23,8 +22,8 @@ use crate::source::Span;
 // ── Resolution ─────────────────────────────────────────────────────────
 
 /// One arm per place a command name can live.
-/// `P` is the external's program: resolved, or admitted by [`classify_command`].
-pub(crate) enum Resolution<P = Program> {
+/// `P` is the external's target, or admission from [`classify_command`].
+pub(crate) enum Resolution<P = Target> {
     Env(Value),
     /// `depth` counts handler frames from the top down to the matched one
     /// inclusive — what `strip_matched` takes.  Boxed: [`HandlerEntry`] would
@@ -77,7 +76,7 @@ pub(crate) fn classify_command(
     env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Resolution<Admitted>> {
+) -> Settled<Resolution<Admission>> {
     Ok(match resolve_command_word(head, env, shell) {
         Resolution::External(head) => Resolution::External(head.admit(mooring, shell)?),
         Resolution::Env(value) => Resolution::Env(value),
@@ -131,7 +130,7 @@ pub(crate) fn run_base_frame(
 
 /// An external's door, with its redirects installed inside it.
 pub(crate) fn run_external(
-    head: Head<Admitted>,
+    head: Head<Admission>,
     args: &[Value],
     redirects: &Redirects<String>,
     span: Option<Span>,

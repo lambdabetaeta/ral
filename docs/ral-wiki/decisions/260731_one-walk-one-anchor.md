@@ -1,6 +1,12 @@
 ---
-status: active
+status: superseded in part
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 ---
+
+> **Superseded in part 2026-10-28.** `PathSearch` is gone: the 126/127 verdict
+> comes from the judged candidate fold's walk, only for an admitted candidate.
+> The one-anchor law stands
+> ([[internals/exec-judgment|exec-judgment]]).
 
 # One walk, one anchor: a PATH search has a single cwd and a single verdict
 

@@ -1,30 +1,48 @@
 ---
-generated_at_commit: 21778dc9d2ea3aa347c7ec0d2cb0d902fc37ffde
-verified_at_commit: 21778dc9d2ea3aa347c7ec0d2cb0d902fc37ffde
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 verified_at_date: 2026-10-28
-anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, Head::admit, ReadRegion::judge_file, check_exec, Admitted, for_kernel, places, deputy_prefixes]
+anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, command_candidates, failure_trace, ReadRegion::judge_file, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
 
-**ral judges a command by the program it will run, then runs exactly that
-program.** One table decides, `ExecRules`, and both the guard and the kernel
+**A head is judged before it is looked at; ral runs exactly the program that
+judgment admits.** One table decides, `ExecRules`, and both the guard and the kernel
 read it ([[design/authority-tables#Two instances|authority-tables]]). This page is the exec half
 of [[internals/capability-enforcement|capability-enforcement]].
 
-## The head is judged by its program
+## The head is judged before it is looked at
 
-**`Head::resolve` (`shell/exec/command/head.rs`) finds the `Program` once**: a
-bundled `Tool`, or a host `File` with its spelling and its real path.
-`Head::admit` judges the head once per launch through `GrantStack::admit`: at
-classification for a plain call; at launch for a direct pipeline stage and
-`detach`. It judges the exec table, then what running reads (below), and mints
-`Admitted`, which `vet` plans from and the launcher takes. A head naming no
-file passes unjudged to `vet`.
+**`Head::resolve` names candidates without I/O; `Head::admit` walks and judges
+each before asking its kind.** Resolution freezes the shown spelling and a
+`Target`: a bundled tool, a path, or a bare name with the effective `PATH` and
+cwd. Admission is once per launch: at classification for a plain call; at
+launch for a direct pipeline stage and `detach`.
 
 - **A bundled name is its tool**, found with no walk, so the in-binary
-  implementation wins over a host twin; any other bare name is the effective
-  `PATH`'s hit.
+  implementation wins over a host twin. The exec table and what running reads
+  judge it through `GrantStack::admit`, which mints the launcher's `Admitted`.
+- **A bare name folds its `PATH` candidates in order**, running the first
+  admitted candidate that holds a program and passing over refusals.
+  `which::locate`'s memo hit is tried first: admitted and runnable, it is the
+  fold's answer; otherwise `command_candidates` supplies the whole fold.
+- **Each candidate's walk supplies what is judged**: the object or absent
+  leaf it reached, or, where it failed, the name at `failure_trace`.
+  `check_exec` judges a `Program`; `check_exec_name` judges a failed walk's
+  name by the same exec and read tests before its error is disclosed.
+- **Failing every candidate, the first failure other than absence says why**,
+  in candidate order: a refusal or 126. With only absence, the verdict is 127.
+  No `PATH`, or `~` with no `HOME`, names no candidate and yields 127.
+- **A path head's admitted walk decides its diagnostic**: absence is 127; a
+  directory or any other present non-program is 126. A failed walk other than
+  `NotFound` or `NotADirectory` is 126 permission denied. For a `PATH`
+  candidate only a regular file lacking `+x` is 126; every other non-program,
+  walk failures included, is absence.
+- **A refused bare name reveals nothing about the candidates' kinds.** Its
+  hint is `'{name}' is no program in any PATH directory the grant runs from`.
+  A refused path head offers itself as text. Admission and its 127/126 verdict
+  precede argv shape; `vet` formats the verdict without probing again.
 - **A path head is walked as written**, anchored at the launch cwd: the kernel
   walks a `..` after the links before it and honours a trailing `/`, so a
   lexical fold would judge another file than `execve` reaches. Windows folds
@@ -43,16 +61,16 @@ file passes unjudged to `vet`.
   `/tmp/evil/rg` does not inherit ``allow: [`name rg]``.
 - **A bare exclusion** also vetoes the name wherever it resolves. It stops an
   absolute `/bin/bash` and a symlink to it alike.
-- **A head that names no file has no program.** It fails with 127 or 126, never
-  with a denial. On Windows a path head written without its extension offers
-  the suffixed file beside it, if one exists.
+- **A Windows extension hint is itself judged.** An admitted absent path head
+  offers a suffixed spelling only where its probe is admitted and runnable.
 
 ## Running reads
 
 **A program that runs must be readable.** After the exec table, `admit` asks
 what running reads (`ExecDenial::Read`): `ReadRegion::judge_file` over the
 `read_region(baseline)` fold for a file, which vouches for the handle, and the
-image's read for a bundled tool.
+image's read for a bundled tool. `admit_name` makes the same exec and read
+judgments at a failed walk's transcript, without minting a handle.
 
 - **A host file** reads its real path. A grant reads what it, and the grants
   enclosing it, let run by path, directory or name (its run places,

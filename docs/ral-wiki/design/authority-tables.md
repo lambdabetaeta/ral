@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 ---
 
 # Authority is a table of scoped rules
@@ -669,11 +669,11 @@ spelling.
 - **A bare exclusion is also a veto on its `command_name_key`**, so it stops an absolute `/bin/bash` and a link to it alike.
 - **A path or dir key splits its polarities.** The allowance is the position its
   walk reached, never re-read; the exclusion is the objects it held. A bare key
-  is resolved where the grant is decoded; a *head* is resolved afresh at each run
-  (`which::locate` keeps an answer for the rest of one top-level run, shared by
-  command resolution, so the program launched is the program judged). Two keys
-  naming one file join to Both: `RealPath`'s `Ord` is the host's file identity, by
-  components off Windows and by Windows identity components on it.
+  is resolved where the grant is decoded; a *head* is resolved afresh at each run.
+  `which::locate`'s memo only orders the first probe; the judged candidate fold
+  decides what runs. Two keys naming one file join to Both: `RealPath`'s `Ord`
+  is the host's file identity, by components off Windows and by Windows
+  identity components on it.
 - **A veto's key folds.** `` deny: [`name bash] `` compiles to a folding exact deny and a
   veto, and Seatbelt's veto regex folds, so a stored key would admit in the
   guard a macOS child's `/x/BASH` that the kernel refuses
@@ -687,9 +687,14 @@ spelling.
   `deputy_prefixes` reports where a write becomes runnable.
 - **A multi-call binary is one file**, so a path key cannot tell its applets
   apart; a bare deny still vetoes by name.
-- **A head that names no file has no program**, so no table judges it: 127, or
-  126 when the file is not executable, never a denial
-  ([[internals/exec-judgment|exec-judgment]]).
+- **A head is judged before it is looked at.** Each candidate's object, absent
+  leaf or failed-walk name is judged as running it would be, before its kind or
+  error is disclosed. A bare name runs the first admitted program in `PATH`
+  order, passing over refused candidates as `execvp` does under a kernel exec
+  filter. Refusing the first candidate would make every bare command fail
+  under `minimal` on a usual `PATH`: its read region omits `~/.local/bin`,
+  which precedes the system tool roots. A grant may select a later candidate,
+  never one it does not admit ([[internals/exec-judgment|exec-judgment]]).
 
 ### Carriers and the linker
 

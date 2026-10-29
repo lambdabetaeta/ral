@@ -17,7 +17,7 @@ mod trace;
 
 #[cfg(test)]
 pub(crate) use error::directory_refusal_for_test;
-pub(crate) use error::{dangling, directory_refused, is_loop, loop_trace};
+pub(crate) use error::{dangling, directory_refused, failure_trace, is_loop};
 pub use exclusion::{Excluded, Hold, Walked};
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use held::steps_taken;

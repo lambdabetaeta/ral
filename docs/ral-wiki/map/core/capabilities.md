@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 578dcf04
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 generated_at_date: 2026-10-28
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -92,7 +92,9 @@ Submodules:
   private fields); a refusal is data, `Refused { program, why:
   ExecDenial }`, `ExecDenial::{Run(Withheld<ExecDeny>), Read(Withheld<FsDeny>)}`;
   `admit` reads through `read_region(baseline)` and vouches for a file through
-  `ReadRegion::judge_file`; it carries no argv.
+  `ReadRegion::judge_file`; it carries no argv. `GrantStack::admit_name`
+  judges a failed walk's `Trace` by the same exec table and `GrantStack::read`,
+  without minting a handle.
   `ExecRules::for_kernel(support)` is
   the table less bundled-tool allowances, joined with the live support as `File`
   allows, what the kernel is handed; `allowed_files` the live file allowances the
@@ -123,7 +125,8 @@ functions fold the whole stack — a module boundary rather than a typestate
 authority and returns domain data, never runtime values or control flow.
 
 - `enforce.rs` — the guards over the model's judgments: `check_exec`
-  (`GrantStack::admit`),
+  (`GrantStack::admit`), `check_exec_name` (`GrantStack::admit_name`, a head's
+  failed-walk name judged as running it would be),
   `check_fs_exact` (the access a walk found, for a probe's name), `fs_denial` (the wording of a
   `Refused`), `check_flag`, and `check_device_name`.
   The exec and fs checks return
@@ -138,7 +141,7 @@ authority and returns domain data, never runtime values or control flow.
 
 ## The shell adapter — `core/src/shell/runtime/state/checks.rs`
 
-- `impl Shell`: `check(Flag, who)`, `check_exec`,
+- `impl Shell`: `check(Flag, who)`, `check_exec`, `exec_refused`,
   `baseline`, `locate`, `locate_dir`, `locate_existing`, `locate_if_admitted`
   (each excusing the discard device `LexicalPath::is_discard` and refusing a
   reserved device name before either region is consulted), `judge` (an object a
@@ -149,7 +152,10 @@ authority and returns domain data, never runtime values or control flow.
   then `GrantStack::judge` on its transcript, handing back the handle vouched
   for. `Shell::refused` mints a `Denial`'s `Break` and records its check
   through `Shell::record_check` with no `Mooring`, so on the trail alone.
-  `Shell::check_exec` records an exec refusal against its call's `Mooring`.
+  `Shell::exec_refused`, shared by `check_exec` and heads, records an exec
+  refusal against its call's `Mooring` and mints its `Break`. `walk_failure`
+  judges `failure_trace` for the requested operation before disclosing an
+  error; `locate_first` judges failed candidates on the same evidence.
   `From<Refusal> for Error` preserves the message and hint at this boundary.
 
 ## Construction — `core/src/authority/grant/`
@@ -302,11 +308,11 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   parent's listing for that identity, Windows the normalized name checked against
   the parent's path). A `..` is physical, the kernel's rule, even from a link
   target (the user's own path keeps its logical fold); the splice count is
-  bounded by `MAX_HOPS`. `walk/error.rs::loop_trace` reads the actual failed
-  link's transcript from a spent-budget error; `Shell::walk_failure` judges
-  disclosure before rendering it, without rewalking the name. Every restart,
-  the given name and each splice alike, is
-  put to one `rooted` check, so a link target relative to a drive's current
+  bounded by `MAX_HOPS`. `walk/error.rs::failure_trace`, exported by `walk.rs`,
+  takes `loop_trace`'s actual failed-link transcript from a spent-budget error,
+  else walks the name leniently with `LeafMode::Follow`. The fs doors judge it
+  for their operation, heads for running, before disclosing the error. Every
+  restart, the given name and each splice alike, is put to one `rooted` check, so a link target relative to a drive's current
   directory or with an unparsed head is refused as the name itself would be.
   `walk_dir`, `walk_lenient` (a grant spelling's transcript, as far as the disk
   goes), `walk_excluded` (an exclusion's `Excluded`, the link and its target
@@ -397,14 +403,15 @@ constructor, so no call site can choose "here" for itself**
   `Word::Path`, `ir::CommandName::of`, the walk itself and the grant decoder's
   `` `name `` check all ask it.
 - `path_dirs` is the sole directory list behind `locate`, `commands_on_path` and
-  `search`; it **drops empty `PATH` elements on every platform**, so a trailing
-  `;` or `:` never means the cwd. `.` and `./bin` are honoured, as written.
-  `locate_in` is the same walk off Windows, unmemoised, over directories a
+  `command_candidates`; it **drops empty `PATH` elements on every platform**,
+  so a trailing `;` or `:` never means the cwd. `.` and `./bin` are honoured, as written.
+  `locate_in` is a Linux-only, unmemoised search over directories a
   caller already holds (`path_dirs(…, None)` for bwrap's pin, absolute entries alone), so no list is
   re-joined into a string to be split again.
-- `search` returns `PathSearch::{Executable, FoundNotExecutable, Missing}` from
-  one traversal — the executable half memoised, the presence half not — so
-  `shell::exec::command::vet` reads a verdict rather than taking a second walk.
+- `command_candidates` names every candidate in `PATH` order, empty with no
+  `PATH`. `locate` memoises the first executable as an undisclosed ordering
+  probe; `Head::select` judges that hit and, unless it is admitted and runnable,
+  folds all candidates. `vet` reads the judged fold's verdict without probing.
 - On Windows, `%PATHEXT%` suffixes **append**: `build.ps1` yields
   `build.ps1`, `build.ps1.EXE`, …, never `build.exe`.
 - Grant construction walks the `PATH` of the decoding environment with

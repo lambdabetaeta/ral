@@ -90,10 +90,6 @@ pub(in crate::path) enum Silent {
     /// An executable-probe predicate, not turn-time model data I/O, so it
     /// raises no card.
     WhichStat,
-    /// The `which`/PATH probe: stats a candidate to tell an unexecutable file
-    /// from an absent one.  An executable-probe predicate, not turn-time model
-    /// data I/O, so it raises no card.
-    WhichStatAbsent,
     /// `PATHEXT`, the Windows resolver's suffix list, which is no XDG base: a
     /// PATH-probe environment read, taken beside the other `which` probes.  It
     /// reads a variable and opens no object, so it raises no card.

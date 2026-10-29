@@ -1,4 +1,5 @@
-use super::Trace;
+use super::{LeafMode, Trace, walk_lenient};
+use crate::path::LexicalPath;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,17 @@ pub(super) fn loop_at(trace: Trace) -> io::Error {
 /// The actual link where the splice budget ran out, never its unresolved tail.
 pub(crate) fn loop_trace(e: &io::Error) -> Option<&Trace> {
     e.get_ref()?.downcast_ref::<Looped>()?.trace.as_deref()
+}
+
+/// What a failed walk of `path` leaves to judge before its error is told: the
+/// link it looped at, else the name walked leniently.
+///
+/// # Errors
+/// The lenient walk's, where it ends no steps: nothing walked, nothing to judge.
+pub(crate) fn failure_trace(path: &LexicalPath, error: &io::Error) -> io::Result<Trace> {
+    loop_trace(error)
+        .cloned()
+        .map_or_else(|| walk_lenient(path, LeafMode::Follow), Ok)
 }
 
 /// Whether `e` is the walk's `ELOOP`: a link met where none is allowed, or a

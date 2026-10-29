@@ -155,15 +155,7 @@ pub(crate) enum Silent {
     #[cfg(all(windows, test))]
     WirePairWindows,
 
-    // Command heads, the terminal device, bootstrap and bundled tools.
-    /// Metadata questions of an admitted program's real path, asked by name
-    /// after its exec failed: is it a directory, does it exist, is it
-    /// executable.  They grant nothing, so they raise no card.
-    HeadRefusal,
-    /// Which extension names a sibling of an admitted program's real path,
-    /// asked by name after its exec failed.  It grants nothing, so it raises
-    /// no card.
-    HeadSuffixed,
+    // The terminal device, bootstrap and bundled tools.
     /// The `ask` builtin's controlling-terminal device (`/dev/tty`, or
     /// `CONIN$` and `CONOUT$` on Windows), opened to prompt and read one line
     /// directly from the user, bypassing redirection.  It raises no card: a

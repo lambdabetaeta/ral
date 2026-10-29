@@ -72,15 +72,4 @@ impl Shell {
     pub fn anchor(&self, path: &std::path::Path) -> crate::path::LexicalPath {
         self.context.resolver().anchor(path)
     }
-
-    /// Absolute path of the executable the shell would run for `name`, via the
-    /// effective `PATH` and cwd; `None` if there is none.
-    ///
-    /// A filesystem question only — admission is
-    /// [`GrantStack::admit`](crate::authority::policy::GrantStack::admit).
-    /// `which` pairs the two to tell denied-but-installed from absent.
-    pub(crate) fn locate_command(&self, name: &str) -> Option<PathBuf> {
-        let env_path = self.context.env_overrides.get_or_host("PATH");
-        crate::path::locate(name, env_path.as_deref(), Some(self.context.cwd()))
-    }
 }

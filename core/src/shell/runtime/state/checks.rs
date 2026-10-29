@@ -8,10 +8,8 @@ use crate::authority::guard::{
 };
 use crate::authority::policy::{Admitted, Baseline, Flag, FsOp, GrantLayer, Program};
 use crate::authority::sandbox::SandboxProjection;
-use crate::path::walk::{Kind, is_loop, loop_trace};
-use crate::path::{
-    Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk, walk_dir, walk_lenient,
-};
+use crate::path::walk::{Kind, failure_trace, is_loop};
+use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk, walk_dir};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
 use std::collections::BTreeMap;
 use std::io;
@@ -58,32 +56,19 @@ impl Shell {
         mooring: &Mooring,
     ) -> Settled<Admitted> {
         let verdict = check_exec(&self.context.grants, self.baseline(), shown, program);
-        verdict.map_err(|Denial { check, error }| {
-            self.record_check(Some(mooring), check);
-            Error::from(error).into()
-        })
+        verdict.map_err(|denial| self.exec_refused(denial, mooring))
+    }
+
+    /// Record an exec `denial` against `mooring` and mint the `Break` that refuses.
+    pub(crate) fn exec_refused(&mut self, denial: Denial, mooring: &Mooring) -> Break {
+        let Denial { check, error } = denial;
+        self.record_check(Some(mooring), check);
+        Error::from(error).into()
     }
 
     /// The baseline every fs judgment of this shell reads: its runtime's.
     pub fn baseline(&self) -> &Baseline {
         self.session.runtime.baseline()
-    }
-
-    /// Judge `path` as a name, walked leniently, for `O`: what a door asks
-    /// where its walk found nothing or failed, so a denied name that does not
-    /// exist reads as denied, not as absent.  A [discard device](LexicalPath::is_discard)
-    /// is exempt from both regions, and a [reserved device name](check_device_name)
-    /// is refused before either, asked before the walk, since the question is
-    /// about the name and not about what is on the disk under it.
-    fn check_named<O: Op>(&mut self, path: &LexicalPath) -> Settled<()> {
-        if path.is_discard() {
-            return Ok(());
-        }
-        check_device_name(path).map_err(Error::from)?;
-        let trace = walk_lenient(path, LeafMode::Follow)
-            .map_err(|e| crate::shell::runtime::Error::io(path.shown(), &e))?;
-        let verdict = check_fs_exact(&self.context.grants, self.baseline(), &trace, &O::FS);
-        self.judged(verdict)
     }
 
     /// An object a door already holds, judged for `O` by the live stack: the
@@ -100,12 +85,15 @@ impl Shell {
     }
 
     /// Judge disclosure at the failed link, or at the leniently resolved name.
+    /// A denied name that does not exist reads as denied, not as absent.
+    /// A [discard device](LexicalPath::is_discard) is exempt; a
+    /// [reserved device name](check_device_name) is refused.
     fn walk_failure<O: Op>(&mut self, path: &LexicalPath, error: &io::Error) -> Settled<Error> {
-        if let Some(trace) = loop_trace(error) {
-            let verdict = check_fs_exact(&self.context.grants, self.baseline(), trace, &O::FS);
+        if !path.is_discard() {
+            check_device_name(path).map_err(Error::from)?;
+            let trace = failure_trace(path, error).map_err(|e| Error::io(path.shown(), &e))?;
+            let verdict = check_fs_exact(&self.context.grants, self.baseline(), &trace, &O::FS);
             self.judged(verdict)?;
-        } else {
-            self.check_named::<O>(path)?;
         }
         Ok(Error::io(path.shown(), error))
     }
@@ -186,11 +174,11 @@ impl Shell {
     }
 
     /// The first of `candidates` that is a regular file the live stack admits
-    /// for `O`, held.  Each walked candidate is judged before its kind is
-    /// asked, present or absent, so which one is refused never says which
-    /// exists; a denied candidate is passed over, as `execvp` does, and the
-    /// first denial is the error where none is admitted; `Ok(None)` where none
-    /// is refused and none is an admitted file.
+    /// for `O`, held. Each candidate is judged before its kind is asked, as
+    /// what its walk reached or, where the walk failed, as its name. A denied
+    /// candidate is passed over, as `execvp` does, and the first denial is the
+    /// error where none is admitted; `Ok(None)` where none is refused and none
+    /// is an admitted file.
     ///
     /// # Errors
     /// The first refused candidate, where none was admitted; or the refusal
@@ -202,8 +190,17 @@ impl Shell {
         let mut first = None;
         for cand in candidates {
             check_device_name(&cand).map_err(Error::from)?;
-            let Ok(located) = walk(&cand, LeafMode::Follow) else {
-                continue;
+            let located = match walk(&cand, LeafMode::Follow) {
+                Ok(located) => located,
+                Err(e) => {
+                    if let Ok(trace) = failure_trace(&cand, &e)
+                        && let Err(denial) =
+                            check_fs_exact(&self.context.grants, self.baseline(), &trace, &O::FS)
+                    {
+                        first.get_or_insert(denial);
+                    }
+                    continue;
+                }
             };
             let real = located.real().clone();
             match (self.context.grants).judge::<O>(self.baseline(), located) {

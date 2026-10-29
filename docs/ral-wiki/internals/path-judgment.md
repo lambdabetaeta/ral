@@ -1,8 +1,8 @@
 ---
-verified_at_commit: 6281520c
-generated_at_commit: 5eaef7d9
-verified_at_date: 2026-10-27
-anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
+verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+verified_at_date: 2026-10-28
+anchors: [walk, walk_excluded, failure_trace, Shell::walk_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -95,13 +95,20 @@ then the handle. These shell adapters live in `shell/runtime/state/checks.rs`:
 `authority::guard` returns diagnostic data, and the adapter records a denial
 and raises its runtime error. Every write is a `locate`.
 
-**A failed walk's diagnostic is judged before it is disclosed.** A spent link
-budget retains the transcript ending at the actual link, without the unresolved
-continuation. `Shell::walk_failure` judges that evidence for the requested
-operation: a refusal records a denied check, while admission preserves the loop
-error, including for probes. This authorizes disclosure only, never an operation
-through an unresolved name. Missing or unenterable tails use the lenient-name
-judgment. Successful accesses still judge the final object, not each hop.
+**A failed walk's diagnostic is judged before it is disclosed.**
+
+- **`failure_trace` supplies the one evidence**: the transcript ending at the
+  actual link where the budget was spent, without the unresolved continuation;
+  otherwise the name walked leniently with `LeafMode::Follow`.
+- **The fs doors judge it for the requested operation `O`** through
+  `Shell::walk_failure`; heads judge it for running through `check_exec_name`.
+  A denied absent name reads as denied, just as a present object there would.
+- **`locate_first` judges every candidate before asking its kind**, including
+  a candidate whose walk failed. It passes over refusals and retains the first
+  if no admitted candidate has the requested kind.
+- **Admission authorizes disclosure only**, preserving the walk's error,
+  including for probes; it permits no operation through an unresolved name.
+  Successful accesses still judge the final object, not each hop.
 
 ## Two readings
 
@@ -196,9 +203,9 @@ function of its layers.**
 
 **A program is judged as a `Located`, its `#!` line read through that handle,
 and it is started by its real name on every platform.** The `Located` has one
-owner at a time: `Head::admit` moves it from the `Head` into the `Admitted`;
-`launch` takes the `Admitted` and drops the `Located`, so no judged program or
-directory handle survives into the run. Landlock rules only allow and cannot
+owner at a time: `Head::admit` walks a candidate and moves its `Located` into
+the `Admitted`; `launch` takes the `Admitted` and drops the `Located`, so no
+judged program or directory handle survives into the run. Landlock rules only allow and cannot
 require the judged object, and a handle kept through the run would hold the
 program's directory on Windows ([[internals/exec-judgment|exec-judgment]]).
 
@@ -326,10 +333,9 @@ position; the kernel judges current ancestry. The residuals:
   reported as not entered, never shown as a plain link with its subtree
   dropped.
 - **Probes by name**: `may_write` (the `is-writable` builtin, and a staged
-  write's check of the file it replaces), the `+x` test of a `PATH` candidate,
-  the diagnostic probes after a failed exec, and git's session-start reading of
-  `.git` answer by name and grant nothing. A casefolded Linux directory stores
-  one spelling the walk cannot ask for.
+  write's check of the file it replaces), the `PATH` ordering memo's `+x` test,
+  and git's session-start reading of `.git` answer by name and grant nothing.
+  A casefolded Linux directory stores one spelling the walk cannot ask for.
 - **Win32 propagates inheritable ACEs by name** inside `SetSecurityInfo`.
 
 See also [[design/authority-tables|authority-tables]] for every platform's

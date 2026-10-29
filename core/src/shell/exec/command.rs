@@ -7,7 +7,6 @@
 //! `build_launch` with it, so both paths resolve and confine a call the
 //! same way.
 
-use crate::authority::policy::Admitted;
 use crate::process::Group;
 use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
 
@@ -23,7 +22,7 @@ mod vet;
 pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
-pub(crate) use head::Head;
+pub(crate) use head::{Admission, Head, Target};
 pub(crate) use process::{brake, build_launch, spawn, with_denials};
 pub(crate) use stdio::{ChildIo, ChildOut, TtyInputPermit, wire_stdio};
 pub(crate) use vet::{SpawnPlan, vet};
@@ -36,7 +35,7 @@ use stdio::inherit_tty;
 /// coreutils/diffutils/ripgrep head takes the same path as any host
 /// executable: its image is `ral --ral-bundled-tool <tool>`.
 pub(crate) fn run(
-    head: Head<Admitted>,
+    head: Head<Admission>,
     args: &[Value],
     mooring: &Mooring,
     shell: &Shell,

@@ -14,7 +14,7 @@ use super::table::{Allows, Denies, Table, Withheld};
 use super::{ExecSummary, GrantStack, Join, Meet};
 use crate::path::{
     self, Authority, Depth, Excluded, FrozenPath, Judged, Located, MatchedBy, Reading, RealPath,
-    Unjudged, command_name_key,
+    Trace, Unjudged, command_name_key,
 };
 use crate::syntax::quote::quote_word;
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,7 @@ impl GrantStack {
         program: Program,
     ) -> Result<Admitted, Box<Refused>> {
         let rules = rules(self);
-        if let Err(why) = run_withheld(rules.as_ref(), &program) {
+        if let Err(why) = run_withheld(rules.as_ref(), program.subject()) {
             return Err(Box::new(Refused { program, why }));
         }
         let read = match program {
@@ -100,6 +100,16 @@ impl GrantStack {
         }
     }
 
+    /// `↓run` (law 7) of a name a walk reached no object at: the exec table,
+    /// then what running would read, both at the name's transcript.
+    pub(crate) fn admit_name(&self, baseline: &Baseline, trace: &Trace) -> Result<(), ExecDenial> {
+        run_withheld(
+            rules(self).as_ref(),
+            Subject::Program(path::Subject::Access(trace)),
+        )?;
+        self.read(baseline, trace).map_err(ExecDenial::Read)
+    }
+
     /// A bundled tool runs ral's image, which only an fs exclusion withholds.
     fn tool_read(&self, baseline: &Baseline) -> Result<(), Withheld<FsDeny>> {
         baseline
@@ -108,11 +118,11 @@ impl GrantStack {
     }
 }
 
-/// Why a supplied exec table withholds `program`'s run, before what running
+/// Why a supplied exec table withholds `subject`'s run, before what running
 /// it reads is asked.
-fn run_withheld(rules: Option<&ExecRules>, program: &Program) -> Result<(), ExecDenial> {
+fn run_withheld(rules: Option<&ExecRules>, subject: Subject<'_>) -> Result<(), ExecDenial> {
     rules
-        .and_then(|rules| rules.withheld(program.subject()))
+        .and_then(|rules| rules.withheld(subject))
         .map_or(Ok(()), |why| Err(ExecDenial::Run(why)))
 }
 

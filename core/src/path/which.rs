@@ -60,21 +60,51 @@ fn locate_at(
         return answer;
     }
     #[cfg(windows)]
-    let found = path_dirs(path_value, cwd).into_iter().find_map(|dir| {
-        windows_command_candidates(&dir.join(name), &suffixes)
-            .into_iter()
-            .find(|c| is_executable_file(c))
-    });
+    let candidates = candidates_with_suffixes(name, path_value, cwd, &suffixes);
     #[cfg(not(windows))]
-    let found = locate_in(name, path_dirs(path_value, cwd));
+    let candidates = command_candidates(name, Some(path_value), cwd);
+    let found = candidates.into_iter().find(|c| is_executable_file(c));
     remember(key, found.clone(), now);
     found
 }
 
+/// The files a bare `name` may be, in `PATH` order: each `path_dirs` entry
+/// joined with `name` (on Windows, with each `%PATHEXT%` suffix). Empty with no `PATH`.
+pub(crate) fn command_candidates(
+    name: &str,
+    path_value: Option<&str>,
+    cwd: Option<&CwdPath>,
+) -> Vec<PathBuf> {
+    let Some(path_value) = path_value else {
+        return Vec::new();
+    };
+    #[cfg(windows)]
+    {
+        candidates_with_suffixes(name, path_value, cwd, &windows_pathext_suffixes())
+    }
+    #[cfg(not(windows))]
+    path_dirs(path_value, cwd)
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .collect()
+}
+
+#[cfg(windows)]
+fn candidates_with_suffixes(
+    name: &str,
+    path_value: &str,
+    cwd: Option<&CwdPath>,
+    suffixes: &[String],
+) -> Vec<PathBuf> {
+    path_dirs(path_value, cwd)
+        .into_iter()
+        .flat_map(|dir| windows_command_candidates(&dir.join(name), suffixes))
+        .collect()
+}
+
 /// The first executable file named `name` in `dirs`, in order and
-/// unmemoised: the walk [`locate`] makes off Windows, for a caller already
-/// holding the directories rather than a `PATH` string.
-#[cfg(not(windows))]
+/// unmemoised, for a caller holding directories rather than a `PATH` string.
+#[cfg(target_os = "linux")]
 pub(crate) fn locate_in(name: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     dirs.into_iter()
         .map(|dir| dir.join(name))
@@ -135,8 +165,8 @@ thread_local! {
     /// nothing survives a run boundary, which is fresher than bash's `hash`
     /// table.  Within a run a `None` older than [`NEGATIVE_TTL`] is re-probed
     /// while positives ride the generation alone, because a stale miss is a
-    /// wrong answer where a stale hit is a deleted file, which `Program::file`
-    /// reports as `Missing::NotFound` (127) without resuming the walk.
+    /// wrong answer where a stale hit is probed like any candidate, fails,
+    /// and the judged fold walks every candidate.
     static LOCATED: RefCell<LocateCache> = RefCell::new(LocateCache {
         generation: GENERATION.load(Ordering::Relaxed),
         entries: HashMap::new(),
@@ -221,7 +251,7 @@ fn anchor_to_cwd(p: PathBuf, cwd: Option<&CwdPath>) -> Option<PathBuf> {
     Some(super::lex::fold_dots(&anchored))
 }
 
-/// The one directory list behind [`locate`] and [`search`]; relative
+/// The one directory list behind [`locate`] and [`command_candidates`]; relative
 /// entries (`./bin`) anchor to `cwd`, and with no cwd are dropped, as a
 /// grant's `path` selector and the bwrap search read `PATH`.
 pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: Option<&CwdPath>) -> Vec<PathBuf> {
@@ -267,56 +297,6 @@ pub(crate) fn is_executable_file(p: &Path) -> bool {
     {
         true
     }
-}
-
-/// What one walk of `PATH` found, in the three states `shell::exec::command::vet`
-/// must tell apart.
-///
-/// Three, because the 126/127 split is a property *of the walk*: a verdict
-/// computed by a second, independent traversal can disagree with the first
-/// about the anchor, the search list, or the moment — and a disagreement in
-/// that shape reads exactly like "on `PATH` but lacking `+x`".  Carrying the
-/// verdict out of the traversal that produced the resolution leaves nothing
-/// for the two to disagree about.
-#[derive(Clone, Debug)]
-pub(crate) enum PathSearch {
-    /// A regular file carrying the executable bit: what the OS would spawn.
-    Executable(PathBuf),
-    /// A file of that name is there, but the walk would not spawn it — 126.
-    FoundNotExecutable(PathBuf),
-    /// No file of that name anywhere on the list — 127.
-    Missing,
-}
-
-/// Walk `PATH` for `name` once and report all three outcomes.
-///
-/// The executable half is [`locate`], memo and TTL unchanged.  The
-/// presence half runs only when that misses — the error path, and bundled
-/// names whose `PATH` holds no host twin — and stays uncached, for the reason
-/// [`LOCATED`] gives: a stale *hit* is caught at `Program::file`, which finds
-/// the file gone and answers 127, but a stale answer here is the difference
-/// between two exit codes a user reads as different diagnoses.  It walks the
-/// same [`path_dirs`] list as the executable half, so no empty entry, no
-/// anchor and no suffix rule can differ between them.
-///
-/// A separator-bearing name is [`PathSearch::Missing`] outright: it is a
-/// path, not `PATH`'s business, and the kernel gives the better diagnosis at
-/// spawn.
-pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: Option<&CwdPath>) -> PathSearch {
-    if names_a_path(name) {
-        return PathSearch::Missing;
-    }
-    if let Some(hit) = locate(name, path_value, cwd) {
-        return PathSearch::Executable(hit);
-    }
-    let Some(path_value) = path_value else {
-        return PathSearch::Missing;
-    };
-    path_dirs(path_value, cwd)
-        .into_iter()
-        .map(|dir| dir.join(name))
-        .find(|candidate| site!(Silent::WhichStatAbsent, candidate => is_file()))
-        .map_or(PathSearch::Missing, PathSearch::FoundNotExecutable)
 }
 
 /// The resolver's fallback when `%PATHEXT%` is unset;
@@ -380,11 +360,7 @@ fn name_key_on(name: &str, rules: PathRules) -> std::borrow::Cow<'_, str> {
 /// the resolver's own default when the variable is unset.  An entry that is
 /// not Unicode is dropped, since a suffix is appended as text.
 ///
-/// Read once per [`locate`] call rather than once per `PATH` directory: the
-/// list is the same for every directory in a walk, so re-reading and
-/// re-splitting the environment at each one bought an env lookup, a split and
-/// a fresh allocation per entry and no freshness anyone could observe.  The
-/// list is also an input to [`LocateKey`], which needs it computed here anyway.
+/// Read once per candidate list, not per directory; also an input to [`LocateKey`].
 #[cfg(windows)]
 fn windows_pathext_suffixes() -> Vec<String> {
     let pathext = site!(Silent::Pathext, std::env::var_os("PATHEXT"))
@@ -828,19 +804,19 @@ mod tests {
         assert_eq!(entries, [Path::new("/a")]);
     }
 
-    /// The 126 case, and the only platform that has one: the presence half
-    /// answers where the executable half declined, off the same walk.
+    /// Candidates include files the executable probe declines.
     #[test]
-    fn search_reports_found_not_executable_on_the_same_walk() {
+    fn candidates_include_a_non_executable_file() {
         let _guard = super::memo_tests::cache_guard();
         let tmp = tempfile::tempdir().unwrap();
         touch(&tmp.path().join("noexec"), 0o644);
         let path_value = tmp.path().to_str().unwrap();
 
         assert_eq!(locate("noexec", Some(path_value), None), None);
-        match search("noexec", Some(path_value), None) {
-            PathSearch::FoundNotExecutable(p) => assert_eq!(p, tmp.path().join("noexec")),
-            other => panic!("expected FoundNotExecutable, got {other:?}"),
-        }
+        let p = command_candidates("noexec", Some(path_value), None)
+            .into_iter()
+            .next()
+            .expect("PATH holds a candidate");
+        assert_eq!(p, tmp.path().join("noexec"));
     }
 }

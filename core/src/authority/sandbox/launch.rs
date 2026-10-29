@@ -771,7 +771,7 @@ mod tests {
 
         let scripts = std::fs::read_dir("/usr/bin").ok()?;
         scripts.flatten().map(|e| e.path()).find(|script| {
-            let Ok(program) = Program::file(script.clone()) else {
+            let Some(program) = Program::file(script.clone()) else {
                 return false;
             };
             let admitted = admitted(program);

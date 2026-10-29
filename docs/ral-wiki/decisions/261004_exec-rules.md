@@ -1,7 +1,7 @@
 ---
 status: superseded
 superseded_by: decisions/261006_one-table-two-instances
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 ---
 
 > **Superseded 2026-10-28.** Its table and meet by
@@ -10,7 +10,9 @@ generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 > its compile by [[decisions/261021_one-path|one-path]]. The law it stated, one
 > judgment that guard and kernel both read, lives in
 > [[design/authority-tables|authority-tables]] (§Two instances, §Exec
-> identities) and [[internals/exec-judgment|exec-judgment]].
+> identities) and [[internals/exec-judgment|exec-judgment]]. Its 'missing is 127
+> under any grant' is reversed: a head is judged before it is looked at
+> ([[internals/exec-judgment|exec-judgment]]).
 
 # Exec rules: one table, one function
 

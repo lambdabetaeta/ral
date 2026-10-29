@@ -119,6 +119,21 @@ impl Display for LocateError {
 const EXCLUSION_HINT: &str =
     "the exclusion belongs to the policy that imposes it; change that policy";
 
+#[derive(Clone, Copy)]
+enum Refusing<'a> {
+    Program(&'a Program),
+    File(&'a RealPath),
+}
+
+impl Display for Refusing<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Program(program) => program.fmt(f),
+            Self::File(real) => real.fmt(f),
+        }
+    }
+}
+
 /// Judge a program: the one exec door.
 pub(crate) fn check_exec(
     grants: &GrantStack,
@@ -128,8 +143,22 @@ pub(crate) fn check_exec(
 ) -> Result<Admitted, Denial> {
     grants.admit(baseline, program).map_err(|refused| {
         let ExecRefused { program, why } = *refused;
-        let error = exec_error(grants, baseline, shown, &program, &why);
-        exec_denial(shown, &program, &why, error)
+        let program = Refusing::Program(&program);
+        let error = exec_error(grants, baseline, shown, program, &why);
+        exec_denial(shown, program, &why, error)
+    })
+}
+
+/// Judge a name a head's walk reached no object at, as running it would be.
+pub(crate) fn check_exec_name(
+    grants: &GrantStack,
+    baseline: &Baseline,
+    shown: &str,
+    trace: &Trace,
+) -> Result<(), Denial> {
+    grants.admit_name(baseline, trace).map_err(|why| {
+        let error = exec_error(grants, baseline, shown, Refusing::File(trace.real()), &why);
+        exec_denial(shown, Refusing::File(trace.real()), &why, error)
     })
 }
 
@@ -138,7 +167,7 @@ fn exec_error(
     grants: &GrantStack,
     baseline: &Baseline,
     shown: &str,
-    program: &Program,
+    program: Refusing<'_>,
     why: &ExecDenial,
 ) -> Refusal {
     let layers = grants.exec().count();
@@ -180,18 +209,18 @@ fn exec_error(
 fn read_cause(
     baseline: &Baseline,
     shown: &str,
-    program: &Program,
+    program: Refusing<'_>,
     why: &Withheld<FsDeny>,
 ) -> String {
     let (lead, subject) = match program {
-        Program::File { located, .. } => (String::new(), format!("'{}'", located.real())),
-        Program::Tool(_) => (
+        Refusing::Program(Program::Tool(_)) => (
             format!("'{shown}' is built into ral, and "),
             baseline.image().map_or_else(
                 || "ral's binary".to_string(),
                 |own| format!("ral's binary '{}'", own.real()),
             ),
         ),
+        file => (String::new(), format!("'{file}'")),
     };
     match why {
         Withheld::MissingAllowance => {
@@ -214,7 +243,7 @@ fn read_hint(why: &Withheld<FsDeny>, layers: usize) -> String {
     }
 }
 
-fn exec_denial(shown: &str, program: &Program, why: &ExecDenial, error: Refusal) -> Denial {
+fn exec_denial(shown: &str, program: Refusing<'_>, why: &ExecDenial, error: Refusal) -> Denial {
     let deny = match why {
         ExecDenial::Run(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
         ExecDenial::Read(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
