@@ -660,7 +660,7 @@ fn a_record_that_does_not_hash_to_its_locus_is_refused_by_name() {
         .expect_err("a record that no longer hashes to its locus is unreadable");
     assert!(
         refusal.contains("did not hash to the locus that named it"),
-        "the refusal must name the digest mismatch, got: {refusal}"
+        "the refusal must name the sum mismatch, got: {refusal}"
     );
 }
 
@@ -1299,7 +1299,7 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
     let path = sessions.path().join("0/record.jsonl");
     drop(live);
     let prefix = fs::read(&path).unwrap();
-    let fragment = b"{\"Protocol\":{\"kind\":\"user_prompt\"";
+    let fragment = b"{\"Protocol\":{\"user_prompt\":{";
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(fragment).unwrap();
     file.flush().unwrap();

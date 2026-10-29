@@ -45,7 +45,8 @@ impl Emitter {
     /// the file's own numbering.  The caller quarantines any torn tail first.
     ///
     /// # Errors
-    /// Returns `Err` if the file cannot be read or reopened.
+    /// Returns `Err` if the file cannot be read or reopened, or its tail is torn
+    /// rather than a whole commit.
     pub fn append_to(dir: &OwnDir) -> io::Result<Self> {
         Ok(Self {
             log: Arc::new(Log::append_to(dir)?),

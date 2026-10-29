@@ -1,6 +1,8 @@
 ---
 generated_at_commit: 0e83863c
 generated_at_date: 2026-10-29
+verified_at_commit: 34266ac0
+verified_at_date: 2026-10-29
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
@@ -49,10 +51,10 @@ The role and snapshot laws are [[design/agents|agents]]'s.
 - Private `Post` distinguishes human text, reads, rewrites and scoped
   deliveries. `Posts` is the only way to observe them, and every observation
   first drops a scoped delivery whose provenance is cancelled. `Post::admit`
-  maps messages and parent `Scoped::FollowUp` input to `Item::Message`.
+  maps messages and parent `Post::FollowUp` input to `Item::Message`.
   [[map/exarch/frontend|Frontend]] maps ordering and coalescing.
 - `Inbox::mailbox` captures current work. `Mailbox::adopt` accepts only
-  that live work, enrolls the optional shared `Child` born Working, and
+  that live work, enrolls the required shared `Arc<Child>` born Working, and
   returns its life node. A delayed construction cannot adopt into
   replacement work.
 - `Child` holds name, birth time, a record seam and one `ChildStatus`;
@@ -131,9 +133,13 @@ fleet root, lease policy and `Tenancy`.
   its engine before its claim releases. An armed claim publishes terminal
   `Died` before removing its name/census entry, outside the census lock;
   a bare unarmed claim releases silently and certifies nothing.
-- `Agent::assemble` (`agent/build.rs`) creates a `Child` for each returning
-  role after engine and log exist. `Fleet::lodge` enrolls it through the
-  captured work mailbox and builds its `Report` and inbox. A dead parent is
+- `Agent::assemble` (`agent/build.rs`) takes a `Kin`, `Trunk` or `Child {
+  parent, work }`, which determines both the `Role` and the `Lodging`
+  (`Root`, `Reporting(Child)` or `Under(Mailbox, Child)`): a parent's work
+  without a child, or the reverse, cannot be stated. The `Child` is created
+  only for a returning role, after engine and log exist. `Fleet::lodge`
+  enrolls it through the captured work mailbox and builds its `Report` and
+  inbox. A dead parent is
   `SessionDead`; abandoned work is `Abandoned`. A root's life is a
   fleet-root child; a child's life is beneath its parent's captured work.
   Its engine incarnation is a child of life, parallel to work. `Emitter::bind`
@@ -150,7 +156,9 @@ fleet root, lease policy and `Tenancy`.
   tenant but the waiter's is bound and live, then reports accumulated
   teardown failures. The census takes no inbox lock under its own.
 - `Agent::drop` first retires the inbox: it ends life and fails a Working
-  child with `ENDED_BEFORE_REPORTING`, recording unless panicking. It then
+  child with `ENDED_BEFORE_REPORTING`, recording unless panicking. The
+  ending reasons (`ENDED_BEFORE_REPORTING`, `ENDED_BEFORE_ANSWERING`,
+  `CANCELLED`) live together in `bus/post.rs`. It then
   clears schedules and records `SessionEnded` unless panicking, preserving
   the tail bookend. Inbox drop retires idempotently; a replied child keeps
   its value and posts nothing. The `Incarnation` drops last: its `Tenancy`
@@ -164,7 +172,9 @@ fleet root, lease policy and `Tenancy`.
 (`spawn::spawn_root`, `hatch_root`) claim then boot fresh engines. Branch
 imports context, not shell state. Resume reads every root record lacking
 `SessionClosed`, retaining its recorded name; headless resume requires
-exactly one live root. Chat, wire and child resumes are refused. The run
+exactly one live root; `Agent::reopen` then records a resumed returning
+(headless) root Working again through `Inbox::resume`, while a conversing
+root records nothing. Chat, wire and child resumes are refused. The run
 lock belongs to the launcher, not an agent.
 
 ## Attend, deliberate, invoke
@@ -204,10 +214,11 @@ lock belongs to the launcher, not an agent.
   with `Keep`, clears schedules and publishes Ready. `Inbox::deposit_reply`
   records and shows `Replied(value)` unless a parent follow-up is queued;
   that crossing leaves Working without a notice. A child parks; a headless
-  root returns. Consuming `settle` (`agent/spawn.rs`) concludes: a recording
-  failure overrides the outcome and is announced once through the independent
-  fleet sink. It then retires with `AgentOutcome::reason`, failing only a
-  Working child, and drops the owner. Teardown and terminal publication
+  root returns. Consuming `settle` (`agent/spawn.rs`) retires with
+  `AgentOutcome::reason`, failing only a Working child; a failed `Failed`
+  append shows that recording failure instead. It then checks availability,
+  announces any failure once through the independent fleet sink, and drops the
+  owner. Teardown and terminal publication
   remain inside census-counted completion.
 - A severed engine has ended life and so cancelled the exchange. `halted`
   names the loss as `Fault::Severed`, repaired as `Aborted`; calls left unrun

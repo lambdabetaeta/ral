@@ -1,5 +1,6 @@
 use super::*;
-use crate::record::{Display, Forensic, Seq};
+use crate::record::{ChildStatus, Display, Forensic, Seq};
+use ral_core::data::FOValue;
 use ral_core::own::TestDir;
 
 fn temp_dir(name: &str) -> TestDir {
@@ -30,6 +31,29 @@ fn changed(mut line: Vec<u8>) -> Vec<u8> {
     let at = line.windows(5).position(|text| text == b"bravo").unwrap();
     line[at] = b'B';
     line
+}
+
+/// `line` with its sum's digits overwritten by a non-hex letter.
+fn unsummed(mut line: Vec<u8>) -> Vec<u8> {
+    let at = b"{\"sum\":\"".len();
+    line[at..at + 16].fill(b'g');
+    line
+}
+
+/// A well-formed line of a shape this exarch never wrote, sealed or not.
+fn foreign_lines() -> [Vec<u8>; 3] {
+    let records = serde_json::json!([error("x")]);
+    let body = serde_json::json!({"at_unix_ms": 0, "records": records}).to_string();
+    let positional = serde_json::json!([0, records]).to_string();
+    [
+        serde_json::json!({"at_unix_ms": 0, "record": error("old")}).to_string(),
+        format!(r#"["{}",{body}]"#, Sum::of(body.as_bytes())),
+        format!(
+            r#"{{"sum":"{}","commit":{positional}}}"#,
+            Sum::of(positional.as_bytes())
+        ),
+    ]
+    .map(String::into_bytes)
 }
 
 fn assert_refusal(error: &io::Error, path: &Path, number: u64, reason: &str) {
@@ -143,17 +167,70 @@ fn a_large_observation_replays_exactly_from_compact_bytes() {
     assert_eq!(Observation::decode(&value).unwrap(), observation);
 }
 
+/// `f` on a thread of Rust's default spawned stack, 2 MiB, which no append or
+/// read may outgrow.
+fn on_a_default_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn_scoped(scope, f)
+            .unwrap()
+            .join()
+            .unwrap()
+    })
+}
+
+#[test]
+fn a_deeply_nested_record_round_trips() {
+    // Building, comparing and dropping a 5000-deep value recurses natively.
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(deep_record_round_trips)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn deep_record_round_trips() {
+    let replied = || {
+        (0..5000).fold(FOValue::Unit, |inner, _| FOValue::List {
+            items: vec![inner],
+        })
+    };
+    let dir = temp_dir("deep");
+    let path = dir.path().join(RECORD);
+    let record = Record::Forensic(Forensic::Status {
+        status: ChildStatus::Replied(replied()),
+    });
+    let commit =
+        on_a_default_stack(|| Log::create(&dir).unwrap().append(NonEmpty::one(record))).unwrap();
+    let (back, line) = on_a_default_stack(|| {
+        let back = read(&path)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        let mut reader = Reader::new(File::open(&path).unwrap());
+        let _record = reader.record(commit.records().first.locus()).unwrap();
+        (back, reader.line.take().unwrap())
+    });
+    for record in [back[0].value(), line.records().first.value()] {
+        assert!(matches!(
+            record,
+            Record::Forensic(Forensic::Status { status: ChildStatus::Replied(got) }) if *got == replied()
+        ));
+    }
+}
+
 #[test]
 fn a_line_of_an_older_exarch_is_refused_by_name() {
-    for interior in [false, true] {
-        let dir = temp_dir(&format!("older-{interior}"));
+    for (index, (line, interior)) in foreign_lines()
+        .into_iter()
+        .flat_map(|line| [(line.clone(), false), (line, true)])
+        .enumerate()
+    {
+        let dir = temp_dir(&format!("older-{index}"));
         let path = dir.path().join(RECORD);
-        let mut bytes = terminated(
-            serde_json::to_vec(&serde_json::json!({
-                "at_unix_ms": 0, "record": error("old")
-            }))
-            .unwrap(),
-        );
+        let mut bytes = terminated(line);
         if interior {
             bytes.extend(terminated(commit_line(&[error("next")])));
         }
@@ -198,8 +275,10 @@ fn a_torn_last_line_is_never_read() {
     let whole = terminated(commit_line(&several().into_iter().collect::<Vec<_>>()));
     let tails = [
         whole[..whole.len() / 2].to_vec(),
+        unsummed(whole.clone()),
         changed(whole),
         b"garbage\n".to_vec(),
+        b"{\"unexpected\":\n".to_vec(),
     ];
     for (index, tail) in tails.into_iter().enumerate() {
         let dir = temp_dir(&format!("torn-{index}"));
@@ -242,10 +321,15 @@ fn a_corrupt_interior_line_is_refused_by_file_and_line() {
     let faults = [
         (
             changed(terminated(commit_line(&[error("bravo")]))),
-            "corrupt",
+            &["corrupt: its commit hashes to"][..],
         ),
-        (b"garbage\n".to_vec(), "not JSON"),
-        (b"{\"not\":\"a commit\"}\n".to_vec(), "older exarch"),
+        (
+            unsummed(terminated(commit_line(&[error("bravo")]))),
+            &["was sealed as", "gggg"][..],
+        ),
+        (b"garbage\n".to_vec(), &["corrupt: it is not JSON"]),
+        (b"{\"unexpected\":\n".to_vec(), &["corrupt: it is not JSON"]),
+        (b"{\"not\":\"a commit\"}\n".to_vec(), &["older exarch"]),
     ];
     for (index, (fault, reason)) in faults.into_iter().enumerate() {
         let dir = temp_dir(&format!("interior-{index}"));
@@ -261,10 +345,9 @@ fn a_corrupt_interior_line_is_refused_by_file_and_line() {
         let mut back = read(&path).unwrap();
         assert!(back.next().unwrap().is_ok());
         let refusal = back.next().unwrap().unwrap_err();
-        if reason == "not JSON" {
-            assert!(refusal.to_string().contains("corrupt"));
+        for part in reason {
+            assert_refusal(&refusal, &path, 2, part);
         }
-        assert_refusal(&refusal, &path, 2, reason);
     }
 }
 
@@ -353,22 +436,91 @@ fn reopening_for_append_continues_the_commit_numbering() {
 }
 
 #[test]
-fn record_at_reads_each_record_of_a_commit_and_refuses_a_stale_locus() {
-    let dir = temp_dir("record-at");
+fn reopening_for_append_refuses_a_torn_tail() {
+    let whole = terminated(commit_line(&[error("bravo")]));
+    for (index, tail) in [whole[..whole.len() / 2].to_vec(), changed(whole)]
+        .into_iter()
+        .enumerate()
+    {
+        let dir = temp_dir(&format!("reopen-torn-{index}"));
+        let path = dir.path().join(RECORD);
+        let mut bytes = terminated(commit_line(&[error("head")]));
+        bytes.extend(tail);
+        std::fs::write(&path, &bytes).unwrap();
+        let refusal = Log::append_to(&dir).err().expect("a torn tail is refused");
+        let text = refusal.to_string();
+        assert!(text.contains(&ral_core::path::shown(&path)), "{text}");
+        assert!(text.contains("torn last line"), "{text}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+    let dir = temp_dir("reopen-empty");
+    std::fs::write(dir.path().join(RECORD), b"").unwrap();
+    let log = Log::append_to(&dir).unwrap();
+    assert_eq!(
+        log.append(NonEmpty::one(error("first"))).unwrap().number(),
+        1
+    );
+}
+
+#[test]
+fn a_reader_reads_each_record_of_each_commit_and_refuses_a_stale_locus() {
+    let dir = temp_dir("reader");
+    let path = dir.path().join(RECORD);
+    let log = Log::create(&dir).unwrap();
+    let commit = log.append(several()).unwrap();
+    let next = log.append(NonEmpty::one(error("delta"))).unwrap();
+    drop(log);
+    let mut reader = Reader::new(File::open(&path).unwrap());
+    let loci = commit
+        .records()
+        .iter()
+        .chain(next.records())
+        .chain(commit.records().rest.iter().rev());
+    for (recorded, expected) in loci.zip(["alpha", "bravo", "charlie", "delta", "charlie", "bravo"])
+    {
+        assert!(
+            matches!(reader.record(recorded.locus()).unwrap(), Record::Forensic(Forensic::Error { text }) if text == expected)
+        );
+    }
+    let beyond = Locus {
+        seq: Seq::new(1, 3),
+        ..commit.records().first.locus().clone()
+    };
+    let refusal = reader.record(&beyond).unwrap_err();
+    assert!(
+        refusal.to_string().contains("which holds fewer"),
+        "{refusal}"
+    );
+    let mut bytes = terminated(commit_line(&[error("prepended")]));
+    bytes.extend(std::fs::read(&path).unwrap());
+    std::fs::write(&path, bytes).unwrap();
+    let refusal = Reader::new(File::open(&path).unwrap())
+        .record(commit.records().rest[0].locus())
+        .unwrap_err();
+    assert!(
+        refusal.to_string().contains("did not hash to the locus"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn a_reader_refuses_a_stale_range_before_parsing_its_records() {
+    let dir = temp_dir("reader-stale-unparsed");
     let path = dir.path().join(RECORD);
     let log = Log::create(&dir).unwrap();
     let commit = log.append(several()).unwrap();
     drop(log);
-    let mut file = File::open(&path).unwrap();
-    for (recorded, expected) in commit.records().iter().zip(["alpha", "bravo", "charlie"]) {
-        assert!(
-            matches!(Log::record_at(&mut file, recorded.locus()).unwrap(), Record::Forensic(Forensic::Error { text }) if text == expected)
-        );
-    }
-    let mut bytes = terminated(commit_line(&[error("prepended")]));
-    bytes.extend(std::fs::read(&path).unwrap());
-    std::fs::write(&path, bytes).unwrap();
-    let refusal = Log::record_at(&mut file, commit.records().rest[0].locus()).unwrap_err();
+    let foreign =
+        RawValue::from_string(r#"{"at_unix_ms":0,"records":[{"alien":1}]}"#.into()).unwrap();
+    let line = serde_json::to_vec(&Line {
+        sum: Sum::of(foreign.get().as_bytes()),
+        commit: &foreign,
+    })
+    .unwrap();
+    std::fs::write(&path, terminated(line)).unwrap();
+    let refusal = Reader::new(File::open(&path).unwrap())
+        .record(commit.records().first.locus())
+        .unwrap_err();
     assert!(
         refusal.to_string().contains("did not hash to the locus"),
         "{refusal}"

@@ -101,7 +101,7 @@ Three adjacent obligations keep the invariant whole:
   judge refusing residues that are not laminar or rows whose `location`
   disagrees with them. It is also
   the one record whose meaning lies in another file: its step reads each
-  resident row's records back through digest-checked pointers, keeping each
+  resident row's records back through sum-checked pointers, keeping each
   row's admissible prefix so that no dangling `tool_use` of the parent's
   spawning batch reaches the child's wire, and an unreadable parent refuses
   the record before the table changes

@@ -99,8 +99,10 @@ monotone, so stale provenance stays stale.
 ([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
 
 - Adoption enrolls a Working child in the parent's current work. Only an
-  accepted parent follow-up makes a replied child Working again; peer
-  messages, steering and wakeups do not.
+  accepted parent follow-up makes a replied child Working again, or a resumed
+  returning root's own reopen; peer messages, steering and wakeups do not.
+  Construction pairs a parent's work with its child by type, so neither can
+  be stated alone.
 - A reply settles only when no parent follow-up is queued. A crossing reply
   leaves the child Working and posts no notice.
 - Finish publishes status and a value-free notice under the same parent
@@ -108,7 +110,9 @@ monotone, so stale provenance stays stale.
   of liveness; `draw` hears a queued finish before quiescing.
 - Retirement fails only a Working child. A replied child keeps its value
   after lease lapse or teardown; owner drop still reports a Working child
-  as failed. Abandoning work forgets its children.
+  as failed. If retirement cannot record that failure, the child shows the
+  recording failure, which the parent hears. Abandoning work forgets its
+  children.
 - `read` reaches the newest own child of a name in the reader's current
   work, live or ended, refusing Working and Failed. A headless root returns
   through the same cell without a parent mailbox.

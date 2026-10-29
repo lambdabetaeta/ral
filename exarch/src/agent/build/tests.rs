@@ -2,8 +2,10 @@ use super::*;
 use crate::agent::testkit::*;
 use crate::bus::{Emitter, Item, Next, ParkMode};
 use crate::provider::scripted::Script;
-use crate::record::{Memory, RECORD, Voice};
+use crate::record::{ChildStatus, Forensic, Memory, RECORD, Voice, read_records};
 use genai::chat::ChatMessage;
+use ral_core::data::FOValue;
+use ral_core::own::TestDir;
 use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
 use std::borrow::Cow;
@@ -1104,4 +1106,65 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         grandchild.engine.read(|t| t.grants()).unwrap(),
         grants.summary()
     );
+}
+
+/// A root whose log last settled on `replied`, resumed as `trunk`; its log's
+/// fold, and the directory that must outlive them.
+fn resumed_root(
+    tag: &str,
+    trunk: Trunk,
+    replied: &ChildStatus,
+) -> (Agent, impl Fn() -> ChildStatus, TestDir) {
+    let dir = tmp(tag);
+    let sessions = dir.make_dir("sessions").unwrap();
+    let log = AgentLog::root(
+        &sessions,
+        AgentId::new(0),
+        "main",
+        &RecordedModel::for_test("old-model"),
+        &RecordedAccount::for_test("old-provider"),
+        "system",
+        None,
+    )
+    .unwrap();
+    let _recorded = log
+        .record_emitter()
+        .emit(Forensic::Status {
+            status: replied.clone(),
+        })
+        .unwrap();
+    let record = log.dir().path().join(RECORD);
+    drop(log);
+    let folded = move || ChildStatus::fold(&read_records(&record).unwrap());
+    assert_eq!(&folded(), replied);
+    let (root, _) = Agent::resume(
+        RootConfig {
+            trunk,
+            ..root_config(&dir, 0)
+        },
+        identity_engine(tag),
+        &scripted("new-model", Script::new()),
+    )
+    .unwrap()
+    .remove(0);
+    (root, folded, dir)
+}
+
+#[test]
+fn a_resumed_returning_root_works_again_and_its_log_folds_so() {
+    let replied = ChildStatus::Replied(FOValue::Int { value: 1 });
+    let (root, folded, _dir) = resumed_root("resume-returning-root", Trunk::Headless, &replied);
+    assert_eq!(root.handle().reply(), None);
+    assert_eq!(folded(), ChildStatus::Working);
+    drop(root);
+    assert_eq!(folded(), ChildStatus::Failed(ENDED_BEFORE_REPORTING.into()));
+}
+
+#[test]
+fn a_resumed_conversing_root_records_no_status() {
+    let replied = ChildStatus::Replied(FOValue::Int { value: 1 });
+    let (root, folded, _dir) = resumed_root("resume-conversing-root", Trunk::Attended, &replied);
+    assert_eq!(folded(), replied);
+    drop(root);
+    assert_eq!(folded(), replied);
 }

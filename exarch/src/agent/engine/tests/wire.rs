@@ -1,4 +1,6 @@
 use super::super::*;
+use crate::agent::Trunk;
+use crate::agent::build::Kin;
 use crate::agent::desk::{ExarchDesk, HostServices, RunHost};
 use crate::agent::fleet::Fleet;
 use crate::agent::testkit::pop;
@@ -31,7 +33,7 @@ fn test_log() -> AgentLog {
 /// tests never spawn from it.
 fn test_trunk(fleet: &Arc<Fleet>) -> crate::agent::testkit::TestAgent {
     let mut spec = crate::agent::testkit::TestAgentSpec::new("wire-trunk");
-    spec.role = crate::agent::Role::Headless;
+    spec.kin = Kin::Trunk(Trunk::Headless);
     crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
 }
 

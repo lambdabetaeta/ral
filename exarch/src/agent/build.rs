@@ -49,15 +49,43 @@ const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindin
     in the old context are dead), pinned state and scheduled events are gone (exarch-pins `list \
     and exarch-schedules `list to confirm), and any sub-agents from before have ended.";
 
+/// Whom a life answers to: its trunk's harness or host, or its parent's work.
+pub(crate) enum Kin {
+    Trunk(Trunk),
+    Child { parent: AgentHandle, work: Mailbox },
+}
+impl Kin {
+    pub(crate) fn role(&self) -> Role {
+        match self {
+            Self::Trunk(trunk) => trunk.role(),
+            Self::Child { parent, .. } => Role::Child {
+                parent: parent.clone(),
+            },
+        }
+    }
+    /// Where it hangs; `born` runs only when someone hears of it.
+    pub(crate) fn lodging(self, born: impl FnOnce() -> Child) -> Lodging {
+        match self {
+            Self::Child { work, .. } => Lodging::Under(work, born()),
+            Self::Trunk(trunk) if trunk.role().returns() => Lodging::Reporting(born()),
+            Self::Trunk(_) => Lodging::Root,
+        }
+    }
+}
+/// Where a life hangs; a parent always hears of its child.
+pub(crate) enum Lodging {
+    Root,
+    Reporting(Child),
+    Under(Mailbox, Child),
+}
 pub(crate) struct Build {
     pub(crate) tenancy: Tenancy,
     pub(crate) log: AgentLog,
-    pub(crate) role: Role,
+    pub(crate) kin: Kin,
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
     pub(crate) search: bool,
     pub(crate) fleet: Arc<Fleet>,
-    pub(crate) parent: Option<Mailbox>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trunk {
@@ -218,21 +246,21 @@ impl Fleet {
         Ok((fleet, engine))
     }
     /// I1: a life hangs under its parent's work or the fleet root.
-    pub(crate) fn lodge(
-        &self,
-        parent: Option<Mailbox>,
-        child: Option<Child>,
-    ) -> Result<(Scope, ScopeNode, Inbox), Unborn> {
-        let child = child.map(Arc::new);
-        let (under, life) = match &parent {
-            Some(work) => (work.scope(), work.adopt(child.clone())?),
-            None => ((*self.root).clone(), self.root.child()),
+    pub(crate) fn lodge(&self, lodging: Lodging) -> Result<(Scope, ScopeNode, Inbox), Unborn> {
+        let (under, life, report) = match lodging {
+            Lodging::Under(work, child) => {
+                let child = Arc::new(child);
+                let life = work.adopt(child.clone())?;
+                (work.scope(), life, Some(Report::new(child, Some(work))))
+            }
+            Lodging::Reporting(child) => (
+                (*self.root).clone(),
+                self.root.child(),
+                Some(Report::new(Arc::new(child), None)),
+            ),
+            Lodging::Root => ((*self.root).clone(), self.root.child(), None),
         };
-        Ok((
-            under,
-            life.clone(),
-            Inbox::new(life, child.map(|child| Report::new(child, parent))),
-        ))
+        Ok((under, life.clone(), Inbox::new(life, report)))
     }
 }
 impl Agent {
@@ -240,19 +268,18 @@ impl Agent {
         let Build {
             tenancy,
             log,
-            role,
+            kin,
             fuel,
             provider,
             search,
             fleet,
-            parent,
         } = b;
         let id = log.id();
         let started = Instant::now();
-        let child = role
-            .returns()
-            .then(|| Child::new(tenancy.claim().name().into(), started, log.record_emitter()));
-        let (under, life, inbox) = fleet.lodge(parent, child)?;
+        let role = kin.role();
+        let lodging = kin
+            .lodging(|| Child::new(tenancy.claim().name().into(), started, log.record_emitter()));
+        let (under, life, inbox) = fleet.lodge(lodging)?;
         // A failed writer or a lost engine ends this life.
         log.record_emitter().bind(life.clone());
         tenancy.transport().bind(life);
@@ -362,6 +389,7 @@ impl Agent {
                 )?;
                 Ok((log, resumed))
             })?;
+        agent.inbox.resume()?;
         agent
             .log
             .borrow_mut()
@@ -400,9 +428,9 @@ impl Agent {
         open: impl FnOnce(&OwnDir, &RecordedModel, &RecordedAccount, &str) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
-        let role = launch.trunk.role();
+        let kin = Kin::Trunk(launch.trunk);
         let system = launch
-            .prompt_for(&tenancy, &role, launch.fuel, tenancy.claim().name())
+            .prompt_for(&tenancy, &kin.role(), launch.fuel, tenancy.claim().name())
             .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let (log, opened) = open(
@@ -414,18 +442,17 @@ impl Agent {
         let agent = Self::assemble(Build {
             tenancy,
             log,
-            role,
+            kin,
             fuel: launch.fuel,
             provider: ProviderHandle::new(provider),
             search: launch.search,
             fleet: fleet.clone(),
-            parent: None,
         })
         .map_err(|why| io::Error::other(why.to_string()))?;
         Ok((agent, opened))
     }
     pub(crate) fn child_of(
-        (parent, mailbox): (&AgentHandle, Mailbox),
+        (parent, work): (&AgentHandle, Mailbox),
         parent_log: &AgentLog,
         fleet: &Arc<Fleet>,
         tenancy: Tenancy,
@@ -434,11 +461,12 @@ impl Agent {
     ) -> Result<Self, String> {
         let launch = &fleet.launch;
         let fuel = parent.0.fuel.saturating_sub(1);
-        let role = Role::Child {
+        let kin = Kin::Child {
             parent: parent.clone(),
+            work,
         };
         let system = launch
-            .prompt_for(&tenancy, &role, fuel, tenancy.claim().name())
+            .prompt_for(&tenancy, &kin.role(), fuel, tenancy.claim().name())
             .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let log = parent_log
@@ -454,12 +482,11 @@ impl Agent {
         Self::assemble(Build {
             tenancy,
             log,
-            role,
+            kin,
             fuel,
             provider: ProviderHandle::new(provider),
             search: parent.0.search,
             fleet: fleet.clone(),
-            parent: Some(mailbox),
         })
         .map_err(|why| why.to_string())
     }

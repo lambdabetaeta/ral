@@ -5,6 +5,8 @@
 
 use super::super::*;
 use super::{message_req, spec, start};
+use crate::agent::Trunk;
+use crate::agent::build::Kin;
 use crate::agent::roster::summary;
 use crate::agent::testkit::{TestAgent, pop};
 use crate::enquiry::ForkClaim;
@@ -99,7 +101,7 @@ fn wire_spawnable_desk(
     );
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
     spec.fuel = fuel;
-    spec.role = crate::agent::Role::Headless;
+    spec.kin = Kin::Trunk(Trunk::Headless);
     let agent =
         crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's wire trunk");
     let (emit, _rx) = crate::bus::dummy_emitter();
@@ -230,7 +232,7 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     let fleet = Fleet::for_test();
     let mut parent_spec = crate::agent::testkit::TestAgentSpec::new("parent");
     parent_spec.fuel = 3;
-    parent_spec.role = crate::agent::Role::Headless;
+    parent_spec.kin = Kin::Trunk(Trunk::Headless);
     let parent =
         crate::agent::testkit::test_agent(&fleet, parent_spec).expect("a fresh fleet's trunk");
 

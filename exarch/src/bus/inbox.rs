@@ -1,8 +1,8 @@
 //! One owner, one lock, and scope-vouched deliveries.
 
-use super::post::Source;
+use super::post::{ENDED_BEFORE_REPORTING, Source};
 use super::{AgentMessage, Item, Next, Read, Rewrite, ScheduleId};
-use crate::record::{AgentId, ChildStatus, Emitter as Recorder, Forensic, Settlement};
+use crate::record::{AgentId, ChildStatus, Emitter as Recorder, Forensic, Settlement, Unavailable};
 use ral_core::data::FOValue;
 use ral_core::process::{CancelCause, Scope, ScopeId, ScopeNode};
 use ral_core::sync::{CondvarExt, LockExt};
@@ -22,8 +22,6 @@ pub(crate) enum ParkMode {
 /// How soon a parked owner sees a cancellation nobody notified: an
 /// ancestor's, or a terminal failure's; its own end, a Stop and a post notify.
 const PARK_POLL: Duration = Duration::from_millis(100);
-
-pub(crate) const ENDED_BEFORE_REPORTING: &str = "ended before reporting";
 
 /// A host job, from a human message until settlement or Stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,16 +210,34 @@ impl Report {
         });
         self.show(status);
     }
+    /// A failed append is an error: the latched writer ends the life.
+    fn resume(&self) -> Result<(), Unavailable> {
+        let record = self.child.record.lock_ignore_poison();
+        if let Some(log) = record.as_ref() {
+            let _recorded = log.emit(Forensic::Status {
+                status: ChildStatus::Working,
+            })?;
+        }
+        drop(record);
+        Ok(())
+    }
+    /// A failed append ends as that failure, which the parent hears instead.
     fn end(&self, reason: String) {
         let mut record = self.child.record.lock_ignore_poison();
         let Some(log) = record.take() else { return };
         if self.child.is_working() {
-            let status = ChildStatus::Failed(reason);
-            if std::thread::panicking() {
-                self.show(status);
+            let ended = ChildStatus::Failed(reason);
+            let shown = if std::thread::panicking() {
+                ended
             } else {
-                self.transition(&log, status);
-            }
+                match log.emit(Forensic::Status {
+                    status: ended.clone(),
+                }) {
+                    Ok(_) => ended,
+                    Err(failure) => ChildStatus::Failed(failure.to_string()),
+                }
+            };
+            self.show(shown);
         }
         drop(record);
     }
@@ -243,7 +259,15 @@ enum Post {
     Human(String),
     Read(Read),
     Rewrite(Rewrite),
-    Scoped { from: Scope, kind: Scoped },
+    Scoped {
+        from: Scope,
+        kind: Scoped,
+    },
+    /// Only `Mailbox::follow_up` makes one: it also moves the child to Working.
+    FollowUp {
+        from: Scope,
+        message: AgentMessage,
+    },
 }
 pub(crate) enum Scoped {
     Agent {
@@ -262,7 +286,6 @@ pub(crate) enum Scoped {
         prompt: String,
     },
     Message(AgentMessage),
-    FollowUp(AgentMessage),
     Nudge {
         prompt: u64,
         text: String,
@@ -274,6 +297,7 @@ impl Post {
             Self::Human(text) => Next::Item(Item::Human(text)),
             Self::Read(read) => Next::Read(read),
             Self::Rewrite(rewrite) => Next::Rewrite(rewrite),
+            Self::FollowUp { message, .. } => Next::Item(Item::Message(message)),
             Self::Scoped { kind, .. } => Next::Item(match kind {
                 Scoped::Agent {
                     name,
@@ -284,7 +308,7 @@ impl Post {
                     settled,
                     elapsed,
                 },
-                Scoped::Message(message) | Scoped::FollowUp(message) => Item::Message(message),
+                Scoped::Message(message) => Item::Message(message),
                 Scoped::Surface { id, values } => Item::Surface { id, values },
                 Scoped::Wakeup {
                     label,
@@ -301,13 +325,21 @@ impl Post {
             Self::Human(_) => Source::User,
             Self::Read(_) => Source::Read,
             Self::Rewrite(_) => Source::Rewrite,
+            Self::FollowUp { .. } => Source::Message,
             Self::Scoped { kind, .. } => match kind {
                 Scoped::Agent { .. } => Source::Agent,
                 Scoped::Surface { .. } => Source::Surface,
                 Scoped::Wakeup { .. } => Source::Schedule,
-                Scoped::Message(_) | Scoped::FollowUp(_) => Source::Message,
+                Scoped::Message(_) => Source::Message,
                 Scoped::Nudge { .. } => Source::Nudge,
             },
+        }
+    }
+    /// The scope that vouches for this post; human input and reads need none.
+    fn voucher(&self) -> Option<&Scope> {
+        match self {
+            Self::Scoped { from, .. } | Self::FollowUp { from, .. } => Some(from),
+            Self::Human(_) | Self::Read(_) | Self::Rewrite(_) => None,
         }
     }
     fn is_wakeup(&self, id: ScheduleId) -> bool {
@@ -399,15 +431,9 @@ impl Posts {
     }
     fn has_parent_input(&mut self) -> bool {
         self.fence();
-        self.queue.iter().any(|(_, post)| {
-            matches!(
-                post,
-                Post::Scoped {
-                    kind: Scoped::FollowUp(_),
-                    ..
-                }
-            )
-        })
+        self.queue
+            .iter()
+            .any(|(_, post)| matches!(post, Post::FollowUp { .. }))
     }
     fn recall(&mut self) -> Vec<String> {
         self.fence();
@@ -434,7 +460,7 @@ impl Posts {
                 Post::Human(text) => Self::join(&mut texts, human_tail, text),
                 Post::Read(r) => texts.push(r.to_string()),
                 Post::Rewrite(r) => texts.push(r.to_string()),
-                Post::Scoped { .. } => {}
+                Post::Scoped { .. } | Post::FollowUp { .. } => {}
             }
             human_tail = matches!(post, Post::Human(_));
         }
@@ -468,7 +494,7 @@ impl Posts {
     }
     fn fence(&mut self) {
         self.queue
-            .retain(|(_, post)| !matches!(post, Post::Scoped { from, .. } if from.is_cancelled()));
+            .retain(|(_, post)| !post.voucher().is_some_and(Scope::is_cancelled));
     }
 }
 impl Shared {
@@ -503,7 +529,7 @@ impl Mailbox {
     pub(crate) fn is_current(&self) -> bool {
         self.shared.lock().vouches(&self.scope)
     }
-    pub(crate) fn adopt(&self, child: Option<Arc<Child>>) -> Result<ScopeNode, Refused> {
+    pub(crate) fn adopt(&self, child: Arc<Child>) -> Result<ScopeNode, Refused> {
         let mut state = self.shared.lock();
         if self.shared.life.is_cancelled() {
             return Err(Refused::Dead);
@@ -511,7 +537,7 @@ impl Mailbox {
         if !state.vouches(&self.scope) {
             return Err(Refused::Abandoned);
         }
-        state.work.children.extend(child);
+        state.work.children.push(child);
         Ok(state.work.scope.child())
     }
     fn finish(&self, child: &Child, status: ChildStatus) {
@@ -539,7 +565,11 @@ impl Mailbox {
         let Some(log) = record.as_ref() else {
             return false;
         };
-        if !self.post(Scoped::FollowUp(message)) {
+        let post = Post::FollowUp {
+            from: self.scope.clone(),
+            message,
+        };
+        if !self.deliver(post) {
             return false;
         }
         if !report.child.is_working() {
@@ -565,9 +595,7 @@ impl Mailbox {
         })
     }
     fn enqueue(&self, state: &mut State, post: Post) -> bool {
-        if self.shared.life.is_cancelled()
-            || matches!(&post, Post::Scoped { from, .. } if from.is_cancelled())
-        {
+        if self.shared.life.is_cancelled() || post.voucher().is_some_and(Scope::is_cancelled) {
             return false;
         }
         if post.is_input() {
@@ -840,6 +868,10 @@ impl Inbox {
         }
         drop(record);
         lease
+    }
+    /// A resumed life works again, however its log last settled.
+    pub(crate) fn resume(&self) -> Result<(), Unavailable> {
+        self.0.report.as_ref().map_or(Ok(()), Report::resume)
     }
     pub(crate) fn disarm_reply_lease(&self) {
         self.0.lock().lease = None;

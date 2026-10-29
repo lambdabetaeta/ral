@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::testkit::{open_next, pop, pop_settled, tmp};
-use crate::bus::AgentOutcome;
+use crate::bus::{AgentOutcome, ENDED_BEFORE_ANSWERING};
 use crate::record::{Memory, RECORD, Record, read_records};
 use ral_core::own::OwnDir;
 use ral_core::process::DurableRoot;
@@ -13,7 +13,7 @@ fn inbox() -> Inbox {
 
 fn adopted(parent: &Inbox, name: &str, record: Recorder) -> Inbox {
     let child = Arc::new(Child::new(name.into(), Instant::now(), record));
-    let life = parent.mailbox().adopt(Some(child.clone())).unwrap();
+    let life = parent.mailbox().adopt(child.clone()).unwrap();
     Inbox::new(life, Some(Report::new(child, Some(parent.mailbox()))))
 }
 
@@ -562,7 +562,7 @@ fn abandon_applies_each_queue_policy_and_forgets_its_children() {
         let work = inbox.mailbox();
         let life = inbox.life_mailbox();
         let child = Arc::new(Child::new("child".into(), Instant::now(), Recorder::none()));
-        let child_life = work.adopt(Some(child)).unwrap();
+        let child_life = work.adopt(child).unwrap();
         let exchange = inbox.exchange();
         assert!(work.status().busy);
         work.steer("first".into());
@@ -577,7 +577,7 @@ fn abandon_applies_each_queue_policy_and_forgets_its_children() {
         assert!(inbox.mailbox().is_current());
         assert!(!life.status().busy);
         let late = Arc::new(Child::new("late".into(), Instant::now(), Recorder::none()));
-        assert!(work.adopt(Some(late)).is_err());
+        assert!(work.adopt(late).is_err());
         match queue {
             Queue::Keep => {
                 assert_eq!(recalled, [] as [String; 0]);
@@ -945,7 +945,7 @@ fn a_reply_crossing_a_follow_up_neither_settles_nor_leases() {
     assert!(!mailbox.post(message()));
     assert!(matches!(
         pop_settled(&parent),
-        Settlement::Failed { reason } if reason == "cancelled"
+        Settlement::Failed { reason } if reason == ENDED_BEFORE_ANSWERING
     ));
     assert!(!parent.mailbox().status().busy);
     assert!(parent.is_empty());
@@ -1152,6 +1152,20 @@ fn retirement_keeps_a_reply_and_is_idempotent() {
     );
     assert_eq!(recorded_statuses(&dir), [replied]);
     assert!(parent.is_empty());
+}
+
+#[test]
+fn a_retirement_that_cannot_record_ends_as_the_failure() {
+    let dir = tmp("inbox-unrecorded-retirement");
+    let parent = inbox();
+    let record = Recorder::create(&dir).unwrap();
+    let child = adopted(&parent, "worker", record.clone());
+    record.fail_after(0);
+    child.retire("retired".into());
+    let failure = ChildStatus::Failed(record.check_available().unwrap_err().to_string());
+    assert_eq!(pop_settled(&parent), failure.settlement().unwrap());
+    assert_eq!(parent.mailbox().child_status("worker"), Some(failure));
+    assert_eq!(recorded_statuses(&dir), [] as [ChildStatus; 0]);
 }
 
 #[test]

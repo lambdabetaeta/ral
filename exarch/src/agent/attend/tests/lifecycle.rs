@@ -3,7 +3,7 @@
 use super::*;
 use crate::agent::AgentHandle;
 use crate::agent::testkit::wait_for_settle;
-use crate::bus::ENDED_BEFORE_REPORTING;
+use crate::bus::{CANCELLED, ENDED_BEFORE_ANSWERING, ENDED_BEFORE_REPORTING};
 use crate::record::{ChildStatus, RECORD, read_records};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -124,7 +124,7 @@ fn a_child_working_past_the_reply_lease_is_not_reaped() {
         Next::Item(Item::Agent {
             settled: Settlement::Failed { reason },
             ..
-        }) if reason == "cancelled"
+        }) if reason == CANCELLED
     ));
 }
 
@@ -448,6 +448,38 @@ fn an_owner_unwinding_shows_failed_and_its_log_reads_working() {
 }
 
 #[test]
+fn settling_a_working_child_that_cannot_record_announces_and_reports_the_failure() {
+    let parent = trunk(false);
+    let child = parent.fork_named("helper").unwrap();
+    let log = child.log_dir().path().join(RECORD);
+    let recorder = child.recorder();
+    recorder.fail_after(0);
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, child.id());
+    child.settle(AgentOutcome::Failed("gave up".into()), &emit);
+    let failure = recorder.check_available().unwrap_err().to_string();
+    let announced: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|signal| match signal {
+            crate::bus::Signal::Transient(_, Transient::Fault { text }) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(announced, std::slice::from_ref(&failure));
+    assert!(matches!(
+        wait_for_settle(&parent.inbox),
+        Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. }) if reason == failure
+    ));
+    assert_eq!(
+        parent.inbox.mailbox().child_status("helper"),
+        Some(ChildStatus::Failed(failure))
+    );
+    assert_eq!(
+        ChildStatus::fold(&read_records(&log).unwrap()),
+        ChildStatus::Working
+    );
+}
+
+#[test]
 fn a_crossing_reply_settles_only_at_retirement() {
     let parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
@@ -463,7 +495,7 @@ fn a_crossing_reply_settles_only_at_retirement() {
     child.settle(AgentOutcome::Replied, &emit);
     assert!(
         matches!(wait_for_settle(&parent.inbox), Next::Item(Item::Agent { settled: Settlement::Failed { reason }, .. })
-        if reason == "cancelled")
+        if reason == ENDED_BEFORE_ANSWERING)
     );
     assert!(!parent.handle().has_busy_children());
 }
@@ -509,7 +541,7 @@ fn cancellation_before_followup_pop_reports_new_work_once() {
         Item::Agent {
             settled: Settlement::Failed { reason },
             ..
-        } if reason == "cancelled"
+        } if reason == CANCELLED
     ));
     parent.arrive(&item).unwrap();
     assert!(!parent.handle().has_busy_children());

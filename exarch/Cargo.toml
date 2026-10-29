@@ -37,6 +37,8 @@ clipboard  = { workspace = true }
 libc       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# `record::log` reads a line at whatever depth it was written.
+serde_stacker = { workspace = true }
 clap       = { workspace = true }
 shlex      = { workspace = true }
 ratatui      = { version = "0.30", features = ["unstable-rendered-line-info"] }

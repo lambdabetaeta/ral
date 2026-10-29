@@ -1,6 +1,8 @@
 //! The desk's own tests.
 
 use super::*;
+use crate::agent::Trunk;
+use crate::agent::build::Kin;
 use crate::agent::roster::summary;
 use crate::agent::testkit::{TestAgent, ral_call, wait_for_settle};
 use crate::bus::FleetSink;
@@ -42,7 +44,7 @@ fn services_with(
     let fleet = Fleet::new(launch, crate::agent::fleet::AGENT_LEASE_IDLE);
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
     spec.fuel = fuel;
-    spec.role = crate::agent::Role::Headless;
+    spec.kin = Kin::Trunk(Trunk::Headless);
     let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
     let (emit, _rx) = crate::bus::dummy_emitter();
     let services = HostServices {

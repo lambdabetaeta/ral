@@ -2,9 +2,9 @@
 status: active
 generated_at_commit: 8cc1d0d9
 generated_at_date: 2026-10-29
-verified_at_commit: 8cc1d0d9
+verified_at_commit: 34266ac0
 verified_at_date: 2026-10-29
-anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::complete_len, Log::record_at, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, model::resume]
+anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::complete_len, Log::extent, log::Reader, Reader::record, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, model::resume]
 ---
 
 # A line is a commit
@@ -23,7 +23,7 @@ folds still step them individually. This is the unit of a write-ahead log
 **The seal names the exact bytes of the commit value.**
 
 ```json
-{"sum":"c8ef6fe8aca8346d","commit":{"at_unix_ms":1761730000000,"records":[{"Display":{"kind":"answer","text":"One line.\n"}},{"Forensic":{"kind":"cancelled"}}]}}
+{"sum":"1315e869d182df50","commit":{"at_unix_ms":1761730000000,"records":[{"Display":{"answer":{"text":"One line.\n"}}},{"Forensic":"cancelled"}]}}
 ```
 
 - `RawValue` preserves that value byte-exact across serialization and
@@ -33,6 +33,20 @@ folds still step them individually. This is the unit of a write-ahead log
   and keep loci small. It is no defence against an editor who can replace
   both value and sum.
 - Hex survives JSON tools that cannot exactly represent integers above 2⁵³.
+- **Records are externally tagged at every level down to a value.** `Protocol`,
+  `Display` and `Forensic` carry no `tag = "kind"`: an internally tagged enum
+  buffers through serde's `Content` and replays it on the native stack,
+  bypassing the stack-grown reader, so a deep reply value would make its
+  session un-resumable. Types still internally tagged inside records
+  (`Settlement`, `DoneOutcome`, `Mark`, diff rows) carry no `FOValue`, so their
+  depth is bounded by their type.
+- Reader and writer are both unbounded in depth and stack-grown
+  (`serde_stacker`); `seal` serializes through an adapter into a `RawValue`
+  and never re-parses. A test round-trips a 5000-deep `Forensic::Status`
+  carrying a reply on a 2 MiB thread.
+- Several records on one line are groundwork for the durable-agent plan
+  (`dev/docs/plans/261028_durable-agent.md`, L3 "one transition, one commit");
+  today `Emitter::emit` writes single-record commits.
 
 ## Torn, corrupt, foreign
 
@@ -41,13 +55,21 @@ folds still step them individually. This is the unit of a write-ahead log
 - A last unterminated line, or a last line that is not JSON or fails its sum,
   is *torn*: it is never read and resume quarantines it whole.
 - Such damage on an earlier line is *corrupt* and refused by file and line.
-- Valid JSON of the wrong line shape, or a sealed commit whose records cannot
-  be parsed (including an empty list), is *foreign* and refused wherever it
-  stands. Damage may coincidentally produce valid JSON of another shape;
-  refusing it rather than quarantining it fails closed.
+- A shape error is re-checked for well-formedness: a line that is not
+  well-formed JSON is damage, not foreign. A well-formed `{sum, commit}` whose
+  sum is not 16 lowercase hex digits is a failed seal, also damage.
+- A line and its body must be JSON objects; an array is foreign.
+- Well-formed JSON of the wrong line shape, or a sealed commit whose records
+  cannot be parsed (including an empty list), is *foreign* and refused
+  wherever it stands. Damage may coincidentally produce valid JSON of another
+  shape, such as a bit-flipped key (`"sun"`); refusing it rather than
+  quarantining it fails closed.
 - Resume folds and checks selection before quarantine, so a refused resume
   leaves the file as found. `Log::complete_len` supplies the whole-commit
   extent to both reader and quarantine.
+- `Log::append_to` refuses a log whose tail is not a whole sealed commit
+  (`Log::extent`), naming the torn byte range, so an append cannot bury it
+  mid-log; resume quarantines first.
 
 ## Addressing
 
@@ -55,8 +77,10 @@ folds still step them individually. This is the unit of a write-ahead log
 
 - `Seq` orders the pair lexicographically; block ids, rewind points and the
   view fold's high-water mark retain their ordering.
-- `Locus` adds the line's byte range and sum. `Log::record_at` refuses a range
-  no longer sealed by that sum before parsing its records.
+- `Locus` adds the line's byte range and sum. `log::Reader` (`Reader::record`)
+  refuses a range no longer sealed by that sum before parsing its records, and
+  parses each addressed line once across consecutive loci on it
+  (`Commit::holds`).
 - `Cursor` counts whole commits, so catch-up cannot resume midway through one.
 
 ## Publication

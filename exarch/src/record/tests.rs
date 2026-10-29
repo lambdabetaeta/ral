@@ -76,7 +76,7 @@ fn a_status_record_round_trips() {
         let wire: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
             wire["commit"]["records"][0]["Forensic"],
-            json!({ "kind": "status", "status": wire_status })
+            json!({ "status": { "status": wire_status } })
         );
         let Some((_, records)) = parse_line(&line) else {
             panic!("a status record's line must unseal");

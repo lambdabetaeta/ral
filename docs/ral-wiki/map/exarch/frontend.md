@@ -1,6 +1,8 @@
 ---
 generated_at_commit: 0e83863c
 generated_at_date: 2026-10-29
+verified_at_commit: 34266ac0
+verified_at_date: 2026-10-29
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
 
@@ -17,7 +19,8 @@ inbound inbox.** The owner is `Agent`; every frontend addresses it through
 `bus/inbox.rs` owns the queue, work, exchange, job and status under one
 mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
 
-- Private `Post` is human text, `Read`, `Rewrite`, or a scoped payload.
+- Private `Post` is human text, `Read`, `Rewrite`, a parent's follow-up, or a
+  scoped payload.
   `Posts` drops scoped posts whose provenance is cancelled before every
   observation, under the lock. Human text and commands are unfenced. A mailbox carries destination
   and vouching `Scope`; it never refreshes provenance at push.
@@ -27,7 +30,9 @@ mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
   outside the abandoned tree. A committed `/clear` discards its captured
   queue boundary and cancels the old incarnation, fencing future batches
   while preserving later human input.
-- Taking up a message is plain; a parent's follow-up is `Scoped::FollowUp`.
+- Taking up a message is plain; a parent's follow-up is a private
+  `Post::FollowUp`, made only by `Mailbox::follow_up`. `Post::voucher` names a
+  scoped post's scope for fencing.
   Busy is a Working child of the current work; finish queues the value-free
   notice with the status under the parent's lock
   ([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).

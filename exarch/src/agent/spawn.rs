@@ -10,24 +10,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 impl Agent {
-    /// Retire with the concluded outcome, then drop: `SessionEnded` and engine
-    /// teardown precede the claim's terminal cue.
+    /// Retire with `outcome`, then drop: `SessionEnded` and engine teardown
+    /// precede the claim's terminal cue. A recording failure, retirement's
+    /// own included, is what a working child ends with, announced once.
     pub(crate) fn settle(self, outcome: AgentOutcome, emit: &Emitter) {
-        let outcome = self.conclude(outcome, emit);
         self.inbox.retire(outcome.reason());
-        drop(self);
-    }
-
-    /// `outcome`, unless recording failed: the failure then overrides it,
-    /// announced once.
-    fn conclude(&self, outcome: AgentOutcome, emit: &Emitter) -> AgentOutcome {
-        match self.check_available() {
-            Ok(()) => outcome,
-            Err(failure) => {
-                announce(&failure, emit);
-                AgentOutcome::Failed(failure.to_string())
-            }
+        if let Err(failure) = self.check_available() {
+            announce(&failure, emit);
         }
+        drop(self);
     }
 }
 

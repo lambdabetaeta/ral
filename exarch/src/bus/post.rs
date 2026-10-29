@@ -63,6 +63,13 @@ impl fmt::Display for Rewrite {
         }
     }
 }
+/// A working child's life ended with no report.
+pub(crate) const ENDED_BEFORE_REPORTING: &str = "ended before reporting";
+/// A replied child's life ended with a follow-up unanswered.
+pub(crate) const ENDED_BEFORE_ANSWERING: &str = "ended before answering its follow-up";
+/// A working child, or a headless root, was cancelled.
+pub(crate) const CANCELLED: &str = "cancelled";
+
 #[derive(Clone, Debug)]
 pub enum AgentOutcome {
     Replied,
@@ -72,10 +79,12 @@ pub enum AgentOutcome {
 }
 impl AgentOutcome {
     /// Why a child still working ends with this outcome.
-    pub(crate) fn reason(&self) -> String {
+    pub(crate) fn reason(self) -> String {
         match self {
-            Self::Replied | Self::Cancelled => "cancelled".into(),
-            Self::Stopped(reason) | Self::Failed(reason) => reason.clone(),
+            // Only a follow-up crossing or following its reply leaves it working.
+            Self::Replied => ENDED_BEFORE_ANSWERING.into(),
+            Self::Cancelled => CANCELLED.into(),
+            Self::Stopped(reason) | Self::Failed(reason) => reason,
         }
     }
 }

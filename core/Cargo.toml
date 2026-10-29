@@ -64,7 +64,7 @@ cap-fs-ext    = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 base64        = { workspace = true }
-serde_stacker = "0.1"
+serde_stacker = { workspace = true }
 # Path digests: the sandbox's persistent DACL capability names, and the
 # identity suffix of `path::project_slug`.
 sha2          = { workspace = true }

@@ -10,7 +10,7 @@ use super::{
     not_recorded_refusal_turn,
 };
 use crate::provider::tools::{COMMAND, RAL_TOOL};
-use crate::record::log::Log;
+use crate::record::log::Reader;
 use crate::record::{
     AgentId, GrepAnswer, GrepHit, Locus, Protocol, RECORD, Record, Recorded, Refusal, Role,
     TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
@@ -19,14 +19,15 @@ use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, To
 use ral_core::own::OwnDir;
 use regex::Regex;
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io;
 use std::path::PathBuf;
 
-/// One handle on session `source`'s record log under `sessions`: the model
+/// One reader of session `source`'s record log under `sessions`: the model
 /// fold's one open of it.
-fn open_log(sessions: &OwnDir, source: AgentId) -> io::Result<File> {
-    Ok(sessions.dir(&source.to_string())?.open(RECORD)?)
+fn open_log(sessions: &OwnDir, source: AgentId) -> io::Result<Reader> {
+    Ok(Reader::new(
+        sessions.dir(&source.to_string())?.open(RECORD)?,
+    ))
 }
 
 /// Session `source`'s record log, as messages name it.
@@ -34,9 +35,9 @@ fn record_name(sessions: &OwnDir, source: AgentId) -> PathBuf {
     sessions.path().join(source.to_string()).join(RECORD)
 }
 
-fn read_at(reader: &mut File, locus: &Locus) -> io::Result<Protocol> {
-    match Log::record_at(reader, locus)? {
-        Record::Protocol(p) => Ok(p),
+fn read_at(reader: &mut Reader, locus: &Locus) -> io::Result<Protocol> {
+    match reader.record(locus)? {
+        Record::Protocol(p) => Ok(p.clone()),
         Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
             "a pointer named a non-protocol record: a turn's address no longer \
              names the records it was measured over",
@@ -98,13 +99,13 @@ fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
 }
 
 /// A placed turn's material, read back through `open` from `sessions`:
-/// consecutive turns naming one log share the one descriptor, so each file is
+/// consecutive turns naming one log share the one reader, so each file is
 /// read in a single pass in locus order.
 ///
 /// # Errors
 /// Names the turn and the file that will not read back.
 fn material(
-    open: &mut Option<(AgentId, File)>,
+    open: &mut Option<(AgentId, Reader)>,
     sessions: &OwnDir,
     turn: &Placed,
 ) -> Result<Vec<ChatMessage>, String> {
@@ -203,10 +204,10 @@ impl TranscriptSearch {
 }
 
 /// Read one turn's records off session `source`'s log under `sessions`,
-/// reusing the descriptor already open when consecutive turns name one
+/// reusing the reader already open when consecutive turns name one
 /// session — so a lineage of many files costs one descriptor, never two.
 fn read_pointer(
-    open: &mut Option<(AgentId, File)>,
+    open: &mut Option<(AgentId, Reader)>,
     sessions: &OwnDir,
     source: AgentId,
     loci: &[Locus],
@@ -214,11 +215,10 @@ fn read_pointer(
     if open.as_ref().is_none_or(|(id, _)| *id != source) {
         // Closed before the next is opened.
         drop(open.take());
-        let file = open_log(sessions, source)?;
-        *open = Some((source, file));
+        *open = Some((source, open_log(sessions, source)?));
     }
-    let (_, file) = open.as_mut().expect("just opened, or already open");
-    loci.iter().map(|locus| read_at(file, locus)).collect()
+    let (_, reader) = open.as_mut().expect("just opened, or already open");
+    loci.iter().map(|locus| read_at(reader, locus)).collect()
 }
 
 /// Each resident row of a link read back through its pointer, and cut to its

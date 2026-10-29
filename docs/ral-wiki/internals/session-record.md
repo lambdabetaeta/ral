@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 8cc1d0d9
+verified_at_commit: 34266ac0
 verified_at_date: 2026-10-29
-anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::record_at, Signal::Commit, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
+anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
 ---
 
 # Session record: one seam, one log
@@ -28,6 +28,19 @@ commits one `Protocol`, `Display`, or `Forensic` record and returns its
    `Locus` names `(commit, index)`, the line's bytes and sum.
 4. Meter usage per record and publish the whole commit as one `Signal::Commit`
    through the attached fleet sink before releasing the lock.
+
+**Records are externally tagged, and a line has no depth limit.** `Record`,
+`Protocol`, `Display` and `Forensic` use serde's default external tagging: an
+internally tagged enum buffers through serde's `Content` and replays it on the
+native stack, bypassing the stack-grown reader, so a deep reply value would
+make its session un-resumable. Reader and writer are both stack-grown
+(`serde_stacker`): `seal` serializes through an adapter into a `RawValue` and
+never re-parses. The types still internally tagged inside records
+(`Settlement`, `DoneOutcome`, `Mark`, diff rows) carry no `FOValue`, so their
+depth is bounded by their type. Lines and bodies read as JSON objects alone;
+an array is foreign. Today `Emitter::emit` writes single-record commits; the
+multi-record commit is groundwork for one-transition-one-commit
+(`dev/docs/plans/261028_durable-agent.md`, L3).
 
 **One `Fatal<Unavailable>` holds the writer's first failure.** It is a leaf lock
 beside the append mutex and retains the original `io::Error`; the first
@@ -129,13 +142,19 @@ to reconstruct them.
 **A returning agent's latest recorded status is a fold of its own log**
 ([[decisions/261029_a-child-is-a-status|a-child-is-a-status]]).
 
-- `ChildStatus::fold` yields Working until the first `Forensic::Status`,
-  then the last status recorded. The parent reads the shared live cell;
-  the fold defines its recorded meaning, not a second live register.
+- The parent reads the shared live cell. `ChildStatus::fold` (test-only)
+  yields Working until the first `Forensic::Status`, then the last status
+  recorded: the oracle the live status must agree with, defining its
+  recorded meaning rather than a second live register.
 - Parent follow-up and child finish hold `Child.record` across decision,
   record and publication. `Report::transition` appends before showing the
   status, outside every inbox lock; a failed append still shows it, since
-  the failure has ended life and the parent must hear the finish.
+  the failure has ended life and the parent must hear the finish. Retirement's
+  own failed `Failed` append shows `Failed(<the recording failure>)`.
+- A resumed returning root (headless) records Working again through
+  `Inbox::resume`, called from `Agent::reopen`; a conversing root records
+  nothing. A headless root running several jobs in one conversation would keep
+  `Replied(v1)` during a later job: accepted, unreachable today.
 - A follow-up is posted before its status is recorded: refusal leaves no
   transition. Retirement takes the record seam and permits no later
   transition. A normal Working owner's Failed record precedes `SessionEnded`.
@@ -286,8 +305,9 @@ if it has one and otherwise this session's `source` id beside the `Locus` of eve
 record it held; the records leave memory and nothing durable is touched. The id,
 not a path, is what is stored (and persisted in an `Inherited` link), so a run
 directory can be moved and every pointer in it still reads back. Every
-read-back through `Log::record_at` checks that the range still holds a line
-sealed by the `Sum` its `Locus` carries, *before* parsing records, so a range
+read-back through `log::Reader` (`Reader::record`) checks that the range still
+holds a line sealed by the `Sum` its `Locus` carries, *before* parsing records,
+and parses each addressed line once across consecutive loci, so a range
 that no longer names what it measured — a copied session directory, an edited
 log — is
 refused as the mismatch it is rather than answered with whatever now lies at
@@ -427,8 +447,13 @@ and quarantine.
 - An unterminated last line, or one with invalid JSON or a failed sum, is
   *torn* and never read; resume quarantines it.
 - Earlier damage is refused as *corrupt*.
-- Valid JSON of the wrong shape and sealed commits with unreadable records
-  are refused as *foreign* wherever they stand.
+- Well-formed JSON objects of the wrong shape and sealed commits with
+  unreadable records are refused as *foreign* wherever they stand. A shape
+  error is re-checked for well-formedness: a line that is not well-formed is
+  damage, and a well-formed `{sum, commit}` whose sum is not 16 lowercase hex
+  digits is a failed seal, also damage. A bit-flipped key stays foreign.
+- `Log::append_to` refuses a log whose tail is not a whole sealed commit
+  (`Log::extent`), naming the torn byte range: resume quarantines first.
 
 Read-back is guarded by the sum at the moment of the read. A failed live
 append leaves at most one terminal partial line; live catch-up is bounded by

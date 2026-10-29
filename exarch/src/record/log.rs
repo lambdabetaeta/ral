@@ -1,6 +1,6 @@
 //! The handle on `sessions/<n>/record.jsonl`: the only writer in the tree for
 //! this log. This module alone knows the line format: `read` serves replay
-//! and resume, `since` a mirror, `record_at` the transcript reader.
+//! and resume, `since` a mirror, [`Reader`] the transcript reader.
 //!
 //! The fleet publisher lives inside the same mutex as the writer ([`Inner`]),
 //! so a record can only be published while its append is held: no code path
@@ -19,30 +19,74 @@ use crate::app::now_unix_ms;
 use ral_core::own::OwnDir;
 use ral_core::process::{Fatal, ScopeNode};
 use ral_core::sync::{LockExt as _, Torn};
-use serde::{Deserialize, Serialize};
+use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor, value::MapAccessDeserializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{error::Category, value::RawValue};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// One line of `record.jsonl`: a commit, sealed by the sum of its exact bytes.
+/// `S` is the seal as read: a [`Sum`], or the text standing where one will not
+/// parse. Read only through [`object`].
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Line<'a> {
-    sum: Sum,
+struct Line<'a, S = Sum> {
+    sum: S,
     #[serde(borrow)]
     commit: &'a RawValue,
 }
 
-/// What a line's `commit` holds.
+/// What a line's `commit` holds. Read only through [`object`].
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Body<R> {
     at_unix_ms: u64,
     records: R,
+}
+
+/// A `T` read from a JSON object alone: a derived struct also reads an array.
+struct Object<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(Fields(PhantomData)).map(Self)
+    }
+}
+
+/// The visitor of [`Object`]: a map's entries, as the fields of a `T`.
+struct Fields<T>(PhantomData<T>);
+
+impl<'de, T: Deserialize<'de>> Visitor<'de> for Fields<T> {
+    type Value = T;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+        T::deserialize(MapAccessDeserializer::new(map))
+    }
+}
+
+/// `text` as a `T`, however deep the writer nested it: every read of a line
+/// goes through here.
+fn from_json<'de, T: Deserialize<'de>>(text: &'de [u8]) -> serde_json::Result<T> {
+    let mut de = serde_json::Deserializer::from_slice(text);
+    // Unbounded depth is safe: `serde_stacker` grows the stack onto the heap.
+    de.disable_recursion_limit();
+    let value = T::deserialize(serde_stacker::Deserializer::new(&mut de))?;
+    de.end()?;
+    Ok(value)
+}
+
+/// `text`, which must be a JSON object, as a `T`.
+fn object<'de, T: Deserialize<'de>>(text: &'de [u8]) -> serde_json::Result<T> {
+    from_json(text).map(|Object(value)| value)
 }
 
 /// Why a complete line yields no commit.
@@ -52,8 +96,8 @@ enum Unsealed {
     Syntax(serde_json::Error),
     /// JSON, but not a `{sum, commit}` line: another writer's.
     Shape(serde_json::Error),
-    /// The commit does not hash to its sum: damage.
-    Sum { sealed: Sum, actual: Sum },
+    /// The commit does not hash to its seal, which may not even be a sum: damage.
+    Sum { sealed: String, actual: Sum },
     /// Sealed, but its records are not this exarch's: another writer's.
     Records(serde_json::Error),
 }
@@ -91,7 +135,7 @@ impl fmt::Display for Unsealed {
             }
             Self::Sum { sealed, actual } => write!(
                 f,
-                "is corrupt: its commit hashes to {actual} but was sealed as {sealed}, so the file changed after it was written (edited by hand, or damaged on disk); {INTACT}"
+                "is corrupt: its commit hashes to {actual} but was sealed as {sealed:?}, so the file changed after it was written (edited by hand, or damaged on disk); {INTACT}"
             ),
             Self::Records(error) => {
                 write!(
@@ -103,42 +147,74 @@ impl fmt::Display for Unsealed {
     }
 }
 
+/// A `T` written however deep: the writer's half of [`from_json`].
+struct Deep<'a, T>(&'a T);
+
+impl<T: Serialize> Serialize for Deep<'_, T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serde_stacker::Serializer::new(serializer))
+    }
+}
+
 /// `body` as one line's bytes, terminator excluded, and the sum sealing it.
 fn seal<R: Serialize>(body: &Body<R>) -> serde_json::Result<(Sum, Vec<u8>)> {
-    let commit = serde_json::value::to_raw_value(body)?;
+    let commit = serde_json::value::to_raw_value(&Deep(body))?;
     let sum = Sum::of(commit.get().as_bytes());
-    Ok((
+    let line = serde_json::to_vec(&Line {
         sum,
-        serde_json::to_vec(&Line {
-            sum,
-            commit: &commit,
-        })?,
-    ))
+        commit: &commit,
+    })?;
+    Ok((sum, line))
 }
 
 /// The commit `line` seals, if its sum holds.
 fn unseal(line: &[u8]) -> Result<(Sum, &RawValue), Unsealed> {
-    let Line { sum, commit } =
-        serde_json::from_slice(line).map_err(|error| match error.classify() {
-            Category::Data => Unsealed::Shape(error),
-            Category::Syntax | Category::Eof | Category::Io => Unsealed::Syntax(error),
-        })?;
+    let Line { sum, commit } = object(line).map_err(|error| unreadable(line, error))?;
     let actual = Sum::of(commit.get().as_bytes());
     if actual == sum {
         Ok((sum, commit))
     } else {
         Err(Unsealed::Sum {
-            sealed: sum,
+            sealed: sum.to_string(),
             actual,
         })
     }
 }
 
+/// Why `line` reads as no [`Line`]: damage unless it is well-formed JSON of
+/// another shape. Re-reads `line`, but only on this error path.
+fn unreadable(line: &[u8], error: serde_json::Error) -> Unsealed {
+    match error.classify() {
+        Category::Syntax | Category::Eof | Category::Io => Unsealed::Syntax(error),
+        Category::Data => match from_json::<IgnoredAny>(line) {
+            Err(syntax) => Unsealed::Syntax(syntax),
+            Ok(_) => match object::<Line<'_, String>>(line) {
+                // A line in every respect but its seal, which no writer leaves.
+                Ok(Line { sum, commit }) => Unsealed::Sum {
+                    sealed: sum,
+                    actual: Sum::of(commit.get().as_bytes()),
+                },
+                Err(_) => Unsealed::Shape(error),
+            },
+        },
+    }
+}
+
 /// The records a sealed commit holds.
 fn records_of(commit: &RawValue) -> Result<NonEmpty<Record>, Unsealed> {
-    serde_json::from_str::<Body<NonEmpty<Record>>>(commit.get())
+    object::<Body<NonEmpty<Record>>>(commit.get().as_bytes())
         .map(|body| body.records)
         .map_err(Unsealed::Records)
+}
+
+/// The `number`th commit, spanning `bytes`, sealed as `body` by `sum`.
+fn commit_of(
+    sum: Sum,
+    body: &RawValue,
+    number: u64,
+    bytes: Range<u64>,
+) -> Result<Commit, Unsealed> {
+    Ok(Commit::new(number, bytes, sum, records_of(body)?))
 }
 
 /// Each commit's records in order; an unreadable line is one error.
@@ -170,7 +246,7 @@ pub(crate) fn commit_line(records: &[Record]) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) fn parse_line(line: &[u8]) -> Option<(Sum, Vec<Record>)> {
     let (sum, commit) = unseal(line).ok()?;
-    let body = serde_json::from_str::<Body<Vec<Record>>>(commit.get()).ok()?;
+    let body = object::<Body<Vec<Record>>>(commit.get().as_bytes()).ok()?;
     Some((sum, body.records))
 }
 
@@ -293,31 +369,45 @@ impl Log {
     /// Reopen `dir`'s record for append — resume — seeding the commit count
     /// and cursor from the lines already on disk, one commit each, so a resumed session's
     /// loci continue the file's own numbering.  Creates the file when there is
-    /// none.  The caller quarantines any torn tail first.
+    /// none.
     ///
     /// The seeding scan streams: a resume counts the file's lines without ever
     /// holding the file.
     ///
     /// # Errors
-    /// Returns `Err` if the file cannot be read or reopened.
+    /// Returns `Err` if the file cannot be read or reopened, or ends in a torn
+    /// line ([`Self::complete_len`]), which the caller quarantines first.
     pub(crate) fn append_to(dir: &OwnDir) -> io::Result<Self> {
-        let (mut commits, mut pos) = (0u64, 0u64);
-        match dir.open(RECORD) {
-            Ok(file) => {
-                let mut prior = BufReader::new(file);
-                loop {
-                    let read = prior.skip_until(b'\n')?;
-                    if read == 0 {
-                        break;
-                    }
-                    commits += 1;
-                    pos += read as u64;
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        let (commits, pos) = match dir.open(RECORD) {
+            Ok(file) => Self::extent(file, &dir.path().join(RECORD))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0),
             Err(error) => return Err(error.into()),
-        }
+        };
         Self::writing(dir, commits, pos)
+    }
+
+    /// The number of commits on `file`, named `name` in messages, and its
+    /// length, refused unless it ends at a whole commit.
+    fn extent(mut file: File, name: &Path) -> io::Result<(u64, u64)> {
+        let len = file.metadata()?.len();
+        let complete = Self::complete_within(&mut file, len)?;
+        if complete < len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cannot append to {}: bytes {complete}..{len} are a torn last line (an unterminated write, or a line that is not JSON or fails its sum); a commit appended after it would leave it corrupt mid-log, so it must be quarantined first, as resuming the session does",
+                    ral_core::path::shown(name)
+                ),
+            ));
+        }
+        let _ = file.seek(SeekFrom::Start(0))?;
+        // Only the `len` bytes measured above, so the count and length agree.
+        let mut lines = BufReader::new(file.take(len));
+        let mut commits = 0;
+        while lines.skip_until(b'\n')? > 0 {
+            commits += 1;
+        }
+        Ok((commits, len))
     }
 
     /// A log over `dir`'s record opened for append, from `commits` and `pos`.
@@ -473,6 +563,11 @@ impl Log {
     /// Returns `Err` if the file cannot be read.
     pub(super) fn complete_len(file: &mut File) -> io::Result<u64> {
         let len = file.metadata()?.len();
+        Self::complete_within(file, len)
+    }
+
+    /// [`Self::complete_len`] of `file`, whose length is `len`.
+    fn complete_within(file: &mut File, len: u64) -> io::Result<u64> {
         let Some(last) = Self::newline_before(file, len)? else {
             return Ok(0);
         };
@@ -557,46 +652,68 @@ impl Log {
             let start = pos;
             pos += line.len() as u64 + 1;
             number += 1;
-            Some(Self::commit_of(&line, number, start..pos, path))
+            Some(
+                unseal(&line)
+                    .and_then(|(sum, body)| commit_of(sum, body, number, start..pos))
+                    .map_err(|fault| fault.at(number, path)),
+            )
         }))
     }
+}
 
-    /// Line `number` of `path`, spanning `bytes`, as the commit it seals.
-    fn commit_of(line: &[u8], number: u64, bytes: Range<u64>, path: &Path) -> io::Result<Commit> {
-        let (sum, body) = unseal(line).map_err(|fault| fault.at(number, path))?;
-        let records = records_of(body).map_err(|fault| fault.at(number, path))?;
-        Ok(Commit::new(number, bytes, sum, records))
+/// Why a locus no longer names what it was measured over.
+const STALE: &str = "the log at this path is no longer the file those byte ranges were measured in; a copied session directory or an edited log";
+
+/// Records read back by [`Locus`] from one log file, each line read once while
+/// consecutive loci lie on it. Messages name the line; the caller names the
+/// file.
+pub(super) struct Reader {
+    file: File,
+    /// The line last read.
+    line: Option<Commit>,
+}
+
+impl Reader {
+    pub(super) fn new(file: File) -> Self {
+        Self { file, line: None }
     }
 
-    /// The record `locus` names, read back from `file`: refused unless the
-    /// range still holds the line its sum sealed. Messages name the line; the
-    /// caller names the file.
-    pub(super) fn record_at(file: &mut File, locus: &Locus) -> io::Result<Record> {
-        const STALE: &str = "the log at this path is no longer the file those byte ranges were measured in; a copied session directory or an edited log";
-        let (number, index, bytes) = (locus.seq().commit(), locus.seq().index(), locus.bytes());
-        let _ = file.seek(SeekFrom::Start(bytes.start))?;
-        let mut buf = Vec::new();
-        let _ = file
-            .take(bytes.end.saturating_sub(bytes.start))
-            .read_to_end(&mut buf)?;
-        let (_, body) = buf
-            .strip_suffix(b"\n")
-            .and_then(|line| unseal(line).ok())
-            .filter(|(sum, _)| *sum == locus.sum())
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "line {number} did not hash to the locus that named it: {STALE}"
-                ))
-            })?;
-        records_of(body)
-            .map_err(|fault| io::Error::other(format!("line {number} {fault}")))?
-            .into_iter()
+    /// The record `locus` names: refused unless its range still holds the
+    /// line its sum sealed.
+    pub(super) fn record(&mut self, locus: &Locus) -> io::Result<&Record> {
+        let line = match self.line.take() {
+            Some(line) if line.holds(locus) => line,
+            _ => self.line_at(locus)?,
+        };
+        let (number, index) = (locus.seq().commit(), locus.seq().index());
+        self.line
+            .insert(line)
+            .records()
+            .iter()
             .nth(index)
+            .map(Recorded::value)
             .ok_or_else(|| {
                 io::Error::other(format!(
                     "a locus named record {index} of line {number}, which holds fewer: {STALE}"
                 ))
             })
+    }
+
+    /// The line `locus` lies on, read, sum-checked and only then parsed.
+    fn line_at(&mut self, locus: &Locus) -> io::Result<Commit> {
+        let (number, bytes) = (locus.seq().commit(), locus.bytes());
+        let _ = self.file.seek(SeekFrom::Start(bytes.start))?;
+        let mut buf = Vec::new();
+        let _ = Read::by_ref(&mut self.file)
+            .take(bytes.end.saturating_sub(bytes.start))
+            .read_to_end(&mut buf)?;
+        match buf.strip_suffix(b"\n").map(unseal) {
+            Some(Ok((sum, body))) if sum == locus.sum() => commit_of(sum, body, number, bytes)
+                .map_err(|fault| io::Error::other(format!("line {number} {fault}"))),
+            _ => Err(io::Error::other(format!(
+                "line {number} did not hash to the locus that named it: {STALE}"
+            ))),
+        }
     }
 }
 

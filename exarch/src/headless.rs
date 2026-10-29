@@ -10,7 +10,7 @@
 use crate::SessionInfo;
 use crate::agent::spawn::announce;
 use crate::agent::{Agent, AgentHandle};
-use crate::bus::{AgentOutcome, Closed, FleetBus, Pumping, Sink, pump};
+use crate::bus::{AgentOutcome, CANCELLED, Closed, FleetBus, Pumping, Sink, pump};
 pub use crate::bus::{Job, JobId};
 use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::provider::{Provider, Usage};
@@ -461,7 +461,7 @@ pub fn run(
         Ok(()) => pumped(attended).and_then(|outcome| match outcome {
             AgentOutcome::Replied => Ok(()),
             AgentOutcome::Stopped(s) => Err(s),
-            AgentOutcome::Cancelled => Err("cancelled".to_string()),
+            AgentOutcome::Cancelled => Err(CANCELLED.into()),
             AgentOutcome::Failed(e) => Err(e),
         }),
         // The failure overrides the attended outcome, announced after it.

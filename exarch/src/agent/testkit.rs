@@ -1,11 +1,10 @@
 //! Fixtures shared by two or more `mod tests` across the crate; a helper only
 //! one of them needs belongs in that file instead.
 
+use crate::agent::build::Kin;
 use crate::agent::fleet::{Claim, Fleet, TenantId, Unborn};
 use crate::agent::handle::Shared;
-use crate::agent::{
-    Agent, AgentHandle, ProviderHandle, Role, RootConfig, RootEngine, SPAWN_FUEL, Trunk,
-};
+use crate::agent::{Agent, AgentHandle, ProviderHandle, RootConfig, RootEngine, SPAWN_FUEL, Trunk};
 use crate::app::Scratch;
 use crate::bus::{AgentOutcome, Child, Emitter, Inbox, Mailbox, ParkMode};
 use crate::provider::Toolset;
@@ -139,8 +138,7 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
 /// A synthetic owner without an engine or log.
 pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
-    pub(crate) role: Role,
-    pub(crate) parent: Option<Mailbox>,
+    pub(crate) kin: Kin,
     pub(crate) idle: Duration,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
@@ -150,20 +148,19 @@ impl TestAgentSpec {
     pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            role: Role::Converses,
-            parent: None,
+            kin: Kin::Trunk(Trunk::Attended),
             idle: Duration::ZERO,
             fuel: 0,
             search: false,
         }
     }
 
-    pub(crate) fn child(name: &str, parent: &AgentHandle, mailbox: Mailbox) -> Self {
+    pub(crate) fn child(name: &str, parent: &AgentHandle, work: Mailbox) -> Self {
         Self {
-            role: Role::Child {
+            kin: Kin::Child {
                 parent: parent.clone(),
+                work,
             },
-            parent: Some(mailbox),
             ..Self::new(name)
         }
     }
@@ -200,8 +197,7 @@ impl std::ops::Deref for TestAgent {
 pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<TestAgent, Unborn> {
     let TestAgentSpec {
         name,
-        role,
-        parent,
+        kin,
         idle,
         fuel,
         search,
@@ -211,14 +207,15 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
     let started = Instant::now()
         .checked_sub(idle)
         .expect("test birth fits the clock");
-    let child = role.returns().then(|| {
+    let role = kin.role();
+    let lodging = kin.lodging(|| {
         Child::new(
             name.as_str().into(),
             started,
             crate::record::Emitter::none(),
         )
     });
-    let (under, _life, inbox) = fleet.lodge(parent, child)?;
+    let (under, _life, inbox) = fleet.lodge(lodging)?;
     let handle = AgentHandle(Arc::new(Shared {
         id,
         name,

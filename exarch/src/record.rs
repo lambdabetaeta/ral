@@ -150,9 +150,9 @@ pub(crate) trait Publish: Send {
 
 /// One fact a session recorded, in one of three classes.
 ///
-/// The outer shape is deliberately not `#[serde(tag = …)]`: each class
-/// already tags its own variant, and folding a second tag over it would
-/// collide the two keys.
+/// Externally tagged, as is each class: an internally tagged enum buffers
+/// through serde's `Content`, whose replay recurses natively, so the log
+/// could not read back a value as deep as it wrote.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Record {
     Protocol(Protocol),
@@ -179,7 +179,7 @@ impl From<Forensic> for Record {
 /// Verbatim payloads the model fold needs — the provider's exact `ChatMessage`
 /// and tool-call ids — and every fact with a protocol form, recorded once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Protocol {
     /// The system prompt every later request goes out under, until the next.
     System {
@@ -272,9 +272,10 @@ impl ChildStatus {
         }
     }
 
-    /// `Working` before the first status record, then the last.
-    #[must_use]
-    pub fn fold<'a>(records: impl IntoIterator<Item = &'a Record>) -> Self {
+    /// `Working` before the first status record, then the last: the oracle
+    /// the live status must agree with.
+    #[cfg(test)]
+    pub(crate) fn fold<'a>(records: impl IntoIterator<Item = &'a Record>) -> Self {
         records
             .into_iter()
             .filter_map(|record| {
@@ -310,7 +311,7 @@ pub enum Settlement {
 /// once the mark tree is drawn.  A `Change` carries its diff already cut at
 /// the source, never the bytes it was taken from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Display {
     /// One line of a reasoning run, or the run's tail where the prose after
     /// it begins.  Consecutive ones grow one block, and the run's own deltas
@@ -380,7 +381,7 @@ pub enum Display {
 /// `Error`, `Nudge`, and `ProviderError` are each the one record their
 /// dual-write sites emit for a single fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Forensic {
     /// Head bookend, carrying enough metadata that the file reads on its own.
     SessionStarted {
@@ -883,6 +884,12 @@ impl Commit {
     }
     pub fn records(&self) -> &NonEmpty<Recorded<Record>> {
         &self.0
+    }
+    /// Whether `locus` names this line: its commit, byte range and sum.
+    #[must_use]
+    pub(crate) fn holds(&self, locus: &Locus) -> bool {
+        let own = self.0.first.locus();
+        (own.seq.commit(), &own.bytes, own.sum) == (locus.seq.commit(), &locus.bytes, locus.sum)
     }
     pub fn into_records(self) -> NonEmpty<Recorded<Record>> {
         self.0

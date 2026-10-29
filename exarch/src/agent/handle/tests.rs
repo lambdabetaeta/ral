@@ -7,7 +7,8 @@ use crate::agent::testkit::{
     TestAgent, TestAgentSpec, open_next, pop, pop_settled, test_agent, trunk,
 };
 use crate::bus::{
-    AgentOutcome, ENDED_BEFORE_REPORTING, Emitter, Item, Next, ParkMode, Queue, Sink,
+    AgentOutcome, ENDED_BEFORE_ANSWERING, ENDED_BEFORE_REPORTING, Emitter, Item, Next, ParkMode,
+    Queue, Sink,
 };
 use crate::headless::SettledConversation;
 use crate::record::{ChildStatus, Forensic, Protocol, Record, Settlement, Voice};
@@ -143,7 +144,7 @@ fn a_child_retired_while_working_fails() {
     worker.inbox.retire(AgentOutcome::Replied.reason());
     assert!(matches!(
         pop_settled(&parent.inbox),
-        Settlement::Failed { reason } if reason == "cancelled"
+        Settlement::Failed { reason } if reason == ENDED_BEFORE_ANSWERING
     ));
     assert!(!parent.has_busy_children());
     assert!(pop(&parent.inbox).is_none());
