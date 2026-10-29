@@ -43,8 +43,7 @@ fn app_in_fleet(born: &Born) -> (App, BusReceiver, TestAgent, Arc<Fleet>) {
 }
 
 const REST: crate::bus::Rest = crate::bus::Rest {
-    owing: false,
-    lives: Vec::new(),
+    pending: false,
     schedules: false,
 };
 
@@ -61,7 +60,7 @@ fn job_commit(app: &mut App, id: AgentId, number: u64, fact: crate::record::Fore
 /// Keep the exchange lease alive while the UI addresses its recorded job.
 fn open_exchange(app: &mut App, root: &TestAgent) -> crate::bus::Lease {
     root.steer("busy".into()).unwrap();
-    let crate::bus::Next::Take { exchange, .. } = root.mailbox.next(&REST) else {
+    let crate::bus::Next::Take { exchange, .. } = root.mailbox.next(REST) else {
         panic!("the queued prompt starts an exchange");
     };
     assert!(root.mailbox.begin());
@@ -382,7 +381,7 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
                 assert_fault_visible(&mut app, id, fault.as_deref().expect("fault precedes Died"));
                 assert!(!handle.is_live());
                 assert!(
-                    matches!(parent.mailbox.next(&REST), Next::Take {
+                    matches!(parent.mailbox.next(REST), Next::Take {
                     input: Input::Child { id: child_id, status: ChildStatus::Replied(_), .. }, ..
                 } if child_id == id),
                     "the already-owed reply precedes retirement"
@@ -636,11 +635,11 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
             );
             assert_eq!(app.tabs.focused_job(), Some(job), "Stop is not settlement");
             assert!(matches!(
-                focused.mailbox.next(&REST),
+                focused.mailbox.next(REST),
                 Next::Command(Command::Read(Read::Resources))
             ));
             assert!(matches!(
-                focused.mailbox.next(&REST),
+                focused.mailbox.next(REST),
                 Next::Settled { stopped: true }
             ));
             job_commit(
@@ -660,7 +659,7 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
             let Next::Take {
                 input: Input::Human(text),
                 exchange: next,
-            } = focused.mailbox.next(&REST)
+            } = focused.mailbox.next(REST)
             else {
                 panic!("a new exchange takes the next prompt");
             };
@@ -729,7 +728,7 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
     let Next::Take {
         input: Input::Child { id, .. },
         exchange,
-    } = root.mailbox.next(&REST)
+    } = root.mailbox.next(REST)
     else {
         panic!("the helper's report wakes the stopped root");
     };
@@ -738,7 +737,7 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
     assert!(root.mailbox.begin());
     assert_eq!(root.status().job, Some(job), "the same job continues");
     assert!(matches!(
-        root.mailbox.next(&REST),
+        root.mailbox.next(REST),
         Next::Settled { stopped: true }
     ));
     job_commit(
@@ -761,7 +760,7 @@ fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
     app.prompt_state.set_prompt("draft");
     app.key(esc, &ctx());
     assert_eq!(root.queued(), ["waiting at rest"]);
-    let Next::Take { exchange, .. } = root.mailbox.next(&REST) else {
+    let Next::Take { exchange, .. } = root.mailbox.next(REST) else {
         panic!("queued input");
     };
     assert!(root.mailbox.begin());
@@ -775,7 +774,7 @@ fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
     app.key(esc, &ctx());
     assert!(exchange.is_cancelled());
     assert!(matches!(
-        root.mailbox.next(&REST),
+        root.mailbox.next(REST),
         Next::Settled { stopped: true }
     ));
     job_commit(
@@ -1477,7 +1476,7 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
     assert!(app.overlay.is_none(), "Enter closes the overlay");
     assert!(
         matches!(
-            root.mailbox.next(&REST),
+            root.mailbox.next(REST),
             Next::Command(Command::Rewrite(Rewrite::Rewind(1)))
         ),
         "the rewind went to the tab it was opened on"

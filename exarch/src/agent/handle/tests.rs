@@ -6,8 +6,7 @@ use crate::bus::{Drained, Input, Next, Rest};
 use ral_core::data::FOValue;
 
 const REST: Rest = Rest {
-    owing: false,
-    lives: Vec::new(),
+    pending: false,
     schedules: false,
 };
 
@@ -39,7 +38,7 @@ fn empty(owner: &TestAgent) -> bool {
 }
 
 fn take(owner: &TestAgent) -> Input {
-    let Next::Take { input, .. } = owner.mailbox.next(&REST) else {
+    let Next::Take { input, .. } = owner.mailbox.next(REST) else {
         panic!("expected a queued input")
     };
     input
@@ -154,7 +153,7 @@ fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
     use crate::record::{Forensic, Protocol, Record, Voice};
     let mut owner = trunk(Trunk::Converses);
     owner.handle().steer("taken up".into()).unwrap();
-    let Next::Take { input, exchange } = owner.mailbox.next(&REST) else {
+    let Next::Take { input, exchange } = owner.mailbox.next(REST) else {
         panic!("human exchange")
     };
     let prompt = owner.admit(input).unwrap();
@@ -195,7 +194,7 @@ fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
 fn a_claimed_surface_declines_without_cancelling_the_current_exchange() {
     let mut owner = trunk(Trunk::Converses);
     owner.handle().steer("opening".into()).unwrap();
-    let Next::Take { exchange, .. } = owner.mailbox.next(&REST) else {
+    let Next::Take { exchange, .. } = owner.mailbox.next(REST) else {
         panic!("an exchange")
     };
     assert!(owner.mailbox.begin());

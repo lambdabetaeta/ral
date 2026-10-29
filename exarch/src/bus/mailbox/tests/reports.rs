@@ -98,9 +98,8 @@ fn a_crossing_follow_up_keeps_the_parent_job_open_until_its_report_wakes_it() {
     let (_follow_up, _exchange) = take(&helper);
     let next = std::thread::scope(|scope| {
         let worker = scope.spawn(|| {
-            parent.next(&Rest {
-                owing: address.status().owes_parent,
-                lives: Vec::new(),
+            parent.next(Rest {
+                pending: address.status().owes_parent,
                 schedules: false,
             })
         });
@@ -180,9 +179,8 @@ fn a_parent_waking_after_report_publication_cannot_settle_with_its_report_unread
             let owing = address.status().owes_parent;
             let owner = &parent;
             let worker = scope.spawn(move || {
-                owner.next(&Rest {
-                    owing,
-                    lives: Vec::new(),
+                owner.next(Rest {
+                    pending: owing,
                     schedules: false,
                 })
             });

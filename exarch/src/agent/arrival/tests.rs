@@ -4,7 +4,7 @@ use crate::agent::testkit::{
 };
 use crate::bus::Emitter;
 use crate::card::testkit::card_value;
-use crate::record::{AgentId, ChildStatus, Display, Record};
+use crate::record::{ChildStatus, Display, Record};
 use ral_core::carrier::Severed;
 use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{
@@ -82,12 +82,30 @@ fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
 fn arrival_records_display_facts() {
     let mut session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
+    let helper = session.fork_named("helper").unwrap();
+    assert!(
+        session
+            .admit(Input::Child {
+                id: helper.id(),
+                name: "helper".into(),
+                status: ChildStatus::Failed("boom".into()),
+                elapsed: Duration::from_millis(1500),
+            })
+            .is_none()
+    );
+    assert!(display_facts(&rx).is_empty());
+    session.body.state.nursery.adopt(
+        helper.handle(),
+        crate::agent::nursery::Joined::new(std::thread::spawn(|| {
+            crate::agent::nursery::Teardown { failures: vec![] }
+        })),
+    );
 
     assert!(session.admit(Input::Human("hello".into())).is_some());
     assert!(
         session
             .admit(Input::Child {
-                id: AgentId::new(99),
+                id: helper.id(),
                 name: "helper".into(),
                 status: ChildStatus::Failed("boom".into()),
                 elapsed: Duration::from_millis(1500),
@@ -386,12 +404,12 @@ fn gone_joins_and_collects_failures_without_a_model_prompt() {
     session.body.state.nursery.adopt((*helper).clone(), joined);
     helper.end();
     assert!(
-        session.rest().pending(),
-        "an ended but unjoined helper is pending"
+        session.rest().pending,
+        "birth debt remains pending after the helper ends"
     );
     assert!(session.admit(Input::Gone(helper.id())).is_none());
-    assert!(session.body.state.nursery.is_joined(helper.id()));
-    assert!(!session.rest().pending());
+    assert!(!session.body.state.nursery.holds(helper.id()));
+    assert!(!session.rest().pending);
     assert_eq!(session.body.state.failures, ["helper teardown"]);
     assert!(session.admit(Input::Gone(helper.id())).is_none());
     assert_eq!(

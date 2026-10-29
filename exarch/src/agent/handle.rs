@@ -7,7 +7,7 @@ use super::{ProviderHandle, Role};
 use crate::bus::{AgentAddress, AgentMessage, Command, Input, Refused, Status};
 use crate::record::{AgentId, ChildStatus, JobId};
 use ral_core::own::OwnDir;
-use ral_core::process::{CancelCause, Scope};
+use ral_core::process::CancelCause;
 use std::{
     fmt,
     sync::Arc,
@@ -126,9 +126,6 @@ impl AgentHandle {
     }
     pub fn is_live(&self) -> bool {
         self.0.address.is_live()
-    }
-    pub(crate) fn life(&self) -> Scope {
-        self.0.address.life()
     }
     pub(crate) fn current_provider(&self) -> Arc<crate::provider::Provider> {
         self.0.provider.current()

@@ -24,6 +24,8 @@ Message a running agent to correct its direction, supply a discovery, or change 
       to: #'plan-review'#, text: #'The empty-input behavior is intentional. Focus on whether the new duplicate check changes error precedence.'#
     ]
 
+Messages between agents are notes, except your messages to your own helpers: each is owed a reply. A helper that needs something from you replies with its question; answer it with a follow-up message.
+
 Reuse a replied child for related work: it retains its context and shell. A helper rests for five hours by default (`--helper-idle` sets the limit), then ends if it has nothing it may take up. A new message from you resumes work. Wait for its next notice before reading again: `read` refuses while it works:
 
     exarch-agents `message [

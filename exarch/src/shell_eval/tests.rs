@@ -669,9 +669,8 @@ fn deferred_batches_keep_the_engine_generation_and_refuse_an_ended_owner() {
     deferred.deliver(vec![FOValue::Unit]);
     assert!(agent.mailbox.drain().is_empty());
     assert!(matches!(
-        agent.mailbox.next(&Rest {
-            owing: false,
-            lives: Vec::new(),
+        agent.mailbox.next(Rest {
+            pending: false,
             schedules: false
         }),
         Next::Ended

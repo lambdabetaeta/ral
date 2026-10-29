@@ -7,7 +7,7 @@ fn a_gated_root_holds_text_but_runs_commands_before_release() {
     address.steer("held".into()).unwrap();
     address.command(Command::Read(Read::Resources)).unwrap();
     assert!(matches!(
-        mailbox.next(&QUIET),
+        mailbox.next(QUIET),
         Next::Command(Command::Read(Read::Resources))
     ));
     assert_eq!(address.queued(), ["held"]);
@@ -18,7 +18,7 @@ fn a_gated_root_holds_text_but_runs_commands_before_release() {
     settled(&mailbox, false);
     address.steer("second job".into()).unwrap();
     let (send, recv) = mpsc::channel();
-    let worker = std::thread::spawn(move || send.send(mailbox.next(&QUIET)).unwrap());
+    let worker = std::thread::spawn(move || send.send(mailbox.next(QUIET)).unwrap());
     let parked = wait_until(|| address.status().waiting_for_input);
     let held = recv.try_recv();
     let released = address.release();
@@ -41,7 +41,7 @@ fn release_cannot_revive_an_ended_gated_root() {
     address.end(CancelCause::Cancelled);
 
     assert!(!address.release());
-    assert!(matches!(mailbox.next(&QUIET), Next::Ended));
+    assert!(matches!(mailbox.next(QUIET), Next::Ended));
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn quiet_inputs_bypass_every_admission_without_consuming_release_or_opening_jobs
         assert!(matches!(take(&mailbox).0, Input::Child { .. }));
         assert!(matches!(take(&mailbox).0, Input::Gone(_)));
         assert!(matches!(
-            mailbox.next(&QUIET),
+            mailbox.next(QUIET),
             Next::Command(Command::Rewrite(Rewrite::Evict))
         ));
         assert!(address.status().job.is_none());
@@ -140,7 +140,7 @@ fn a_resting_helper_times_out_and_refuses_later_input() {
     let mailbox = mailbox(Admission::Parent { idle });
     let address = mailbox.address();
     address.post(wakeup(1, "held")).unwrap();
-    let worker = std::thread::spawn(move || mailbox.next(&QUIET));
+    let worker = std::thread::spawn(move || mailbox.next(QUIET));
     let finished = wait_until(|| worker.is_finished());
     let cause = address.0.life.cause();
     address.end(CancelCause::Cancelled);
@@ -162,7 +162,7 @@ fn idle_expiry_does_not_end_an_open_job_before_it_settles() {
     let _exchange = start(&mailbox);
     settled(&mailbox, false);
     assert!(mailbox.address().is_live());
-    assert!(matches!(mailbox.next(&QUIET), Next::Ended));
+    assert!(matches!(mailbox.next(QUIET), Next::Ended));
     assert_eq!(mailbox.life().cause(), Some(CancelCause::TimedOut));
 }
 
@@ -180,7 +180,7 @@ fn a_parent_message_racing_the_idle_limit_is_taken_or_refused_ended() {
                 address.post(message("at the deadline", true))
             });
             barrier.wait();
-            let next = mailbox.next(&QUIET);
+            let next = mailbox.next(QUIET);
             (post.join().unwrap(), next)
         });
         match (posted, next) {
@@ -209,13 +209,11 @@ fn waiting_for_input_and_busy_distinguish_human_wait_from_pending_helpers() {
     for rest in [
         QUIET,
         Rest {
-            owing: true,
-            lives: Vec::new(),
+            pending: true,
             schedules: false,
         },
         Rest {
-            owing: false,
-            lives: Vec::new(),
+            pending: false,
             schedules: true,
         },
     ] {
@@ -223,11 +221,11 @@ fn waiting_for_input_and_busy_distinguish_human_wait_from_pending_helpers() {
         let address = mailbox.address();
         let _exchange = start(&mailbox);
         let job = address.status().job;
-        let (pending, schedules) = (rest.pending(), rest.schedules);
+        let (pending, schedules) = (rest.pending, rest.schedules);
         if !pending && !schedules {
             settled(&mailbox, false);
         }
-        let worker = std::thread::spawn(move || mailbox.next(&rest));
+        let worker = std::thread::spawn(move || mailbox.next(rest));
         let waiting = wait_until(|| {
             let status = address.status();
             status.busy == pending && status.waiting_for_input == (!pending && !schedules)

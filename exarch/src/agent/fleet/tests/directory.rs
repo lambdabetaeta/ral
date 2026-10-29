@@ -8,8 +8,7 @@ use ral_core::process::CancelCause;
 use std::sync::Barrier;
 
 const REST: Rest = Rest {
-    owing: false,
-    lives: Vec::new(),
+    pending: false,
     schedules: false,
 };
 
@@ -181,7 +180,7 @@ fn stopping_an_exchange_spares_the_helper_subtree_and_the_next_exchange() {
     let child = agent(&fleet, "child", Some(&root));
     let grandchild = agent(&fleet, "grandchild", Some(&child));
     child.steer("work".into()).unwrap();
-    let Next::Take { exchange, .. } = child.mailbox.next(&REST) else {
+    let Next::Take { exchange, .. } = child.mailbox.next(REST) else {
         panic!("a human prompt starts an exchange");
     };
     assert!(child.mailbox.begin());
@@ -193,7 +192,7 @@ fn stopping_an_exchange_spares_the_helper_subtree_and_the_next_exchange() {
     assert!(child.is_live());
     assert!(grandchild.is_live());
     child.steer("next".into()).unwrap();
-    let Next::Take { exchange: next, .. } = child.mailbox.next(&REST) else {
+    let Next::Take { exchange: next, .. } = child.mailbox.next(REST) else {
         panic!("the next prompt starts a fresh exchange");
     };
     assert!(!next.is_cancelled());
@@ -243,14 +242,14 @@ fn the_summary_counts_only_resting_replies_to_the_reader() {
     assert_eq!(answered.replied, 1);
     assert_eq!(roster::summary(&root, &fleet).replied, 0);
     child.steer("a quiet human follow-up".into()).unwrap();
-    assert!(matches!(child.mailbox.next(&REST), Next::Take { .. }));
+    assert!(matches!(child.mailbox.next(REST), Next::Take { .. }));
     assert!(child.mailbox.begin());
     assert_eq!(roster::summary(&mid, &fleet).replied, 0);
     assert!(matches!(
         roster::listing(&mid, &fleet).last().unwrap().state,
         RosterState::Busy
     ));
-    assert!(matches!(child.mailbox.next(&REST), Next::Settled { .. }));
+    assert!(matches!(child.mailbox.next(REST), Next::Settled { .. }));
     child.report(ChildStatus::Stopped);
     assert_eq!(roster::summary(&mid, &fleet).replied, 0);
 }
@@ -293,7 +292,7 @@ fn beginning_an_exchange_stamps_its_clock_without_observation_renewing_rest() {
     assert!(root.status().last_exchange.is_none());
     assert_eq!(root.status().rest, resting);
     assert!(matches!(
-        root.mailbox.next(&REST),
+        root.mailbox.next(REST),
         Next::Take { input: Input::Human(text), .. } if text == "hi"
     ));
     assert!(

@@ -210,9 +210,8 @@ fn next_input(mailbox: &crate::bus::AgentMailbox) -> Input {
             address.end(ral_core::process::CancelCause::TimedOut);
         }
     });
-    let next = mailbox.next(&Rest {
-        owing: true,
-        lives: Vec::new(),
+    let next = mailbox.next(Rest {
+        pending: true,
         schedules: false,
     });
     let _ = done.send(());

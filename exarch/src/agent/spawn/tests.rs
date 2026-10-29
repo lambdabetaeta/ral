@@ -18,7 +18,7 @@ fn wait_until(reason: &str, mut ready: impl FnMut() -> bool) {
 fn next_input(parent: &Agent) -> Input {
     let handle = parent.handle();
     let _timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || handle.end());
-    let Next::Take { input, .. } = parent.mailbox.next(&parent.rest()) else {
+    let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
         panic!("a helper posts a report followed by Gone")
     };
     input
@@ -230,7 +230,7 @@ fn an_unwinding_helper_publishes_failure_before_its_parent_settles() {
     parent.couple(&emit);
     assert!(parent.mailbox.begin());
     let helper = launch_child(&mut parent, child, None, &emit);
-    assert!(parent.rest().pending());
+    assert!(parent.rest().pending);
     let child_report = next_input(&parent);
     assert!(
         matches!(&child_report, Input::Child { id, status: ChildStatus::Failed(_), .. } if *id == helper.id())
@@ -240,9 +240,8 @@ fn an_unwinding_helper_publishes_failure_before_its_parent_settles() {
     assert!(matches!(gone, Input::Gone(id) if id == helper.id()));
     assert!(parent.admit(gone).is_none());
     assert!(matches!(
-        parent.mailbox.next(&Rest {
-            owing: false,
-            lives: Vec::new(),
+        parent.mailbox.next(Rest {
+            pending: false,
             schedules: false
         }),
         Next::Settled { .. }

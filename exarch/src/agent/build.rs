@@ -236,6 +236,7 @@ impl Agent {
         engine.transport().bind(life.clone());
         let mailbox = AgentMailbox::new(life, log.record_emitter(), admission);
         engine.install(&mailbox.address(), 0);
+        let owed = role.parent().is_some();
         let handle = AgentHandle(Arc::new(Shared {
             id: log.id(),
             name: name.name().to_string(),
@@ -258,7 +259,7 @@ impl Agent {
                 state: State {
                     nursery: Nursery::default(),
                     reply: None,
-                    owed: false,
+                    owed,
                     failures: Vec::new(),
                     pins: BTreeMap::default(),
                     schedules: crate::schedule::ScheduleRegistry::new(),

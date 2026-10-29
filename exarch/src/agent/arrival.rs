@@ -1,6 +1,6 @@
 //! Admission owns the meaning of inputs, including quiet and stale ones.
 
-use crate::agent::Agent;
+use crate::agent::{Agent, Role};
 use crate::bus::{Input, notice, surface_notice};
 use crate::record::{Display, Voice};
 use crate::shell_eval::surface;
@@ -17,7 +17,7 @@ impl Agent {
     pub(super) fn admit(&mut self, input: Input) -> Option<Prompt> {
         let (text, voice) = match input {
             Input::Human(text) => {
-                self.body.state.owed |= self.handle.0.role.returns();
+                self.body.state.owed |= matches!(self.handle.0.role, Role::Returns);
                 (text, Voice::Human)
             }
             Input::Message(message) => {
@@ -30,7 +30,7 @@ impl Agent {
                 status,
                 elapsed,
             } => {
-                if self.body.state.nursery.is_joined(id) {
+                if !self.body.state.nursery.holds(id) {
                     return None;
                 }
                 let settled = status.settlement();

@@ -8,15 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-fn pending(nursery: &Nursery) -> bool {
-    crate::bus::Rest {
-        owing: nursery.owing(),
-        lives: nursery.lives(),
-        schedules: false,
-    }
-    .pending()
-}
-
 #[test]
 fn joined_waits_on_drop_even_during_unwind() {
     let completed = Arc::new(AtomicBool::new(false));
@@ -33,7 +24,7 @@ fn joined_waits_on_drop_even_during_unwind() {
 }
 
 #[test]
-fn ended_helpers_remain_pending_until_joined_and_failures_are_taken_once() {
+fn ended_helpers_without_debt_are_not_pending_and_failures_are_taken_once() {
     let parent = trunk(Trunk::Converses);
     let helper = test_agent(
         &parent.fleet,
@@ -53,19 +44,19 @@ fn ended_helpers_remain_pending_until_joined_and_failures_are_taken_once() {
             }
         })),
     );
-    assert!(pending(&nursery), "birth owes a report");
+    assert!(nursery.owing(), "birth owes a report");
     handle.report(ChildStatus::Replied(FOValue::Unit));
-    assert!(!pending(&nursery), "a live resting helper owes nothing");
+    assert!(!nursery.owing(), "a live resting helper owes nothing");
     handle.end();
     assert!(
-        pending(&nursery),
-        "an ended helper is pending even without a report debt"
+        !nursery.owing(),
+        "an ended helper without debt is not pending"
     );
-    assert!(!nursery.is_joined(handle.id()));
+    assert!(nursery.holds(handle.id()));
     release.send(()).unwrap();
     assert_eq!(nursery.join(handle.id()), vec!["helper teardown failed"]);
-    assert!(nursery.is_joined(handle.id()));
-    assert!(!pending(&nursery));
+    assert!(!nursery.holds(handle.id()));
+    assert!(!nursery.owing());
     assert_eq!(nursery.join(handle.id()), Vec::<String>::new());
     assert_eq!(nursery.dismiss_all(), Vec::<String>::new());
 }
@@ -125,9 +116,9 @@ fn dismiss_all_ends_every_helper_before_joining_any() {
         nursery.dismiss_all(),
         vec!["first failure", "second failure"]
     );
-    assert!(nursery.is_joined(first_handle.id()));
-    assert!(nursery.is_joined(second_handle.id()));
-    assert!(!pending(&nursery));
+    assert!(!nursery.holds(first_handle.id()));
+    assert!(!nursery.holds(second_handle.id()));
+    assert!(!nursery.owing());
     assert_eq!(nursery.dismiss_all(), Vec::<String>::new());
 }
 

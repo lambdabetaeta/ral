@@ -3,7 +3,6 @@
 use crate::agent::AgentHandle;
 use crate::bus::{WORKER_PANIC_PREFIX, panic_msg};
 use crate::record::AgentId;
-use ral_core::process::Scope;
 use std::thread::JoinHandle;
 
 #[derive(Default)]
@@ -20,10 +19,10 @@ impl Nursery {
             .find_map(|(handle, _)| (handle.0.name == name).then_some(handle))
     }
 
-    pub(crate) fn is_joined(&self, id: AgentId) -> bool {
+    pub(crate) fn holds(&self, id: AgentId) -> bool {
         self.0
             .iter()
-            .any(|(handle, thread)| handle.id() == id && thread.is_none())
+            .any(|(handle, thread)| handle.id() == id && thread.is_some())
     }
 
     pub(crate) fn join(&mut self, id: AgentId) -> Vec<String> {
@@ -47,11 +46,6 @@ impl Nursery {
     /// Some unjoined helper owes a report (A5).
     pub(crate) fn owing(&self) -> bool {
         self.unjoined().any(|handle| handle.status().owes_parent)
-    }
-
-    /// Every unjoined helper's life, for `Rest::pending` (A10).
-    pub(crate) fn lives(&self) -> Vec<Scope> {
-        self.unjoined().map(AgentHandle::life).collect()
     }
 
     pub(crate) fn dismiss_all(&mut self) -> Vec<String> {

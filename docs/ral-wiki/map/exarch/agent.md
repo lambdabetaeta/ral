@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e5a23909
+generated_at_commit: 7eab51c3
 generated_at_date: 2026-10-29
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
@@ -80,14 +80,15 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
   `Input::Child` iff it owes its parent, then leaves the flag set only if
   parent input remains queued. Human-only dealings with a resting helper
   notify no parent model and open no parent job.
-- `Rest::pending` (A10): some unjoined helper owes its parent
-  (`Nursery::owing`, a snapshot) or has an ended life (`Nursery::lives`, read
-  afresh under the parent's lock, since a life ended through its node posts
-  nothing before `Gone`). `Status::working` is a view: parent obligation or
-  open job.
+- `Rest::pending` (A10) snapshots `Nursery::owing`: an unjoined helper is
+  pending exactly while it owes its parent. `Status::working` is a view:
+  parent obligation or open job.
+- A12 reminds an owing agent when no worker runs, `Rest` is empty and no
+  `Human`, `Message` or `Child` is queued. Reading `Rest` before the queue
+  prevents a reminder from overtaking a helper's report.
 - `Agent::admit(Child)` records `Display::SubagentDone` and supplies the model
-  notice, unless already joined. `Gone` joins and collects failures without
-  a model prompt. `read` reaches the newest own helper by name in the nursery.
+  notice only for an adopted, unjoined helper. `Gone` joins and collects
+  failures without a model prompt. `read` reaches the newest own helper by name.
 - `Agent::teardown` ends life, reports owed failure, dismisses and joins
   helpers, takes `Option<Engine>` and retires it once; a repeat finds no
   engine and does nothing. `Body::retire_engine` records `TeardownFailed` and

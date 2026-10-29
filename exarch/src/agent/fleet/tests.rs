@@ -29,23 +29,22 @@ fn configured_helper_idle_reaches_the_child_mailbox() {
     assert_eq!(parent.fleet.launch.idle, Duration::ZERO);
     let helper = forked_child(&parent, "short-lived", "`inherit");
     let rest = Rest {
-        owing: false,
-        lives: Vec::new(),
+        pending: false,
         schedules: false,
     };
     helper.handle().steer("task".into()).unwrap();
-    let Next::Take { exchange, .. } = helper.mailbox.next(&rest) else {
+    let Next::Take { exchange, .. } = helper.mailbox.next(rest) else {
         panic!("admitted input takes precedence over the idle limit");
     };
     assert!(helper.mailbox.begin());
     assert!(!exchange.is_cancelled());
     helper.handle().report(ChildStatus::Replied(FOValue::Unit));
-    assert!(matches!(helper.mailbox.next(&rest), Next::Settled { .. }));
+    assert!(matches!(helper.mailbox.next(rest), Next::Settled { .. }));
     assert!(
         helper.handle().is_live(),
         "settlement does not end the life"
     );
-    assert!(matches!(helper.mailbox.next(&rest), Next::Ended));
+    assert!(matches!(helper.mailbox.next(rest), Next::Ended));
     assert_eq!(helper.mailbox.life().cause(), Some(CancelCause::TimedOut));
     assert!(parent.handle().is_live());
     assert!(parent.fleet.resolve("short-lived").is_none());

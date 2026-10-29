@@ -255,7 +255,7 @@ fn agents_dismiss_joins_before_its_summary_excludes_the_helper() {
     assert!(result.contains("EXIT: 0"), "{result}");
     assert!(result.contains("live: 0"), "{result}");
     assert!(!helper.is_live());
-    assert!(session.body.state.nursery.is_joined(helper.id()));
+    assert!(!session.body.state.nursery.holds(helper.id()));
     assert!(session.fleet.resolve("doomed").is_none());
 }
 

@@ -149,13 +149,12 @@ impl Unit {
 /// The agent-side facts one nudge decision reads, assembled by `follow_up` in
 /// `agent/attend.rs`.
 pub(crate) struct Facts {
-    /// True for an agent that returns through `reply` — a fork or the
-    /// headless root, never a conversing one.
+    /// The agent owes a reply (A5).
     pub must_reply: bool,
     /// One-line digest of the whole pin register, `None` when nothing is
     /// pinned.
     pub pinned: Option<String>,
-    /// No running worker and no busy children.
+    /// No running worker, nothing pending, no armed returning-agent schedule.
     pub quiet: bool,
 }
 

@@ -583,12 +583,10 @@ recorded busy period, not a scope
 - `JobOpened` and registration, `JobSettled` and clearing, and Stop's mark
   share the mailbox lock. New input may continue a stopped job; settlement
   waits for the empty queue, pending helpers and returning-agent schedules.
-- A helper is pending while it owes its parent or has announced retirement,
-  until joined. Retirement posts a quiet notification under descendant then
-  ancestor mailbox locks before cancelling life. The persistent status makes
-  the obligation survive notification consumption; `Gone` joins quietly.
-  A settlement preceding announcement may overlap cleanup, so a later
-  failure invalidates the walk and account.
+- A helper is pending while it owes its parent. Reporting queues `Child`
+  before clearing the debt; `Gone` later joins it quietly, even at rest.
+  A helper ending after reporting does not hold settlement open; teardown
+  failures can arrive later.
 - Provider waits poll exchange; parks poll life every condvar wake or
   `PARK_POLL`. Own end, Stop and posts notify. Factory, attach, probe and
   protocol writes retain independent deadlines.
@@ -617,7 +615,7 @@ recorded busy period, not a scope
   release of the next job. Human text, messages, wakeups and worker batches
   may then open it. A stopped helper's report can wake the root in the same
   job; a stopped mark is carried by the eventual `JobSettled`.
-- Settlement follows pending-helper joins, not shutdown of resting engines.
+- Settlement waits for helper debts, not shutdown of resting engines.
   A resting helper ending during a walk can report teardown failure later;
   Synod treats `TeardownFailed` as terminal. Engine end requires the wire
   `Detach → Ended` acknowledgment, not EOF. `Guest::end` joins all agents

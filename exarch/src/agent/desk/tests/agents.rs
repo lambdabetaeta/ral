@@ -572,9 +572,8 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
             assert!(desk.agent_stop("sibling").is_err());
             assert!(desk.agent_stop("mid").is_err());
             grandchild.steer("go".into()).unwrap();
-            let Next::Take { exchange, .. } = grandchild.mailbox.next(&Rest {
-                owing: false,
-                lives: Vec::new(),
+            let Next::Take { exchange, .. } = grandchild.mailbox.next(Rest {
+                pending: false,
                 schedules: false,
             }) else {
                 panic!("a human message resumes the descendant")
@@ -784,7 +783,7 @@ fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
         desk.ask(Request::Agents(Agents::Dismiss("helper".into())))
             .unwrap();
         assert!(!old.is_live());
-        assert!(desk.loan.get().unwrap().state.nursery.is_joined(old.id()));
+        assert!(!desk.loan.get().unwrap().state.nursery.holds(old.id()));
         assert!(
             fleet.resolve("helper").is_none(),
             "dismiss returns only after the name is released"
@@ -831,7 +830,7 @@ fn dismiss_refuses_a_grandchild_and_leaves_both_lives_untouched() {
         );
         assert!(child.is_live());
         assert!(grandchild.is_live());
-        assert!(!desk.loan.get().unwrap().state.nursery.is_joined(child.id()));
+        assert!(desk.loan.get().unwrap().state.nursery.holds(child.id()));
     });
 }
 

@@ -1,11 +1,11 @@
 ---
 status: active
 amended_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
-generated_at_commit: e5a23909
+generated_at_commit: 7eab51c3
 generated_at_date: 2026-10-29
 verified_at_commit: e5a23909
 verified_at_date: 2026-10-29
-anchors: [ChildStatus, Settlement, Forensic::Status, AgentAddress::report, Nursery::pending, Status::working]
+anchors: [ChildStatus, Settlement, Forensic::Status, AgentHandle::report, Nursery::owing, Status::working]
 ---
 
 # A child is a status
@@ -123,8 +123,8 @@ status, not a sum of owed answers.** This reverses the debt mechanism of
 
 - `exarch/src/record.rs`: `ChildStatus`, `Settlement`, `Forensic::Status`.
 - `exarch/src/bus/mailbox.rs`: `Status::working`, `AgentAddress::report`,
-  mailbox publication and parent obligation.
-- `exarch/src/agent/nursery.rs`: `Nursery::pending`, retained helper handles
+  mailbox publication and parent obligation; `agent/handle.rs`: `AgentHandle::report`.
+- `exarch/src/agent/nursery.rs`: `Nursery::owing`, retained helper handles
   and joins; `agent/desk/agents.rs`: newest own helper's `read`.
 - `exarch/src/agent/{attend,arrival,spawn}.rs`: recording reports, parent
   uptake and terminal reporting/departure.

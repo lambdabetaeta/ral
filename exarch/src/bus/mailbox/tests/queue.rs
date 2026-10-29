@@ -86,7 +86,7 @@ fn drain_takes_messages_batches_reads_and_wakeups_until_the_first_rewrite() {
     );
     assert!(mailbox.drain().is_empty());
     assert!(matches!(
-        mailbox.next(&QUIET),
+        mailbox.next(QUIET),
         Next::Command(Command::Rewrite(Rewrite::Rewind(7)))
     ));
     assert!(matches!(take(&mailbox).0, Input::Human(text) if text == "after"));
@@ -129,7 +129,7 @@ fn clear_drops_reports_gone_wakeups_and_batches_but_keeps_all_typed_input() {
         if text == "old" && message.text == "peer")
     );
     assert!(matches!(
-        mailbox.next(&QUIET),
+        mailbox.next(QUIET),
         Next::Command(Command::Rewrite(Rewrite::Clear))
     ));
     assert!(matches!(take(&mailbox).0, Input::Human(text) if text == "new"));
@@ -167,7 +167,7 @@ fn source_depths_count_every_kind_without_changing_the_queue() {
 }
 
 #[test]
-fn only_human_and_peer_input_counts_as_steering() {
+fn human_peer_and_child_inputs_count_as_prompting() {
     let mailbox = mailbox(Admission::Free);
     let address = mailbox.address();
     address.post(surface()).unwrap();
@@ -179,6 +179,10 @@ fn only_human_and_peer_input_counts_as_steering() {
     assert!(!mailbox.has_input());
     address.post(message("peer", false)).unwrap();
     assert!(mailbox.has_input());
+    let _drained = mailbox.drain();
+    assert!(!mailbox.has_input());
+    address.post(child(ChildStatus::Stopped)).unwrap();
+    assert!(mailbox.has_input());
 }
 
 #[test]
@@ -187,7 +191,7 @@ fn ending_refuses_posts_and_ignores_queued_work() {
     let address = mailbox.address();
     address.steer("queued".into()).unwrap();
     address.end(CancelCause::Cancelled);
-    assert!(matches!(mailbox.next(&QUIET), Next::Ended));
+    assert!(matches!(mailbox.next(QUIET), Next::Ended));
     assert!(matches!(address.steer("late".into()), Err(Refused::Ended)));
     assert_eq!(address.queued(), [] as [String; 0]);
     assert_eq!(address.recall(), [] as [String; 0]);
@@ -219,7 +223,7 @@ fn a_parked_owner_observes_ancestor_cancellation() {
     let root = DurableRoot::default();
     let mailbox = AgentMailbox::new(root.child(), Recorder::none(), Admission::Free);
     let address = mailbox.address();
-    let worker = std::thread::spawn(move || mailbox.next(&QUIET));
+    let worker = std::thread::spawn(move || mailbox.next(QUIET));
     root.cancel(CancelCause::Cancelled);
     let finished = wait_until(|| worker.is_finished());
     address.end(CancelCause::Cancelled);

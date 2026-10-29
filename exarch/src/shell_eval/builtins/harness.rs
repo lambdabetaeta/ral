@@ -451,7 +451,8 @@ user instead. Return first-order data: no blocks, handles, or environments.
 Write reply last: the value is deposited after the enclosing ral batch drains.
 Final prose alone does not deliver a reply. A child keeps its helpers and
 rests once its pending work settles; a headless root finishes. Human dealings
-with a helper are quiet: its parent sees its status but receives no notice.
+with a helper are quiet and owe it nothing: its parent sees its status but
+receives no notice.
 
 Stop a descendant
 

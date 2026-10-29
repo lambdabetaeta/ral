@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::gauge::{EVICT_THRESHOLD, Measure};
+use crate::agent::nursery::{Joined, Teardown};
 use crate::agent::testkit::*;
 use crate::bus::{Command, Drained, Input, Next, Rest};
 use crate::provider::scripted::{Reply, Script};
@@ -19,9 +20,8 @@ fn open_for_drain(session: &Agent) -> crate::bus::Lease {
     let crate::bus::Next::Take {
         input: Input::Human(_),
         exchange,
-    } = session.mailbox.next(&crate::bus::Rest {
-        owing: false,
-        lives: Vec::new(),
+    } = session.mailbox.next(crate::bus::Rest {
+        pending: false,
         schedules: false,
     })
     else {
@@ -353,6 +353,10 @@ fn sub_agent_returns_through_reply() {
     let exchange = open_for_drain(&parent);
     let job = parent.handle().status().job;
     let mut child = forked_child(&parent, "helper", "`inherit");
+    parent.body.state.nursery.adopt(
+        child.handle(),
+        Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
+    );
     let provider = scripted(
         "test-model",
         Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -795,9 +799,8 @@ fn stop_keeps_queued_prompts_and_a_later_exchange_keeps_the_context() {
     let Next::Take {
         input: Input::Human(text),
         exchange,
-    } = session.mailbox.next(&Rest {
-        owing: false,
-        lives: Vec::new(),
+    } = session.mailbox.next(Rest {
+        pending: false,
         schedules: false,
     })
     else {
@@ -962,6 +965,11 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
     for surface in [false, true] {
         let mut session = Agent::for_test("system").unwrap();
         let exchange = open_for_drain(&session);
+        let worker = forked_child(&session, "worker", "`inherit");
+        session.body.state.nursery.adopt(
+            worker.handle(),
+            Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
+        );
         session
             .mailbox
             .address()
@@ -972,7 +980,7 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
                 }
             } else {
                 Input::Child {
-                    id: crate::record::AgentId::new(99),
+                    id: worker.id(),
                     name: "worker".into(),
                     status: ChildStatus::Failed("found it".into()),
                     elapsed: Duration::ZERO,
@@ -1367,6 +1375,10 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
             TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
         )
         .unwrap();
+        child.body.state.nursery.adopt(
+            (*grandchild).clone(),
+            Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
+        );
         let address = child.mailbox.address();
         child
             .body
@@ -1503,17 +1515,15 @@ fn a_rewrite_queued_before_reply_boundary_input_runs_before_admission() {
         ),
         Ok(Outcome::Replied)
     ));
-    let Next::Command(command) = child.mailbox.next(&Rest {
-        owing: false,
-        lives: Vec::new(),
+    let Next::Command(command) = child.mailbox.next(Rest {
+        pending: false,
         schedules: false,
     }) else {
         panic!("rewrite precedes later input")
     };
     assert!(child.command(command, &emit).is_continue());
-    let Next::Take { input, exchange } = child.mailbox.next(&Rest {
-        owing: false,
-        lives: Vec::new(),
+    let Next::Take { input, exchange } = child.mailbox.next(Rest {
+        pending: false,
         schedules: false,
     }) else {
         panic!("follow-up input")

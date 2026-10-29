@@ -10,7 +10,7 @@ use std::sync::Arc;
 fn next_child(parent: &Agent) -> (crate::record::AgentId, ChildStatus) {
     let handle = parent.handle();
     let _timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || handle.end());
-    match parent.mailbox.next(&parent.rest()) {
+    match parent.mailbox.next(parent.rest()) {
         Next::Take {
             input: Input::Child { id, status, .. },
             ..
@@ -109,12 +109,12 @@ fn helper_ends_after_resting_and_does_not_repeat_its_report() {
         (_, ChildStatus::Replied(FOValue::Int { value: 42 }))
     ));
     wait_until("resting helper did not time out", || !helper.is_live());
-    let Next::Take { input, .. } = parent.mailbox.next(&parent.rest()) else {
+    let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
         panic!("Gone")
     };
     assert!(matches!(input, Input::Gone(gone) if gone == id));
     assert!(parent.admit(input).is_none());
-    assert!(parent.body.state.nursery.is_joined(id));
+    assert!(!parent.body.state.nursery.holds(id));
     assert!(parent.mailbox.drain().is_empty());
 }
 
@@ -148,7 +148,7 @@ fn a_previous_reply_does_not_suppress_followup_repairs() {
             .handle()
             .message(&parent.handle(), "second task".into())
             .unwrap();
-        let Next::Take { input, exchange } = child.mailbox.next(&child.rest()) else {
+        let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
             panic!("follow-up")
         };
         let prompt = child.admit(input).unwrap();
@@ -198,7 +198,7 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
             .handle()
             .message(&parent.handle(), "follow up".into())
             .unwrap();
-        let Next::Take { input, exchange } = child.mailbox.next(&child.rest()) else {
+        let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
             panic!("follow-up")
         };
         let prompt = child.admit(input).unwrap();
@@ -289,8 +289,8 @@ fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() 
         helper.status().owes_parent,
         "queued parent input is still owed"
     );
-    assert!(parent.rest().pending());
-    let Next::Take { input, .. } = parent.mailbox.next(&parent.rest()) else {
+    assert!(parent.rest().pending);
+    let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
         panic!("report, not settlement")
     };
     assert!(matches!(input, Input::Child { .. }));
@@ -305,35 +305,73 @@ fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() 
 
 #[test]
 fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
-    let mut parent = trunk(Trunk::Converses);
-    let helper = test_agent(
-        &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
-    )
-    .unwrap();
-    let handle = (*helper).clone();
-    parent.body.state.nursery.adopt(
-        handle.clone(),
-        Joined::new(std::thread::spawn(move || {
-            wait_until("helper ended", || !helper.is_live());
-            drop(helper);
-            Teardown { failures: vec![] }
-        })),
-    );
-    assert!(parent.mailbox.begin());
-    handle.report(ChildStatus::Replied(FOValue::Unit));
-    assert!(
-        !parent.rest().pending(),
-        "report is already queued when the debt clears"
-    );
-    let Next::Take { input, .. } = parent.mailbox.next(&parent.rest()) else {
-        panic!("report before settlement")
-    };
-    assert!(parent.admit(input).is_some());
-    assert!(matches!(
-        parent.mailbox.next(&parent.rest()),
-        Next::Settled { stopped: false }
-    ));
+    for kind in [Trunk::Converses, Trunk::Returns] {
+        let mut parent = trunk(kind);
+        let helper = test_agent(
+            &parent.fleet,
+            TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        )
+        .unwrap();
+        let handle = (*helper).clone();
+        parent.body.state.nursery.adopt(
+            handle.clone(),
+            Joined::new(std::thread::spawn(move || {
+                wait_until("helper ended", || !helper.is_live());
+                drop(helper);
+                Teardown { failures: vec![] }
+            })),
+        );
+        let parent_handle = parent.handle();
+        let _timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
+            parent_handle.end();
+        });
+        parent.handle().steer("work".into()).unwrap();
+        let Next::Take { input, exchange } = parent.mailbox.next(parent.rest()) else {
+            panic!("human input")
+        };
+        let prompt = parent.admit(input).unwrap();
+        assert!(parent.mailbox.begin());
+        assert_eq!(parent.body.state.owed, kind == Trunk::Returns);
+        handle.report(ChildStatus::Replied(FOValue::Unit));
+        assert!(
+            !parent.rest().pending,
+            "report is already queued when the debt clears"
+        );
+        assert!(!handle.status().owes_parent);
+        assert!(parent.mailbox.has_input());
+        set_provider(
+            &parent,
+            scripted(
+                "test-model",
+                Script::new().then(Reply::text("read the report next")),
+            ),
+        );
+        let (emit, rx) = emitter(&parent);
+        let _outcome = parent.exchange(&exchange, prompt, &emit);
+        let records = crate::bus::drain_records(&rx);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, Record::Forensic(Forensic::TurnStarted { .. })))
+                .count(),
+            1
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record, Record::Forensic(Forensic::Nudge { .. })))
+        );
+        assert!(parent.mailbox.has_input());
+        let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
+            panic!("report before settlement")
+        };
+        assert!(matches!(&input, Input::Child { id, .. } if *id == handle.id()));
+        assert!(parent.admit(input).is_some());
+        assert!(matches!(
+            parent.mailbox.next(parent.rest()),
+            Next::Settled { stopped: false }
+        ));
+    }
 }
 
 #[test]
@@ -345,20 +383,30 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
             idle: Duration::from_hours(5),
         },
     ] {
-        let parent = Agent::for_test_with(TestTrunk {
+        let mut parent = Agent::for_test_with(TestTrunk {
             trunk: Trunk::Converses,
             admission,
             ..TestTrunk::new("system")
         })
         .unwrap();
         let mut child = parent.fork_named("helper").unwrap();
+        parent.body.state.nursery.adopt(
+            child.handle(),
+            Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
+        );
+        assert!(parent.rest().pending);
         child.report(ChildStatus::Replied(FOValue::Int { value: 1 }));
+        assert!(!parent.rest().pending);
         let _report = next_child(&parent);
         let (emit, rx) = emitter(&parent);
         parent.couple(&emit);
-        let (child_emit, _child_rx) = emitter(&child);
+        let (child_emit, child_rx) = emitter(&child);
+        let child_handle = child.handle();
+        let _timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
+            child_handle.end();
+        });
         child.handle().steer("human task".into()).unwrap();
-        let Next::Take { input, exchange } = child.mailbox.next(&child.rest()) else {
+        let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
             panic!("human input")
         };
         let prompt = child.admit(input).unwrap();
@@ -388,6 +436,56 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
             )),
             "the parent's recorder receives nothing about human-only work"
         );
+        let _records = crate::bus::drain_records(&child_rx);
+        assert!(!child.body.state.owed);
+        assert!(!child.handle().status().owes_parent);
+        assert!(!parent.rest().pending);
+        child.handle().steer("human note".into()).unwrap();
+        assert!(!child.body.state.owed);
+        assert!(!child.handle().status().owes_parent);
+        assert!(!parent.rest().pending);
+        let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
+            panic!("second human input")
+        };
+        let prompt = child.admit(input).unwrap();
+        assert!(child.mailbox.begin());
+        assert!(!child.body.state.owed);
+        assert!(!child.handle().status().owes_parent);
+        assert!(!parent.rest().pending);
+        set_provider(
+            &child,
+            scripted("test-model", Script::new().then(Reply::text("noted"))),
+        );
+        let outcome = child.exchange(&exchange, prompt, &child_emit);
+        assert!(!child.body.state.owed);
+        assert!(!child.handle().status().owes_parent);
+        assert!(!parent.rest().pending);
+        settle(&mut child, outcome);
+        assert!(!child.body.state.owed);
+        assert!(!child.handle().status().owes_parent);
+        assert!(!parent.rest().pending);
+        let records = crate::bus::drain_records(&child_rx);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, Record::Forensic(Forensic::TurnStarted { .. })))
+                .count(),
+            1
+        );
+        assert!(!records.iter().any(|record| matches!(
+            record,
+            Record::Forensic(Forensic::Nudge { .. } | Forensic::Status { .. })
+        )));
+        assert!(matches!(
+            child.handle().status().report,
+            Some(ChildStatus::Replied(FOValue::Int { value: 2 }))
+        ));
+        assert!(!child.handle().status().working());
+        assert!(!parent.mailbox.has_input());
+        assert!(parent.mailbox.drain().is_empty());
+        assert!(parent.handle().status().job.is_none());
+        assert!(parent.rendered_messages().is_empty());
+        assert!(crate::bus::drain_records(&rx).is_empty());
     }
 }
 
@@ -409,7 +507,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
         })),
     );
     parent.handle().steer("work".into()).unwrap();
-    let Next::Take { input, exchange } = parent.mailbox.next(&parent.rest()) else {
+    let Next::Take { input, exchange } = parent.mailbox.next(parent.rest()) else {
         panic!("work")
     };
     assert!(parent.admit(input).is_some());
@@ -428,7 +526,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     let Next::Take {
         input,
         exchange: resumed,
-    } = parent.mailbox.next(&parent.rest())
+    } = parent.mailbox.next(parent.rest())
     else {
         panic!("helper wakes parent")
     };
@@ -452,7 +550,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
             .contains("helper")
     );
     assert!(matches!(
-        parent.mailbox.next(&parent.rest()),
+        parent.mailbox.next(parent.rest()),
         Next::Settled { stopped: true }
     ));
 }
@@ -464,7 +562,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
         let mut child = parent.fork_named("helper").unwrap();
         assert!(child.mailbox.begin());
         child.handle().steer("first".into()).unwrap();
-        let Next::Take { input, exchange } = child.mailbox.next(&child.rest()) else {
+        let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
             panic!("first input")
         };
         assert!(child.admit(input).is_some());
@@ -486,7 +584,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
                     Script::new().then(Reply::error(ProviderError::Other("no reply".into()))),
                 ),
             );
-            let Next::Take { input, exchange } = child.mailbox.next(&child.rest()) else {
+            let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
                 panic!("Stop preserves the queued parent message")
             };
             assert!(matches!(input, Input::Message(_)));
@@ -541,7 +639,7 @@ fn ending_a_parent_joins_helper_engines_before_ending_its_own() {
     assert!(observed.load(std::sync::atomic::Ordering::Acquire));
     assert!(!helper.is_live());
     assert!(engine.session_ended().unwrap().is_some());
-    assert!(parent.body.state.nursery.is_joined(helper.id()));
+    assert!(!parent.body.state.nursery.holds(helper.id()));
 }
 
 #[test]
@@ -563,7 +661,7 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
         })),
     );
     assert!(parent.admit(Input::Gone(id)).is_none());
-    assert!(parent.body.state.nursery.is_joined(id));
+    assert!(!parent.body.state.nursery.holds(id));
     assert_eq!(
         parent.body.state.failures,
         vec!["helper's certified failure"]
@@ -592,10 +690,14 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
 fn a_stopped_notice_has_the_new_settlement_not_a_legacy_failure() {
     let mut parent = trunk(Trunk::Converses);
     let child = parent.fork_named("helper").unwrap();
+    parent.body.state.nursery.adopt(
+        child.handle(),
+        Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
+    );
     let (emit, rx) = emitter(&parent);
     parent.couple(&emit);
     child.handle().report(ChildStatus::Stopped);
-    let Next::Take { input, .. } = parent.mailbox.next(&parent.rest()) else {
+    let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
         panic!("report")
     };
     let prompt = parent.admit(input).unwrap();
@@ -691,18 +793,20 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
 }
 
 #[test]
-fn a_job_cannot_settle_while_an_ended_helper_is_unjoined() {
+fn a_job_settles_when_an_ended_helper_has_no_debt() {
     let mut parent = trunk(Trunk::Converses);
+    let life = DurableRoot::default().child();
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), life.clone()),
     )
     .unwrap();
     let handle = (*helper).clone();
+    let (release, receiver) = std::sync::mpsc::channel();
     parent.body.state.nursery.adopt(
         handle.clone(),
         Joined::new(std::thread::spawn(move || {
-            wait_until("helper ends", || !helper.is_live());
+            receiver.recv_timeout(Duration::from_secs(10)).unwrap();
             drop(helper);
             Teardown { failures: vec![] }
         })),
@@ -710,30 +814,19 @@ fn a_job_cannot_settle_while_an_ended_helper_is_unjoined() {
     assert!(parent.mailbox.begin());
     handle.report(ChildStatus::Replied(FOValue::Unit));
     let _report = next_child(&parent);
-    let sampled = parent.rest();
-    assert!(!sampled.pending());
-    handle.end();
-    assert!(sampled.pending(), "a snapshot reads each life afresh");
+    life.cancel(CancelCause::Cancelled);
+    assert!(!parent.rest().pending);
     let parent_handle = parent.handle();
-    let owner_address = parent_handle.0.address.clone();
-    let helper_id = handle.id();
-    let _timeout =
-        ral_core::process::arm_callback(Duration::from_secs(10), move || parent_handle.end());
-    let owner = std::thread::spawn(move || {
-        let Next::Take { input, .. } = parent.mailbox.next(&sampled) else {
-            panic!("Gone must precede settlement")
-        };
-        assert!(matches!(input, Input::Gone(id) if id == helper_id));
-        assert!(parent.admit(input).is_none());
-        assert!(parent.body.state.nursery.is_joined(helper_id));
-        assert!(matches!(
-            parent.mailbox.next(&parent.rest()),
-            Next::Settled { stopped: false }
-        ));
+    let _timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
+        parent_handle.end();
     });
-    // `next` can return only what was posted: Gone, never a settlement.
-    owner_address.post(Input::Gone(helper_id)).unwrap();
-    owner.join().unwrap();
+    assert!(matches!(
+        parent.mailbox.next(parent.rest()),
+        Next::Settled { stopped: false }
+    ));
+    release.send(()).unwrap();
+    assert!(parent.admit(Input::Gone(handle.id())).is_none());
+    assert!(!parent.body.state.nursery.holds(handle.id()));
 }
 
 #[test]
@@ -922,7 +1015,7 @@ fn a_parent_messaging_at_the_idle_deadline_gets_a_report_or_a_refusal_never_sile
         Err(Refused::Ended)
     ));
     assert!(matches!(
-        parent.mailbox.next(&parent.rest()),
+        parent.mailbox.next(parent.rest()),
         Next::Take { input: Input::Gone(id), .. } if id == helper.id()
     ));
     assert!(parent.fleet.resolve("helper").is_none());

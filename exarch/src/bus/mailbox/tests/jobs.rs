@@ -148,7 +148,7 @@ fn peer_message_racing_settlement_is_taken_in_the_job_or_refused_at_rest() {
                 address.post(message("peer", false))
             });
             barrier.wait();
-            let next = mailbox.next(&QUIET);
+            let next = mailbox.next(QUIET);
             (post.join().unwrap(), next)
         });
         match (posted, next) {
@@ -202,7 +202,7 @@ fn every_post_kind_racing_settlement_is_taken_in_the_job_or_opens_the_next() {
                     post(&address);
                 });
                 barrier.wait();
-                let next = mailbox.next(&QUIET);
+                let next = mailbox.next(QUIET);
                 poster.join().unwrap();
                 next
             });
@@ -282,7 +282,7 @@ fn stop_racing_settlement_has_the_same_verdict_as_the_settled_record() {
                 address.stop(id)
             });
             barrier.wait();
-            let next = mailbox.next(&QUIET);
+            let next = mailbox.next(QUIET);
             (stop.join().unwrap(), next)
         });
         assert!(matches!(next, Next::Settled { stopped } if stopped == stop.is_some()));
@@ -305,7 +305,7 @@ fn a_failed_job_open_or_settlement_ends_the_bound_life() {
             let _exchange = start(&mailbox);
             record.fail_after(0);
         }
-        assert!(matches!(mailbox.next(&QUIET), Next::Ended));
+        assert!(matches!(mailbox.next(QUIET), Next::Ended));
         assert!(!mailbox.address().is_live());
         assert!(record.check_available().is_err());
         assert!(
@@ -315,38 +315,4 @@ fn a_failed_job_open_or_settlement_ends_the_bound_life() {
                 .any(|record| { matches!(record, Record::Forensic(Forensic::JobSettled { .. })) })
         );
     }
-}
-
-#[test]
-fn a_helper_life_ended_through_its_node_keeps_the_job_open_until_a_post() {
-    let parent = mailbox(Admission::Free);
-    let _exchange = start(&parent);
-    let address = parent.address();
-    let job = address.status().job;
-    let helper = DurableRoot::default().child();
-    let rest = Rest {
-        owing: false,
-        lives: vec![(*helper).clone()],
-        schedules: false,
-    };
-    helper.cancel(CancelCause::Cancelled);
-    let next = std::thread::scope(|scope| {
-        let worker = scope.spawn(|| parent.next(&rest));
-        let waiting = wait_until(|| address.status().busy);
-        let still_open = address.status().job == job && !worker.is_finished();
-        address.post(Input::Gone(AgentId::new(8))).unwrap();
-        let next = worker.join().unwrap();
-        assert!(waiting, "an ended life is pending without being announced");
-        assert!(still_open);
-        next
-    });
-    assert!(matches!(
-        next,
-        Next::Take {
-            input: Input::Gone(_),
-            ..
-        }
-    ));
-    assert_eq!(address.status().job, job);
-    settled(&parent, false);
 }

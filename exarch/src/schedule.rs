@@ -873,8 +873,7 @@ mod tests {
 
     const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
     const QUIET: Rest = Rest {
-        owing: false,
-        lives: Vec::new(),
+        pending: false,
         schedules: false,
     };
 
@@ -970,12 +969,11 @@ mod tests {
                     let registry = &registry;
                     scope.spawn(move || {
                         let rest = Rest {
-                            owing: false,
-                            lives: Vec::new(),
+                            pending: false,
                             schedules: registry.armed(),
                         };
                         park_tx.send(rest.schedules).unwrap();
-                        assert!(done_tx.send(mailbox.next(&rest)).is_ok());
+                        assert!(done_tx.send(mailbox.next(rest)).is_ok());
                     })
                 };
                 assert!(park_rx.recv_timeout(SYNC_TIMEOUT).unwrap());
@@ -997,7 +995,7 @@ mod tests {
                 producer.join().unwrap();
                 consumer.join().unwrap();
                 assert!(!registry.armed());
-                assert!(matches!(mailbox.next(&QUIET), Next::Settled { .. }));
+                assert!(matches!(mailbox.next(QUIET), Next::Settled { .. }));
             });
         }
     }
@@ -1151,9 +1149,8 @@ mod tests {
         let (producer, release) = paused_fire(&registry, now);
         mailbox.address().end(CancelCause::Cancelled);
         assert!(matches!(
-            mailbox.next(&Rest {
-                owing: false,
-                lives: Vec::new(),
+            mailbox.next(Rest {
+                pending: false,
                 schedules: registry.armed(),
             }),
             Next::Ended
@@ -1254,7 +1251,6 @@ mod tests {
     }
 
     fn wait_for_scheduled_rest(host: &crate::host::Host) -> JobId {
-        let mut exhausted = false;
         let mut first_job = None;
         loop {
             match host
@@ -1272,10 +1268,8 @@ mod tests {
                                         .is_none()
                                 );
                             }
-                            Record::Forensic(Forensic::Error { text })
-                                if text.contains("nudge budget") =>
-                            {
-                                exhausted = true;
+                            Record::Forensic(Forensic::Error { .. } | Forensic::Nudge { .. }) => {
+                                panic!("an armed schedule must not produce errors or nudges");
                             }
                             Record::Forensic(
                                 Forensic::JobSettled { .. } | Forensic::Status { .. },
@@ -1286,7 +1280,11 @@ mod tests {
                         }
                     }
                 }
-                Signal::Transient(_, Transient::State(AgentState::Ready)) if exhausted => break,
+                Signal::Transient(_, Transient::State(AgentState::Ready))
+                    if first_job.is_some() =>
+                {
+                    break;
+                }
                 Signal::Transient(_, Transient::Died { .. } | Transient::Fault { .. }) => {
                     panic!("the scheduled root must stay live")
                 }
@@ -1310,11 +1308,8 @@ mod tests {
                 )
                 .unwrap();
         }
-        let mut script = Script::new();
-        for _ in 0..4 {
-            script = script.then(Reply::text("waiting for the wakeup"));
-        }
-        script = script
+        let script = Script::new()
+            .then(Reply::text("waiting for the wakeup"))
             .then(Reply::tool_calls(vec![ral_call(
                 "reply",
                 "exarch-agents `reply 'awake'",

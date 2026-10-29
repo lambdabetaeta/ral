@@ -17,7 +17,7 @@ fn emitter(session: &Agent) -> (Emitter, crate::bus::BusReceiver) {
 
 fn human_exchange(session: &mut Agent, text: &str, emit: &Emitter) -> AgentOutcome {
     session.handle().steer(text.into()).unwrap();
-    let Next::Take { input, exchange } = session.mailbox.next(&session.rest()) else {
+    let Next::Take { input, exchange } = session.mailbox.next(session.rest()) else {
         panic!("a queued human input is taken up")
     };
     let prompt = session.admit(input).unwrap();
@@ -27,7 +27,7 @@ fn human_exchange(session: &mut Agent, text: &str, emit: &Emitter) -> AgentOutco
 }
 
 fn settle(session: &mut Agent, last: AgentOutcome) {
-    let Next::Settled { stopped } = session.mailbox.next(&session.rest()) else {
+    let Next::Settled { stopped } = session.mailbox.next(session.rest()) else {
         panic!("an empty job with no pending helpers settles")
     };
     session.settled(stopped, Some(last));
@@ -116,7 +116,7 @@ fn failed_mandatory_repair_ends_the_child_not_its_parent() {
     assert!(!descendant.handle().is_live());
     let _teardown = child.teardown();
     assert!(matches!(
-        parent.mailbox.next(&parent.rest()),
+        parent.mailbox.next(parent.rest()),
         Next::Take {
             input: Input::Child {
                 status: ChildStatus::Failed(_),
@@ -158,7 +158,7 @@ fn a_recording_failure_is_announced_even_when_the_life_was_already_ended() {
             .collect();
         assert_eq!(faults, vec![failure]);
         assert!(matches!(
-            parent.mailbox.next(&parent.rest()),
+            parent.mailbox.next(parent.rest()),
             Next::Take {
                 input: Input::Child {
                     status: ChildStatus::Failed(_),
@@ -203,7 +203,7 @@ fn stop_after_a_mid_job_pop_records_the_prompt_without_running_a_turn() {
     session.couple(&emit);
     assert!(session.mailbox.begin());
     session.handle().steer("old".into()).unwrap();
-    let Next::Take { input, exchange } = session.mailbox.next(&session.rest()) else {
+    let Next::Take { input, exchange } = session.mailbox.next(session.rest()) else {
         panic!("human input")
     };
     let prompt = session.admit(input).unwrap();
@@ -587,8 +587,61 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
         )
         .unwrap();
     assert!(child.rest().schedules);
+    assert!(child.body.state.owed);
+    assert!(child.handle().status().owes_parent);
+    assert!(!child.rest().pending);
+    assert!(!child.mailbox.has_input());
+    assert!(child.mailbox.drain().is_empty());
+    let child_handle = child.handle();
+    let _child_timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
+        child_handle.end();
+    });
+    let (emit, rx) = emitter(&child);
+    set_provider(
+        &child,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::text("wait for the schedule")),
+        ),
+    );
+    let _outcome = human_exchange(&mut child, "work", &emit);
+    let records = crate::bus::drain_records(&rx);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::Forensic(Forensic::TurnStarted { .. })))
+            .count(),
+        1
+    );
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        Record::Forensic(Forensic::Nudge { .. } | Forensic::Status { .. })
+    )));
+    assert!(child.body.state.owed);
+    assert!(child.handle().status().owes_parent);
+    assert!(child.rest().schedules);
     child.report(ChildStatus::Replied(FOValue::Unit));
     assert!(!child.rest().schedules);
+    assert!(!child.body.state.owed);
+    assert!(!child.handle().status().owes_parent);
+    let parent_handle = parent.handle();
+    let _parent_timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
+        parent_handle.end();
+    });
+    let Next::Take {
+        input,
+        exchange: _parent_exchange,
+    } = parent.mailbox.next(parent.rest())
+    else {
+        panic!("the child's explicit report")
+    };
+    assert!(matches!(
+        input,
+        Input::Child { id, status: ChildStatus::Replied(FOValue::Unit), .. }
+            if id == child.id()
+    ));
+    assert!(parent.mailbox.drain().is_empty());
+    let _records = crate::bus::drain_records(&rx);
     let grandchild = test_agent(
         &child.fleet,
         TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
@@ -596,16 +649,57 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     .unwrap();
     let handle = (*grandchild).clone();
     child.body.state.nursery.adopt(
-        handle,
+        handle.clone(),
         crate::agent::nursery::Joined::new(std::thread::spawn(move || {
+            wait_until("grandchild ended", || !grandchild.is_live());
             drop(grandchild);
             Teardown { failures: vec![] }
         })),
     );
-    assert!(child.rest().pending());
+    assert!(child.rest().pending);
+    handle.report(ChildStatus::Replied(FOValue::Unit));
+    assert!(!handle.status().owes_parent);
+    assert!(!child.rest().pending);
+    let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
+        panic!("grandchild report")
+    };
+    assert!(matches!(&input, Input::Child { id, .. } if *id == handle.id()));
+    let prompt = child.admit(input).unwrap();
+    assert!(child.mailbox.begin());
+    assert!(!child.body.state.owed);
+    assert!(!child.handle().status().owes_parent);
+    set_provider(
+        &child,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::text("noted the helper report")),
+        ),
+    );
+    let outcome = child.exchange(&exchange, prompt, &emit);
+    settle(&mut child, outcome);
+    let records = crate::bus::drain_records(&rx);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::Forensic(Forensic::TurnStarted { .. })))
+            .count(),
+        1
+    );
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        Record::Forensic(Forensic::Nudge { .. } | Forensic::Status { .. })
+    )));
+    assert!(!child.body.state.owed);
+    assert!(!child.handle().status().owes_parent);
+    assert!(!child.handle().status().working());
+    assert!(matches!(
+        child.handle().status().report,
+        Some(ChildStatus::Replied(FOValue::Unit))
+    ));
+    assert!(parent.mailbox.drain().is_empty());
     let failures = child.body.state.nursery.dismiss_all();
     assert_eq!(failures, Vec::<String>::new());
-    assert!(!child.rest().pending());
+    assert!(!child.rest().pending);
 }
 
 mod lifecycle;

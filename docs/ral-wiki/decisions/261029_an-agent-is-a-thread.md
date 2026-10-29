@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: e5a23909
+generated_at_commit: 7eab51c3
 generated_at_date: 2026-10-29
 verified_at_commit: e5a23909
 verified_at_date: 2026-10-29
@@ -35,12 +35,16 @@ they do not drive exchanges.
   its latest exchange. Human gestures additionally recall queued text in the
   same critical section; desk Stop and SIGINT leave it queued. Stale ids do nothing;
   a job without settlement ended with its life.
-- **A5 — Reports are messages.** `Replied(v)`, `Failed(reason)` and `Stopped`
-  are recorded by the agent and published in its mailbox. A helper starts
-  with `owes_parent`; each accepted parent message sets it under the queue
-  lock. Reporting posts `Input::Child` under that lock iff it owes its
-  parent, then resets the flag to whether parent input remains queued.
-  Its thread publishes `Died { failures }` after final owner drop, then posts `Gone` to its parent last.
+- **A5 — A parent is owed a reply.** A helper owes its parent from birth
+  (its task) and from each accepted parent message. The owner holds this as
+  `State::owed`; the mailbox's `owes_parent` decides the post. A headless
+  root owes from each human input. Human input to a helper and peer messages
+  create no debt. `report` records `Forensic::Status`, publishes, clears
+  `State::owed`, and posts `Input::Child` under the helper's lock iff
+  `owes_parent`. It then resets `owes_parent` to whether parent input remains
+  queued. A job that settles owing reports `Stopped` if stopped, else
+  `Failed`. The helper's thread posts `Died`, then `Gone`, last. A parent
+  admits a `Child` only from a helper it holds unjoined.
 - **A6 — Admission.** At rest, `Free` admits any input, `Gated` admits any
   after a release (given at rest; ignored while working) consumed by job opening, and `Parent` admits human and
   parent input. Commands, `Child` and `Gone` are quiet: never held and do not
@@ -60,13 +64,12 @@ they do not drive exchanges.
   `Parent`-admitted life with `TimedOut` after its idle interval with no
   admissible input. A racing post either wins or is refused. Default:
   `HELPER_IDLE`, five hours; `--helper-idle` overrides it.
-- **A10 — Rest owes nothing.** An unjoined helper is pending while it owes
-  its parent or its life has ended. A life can end through its node alone
-  (the latched record writer, a severed transport), which posts nothing
-  until `Gone`; so `Rest` carries a snapshot of the debts and every unjoined
-  helper's life `Scope`, which `next` reads afresh under the parent's lock.
-  A settlement either sees the end and waits for `Gone`, or precedes it.
-  Human dealings with a resting helper remain quiet to the parent model.
+- **A10 — Rest owes nothing.** An unjoined helper is pending exactly while
+  it owes its parent. `owes_parent` clears only in `report`, after the
+  `Child` is queued at the parent. So `Rest::pending`, read before the
+  parent's lock, stays current until some post reaches the parent, which
+  wakes it. A helper that ended after reporting owes nothing, and its `Gone`
+  joins it in or out of a job.
 - **A11 — Engines end once.** An agent holds `Option<Engine>`; final teardown
   takes it before retirement, so repeated teardown cannot retire it again.
   Clear retires the outgoing engine, or the prepared engine on commit
@@ -75,6 +78,12 @@ they do not drive exchanges.
   to `Host::end`, never re-recorded by joiners. Unwind drops an unended engine;
   the panic is the failure. Failed thread creation tears down the unlaunched
   agent; `LaunchError` returns both the spawn cause and teardown failures.
+
+- **A12 — Reminders.** At the end of an exchange, an owing agent is reminded
+  to reply iff no worker runs, `Rest` is empty, and no `Human`, `Message` or
+  `Child` is queued. `Rest` is read before the queue. A helper queues its
+  `Child` before clearing its flag, so a debt seen paid means the report is
+  already queued, and the reminder never overtakes a report.
 
 ## Delivery and replacement
 
@@ -115,7 +124,7 @@ without holding the parent's mailbox.
   survives as life ⊃ exchange; work scopes, provenance vouching, receipts,
   shared status cells, census and reply lease do not.
 - [[260806_exchange-ends-at-fleet-quiescence]] is superseded: jobs are
-  recorded busy periods for every agent, with pending helpers joined before
+  recorded busy periods for every agent, with helper debts paid before
   settlement. Synod gates the next job across its folder walk.
 - [[260826_reply-parks]] is superseded: a helper rests and times itself out;
   reporting does not end its helpers.

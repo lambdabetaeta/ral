@@ -54,8 +54,8 @@ fleet root
   Declined stale input opens nothing. Mid-job input opens no second job.
 - `JobSettled` is committed under the queue lock that finds nothing queued
   and no pending helpers. An unjoined helper is pending while it owes its
-  parent or its life has ended; the parent reads each helper's life afresh
-  under its own lock, so an end seen before settlement is joined first.
+  parent. A helper that has reported no longer holds the job open; `Gone`
+  joins it when it arrives.
 - Stop shares this lock and marks the matching job stopped; human gestures recall text;
   stale ids do nothing. Further input may run before that same job settles.
 - `Host` launches roots and owns their feed, then ends and joins all of
@@ -71,9 +71,10 @@ fleet root
 
 **A helper's published status and its obligation are different facts.**
 
-- A returning agent owes a report after taking up human or parent input,
-  until reply, rest or end. Reports are `Replied(FOValue)`, `Failed(reason)`
-  or `Stopped`, recorded in its own log and published in its mailbox.
+- A returning agent owes a report from its task and parent messages, or,
+  for a headless root, human input.
+  Human input to a helper creates no debt. Reports are `Replied(FOValue)`,
+  `Failed(reason)` or `Stopped`, recorded in its log and published in its mailbox.
 - A helper's mailbox starts owing its parent. Parent enqueue sets that flag
   atomically; reporting posts `Child` to the parent under the helper lock,
   then retains the flag only if another parent message remains queued.
@@ -87,6 +88,10 @@ fleet root
 - The body is owned plainly between shell calls and lent only for foreground
   dispatch. The loan returns on unwind too; a later enquiry answers `no desk`.
   Call-local acts use `AtomicRefCell`, not a persistent shared agent cell.
+
+Debts follow parent edges only: waits descend a finite tree, so a leaf with
+nothing on its way is reminded to reply and frees its parent. Peer messages
+are notes; peer debts could form cycles.
 
 ## Roots, replacement and teardown
 

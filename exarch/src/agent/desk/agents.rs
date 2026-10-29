@@ -188,7 +188,7 @@ impl ExarchDesk {
         let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         let verdict = match body.state.nursery.named(name).cloned() {
             Some(helper) => {
-                let ended = body.state.nursery.is_joined(helper.id());
+                let ended = !body.state.nursery.holds(helper.id());
                 helper.end();
                 let failures = body.state.nursery.join(helper.id());
                 body.state.failures.extend(failures);

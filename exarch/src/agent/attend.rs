@@ -26,14 +26,13 @@ impl Agent {
         loop {
             let rest = self.rest();
             if self.handle.is_live() {
-                self.recorder()
-                    .transient(Transient::State(if rest.pending() {
-                        AgentState::WaitingOnAgents
-                    } else {
-                        AgentState::Ready
-                    }));
+                self.recorder().transient(Transient::State(if rest.pending {
+                    AgentState::WaitingOnAgents
+                } else {
+                    AgentState::Ready
+                }));
             }
-            match self.mailbox.next(&rest) {
+            match self.mailbox.next(rest) {
                 Next::Ended => break,
                 Next::Settled { stopped } => self.settled(stopped, last.take()),
                 Next::Command(command) => {
@@ -59,8 +58,7 @@ impl Agent {
     pub(super) fn rest(&self) -> Rest {
         let nursery = &self.body.state.nursery;
         Rest {
-            owing: nursery.owing(),
-            lives: nursery.lives(),
+            pending: nursery.owing(),
             schedules: self.handle.0.role.returns() && self.body.state.schedules.armed(),
         }
     }
@@ -87,6 +85,8 @@ impl Agent {
                 }
             };
             let final_outcome = agent_outcome(&outcome);
+            // A12: read debts before checking the queue.
+            let rest = self.rest();
             if exchange.is_cancelled() || self.mailbox.has_input() {
                 return final_outcome;
             }
@@ -99,9 +99,9 @@ impl Agent {
                 }
             };
             let facts = nudge::Facts {
-                must_reply: self.handle.0.role.returns(),
+                must_reply: self.body.state.owed,
                 pinned: self.pinned_digest(),
-                quiet: workers_idle && !self.rest().pending(),
+                quiet: workers_idle && !rest.pending && !rest.schedules,
             };
             let body = &mut *self.body;
             let Some(text) = body

@@ -13,8 +13,7 @@ mod reports;
 mod wakeups;
 
 const QUIET: Rest = Rest {
-    owing: false,
-    lives: Vec::new(),
+    pending: false,
     schedules: false,
 };
 const WAIT: Duration = Duration::from_secs(5);
@@ -36,7 +35,7 @@ fn helper() -> AgentMailbox {
 }
 
 fn take(mailbox: &AgentMailbox) -> (Input, Lease) {
-    match mailbox.next(&QUIET) {
+    match mailbox.next(QUIET) {
         Next::Take { input, exchange } => (input, exchange),
         _ => panic!("expected an input and its exchange"),
     }
@@ -93,7 +92,7 @@ fn depth(mailbox: &AgentMailbox, source: Source) -> u64 {
 }
 
 fn settled(mailbox: &AgentMailbox, stopped: bool) {
-    assert!(matches!(mailbox.next(&QUIET), Next::Settled { stopped: mark } if mark == stopped));
+    assert!(matches!(mailbox.next(QUIET), Next::Settled { stopped: mark } if mark == stopped));
     let status = mailbox.address().status();
     assert!(status.job.is_none());
     assert!(status.rest.is_some());

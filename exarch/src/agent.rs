@@ -73,6 +73,7 @@ pub(crate) type Pins = BTreeMap<String, PinDigest>;
 pub(crate) struct State {
     pub(crate) nursery: Nursery,
     pub(crate) reply: Option<FOValue>,
+    /// A5: a reply is owed to the parent, or to a headless root's human.
     pub(crate) owed: bool,
     pub(crate) failures: Vec<String>,
     pub(crate) pins: Pins,

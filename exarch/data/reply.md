@@ -4,4 +4,4 @@ The reply is first-order ral data; give exactly the shape the task asked for. A 
 
 `reply` stages the value; it is deposited once the enclosing ral batch drains, so write it last.
 
-When children of your own are outstanding, end the turn and wait for their notices; never poll or invent busywork. Reply only after their results and your own work are complete.
+When children of your own are outstanding, end the turn and wait for their notices; never poll or invent busywork. Reply only after their results and your own work are complete. If you need something from your spawner, reply with the question; its answer comes as a message.

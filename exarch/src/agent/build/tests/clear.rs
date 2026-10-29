@@ -77,7 +77,7 @@ fn clear_dismisses_and_joins_helpers_drops_reports_and_keeps_human_and_peer_inpu
         parent.fleet.resolve("helper").is_none(),
         "clear joined the helper and released its name"
     );
-    assert!(!parent.rest().pending());
+    assert!(!parent.rest().pending);
     assert!(parent.body.state.nursery.named("helper").is_none());
     assert!(parent.fleet.name("helper").is_ok());
     let inputs = parent.mailbox.drain();
@@ -217,7 +217,7 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
             assert_eq!(helper_engine.session_ended().unwrap(), None);
         }
         assert_eq!(helper.is_live(), failure != "unavailable");
-        assert!(agent.rest().pending());
+        assert!(agent.rest().pending);
         if failure != "unavailable" {
             assert_eq!(agent.handle().queued(), ["keep queued"]);
         }
@@ -319,7 +319,7 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
     let before = serde_json::to_vec(&child.rendered_messages()).unwrap();
     assert!(child.clear().unwrap_err().contains("new conversation"));
     assert!(helper.is_live());
-    assert!(child.rest().pending());
+    assert!(child.rest().pending);
     assert_eq!(child.handle().queued(), ["keep queued"]);
     assert_eq!(child.body.state.schedules.list().len(), 1);
     assert_eq!(child.body.state.pins.len(), 1);

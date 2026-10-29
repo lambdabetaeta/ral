@@ -118,22 +118,12 @@ impl Status {
     }
 }
 
-/// What keeps the owner from resting.
-#[derive(Clone)]
+/// What keeps the owner from settling (A10).
+#[derive(Clone, Copy)]
 pub(crate) struct Rest {
-    /// A helper owes a report: a snapshot, current until a post (A10).
-    pub owing: bool,
-    /// Every unjoined helper's life, read afresh under the lock: a life
-    /// cancelled through its node posts nothing until its `Gone`.
-    pub lives: Vec<Scope>,
+    /// Some unjoined helper owes us a report.
+    pub pending: bool,
     pub schedules: bool,
-}
-
-impl Rest {
-    /// A10: a helper is pending while it owes a report or has ended unjoined.
-    pub(crate) fn pending(&self) -> bool {
-        self.owing || self.lives.iter().any(Scope::is_cancelled)
-    }
 }
 
 pub(crate) enum Next {
@@ -314,14 +304,13 @@ impl AgentMailbox {
         (*self.shared.life).clone()
     }
 
-    pub(crate) fn next(&self, rest: &Rest) -> Next {
+    pub(crate) fn next(&self, rest: Rest) -> Next {
         let mut queue = self.shared.lock();
         loop {
             if self.shared.life.is_cancelled() {
                 return Next::Ended;
             }
-            let pending = rest.pending();
-            queue.busy = pending;
+            queue.busy = rest.pending;
             let index = match &queue.phase {
                 Phase::Working(_) => (!queue.items.is_empty()).then_some(0),
                 Phase::Resting { released, .. } => queue
@@ -341,7 +330,7 @@ impl AgentMailbox {
                 };
             }
             let wait = match (&queue.phase, self.shared.admission) {
-                (Phase::Working(job), _) if !pending && !rest.schedules => {
+                (Phase::Working(job), _) if !rest.pending && !rest.schedules => {
                     let stopped = job.stopped;
                     let settled = Forensic::JobSettled {
                         job: job.id,
@@ -367,7 +356,7 @@ impl AgentMailbox {
                 }
                 _ => PARK_POLL,
             };
-            queue.waiting_for_input = !pending && !rest.schedules;
+            queue.waiting_for_input = !rest.pending && !rest.schedules;
             (queue, _) = self.shared.signal.wait_timeout_ignore_poison(queue, wait);
         }
     }
@@ -417,12 +406,14 @@ impl AgentMailbox {
         drained
     }
 
+    /// A queued input that will prompt the model (A12).
     pub(crate) fn has_input(&self) -> bool {
-        self.shared
-            .lock()
-            .items
-            .iter()
-            .any(|item| matches!(item, Queued::Input(Input::Human(_) | Input::Message(_))))
+        self.shared.lock().items.iter().any(|item| {
+            matches!(
+                item,
+                Queued::Input(Input::Human(_) | Input::Message(_) | Input::Child { .. })
+            )
+        })
     }
 
     /// A non-renewing snapshot; adjacent human fragments count as one input.
@@ -602,11 +593,6 @@ impl AgentAddress {
 
     pub(crate) fn is_live(&self) -> bool {
         !self.0.life.is_cancelled()
-    }
-
-    /// The life others may watch end without locking this mailbox.
-    pub(crate) fn life(&self) -> Scope {
-        (*self.0.life).clone()
     }
 
     pub(crate) fn status(&self) -> Status {
