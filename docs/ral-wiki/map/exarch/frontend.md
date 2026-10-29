@@ -1,6 +1,6 @@
 ---
-generated_at_commit: eb4a62f0
-generated_at_date: 2026-10-28
+generated_at_commit: e82dee76
+generated_at_date: 2026-10-29
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
 
@@ -130,8 +130,8 @@ elapsed time, actual ending and how to use `await` / `workers`.
   The failure overrides the attended outcome, as at every terminus. That
   census report supersedes the first. `JobEnd.outcome` and the census
   join failures one per line. A settlement failure severs once, after the
-  pumps. The next job, “Stopped.” and Synod's closing folder walk cannot
-  overtake those writes or final output
+  pumps, which ends the root's life with its engine. The next job, “Stopped.”
+  and Synod's closing folder walk cannot overtake those writes or final output
   ([[decisions/260806_exchange-ends-at-fleet-quiescence|job settlement]]).
 - `end_fleet(self)` ends the whole shared fleet, drops the owner, then waits
   on the detached `Census`, retaining no launch or factory. Synod recovers

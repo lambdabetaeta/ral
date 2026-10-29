@@ -4,15 +4,15 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::time::Duration;
 
 use crate::carrier::{ControlRoute, ControlSender, EventReceiver, forbid_reentry};
 use crate::carrier::{
-    Ends, Host, Line, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id, sever,
+    Ends, Host, Line, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id,
 };
 use crate::data::FOValue;
-use crate::process::Scope;
+use crate::process::{Fatal, Scope};
 use crate::protocol::channel::{Liveness, WireChannel, WireStream, WriteError, ticks};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
@@ -32,7 +32,7 @@ use crate::sync::{CondvarExt as _, LockExt};
 /// `Pong`s, and timestamps every frame it reads. All writes go through its
 /// [`Line`], the ticker's `Ping` included.
 pub struct WireTransport {
-    /// The severance cell is shared with the reader and the line; the reader
+    /// The severance is shared with the reader and the line; the reader
     /// and the ticker check it to break early; the sink with the reader, so
     /// `set_deferred_sink` takes effect on the next batch.
     ends: Ends,
@@ -76,7 +76,7 @@ fn spawn_wire_reader(
     mut reader_ch: WireChannel,
     event_tx: mpsc::Sender<(DispatchId, Event)>,
     deferred_sink: Arc<Mutex<Option<Arc<dyn DeferredSink>>>>,
-    severance: Arc<OnceLock<Severed>>,
+    severance: Arc<Fatal<Severed>>,
     unanswered: Arc<AtomicU32>,
     session: Arc<(Mutex<SessionState>, Condvar)>,
 ) -> std::thread::JoinHandle<()> {
@@ -85,15 +85,13 @@ fn spawn_wire_reader(
         // so `dispatch_to_report`'s `expect` always finds a cause. Declared first so
         // it drops after the loop's own locals but before the captured `event_tx`.
         struct SeverOnExit<'a> {
-            severance: &'a OnceLock<Severed>,
+            severance: &'a Fatal<Severed>,
             session: &'a (Mutex<SessionState>, Condvar),
         }
         impl Drop for SeverOnExit<'_> {
             fn drop(&mut self) {
-                sever(
-                    self.severance,
-                    Severed::Closed("the reader thread ended".into()),
-                );
+                self.severance
+                    .latch(Severed::Closed("the reader thread ended".into()));
                 self.session.1.notify_all();
             }
         }
@@ -103,7 +101,7 @@ fn spawn_wire_reader(
         };
 
         loop {
-            if severance.get().is_some() {
+            if severance.cause().is_some() {
                 break;
             }
             match reader_ch.read_frame() {
@@ -132,31 +130,25 @@ fn spawn_wire_reader(
                             break;
                         }
                         Frame::Session(SessionEvent::Refused(msg)) => {
-                            sever(&severance, Severed::Refused(msg));
+                            severance.latch(Severed::Refused(msg));
                             break;
                         }
                         Frame::Pong(_) => {}
                         other => {
-                            sever(
-                                &severance,
-                                Severed::Faulted(format!(
-                                    "it sent a {} frame, which only a front-end sends",
-                                    other.kind()
-                                )),
-                            );
+                            severance.latch(Severed::Faulted(format!(
+                                "it sent a {} frame, which only a front-end sends",
+                                other.kind()
+                            )));
                             break;
                         }
                     }
                 }
                 Ok(None) => {
-                    sever(
-                        &severance,
-                        Severed::Closed("the engine closed the connection".into()),
-                    );
+                    severance.latch(Severed::Closed("the engine closed the connection".into()));
                     break;
                 }
                 Err(e) => {
-                    sever(&severance, Severed::Closed(e.to_string()));
+                    severance.latch(Severed::Closed(e.to_string()));
                     break;
                 }
             }
@@ -185,7 +177,7 @@ fn spawn_heartbeat(line: Weak<Line>, unanswered: Arc<AtomicU32>, liveness: Liven
             std::thread::sleep(liveness.interval);
             // Held for one tick, never across the sleep.
             let Some(line) = line.upgrade() else { break };
-            if line.severance.get().is_some() {
+            if line.severance.cause().is_some() {
                 break;
             }
             // Only probes this thread actually sent can condemn the peer, so a
@@ -229,7 +221,7 @@ impl WireTransport {
         // progress.
         let shutdown = writer.try_clone()?;
 
-        let severance = Arc::new(OnceLock::new());
+        let severance = Arc::new(Fatal::default());
         let unanswered = Arc::new(AtomicU32::new(0));
         let (event_tx, event_rx) = mpsc::channel();
         let session = Arc::new((Mutex::new(SessionState::Opening), Condvar::new()));
@@ -342,7 +334,7 @@ impl WireTransport {
                 return Ok(());
             }
             if left == 0 {
-                return Err(self.line.sever(Severed::Silent(self.patience)).clone());
+                return Err(self.line.sever(Severed::Silent(self.patience)));
             }
             let (next, timed_out) = self.session.1.wait_timeout_ignore_poison(guard, TICK);
             guard = next;
@@ -425,7 +417,7 @@ impl Transport for WireTransport {
 
     /// Also shuts the connection, so the engine sees EOF.
     fn sever(&self, cause: Severed) -> Severed {
-        self.line.sever(cause).clone()
+        self.line.sever(cause)
     }
 
     /// An answer the fuse refuses is replaced by its refusal, so the parked

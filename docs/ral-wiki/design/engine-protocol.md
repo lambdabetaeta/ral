@@ -1,5 +1,6 @@
 ---
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
+generated_at_commit: e82dee76
+generated_at_date: 2026-10-29
 ---
 
 # The engine protocol
@@ -324,8 +325,8 @@ EOF or the liveness deadline closes it without certification.
 
 **One owner per connection.** A wire transport alone owns its `Line`:
 the write channel, a never-locked duplicate to shut the socket with, and
-the severance cell. A control sender and the heartbeat hold the line
-weakly, so holding a sender holds no connection, and a verb aimed at a
+the severance, a `Fatal<Severed>`. A control sender and the heartbeat hold the
+line weakly, so holding a sender holds no connection, and a verb aimed at a
 gone line is a no-op. The wire transport's drop shuts the socket, which
 acts on the connection rather than on one descriptor, and the engine reads
 EOF; this initiates teardown but proves nothing about when it finishes.
@@ -431,10 +432,17 @@ sends — a fault the front-end observed for itself and records through
 `Transport::sever`. `Severed` is terminal — a front-end that observes one
 ends its session, never retries into it: exarch's headless and synod
 front-ends end the conversation on it, showing its sentence once — and first
-cause wins where more than one could apply. The reader thread that
-watches a wire connection always severs *before* it closes the event
-stream it drives, so a closed stream is proof a cause already exists to
-read back.
+cause wins where more than one could apply.
+
+A front-end may bind a life to the severance (`Transport::bind`); whichever
+thread severs then cancels it — the reader, the heartbeat or a failed write.
+Teardown severs too (the reader on `Ended`, the drop), so a front-end
+replacing an engine under a living life unbinds it first (`Transport::unbind`).
+Exarch binds each agent's life, so a lost engine stops its owner's work at once.
+
+The reader thread that watches a wire connection always severs *before* it
+closes the event stream it drives, so a closed stream is proof a cause already
+exists to read back.
 
 The **attach verdict** is the handshake's answer: the engine replies to
 every `Attach` with `Attached` or `Refused(reason)` as a session event, and

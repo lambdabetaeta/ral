@@ -21,7 +21,7 @@
 use super::{Cursor, Entry, Locus, Publish, RECORD, Record, Recorded, Seq, Transient};
 use crate::app::now_unix_ms;
 use ral_core::own::OwnDir;
-use ral_core::process::{CancelCause, ScopeNode};
+use ral_core::process::{Fatal, ScopeNode};
 use ral_core::sync::{LockExt as _, Torn};
 use std::fmt;
 use std::fs::File;
@@ -80,17 +80,10 @@ impl From<Unavailable> for io::Error {
 /// bytes. A poisoned log must stay poisoned.
 pub(crate) struct Log {
     inner: Mutex<Inner>,
-    /// A leaf lock, poison ignored: its updates are total.
-    latch: Mutex<WriteLatch>,
+    /// The writer's first failure: it ends the life bound to it.
+    failure: Fatal<Unavailable>,
     /// The record file, as messages name it.
     record: Option<PathBuf>,
-}
-
-/// The writer's first failure, and the life it ends.
-#[derive(Default)]
-struct WriteLatch {
-    failure: Option<Unavailable>,
-    life: Option<ScopeNode>,
 }
 
 /// The session directory a log is kept in, and the writer on its record file.
@@ -209,7 +202,7 @@ impl Log {
                 seq,
                 pos,
             }),
-            latch: Mutex::default(),
+            failure: Fatal::default(),
         }
     }
 
@@ -250,34 +243,15 @@ impl Log {
         Ok((from, Self::records(source, from.seq, from.end, until)?))
     }
 
-    fn latched(&self) -> Option<Unavailable> {
-        self.latch.lock_ignore_poison().failure.clone()
-    }
-
     /// Latch `cause` unless a failure stands, ending the bound life.
     pub(super) fn fail(&self, cause: io::Error) -> Unavailable {
-        let mut latch = self.latch.lock_ignore_poison();
-        let failure = latch
-            .failure
-            .get_or_insert_with(|| Unavailable::new(self.record.clone(), cause))
-            .clone();
-        if let Some(life) = latch.life.take() {
-            // Without the inbox lock or a notify: a parked owner sees it within PARK_POLL.
-            life.cancel(CancelCause::Cancelled);
-        }
-        drop(latch);
-        failure
+        self.failure
+            .latch(Unavailable::new(self.record.clone(), cause))
     }
 
     /// End `life` when this writer fails, at once if it has.
     pub(super) fn bind(&self, life: ScopeNode) {
-        let mut latch = self.latch.lock_ignore_poison();
-        debug_assert!(latch.life.is_none(), "one writer, one life");
-        if latch.failure.is_some() {
-            life.cancel(CancelCause::Cancelled);
-        } else {
-            latch.life = Some(life);
-        }
+        self.failure.bind(life);
     }
 
     /// Observe without the append lock, latching poison when first met.
@@ -285,7 +259,7 @@ impl Log {
         if self.inner.is_poisoned() {
             return Err(self.fail(Torn.into()));
         }
-        self.latched().map_or(Ok(()), Err)
+        self.failure.cause().map_or(Ok(()), Err)
     }
 
     #[cfg(test)]
@@ -319,7 +293,7 @@ impl Log {
             .inner
             .lock_strict()
             .map_err(|torn| self.fail(torn.into()))?;
-        if let Some(failure) = self.latched() {
+        if let Some(failure) = self.failure.cause() {
             return Err(failure);
         }
         let mut line = serde_json::to_vec(&Entry {

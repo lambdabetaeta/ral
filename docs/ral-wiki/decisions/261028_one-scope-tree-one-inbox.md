@@ -1,9 +1,10 @@
 ---
 status: active
-generated_at_commit: eb4a62f0
-verified_at_commit: eb4a62f0
-verified_at_date: 2026-10-28
-anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Owed, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report, Unavailable, Emitter::bind, Agent::conclude, Tenancy::discard]
+generated_at_commit: e82dee76
+generated_at_date: 2026-10-29
+verified_at_commit: e82dee76
+verified_at_date: 2026-10-29
+anchors: [Agent, AgentHandle, Inbox, Mailbox, Scope, ScopeNode, Scope::id, Job, JobId, JobEnd, SettledConversation::await_job, SettledConversation::run, AgentHandle::stop, Fleet::wait_settled, Posts, Owed, Census, Claim, Tenancy, Incarnation, Opening, Ticket, RootEngine, Pool, dispatch_to_report, Unavailable, Emitter::bind, Agent::conclude, Tenancy::discard, Fatal, Transport::bind, Transport::unbind, Agent::halted]
 ---
 
 # One scope tree, one inbox
@@ -50,6 +51,7 @@ fleet root (DurableRoot)
 | committed `/clear` | engine incarnation, replaced by its prepared successor | `Cancelled` |
 | `end`; `/close`; agent cancel; owner drop | life | `Cancelled` |
 | first failed record append | life | `Cancelled` |
+| engine severance | life | `Cancelled` |
 | idle reply lease lapse | life | `TimedOut` |
 | `/quit`; `end_fleet`; SIGTERM / SIGHUP | fleet root | `Cancelled` / `Terminated` |
 | process abort | fleet root | `Aborted` |
@@ -58,12 +60,16 @@ fleet root (DurableRoot)
   and so the engine. Clear prepares a successor without changing that scope;
   only committed `Cleared` permits fencing it, installing the prepared engine
   and certifying the outgoing one. Failed preparation preserves the old scope.
+  Installing the prepared engine first moves the life's binding to it, since
+  the outgoing engine's teardown may sever. A life is bound to exactly the
+  engine its incarnation holds.
 - An interrupt preserves helpers. Abandoning work ends every adopted
   descendant and its current exchange, but preserves the agent.
 - Ending life ends its subtree. Dropping the owner also ends life; there
   are no surviving descendants whose consumer has disappeared.
-- Parked owners poll life every `PARK_POLL`; provider requests poll their
-  exchange. Own end, Stop and posts notify the inbox condvar.
+- Parked owners poll life every `PARK_POLL`, including after a terminal
+  failure; provider requests poll their exchange. Own end, Stop and posts
+  notify the inbox condvar.
 - Factory, attach, probe and protocol-write waits have their own deadlines,
   not scope-driven interruption. Cancelled work refuses what follows them.
 
@@ -241,10 +247,14 @@ second backend job arbiter is needed.
   drop in order: the engine's owner is its `Tenancy`, whose drop certifies and
   ends and drops the engine before its `Claim` releases the name and census
   entry. An armed claim publishes final `Died` before that release, outside
-  the census lock. A recording failure ends life when the writer latches it.
+  the census lock. A terminal failure ends life from the thread that latches
+  it. The record writer's first failure and the engine's severance are each
+  a `Fatal` (`ral_core::process`) bound to the owner's life; a standing cause
+  implies that life has ended.
   The owner's terminus (`settle`, the headless run, `SettledConversation::run`)
-  announces it once as `Transient::Fault` on the fleet sink, which the failed
-  writer cannot block, then retires; parent retirement precedes the cue.
+  announces a recording failure once as `Transient::Fault` on the fleet sink,
+  which the failed writer cannot block, then retires; parent retirement
+  precedes the cue. The terminus names a severance as `EngineLost`.
   The last owner cannot empty the census ahead of its death cue.
 - The `Census` holds, under one lock, the name table, the `tenants` map and
   the teardown failures. `Fleet::claim` reserves the name and an unbound

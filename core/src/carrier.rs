@@ -9,14 +9,14 @@
 //! stream and the session sink are stated once.
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use crate::authority::policy::GrantSummary;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::engine::Scopes;
-use crate::process::{Ambient, CancelCause, POLL_SLICE, Scope, interrupt_epoch};
+use crate::process::{Ambient, CancelCause, Fatal, POLL_SLICE, Scope, ScopeNode, interrupt_epoch};
 use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, PathEntry, Probe, WorkerRow};
 use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
@@ -41,6 +41,7 @@ pub use wire::run_engine;
 
 /// Why no further frame will cross the protocol. Terminal: a severed transport
 /// never recovers, so a front-end that sees one ends its session.
+/// A front-end binds the life it ends with [`Transport::bind`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severed {
     /// The engine refused `Attach`, in its own words: a protocol version
@@ -93,11 +94,6 @@ impl std::fmt::Display for Severed {
     }
 }
 
-/// First cause wins; the one that stands.
-fn sever(severance: &OnceLock<Severed>, cause: Severed) -> &Severed {
-    severance.get_or_init(|| cause)
-}
-
 /// Why a probe has no reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeError {
@@ -141,7 +137,7 @@ impl Host for () {
 pub struct Ends {
     control: ControlSender,
     events: Arc<EventReceiver>,
-    severance: Arc<OnceLock<Severed>>,
+    severance: Arc<Fatal<Severed>>,
     /// `None` until a host installs one, and while it is `None` a settling
     /// worker's batch is dropped: a front-end declining session events, not a
     /// loss the carrier owes anyone.
@@ -150,12 +146,8 @@ pub struct Ends {
 
 impl Ends {
     /// Ends over `control` and `events`, whose severance is `severance`: the
-    /// cell `control`'s own route records into, if it writes a wire.
-    fn new(
-        control: ControlSender,
-        events: EventReceiver,
-        severance: Arc<OnceLock<Severed>>,
-    ) -> Self {
+    /// severance `control`'s own route records into, if it writes a wire.
+    fn new(control: ControlSender, events: EventReceiver, severance: Arc<Fatal<Severed>>) -> Self {
         Self {
             control,
             events: Arc::new(events),
@@ -166,7 +158,7 @@ impl Ends {
 
     /// The cause that stands: the first one recorded.
     fn sever(&self, cause: Severed) -> Severed {
-        sever(&self.severance, cause).clone()
+        self.severance.latch(cause)
     }
 }
 
@@ -221,7 +213,7 @@ pub trait Transport: Send + Sync {
     /// Why no further frame will cross the protocol, if that has happened: a
     /// write error, a read EOF, a refused `Attach`, or a silence deadline.
     fn severed(&self) -> Option<Severed> {
-        self.ends().severance.get().cloned()
+        self.ends().severance.cause()
     }
 
     /// Declare the engine dead for a cause the front-end observed itself — an
@@ -229,6 +221,18 @@ pub trait Transport: Send + Sync {
     /// which is the first one recorded.
     fn sever(&self, cause: Severed) -> Severed {
         self.ends().sever(cause)
+    }
+
+    /// End `life` when this transport severs, at once if it has: whichever
+    /// thread severs it cancels the life. One life at a time.
+    fn bind(&self, life: ScopeNode) {
+        self.ends().severance.bind(life);
+    }
+
+    /// Release the bound life unended, before a teardown that severs; `None`
+    /// once severed, which ended it.
+    fn unbind(&self) -> Option<ScopeNode> {
+        self.ends().severance.unbind()
     }
 
     /// Install the session sink a `Frame::Session` batch is delivered to.
@@ -514,13 +518,13 @@ fn mint_dispatch_id() -> DispatchId {
 
 // ── Senders and receivers ─────────────────────────────────────────────
 
-/// A wire connection's front-end write end, and the cell its failures record
+/// A wire connection's front-end write end, and the severance its failures record
 /// into. Its transport alone owns it; every other holder is weak.
 struct Line {
     channel: Mutex<WireChannel>,
     /// Never locked, so a shutdown never parks behind a stalled write.
     shutdown: WireChannel,
-    severance: Arc<OnceLock<Severed>>,
+    severance: Arc<Fatal<Severed>>,
 }
 
 impl Line {
@@ -528,14 +532,14 @@ impl Line {
     /// `Closed` cause.
     fn write(&self, frame: &Frame) -> Result<(), WriteError> {
         write_or_sever(&self.channel, frame, |e| {
-            sever(&self.severance, Severed::Closed(e.to_string()));
+            self.severance.latch(Severed::Closed(e.to_string()));
         })
     }
 
-    /// Record `cause`, first cause winning, and shut the socket down: the
+    /// Latch `cause`, first cause winning, and shut the socket down: the
     /// engine reads EOF and the reader wakes.
-    fn sever(&self, cause: Severed) -> &Severed {
-        let standing = sever(&self.severance, cause);
+    fn sever(&self, cause: Severed) -> Severed {
+        let standing = self.severance.latch(cause);
         self.shutdown.shutdown();
         standing
     }

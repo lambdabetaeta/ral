@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
-generated_at_date: 2026-10-28
+generated_at_commit: e82dee76
+generated_at_date: 2026-10-29
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
 
@@ -340,6 +340,9 @@ is judged; shared machinery stays with exarch and vm-manager.
   success restores it.
 - `Conversation::{handle, await_job}` expose the `AgentHandle` and human-only
   job wait. `lost()` records terminal failure; the loop ends without another job.
+  An engine lost between jobs ends the root's life, so `await_job` returns
+  nothing. `capture_a_dead_engine` reads the loss without ending life itself;
+  the loop reports it as a failure before the machine shuts down.
   Engine diagnostics are captured into `engine.log` while the machine is up.
   Capture repeats the failure so the file stands alone; capture failure is
   secondary.

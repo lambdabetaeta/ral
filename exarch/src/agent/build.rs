@@ -249,7 +249,9 @@ impl Agent {
         let id = log.id();
         let started = Instant::now();
         let (under, life, inbox) = fleet.lodge(parent, tenancy.claim().name(), started)?;
-        log.record_emitter().bind(life); // A failed writer ends this life.
+        // A failed writer or a lost engine ends this life.
+        log.record_emitter().bind(life.clone());
+        tenancy.transport().bind(life);
         let handle = AgentHandle(Arc::new(Shared {
             id,
             name: tenancy.claim().name().to_string(),

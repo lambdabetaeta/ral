@@ -27,8 +27,8 @@ separate depth bound; it does not decide whether an agent returns.
 - A child holding a current reply parks `Engaged` under its follow-up lease.
 - Outstanding child obligations give `HeldByChildren`; armed self-schedules
   give `UntilCancelled`; otherwise the node quiesces.
-- Life cancellation ends every park. A severed engine runs nothing further.
-  Quiescence never wins over a live queued delivery.
+- Life cancellation ends every park; a severed engine or a failed record
+  writer cancels life. Quiescence never wins over a live queued delivery.
 
 ## Scope is the control boundary
 
@@ -224,7 +224,8 @@ not again interpolated into prose
 **A returned value is deposited state, not prose scraped from a final turn.**
 
 - `` exarch-agents `reply `` stages a faithful `FOValue`; after the whole
-  tool batch, cancellation/severance are checked before harvesting it.
+  tool batch, cancellation is checked before harvesting it. A severed engine
+  has already cancelled the exchange.
   Reply abandons delegated work, clears schedules, publishes Ready,
   deposits the value and pays every debt taken up to the parent.
 - The child parks. Its parent reads the value through

@@ -156,10 +156,15 @@ impl Incarnation {
     pub(crate) fn discard(&self, prepared: Engine) {
         self.tenancy.discard(prepared);
     }
-    /// Fence the outgoing producers before its certified teardown.
+    /// Fence the outgoing producers, and move the life's binding to `fresh`
+    /// before the outgoing engine's certified teardown, which may sever.
     pub(crate) fn install_rebirth(&mut self, fresh: Engine) {
         self.scope.cancel(CancelCause::Cancelled);
         self.scope = self.life.child();
+        // `None`: the outgoing engine was lost, which ended this life.
+        if let Some(life) = self.tenancy.transport().unbind() {
+            fresh.transport().bind(life);
+        }
         self.tenancy.install(fresh);
     }
     pub(crate) fn tenant(&self) -> TenantId {

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: eb4a62f0
-generated_at_date: 2026-10-28
+generated_at_commit: e82dee76
+generated_at_date: 2026-10-29
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
@@ -83,8 +83,9 @@ The role and snapshot laws are [[design/agents|agents]]'s.
   boots from that same recipe without changing the live engine; wire and
   adopted engines refuse.
 - `Incarnation` (same file) owns the `Tenancy` and the deferred-batch scope.
-  `install_rebirth` fences that scope, then installs an already-booted
-  engine through `Tenancy::install` and certifies the outgoing one.
+  `assemble` binds the engine's severance to life beside the writer.
+  `install_rebirth` fences that scope and moves the life's binding to the
+  successor before `Tenancy::install` certifies the outgoing engine.
   `Engine::end` is `Err` when teardown is uncertified.
 - `RootEngine::{Identity, Wire}` (`agent/build.rs`) chooses construction;
   `RootEngine::guest` adopts the guest control stream with guest cwd/home
@@ -124,8 +125,9 @@ fleet root, lease policy and `Tenancy`.
   mailbox only after engine and log exist. A dead parent is `SessionDead`;
   abandoned work is `Abandoned`. A root's life is a fleet-root child; a
   child's life is a child of its parent's captured work. Its engine incarnation
-  is a child of life, parallel to work. `Emitter::bind` binds the writer to
-  that life; its first failure cancels it.
+  is a child of life, parallel to work. `Emitter::bind` and `Transport::bind`
+  bind the writer's failure and engine's severance to that life; either
+  latch cancels it.
 - `Fleet::{resolve, live, roots}` derive live addresses from names, sorted
   by id, with roots filtered by role. There is no separate children or roots
   index. `roster::listing` / `summary` project these live handles.
@@ -160,12 +162,12 @@ lock belongs to the launcher, not an agent.
   `Inbox::draw`, outside the inbox lock. The inbox re-evaluates `park_mode`
   on every wake, refuses dead life or a stopped job, and pops queued live
   work before honouring `Quiesce`. `PARK_POLL` also bounds ancestor-cancel
-  observation. On exit, `attend` asserts that a live owner's exchange ends
-  prompt-admissible.
+  and terminal-failure observation. On exit, `attend` asserts that a live
+  owner's exchange ends prompt-admissible.
 - Parking is computed: an attended conversing root is `Held`; a replied
   child is `Engaged`; outstanding obligations give `HeldByChildren`; armed
-  schedules give `UntilCancelled`; otherwise `Quiesce`. Severance always
-  quiesces, while life cancellation is checked by the inbox itself.
+  schedules give `UntilCancelled`; otherwise `Quiesce`. A severance ends
+  life, which the inbox checks itself.
 - `take_up` runs reads/rewrites or calls `arrive`. A declined claimed-worker
   completion drops its `Opening`. An accepted exchange-opening item
   `open`s the `Opening` minted at pop and cancels its predecessor; a nudge
@@ -192,10 +194,12 @@ lock belongs to the launcher, not an agent.
   is announced once through the independent fleet sink. It then retires the
   inbox and drops the owner. Teardown and terminal publication remain inside
   census-counted completion.
-- A severed engine runs no more calls. `EngineLost` words the cause for
-  model and log; headless/Synod end the conversation. Fallible quiesce
-  leaves a usable session prompt-admissible; failed mandatory repair or
-  a shared writer fault instead ends the affected owner as unavailable.
+- A severed engine has ended life and so cancelled the exchange. `halted`
+  names the loss as `Fault::Severed`, repaired as `Aborted`; calls left unrun
+  answer `EngineLost` rather than an interruption. Headless/Synod end the
+  conversation. Fallible quiesce leaves a usable session prompt-admissible;
+  failed mandatory repair or a shared writer fault instead ends the affected
+  owner as unavailable.
   Neither a provider request nor ordinary Ready parking follows that fault
   ([[invariants/turn-ends-ready|exchange-ends-ready]]).
 

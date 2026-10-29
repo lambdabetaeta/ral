@@ -420,14 +420,23 @@ fn drive(
         state: AgentStateDto::Ready,
     });
 
-    while let Some(job) = conversation.await_job() {
+    let ended = loop {
+        // The wait ends with the root's life: closed by the host, or ended by
+        // its engine's loss.
+        let Some(job) = conversation.await_job() else {
+            // Captured while the machine exists, and reported before it stops.
+            break conversation.capture_a_dead_engine().map_err(|message| {
+                emitter.event(SynodEvent::Failure { message });
+                true
+            });
+        };
         let id = job.id().into();
         if !emitter.job_began(id) {
-            break;
+            break Ok(());
         }
         let end = conversation.run(job, &mut sink);
         if !emitter.current() {
-            break;
+            break Ok(());
         }
         if let Err(e) = &end.outcome {
             emitter.event(SynodEvent::Failure { message: e.clone() });
@@ -439,11 +448,10 @@ fn drive(
             conversation.report().map(WindowReport::of),
         );
         if conversation.lost() {
-            let _ = conversation.end();
-            return Err(true);
+            break Err(true);
         }
-    }
+    };
 
     let _ = conversation.end();
-    Ok(())
+    ended
 }

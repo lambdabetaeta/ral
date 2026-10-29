@@ -1,7 +1,7 @@
 ---
-verified_at_commit: eb4a62f0
-verified_at_date: 2026-10-28
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge]
+verified_at_commit: e82dee76
+verified_at_date: 2026-10-29
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
 ---
 
 # Session record: one seam, one log
@@ -29,7 +29,7 @@ a `Protocol`, `Display`, or `Forensic` record, and returns the
    through the attached weak fleet sink before releasing the lock; the record
    is cloned only for that channel.
 
-**One shared latch holds the writer's first `Unavailable`.** It is a leaf
+**One `Fatal<Unavailable>` holds the writer's first failure.** It is a leaf lock
 beside the append mutex and retains the original `io::Error`; the first
 failure wins. Every uncommitted append latches, including encoding failures;
 append-lock poison is latched when first met. A durable record refused by

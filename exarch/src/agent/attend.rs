@@ -39,9 +39,6 @@ impl Agent {
         self.couple(emit);
         let mut settled = None;
         let lost = loop {
-            if let Some(s) = self.engine.severed() {
-                break Some(s);
-            }
             let Some(drawn) = self.draw() else {
                 break None;
             };
@@ -217,9 +214,6 @@ impl Agent {
         self.residency(state.leased(), state.has_busy_children())
     }
     fn residency(&self, leased: bool, busy: bool) -> ParkMode {
-        if self.engine.severed().is_some() {
-            return ParkMode::Quiesce;
-        }
         if matches!(self.handle.0.role, Role::Converses) && self.fleet.launch.trunk.attended() {
             return ParkMode::Held;
         }

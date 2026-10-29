@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
-generated_at_date: 2026-10-28
+generated_at_commit: e82dee76
+generated_at_date: 2026-10-29
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -201,23 +201,24 @@ The two interpretations of the algebra, and what they share.
 
 - `Severed` — why no further frame will cross: `Refused` / `Closed` /
   `Silent` / `Faulted`, `Display`ed as the sentence a front-end shows, and
-  `code()` the stable name it is quoted by; the private `sever()` is
-  first-cause-wins.
+  `code()` the stable name it is quoted by; the first cause stands.
 - `ProbeError` — `Rejected` (a probe mid-run, a panicked reading, or one the
   fuse refused before it was sent) or `Severed`.
 - `Host` trait — one run's host-facing surface: `surface`, `enquire`;
   `impl Host for ()` is the mute host.
 - `Ends` — the front-end state both carriers hold in one value: the
-  `ControlSender`, the `EventReceiver`, the severance cell and the session
-  sink. A carrier supplies `Transport::ends` and the verbs that differ in
-  carriage (`dispatch`, `probe`, `answer`); `control`, `events`,
-  `severed`, `sever` and `set_deferred_sink` are provided. The wire carrier
-  overrides `sever` only to shut the socket too, through its `Line`.
+  `ControlSender`, the `EventReceiver`, the severance, a `Fatal<Severed>`,
+  and the session sink. A carrier supplies `Transport::ends` and the verbs
+  that differ in carriage (`dispatch`, `probe`, `answer`); `control`,
+  `events`, `severed`, `sever`, `bind`, `unbind` and `set_deferred_sink` are
+  provided. The wire carrier overrides `sever` only to shut the socket too,
+  through its `Line`.
 - `Transport` trait — the front-end side of the protocol. Construction is
   attach, so the trait has no attach of its own; `sever` lets a front-end
-  record a fault it observed. It also provides the host's typed probe doors,
-  one per `Probe`: `cwd`, `home`, `env_var`, `builtin_names`, `path_bytes`,
-  `binding_count`, `leased_binding_count`, `largest_binding_bytes`,
+  record a fault it observed. `bind(life)` ends a life when the transport
+  severs; `unbind()` releases it unended. It also provides the host's typed
+  probe doors, one per `Probe`: `cwd`, `home`, `env_var`, `builtin_names`,
+  `path_bytes`, `binding_count`, `leased_binding_count`, `largest_binding_bytes`,
   `workers`, `session_ended`, `completion_names`, `bindings`,
   `path_entries`, each decoding through `Datum` and severing the transport
   `Faulted` on an answer outside its shape (`read`). It has no explicit
@@ -244,7 +245,7 @@ The two interpretations of the algebra, and what they share.
   hands back an event a probe's or a desk's pre-drain read past, in arrival
   order, rather than dropping it.
 - `Line` — the wire front-end's write end, owned by its `WireTransport`
-  alone: `write` is the severance law's front-end half, and `sever` records a
+  alone: `write` is the severance law's front-end half, and `sever` latches a
   cause and shuts the never-locked duplicate.
 
 ### `carrier/identity.rs`

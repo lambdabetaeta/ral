@@ -72,7 +72,7 @@ impl Agent {
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand.
             if exchange.is_cancelled() {
-                return self.cancelled();
+                return self.halted();
             }
             if self.must_force_evict(provider) {
                 self.force_eviction();
@@ -152,7 +152,7 @@ impl Agent {
             exchange.is_cancelled() || matches!(taken, Err(ProviderError::Cancelled(_)));
         stream.close(&recorder);
         match taken {
-            _ if cancelled => self.cancelled().map(Turn::Ends),
+            _ if cancelled => self.halted().map(Turn::Ends),
             Ok(step) => self.settle_turn(step),
             Err(error) => self.relieve(exchange, error, provider, retried),
         }
@@ -264,14 +264,10 @@ impl Agent {
         let results = self.run_batch(exchange, calls, emit);
         self.log.borrow_mut().append_tool_results(results)?;
         self.readings.nudges.reset();
-        // A call in the batch may have found the engine gone.
-        if let Some(s) = self.engine.severed() {
-            return Err(s.into());
-        }
         // A cancelled batch admits nothing: a read run or a steer recorded
         // here would belong to the exchange being dropped.
         if exchange.is_cancelled() {
-            return self.cancelled().map(ControlFlow::Break);
+            return self.halted().map(ControlFlow::Break);
         }
         // Reply abandons work; arrivals stay queued for the next draw.
         if let Some(payload) = self.reply.borrow_mut().take() {
@@ -294,7 +290,7 @@ impl Agent {
             }
         }
         if exchange.is_cancelled() {
-            return self.cancelled().map(ControlFlow::Break);
+            return self.halted().map(ControlFlow::Break);
         }
         let climbed = self.climbed(provider)?;
         let steering = self.tell(climbed);
@@ -343,9 +339,9 @@ impl Agent {
         true
     }
 
-    /// Run a batch of tool calls in order, short-circuiting the rest to
-    /// cancelled results the instant the exchange is cancelled.  Every call answers
-    /// synchronously — a `spawn` returns a start receipt, not a join handle.
+    /// Run a batch of tool calls in order; once the exchange is cancelled, the
+    /// rest answer why, unrun. Every call answers synchronously — a `spawn`
+    /// returns a start receipt, not a join handle.
     fn run_batch(
         &self,
         exchange: &Scope,
@@ -356,16 +352,10 @@ impl Agent {
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
             if exchange.is_cancelled() {
-                results.push(cancelled_result(call.call_id));
-                results.extend(it.map(|r| cancelled_result(r.call_id)));
-                break;
-            }
-            // A severed engine runs nothing more, so the rest answer its loss.
-            if let Some(s) = self.engine.severed() {
-                let lost = crate::agent::EngineLost::running(&s, self.run_dir()).to_string();
+                let content = self.unrun();
                 results.extend(std::iter::once(call).chain(it).map(|r| SessionToolResult {
                     id: r.call_id,
-                    content: lost.clone(),
+                    content: content.clone(),
                 }));
                 break;
             }
@@ -424,21 +414,28 @@ impl Agent {
         Ok(Outcome::Replied)
     }
 
-    /// The log already carries `Cancelled` through `quiesce`'s own
-    /// `Forensic::Cancelled` record; the view fold draws it, so there is no
-    /// separate user-facing companion left to emit.
-    fn cancelled(&self) -> Result<Outcome, Fault> {
+    /// The exchange halted: its engine was lost, which ended the life, or it
+    /// was cancelled. A cancellation's `Forensic::Cancelled` comes from
+    /// `quiesce` itself; the view fold draws it.
+    fn halted(&self) -> Result<Outcome, Fault> {
+        if let Some(lost) = self.engine.severed() {
+            return Err(lost.into());
+        }
         self.log.borrow_mut().quiesce(QuiesceReason::Cancelled)?;
         Ok(Outcome::Cancelled)
     }
-}
 
-fn cancelled_result(id: String) -> SessionToolResult {
-    SessionToolResult {
-        id,
-        content: "[EXARCH // Request interrupted by user, before tool execution.]".into(),
+    /// What a call its halted exchange never ran answers: the engine's loss,
+    /// or an interruption.
+    fn unrun(&self) -> String {
+        self.engine.severed().map_or_else(
+            || INTERRUPTED.to_string(),
+            |lost| crate::agent::EngineLost::running(&lost, self.run_dir()).to_string(),
+        )
     }
 }
+
+const INTERRUPTED: &str = "[EXARCH // Request interrupted by user, before tool execution.]";
 
 /// Stands in for an assistant message that would serialise to no substantive
 /// content.  Anthropic rejects an empty assistant turn once a later message

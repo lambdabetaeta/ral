@@ -192,12 +192,10 @@ impl Conversation {
         self.report.as_ref()
     }
 
-    fn capture_a_dead_engine(&self) -> Result<(), String> {
-        let Some(sentence) = self.guest.severance() else {
-            return Ok(());
-        };
-        self.handle().end();
-        Err(sentence)
+    /// The engine's loss, captured while the machine exists; the loss has
+    /// already ended the root's life.
+    pub(crate) fn capture_a_dead_engine(&self) -> Result<(), String> {
+        self.guest.severance().map_or(Ok(()), Err)
     }
 
     /// A terminal failure or host `end` closes the root's inbox life.

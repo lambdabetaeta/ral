@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 578dcf04
-generated_at_date: 2026-10-28
+generated_at_commit: e82dee76
+generated_at_date: 2026-10-29
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -196,6 +196,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   scope folds: `forward_ambient` hands each to a host thread, which forwards it
   to its engine as `Control`
   ([[internals/cancellation|cancellation]]).
+- `fatal.rs` — `Fatal<T>`, a terminal failure latched once: the first cause
+  stands. Latching cancels the bound `ScopeNode` with `Cancelled` under the
+  lock that records the cause, so a standing cause implies an ended life.
+  A life bound after the latch is cancelled at once; `unbind` releases one
+  unended. The carriers' severance and exarch's record writer are each one.
 - `signal.rs` — *signals are causes*: the platform handlers translate each
   delivered signal into a `CancelCause` on the ambient causes — SIGINT →
   foreground `Interrupted`, SIGTERM/SIGHUP → root `Terminated` — so one

@@ -197,6 +197,27 @@ fn clear_fences_the_old_incarnation_only_after_successful_preparation() {
 }
 
 #[test]
+fn a_reborn_engine_carries_the_life() {
+    use ral_core::carrier::{Severed, Transport as _};
+    let mut session = Agent::for_test("system").unwrap();
+    let crate::agent::engine::EngineKind::Identity(outgoing) = session.engine.kind() else {
+        panic!("an identity root");
+    };
+    session.clear().unwrap();
+    assert!(session.handle().is_live());
+    outgoing.sever(Severed::Closed("the outgoing engine".into()));
+    assert!(
+        session.handle().is_live(),
+        "the outgoing engine no longer holds the life"
+    );
+    session
+        .engine
+        .transport()
+        .sever(Severed::Closed("the reborn engine".into()));
+    assert!(!session.handle().is_live());
+}
+
+#[test]
 fn failed_clear_preserves_the_live_session() {
     use genai::chat::{ContentPart, ToolCall};
     use ral_core::carrier::Transport as _;

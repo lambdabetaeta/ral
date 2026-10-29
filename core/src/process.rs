@@ -8,6 +8,7 @@
 pub mod cancel;
 pub(crate) mod child;
 pub mod deadline;
+mod fatal;
 pub(crate) mod foreground;
 pub(crate) mod group;
 pub(crate) mod jail;
@@ -31,6 +32,7 @@ pub(crate) use launch::{Launch, StdioSpec};
 pub use lease::{RequestedTerminalAccess, TerminalLease};
 
 pub use deadline::{Deadline, arm_callback, arm_lifetime};
+pub use fatal::Fatal;
 pub(crate) use reaper::Watch;
 pub(crate) use tree::sample_descendants;
 

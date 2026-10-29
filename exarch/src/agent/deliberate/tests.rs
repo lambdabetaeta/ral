@@ -133,6 +133,73 @@ fn a_real_tool_display_failure_stops_the_batch_and_the_next_model_request() {
     );
 }
 
+#[test]
+fn a_severed_engine_cuts_its_batch_short_and_answers_the_loss() {
+    use ral_core::carrier::{Severed, Transport as _};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
+    open_for_drain(&session);
+    let crate::agent::engine::EngineKind::Identity(transport) = session.engine.kind() else {
+        panic!("an identity root");
+    };
+    let cause = Severed::Closed("engine lost mid-batch".into());
+    let lost = cause.clone();
+    T2_CANCEL.set(Some(Box::new(move || {
+        transport.sever(lost);
+    })));
+    let ran_second = Arc::new(AtomicBool::new(false));
+    let ran = ran_second.clone();
+    T2_ARRIVAL.set(Some(Box::new(move || ran.store(true, Ordering::Release))));
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![
+                ral_call("first", "t2-cancel-now"),
+                ral_call("second", "t2-arrive"),
+            ]))
+            .then(Reply::panicking()),
+    );
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    let result = session.deliberate(
+        &session.inbox.exchange(),
+        &provider,
+        Some(("run both".into(), Voice::Human)),
+        None,
+        &emit,
+    );
+    let _ = T2_CANCEL.take();
+    let _ = T2_ARRIVAL.take();
+    assert!(
+        matches!(result, Err(Fault::Severed(ref c)) if *c == cause),
+        "{result:?}"
+    );
+    assert!(!ran_second.load(Ordering::Acquire));
+    assert!(!session.handle().is_live());
+    let records =
+        crate::record::read_records(&session.log_dir().path().join("record.jsonl")).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::Forensic(Forensic::TurnStarted { .. })))
+            .count(),
+        1
+    );
+    let second = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Protocol(Protocol::ToolResults { results }) => {
+                results.iter().find(|result| result.id == "second")
+            }
+            _ => None,
+        })
+        .expect("the second tool result");
+    assert_eq!(
+        second.content,
+        crate::agent::EngineLost::running(&cause, session.run_dir()).to_string()
+    );
+}
+
 thread_local! {
     static T2_CANCEL: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
     static T2_QUEUE: std::cell::RefCell<Option<crate::agent::AgentHandle>> = const { std::cell::RefCell::new(None) };

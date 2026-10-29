@@ -19,8 +19,8 @@ pub(crate) enum ParkMode {
     Quiesce,
 }
 
-/// How soon a parked owner sees severance or an ancestor's cancellation;
-/// its own end, a Stop and a post notify.
+/// How soon a parked owner sees a cancellation nobody notified: an
+/// ancestor's, or a terminal failure's; its own end, a Stop and a post notify.
 const PARK_POLL: Duration = Duration::from_millis(100);
 
 /// A host job, from a human message until settlement or Stop.

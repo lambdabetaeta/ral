@@ -41,6 +41,24 @@ fn an_ended_life_draws_nothing_and_announces_no_idle_state() {
 }
 
 #[test]
+fn a_severed_engine_ends_the_life_and_its_attendance() {
+    let mut session = Agent::for_test("system").unwrap();
+    let cause = Severed::Closed("engine lost".into());
+    session.engine.transport().sever(cause.clone());
+    assert!(!session.handle().is_live());
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.id());
+    let lost = EngineLost::running(&cause, session.run_dir()).to_string();
+    assert!(matches!(session.attend(&emit), AgentOutcome::Failed(why) if why == lost));
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok()).any(|signal| matches!(
+            signal,
+            crate::bus::Signal::Transient(_, Transient::State(_))
+        ))
+    );
+}
+
+#[test]
 fn failed_mandatory_repair_ends_only_its_session_and_reports_to_its_parent() {
     let mut parent = Agent::for_test("system").unwrap();
     let mut child = parent.fork().unwrap();
@@ -628,8 +646,6 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
     assert!(session.take_up(next, &emit).unwrap().settled.is_some());
     let view = serde_json::to_string(&session.rendered_messages()).unwrap();
     assert!(view.contains("errand finished."), "{view}");
-    let cause = Severed::Closed("engine lost".into());
-    session.engine.transport().sever(cause.clone());
     let done = DoneEvent {
         id: WorkerId(1),
         title: "ready-job".into(),
@@ -641,8 +657,12 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
         id: session.id(),
         values: vec![done],
     });
+    // Drawn first: the severance ends the life, which draws nothing more.
     let next = session.inbox.draw(|_| ParkMode::Quiesce).unwrap();
+    let cause = Severed::Closed("engine lost".into());
+    session.engine.transport().sever(cause.clone());
     assert!(matches!(session.take_up(next, &emit), Err(c) if c == cause));
+    assert!(!session.handle().is_live());
 }
 
 #[test]

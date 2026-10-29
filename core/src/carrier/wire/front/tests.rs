@@ -6,6 +6,7 @@
 //! upper bound, only that death is or is not reached within seconds of slack.
 use super::*;
 use crate::path::EnginePath;
+use crate::process::CancelCause;
 use crate::protocol::{Ending, PROTOCOL_VERSION, Report};
 use crate::source::SourceOrigin;
 use std::os::unix::net::UnixStream;
@@ -217,6 +218,19 @@ fn a_hangup_closes_the_event_stream_and_marks_death() {
         transport.severed().is_some(),
         "a hangup is death under every teardown path"
     );
+}
+
+/// The reader latches before it closes the stream, so the life bound to the
+/// transport has ended, from the reader's thread, by the time `recv` fails.
+#[test]
+fn a_hangup_ends_the_bound_life() {
+    let (front, back) = UnixStream::pair().unwrap();
+    let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
+    let life = crate::process::DurableRoot::default().child();
+    transport.bind(life.clone());
+    drop(back);
+    assert!(transport.events().recv().is_none());
+    assert_eq!(life.cause(), Some(CancelCause::Cancelled));
 }
 
 /// The control path holds the same law as the data path: a `Cancel` the
