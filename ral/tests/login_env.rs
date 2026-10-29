@@ -86,7 +86,10 @@ fn login_adopts_removed_variables() {
         &[],
         "echo !{has !{env} RAL_DROP_ME}\n",
     );
-    assert!(repl_output_lines(&out.stdout).any(|l| l == "false"), "{out:?}");
+    assert!(
+        repl_output_lines(&out.stdout).any(|l| l == "false"),
+        "{out:?}"
+    );
 }
 
 #[test]
@@ -109,7 +112,10 @@ fn failed_profile_warns_and_keeps_the_session() {
 #[test]
 fn norc_skips_login_adoption() {
     let out = login(PROFILE, &["--norc"], "echo !{has !{env} RAL_LOGIN_PROBE}\n");
-    assert!(repl_output_lines(&out.stdout).any(|l| l == "false"), "{out:?}");
+    assert!(
+        repl_output_lines(&out.stdout).any(|l| l == "false"),
+        "{out:?}"
+    );
 }
 
 #[test]

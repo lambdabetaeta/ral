@@ -278,11 +278,7 @@ impl Granted {
 
 /// # Safety
 /// `pipe` must be a live, connected server end of a named pipe.
-unsafe fn open_for_client(
-    pipe: HANDLE,
-    folder: &Path,
-    read_only: bool,
-) -> Result<Granted, Error> {
+unsafe fn open_for_client(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Granted, Error> {
     // SAFETY: `pipe` is a connected server-end handle; impersonation lasts until
     // `RevertToSelf`, which the guard below performs on every path out.
     if unsafe { ImpersonateNamedPipeClient(pipe) } == 0 {

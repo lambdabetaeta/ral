@@ -199,7 +199,10 @@ fn assemble(
         hvsock::Listener::bind(&machine_id, port).map_err(|cause| {
             Error::backend(
                 HYPERVISOR,
-                format!("{} could not be opened for the machine: {cause}", wire.noun()),
+                format!(
+                    "{} could not be opened for the machine: {cause}",
+                    wire.noun()
+                ),
             )
         })
     };

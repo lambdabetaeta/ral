@@ -325,19 +325,7 @@ mod tests {
                 observation.what,
                 Observed::Check(Check::new(
                     Resource::Exec,
-                    [
-                        ("name".into(), name.clone()),
-                        (
-                            "resolved".into(),
-                            crate::path::shown(
-                                crate::test_helper::trace(&dirs[1])
-                                    .real()
-                                    .as_path()
-                                    .join(&name),
-                            ),
-                        ),
-                    ]
-                    .into(),
+                    [("name".into(), name.clone())].into(),
                 ))
             );
         }

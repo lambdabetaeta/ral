@@ -313,8 +313,9 @@ Bodies are grouped by concern, one submodule each:
   that would run, and the doc ladder that asks *that* registry — a session
   binding owning its name outright rather than inheriting the doc of what it
   shadows. The shared renderer separates a doc's conventional `usage  — prose`
-  opening and labels `Usage:`, `Type:`, `Source:`, and `Shadows:`; absent facts
-  are omitted. `locate_all` returns the whole resolution chain, so `explain`
+  opening, heads the entry `name · source`, and labels `usage`, `type`,
+  `path`, and `shadows`; absent facts are omitted. `locate_all` returns the
+  whole resolution chain, so `explain`
   also names what a name shadows, a PATH binary included, which is the
   question `which` answers wrongly for every name ral provides;
 - `print.rs` — the value pretty-printer shared by the REPL and exarch's

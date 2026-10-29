@@ -267,7 +267,7 @@ mod words {
     }
 
     #[test]
-    fn an_exec_refusal_records_its_name_program_and_exclusion() {
+    fn an_exec_refusal_records_its_name_and_exclusion_without_the_resolved_target() {
         let tmp = tempfile::tempdir().unwrap();
         let tree = Tree::lay(tmp.path(), &["/x/t"]);
         let x = dir(&tree.at("/x"));
@@ -279,7 +279,8 @@ mod words {
         };
         assert_eq!(denial.check.resource, Resource::Exec);
         assert_eq!(denial.check.fields["name"], "t");
-        assert_eq!(denial.check.fields["resolved"], tree.at("/x/t"));
+        assert!(!denial.check.fields.contains_key("resolved"));
+        assert!(!denial.error.message.contains(&tree.at("/x/t")));
         assert!(denial.check.fields.contains_key("deny"));
         assert!(!denial.check.fields.contains_key("args"));
     }
@@ -366,9 +367,10 @@ mod words {
             ..Capabilities::default()
         }]);
         let (baseline, nowhere) = (Baseline::default(), trace("/nowhere/x"));
-        let read = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Read);
+        let path = crate::path::LexicalPath::absolute(nowhere.real().as_path()).unwrap();
+        let read = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Read, &path);
         assert!(read.err().unwrap().error.message.contains("reading"));
-        let write = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Write);
+        let write = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Write, &path);
         assert!(write.err().unwrap().error.message.contains("writing"));
     }
 }

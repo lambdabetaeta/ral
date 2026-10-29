@@ -176,7 +176,10 @@ mod tests {
             .unwrap();
             let result = Request::read(&mut &buffer[..]);
             if version == VERSION {
-                assert!(result.is_err(), "a malformed current request is a decode error");
+                assert!(
+                    result.is_err(),
+                    "a malformed current request is a decode error"
+                );
             } else {
                 assert!(matches!(
                     result.unwrap(),

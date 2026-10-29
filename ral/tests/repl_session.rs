@@ -500,7 +500,10 @@ fn rc_umask_applies_to_children_and_rals_own_creates() {
         &env,
         &format!("/bin/sh -c umask\necho x > '{}'\n", file.display()),
     );
-    assert!(repl_output_lines(&out.stdout).any(|l| l == "0077"), "{out:?}");
+    assert!(
+        repl_output_lines(&out.stdout).any(|l| l == "0077"),
+        "{out:?}"
+    );
     assert_eq!(
         std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
         0o600

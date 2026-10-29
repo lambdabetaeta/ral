@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 4a4fb24c50333afaea7d036e5b4bab7450d67e8b
+generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 verified_at_date: 2026-10-28
 anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, command_candidates, failure_trace, ReadRegion::judge_file, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
@@ -46,8 +46,11 @@ launch for a direct pipeline stage and `detach`.
   walk failures included, is absence.
 - **A refused bare name reveals nothing about the candidates' kinds.** Its
   hint is `'{name}' is no program in any PATH directory the grant runs from`.
-  A refused path head offers itself as text. Admission and its 127/126 verdict
-  precede argv shape; `vet` formats the verdict without probing again.
+  A refused path head offers itself as text. Refusal messages name the shown
+  command, and denial records keep that name and any exclusion, never the
+  resolved target: a refusal grants no authority to read a link's target.
+  Admission and its 127/126 verdict precede argv shape; `vet` formats the
+  verdict without probing again.
 - **A path head is walked as written**, anchored at the launch cwd: the kernel
   walks a `..` after the links before it and honours a trailing `/`, so a
   lexical fold would judge another file than `execve` reaches. Windows folds

@@ -120,8 +120,8 @@ impl Interface {
         ioctl(sock.as_raw_fd(), code(libc::SIOCSIFNETMASK), &mut req)
             .map_err(|err| format!("could not set {IFACE}'s netmask: {err}"))?;
 
-        req.ifr_ifru.ifru_mtu = libc::c_int::try_from(guest_abi::link::MTU)
-            .expect("MTU is 1500, which fits a c_int");
+        req.ifr_ifru.ifru_mtu =
+            libc::c_int::try_from(guest_abi::link::MTU).expect("MTU is 1500, which fits a c_int");
         ioctl(sock.as_raw_fd(), code(libc::SIOCSIFMTU), &mut req)
             .map_err(|err| format!("could not set {IFACE}'s MTU: {err}"))?;
 

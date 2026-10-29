@@ -388,7 +388,9 @@ mod teardown_tests {
         let transport = boot(&BARE);
         let ticket = {
             let mut engine = transport.engine.lock();
-            engine.shell.set_worker_drain_grace(std::time::Duration::from_millis(20));
+            engine
+                .shell
+                .set_worker_drain_grace(std::time::Duration::from_millis(20));
             engine.shell.local.workers.live_ticket()
         };
         for _ in 0..2 {

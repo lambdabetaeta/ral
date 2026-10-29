@@ -89,7 +89,9 @@ pub enum Error {
         path: PathBuf,
         cause: String,
     },
-    ServiceUnlocated { cause: String },
+    ServiceUnlocated {
+        cause: String,
+    },
     NoGuestImage {
         #[serde(with = "crate::os_path::list")]
         looked_in: Vec<PathBuf>,
@@ -128,7 +130,10 @@ pub enum Error {
     /// macOS requires file URLs; empty paths and embedded NULs are refused.
     NotAFileUrl(#[serde(with = "crate::os_path")] PathBuf),
     /// Must remain legible across protocol skew; its shape never changes.
-    VersionSkew { client: u32, service: u32 },
+    VersionSkew {
+        client: u32,
+        service: u32,
+    },
     /// The hypervisor's complaint names no file, so the supplied files travel beside it.
     NotConstructed {
         hypervisor: Cow<'static, str>,

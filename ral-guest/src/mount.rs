@@ -24,7 +24,9 @@ pub(crate) enum Options {
     None,
     Fixed(&'static CStr),
     /// The options name a descriptor that exists only after dialing.
-    Plan9Dial { port: u32 },
+    Plan9Dial {
+        port: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -4,9 +4,9 @@
 //! effect abstains, so a check passes unless some layer withholds.
 
 use crate::authority::guard::{
-    Denial, Refusal, check_device_name, check_exec, check_flag, check_fs_exact, fs_denial,
+    Denial, Refusal, check_device_name, check_flag, check_fs_exact, fs_denial,
 };
-use crate::authority::policy::{Admitted, Baseline, Flag, FsOp, GrantLayer, Program};
+use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer};
 use crate::authority::sandbox::SandboxProjection;
 use crate::path::walk::{Kind, failure_trace, is_loop};
 use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk, walk_dir};
@@ -44,21 +44,6 @@ impl Shell {
         verdict.map_err(|denial| self.refused(denial))
     }
 
-    /// Judge `program`, shown as `shown`; a refusal is recorded against
-    /// `mooring`.  The [`Admitted`] is what the launcher demands.
-    ///
-    /// # Errors
-    /// `Err` if the active grant denies the program.
-    pub(crate) fn check_exec(
-        &mut self,
-        shown: &str,
-        program: Program,
-        mooring: &Mooring,
-    ) -> Settled<Admitted> {
-        let verdict = check_exec(&self.context.grants, self.baseline(), shown, program);
-        verdict.map_err(|denial| self.exec_refused(denial, mooring))
-    }
-
     /// Record an exec `denial` against `mooring` and mint the `Break` that refuses.
     pub(crate) fn exec_refused(&mut self, denial: Denial, mooring: &Mooring) -> Break {
         let Denial { check, error } = denial;
@@ -77,10 +62,18 @@ impl Shell {
     /// # Errors
     /// The grant's refusal.
     pub fn judge<O: Op>(&mut self, located: Located) -> Settled<Located<Judged<O>>> {
-        let real = located.real().clone();
+        let path = self.anchor(located.real().as_path());
+        self.judge_named::<O>(located, &path)
+    }
+
+    fn judge_named<O: Op>(
+        &mut self,
+        located: Located,
+        path: &LexicalPath,
+    ) -> Settled<Located<Judged<O>>> {
         let verdict = (self.context.grants)
             .judge::<O>(self.baseline(), located)
-            .map_err(|refused| fs_denial(&self.context.grants, refused, &O::FS, &real));
+            .map_err(|refused| fs_denial(&self.context.grants, refused, &O::FS, path));
         self.judged(verdict)
     }
 
@@ -92,7 +85,8 @@ impl Shell {
         if !path.is_discard() {
             check_device_name(path).map_err(Error::from)?;
             let trace = failure_trace(path, error).map_err(|e| Error::io(path.shown(), &e))?;
-            let verdict = check_fs_exact(&self.context.grants, self.baseline(), &trace, &O::FS);
+            let verdict =
+                check_fs_exact(&self.context.grants, self.baseline(), &trace, &O::FS, path);
             self.judged(verdict)?;
         }
         Ok(Error::io(path.shown(), error))
@@ -121,7 +115,7 @@ impl Shell {
     pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<Judged<O>>> {
         check_device_name(path).map_err(Error::from)?;
         let located = self.named_on_failure::<O, _>(path, walk(path, LeafMode::Follow))?;
-        self.judge(located)
+        self.judge_named(located, path)
     }
 
     /// [`locate`](Self::locate) for a directory entered: `walk_dir`, then the
@@ -132,10 +126,9 @@ impl Shell {
     pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
         check_device_name(path).map_err(Error::from)?;
         let dir = self.named_on_failure::<O, _>(path, walk_dir(path))?;
-        let real = dir.real().clone();
         let verdict = (self.context.grants)
             .judge_dir::<O>(self.baseline(), dir)
-            .map_err(|refused| fs_denial(&self.context.grants, refused, &O::FS, &real));
+            .map_err(|refused| fs_denial(&self.context.grants, refused, &O::FS, path));
         self.judged(verdict)
     }
 
@@ -169,7 +162,7 @@ impl Shell {
                 };
             }
         };
-        let held = self.judge::<O>(located)?;
+        let held = self.judge_named::<O>(located, path)?;
         Ok(held.stat().is_some().then_some(held))
     }
 
@@ -194,21 +187,25 @@ impl Shell {
                 Ok(located) => located,
                 Err(e) => {
                     if let Ok(trace) = failure_trace(&cand, &e)
-                        && let Err(denial) =
-                            check_fs_exact(&self.context.grants, self.baseline(), &trace, &O::FS)
+                        && let Err(denial) = check_fs_exact(
+                            &self.context.grants,
+                            self.baseline(),
+                            &trace,
+                            &O::FS,
+                            &cand,
+                        )
                     {
                         first.get_or_insert(denial);
                     }
                     continue;
                 }
             };
-            let real = located.real().clone();
             match (self.context.grants).judge::<O>(self.baseline(), located) {
                 Ok(found) if found.trace().kind() == Some(Kind::File) => return Ok(Some(found)),
                 Ok(_) => {}
                 Err(refused) => {
                     first.get_or_insert_with(|| {
-                        fs_denial(&self.context.grants, refused, &O::FS, &real)
+                        fs_denial(&self.context.grants, refused, &O::FS, &cand)
                     });
                 }
             }

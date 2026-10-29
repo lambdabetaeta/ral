@@ -638,7 +638,7 @@ fn a_worker_explains_against_its_creators_session() {
     shell.set_var("sess_name".into(), Value::Int(1));
     let (direct, printed) = run_captured(&mut shell, "!{ explain sess_name }", None);
     direct.expect("explain must run");
-    assert!(String::from_utf8_lossy(&printed).contains("Source: session"));
+    assert!(String::from_utf8_lossy(&printed).contains("sess_name · session"));
     let (awaited, replayed) = run_captured(
         &mut shell,
         "let h = !{spawn { explain sess_name }}\nawait $h",

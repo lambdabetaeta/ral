@@ -1,6 +1,6 @@
 ---
 verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
-generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_date: 2026-10-28
 anchors: [walk, walk_excluded, failure_trace, Shell::walk_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
@@ -94,6 +94,12 @@ The door is `Shell::locate` (and `locate_dir`, `locate_existing`,
 then the handle. These shell adapters live in `shell/runtime/state/checks.rs`:
 `authority::guard` returns diagnostic data, and the adapter records a denial
 and raises its runtime error. Every write is a `locate`.
+
+**Judgment does not authorize disclosure of the resolved name.** Refusal
+messages and denial records name the request's `LexicalPath::shown()`, not
+`Trace::real()`: resolving a link in a read-withheld directory must not reveal
+its target. The transcript still decides authority; admitted aliases keep
+working regardless of the readability of intermediate links.
 
 **A failed walk's diagnostic is judged before it is disclosed.**
 

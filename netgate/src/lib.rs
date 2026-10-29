@@ -19,6 +19,9 @@ pub use device::{TunDevice, spawn as spawn_device};
 
 /// # Errors
 /// Reports wire cloning or thread startup failure; the wire uses `guest_abi::packet` framing.
-pub fn run(wire: ral_core::protocol::channel::WireStream, config: Config) -> std::io::Result<Session> {
+pub fn run(
+    wire: ral_core::protocol::channel::WireStream,
+    config: Config,
+) -> std::io::Result<Session> {
     stack::run(wire, config)
 }

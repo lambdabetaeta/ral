@@ -205,7 +205,7 @@ conventional `$` prompt, the program as `path`, each arg as plain ink, and a
 the pattern as `code` `in` the cwd scope as `path`; a capability check reads
 `check <resource> <decision> <fields…>`, the decision roled `Role::Bad` when
 denied (the only decision the rail ever surfaces) and its trailing fields —
-core's own `resource`-specific map, `name`/`resolved`/`deny` for `exec`,
+core's own `resource`-specific map, `name`/`deny` for `exec`,
 `op`/`path` for `fs`, `prefix` for `deputy` — rendered as `key=value` pairs in
 the map's own order, whatever is present, nothing inferred. `Role::Path`
 carries a real hue, so the subject of every row stands as figure against the

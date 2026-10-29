@@ -15,6 +15,7 @@
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
 
+use crate::authority::guard::check_exec;
 use crate::authority::policy::FsAllow;
 use crate::authority::policy::Program;
 #[cfg(unix)]
@@ -174,14 +175,14 @@ pub fn admits_file(shell: &Shell, real: &str) -> bool {
         .is_ok()
 }
 
-/// `Shell::check_exec` on the file whose real path is `real`.
+/// The exec door on the file whose real path is `real`, its refusal recorded.
 ///
 /// # Errors
 /// `Err` if the active grant denies the file.
 pub fn check_file(shell: &mut Shell, real: &str) -> Settled<()> {
-    shell
-        .check_exec(real, file(real), &Mooring::adrift())
+    check_exec(&shell.context.grants, shell.baseline(), real, file(real))
         .map(drop)
+        .map_err(|denial| shell.exec_refused(denial, &Mooring::adrift()))
 }
 
 /// The scheme `name` carries on the live scope: `None` when it is unbound or

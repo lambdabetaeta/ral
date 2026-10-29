@@ -322,6 +322,51 @@ fn a_loop_diagnostic_is_judged_at_the_failed_link() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_refused_link_does_not_disclose_its_target_in_errors_or_audit() {
+    use std::os::unix::fs::symlink;
+
+    let (_tmp, dir) = fixture();
+    std::fs::create_dir(dir.join("hidden")).unwrap();
+    std::fs::write(dir.join("hidden/undisclosed-file"), "secret").unwrap();
+    std::fs::create_dir(dir.join("hidden/undisclosed-directory")).unwrap();
+    symlink("undisclosed-file", dir.join("hidden/file")).unwrap();
+    symlink(
+        dir.join("hidden/undisclosed-file"),
+        dir.join("hidden/absolute"),
+    )
+    .unwrap();
+    symlink("undisclosed-absent", dir.join("hidden/absent")).unwrap();
+    symlink("undisclosed-directory", dir.join("hidden/directory")).unwrap();
+    symlink("undisclosed-loop", dir.join("hidden/loop")).unwrap();
+    symlink("undisclosed-loop", dir.join("hidden/undisclosed-loop")).unwrap();
+
+    for policy in ["read: []", "read: [`cwd .], deny: [`cwd hidden]"] {
+        for operation in [
+            "from-string < hidden/file",
+            "from-string < hidden/absolute",
+            "exists hidden/absent",
+            "file-info hidden/file",
+            "list-dir hidden/directory",
+            "exists hidden/directory/missing/child",
+            "exists hidden/loop/child",
+            "echo x > hidden/file",
+            "within [dir: hidden/directory] { cwd }",
+            "./hidden/file",
+            "./hidden/loop/child",
+        ] {
+            let body = format!("grant [fs: [{policy}]] {{ {operation} }}");
+            let error = run_in(&dir, &body).expect_err("the access must be refused");
+            let diagnostic = format!("{error:?}");
+            assert!(diagnostic.contains("hidden/"), "{body}: {diagnostic}");
+            assert!(!diagnostic.contains("undisclosed"), "{body}: {diagnostic}");
+            let report = shown(&dir, &format!("audit {{ {body} }}"));
+            assert!(!report.contains("undisclosed"), "{body}: {report}");
+        }
+    }
+}
+
 /// `within [dir: d]` enters the directory `d` is: refused where a deny holds
 /// it, however spelled, and under an allowance the cwd is its real position.
 #[cfg(unix)]

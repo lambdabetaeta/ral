@@ -49,11 +49,8 @@ pub(crate) fn inflate(archive: &Path, into: &mut File, verify: Option<&str>) -> 
         ))?;
         bytes += u64::try_from(n).unwrap_or(u64::MAX);
     }
-    sink.flush().map_err(Error::host_file(
-        HostFile::GuestImage,
-        Act::Unpack,
-        archive,
-    ))?;
+    sink.flush()
+        .map_err(Error::host_file(HostFile::GuestImage, Act::Unpack, archive))?;
     if let (Some(expected), Some(hasher)) = (verify, hasher)
         && hex(&hasher.finalize()) != expected
     {

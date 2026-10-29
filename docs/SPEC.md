@@ -3438,9 +3438,9 @@ audit trail is open — from the language-level `audit { ... }` form or from bat
 nothing to ask for and nothing to switch off, so no grant can hide a denial
 from a trail its caller opened.
 
-An exec check identifies the command by the name shown and the program
-resolved, never its arguments. A filesystem check identifies the operation and
-the path. A denied exec also reaches the surface rail, whether or not a trail
+An exec check identifies the command by the name shown, never the program it
+resolves to or its arguments. A filesystem check identifies the operation and
+the path as requested: a refusal discloses no link's target. A denied exec also reaches the surface rail, whether or not a trail
 is open.
 
 `grant` is transparent to the audit model: it contributes no observation of its
@@ -4151,8 +4151,8 @@ signature where one exists, and where the name comes from. It understands
 language forms and literals, core and host builtins, prelude entries,
 documented host libraries, session bindings, aliases, handlers, and external
 commands. Language entries are short standalone usage guides. The renderer
-separates a conventional usage line from its prose and labels the facts it has
-as `Usage:`, `Type:`, `Source:`, and `Shadows:`; a missing fact is omitted. If
+heads the entry with the name and its source, prints the prose, then labels the
+facts it has as `usage`, `type`, `path`, and `shadows`; a missing fact is omitted. If
 no exact documented name exists, it searches documented names
 case-insensitively. Regex search is used when regex support is compiled in;
 otherwise the search is a substring match.
@@ -4623,9 +4623,9 @@ beginning with `_` are hidden. The lists are sorted.
 
 `explain name` shows the entry's full documentation, inferred or declared type
 where one exists, and where it comes from. For a language entry the full
-documentation is a standalone usage guide. Available facts are labelled
-`Usage:`, `Type:`, `Source:`, and `Shadows:`. When no exact entry resolves,
-`explain` performs a case-insensitive search and prints matching public
+documentation is a standalone usage guide. The source heads the entry; the
+other facts are labelled `usage`, `type`, `path`, and `shadows`. When no exact
+entry resolves, `explain` performs a case-insensitive search and prints matching public
 entries. These commands are informational: a missing query prints a message
 and leaves status zero.
 
