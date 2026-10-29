@@ -13,7 +13,7 @@ use crate::agent::tools;
 use crate::bus::{Emitter, Next, Queue};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::ToolResult as SessionToolResult;
-use crate::record::commit::Stream;
+use crate::record::stream::Stream;
 use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient, Voice};
 use ral_core::data::FOValue;
 use ral_core::process::Scope;

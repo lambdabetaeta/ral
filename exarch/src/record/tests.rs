@@ -72,17 +72,19 @@ fn a_status_record_round_trips() {
             status: status.clone(),
         }
         .into();
-        let line = envelope_line(&record);
+        let line = commit_line(std::slice::from_ref(&record));
         let wire: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
-            wire["record"]["Forensic"],
+            wire["commit"]["records"][0]["Forensic"],
             json!({ "kind": "status", "status": wire_status })
         );
-        let Record::Forensic(Forensic::Status { status: back }) = record_from_line(&line).unwrap()
-        else {
+        let Some((_, records)) = parse_line(&line) else {
+            panic!("a status record's line must unseal");
+        };
+        let [Record::Forensic(Forensic::Status { status: back })] = records.as_slice() else {
             panic!("a status record must round-trip as a status record");
         };
-        assert_eq!(back, status);
+        assert_eq!(back, &status);
     }
 }
 

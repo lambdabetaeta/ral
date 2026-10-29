@@ -174,18 +174,22 @@ fn live_surfaces_record_their_seam_twins() {
     let mut transients: Vec<&'static str> = Vec::new();
     while let Ok(sig) = rx.try_recv() {
         match sig {
-            Signal::Fact(_, fact) => facts.push(match fact.value() {
-                Record::Display(Display::Observation { .. }) => "io",
-                Record::Display(Display::Card { .. }) => "card",
-                Record::Display(Display::Done {
-                    outcome: crate::card::DoneOutcome::Ok,
-                    ..
-                }) => "done",
-                Record::Forensic(Forensic::Reap { cause, .. }) if cause == "retention" => "notice",
-                Record::Forensic(Forensic::Pin { key }) if key == "tasks" => "pin",
-                Record::Forensic(Forensic::Unpin { key }) if key == "tasks" => "unpin",
-                _ => continue,
-            }),
+            Signal::Commit(_, commit) => facts.extend(commit.records().iter().filter_map(|fact| {
+                Some(match fact.value() {
+                    Record::Display(Display::Observation { .. }) => "io",
+                    Record::Display(Display::Card { .. }) => "card",
+                    Record::Display(Display::Done {
+                        outcome: crate::card::DoneOutcome::Ok,
+                        ..
+                    }) => "done",
+                    Record::Forensic(Forensic::Reap { cause, .. }) if cause == "retention" => {
+                        "notice"
+                    }
+                    Record::Forensic(Forensic::Pin { key }) if key == "tasks" => "pin",
+                    Record::Forensic(Forensic::Unpin { key }) if key == "tasks" => "unpin",
+                    _ => return None,
+                })
+            })),
             Signal::Transient(_, t) => transients.push(match t {
                 Transient::Pin { key, .. } if key == "tasks" => "pin",
                 Transient::Unpin { key } if key == "tasks" => "unpin",

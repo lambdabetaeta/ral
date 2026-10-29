@@ -44,7 +44,7 @@ fn merge_key(sig: &Signal) -> Option<(AgentId, MergeClass)> {
             };
             Some((*id, class))
         }
-        Signal::Fact(..) | Signal::Born(..) => None,
+        Signal::Commit(..) | Signal::Born(..) => None,
     }
 }
 
@@ -52,14 +52,14 @@ fn merge_key(sig: &Signal) -> Option<(AgentId, MergeClass)> {
 fn merged_text(sig: &mut Signal) -> Option<&mut String> {
     match sig {
         Signal::Transient(_, Transient::Token(s) | Transient::Thinking(s)) => Some(s),
-        Signal::Transient(..) | Signal::Fact(..) | Signal::Born(..) => None,
+        Signal::Transient(..) | Signal::Commit(..) | Signal::Born(..) => None,
     }
 }
 
 fn text_len(sig: &Signal) -> usize {
     match sig {
         Signal::Transient(_, Transient::Token(s) | Transient::Thinking(s)) => s.len(),
-        Signal::Transient(..) | Signal::Fact(..) | Signal::Born(..) => 0,
+        Signal::Transient(..) | Signal::Commit(..) | Signal::Born(..) => 0,
     }
 }
 

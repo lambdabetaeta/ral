@@ -70,8 +70,8 @@ mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
 
 **Recording precedes publication, and completion is not channel state.**
 
-- `record/seam.rs::Emitter::emit` appends each `Record` to `record.jsonl`
-  and publishes its witnessed `Recorded<Record>` under the writer's mutex.
+- `record/seam.rs::Emitter::commit` appends one commit to `record.jsonl`
+  and publishes it whole under the writer's mutex; `emit` commits one record.
   `Protocol`, `Display` and `Forensic` are disjoint durable classes;
   `Transient` has no sequence or durable form. The writer owns a `File`
   directly. The first uncommitted append (write, encoding or append-lock
@@ -80,9 +80,10 @@ mutex and condvar; `bus/post.rs` owns delivery payloads and `Next`.
   that failure; `check_available` observes it; `emit_or_end` leaves it to the
   owner. Producers never report it. The owner's terminus announces it once
   as `Transient::Fault` on the independent fleet sink and makes it the outcome.
-- `bus/signal.rs::Signal` is `Fact`, `Born`, or `Transient`, addressed by
+- `bus/signal.rs::Signal` is `Commit`, `Born`, or `Transient`, addressed by
   `AgentId`. `Emitter::child` publishes birth before that emitter can send
-  any work. `bus/sink.rs::Sink` consumes `fact` / `transient`.
+  any work. `bus/sink.rs::Sink` consumes `fact` per record within one
+  `accept`, and `transient`.
 - `bus/emitter.rs::FleetBus` owns the channel and usage meter. `pump`
   (`bus/sink.rs`) runs an owner on a scoped thread and drains into its sink.
   An explicit completion flag ends the pump even if background producers
@@ -150,13 +151,13 @@ elapsed time, actual ending and how to use `await` / `workers`.
   ([[internals/session-record|session-record]],
   [[invariants/turn-ends-ready|exchange-ends-ready]]).
 - `record/log.rs::Log::since` fixes extent and read handle under the writer
-  mutex, then streams beyond a `Cursor` outside it. Records arriving after
-  that extent take the channel. `record/replay.rs` owns replay/refusal.
+  mutex, then streams commits beyond a `Cursor` outside it. Commits arriving
+  after that extent take the channel. `record/replay.rs` owns replay/refusal.
 - `record/view.rs::Blocks` folds each witnessed fact; `Delta` reports
   `Opened`, `Grew`, `Patched`, `Rewound`, `Cleared`, or `Quiet`.
   `tui/mirror.rs::Mirror` maintains one rendered block per retained incident;
-  `Scrollback::fact` catches up from the log at birth or a sequence gap.
-  Duplicate facts fold once. Headless/Synod sinks narrate rather than catch up.
+  `Scrollback::commit` catches up from the log at birth or a commit gap.
+  Duplicate commits fold once. Headless/Synod sinks narrate rather than catch up.
 - Resume catches up each root only to its recorded pre-run extent, draws
   the resumed note there, then catches up the new run. The bus's usage meter
   plus resumed usage supplies totals, independent of views.
@@ -198,7 +199,7 @@ elapsed time, actual ending and how to use `await` / `workers`.
 - `rail.rs`, `line.rs` and `group.rs` bind shape to kind, hue to producing
   agent, luminance to magnitude/figure-ground. Machine output is recessed;
   human prompts have their own neutral fence. Cards use one mark interpreter.
-- `record/commit.rs::Stream` cuts prose/thinking at newlines; the view draws
+- `record/stream.rs::Stream` cuts prose/thinking at newlines; the view draws
   the uncommitted tail in the block that will absorb it. `Boundary` retires
   abandoned tails. `md.rs` shares ral highlighting with tool panels, renders
   math through `tui-math`, and falls back to literal source on refusal.

@@ -32,11 +32,11 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
 }
 
-/// A hand-written `record.jsonl` line needs the `Entry` envelope too, since
-/// [`record::log::Log::read`] is private to the crate and these tests write
-/// past it on purpose.
-fn envelope_line(record: &record::Record) -> String {
-    serde_json::json!({ "at_unix_ms": 0, "record": record }).to_string()
+/// A hand-written line, sealed by the first 16 hex digits of its commit's blake3.
+fn commit_line(records: &serde_json::Value) -> String {
+    let commit = serde_json::json!({ "at_unix_ms": 0, "records": records }).to_string();
+    let sum = &blake3::hash(commit.as_bytes()).to_hex()[..16];
+    format!(r#"{{"sum":"{sum}","commit":{commit}}}"#)
 }
 
 /// Whether any resident block carries `needle` in its own text — matched on
@@ -212,7 +212,8 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
         .expect("record log");
     writeln!(
         file,
-        r#"{{"at_unix_ms":0,"record":{{"FutureClass":{{"anything":1}}}}}}"#
+        "{}",
+        commit_line(&serde_json::json!([{"FutureClass": {"anything": 1}}]))
     )
     .expect("append a foreign line");
     file.flush().expect("flush the foreign line");
@@ -260,7 +261,7 @@ fn resume_child() {
         .append(true)
         .open(&path)
         .expect("record log");
-    file.write_all(envelope_line(&record).as_bytes())
+    file.write_all(commit_line(&serde_json::json!([record])).as_bytes())
         .expect("write crash prompt");
     file.write_all(b"\n").expect("terminate crash prompt line");
     file.flush().expect("flush crash prompt");

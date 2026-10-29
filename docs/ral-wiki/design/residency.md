@@ -47,7 +47,7 @@ to buy uniformity would buy it at the price of a lie.
 
 The accumulator's contents have a second characterisation, exact in scope:
 **a scrollback is always a fold's memo.** Resume seeds that memo from the session
-record before the worker spawns; live `Signal::Fact`s step the same fold, while
+record before the worker spawns; live `Signal::Commit`s step the same fold, while
 `Signal::Transient`s touch only its provisional edge
 ([[internals/session-record|session-record]]). The scrollback owns presentation
 state around the memo — scroll, disclosure, the open line, the bounded window —

@@ -1,6 +1,6 @@
 //! The transcript reader: locate the items a read or grep names under the
 //! session lock, then read turns back through their [`Pointer`]s with the
-//! lock gone — each record checked against its [`Locus`] digest before it
+//! lock gone — each record checked against its [`Locus`] sum before it
 //! is parsed.
 
 use super::state::admissible_prefix;
@@ -10,8 +10,9 @@ use super::{
     not_recorded_refusal_turn,
 };
 use crate::provider::tools::{COMMAND, RAL_TOOL};
+use crate::record::log::Log;
 use crate::record::{
-    AgentId, Entry, GrepAnswer, GrepHit, Locus, Protocol, RECORD, Record, Recorded, Refusal, Role,
+    AgentId, GrepAnswer, GrepHit, Locus, Protocol, RECORD, Record, Recorded, Refusal, Role,
     TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
 };
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
@@ -19,7 +20,7 @@ use ral_core::own::OwnDir;
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::PathBuf;
 
 /// One handle on session `source`'s record log under `sessions`: the model
@@ -34,24 +35,7 @@ fn record_name(sessions: &OwnDir, source: AgentId) -> PathBuf {
 }
 
 fn read_at(reader: &mut File, locus: &Locus) -> io::Result<Protocol> {
-    let bytes = locus.bytes();
-    let length = usize::try_from(bytes.end.saturating_sub(bytes.start))
-        .map_err(|_| io::Error::other("a record's byte range is too large to read"))?;
-    let _ = reader.seek(SeekFrom::Start(bytes.start))?;
-    let mut buf = vec![0; length];
-    reader.read_exact(&mut buf)?;
-    let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
-    // Before the parse, not after: a stale range can hold a well-formed
-    // record, and refusing it as bad JSON would name the wrong fault.
-    if Locus::digest_of(line) != locus.digest() {
-        return Err(io::Error::other(
-            "a record did not hash to the locus that named it: the log at this \
-             path is no longer the file those byte ranges were measured in; a \
-             copied session directory or an edited log",
-        ));
-    }
-    let entry: Entry<Record> = serde_json::from_slice(line).map_err(io::Error::other)?;
-    match entry.record {
+    match Log::record_at(reader, locus)? {
         Record::Protocol(p) => Ok(p),
         Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
             "a pointer named a non-protocol record: a turn's address no longer \

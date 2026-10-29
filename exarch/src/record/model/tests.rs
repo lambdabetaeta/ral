@@ -72,7 +72,7 @@ fn under(from: u64, to: u64) -> Location {
 /// One record through the live fold. The table is what these tests read,
 /// so a placeholder locus is address enough.
 fn step(context: &mut Context, protocol: Protocol) -> Result<(), Refusal> {
-    let seq = Seq::new(context.log_len() as u64 + 1);
+    let seq = Seq::new(context.log_len() as u64 + 1, 0);
     context.step(Recorded::new(Locus::placeholder(seq), protocol))
 }
 
@@ -988,7 +988,7 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
             },
             at: Pointer {
                 source,
-                loci: vec![Locus::placeholder(Seq::new(1))],
+                loci: vec![Locus::placeholder(Seq::new(1, 0))],
             },
         }],
         residues: Vec::new(),

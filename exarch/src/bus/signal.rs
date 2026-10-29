@@ -2,15 +2,16 @@
 //! [`Signal`] — a durable fact witnessed at append, an agent's birth, or a
 //! transient that never touches the log.  The inbound dual is `post`.
 
-use crate::record::{AgentId, Born, Record, Recorded, Transient};
+use crate::record::{AgentId, Born, Commit, Transient};
 
 /// What the fleet channel carries, tagged with the [`AgentId`] it concerns.
 ///
 /// One channel, so the TUI's single per-fleet dispatch loop routes all of it
 /// by [`AgentId`] without restructuring.
 pub enum Signal {
-    /// A record, stamped with the sequence number its append gave it.
-    Fact(AgentId, Recorded<Record>),
+    /// A commit, its records stamped with the loci its append gave them;
+    /// one signal, so a frontend absorbs it whole.
+    Commit(AgentId, Commit),
     /// An agent's birth: sent by minting its emitter, so ahead of anything
     /// that emitter carries.
     Born(AgentId, Born),

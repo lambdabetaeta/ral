@@ -3,7 +3,7 @@ use crate::agent::gauge::{EVICT_THRESHOLD, Measure};
 use crate::agent::testkit::*;
 use crate::bus::{AgentOutcome, Item, ParkMode, Scoped};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Display, Protocol, Publish, Record, Recorded, Settlement};
+use crate::record::{Commit, Display, Protocol, Publish, Record, Settlement};
 use genai::chat::ChatRole;
 use ral_core::process::{CancelCause, DurableRoot, ScopeNode};
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
@@ -295,14 +295,14 @@ fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_reque
         sink: Box<dyn Publish>,
     }
     impl Publish for StopOnSteering {
-        fn fact(&self, recorded: Recorded<Record>) {
-            if matches!(recorded.value(), Record::Protocol(Protocol::Steering { text, voice: Voice::Human }) if text == "first")
+        fn commit(&self, commit: Commit) {
+            if commit.records().iter().any(|recorded| matches!(recorded.value(), Record::Protocol(Protocol::Steering { text, voice: Voice::Human }) if text == "first"))
             {
                 assert_eq!(self.handle.stop(self.job), Some(vec![]));
                 self.exchange.cancel(CancelCause::Cancelled);
                 self.handle.steer("fresh".into()).unwrap();
             }
-            self.sink.fact(recorded);
+            self.sink.commit(commit);
         }
         fn transient(&self, transient: Transient) {
             self.sink.transient(transient);
@@ -820,7 +820,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
         })
         .unwrap();
     let answer = signals.iter().position(|sig| matches!(sig,
-        crate::bus::Signal::Fact(_, rec) if matches!(rec.value(), Record::Protocol(Protocol::AssistantMessage { message, .. }) if message.content.first_text() == Some("answered"))
+        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|rec| matches!(rec.value(), Record::Protocol(Protocol::AssistantMessage { message, .. }) if message.content.first_text() == Some("answered")))
     )).unwrap();
     assert!(fold < answer);
     let rendered = session.rendered_messages();
@@ -864,7 +864,7 @@ fn a_read_queued_after_a_prompt_runs_after_it_lands() {
     T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
     let signals: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let prompt = signals.iter().position(|sig| matches!(sig,
-        crate::bus::Signal::Fact(_, rec) if matches!(rec.value(), Record::Protocol(Protocol::Steering { text, .. }) if text == "queued prompt")
+        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|rec| matches!(rec.value(), Record::Protocol(Protocol::Steering { text, .. }) if text == "queued prompt"))
     )).unwrap();
     let fold = signals
         .iter()
@@ -1182,8 +1182,12 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
         cause: Severed,
     }
     impl Publish for SeverOnCard {
-        fn fact(&self, recorded: Recorded<Record>) {
-            if matches!(recorded.value(), Record::Display(Display::Card { .. })) {
+        fn commit(&self, commit: Commit) {
+            if commit
+                .records()
+                .iter()
+                .any(|recorded| matches!(recorded.value(), Record::Display(Display::Card { .. })))
+            {
                 use ral_core::carrier::Transport as _;
                 self.transport.sever(self.cause.clone());
             }

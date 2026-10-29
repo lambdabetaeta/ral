@@ -202,18 +202,18 @@ fn ordinary_failed_conversation_remains_usable_for_the_next_job() {
 /// in `print_block`'s `K::Error` arm.
 #[test]
 fn recovered_worker_panic_reports_error_not_success() {
-    use crate::record::{Forensic, Locus, Record, Recorded, Seq};
+    use crate::record::{Commit, Forensic, NonEmpty, Record};
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
     let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
-    h.accept(Signal::Fact(
+    h.accept(Signal::Commit(
         root,
-        Recorded::new(
-            Locus::placeholder(Seq::new(1)),
-            Record::Forensic(Forensic::Error {
+        Commit::placeholder(
+            1,
+            NonEmpty::one(Record::Forensic(Forensic::Error {
                 text: format!("{}boom", crate::bus::WORKER_PANIC_PREFIX),
-            }),
+            })),
         ),
     ));
     let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
@@ -227,7 +227,7 @@ fn recovered_worker_panic_reports_error_not_success() {
 /// there.  A child's own turns never count toward root's.
 #[test]
 fn num_turns_counts_root_turns() {
-    use crate::record::{Forensic, Locus, Record, Recorded, Seq};
+    use crate::record::{Commit, Forensic, NonEmpty, Record};
     let root: AgentId = AgentId::new(1);
     let sub: AgentId = AgentId::new(2);
     let mut sink_out = Vec::new();
@@ -236,15 +236,15 @@ fn num_turns_counts_root_turns() {
     let mut seq = 0u64;
     let mut turn_started = |id: AgentId, turn: u64| {
         seq += 1;
-        Signal::Fact(
+        Signal::Commit(
             id,
-            Recorded::new(
-                Locus::placeholder(Seq::new(seq)),
-                Record::Forensic(Forensic::TurnStarted {
+            Commit::placeholder(
+                seq,
+                NonEmpty::one(Record::Forensic(Forensic::TurnStarted {
                     turn,
                     tuning: crate::provider::Tuning::initial(),
                     via: None,
-                }),
+                })),
             ),
         )
     };
@@ -261,7 +261,7 @@ fn num_turns_counts_root_turns() {
 /// `Sink::accept` drives.
 #[test]
 fn a_card_fact_reaches_stderr_through_the_view_fold() {
-    use crate::record::{Display, Locus, Record, Recorded, Seq};
+    use crate::record::{Commit, Display, NonEmpty, Record};
     let root: AgentId = AgentId::new(1);
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
@@ -269,12 +269,9 @@ fn a_card_fact_reaches_stderr_through_the_view_fold() {
     let card = Card(vec![Mark::Raw {
         bytes: b"a rendered surface".to_vec(),
     }]);
-    h.accept(Signal::Fact(
+    h.accept(Signal::Commit(
         root,
-        Recorded::new(
-            Locus::placeholder(Seq::new(1)),
-            Record::Display(Display::Card { card }),
-        ),
+        Commit::placeholder(1, NonEmpty::one(Record::Display(Display::Card { card }))),
     ));
     let err = String::from_utf8_lossy(&sink_err);
     assert!(
@@ -514,7 +511,11 @@ struct Collecting {
 impl Sink for Collecting {
     fn accept(&mut self, signal: Signal) {
         match &signal {
-            Signal::Fact(id, rec) => self.fact(*id, rec),
+            Signal::Commit(id, commit) => {
+                for rec in commit.records() {
+                    self.fact(*id, rec);
+                }
+            }
             Signal::Transient(id, t) => self.transient(*id, t),
             Signal::Born(id, born) => self.born(*id, born),
         }
@@ -977,9 +978,9 @@ fn helper_ready_precedes_its_parent_result_before_the_next_draw() {
         .expect("reply publishes Ready without another draw");
     let result = sink.signals.iter().position(|signal| matches!(
         signal,
-        Signal::Fact(id, rec) if *id == root.id() && matches!(
+        Signal::Commit(id, commit) if *id == root.id() && commit.records().iter().any(|rec| matches!(
             rec.value(), Record::Display(Display::SubagentDone { name, .. }) if name == "helper"
-        )
+        ))
     )).expect("parent announces its helper's result");
     assert!(ready < result);
     assert!(!sink.signals.iter().any(|signal| matches!(
@@ -1267,10 +1268,10 @@ fn settled_conversation_reuses_a_helper_without_a_second_birth() {
         )), "helper state {state:?} must remain connected");
     }
     assert!(second.signals.iter().any(|s| matches!(s,
-        Signal::Fact(id, rec) if *id == helper.id() && matches!(rec.value(), Record::Display(Display::ToolCall { .. }))
+        Signal::Commit(id, commit) if *id == helper.id() && commit.records().iter().any(|rec| matches!(rec.value(), Record::Display(Display::ToolCall { .. })))
     )), "helper tool facts must remain connected");
     assert!(second.signals.iter().any(|s| matches!(s,
-        Signal::Fact(id, rec) if *id == helper.id() && matches!(rec.value(), Record::Forensic(crate::record::Forensic::UsageDelta { .. }))
+        Signal::Commit(id, commit) if *id == helper.id() && commit.records().iter().any(|rec| matches!(rec.value(), Record::Forensic(crate::record::Forensic::UsageDelta { .. })))
     )), "helper usage must remain connected");
 }
 

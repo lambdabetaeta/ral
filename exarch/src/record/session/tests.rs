@@ -1142,7 +1142,7 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
         },
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(&crate::record::envelope_line(&foreign))
+    file.write_all(&crate::record::commit_line(std::slice::from_ref(&foreign)))
         .unwrap();
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
@@ -1314,7 +1314,7 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
 }
 
 #[test]
-fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
+fn resume_refuses_a_corrupt_interior_line_without_mutating_the_file() {
     let sessions = sessions_root("resume-garbage");
     let live = AgentLog::root(
         &sessions,
@@ -1330,12 +1330,22 @@ fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
     drop(live);
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(b"garbage\n").unwrap();
+    let after = Record::from(Forensic::Error {
+        text: "a sealed line after the garbage".into(),
+    });
+    file.write_all(&crate::record::commit_line(std::slice::from_ref(&after)))
+        .unwrap();
+    file.write_all(b"\n").unwrap();
     file.flush().unwrap();
     let before = fs::read(&path).unwrap();
 
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
+        .err()
+        .expect("garbage before a sealed line is not a crash tail");
+    let text = error.to_string();
     assert!(
-        AgentLog::resume(&sessions, AgentId::new(0)).is_err(),
-        "garbage is not a crash tail"
+        text.contains("corrupt") && text.contains("not JSON"),
+        "{text}"
     );
     assert!(
         AgentLog::live_roots(&sessions).is_err(),
@@ -1366,7 +1376,7 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
         stop_reason: None,
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(&crate::record::envelope_line(&foreign))
+    file.write_all(&crate::record::commit_line(std::slice::from_ref(&foreign)))
         .unwrap();
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
@@ -1400,7 +1410,7 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
         voice: Voice::Human,
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(&crate::record::envelope_line(&orphan))
+    file.write_all(&crate::record::commit_line(std::slice::from_ref(&orphan)))
         .unwrap();
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
@@ -1438,7 +1448,7 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
         voice: Voice::Human,
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(&crate::record::envelope_line(&stale))
+    file.write_all(&crate::record::commit_line(std::slice::from_ref(&stale)))
         .unwrap();
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
@@ -1529,8 +1539,13 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
     let data = fs::read(&path).unwrap();
     let mut torn = Vec::with_capacity(data.len());
     for fragment in data.split_inclusive(|byte| *byte == b'\n') {
-        let record = crate::record::record_from_line(&fragment[..fragment.len() - 1]).unwrap();
-        if matches!(record, Record::Protocol(Protocol::ToolResults { .. })) {
+        let records = crate::record::parse_line(&fragment[..fragment.len() - 1])
+            .unwrap()
+            .1;
+        if records
+            .iter()
+            .any(|record| matches!(record, Record::Protocol(Protocol::ToolResults { .. })))
+        {
             continue;
         }
         torn.extend_from_slice(fragment);
@@ -2024,7 +2039,7 @@ fn admission_refuses_inherited_after_the_first_turn() {
         residues: Vec::new(),
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(&crate::record::envelope_line(&late))
+    file.write_all(&crate::record::commit_line(std::slice::from_ref(&late)))
         .unwrap();
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();

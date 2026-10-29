@@ -121,7 +121,7 @@ impl Chrome {
 
 /// A group's `∴` part: each stretch of thinking the fold committed, in
 /// arrival order; the mass of the prose they became — the deliberation
-/// grain's denominator, which the commit cannot carry, being recorded before
+/// grain's denominator, which the record cannot carry, being recorded before
 /// the prose it precedes.
 #[derive(Default)]
 pub(super) struct Thinking {
@@ -570,7 +570,7 @@ impl Block {
     }
 
     /// The mass of the prose this block's deliberation became — the grain's
-    /// denominator, which the view measures because the commit precedes it.
+    /// denominator, which the view measures because the record precedes it.
     pub(super) fn set_answer_chars(&mut self, chars: u32) {
         if let BlockKind::Group(g) = &mut self.kind
             && g.thinking.answer_chars != chars

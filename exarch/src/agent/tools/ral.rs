@@ -72,7 +72,7 @@ fn invalid_input(id: String, reason: &str, session: &Agent) -> SessionToolResult
     SessionToolResult { id, content: msg }
 }
 
-/// Record the call's display commit; the witnessed [`BlockId`] addresses its
+/// Record the call's display record; the witnessed [`BlockId`] addresses its
 /// paired result. A call whose row cannot be recorded is not made.
 fn record_call(
     session: &Agent,
@@ -89,7 +89,7 @@ fn record_call(
         .map(|recorded| BlockId::new(recorded.locus().seq()))
 }
 
-/// The paired half: what the result told, addressed at the call commit it
+/// The paired half: what the result told, addressed at the call record it
 /// answers.
 fn record_result(session: &Agent, content: &str, failed: bool, call: BlockId) {
     session.recorder().emit_or_end(Display::Verdict {

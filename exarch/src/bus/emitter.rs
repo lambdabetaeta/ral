@@ -5,7 +5,7 @@ use super::channel::{BusReceiver, BusSender, WeakSender, channel};
 use super::signal::Signal;
 use crate::provider::Usage;
 use crate::record::AgentId;
-use crate::record::{Born, Forensic, Publish, Record, Recorded, Transient};
+use crate::record::{Born, Commit, Forensic, Publish, Record, Transient};
 use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
@@ -40,13 +40,15 @@ pub(crate) struct FleetSink {
 }
 
 impl Publish for FleetSink {
-    fn fact(&self, recorded: Recorded<Record>) {
-        if let Record::Forensic(Forensic::UsageDelta { usage, .. }) = recorded.value() {
-            self.meter.add(*usage);
+    fn commit(&self, commit: Commit) {
+        for recorded in commit.records() {
+            if let Record::Forensic(Forensic::UsageDelta { usage, .. }) = recorded.value() {
+                self.meter.add(*usage);
+            }
         }
         if self
             .tx
-            .send_signal(Signal::Fact(self.id, recorded))
+            .send_signal(Signal::Commit(self.id, commit))
             .is_err()
         {
             // No live receiver; the record is already durable on disk, which is

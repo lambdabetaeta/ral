@@ -877,11 +877,13 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
 fn clear_keeps_human_input_posted_by_its_commit_publication() {
     struct OnClear(Mailbox, Arc<AtomicU64>);
     impl crate::record::Publish for OnClear {
-        fn fact(&self, recorded: crate::record::Recorded<crate::record::Record>) {
-            if matches!(
-                recorded.value(),
-                crate::record::Record::Protocol(crate::record::Protocol::Cleared)
-            ) {
+        fn commit(&self, commit: crate::record::Commit) {
+            if commit.records().iter().any(|recorded| {
+                matches!(
+                    recorded.value(),
+                    crate::record::Record::Protocol(crate::record::Protocol::Cleared)
+                )
+            }) {
                 assert!(self.0.is_current());
                 assert!(self.0.steer("during publication".into()));
                 self.1.fetch_add(1, Ordering::Relaxed);

@@ -361,7 +361,7 @@ fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
     let outcome = session.attend(&emit);
     let signals: Vec<crate::bus::Signal> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert!(signals.iter().any(|s| matches!(s,
-        crate::bus::Signal::Fact(_, fact) if matches!(fact.value(), Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX))
+        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|fact| matches!(fact.value(), Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX)))
     )));
     assert!(signals.iter().any(|s| matches!(s,
         crate::bus::Signal::Transient(_, crate::record::Transient::Token(t)) if t == "recovered"

@@ -1,7 +1,7 @@
 use super::*;
 use crate::card::{Card, Mark};
 use crate::record::{
-    BlockId, Display, Forensic, Locus, Protocol, Record, Recorded, Seq, Verdict, Voice,
+    BlockId, Display, Forensic, Locus, NonEmpty, Protocol, Record, Recorded, Seq, Verdict, Voice,
 };
 
 fn scrollback() -> Scrollback {
@@ -16,7 +16,7 @@ fn rail_rows(rows: &[Row], glyph: &str) -> Vec<usize> {
 }
 
 /// A running counter's worth of facts, so a test can interleave chrome
-/// between commits without two calls colliding on the same `Seq`.
+/// between records without two calls colliding on the same `Seq`.
 struct Stream(u64);
 
 impl Stream {
@@ -26,8 +26,8 @@ impl Stream {
 
     fn land(&mut self, sb: &mut Scrollback, record: Record) -> Seq {
         self.0 += 1;
-        let seq = Seq::new(self.0);
-        sb.step(&Recorded::new(Locus::placeholder(seq), record));
+        let seq = Seq::new(self.0, 0);
+        sb.absorb(&Recorded::new(Locus::placeholder(seq), record));
         seq
     }
 
@@ -435,10 +435,10 @@ fn the_standing_thinking_rung_reaches_past_and_future_groups() {
     );
 }
 
-/// Chrome drawn between two commits keeps its place: it is appended where
+/// Chrome drawn between two records keeps its place: it is appended where
 /// it was drawn, and no later record moves it.
 #[test]
-fn chrome_holds_its_place_among_the_commits() {
+fn chrome_holds_its_place_among_the_records() {
     let mut sb = scrollback();
     let mut log = Stream::new();
     let _ = log.land(
@@ -473,7 +473,7 @@ fn chrome_holds_its_place_among_the_commits() {
     };
     assert!(
         at("one") < at("between") && at("between") < at("two"),
-        "chrome drawn between two commits renders between them: {rendered:?}"
+        "chrome drawn between two records renders between them: {rendered:?}"
     );
 }
 
@@ -494,10 +494,10 @@ fn on_air(recorder: &Recorder) -> crate::bus::BusReceiver {
     rx
 }
 
-fn heard(rx: &crate::bus::BusReceiver) -> Vec<Recorded<Record>> {
+fn heard(rx: &crate::bus::BusReceiver) -> Vec<Commit> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
-            crate::bus::Signal::Fact(_, rec) => Some(rec),
+            crate::bus::Signal::Commit(_, rec) => Some(rec),
             crate::bus::Signal::Born(..) | crate::bus::Signal::Transient(..) => None,
         })
         .collect()
@@ -518,17 +518,65 @@ fn a_late_mirror_catches_up_hears_nothing_twice_and_reads_past_a_gap() {
     let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.clone(), None);
     sb.catch_up();
     for rec in heard(&rx) {
-        sb.fact(&rec);
+        sb.commit(&rec);
     }
     emit("charlie");
     emit("delta");
     let delta = heard(&rx).pop().expect("delta is heard");
-    sb.fact(&delta);
+    sb.commit(&delta);
 
     let all = text(&mut sb);
     for word in ["alpha", "bravo", "charlie", "delta"] {
         assert_eq!(all.matches(word).count(), 1, "{word} once: {all:?}");
     }
+}
+
+#[test]
+fn a_late_mirror_catches_up_across_multi_record_commits() {
+    let dir = ral_core::own::OwnDir::for_test("scrollback-multi-record").expect("a test directory");
+    let recorder = Recorder::create(&dir).expect("a record log");
+    let emit = |first, rest: &[&str]| {
+        recorder
+            .commit(NonEmpty {
+                first: prompt(first).into(),
+                rest: rest.iter().map(|text| prompt(text).into()).collect(),
+            })
+            .expect("the log appends")
+    };
+    let first = emit("alpha", &["bravo"]);
+    let rx = on_air(&recorder);
+    let second = emit("charlie", &["delta", "echo"]);
+    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.clone(), None);
+    sb.catch_up();
+    sb.commit(&first);
+    sb.commit(&second);
+    let _third = emit("foxtrot", &["golf"]);
+    let fourth = emit("hotel", &["india"]);
+    sb.commit(&fourth);
+
+    let all = text(&mut sb);
+    let words = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+    ];
+    let positions = words.map(|word| {
+        assert_eq!(all.matches(word).count(), 1, "{word} once: {all:?}");
+        all.find(word).expect("the word is drawn")
+    });
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{all:?}"
+    );
+    assert_eq!(sb.cursor.map(Cursor::next), Some(5));
+    assert_eq!(heard(&rx).len(), 3);
+
+    let mut recalled = Scrollback::new(AgentSlot(0), Detail::Full, recorder, None);
+    recalled.recall(first.bytes().end);
+    let prefix = text(&mut recalled);
+    assert!(
+        prefix.contains("alpha") && prefix.contains("bravo"),
+        "{prefix:?}"
+    );
+    assert!(!prefix.contains("charlie"), "{prefix:?}");
 }
 
 /// A `/clear` is a record like any other: the mirror drops what it held,
@@ -549,8 +597,8 @@ fn a_cleared_record_starts_the_mirror_over_and_keeps_the_cursor() {
     let after = live.pop().expect("the prompt after the clear");
     let cleared = live.pop().expect("the clear");
 
-    assert!(sb.fact(&cleared), "a clear starts the mirror over");
-    assert!(!sb.fact(&after), "a prompt does not");
+    assert!(sb.commit(&cleared), "a clear starts the mirror over");
+    assert!(!sb.commit(&after), "a prompt does not");
 
     let all = text(&mut sb);
     assert!(all.contains("the session card"), "{all:?}");
@@ -559,7 +607,7 @@ fn a_cleared_record_starts_the_mirror_over_and_keeps_the_cursor() {
     assert!(!all.contains("before"), "{all:?}");
     assert_eq!(
         sb.cursor.map(Cursor::next),
-        Some(after.locus().seq().get() + 1),
+        Some(after.number() + 1),
         "the cursor stayed on the log"
     );
 }

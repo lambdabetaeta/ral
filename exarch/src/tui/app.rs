@@ -1,5 +1,5 @@
 //! One [`App`] owns the tabs, scrollbacks, prompt, and gesture state, and folds
-//! the [`crate::bus::Signal`] stream — `Fact` through [`App::fact`], `Born`
+//! the [`crate::bus::Signal`] stream — `Commit` through [`App::commit`], `Born`
 //! through [`App::born`], `Transient` through [`App::transient`] — into
 //! scrollback blocks.
 
@@ -21,7 +21,7 @@ use crate::agent::fleet::Fleet;
 use crate::bus::{BusReceiver, Read, Rewrite, UsageMeter};
 use crate::card::Card;
 use crate::provider::{Bureau, Usage};
-use crate::record::{AgentId, Born, Record, Recorded, Resumed, Transient};
+use crate::record::{AgentId, Born, Commit, Resumed, Transient};
 use clipboard::Clipboard;
 
 use ratatui::crossterm::event::{
@@ -322,17 +322,16 @@ impl App {
             || self.overlay.is_some()
     }
 
-    /// Fold one witnessed record fact into the screen — the sole way a
-    /// `Display`/`Forensic` commit reaches it — through the scrollback that
-    /// mirrors its log ([`Scrollback::fact`]).  A fact that starts the mirror
+    /// Fold one whole commit into the screen through the scrollback that
+    /// mirrors its log ([`Scrollback::commit`]). A commit that starts the mirror
     /// over is a `/clear`, which retires the agent's descendants' tabs.  A
     /// tab in the linger window is frozen: it still renders its final frame
     /// and ages out, but no further event belongs in it.
-    pub fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
+    pub fn commit(&mut self, id: AgentId, commit: &Commit) {
         if self.tabs.lingering(id) {
             return;
         }
-        if self.with_scrollback(id, |sb| sb.fact(rec)) == Some(true) {
+        if self.with_scrollback(id, |sb| sb.commit(commit)) == Some(true) {
             if let Some(status) = self.tabs.status_mut(id) {
                 *status = Status::new();
             }
@@ -369,7 +368,7 @@ impl App {
     }
 
     /// Draw one live-only transient directly, with no log-backed fold: the
-    /// mirror of [`Self::fact`] for [`crate::bus::Signal::Transient`].
+    /// mirror of [`Self::commit`] for [`crate::bus::Signal::Transient`].
     /// Every variant is routed here: to the tabs, the tab's [`Status`], or its
     /// scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {

@@ -1,6 +1,4 @@
-//! Resume from disk: quarantine a torn tail, then fold `record.jsonl`
-//! into a fresh [`Context`] through the same [`Context::step`] the live
-//! path runs.
+//! Resume from disk: fold `record.jsonl`, then quarantine a torn tail.
 
 use super::{Context, Model};
 use crate::record::log::Log;
@@ -12,8 +10,7 @@ use std::path::PathBuf;
 /// Where a torn tail goes: beside the record it was cut from.
 const CRASH: &str = "record.jsonl.crash";
 
-/// Move a torn tail to `record.jsonl.crash` and trim the live file back to
-/// its last complete line.
+/// Quarantine a torn tail: an unterminated write, or a last line whose sum fails.
 fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
     let mut file = session.open(RECORD)?;
     let complete = Log::complete_len(&mut file)?;
@@ -32,7 +29,7 @@ fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
     live.set_len(complete)?;
     live.sync_all()?;
     ral_core::errln!(
-        "exarch: quarantined {} bytes from {} in {} before trimming the live log",
+        "exarch: quarantined a torn last line ({} bytes) from {} in {}, and trimmed the live log to its last whole commit",
         tail.len(),
         ral_core::path::shown(session.path().join(RECORD)),
         ral_core::path::shown(session.path().join(CRASH))
@@ -40,13 +37,13 @@ fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
     Ok(())
 }
 
-/// Fold `record.jsonl` into a fresh [`Context`]: quarantine a torn tail, check
-/// the file's first record heads a root, then hand every record to
-/// [`Model::step`] and every forensic one to a [`Selection`].
+/// Fold `record.jsonl` into a fresh [`Context`], then quarantine a torn tail,
+/// so a refused resume leaves the file as it found it. Check the first record
+/// heads a root and hand records to [`Model::step`] and [`Selection`].
 ///
 /// There is nothing to compare the result with, and nothing to check it
 /// against: the law is that the fold refuses what it cannot admit, and what
-/// guards a read-back is `read_at`'s digest check, at the moment of the
+/// guards a read-back is `read_at`'s sum check, at the moment of the
 /// read, where the risk is.
 ///
 /// The pass is a stream rather than a collection, so what a resume holds is
@@ -62,7 +59,6 @@ fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
 pub fn resume(sessions: &OwnDir, id: AgentId) -> io::Result<(Context, Selection)> {
     let session = sessions.dir(&id.to_string())?;
     let path: PathBuf = session.path().join(RECORD);
-    quarantine_tail(&session)?;
     let mut context = Context::new(id, sessions.clone());
     let mut selection = Selection::default();
     for (n, record) in Log::read(session.open(RECORD)?, &path)?.enumerate() {
@@ -98,5 +94,6 @@ pub fn resume(sessions: &OwnDir, id: AgentId) -> io::Result<(Context, Selection)
             ral_core::path::shown(&path)
         )));
     }
+    quarantine_tail(&session)?;
     Ok((context, selection))
 }

@@ -51,7 +51,7 @@ fn resources_command_routes_through_attend_and_emits_once() {
     // same channel, so the claim below is about the live half alone.
     let mut transients = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|sig| match sig {
         crate::bus::Signal::Transient(_, t) => Some(t),
-        crate::bus::Signal::Fact(..) | crate::bus::Signal::Born(..) => None,
+        crate::bus::Signal::Commit(..) | crate::bus::Signal::Born(..) => None,
     });
     match transients
         .next()

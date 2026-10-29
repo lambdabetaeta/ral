@@ -1,5 +1,5 @@
 //! Line builders: each returns `Vec<Line<'static>>` ready for the scrollback,
-//! drawing colour and width from [`super::palette`].  [`super::App::fact`]
+//! drawing colour and width from [`super::palette`].  [`super::App::commit`]
 //! calls in here to turn a typed [`crate::card::Card`] into rows.
 //!
 //! No builder here draws a rail glyph: `Block::railed` in `block.rs` sets it

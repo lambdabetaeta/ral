@@ -1,4 +1,4 @@
-//! The commit producer: the stream chopper that decides where the model's
+//! The stream producer: the stream chopper that decides where the model's
 //! own text enters the display half of the log, upstream of the seam — so
 //! what is recorded is what the user saw, and a resumed scrollback rebuilds
 //! it.

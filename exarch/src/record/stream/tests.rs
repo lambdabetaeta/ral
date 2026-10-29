@@ -8,7 +8,7 @@ use ral_core::own::{OwnDir, TestDir};
 /// The emitter over a log in a directory of its own, which comes back with it
 /// and must be held: dropping it deletes the log.
 fn emitter() -> (TestDir, Emitter, BusReceiver) {
-    let dir = OwnDir::for_test("commit").expect("a test directory");
+    let dir = OwnDir::for_test("stream").expect("a test directory");
     let emit = Emitter::create(&dir).expect("temp record log");
     let (tx, rx) = channel();
     emit.attach(Box::new(FleetSink {
@@ -42,8 +42,8 @@ fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
     stream.push(&emit, Delta::Say("Second paragraph.\n\ntail"));
     stream.close(&emit);
 
-    let commits = drain_display(&rx);
-    match commits.as_slice() {
+    let records = drain_display(&rx);
+    match records.as_slice() {
         [Display::Thinking { text }, rest @ ..] => {
             assert_eq!(text, "weighing the cases\n");
             assert!(

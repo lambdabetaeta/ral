@@ -86,7 +86,7 @@ impl Agent {
         self.log.borrow().record_emitter().attach(emit.fleet_sink());
     }
 
-    /// This session's recorder, for whoever authors a display commit — the
+    /// This session's recorder, for whoever authors a display record — the
     /// chopper, the surface buffer, a tool-call row.
     pub(crate) fn recorder(&self) -> crate::record::Emitter {
         self.log.borrow().record_emitter()

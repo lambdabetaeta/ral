@@ -18,6 +18,7 @@ use exarch::agent::outcome::{Fault, Outcome};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{CutShort, Provider, ProviderError};
+use exarch::record::Recorded;
 use exarch::record::{AgentId, AgentState};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient, Voice};
 use exarch::record::{EditAuthority, Residue};
@@ -63,7 +64,9 @@ fn drive_deliberate(session: &mut Agent, provider: &Arc<Provider>, prompt: Optio
     let mut transients = Vec::new();
     for sig in rx {
         match sig {
-            exarch::bus::Signal::Fact(_, fact) => facts.push(fact.into_value()),
+            exarch::bus::Signal::Commit(_, commit) => {
+                facts.extend(commit.into_records().into_iter().map(Recorded::into_value));
+            }
             exarch::bus::Signal::Transient(_, transient) => transients.push(transient),
             exarch::bus::Signal::Born(..) => {}
         }
@@ -403,16 +406,21 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
 
     // Reclamation is heap-only: the one seam's log keeps every byte.
     #[derive(serde::Deserialize)]
-    struct Entry {
-        record: Record,
+    struct Line {
+        commit: Commit,
+    }
+    #[derive(serde::Deserialize)]
+    struct Commit {
+        records: Vec<Record>,
     }
     let records: Vec<Record> = serde_json::Deserializer::from_reader(std::io::BufReader::new(
         std::fs::File::open(session.log_dir().path().join("record.jsonl")).unwrap(),
     ))
-    .into_iter::<Entry>()
-    .map(|entry| entry.map(|e| e.record))
+    .into_iter::<Line>()
+    .map(|line| line.map(|line| line.commit.records))
     .collect::<Result<Vec<_>, _>>()
-    .unwrap();
+    .unwrap()
+    .concat();
     assert!(
         records.iter().any(|record| matches!(
             record,

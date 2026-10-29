@@ -6,7 +6,7 @@
 //! is redrawn each tick, so scrollback is ours, not the host terminal's, and
 //! every tab keeps its own scroll position.
 //!
-//! [`Scrollback::fact`] is the sole producer: it steps the mirror and acts on
+//! [`Scrollback::commit`] is the sole producer: it steps the mirror and acts on
 //! what the step reports, and `App::transient` draws whatever is live-only —
 //! [`Scrollback::push_chrome`], the chrome door, and [`Scrollback::push_token`]
 //! and [`Scrollback::push_thinking`], which carry the open lines the live tail
@@ -14,7 +14,7 @@
 //!
 //! The mirror is a cursor over one log, and the channel only its fast path:
 //! what the channel cannot vouch for — the log as it stood at birth, a gap —
-//! it reads from the log itself ([`Scrollback::catch_up`]), and a record heard
+//! it reads from the log itself ([`Scrollback::catch_up`]), and a commit heard
 //! twice folds once.
 
 use super::block::{Block, Chrome, Member, seam};
@@ -26,7 +26,7 @@ use super::row::Row;
 use super::select::{Cell, plain_slice};
 use crate::card::Card;
 use crate::provider::Usage;
-use crate::record::{self, Cursor, Delta, Emitter as Recorder, Record, Recorded};
+use crate::record::{self, Commit, Cursor, Delta, Emitter as Recorder, Record, Recorded};
 
 /// Carry a lane's open line across one delta: the text after the last newline
 /// is exactly what no record holds yet, since the worker cuts its records at
@@ -130,7 +130,7 @@ impl Scrollback {
     /// Mirror a resumed session's history: the records in the log's first
     /// `bytes`.
     pub(super) fn recall(&mut self, bytes: u64) {
-        self.read_log(|rec| rec.locus().bytes().start < bytes);
+        self.read_log(|commit| commit.bytes().start < bytes);
     }
 
     /// Read the log past this mirror's cursor — all of it when the mirror has
@@ -140,25 +140,25 @@ impl Scrollback {
         self.read_log(|_| true)
     }
 
-    /// [`Self::catch_up`], stopping at the first record `keep` refuses.
-    fn read_log(&mut self, keep: impl Fn(&Recorded<Record>) -> bool) -> bool {
+    /// [`Self::catch_up`], stopping at the first commit `keep` refuses.
+    fn read_log(&mut self, keep: impl Fn(&Commit) -> bool) -> bool {
         let mut cleared = false;
         let read = self
             .recorder
             .since(self.cursor)
-            .and_then(|(from, records)| {
+            .and_then(|(from, commits)| {
                 if self.cursor.is_none() {
                     self.cursor = Some(from);
                     if let Some(card) = self.opening.clone() {
                         self.mirror.push_chrome(Chrome::Opening(card));
                     }
                 }
-                for rec in records {
-                    let rec = rec?;
-                    if !keep(&rec) {
+                for commit in commits {
+                    let commit = commit?;
+                    if !keep(&commit) {
                         break;
                     }
-                    cleared |= self.step(&rec);
+                    cleared |= self.step(&commit);
                 }
                 Ok(())
             });
@@ -493,7 +493,7 @@ impl Scrollback {
         }
         // The block the line continues: the one at the tail, when the line's
         // record would grow it.  This splice and the fold's rule for growing a
-        // block must agree, or the commit moves the picture.
+        // block must agree, or the record moves the picture.
         let joins = self.mirror.blocks.last().is_some_and(if answering {
             Block::takes_prose
         } else {
@@ -643,25 +643,35 @@ impl Scrollback {
         self.thinking_line.clear();
     }
 
-    /// Mirror one fact heard live, first reading the log when it is not the
-    /// next one this mirror holds: none yet, or a gap.  A record heard twice
+    /// Mirror one commit heard live, first reading the log when it is not the
+    /// next one this mirror holds: none yet, or a gap.  A commit heard twice
     /// folds once.  Reports whether the mirror started over — a `/clear`.
-    pub(super) fn fact(&mut self, rec: &Recorded<Record>) -> bool {
+    pub(super) fn commit(&mut self, commit: &Commit) -> bool {
         match self
             .cursor
-            .map(|cursor| rec.locus().seq().get().cmp(&cursor.next()))
+            .map(|cursor| commit.number().cmp(&cursor.next()))
         {
             Some(std::cmp::Ordering::Less) => false,
-            Some(std::cmp::Ordering::Equal) => self.step(rec),
+            Some(std::cmp::Ordering::Equal) => self.step(commit),
             _ => self.catch_up(),
         }
+    }
+
+    /// Mirror `commit` whole and move the cursor past it. Reports whether any
+    /// of its records was a clear.
+    fn step(&mut self, commit: &Commit) -> bool {
+        self.cursor = self.cursor.map(|cursor| cursor.past(commit));
+        let mut cleared = false;
+        for rec in commit.records() {
+            cleared |= self.absorb(rec);
+        }
+        cleared
     }
 
     /// Step the mirror and account for what left it: the screen rows and
     /// blocks it retired, and — on a clear — the open lines and scroll state,
     /// under the opening again.  Reports whether the record was a clear.
-    fn step(&mut self, rec: &Recorded<Record>) -> bool {
-        self.cursor = self.cursor.map(|cursor| cursor.past(rec.locus()));
+    fn absorb(&mut self, rec: &Recorded<Record>) -> bool {
         let (delta, gone) = self.mirror.step(rec);
         let all: usize = screen(gone.iter().chain(&self.mirror.blocks))
             .map(|(_, rows)| rows.len())

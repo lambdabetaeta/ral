@@ -102,7 +102,7 @@ fn arrival_records_display_facts() {
         elapsed_ms,
     }) = facts.next()
     else {
-        panic!("the subagent's breadcrumb is the first display commit");
+        panic!("the subagent's breadcrumb is the first display record");
     };
     assert_eq!(name, "helper");
     assert_eq!(

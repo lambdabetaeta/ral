@@ -1,7 +1,7 @@
 use super::*;
 
 fn call(intent: &str, magnitude: Option<u32>) -> Call {
-    let mut call = Call::open(Seq::new(1), intent.into(), String::new(), 0);
+    let mut call = Call::open(Seq::new(1, 0), intent.into(), String::new(), 0);
     if let Some(lines) = magnitude {
         call.settle(Verdict {
             lines,
@@ -15,7 +15,7 @@ fn call(intent: &str, magnitude: Option<u32>) -> Call {
 /// every row is washed to the full width — no ragged right edge.
 #[test]
 fn source_rows_paint_an_inset_panel() {
-    let c = Call::open(Seq::new(1), "x".into(), "let x = 1\nlet y = 2".into(), 0);
+    let c = Call::open(Seq::new(1, 0), "x".into(), "let x = 1\nlet y = 2".into(), 0);
     let rows = source_rows(&c, 60);
     assert_eq!(rows.len(), 2);
     for r in &rows {

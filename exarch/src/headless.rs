@@ -59,7 +59,7 @@ pub struct Headless<'a> {
     panicked: bool,
     ended_with_newline: bool,
     /// One view-fold memo per source agent — a fact's `Seq` is only unique
-    /// within its own session log, so root's commits and a child's may not
+    /// within its own session log, so root's records and a child's may not
     /// share one fold.
     folds: HashMap<AgentId, Blocks>,
 }

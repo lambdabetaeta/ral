@@ -46,8 +46,8 @@ struct Buckets<'a> {
 /// floor, and its effects are the facts themselves, grouped into rows only at
 /// render.
 ///
-/// Named by the [`Seq`] of the commit that opened it, which is how the result
-/// patch addressed to that commit finds the bar it earned.
+/// Named by the [`Seq`] of the record that opened it, which is how the result
+/// patch addressed to that record finds the bar it earned.
 pub(super) struct Call {
     at: Seq,
     intent: String,

@@ -184,7 +184,7 @@ impl Mirror {
 
     /// Weigh the deliberation above the prose block at `at` against it: the
     /// grain's denominator is the mass of the prose that deliberation became,
-    /// which the commit precedes and the view therefore measures.
+    /// which the record precedes and the view therefore measures.
     fn grain(&mut self, at: usize) {
         let Some(chars) = self.blocks[at].prose_chars() else {
             return;
@@ -263,7 +263,7 @@ impl Mirror {
     /// hand back what went.
     ///
     /// Chrome inherits the expiry of the block it was drawn after, having no
-    /// commit of its own; chrome drawn before any block — the banner — lives
+    /// record of its own; chrome drawn before any block — the banner — lives
     /// exactly as long as the fold still holds the session's opening block.
     fn trim(&mut self) -> Vec<Block> {
         let Some(first) = self.fold.blocks().first().map(|b| b.id().seq()) else {

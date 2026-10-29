@@ -19,7 +19,7 @@
 //! Rows are never removed, so ids stay monotone down the lineage.
 //!
 //! A link ([`Protocol::Inherited`]) is the one record whose meaning lies in
-//! another file: its step reads the parent's records through digest-checked
+//! another file: its step reads the parent's records through sum-checked
 //! pointers, and that file only ever grows.
 
 mod fold;

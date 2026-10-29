@@ -184,7 +184,7 @@ fn recording_failure_with_independent_root(poison: bool) {
         let died = matches!(&signal, Signal::Transient(agent, Transient::Died) if *agent == id);
         match signal {
             Signal::Born(agent, born) => app.born(agent, &born),
-            Signal::Fact(agent, fact) => app.fact(agent, &fact),
+            Signal::Commit(agent, commit) => app.commit(agent, &commit),
             Signal::Transient(agent, transient) => {
                 if agent == id {
                     assert!(!matches!(&transient, Transient::State(AgentState::Ready)));
@@ -334,7 +334,7 @@ fn spawned_finalization_delivers_late_write_failure_and_poison_before_death() {
                     app.born(agent, &born);
                     app.tabs.set_focus(agent);
                 }
-                Signal::Fact(agent, fact) => app.fact(agent, &fact),
+                Signal::Commit(agent, commit) => app.commit(agent, &commit),
                 Signal::Transient(agent, transient) => {
                     if agent == id {
                         match &transient {
@@ -512,7 +512,7 @@ fn the_last_spawned_owner_publishes_death_before_the_tui_final_drain() {
         for signal in signals {
             match signal {
                 Signal::Born(agent, born) => app.born(agent, &born),
-                Signal::Fact(agent, fact) => app.fact(agent, &fact),
+                Signal::Commit(agent, commit) => app.commit(agent, &commit),
                 Signal::Transient(agent, transient) => {
                     assert_eq!(agent, id);
                     match &transient {
@@ -1002,7 +1002,7 @@ fn matrix_mode_swallows_prompt_editing() {
 /// of it.
 #[test]
 fn a_pin_never_splits_a_coalesced_observation_run() {
-    use crate::record::{Display, Locus, Record, Recorded, Seq};
+    use crate::record::{Commit, Display, NonEmpty, Record};
     use ral_core::data::datum::Datum as _;
     use ral_core::fact::Read;
 
@@ -1016,9 +1016,9 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
     let mut seq = 0;
     let mut fact = |app: &mut App, display| {
         seq += 1;
-        app.fact(
+        app.commit(
             root.id(),
-            &Recorded::new(Locus::placeholder(Seq::new(seq)), Record::Display(display)),
+            &Commit::placeholder(seq, NonEmpty::one(Record::Display(display))),
         );
     };
     let read_at = |path: &str| {
@@ -1087,19 +1087,19 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
 /// from a worker whose cancel it outran must not paint into it.
 #[test]
 fn a_dying_tab_admits_no_straggler() {
-    use crate::record::{Display, Locus, Record, Recorded, Seq};
+    use crate::record::{Commit, Display, NonEmpty, Record};
 
     let (mut app, rx, root) = app();
     let helper = AgentId::new(root.id().get() + 1);
     born(&mut app, helper, "helper", root.id());
-    let locus = Locus::placeholder(Seq::new(1));
-    app.fact(
+    let number = 1;
+    app.commit(
         helper,
-        &Recorded::new(
-            locus,
-            Record::Display(Display::Answer {
+        &Commit::placeholder(
+            number,
+            NonEmpty::one(Record::Display(Display::Answer {
                 text: "alive".into(),
-            }),
+            })),
         ),
     );
     app.transient(helper, Transient::Died, &rx);
@@ -1110,14 +1110,14 @@ fn a_dying_tab_admits_no_straggler() {
         .probe_figures()
         .0;
 
-    let locus = Locus::placeholder(Seq::new(2));
-    app.fact(
+    let number = 2;
+    app.commit(
         helper,
-        &Recorded::new(
-            locus,
-            Record::Display(Display::Answer {
+        &Commit::placeholder(
+            number,
+            NonEmpty::one(Record::Display(Display::Answer {
                 text: "straggler".into(),
-            }),
+            })),
         ),
     );
 
@@ -1165,8 +1165,8 @@ fn a_clear_wipes_the_pins_and_the_state() {
         mpsc::channel().0,
     );
     let hear = |app: &mut App| {
-        while let Ok(Signal::Fact(_, rec)) = rx.try_recv() {
-            app.fact(root.id(), &rec);
+        while let Ok(Signal::Commit(_, rec)) = rx.try_recv() {
+            app.commit(root.id(), &rec);
         }
     };
 
@@ -1219,7 +1219,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
 #[test]
 fn rewind_acts_on_the_tab_it_was_opened_on() {
     use crate::bus::{Next, Rewrite};
-    use crate::record::{Locus, Protocol, Seq, Voice};
+    use crate::record::{Commit, NonEmpty, Protocol, Record, Voice};
 
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
@@ -1234,15 +1234,15 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
     );
     let child = AgentId::new(root.id().get() + 1);
     born(&mut app, child, "child", root.id());
-    app.fact(
+    app.commit(
         root.id(),
-        &Recorded::new(
-            Locus::placeholder(Seq::new(1)),
-            Record::Protocol(Protocol::UserPrompt {
+        &Commit::placeholder(
+            1,
+            NonEmpty::one(Record::Protocol(Protocol::UserPrompt {
                 turn: 1,
                 text: "hello".into(),
                 voice: Voice::Human,
-            }),
+            })),
         ),
     );
 

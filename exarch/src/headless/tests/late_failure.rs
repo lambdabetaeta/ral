@@ -199,9 +199,9 @@ fn late_recording_failure_pumps_replied_helper_teardown_before_job_end() {
         );
         assert_eq!(end.outcome.unwrap_err(), sink.why.unwrap());
         let output = sink.inner.signals.iter().position(|signal| matches!(signal,
-            Signal::Fact(agent, rec) if *agent == helper.id() && matches!(rec.value(),
+            Signal::Commit(agent, commit) if *agent == helper.id() && commit.records().iter().any(|rec| matches!(rec.value(),
                 Record::Display(Display::Answer { text }) if text == "helper teardown complete"
-            )
+            ))
         )).expect("helper's final output must reach the sink before JobEnd");
         let died = sink
             .inner

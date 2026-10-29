@@ -5,7 +5,10 @@ use crate::provider::Tuning;
 /// A block that never joins the one before it, so a test about the window
 /// counts blocks rather than the lanes that grow.
 fn push(memo: &mut Blocks, seq: u64, text: &str) -> Delta {
-    memo.step_forensic(Seq::new(seq), &Forensic::SystemNote { text: text.into() })
+    memo.step_forensic(
+        Seq::new(seq, 0),
+        &Forensic::SystemNote { text: text.into() },
+    )
 }
 
 /// A rewind cuts the view back to the first block that is a turn at or
@@ -30,15 +33,15 @@ fn a_rewind_cuts_from_the_anchors_first_block() {
     };
     let answer = |text: &str| Display::Answer { text: text.into() };
     let mut memo = Blocks::default();
-    let _ = memo.step_protocol(Seq::new(1), &prompt("one", Some(1)));
-    let _ = memo.step_forensic(Seq::new(2), &started(2));
-    let _ = memo.step_display(Seq::new(3), answer("two"));
-    let _ = memo.step_protocol(Seq::new(4), &prompt("three", Some(3)));
-    let _ = memo.step_forensic(Seq::new(5), &started(4));
-    let _ = memo.step_protocol(Seq::new(6), &prompt("steer", None));
-    let _ = memo.step_forensic(Seq::new(7), &started(5));
-    let _ = memo.step_display(Seq::new(8), answer("four"));
-    let _ = memo.step_protocol(Seq::new(9), &prompt("five", Some(6)));
+    let _ = memo.step_protocol(Seq::new(1, 0), &prompt("one", Some(1)));
+    let _ = memo.step_forensic(Seq::new(2, 0), &started(2));
+    let _ = memo.step_display(Seq::new(3, 0), answer("two"));
+    let _ = memo.step_protocol(Seq::new(4, 0), &prompt("three", Some(3)));
+    let _ = memo.step_forensic(Seq::new(5, 0), &started(4));
+    let _ = memo.step_protocol(Seq::new(6, 0), &prompt("steer", None));
+    let _ = memo.step_forensic(Seq::new(7, 0), &started(5));
+    let _ = memo.step_display(Seq::new(8, 0), answer("four"));
+    let _ = memo.step_protocol(Seq::new(9, 0), &prompt("five", Some(6)));
     assert_eq!(
         memo.prompts().collect::<Vec<_>>(),
         [(1, "one"), (3, "three"), (6, "five")],
@@ -63,16 +66,16 @@ fn a_rewind_cuts_from_the_anchors_first_block() {
         "turn 2's own breadcrumb, its prompt kept"
     );
     assert_eq!(
-        memo.step_protocol(Seq::new(10), &Protocol::Rewound { anchor: 3 }),
-        Delta::Rewound(Some(BlockId::new(Seq::new(4))))
+        memo.step_protocol(Seq::new(10, 0), &Protocol::Rewound { anchor: 3 }),
+        Delta::Rewound(Some(BlockId::new(Seq::new(4, 0))))
     );
     assert!(matches!(
         memo.blocks(),
         [_, _, _, b] if matches!(b.kind, BlockKind::Rewound { anchor: 3 })
     ));
     assert_eq!(
-        memo.step_protocol(Seq::new(11), &Protocol::Rewound { anchor: 1 }),
-        Delta::Rewound(Some(BlockId::new(Seq::new(1))))
+        memo.step_protocol(Seq::new(11, 0), &Protocol::Rewound { anchor: 1 }),
+        Delta::Rewound(Some(BlockId::new(Seq::new(1, 0))))
     );
     assert_eq!(memo.blocks().len(), 1);
 }
@@ -98,12 +101,12 @@ fn a_prompt_is_drawn_unless_the_harness_spoke_it() {
             voice,
         };
         assert_eq!(
-            memo.step_protocol(Seq::new(1), &prompt) != Delta::Quiet,
+            memo.step_protocol(Seq::new(1, 0), &prompt) != Delta::Quiet,
             drawn,
             "{voice:?} prompt"
         );
         assert_eq!(
-            memo.step_protocol(Seq::new(2), &steering) != Delta::Quiet,
+            memo.step_protocol(Seq::new(2, 0), &steering) != Delta::Quiet,
             drawn,
             "{voice:?} steering"
         );
@@ -132,12 +135,12 @@ fn only_a_forced_eviction_draws() {
     };
     let mut memo = Blocks::default();
     assert_eq!(
-        memo.step_protocol(Seq::new(1), &evicted(EditAuthority::Model)),
+        memo.step_protocol(Seq::new(1, 0), &evicted(EditAuthority::Model)),
         Delta::Quiet
     );
     assert_eq!(
-        memo.step_protocol(Seq::new(2), &evicted(EditAuthority::Harness)),
-        Delta::Opened(BlockId::new(Seq::new(2)))
+        memo.step_protocol(Seq::new(2, 0), &evicted(EditAuthority::Harness)),
+        Delta::Opened(BlockId::new(Seq::new(2, 0)))
     );
     assert!(matches!(
         memo.blocks(),
@@ -159,13 +162,13 @@ fn only_a_forced_eviction_draws() {
 fn a_clear_leaves_its_marker_and_the_usage() {
     let mut memo = Blocks::default();
     let _ = memo.step_display(
-        Seq::new(1),
+        Seq::new(1, 0),
         Display::Answer {
             text: "old\n".into(),
         },
     );
     let _ = memo.step_forensic(
-        Seq::new(2),
+        Seq::new(2, 0),
         &Forensic::UsageDelta {
             usage: Usage {
                 input: 100,
@@ -176,14 +179,14 @@ fn a_clear_leaves_its_marker_and_the_usage() {
         },
     );
     assert_eq!(
-        memo.step_protocol(Seq::new(3), &Protocol::Cleared),
+        memo.step_protocol(Seq::new(3, 0), &Protocol::Cleared),
         Delta::Cleared
     );
     assert!(matches!(
         memo.blocks(),
-        [b] if matches!(b.kind, BlockKind::Cleared) && b.seq == Seq::new(3)
+        [b] if matches!(b.kind, BlockKind::Cleared) && b.seq == Seq::new(3, 0)
     ));
-    assert_eq!(memo.origin(), Some(Seq::new(3)));
+    assert_eq!(memo.origin(), Some(Seq::new(3, 0)));
     assert_eq!(memo.usage().input, 100, "usage persists");
     assert_eq!(memo.last_input(), 0, "the gauge numerator restarts");
 }
@@ -193,14 +196,14 @@ fn a_clear_leaves_its_marker_and_the_usage() {
 fn a_started_turn_opens_a_turn_block() {
     let mut memo = Blocks::default();
     let delta = memo.step_forensic(
-        Seq::new(1),
+        Seq::new(1, 0),
         &Forensic::TurnStarted {
             turn: 7,
             tuning: Tuning::default(),
             via: None,
         },
     );
-    assert_eq!(delta, Delta::Opened(BlockId::new(Seq::new(1))));
+    assert_eq!(delta, Delta::Opened(BlockId::new(Seq::new(1, 0))));
     assert!(matches!(
         memo.blocks(),
         [b] if matches!(b.kind, BlockKind::Turn { id: 7 })
@@ -213,21 +216,21 @@ fn a_started_turn_opens_a_turn_block() {
 fn consecutive_records_of_one_lane_grow_a_single_block() {
     let mut memo = Blocks::default();
     let opened = memo.step_display(
-        Seq::new(1),
+        Seq::new(1, 0),
         Display::Answer {
             text: "first line\n".into(),
         },
     );
-    assert_eq!(opened, Delta::Opened(BlockId::new(Seq::new(1))));
+    assert_eq!(opened, Delta::Opened(BlockId::new(Seq::new(1, 0))));
     let grew = memo.step_display(
-        Seq::new(2),
+        Seq::new(2, 0),
         Display::Answer {
             text: "second line\n".into(),
         },
     );
     assert_eq!(
         grew,
-        Delta::Grew(BlockId::new(Seq::new(1))),
+        Delta::Grew(BlockId::new(Seq::new(1, 0))),
         "the second record grows the block the first opened"
     );
     match memo.blocks() {
@@ -241,7 +244,7 @@ fn consecutive_records_of_one_lane_grow_a_single_block() {
     }
 
     let _ = memo.step_display(
-        Seq::new(3),
+        Seq::new(3, 0),
         Display::ToolCall {
             tool: "ral".into(),
             cmd: "ls".into(),
@@ -249,7 +252,7 @@ fn consecutive_records_of_one_lane_grow_a_single_block() {
         },
     );
     let _ = memo.step_display(
-        Seq::new(4),
+        Seq::new(4, 0),
         Display::Answer {
             text: "after the call\n".into(),
         },
@@ -266,9 +269,9 @@ fn consecutive_records_of_one_lane_grow_a_single_block() {
 #[test]
 fn a_verdict_patches_the_call_it_names() {
     let mut memo = Blocks::default();
-    let call = BlockId::new(Seq::new(1));
+    let call = BlockId::new(Seq::new(1, 0));
     let _ = memo.step_display(
-        Seq::new(1),
+        Seq::new(1, 0),
         Display::ToolCall {
             tool: "ral".into(),
             cmd: "read 'x'".into(),
@@ -276,7 +279,7 @@ fn a_verdict_patches_the_call_it_names() {
         },
     );
     let _ = memo.step_protocol(
-        Seq::new(2),
+        Seq::new(2, 0),
         &Protocol::UserPrompt {
             turn: 1,
             text: "on".into(),
@@ -285,7 +288,7 @@ fn a_verdict_patches_the_call_it_names() {
     );
     assert_eq!(
         memo.step_display(
-            Seq::new(3),
+            Seq::new(3, 0),
             Display::Verdict {
                 call,
                 verdict: Verdict::of("a\nb\n", false),
@@ -305,9 +308,9 @@ fn a_verdict_patches_the_call_it_names() {
     ));
     assert_eq!(
         memo.step_display(
-            Seq::new(4),
+            Seq::new(4, 0),
             Display::Verdict {
-                call: BlockId::new(Seq::new(99)),
+                call: BlockId::new(Seq::new(99, 0)),
                 verdict: Verdict::of("a\n", false),
             },
         ),
@@ -330,12 +333,12 @@ fn the_window_bounds_the_fold_as_blocks_land() {
     );
     assert_eq!(
         memo.blocks().first().map(|b| b.seq),
-        Some(Seq::new(51)),
+        Some(Seq::new(51, 0)),
         "the oldest blocks go first"
     );
     assert_eq!(
         memo.origin(),
-        Some(Seq::new(1)),
+        Some(Seq::new(1, 0)),
         "the session's opening block is remembered past its eviction"
     );
 }
@@ -350,9 +353,9 @@ fn a_model_change_carries_its_window_and_a_bare_one_clears_it() {
         account: "a".into(),
     };
     let mut memo = Blocks::default();
-    let _ = memo.step_forensic(Seq::new(1), &change(Some(200_000)));
+    let _ = memo.step_forensic(Seq::new(1, 0), &change(Some(200_000)));
     assert_eq!(memo.context_window(), Some(200_000));
-    let _ = memo.step_forensic(Seq::new(2), &change(None));
+    let _ = memo.step_forensic(Seq::new(2, 0), &change(None));
     assert_eq!(memo.context_window(), None);
 }
 
@@ -367,8 +370,8 @@ fn last_input_is_the_latest_turn_while_usage_sums() {
         provider: None,
     };
     let mut memo = Blocks::default();
-    let _ = memo.step_forensic(Seq::new(1), &delta(100));
-    let _ = memo.step_forensic(Seq::new(2), &delta(250));
+    let _ = memo.step_forensic(Seq::new(1, 0), &delta(100));
+    let _ = memo.step_forensic(Seq::new(2, 0), &delta(250));
     assert_eq!(memo.last_input(), 250);
     assert_eq!(memo.usage().input, 350);
 }

@@ -113,7 +113,7 @@ fn a_torn_tail_is_ignored() {
         .append(true)
         .open(&path)
         .expect("the log reopens");
-    file.write_all(br#"{"at_unix_ms":0,"record":{"kind":"user_pro"#)
+    file.write_all(br#"{"sum":"0123456789abcdef","commit":{"at_unix_ms":0,"records":[{"Pro"#)
         .expect("a torn write");
     assert_eq!(rendered(&path), whole);
 }

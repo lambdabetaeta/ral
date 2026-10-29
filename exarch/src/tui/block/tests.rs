@@ -68,7 +68,7 @@ fn thinking(text: &str) -> Block {
 fn run(intent: &str) -> Block {
     Block::group(
         Member::Call(group::Call::open(
-            Seq::new(1),
+            Seq::new(1, 0),
             intent.into(),
             "read 'x'".into(),
             0,

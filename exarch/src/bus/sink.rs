@@ -70,7 +70,7 @@ fn drain_signals(
 /// drain passes; the TUI is not a `Sink`, but its `ui_loop` drains
 /// [`drain_signals`] on its render cadence, so completion is identical on both.
 pub trait Sink {
-    /// A durable fact reaching the sink live, as [`Signal::Fact`] carries it —
+    /// Each record of a [`Signal::Commit`], in order, within one `accept`:
     /// witnessed, since a fold is stepped by the record *and* its locus.
     ///
     /// The default does nothing: a frontend draws whichever half of the seam
@@ -111,7 +111,11 @@ pub trait Sink {
     /// Route one raw signal to `fact`, `born` or `transient`.
     fn accept(&mut self, sig: Signal) {
         match sig {
-            Signal::Fact(id, fact) => self.fact(id, &fact),
+            Signal::Commit(id, commit) => {
+                for rec in commit.records() {
+                    self.fact(id, rec);
+                }
+            }
             Signal::Born(id, born) => self.born(id, &born),
             Signal::Transient(id, t) => self.transient(id, &t),
         }
@@ -178,9 +182,11 @@ where
 pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
-            Signal::Fact(_, rec) => Some(rec.into_value()),
+            Signal::Commit(_, commit) => Some(commit.into_records()),
             Signal::Born(..) | Signal::Transient(..) => None,
         })
+        .flatten()
+        .map(Recorded::into_value)
         .collect()
 }
 

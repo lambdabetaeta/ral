@@ -343,7 +343,7 @@ impl AgentLog {
     }
 
     /// The record seam this session authors through — a cheap clone whoever
-    /// couples a live bus, records a display commit, or feeds the chopper
+    /// couples a live bus, records a display record, or feeds the chopper
     /// takes for themselves.
     pub fn record_emitter(&self) -> crate::record::Emitter {
         self.seam.clone()

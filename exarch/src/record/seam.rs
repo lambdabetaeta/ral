@@ -1,5 +1,5 @@
-//! The emit seam: [`Emitter::emit`] is the only publisher, and the only way
-//! to mint a [`Recorded`] from a live fact — append-then-publish as one
+//! The emit seam: [`Emitter::commit`] is the only publisher; [`Emitter::emit`]
+//! is a commit of one record. Append-then-publish is one
 //! critical section inside [`Log`]'s own mutex, so the channel a printer
 //! drains can never run ahead of the file a resume replays.
 //!
@@ -10,7 +10,7 @@
 //! sequence number.
 
 use super::log::Log;
-use super::{Cursor, Publish, Record, Recorded, Transient, Unavailable};
+use super::{Commit, Cursor, NonEmpty, Publish, Record, Recorded, Transient, Unavailable};
 use ral_core::own::OwnDir;
 use ral_core::process::ScopeNode;
 use std::fmt;
@@ -69,7 +69,7 @@ impl Emitter {
         self.log.attach(sink);
     }
 
-    /// A mirror's catch-up: where `after` stands, and the records past it.
+    /// A mirror's catch-up: where `after` stands, and the commits past it.
     /// See [`super::log::Log::since`].
     ///
     /// # Errors
@@ -77,10 +77,7 @@ impl Emitter {
     pub(crate) fn since(
         &self,
         after: Option<Cursor>,
-    ) -> io::Result<(
-        Cursor,
-        impl Iterator<Item = io::Result<Recorded<Record>>> + use<>,
-    )> {
+    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Commit>> + use<>)> {
         self.log.since(after)
     }
 
@@ -114,14 +111,24 @@ impl Emitter {
         self.log.poison_append();
     }
 
-    /// Append `record` and publish it, in that order, under one lock.
+    /// Append `records` as one commit and publish it under one lock:
+    /// the log holds all of them or none.
     ///
     /// # Errors
-    /// Propagates a failed append: a write to the one authoritative log is a
-    /// session error, never a shrug.
+    /// Propagates a failed append, which latches the writer.
+    pub fn commit(&self, records: NonEmpty<Record>) -> Result<Commit, Unavailable> {
+        self.log.append(records)
+    }
+
+    /// [`Self::commit`] of one record.
+    ///
+    /// # Errors
+    /// Propagates a failed append, which latches the writer.
     pub fn emit(&self, record: impl Into<Record>) -> Result<Recorded<Record>, Unavailable> {
-        let record = record.into();
-        Ok(Recorded::new(self.log.append(&record)?, record))
+        Ok(self
+            .commit(NonEmpty::one(record.into()))?
+            .into_records()
+            .first)
     }
 
     /// [`Self::emit`] where a failure needs no answer here: it has latched the

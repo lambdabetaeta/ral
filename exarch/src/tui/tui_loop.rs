@@ -130,7 +130,7 @@ pub fn run(
 /// Route one `Signal` to its `App` entry point.
 fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
     match sig {
-        Signal::Fact(id, fact) => tui.app.fact(id, &fact),
+        Signal::Commit(id, commit) => tui.app.commit(id, &commit),
         Signal::Born(id, born) => tui.app.born(id, &born),
         Signal::Transient(id, t) => tui.app.transient(id, t, rx),
     }
@@ -201,7 +201,7 @@ fn ui_loop(
                 // owner.  Streaming transients must not split a concurrent paste.
                 if matches!(
                     &sig,
-                    Signal::Fact(..) | Signal::Transient(_, Transient::Died)
+                    Signal::Commit(..) | Signal::Transient(_, Transient::Died)
                 ) {
                     deliver(tui, paste.flush_pending(), ctx)?;
                 }

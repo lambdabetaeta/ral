@@ -25,7 +25,56 @@ fn assert_locus(bytes: &[u8], locus: &Locus) {
     let end = usize::try_from(range.end).unwrap();
     let line = &bytes[start..end];
     assert_eq!(line.last(), Some(&b'\n'));
-    assert_eq!(Locus::digest_of(&line[..line.len() - 1]), locus.digest());
+    let (sum, _) = crate::record::parse_line(&line[..line.len() - 1]).unwrap();
+    assert_eq!(sum, locus.sum());
+}
+
+#[test]
+fn a_commit_is_published_as_one_signal() {
+    let dir = OwnDir::for_test("commit-one-signal").unwrap();
+    let emit = Emitter::create(&dir).unwrap();
+    let id = AgentId::new(7);
+    let (tx, rx) = channel();
+    emit.attach(Box::new(FleetSink {
+        id,
+        tx: tx.downgrade(),
+        meter: UsageMeter::default(),
+    }));
+    let returned = emit
+        .commit(NonEmpty {
+            first: Forensic::Error {
+                text: "first".into(),
+            }
+            .into(),
+            rest: vec![
+                Forensic::Error {
+                    text: "second".into(),
+                }
+                .into(),
+                Forensic::Error {
+                    text: "third".into(),
+                }
+                .into(),
+            ],
+        })
+        .unwrap();
+    let Signal::Commit(source, published) = rx.try_recv().unwrap() else {
+        panic!("one whole commit is published")
+    };
+    assert_eq!(source, id);
+    let loci = |commit: &Commit| {
+        commit
+            .records()
+            .iter()
+            .map(|rec| rec.locus().clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(loci(&published), loci(&returned));
+    assert_eq!(published.records().iter().count(), 3);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 }
 
 #[test]
@@ -45,15 +94,23 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
             meter: UsageMeter::default(),
         }));
         emit.check_available().unwrap();
-        let head = emit.emit(opening(&dir, id)).unwrap();
+        let head = emit
+            .commit(NonEmpty::one(opening(&dir, id).into()))
+            .unwrap();
         let retained = first
-            .emit(Display::Answer {
-                text: "retained".into(),
-            })
+            .commit(NonEmpty::one(
+                Display::Answer {
+                    text: "retained".into(),
+                }
+                .into(),
+            ))
             .unwrap();
         let committed = fs::read(&path).unwrap();
-        assert_eq!(retained.locus().bytes().end, committed.len() as u64);
-        let cursor = Cursor::start().past(retained.locus());
+        assert_eq!(
+            retained.records().first.locus().bytes().end,
+            committed.len() as u64
+        );
+        let cursor = Cursor::start().past(&retained);
 
         second.fail_after(allowed);
         let error = second
@@ -92,21 +149,27 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
         assert_eq!(from, Cursor::start());
         let records = records.collect::<io::Result<Vec<_>>>().unwrap();
         assert_eq!(records.len(), 2);
-        for (record, expected) in records.iter().zip([head.locus(), retained.locus()]) {
-            assert_eq!(record.locus(), expected);
-            assert_locus(&failed, record.locus());
+        for (record, expected) in records.iter().zip([
+            head.records().first.locus(),
+            retained.records().first.locus(),
+        ]) {
+            assert_eq!(record.records().first.locus(), expected);
+            assert_locus(&failed, record.records().first.locus());
         }
         let (from, records) = emit.since(Some(cursor)).unwrap();
         assert_eq!(from, cursor);
         assert_eq!(from.next(), 3);
         assert_eq!(records.count(), 0);
 
-        for expected in [head.locus(), retained.locus()] {
-            let Signal::Fact(source, fact) = rx.recv().unwrap() else {
+        for expected in [
+            head.records().first.locus(),
+            retained.records().first.locus(),
+        ] {
+            let Signal::Commit(source, commit) = rx.recv().unwrap() else {
                 panic!("only committed facts are published")
             };
             assert_eq!(source, id);
-            assert_eq!(fact.locus(), expected);
+            assert_eq!(commit.records().first.locus(), expected);
         }
         assert!(rx.try_recv().is_err());
 
@@ -129,7 +192,7 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
                 text: "after recovery".into(),
             })
             .unwrap();
-        assert_eq!(next.locus().seq().get(), cursor.next());
+        assert_eq!(next.locus().seq().commit(), cursor.next());
         assert_eq!(next.locus().bytes().start, committed.len() as u64);
         let recovered = fs::read(&path).unwrap();
         assert_eq!(next.locus().bytes().end, recovered.len() as u64);
@@ -139,10 +202,130 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
             .collect::<io::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(replayed.len(), 3);
-        assert_eq!(replayed[0].locus(), head.locus());
-        assert_eq!(replayed[1].locus(), retained.locus());
+        assert_eq!(replayed[0].locus(), head.records().first.locus());
+        assert_eq!(replayed[1].locus(), retained.records().first.locus());
         assert_eq!(replayed[2].locus(), next.locus());
     }
+}
+
+#[test]
+fn a_torn_last_commit_is_quarantined_whole() {
+    for cut in [true, false] {
+        let sessions = OwnDir::for_test(&format!("torn-commit-{cut}")).unwrap();
+        let id = AgentId::new(7);
+        let dir = sessions.make_dir(&id.to_string()).unwrap();
+        let path = dir.path().join(RECORD);
+        let emit = Emitter::create(&dir).unwrap();
+        let head = emit.emit(opening(&dir, id)).unwrap();
+        let start = usize::try_from(head.locus().bytes().end).unwrap();
+        let _commit = emit
+            .commit(NonEmpty {
+                first: Forensic::Error {
+                    text: "first record".into(),
+                }
+                .into(),
+                rest: vec![
+                    Forensic::Error {
+                        text: "second record".into(),
+                    }
+                    .into(),
+                ],
+            })
+            .unwrap();
+        drop(emit);
+        let mut bytes = fs::read(&path).unwrap();
+        if cut {
+            bytes.truncate(start + (bytes.len() - start) / 2);
+        } else {
+            let at = bytes
+                .windows(13)
+                .position(|text| text == b"second record")
+                .unwrap();
+            bytes[at] = b'S';
+        }
+        fs::write(&path, &bytes).unwrap();
+        let (_context, _selection) = model::resume(&sessions, id).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes[..start]);
+        assert_eq!(
+            fs::read(dir.path().join("record.jsonl.crash")).unwrap(),
+            bytes[start..]
+        );
+        let back = Log::read(dir.open(RECORD).unwrap(), &path)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].locus(), head.locus());
+    }
+}
+
+#[test]
+fn a_refused_resume_leaves_the_record_as_it_found_it() {
+    let sessions = OwnDir::for_test("refused-resume-unchanged").unwrap();
+    let id = AgentId::new(7);
+    let dir = sessions.make_dir(&id.to_string()).unwrap();
+    let path = dir.path().join(RECORD);
+    let emit = Emitter::create(&dir).unwrap();
+    let _head = emit.emit(opening(&dir, id)).unwrap();
+    let _a = emit
+        .commit(NonEmpty {
+            first: Forensic::Error {
+                text: "first record".into(),
+            }
+            .into(),
+            rest: vec![
+                Forensic::Error {
+                    text: "second record".into(),
+                }
+                .into(),
+            ],
+        })
+        .unwrap();
+    let b = emit
+        .commit(NonEmpty::one(Forensic::Cancelled.into()))
+        .unwrap();
+    drop(emit);
+    let mut bytes = fs::read(&path).unwrap();
+    let at = bytes
+        .windows(13)
+        .position(|text| text == b"second record")
+        .unwrap();
+    bytes[at] = b'S';
+    let start = usize::try_from(b.bytes().start).unwrap();
+    bytes.truncate(start + (bytes.len() - start) / 2);
+    fs::write(&path, &bytes).unwrap();
+    let refusal = model::resume(&sessions, id)
+        .err()
+        .expect("corrupt interior refused")
+        .to_string();
+    assert!(refusal.contains(&ral_core::path::shown(&path)), "{refusal}");
+    assert!(refusal.contains("line 2"), "{refusal}");
+    assert!(refusal.contains("corrupt"), "{refusal}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert!(!dir.path().join("record.jsonl.crash").exists());
+}
+
+#[test]
+fn a_log_of_an_older_exarch_is_refused_by_name() {
+    let sessions = OwnDir::for_test("older-resume").unwrap();
+    let id = AgentId::new(7);
+    let dir = sessions.make_dir(&id.to_string()).unwrap();
+    let path = dir.path().join(RECORD);
+    let mut bytes = serde_json::to_vec(&serde_json::json!({
+        "at_unix_ms": 0, "record": Record::Forensic(opening(&dir, id))
+    }))
+    .unwrap();
+    bytes.push(b'\n');
+    fs::write(&path, &bytes).unwrap();
+    let refusal = model::resume(&sessions, id)
+        .err()
+        .expect("older log refused")
+        .to_string();
+    assert!(refusal.contains(&ral_core::path::shown(&path)), "{refusal}");
+    assert!(refusal.contains("line 1"), "{refusal}");
+    assert!(refusal.contains("older exarch"), "{refusal}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert!(!dir.path().join("record.jsonl.crash").exists());
 }
 
 #[test]
@@ -157,7 +340,7 @@ fn availability_observation_does_not_wait_for_publication() {
     }
 
     impl Publish for Probe {
-        fn fact(&self, _: Recorded<Record>) {
+        fn commit(&self, _: Commit) {
             self.entered.send(()).unwrap();
             self.release
                 .recv_timeout(Duration::from_secs(5))
@@ -271,7 +454,7 @@ fn a_writer_fault_does_not_disable_an_independent_session() {
     assert!(broken.emit(Forensic::Cancelled).is_err());
     healthy.check_available().unwrap();
     let fact = healthy.emit(Forensic::Cancelled).unwrap();
-    assert_eq!(fact.locus().seq().get(), 1);
+    assert_eq!(fact.locus().seq().commit(), 1);
     let bytes = fs::read(healthy_dir.path().join(RECORD)).unwrap();
     assert_eq!(fact.locus().bytes(), 0..bytes.len() as u64);
     assert_locus(&bytes, fact.locus());

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 0e83863c
+verified_at_commit: 8cc1d0d9
 verified_at_date: 2026-10-29
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
+anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::record_at, Signal::Commit, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, Fleet::lodge, Fatal]
 ---
 
 # Session record: one seam, one log
@@ -16,18 +16,18 @@ operational path behind the [[map/exarch/frontend|frontend]],
 
 ## The seam
 
-`Emitter::emit` takes `impl Into<Record>`, so a live producer can append only
-a `Protocol`, `Display`, or `Forensic` record, and returns the
-`Recorded<Record>` it minted or `Unavailable`. It delegates to
-`record::Log::append`, whose mutex protects the whole critical section:
+**One commit is one sealed line**
+([[decisions/261029_a-line-is-a-commit|a-line-is-a-commit]]). `Emitter::commit`
+takes `NonEmpty<Record>` and returns its `Commit` or `Unavailable`; `emit`
+commits one `Protocol`, `Display`, or `Forensic` record and returns its
+`Recorded<Record>`. `Log::append` holds its mutex across:
 
-1. Serialize the record under its append timestamp as an `Entry` envelope, from
-   a borrow.
-2. Write the complete serialized line directly to its owned `File`.
-3. Advance the `Seq` and byte cursor and build the `Recorded<Record>` locus.
-4. Meter usage where applicable and publish `Signal::Fact(AgentId, recorded)`
-   through the attached weak fleet sink before releasing the lock; the record
-   is cloned only for that channel.
+1. Serialize the records under one timestamp and seal the commit with its `Sum`.
+2. Write the one line to the owned `File`.
+3. Advance the commit count and byte cursor and build the `Commit`; each
+   `Locus` names `(commit, index)`, the line's bytes and sum.
+4. Meter usage per record and publish the whole commit as one `Signal::Commit`
+   through the attached fleet sink before releasing the lock.
 
 **One `Fatal<Unavailable>` holds the writer's first failure.** It is a leaf lock
 beside the append mutex and retains the original `io::Error`; the first
@@ -36,7 +36,7 @@ append-lock poison is latched when first met. A durable record refused by
 the live fold latches too. Later appends return that same failure before
 serialization, writing or publication. Availability observation takes no
 append lock; append checks the latch under its lock. Failed appends advance
-neither committed sequence nor byte cursor, and the owned `File` has no
+neither the commit count nor the byte cursor, and the owned `File` has no
 user-space buffer to flush on drop.
 
 The latch ends the life node `Fleet::lodge` mints, handed to the writer by
@@ -58,16 +58,14 @@ Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
 can catch up. The sink is attachable because the session log outlives a TUI
 session bus and the headless per-exchange buses that are attached to it in
-turn. A log keeps what it appended while it had no sink at all — a session's
-head bookend, a fork's inherited context — and `attach` publishes that backlog
-in order through the arriving sink, so the seam delivers every record to the
-sink exactly once, whenever the sink arrives. Redelivery is safe because the
+turn. What a log appends with no sink attached reaches no channel; a mirror
+reads it from the file with `Emitter::since`. Redelivery is safe because the
 view fold ignores a `Seq` it has already folded: a resumed memo seeded from
 the file is not stepped a second time by the same head records.
 
 `Emitter::transient` uses the same log mutex for ordering but never writes a
-line or takes a sequence number. It publishes the other channel passenger,
-`Signal::Transient(AgentId, Transient)`. A `Signal::Fact` is the recorded,
+line or takes a commit number. It publishes the other channel passenger,
+`Signal::Transient(AgentId, Transient)`. A `Signal::Commit` is the recorded,
 stamped, file-backed half; a `Signal::Transient` is live-only and has no
 replay path.
 
@@ -87,7 +85,7 @@ class that can say it.**
 - `Display` is worker-authored presentation data that has *no* protocol form:
   chopped prose and reasoning, tool calls and each call's `Verdict`, one
   observation per observation, cards, notices, done outcomes, and other committed
-  rows. `record/commit.rs` does the chopping
+  rows. `record/stream.rs` does the chopping
   before the fact reaches the seam; grouping a call's effects is the frontend's,
   derived online ([[map/exarch/io-surface|io-surface]]). Cards and observations
   carry their round-trippable data, not a pre-rendered terminal image; the view
@@ -150,10 +148,10 @@ to reconstruct them.
 
 ## The two folds
 
-`record::Fold` gives both projections one driver. `record::replay` streams
-`record::Log::read` one line at a time, reconstructs each `Recorded<Record>`,
-and calls the fold's exhaustive `step`; a parse error or an unrecognised
-record is a `Refusal`, so replay does not silently skip a vocabulary change.
+`record::Fold` gives both projections one driver. `record::Log::read` reads
+one commit at a time and flattens it into its records; `record::replay` calls
+the fold's exhaustive `step` for each. A fold sees no commit boundary; a parse
+error or unrecognised record is a `Refusal`, never a silent skip.
 
 `Fold::step` takes each record by value, and `replay` hands over the ones it
 reads. The model path is `record::Model::step` over `Protocol` records only.
@@ -288,9 +286,10 @@ if it has one and otherwise this session's `source` id beside the `Locus` of eve
 record it held; the records leave memory and nothing durable is touched. The id,
 not a path, is what is stored (and persisted in an `Inherited` link), so a run
 directory can be moved and every pointer in it still reads back. Every
-read of a range checks the record's bytes against the digest the `Locus`
-carries, *before* the parse, so a range that no longer names what it
-measured — a copied session directory, an edited log — is
+read-back through `Log::record_at` checks that the range still holds a line
+sealed by the `Sum` its `Locus` carries, *before* parsing records, so a range
+that no longer names what it measured — a copied session directory, an edited
+log — is
 refused as the mismatch it is rather than answered with whatever now lies at
 those offsets. The reader reads a turn at a time, so a search never holds more
 than one turn, and it holds one descriptor, reopening only where
@@ -320,7 +319,7 @@ check, and `holder` would serve that check anyway; it lives in
 it.
 
 **A link is the one record whose meaning lies in another file.** Its step reads
-the parent's records through digest-checked pointers (`read_seeds`, after
+the parent's records through sum-checked pointers (`read_seeds`, after
 `judge` and before any mutation, so a failed read leaves the structure as it
 was), keeps the *admissible prefix* of every resident row —
 a parent's spawning batch, or an ancestor's turn cut the same way, loses its
@@ -369,9 +368,8 @@ no residue, and stay in the transcript.** `Protocol::Cleared` is
   is being written, so `` `read `` does not refuse it as "being written now".
 - A cleared child keeps its parentage: `Cleared` changes the context, not the
   lineage, so a cleared fork resumes as a fork and not as a root.
-- Old logs are refused: `Log::records` fails on a line this exarch does not
-  write, with a message asking whether an older exarch recorded it. The vocabulary
-  carries no reader for earlier shapes.
+- Old logs are refused: the reader fails on the first line that is not a
+  commit this exarch writes, asking whether an older exarch recorded it.
 
 Withdrawal keeps the law of
 [[decisions/260906_context-rollover|context-rollover]]: every closed record is
@@ -421,19 +419,22 @@ which keeps the link the first protocol record of a fork, and a resume records
 The price is the prompt's size, once per log (about 50 KB), and again on each
 change.
 
-`record::model::resume` quarantines a torn crash tail, checks the file's first
-record heads a root, and streams every record through `Model::step` and every
-forensic one through a `Selection`. `Log::read` reads only through the last
-newline, so an unterminated tail is never parsed; one function in `log.rs`
-answers that length for the reader and for the quarantine. There is no second
-fold and nothing to compare: what guards a read-back is the digest, at the moment
-of the read, where the risk is. A failed live append leaves at most one terminal
-partial line: that writer never appends behind it. Live catch-up remains
-bounded by the last committed byte cursor. Explicit resume quarantines an
-unterminated tail, refuses any complete malformed line, and reopens at the
-measured complete prefix. A complete valid line written before a crash but
-not yet published is recovered by replay. A missing `record.jsonl` is a named refusal, not
-an invitation to start an empty resumed session. `AgentLog::resume` takes
+**Resume folds before quarantine, so a refusal leaves the file unchanged.**
+`record::model::resume` checks the root and folds records through `Model::step`
+and `Selection`; `Log::complete_len` answers where whole commits end for reader
+and quarantine.
+
+- An unterminated last line, or one with invalid JSON or a failed sum, is
+  *torn* and never read; resume quarantines it.
+- Earlier damage is refused as *corrupt*.
+- Valid JSON of the wrong shape and sealed commits with unreadable records
+  are refused as *foreign* wherever they stand.
+
+Read-back is guarded by the sum at the moment of the read. A failed live
+append leaves at most one terminal partial line; live catch-up is bounded by
+the committed byte cursor. A complete valid line written before a crash but
+not yet published is recovered by replay. A missing `record.jsonl` is a named
+refusal, not an invitation to start an empty resumed session. `AgentLog::resume` takes
 the session id alone: the name is `live_roots`', read off the same head record,
 and `live_roots` refuses a session whose record does not parse rather than
 hiding it.
@@ -464,8 +465,9 @@ is private to the fold, and the memo keeps a bounded resident window
 Each step reports what it did as a `Delta`: `Opened` a block, `Grew` the lane
 the tail held, `Patched` a call with its verdict, `Rewound` or `Cleared` the blocks, or `Quiet`. A frontend is a
 `bus::Sink`: it owns its own `Blocks` memo, steps it through
-`Sink::fact(id, rec)` — the witnessed record, since a fold is stepped by the
-record *and* its locus — and draws that increment, so a frontend is itself a
+`Sink::fact(id, rec)` for each record of a commit within one `Sink::accept` —
+the witnessed record, since a fold is stepped by the record *and* its locus —
+and draws that increment, so a frontend is itself a
 fold over the one log, and cannot invent a third block projection: it renders
 from `BlockKind` off its memo, never from the record vocabulary
 ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
@@ -480,7 +482,7 @@ incident, with deliberation and the work it ordered collapsed into a group as
 they land; headless keeps one memo per source agent and prints each opened
 block.
 
-Live and replay use the same view fold. The TUI's `App::fact` and
+Live and replay use the same view fold. The TUI's `App::commit` and
 `App::transient` are the two distinct routes: durable blocks are fold-backed,
 while an open answer/thinking line or chrome row remains provisional until a
 later record or boundary resolves it.
@@ -488,8 +490,8 @@ later record or boundary resolves it.
 ## Resume, clear and export
 
 **Resume and a live tab are one construction.** A tab's `Scrollback` is a
-cursor over the log: `Scrollback::fact` steps a record that is next, ignores one
-heard twice, and otherwise catches up from the file, so birth, a gap and a
+cursor counted in commits: `Scrollback::commit` steps a commit that is next,
+ignores one heard twice, and otherwise catches up from the file, so birth, a gap and a
 resumed session all read the history exactly as if it had arrived live. A
 resumed root's tab reads only the bytes that predate this run and then draws the
 "resumed" note at the true boundary. Cumulative usage comes from the replayed
@@ -523,15 +525,16 @@ hands each block it lets go to a `Render`er — `Plain` forces every block whole
 the script and prose the screen reduces — behind a `Format` seam that admits
 HTML later. Because the mirror retires its blocks on a clear, an export keeps the
 transcript from before it, then `[cleared]`, then what follows. A torn tail is
-never parsed.
+never read.
 
 The resulting trust boundary is small: `record.jsonl` is the durable fact
-stream, `Record` classes say which fold may project each fact, `Signal::Fact`
-delivers stamped commits live, and `Transient` carries only process-lifetime
+stream, `Record` classes say which fold may project each fact, `Signal::Commit`
+delivers whole commits live, and `Transient` carries only process-lifetime
 edges.
 
-See [[decisions/260814_one-seam-one-log|one-seam-one-log]] for the seam and
-fold law, [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]] for the
+See [[decisions/261029_a-line-is-a-commit|a-line-is-a-commit]] for the commit
+boundary, [[decisions/260814_one-seam-one-log|one-seam-one-log]] for the seam
+and fold law, [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]] for the
 single durable record, [[decisions/260816_the-window-is-not-the-transcript|the-window-is-not-the-transcript]]
 for the window, and
 [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]] for

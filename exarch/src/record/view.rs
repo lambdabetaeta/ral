@@ -1,5 +1,5 @@
 //! The view fold: folds the [`Protocol`] facts a scrollback draws, the
-//! [`Display`] commits and the [`Forensic`] rows into [`Blocks`] — the memo
+//! [`Display`] records and the [`Forensic`] rows into [`Blocks`] — the memo
 //! `tui` and `headless` each keep their own of, stepped by the record and read
 //! through [`BlockKind`].
 //!
@@ -17,7 +17,7 @@ use crate::provider::{ProviderError, Usage};
 use ral_core::data::FOValue;
 use serde::{Deserialize, Serialize};
 
-/// What a [`Block`] carries: the [`Display`] commits verbatim, plus the
+/// What a [`Block`] carries: the [`Display`] records verbatim, plus the
 /// [`Forensic`] rows this fold draws — errors, notes, nudge marks.
 ///
 /// Field shapes mirror [`Display`] and [`Forensic`] exactly; this fold
@@ -163,7 +163,7 @@ pub enum Delta {
 /// lets it go, and no printer keeps a second trim of its own.
 pub const BLOCKS_WINDOW: usize = 1000;
 
-/// The view fold's memo: the last [`BLOCKS_WINDOW`] commits and drawn
+/// The view fold's memo: the last [`BLOCKS_WINDOW`] blocks and drawn
 /// breadcrumbs this session has recorded, in log order.
 #[derive(Default)]
 #[allow(
@@ -256,7 +256,7 @@ impl Blocks {
     /// so a reader sees the text as it is spoken.  A block is the run of
     /// records that meet: any record of another kind — a tool call, a prompt
     /// — ends the run, and the next line of prose opens a fresh block.  This
-    /// is what frees the commit producer from having to cut anywhere
+    /// is what frees the stream producer from having to cut anywhere
     /// meaningful, and it keeps a block's `Seq` the one it opened with, so a
     /// dial set on it survives the growth.
     fn push(&mut self, seq: Seq, kind: BlockKind) -> Delta {

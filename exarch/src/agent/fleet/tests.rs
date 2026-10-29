@@ -42,7 +42,7 @@ fn a_claim_counts_construction_until_it_is_dropped() {
 fn death_is_published_after_the_engine_drops_but_before_the_last_claim_releases() {
     use crate::agent::engine::EngineKind;
     use crate::agent::testkit::bare_transport;
-    use crate::record::{Publish, Record, Recorded, Transient};
+    use crate::record::{Commit, Publish, Transient};
     use ral_core::carrier::IdentityTransport;
     use std::sync::{Weak, mpsc};
 
@@ -58,8 +58,8 @@ fn death_is_published_after_the_engine_drops_but_before_the_last_claim_releases(
     }
 
     impl Publish for DeathWitness {
-        fn fact(&self, recorded: Recorded<Record>) {
-            panic!("claim release must publish no recorded fact: {recorded:?}");
+        fn commit(&self, commit: Commit) {
+            panic!("claim release must publish no commit: {commit:?}");
         }
 
         fn transient(&self, transient: Transient) {
@@ -128,7 +128,7 @@ fn death_is_published_after_the_engine_drops_but_before_the_last_claim_releases(
 #[test]
 fn rearming_death_publication_replaces_the_sink_and_publishes_once() {
     use crate::agent::testkit::bare_transport;
-    use crate::record::{Publish, Record, Recorded, Transient};
+    use crate::record::{Commit, Publish, Transient};
     use std::sync::mpsc;
 
     struct DeathCount {
@@ -137,8 +137,8 @@ fn rearming_death_publication_replaces_the_sink_and_publishes_once() {
     }
 
     impl Publish for DeathCount {
-        fn fact(&self, recorded: Recorded<Record>) {
-            panic!("claim release must publish no recorded fact: {recorded:?}");
+        fn commit(&self, commit: Commit) {
+            panic!("claim release must publish no commit: {commit:?}");
         }
 
         fn transient(&self, transient: Transient) {

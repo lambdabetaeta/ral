@@ -87,7 +87,7 @@ pub(crate) fn spawn_root(
         Memory::Amnemon => "/new",
         Memory::Mnemon => "/branch",
     };
-    // The row's display commit, authored beside the rail row `spawn_async`
+    // The row's display record, authored beside the rail row `spawn_async`
     // emits from the same inputs; a harness spawn's recorded row is the
     // desk's own HarnessCall commit instead.
     session

@@ -1,8 +1,9 @@
 //! The one seam, one log: every fact a session records crosses here, once,
-//! as a [`Record`].
+//! as a [`Record`]. A record lands in a [`Commit`], one line of the log,
+//! alone or beside the records it must not be seen without.
 //!
 //! A `Record` is one of three classes: [`Protocol`] (verbatim payloads the
-//! model fold folds), [`Display`] (commits the view fold folds), [`Forensic`]
+//! model fold folds), [`Display`] (presentation the view fold folds), [`Forensic`]
 //! (breadcrumbs neither fold projects but which are worth keeping).  Nothing
 //! outside this module tree may mint a fourth class, invent a variant absent
 //! from the disposition, or read the log back except through [`replay()`].
@@ -13,14 +14,15 @@
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::wildcard_enum_match_arm)]
 
-pub(crate) mod commit;
 pub mod fault;
 mod log;
 pub(crate) mod model;
+mod non_empty;
 mod replay;
 mod seam;
 mod selection;
 mod session;
+pub(crate) mod stream;
 mod view;
 
 #[cfg(test)]
@@ -28,7 +30,10 @@ mod view;
 mod tests;
 
 pub use log::Unavailable;
+#[cfg(test)]
+pub(crate) use log::{commit_line, parse_line};
 pub use model::{ItemKind, Linked, Location, Pointer, Residue, Span, SpanRow, TurnRow};
+pub use non_empty::NonEmpty;
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
 pub use selection::Selection;
@@ -136,11 +141,10 @@ impl AgentState {
     }
 }
 
-/// Where the seam publishes a fact it has just appended, and the transients
-/// that ride beside them: the one way onto the live channel, attachable after
-/// the log exists because the log outlives any bus.
+/// Where the seam publishes a commit it has just appended, whole, and the
+/// transients that ride beside it.
 pub(crate) trait Publish: Send {
-    fn fact(&self, recorded: Recorded<Record>);
+    fn commit(&self, commit: Commit);
     fn transient(&self, t: Transient);
 }
 
@@ -154,20 +158,6 @@ pub enum Record {
     Protocol(Protocol),
     Display(Display),
     Forensic(Forensic),
-}
-
-/// The line `record.jsonl` actually holds: a [`Record`] with the wall-clock
-/// moment it was appended.  Written and read by [`log`] alone — every other
-/// module sees a bare `Record`, since a resume, a fold, and a channel
-/// publish have no use yet for the moment a line was appended.
-///
-/// Deliberately not `#[serde(flatten)]`: flattening would swallow the class
-/// enums' own `deny_unknown_fields` into this envelope's unknown-key check,
-/// which defeats the reason that attribute is on them.
-#[derive(Serialize, Deserialize)]
-struct Entry<R> {
-    at_unix_ms: u64,
-    record: R,
 }
 
 impl From<Protocol> for Record {
@@ -308,7 +298,7 @@ pub enum Settlement {
     Failed { reason: String },
 }
 
-/// The commits the view fold needs — cut, coalesced, and reduced *before*
+/// The records the view fold needs — cut, coalesced, and reduced *before*
 /// they reach the seam, so a resumed scrollback matches what the user
 /// actually saw.
 ///
@@ -369,7 +359,7 @@ pub enum Display {
         change: Change,
     },
     /// A render document a ral kit composed for the `surface` builtin: the
-    /// mark tree *is* the fact here, so unlike the other three commits in
+    /// mark tree *is* the fact here, so unlike the other records in
     /// this list it is what gets recorded, as the typed card itself.
     Card {
         card: Card,
@@ -727,117 +717,183 @@ impl RecordedModel {
     }
 }
 
-/// A record's position in the log — the line it was assigned at append.
+/// A record's place in the log: its commit (the line it was appended in,
+/// counted from 1) and its index there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Seq(u64);
+pub struct Seq {
+    // Declaration order is the derived lexicographic order.
+    commit: u64,
+    index: usize,
+}
 
 impl Seq {
-    pub(crate) fn new(n: u64) -> Self {
-        Self(n)
+    pub(crate) fn new(commit: u64, index: usize) -> Self {
+        Self { commit, index }
     }
 
-    pub fn get(self) -> u64 {
-        self.0
+    pub fn commit(self) -> u64 {
+        self.commit
+    }
+
+    pub fn index(self) -> usize {
+        self.index
     }
 }
 
-/// How far a reader has come through one log: the last record of it read —
-/// its [`Seq`] and the byte its line ends at — if any.
+/// How far a reader has come through one log: the last commit it read, by
+/// its number and the byte its line ends at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
-    seq: u64,
+    commit: u64,
     end: u64,
 }
 
 impl Cursor {
-    /// The head of the log, before its first record.
+    /// The head of the log, before its first commit.
     pub fn start() -> Self {
-        Self { seq: 0, end: 0 }
+        Self { commit: 0, end: 0 }
     }
 
-    /// The [`Seq`] the log's next record carries.
+    /// The number the log's next commit carries.
     pub fn next(self) -> u64 {
-        self.seq + 1
+        self.commit + 1
     }
 
-    /// Past `locus`.
+    /// Past `commit`.
     #[must_use]
-    pub fn past(self, locus: &Locus) -> Self {
+    pub fn past(self, commit: &Commit) -> Self {
         Self {
-            seq: locus.seq().get(),
-            end: locus.bytes().end,
+            commit: commit.number(),
+            end: commit.bytes().end,
         }
     }
 }
 
-/// Where one record lives: its [`Seq`], the byte range `append` wrote it to,
-/// and a digest of its own bytes that a stale range fails rather than reads
-/// past.
+/// The first 64 bits of a commit's blake3, as 16 lowercase hex digits.
+/// Guards against damage, not an editor who can rewrite the sum too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sum(u64);
+
+impl Sum {
+    fn of(bytes: &[u8]) -> Self {
+        let &[a, b, c, d, e, f, g, h, ..] = blake3::hash(bytes).as_bytes();
+        Self(u64::from_be_bytes([a, b, c, d, e, f, g, h]))
+    }
+}
+
+impl fmt::Display for Sum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+impl Serialize for Sum {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Sum {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error as _, Unexpected};
+        let text = String::deserialize(deserializer)?;
+        let invalid =
+            || D::Error::invalid_value(Unexpected::Str(&text), &"16 lowercase hex digits");
+        if text.len() != 16
+            || !text
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(invalid());
+        }
+        u64::from_str_radix(&text, 16)
+            .map(Self)
+            .map_err(|_| invalid())
+    }
+}
+
+/// Where one record lives: its [`Seq`], and the byte range and [`Sum`] of
+/// its line, so a stale range fails rather than answering with a neighbour.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[must_use]
 pub struct Locus {
     seq: Seq,
     bytes: Range<u64>,
-    /// Blake3 of the record's own bytes, truncated: a range read back
-    /// against a file it was not measured in — a copied directory, an
-    /// edited log, a torn write — fails to match rather than returning a
-    /// plausible neighbour.
-    digest: u64,
+    sum: Sum,
 }
 
 impl Locus {
-    /// `body` is the record's JSON without its line terminator; the range it
-    /// occupies includes that terminator.
-    pub(crate) fn over(seq: Seq, at: u64, body: &[u8]) -> Self {
-        Self {
-            seq,
-            bytes: at..at + body.len() as u64 + 1,
-            digest: Self::digest_of(body),
-        }
-    }
-
-    /// The digest a body must hash to. Truncated to 64 bits: this guards
-    /// against a stale offset, not an adversary.
-    pub(crate) fn digest_of(body: &[u8]) -> u64 {
-        u64::from_le_bytes(
-            blake3::hash(body).as_bytes()[..8]
-                .try_into()
-                .expect("blake3 digests are 32 bytes"),
-        )
-    }
-
-    /// A locus that names no bytes. The view fold never reads a record back
-    /// through one, so its tests need no file behind it — the one locus not
-    /// derived from a record's own bytes, and `cfg(test)` so no production
-    /// path can mint one.
+    /// A locus with no file behind it, for folds that never read back.
     #[cfg(test)]
     pub(crate) fn placeholder(seq: Seq) -> Self {
         Self {
             seq,
             bytes: 0..0,
-            digest: Self::digest_of(&[]),
+            sum: Sum::of(&[]),
         }
     }
 
     pub fn seq(&self) -> Seq {
         self.seq
     }
-
     pub fn bytes(&self) -> Range<u64> {
         self.bytes.clone()
     }
+    pub fn sum(&self) -> Sum {
+        self.sum
+    }
+}
 
-    pub fn digest(&self) -> u64 {
-        self.digest
+/// One line of the log: records appended together, each named by its [`Locus`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct Commit(NonEmpty<Recorded<Record>>);
+
+impl Commit {
+    #[cfg(test)]
+    pub(crate) fn placeholder(number: u64, records: NonEmpty<Record>) -> Self {
+        Self::new(number, 0..0, Sum::of(&[]), records)
+    }
+
+    /// The records of line `number`, which spans `bytes` and is sealed by `sum`:
+    /// the one place a [`Locus`] is minted.
+    fn new(number: u64, bytes: Range<u64>, sum: Sum, records: NonEmpty<Record>) -> Self {
+        let locus = |index| Locus {
+            seq: Seq::new(number, index),
+            bytes: bytes.clone(),
+            sum,
+        };
+        let NonEmpty { first, rest } = records;
+        Self(NonEmpty {
+            first: Recorded::new(locus(0), first),
+            rest: (1..)
+                .zip(rest)
+                .map(|(index, record)| Recorded::new(locus(index), record))
+                .collect(),
+        })
+    }
+
+    /// The line it occupies, counted from 1.
+    pub fn number(&self) -> u64 {
+        self.0.first.locus().seq().commit()
+    }
+    /// Its line's bytes, terminator included.
+    pub fn bytes(&self) -> Range<u64> {
+        self.0.first.locus().bytes()
+    }
+    pub fn records(&self) -> &NonEmpty<Recorded<Record>> {
+        &self.0
+    }
+    pub fn into_records(self) -> NonEmpty<Recorded<Record>> {
+        self.0
     }
 }
 
 /// A record witnessed by the seam: its [`Locus`] beside the value `emit` was
 /// given.
 ///
-/// Built only at append time (by [`Emitter::emit`]) and at replay time
-/// (reconstructing history from the file) — nowhere else, since nothing but
-/// those two moments has a `Locus` to attach.
+/// Its locus comes from a [`Commit`], where a line is appended or read back,
+/// or from a [`Pointer`] the transcript reader follows.
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct Recorded<R>(Locus, R);
@@ -864,8 +920,8 @@ impl<R> Recorded<R> {
     }
 }
 
-/// A named commit in the view fold's memo — a block is named by its own
-/// commit's [`Seq`].
+/// A named block in the view fold's memo, named by
+/// the [`Seq`] of the record that opened it.
 ///
 /// A result patch carries its call's `BlockId`, and the fold tolerates a
 /// patch whose target it has already evicted.
@@ -900,28 +956,6 @@ pub trait Fold {
     /// Returns [`Refusal`] when this fold does not recognise the record —
     /// during replay that refuses the session rather than skip it silently.
     fn step(memo: &mut Self::Memo, record: Recorded<Record>) -> Result<(), Refusal>;
-}
-
-/// The other half of [`read_records`]: a test that hand-writes or
-/// hand-edits `record.jsonl` needs the envelope shape too, without reaching
-/// for the private [`Entry`] type itself.
-#[cfg(test)]
-pub(crate) fn envelope_line(record: &Record) -> Vec<u8> {
-    serde_json::to_vec(&Entry {
-        at_unix_ms: 0,
-        record,
-    })
-    .expect("a Record always serialises")
-}
-
-/// The read-side twin of [`envelope_line`], for a test that pulls one line
-/// back off a live-written `record.jsonl` to inspect or edit it.
-///
-/// # Errors
-/// Returns `Err` when `line` does not parse as the `Entry` envelope.
-#[cfg(test)]
-pub(crate) fn record_from_line(line: &[u8]) -> serde_json::Result<Record> {
-    serde_json::from_slice::<Entry<Record>>(line).map(|entry| entry.record)
 }
 
 #[cfg(test)]
