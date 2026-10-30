@@ -128,6 +128,7 @@ fn drain_observes_the_queued_second_resumed_root_before_idle_and_settlement() {
         search: false,
         factory: None,
         bureau: Arc::new(Bureau::scripted([])),
+        max_tokens: None,
         roles: Roles::default(),
     };
     let engine = || RootEngine::Identity {

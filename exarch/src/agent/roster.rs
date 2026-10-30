@@ -6,8 +6,8 @@ use crate::record::ChildStatus;
 use std::time::Duration;
 
 impl AgentInfo {
-    fn of(agent: &AgentHandle) -> Self {
-        let status = agent.status();
+    fn of(agent: &AgentHandle) -> Option<Self> {
+        let status = agent.status().ok()?;
         let state = if status.working() {
             if status.busy {
                 RosterState::WaitingOnAgents
@@ -19,7 +19,7 @@ impl AgentInfo {
         } else {
             RosterState::Waiting
         };
-        Self {
+        Some(Self {
             name: agent.0.name.clone(),
             spawner: agent
                 .0
@@ -30,7 +30,7 @@ impl AgentInfo {
             elapsed: agent.elapsed(),
             state,
             idle: status.rest.map_or(Duration::ZERO, |at| at.elapsed()),
-        }
+        })
     }
 }
 pub(crate) fn listing(reader: &AgentHandle, fleet: &Fleet) -> Vec<AgentInfo> {
@@ -40,22 +40,27 @@ pub(crate) fn listing(reader: &AgentHandle, fleet: &Fleet) -> Vec<AgentInfo> {
         .live()
         .iter()
         .filter(|node| node.root().id() == root)
-        .map(AgentInfo::of)
+        .filter_map(AgentInfo::of)
         .collect()
 }
 pub(crate) fn summary(reader: &AgentHandle, fleet: &Fleet) -> Summary {
-    let live = fleet.registry.live();
     let root = reader.root().id();
+    let counted: Vec<_> = fleet
+        .registry
+        .live()
+        .into_iter()
+        .filter(|node| node.root().id() == root)
+        .filter_map(|node| {
+            let status = node.status().ok()?;
+            Some((node, status))
+        })
+        .collect();
+    let reader_counted = counted.iter().any(|(node, _)| node.id() == reader.id());
     Summary {
-        live: live
+        live: counted.len() - usize::from(reader_counted),
+        replied: counted
             .iter()
-            .filter(|node| node.root().id() == root)
-            .count()
-            .saturating_sub(1),
-        replied: live
-            .iter()
-            .filter(|node| {
-                let status = node.status();
+            .filter(|(node, status)| {
                 node.parent()
                     .is_some_and(|parent| parent.id() == reader.id())
                     && !status.working()

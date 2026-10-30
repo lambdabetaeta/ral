@@ -115,6 +115,7 @@ impl Conversation {
             // Guest::start installs the factory once its machine exists.
             factory: None,
             bureau,
+            max_tokens: None,
             roles: exarch::provider::roles::Roles::default(),
         };
         let guest = Guest::start(

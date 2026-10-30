@@ -8,7 +8,7 @@ use crate::host::Host;
 use crate::port::{Port, Signal};
 use crate::provider::scripted::{Reply, Script};
 use crate::provider::{Account, Bureau, Choice, Login, Pick, Tuning, Via};
-use crate::record::{AgentId, ChildStatus, Protocol, Voice};
+use crate::record::{AgentId, ChildStatus};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,7 +85,8 @@ fn resources_command_runs_at_gated_rest_once_without_opening_a_job() {
     assert!(rows.iter().any(|row| row.label == "workers.running"));
     assert!(!records.iter().any(|record| matches!(
         record,
-        Record::Forensic(Forensic::JobOpened | Forensic::TurnStarted { .. })
+        Record::Control(crate::record::Control::JobOpened)
+            | Record::Forensic(Forensic::TurnStarted { .. })
     )));
 }
 
@@ -104,7 +105,8 @@ fn rewind_past_the_last_turn_reports_the_bad_anchor() {
         Record::Forensic(Forensic::Error { text }) if text.contains("turn 7"))));
     assert!(!records.iter().any(|record| matches!(
         record,
-        Record::Forensic(Forensic::JobOpened | Forensic::TurnStarted { .. })
+        Record::Control(crate::record::Control::JobOpened)
+            | Record::Forensic(Forensic::TurnStarted { .. })
     )));
 }
 
@@ -169,12 +171,21 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
     }
 }
 
+fn is_pick(selected: &crate::provider::Selected, pick: &Pick) -> bool {
+    selected.model == pick.choice.model
+        && selected.account == pick.choice.account.id.as_str()
+        && selected.via == pick.choice.via
+        && selected.tuning == pick.tuning
+}
 fn wait_for_pick(port: &Port, id: AgentId, pick: &Pick) {
-    wait_until(|| port.row(id).is_some_and(|row| row.pick == *pick));
+    wait_until(|| port.row(id).is_some_and(|row| is_pick(&row.selected, pick)));
 }
 
 fn settled(record: &Record) -> bool {
-    matches!(record, Record::Forensic(Forensic::JobSettled { .. }))
+    matches!(
+        record,
+        Record::Control(crate::record::Control::JobSettled { .. })
+    )
 }
 
 #[test]
@@ -206,18 +217,19 @@ fn model_at_rest_records_its_built_selection_in_its_own_log_then_runs_on_the_pub
         let host = testkit::host(session);
         let id = host.roots()[0];
         let port = host.port();
-        assert_ne!(port.row(id).unwrap().pick, expected);
+        assert!(!is_pick(&port.row(id).unwrap().selected, &expected));
         port.command(id, Command::Model(requested)).unwrap();
         let records = until_record(&host, id, |record| {
-            matches!(record, Record::Forensic(Forensic::ModelChanged { .. }))
+            matches!(
+                record,
+                Record::Control(crate::record::Control::ModelChanged { .. })
+            )
         });
         assert!(records.iter().any(|record| matches!(record,
-            Record::Forensic(Forensic::ModelChanged { model, context_window, label, service, account, via })
-            if model == &expected.choice.model && context_window.is_none()
-                && label == &crate::provider::identity::label(&expected.choice.account, &[])
-                && service == expected.choice.account.service.name.as_str()
-                && account == expected.choice.account.id.as_str()
-                && via == &expected.choice.via
+            Record::Control(crate::record::Control::ModelChanged { selected })
+            if is_pick(selected, &expected) && selected.context_window.is_none()
+                && selected.label == crate::provider::identity::label(&expected.choice.account, &[])
+                && selected.service == expected.choice.account.service.name.as_str()
         )));
         wait_for_pick(&port, id, &expected);
         port.submit(id, "use the new provider".into()).unwrap();
@@ -229,14 +241,19 @@ fn model_at_rest_records_its_built_selection_in_its_own_log_then_runs_on_the_pub
             Record::Forensic(Forensic::TurnStarted { tuning, via, .. }) if tuning == &expected.tuning && via == &expected.choice.via
         )));
         let own_log = crate::record::read_records(&dir.path().join(crate::record::RECORD)).unwrap();
-        assert_eq!(own_log.iter().filter(|record| matches!(record, Record::Forensic(Forensic::ModelChanged { model, via, .. }) if model == &expected.choice.model && via == &expected.choice.via)).count(), 1);
+        assert_eq!(own_log.iter().filter(|record| matches!(record, Record::Control(crate::record::Control::ModelChanged { selected }) if is_pick(selected, &expected))).count(), 1);
         let switched = own_log
             .iter()
-            .position(|record| matches!(record, Record::Forensic(Forensic::ModelChanged { .. })))
+            .position(|record| {
+                matches!(
+                    record,
+                    Record::Control(crate::record::Control::ModelChanged { .. })
+                )
+            })
             .unwrap();
         let job = own_log
             .iter()
-            .position(|record| matches!(record, Record::Forensic(Forensic::JobOpened)))
+            .position(|record| matches!(record, Record::Control(crate::record::Control::JobOpened)))
             .unwrap();
         assert!(switched < job, "the rest-time switch opens no exchange");
         assert_eq!(host.end(), [] as [String; 0]);
@@ -253,8 +270,18 @@ fn a_refused_model_build_records_an_error_and_keeps_the_provider_and_published_p
             Script::new().then(Reply::text("old provider still runs")),
         ),
     );
-    let before = Pick::of(&session.body.state.provider);
+    let before = session.body.client.selected().clone();
     let dir = session.log_dir().clone();
+    let setup_switches = crate::record::read_records(&dir.path().join(crate::record::RECORD))
+        .unwrap()
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record,
+                Record::Control(crate::record::Control::ModelChanged { .. })
+            )
+        })
+        .count();
     let host = testkit::host(session);
     let id = host.roots()[0];
     let port = host.port();
@@ -265,18 +292,24 @@ fn a_refused_model_build_records_an_error_and_keeps_the_provider_and_published_p
     assert!(records.iter().any(|record| matches!(record,
         Record::Forensic(Forensic::Error { text }) if text == "could not switch to switched-model: this scripted session has no script left to mint switched-model"
     )));
-    assert_eq!(port.row(id).unwrap().pick, before);
+    assert_eq!(port.row(id).unwrap().selected, before);
     port.submit(id, "continue".into()).unwrap();
     let records = until_record(&host, id, settled);
     assert!(records.iter().any(|record| matches!(record,
         Record::Display(crate::record::Display::Answer { text }) if text == "old provider still runs"
     )));
-    assert_eq!(port.row(id).unwrap().pick, before);
+    assert_eq!(port.row(id).unwrap().selected, before);
     let own_log = crate::record::read_records(&dir.path().join(crate::record::RECORD)).unwrap();
-    assert!(
-        !own_log
+    assert_eq!(
+        own_log
             .iter()
-            .any(|record| matches!(record, Record::Forensic(Forensic::ModelChanged { .. })))
+            .filter(|record| matches!(
+                record,
+                Record::Control(crate::record::Control::ModelChanged { .. })
+            ))
+            .count(),
+        setup_switches,
+        "the refused build records no additional switch"
     );
     assert_eq!(host.end(), [] as [String; 0]);
 }
@@ -316,7 +349,7 @@ static MODEL_TOOL_BUILTINS: [ral_core::shell::runtime::BuiltinEntry; 1] =
     )];
 
 #[test]
-fn model_posted_during_a_tool_applies_at_its_boundary_but_only_the_next_attempt_uses_it() {
+fn model_posted_during_a_tool_applies_to_the_next_request() {
     MODEL_TOOL_ENTERED.store(false, std::sync::atomic::Ordering::Release);
     MODEL_TOOL_RELEASE.store(false, std::sync::atomic::Ordering::Release);
     let mut session = with_minting(
@@ -335,7 +368,7 @@ fn model_posted_during_a_tool_applies_at_its_boundary_but_only_the_next_attempt_
             )]))
             .then(Reply::empty()),
     );
-    let old_pick = Pick::of(&old);
+    let old_pick = old.selected().clone();
     set_provider(&mut session, old);
     let host = testkit::host(session);
     let release = ReleaseModelTool;
@@ -346,7 +379,7 @@ fn model_posted_during_a_tool_applies_at_its_boundary_but_only_the_next_attempt_
     let new_pick = routed_pick();
     port.command(id, Command::Model(new_pick.clone())).unwrap();
     assert_eq!(port.queued(id).unwrap(), ["/model switched-model"]);
-    assert_eq!(port.row(id).unwrap().pick, old_pick);
+    assert_eq!(port.row(id).unwrap().selected, old_pick);
     drop(release);
     let records = until_record(&host, id, settled);
     wait_for_pick(&port, id, &new_pick);
@@ -360,14 +393,18 @@ fn model_posted_during_a_tool_applies_at_its_boundary_but_only_the_next_attempt_
     assert_eq!(
         turns,
         [
-            (&old_pick.tuning, &old_pick.choice.via),
-            (&old_pick.tuning, &old_pick.choice.via),
+            (&old_pick.tuning, &old_pick.via),
             (&new_pick.tuning, &new_pick.choice.via)
         ]
     );
     let switched = records
         .iter()
-        .position(|record| matches!(record, Record::Forensic(Forensic::ModelChanged { .. })))
+        .position(|record| {
+            matches!(
+                record,
+                Record::Control(crate::record::Control::ModelChanged { .. })
+            )
+        })
         .unwrap();
     let turn_positions: Vec<_> = records
         .iter()
@@ -377,19 +414,48 @@ fn model_posted_during_a_tool_applies_at_its_boundary_but_only_the_next_attempt_
         })
         .collect();
     assert!(turn_positions[0] < switched && switched < turn_positions[1]);
-    assert!(
-        records[turn_positions[1]..turn_positions[2]]
-            .iter()
-            .any(|record| matches!(
-                record,
-                Record::Protocol(Protocol::Steering {
-                    voice: Voice::Harness,
-                    ..
-                })
-            ))
-    );
     assert!(records.iter().any(|record| matches!(record,
-        Record::Forensic(Forensic::Status { status: ChildStatus::Replied(value) }) if value.as_str() == Some("new attempt")
+        Record::Control(crate::record::Control::Status { status: ChildStatus::Replied(value) }) if value.as_str() == Some("new attempt")
     )));
+    assert_eq!(host.end(), [] as [String; 0]);
+}
+
+#[test]
+fn switching_from_a_shared_plan_records_the_launch_cap_not_the_old_clients_cap() {
+    let mut session = with_minting(
+        testkit::trunk(Trunk::Converses),
+        vec![Script::new().then(Reply::text("metered answer"))],
+    );
+    Arc::get_mut(&mut session.fleet).unwrap().launch.max_tokens = Some(731);
+    let old = Bureau::scripted([Script::new()])
+        .build(
+            Choice {
+                account: Account::login(Login::Chatgpt, "plan", "plan@example.test"),
+                model: "shared-plan".into(),
+                via: None,
+            },
+            &Tuning::default(),
+            Some(731),
+        )
+        .unwrap();
+    assert_eq!(old.selected().max_tokens, None);
+    set_provider(&mut session, old);
+    let host = testkit::host(session);
+    let id = host.roots()[0];
+    let port = host.port();
+    let pick = routed_pick();
+    port.command(id, Command::Model(pick.clone())).unwrap();
+    let records = until_record(&host, id, |record| {
+        matches!(
+            record,
+            Record::Control(crate::record::Control::ModelChanged { .. })
+        )
+    });
+    wait_for_pick(&port, id, &pick);
+    let selected = port.row(id).unwrap().selected;
+    assert_eq!(selected.max_tokens, Some(731));
+    assert!(records.iter().any(|record| matches!(record, Record::Control(crate::record::Control::ModelChanged { selected: recorded }) if recorded == &selected)));
+    port.submit(id, "use the metered client".into()).unwrap();
+    assert!(until_record(&host, id, settled).iter().any(|record| matches!(record, Record::Display(crate::record::Display::Answer { text }) if text == "metered answer")));
     assert_eq!(host.end(), [] as [String; 0]);
 }

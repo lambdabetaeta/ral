@@ -1,9 +1,11 @@
 ---
 status: accepted
-generated_at_commit: ed466ea2
+generated_at_commit: fc0c9fbb
 ---
 
 # The fold reports, the printer mirrors
+
+> *Amended 2026-10-30*: `Protocol` is named `Transcript`, and the context module is `record::context`; historical names below are retained.
 
 **The view fold says what each record did to it, and a frontend keeps a 1:1
 mirror of its own memo driven by those reports.** `Blocks::step` returns a

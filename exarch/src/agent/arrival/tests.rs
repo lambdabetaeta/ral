@@ -60,7 +60,7 @@ fn display_facts(rx: &crate::bus::BusReceiver) -> Vec<Display> {
         .into_iter()
         .filter_map(|record| match record {
             Record::Display(display) => Some(display),
-            Record::Protocol(_) | Record::Forensic(_) => None,
+            Record::Transcript(_) | Record::Control(_) | Record::Forensic(_) => None,
         })
         .collect()
 }
@@ -77,7 +77,7 @@ fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
 
 /// An arrival records only what no protocol record speaks for: a subagent's
 /// breadcrumb commits `Display::SubagentDone`, and a prompt commits nothing,
-/// since its `Protocol` record is the one fact of it.
+/// since its `Transcript` record is the one fact of it.
 #[test]
 fn arrival_records_display_facts() {
     let mut session = Agent::for_test("system").unwrap();
@@ -94,7 +94,7 @@ fn arrival_records_display_facts() {
             .is_none()
     );
     assert!(display_facts(&rx).is_empty());
-    session.body.state.nursery.adopt(
+    session.body.nursery.adopt(
         helper.handle(),
         crate::agent::nursery::Joined::new(std::thread::spawn(|| {
             crate::agent::nursery::Teardown { failures: vec![] }
@@ -137,7 +137,7 @@ fn arrival_records_display_facts() {
 /// model context without probing for a worker row.
 #[test]
 fn surface_batch_without_done_event_replays_cards_and_wakes_model() {
-    let mut session = Agent::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
 
     let item = Input::Surface {
@@ -295,7 +295,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
 /// first, then declines the input and leaves the engine loss observable.
 #[test]
 fn severed_worker_probe_declines_after_replaying_cards() {
-    let mut session = Agent::for_test("system").unwrap();
+    let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
     let cause = Severed::Closed("engine gone".into());
     session.engine().transport().sever(cause.clone());
@@ -315,40 +315,34 @@ fn severed_worker_probe_declines_after_replaying_cards() {
 }
 
 #[test]
-fn admission_marks_only_returning_human_and_parent_messages_as_owed() {
+fn admission_renders_human_and_peer_inputs_without_changing_debt() {
     use crate::agent::Trunk;
     use crate::agent::testkit::{forked_child, trunk};
     use crate::bus::AgentMessage;
-
     for kind in [Trunk::Converses, Trunk::Returns] {
-        let mut root = trunk(kind);
-        assert!(!root.body.state.owed);
+        let root = trunk(kind);
         let prompt = root.admit(Input::Human("human task".into())).unwrap();
         assert_eq!(prompt.text, "human task");
         assert_eq!(prompt.voice, crate::record::Voice::Human);
-        assert_eq!(root.body.state.owed, kind == Trunk::Returns);
+        assert!(!root.handle().status().unwrap().owes);
     }
     let parent = trunk(Trunk::Converses);
-    let mut helper = forked_child(&parent, "helper", "`inherit");
-    for from_parent in [false, true] {
-        helper.body.state.owed = false;
-        let prompt = helper
-            .admit(Input::Message(AgentMessage {
-                from: parent.id(),
-                from_name: "parent".into(),
-                text: "follow-up".into(),
-                from_parent,
-            }))
-            .unwrap();
-        assert_eq!(prompt.voice, crate::record::Voice::Peer);
-        assert!(prompt.text.contains("follow-up"));
-        assert_eq!(helper.body.state.owed, from_parent);
-    }
+    let helper = forked_child(&parent, "helper", "`inherit");
+    let prompt = helper
+        .admit(Input::Message(AgentMessage {
+            from: parent.id(),
+            from_name: "parent".into(),
+            text: "follow-up".into(),
+        }))
+        .unwrap();
+    assert_eq!(prompt.voice, crate::record::Voice::Peer);
+    assert!(prompt.text.contains("follow-up"));
+    assert!(helper.handle().status().unwrap().owes);
 }
 
 #[test]
-fn stale_surface_generation_and_wakeup_epoch_are_quiet() {
-    let mut session = Agent::for_test("system").unwrap();
+fn stale_surface_generation_is_quiet_and_wakeups_render() {
+    let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
     let generation = session.generation;
     assert!(
@@ -360,29 +354,18 @@ fn stale_surface_generation_and_wakeup_epoch_are_quiet() {
             .is_none()
     );
     assert!(display_facts(&rx).is_empty(), "stale cards must not replay");
-    let epoch = session.body.state.schedules.epoch();
-    session.body.state.schedules.clear();
-    assert!(
-        session
-            .admit(Input::Wakeup {
-                id: crate::bus::ScheduleId::new(1),
-                epoch,
-                text: "old wakeup".into(),
-            })
-            .is_none()
-    );
-    let epoch = session.body.state.schedules.epoch();
+
     let prompt = session
         .admit(Input::Wakeup {
             id: crate::bus::ScheduleId::new(2),
-            epoch,
+
             text: "current wakeup".into(),
         })
         .unwrap();
     assert_eq!(prompt.text, "current wakeup");
     assert_eq!(prompt.voice, crate::record::Voice::Wakeup);
     assert!(
-        session.handle().status().job.is_none(),
+        session.handle().status().unwrap().job.is_none(),
         "admission alone opens no job"
     );
 }
@@ -401,19 +384,19 @@ fn gone_joins_and_collects_failures_without_a_model_prompt() {
     let joined = Joined::new(std::thread::spawn(|| Teardown {
         failures: vec!["helper teardown".into()],
     }));
-    session.body.state.nursery.adopt((*helper).clone(), joined);
+    session.body.nursery.adopt((*helper).clone(), joined);
     helper.end();
     assert!(
         session.rest().pending,
         "birth debt remains pending after the helper ends"
     );
-    assert!(session.admit(Input::Gone(helper.id())).is_none());
-    assert!(!session.body.state.nursery.holds(helper.id()));
+    session.gone(helper.id());
+    assert!(!session.body.nursery.holds(helper.id()));
     assert!(!session.rest().pending);
-    assert_eq!(session.body.state.failures, ["helper teardown"]);
-    assert!(session.admit(Input::Gone(helper.id())).is_none());
+    assert_eq!(session.body.failures, ["helper teardown"]);
+    session.gone(helper.id());
     assert_eq!(
-        session.body.state.failures.len(),
+        session.body.failures.len(),
         1,
         "a failure is collected once"
     );
@@ -428,5 +411,5 @@ fn gone_joins_and_collects_failures_without_a_model_prompt() {
             .is_none(),
         "joined helpers' late reports stay quiet"
     );
-    session.body.state.failures.clear();
+    session.body.failures.clear();
 }

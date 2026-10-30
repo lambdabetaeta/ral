@@ -45,7 +45,8 @@ impl Nursery {
 
     /// Some unjoined helper owes a report (A5).
     pub(crate) fn owing(&self) -> bool {
-        self.unjoined().any(|handle| handle.status().owes_parent)
+        self.unjoined()
+            .any(|handle| handle.status().is_ok_and(|status| status.owes))
     }
 
     pub(crate) fn dismiss_all(&mut self) -> Vec<String> {

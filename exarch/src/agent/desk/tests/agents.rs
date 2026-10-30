@@ -4,6 +4,17 @@ use super::*;
 use crate::agent::nursery::{Joined, Teardown};
 use crate::agent::testkit::{TestAgentSpec, test_agent};
 
+fn set_desk_provider(desk: &ExarchDesk, provider: Arc<Provider>) {
+    desk.call
+        .handle
+        .0
+        .address
+        .transact(|txn| txn.change_model(provider.selected().clone()))
+        .unwrap()
+        .unwrap();
+    desk.loan.get().unwrap().client = provider;
+}
+
 /// The report is a message; read answers the helper's published status.
 #[test]
 fn agent_start_reports_to_the_parent_mailbox_and_publishes_the_read_value() {
@@ -16,7 +27,7 @@ fn agent_start_reports_to_the_parent_mailbox_and_publishes_the_read_value() {
                 "exarch-agents `reply 'hi from child'",
             )])),
         ));
-        desk.loan.get().unwrap().state.provider = provider;
+        set_desk_provider(&desk, provider);
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "say hi", "helper"))
@@ -51,7 +62,6 @@ fn adopt_synthetic(desk: &ExarchDesk, helper: &TestAgent) {
     desk.loan
         .get()
         .unwrap()
-        .state
         .nursery
         .adopt((**helper).clone(), thread);
 }
@@ -65,7 +75,9 @@ fn read_answers_the_published_reply_even_after_the_helper_ends() {
         )
         .unwrap();
         adopt_synthetic(&desk, &child);
-        child.report(ChildStatus::Replied(text("hi from child")));
+        child
+            .report(ChildStatus::Replied(text("hi from child")))
+            .unwrap();
         for ended in [false, true] {
             if ended {
                 child.end();
@@ -104,7 +116,9 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
             TestAgentSpec::child("grandchild", &child, child.mailbox.life().child()),
         )
         .unwrap();
-        grandchild.report(ChildStatus::Replied(text("not yours")));
+        grandchild
+            .report(ChildStatus::Replied(text("not yours")))
+            .unwrap();
         assert!(
             desk.agent_read("helper".into())
                 .unwrap_err()
@@ -117,7 +131,9 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
                 .message
                 .contains("reads only your own helpers")
         );
-        child.report(ChildStatus::Failed("engine failed".into()));
+        child
+            .report(ChildStatus::Failed("engine failed".into()))
+            .unwrap();
         assert!(
             desk.agent_read("helper".into())
                 .unwrap_err()
@@ -137,7 +153,7 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
                 .message
                 .contains("has no reply to read")
         );
-        child.report(ChildStatus::Stopped);
+        child.report(ChildStatus::Stopped).unwrap();
         assert!(
             desk.agent_read("helper".into())
                 .unwrap_err()
@@ -156,7 +172,9 @@ fn read_refuses_an_old_reply_while_a_follow_up_is_working() {
         )
         .unwrap();
         adopt_synthetic(&desk, &child);
-        child.report(ChildStatus::Replied(text("old answer")));
+        child
+            .report(ChildStatus::Replied(text("old answer")))
+            .unwrap();
         assert!(desk.agent_read("helper".into()).is_ok());
         child.message(&agent, "follow up".into()).unwrap();
         assert!(
@@ -175,13 +193,16 @@ fn read_refuses_an_old_reply_while_a_follow_up_is_working() {
 fn start_answers_the_fleets_state_not_a_receipt() {
     with_spawnable_desk(3, |desk, fleet, agent| {
         let parent_mailbox = &agent.mailbox;
-        desk.loan.get().unwrap().state.provider = Arc::new(Provider::scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call(
-                "r1",
-                "exarch-agents `reply 'a'",
-            )])),
-        ));
+        set_desk_provider(
+            &desk,
+            Arc::new(Provider::scripted(
+                "test-model",
+                Script::new().then(Reply::tool_calls(vec![ral_call(
+                    "r1",
+                    "exarch-agents `reply 'a'",
+                )])),
+            )),
+        );
         // Held for the whole test, and with no worker behind it, so it never
         // settles out from under the assertion below.
         let sibling = crate::agent::testkit::TestAgentSpec::child(
@@ -236,7 +257,7 @@ fn inherit_is_the_parents_provider_and_a_role_the_bound_one() {
     };
     with_fleet_desk(3, launch, |desk, _, _agent| {
         let body = desk.loan.get().unwrap();
-        let parent = body.state.provider.clone();
+        let parent = body.client.clone();
         let inherited = desk.child_provider(&body, &Selection::Inherit).unwrap();
         assert!(Arc::ptr_eq(&parent, &inherited));
         let child = desk
@@ -378,7 +399,7 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
                 "exarch-agents `reply 'a'",
             )])),
         ));
-        desk.loan.get().unwrap().state.provider = provider;
+        set_desk_provider(&desk, provider);
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "go", "helper"))
@@ -460,7 +481,7 @@ fn fuel_bounds_depth_not_fanout() {
                     "exarch-agents `reply 'c'",
                 )])),
         ));
-        desk.loan.get().unwrap().state.provider = provider;
+        set_desk_provider(&desk, provider);
 
         for i in 0..3 {
             let answer = with_parked(&desk, move |desk, session| {
@@ -569,10 +590,8 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
             assert!(desk.agent_stop("sibling").is_err());
             assert!(desk.agent_stop("mid").is_err());
             grandchild.steer("go".into()).unwrap();
-            let Next::Take { exchange, .. } = grandchild.mailbox.next(Rest {
-                pending: false,
-                schedules: false,
-            }) else {
+            let Next::Take { exchange, .. } = grandchild.mailbox.next(Rest { pending: false })
+            else {
                 panic!("a human message resumes the descendant")
             };
             assert!(grandchild.mailbox.begin());
@@ -609,7 +628,7 @@ fn adopt_failing(
     failures: Vec<String>,
 ) -> crate::agent::AgentHandle {
     let handle = (*helper).clone();
-    desk.loan.get().unwrap().state.nursery.adopt(
+    desk.loan.get().unwrap().nursery.adopt(
         handle.clone(),
         Joined::new(std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -683,7 +702,7 @@ fn dismiss_propagates_the_helpers_teardown_failures_to_its_parent() {
             .unwrap();
         assert_eq!(harness_results(&desk), ["agent 'helper' dismissed"]);
         assert_eq!(
-            desk.loan.get().unwrap().state.failures,
+            desk.loan.get().unwrap().failures,
             ["helper's teardown failure"]
         );
         assert!(!helper.is_live());
@@ -701,7 +720,7 @@ fn dismissing_an_already_joined_helper_says_so() {
         .unwrap();
         let helper = adopt_failing(&desk, helper, Vec::new());
         helper.end();
-        desk.loan.get().unwrap().state.nursery.join(helper.id());
+        desk.loan.get().unwrap().nursery.join(helper.id());
         desk.ask(Request::Agents(Agents::Dismiss("helper".into())))
             .unwrap();
         assert_eq!(harness_results(&desk), ["agent 'helper' had already ended"]);
@@ -742,7 +761,7 @@ fn message_reaches_a_working_peer_but_a_resting_helper_admits_only_its_parent() 
             assert!(sibling.mailbox.begin());
             assert!(desk.ask(message_req("sibling", "hi")).is_ok());
             assert!(
-                matches!(next_input(&sibling.mailbox), Input::Message(message) if message.text == "hi" && !message.from_parent)
+                matches!(next_input(&sibling.mailbox), Input::Message(message) if message.text == "hi")
             );
         },
     );
@@ -751,18 +770,21 @@ fn message_reaches_a_working_peer_but_a_resting_helper_admits_only_its_parent() 
 #[test]
 fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
     with_spawnable_desk(3, |desk, fleet, agent| {
-        desk.loan.get().unwrap().state.provider = Arc::new(Provider::scripted(
-            "test-model",
-            Script::new()
-                .then(Reply::tool_calls(vec![ral_call(
-                    "first",
-                    "exarch-agents `reply 'one'",
-                )]))
-                .then(Reply::tool_calls(vec![ral_call(
-                    "second",
-                    "exarch-agents `reply 'two'",
-                )])),
-        ));
+        set_desk_provider(
+            &desk,
+            Arc::new(Provider::scripted(
+                "test-model",
+                Script::new()
+                    .then(Reply::tool_calls(vec![ral_call(
+                        "first",
+                        "exarch-agents `reply 'one'",
+                    )]))
+                    .then(Reply::tool_calls(vec![ral_call(
+                        "second",
+                        "exarch-agents `reply 'two'",
+                    )])),
+            )),
+        );
         with_parked(&desk, |desk, id| desk.ask(start_req(id, "go", "helper"))).unwrap();
         assert!(matches!(
             next_input(&agent.mailbox),
@@ -776,7 +798,7 @@ fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
         desk.ask(Request::Agents(Agents::Dismiss("helper".into())))
             .unwrap();
         assert!(!old.is_live());
-        assert!(!desk.loan.get().unwrap().state.nursery.holds(old.id()));
+        assert!(!desk.loan.get().unwrap().nursery.holds(old.id()));
         assert!(
             fleet.registry.resolve("helper").is_none(),
             "dismiss returns only after the name is released"
@@ -784,7 +806,9 @@ fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
         with_parked(&desk, |desk, id| desk.ask(start_req(id, "again", "helper"))).unwrap();
         let newest = fleet.registry.resolve("helper").unwrap();
         assert_ne!(old.id(), newest.id());
-        assert!(matches!(next_input(&agent.mailbox), Input::Gone(id) if id == old.id()));
+        assert!(
+            matches!(agent.mailbox.next(Rest { pending: true }), Next::Gone(id) if id == old.id())
+        );
         assert!(matches!(
             next_input(&agent.mailbox),
             Input::Child {
@@ -823,7 +847,7 @@ fn dismiss_refuses_a_grandchild_and_leaves_both_lives_untouched() {
         );
         assert!(child.is_live());
         assert!(grandchild.is_live());
-        assert!(desk.loan.get().unwrap().state.nursery.holds(child.id()));
+        assert!(desk.loan.get().unwrap().nursery.holds(child.id()));
     });
 }
 
@@ -892,7 +916,7 @@ fn reply_stages_the_payload_last_write_wins() {
         }
 
         assert_eq!(
-            d.loan.get().unwrap().state.reply.take(),
+            d.loan.get().unwrap().reply.take(),
             Some(FOValue::String {
                 value: "second".into()
             }),
@@ -969,7 +993,11 @@ fn a_helper_started_with_inherit_after_a_model_switch_runs_on_the_switched_provi
         match signal {
             Signal::Born(id, born) if born.name == "switched-helper" => {
                 assert_eq!(born.parent, Some(root));
-                assert_eq!(port.row(id).unwrap().pick, pick);
+                let selected = port.row(id).unwrap().selected;
+                assert_eq!(selected.model, pick.choice.model);
+                assert_eq!(selected.account, pick.choice.account.id.as_str());
+                assert_eq!(selected.tuning, pick.tuning);
+                assert_eq!(selected.via, pick.choice.via);
                 helper = Some(id);
             }
             Signal::Commit(id, commit) if Some(id) == helper => {
@@ -980,7 +1008,7 @@ fn a_helper_started_with_inherit_after_a_model_switch_runs_on_the_switched_provi
                             assert_eq!(via, &pick.choice.via);
                             child_requested = true;
                         }
-                        Record::Forensic(Forensic::Status {
+                        Record::Control(crate::record::Control::Status {
                             status: ChildStatus::Replied(value),
                         }) => {
                             assert_eq!(value, &text("switched child"));

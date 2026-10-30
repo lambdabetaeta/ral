@@ -4,6 +4,8 @@ status: 'accepted; amended in carrier by [[decisions/260907_the-turn-is-the-atom
 
 # The transcript is a value
 
+> *Amended 2026-10-30*: `Protocol` is named `Transcript`, and the context module is `record::context`; historical names below are retained.
+
 > Amended in carrier by
 > [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]], in two
 > steps. First: read `Rendered` for `Transcript`, `TurnRender`/`render_turn`

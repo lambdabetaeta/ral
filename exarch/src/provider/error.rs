@@ -88,7 +88,7 @@ pub enum ProviderError {
         sent: Option<u64>,
         limit: Option<u64>,
         /// The window exarch was working to, before the overflow narrowed it;
-        /// stamped by `Provider::complete`.
+        /// stamped by the agent's overflow relief transaction.
         listed: Option<u64>,
         body: Option<Body>,
     },

@@ -11,7 +11,7 @@ fn a_gated_root_holds_text_but_runs_commands_before_release() {
         Next::Command(Command::Read(Read::Resources))
     ));
     assert_eq!(address.queued(), ["held"]);
-    assert!(address.status().job.is_none());
+    assert!(address.status().unwrap().job.is_none());
     assert!(address.release());
     assert!(matches!(take(&mailbox).0, Input::Human(text) if text == "held"));
     assert!(mailbox.begin());
@@ -19,7 +19,7 @@ fn a_gated_root_holds_text_but_runs_commands_before_release() {
     address.steer("second job".into()).unwrap();
     let (send, recv) = mpsc::channel();
     let worker = std::thread::spawn(move || send.send(mailbox.next(QUIET)).unwrap());
-    let parked = wait_until(|| address.status().waiting_for_input);
+    let parked = wait_until(|| address.status().unwrap().waiting_for_input);
     let held = recv.try_recv();
     let released = address.release();
     let next = recv.recv_timeout(WAIT);
@@ -57,18 +57,18 @@ fn quiet_inputs_bypass_every_admission_without_consuming_release_or_opening_jobs
             .post(wakeup(1, "held for parent admission"))
             .unwrap();
         address.post(child(ChildStatus::Stopped)).unwrap();
-        address.post(Input::Gone(AgentId::new(8))).unwrap();
+        address.gone(AgentId::new(8));
         address.command(Command::Rewrite(Rewrite::Evict)).unwrap();
         if admission == Admission::Free {
             assert!(matches!(take(&mailbox).0, Input::Wakeup { .. }));
         }
         assert!(matches!(take(&mailbox).0, Input::Child { .. }));
-        assert!(matches!(take(&mailbox).0, Input::Gone(_)));
+        assert!(matches!(mailbox.next(QUIET), Next::Gone(_)));
         assert!(matches!(
             mailbox.next(QUIET),
             Next::Command(Command::Rewrite(Rewrite::Evict))
         ));
-        assert!(address.status().job.is_none());
+        assert!(address.status().unwrap().job.is_none());
         if admission != Admission::Free {
             assert_eq!(depth(&mailbox, Source::Schedule), 1);
         }
@@ -86,13 +86,7 @@ fn quiet_inputs_leave_an_existing_gate_release_for_the_next_accepted_prompt() {
     assert!(matches!(take(&mailbox).0, Input::Human(text) if text == "accepted"));
     assert!(mailbox.begin());
     settled(&mailbox, false);
-    assert!(matches!(
-        mailbox.shared.lock().phase,
-        Phase::Resting {
-            released: false,
-            ..
-        }
-    ));
+    assert!(!mailbox.transact(|txn| txn.cell.released).unwrap());
 }
 
 #[test]
@@ -100,8 +94,8 @@ fn resting_helpers_refuse_peers_and_resume_on_their_parent_or_the_human() {
     for parent in [false, true] {
         let mailbox = helper();
         let address = mailbox.address();
-        address.report(ChildStatus::Replied(FOValue::Unit), None);
-        assert!(!address.status().working());
+        publish(&address, ChildStatus::Replied(FOValue::Unit));
+        assert!(!address.status().unwrap().working());
         assert!(matches!(
             address.post(message("peer", false)),
             Err(Refused::Resting)
@@ -109,22 +103,24 @@ fn resting_helpers_refuse_peers_and_resume_on_their_parent_or_the_human() {
         address.post(wakeup(1, "held")).unwrap();
         if parent {
             address.post(message("parent", true)).unwrap();
-            assert!(address.status().owes_parent);
+            assert!(address.status().unwrap().owes);
         } else {
             address.steer("human".into()).unwrap();
-            assert!(!address.status().owes_parent);
+            assert!(!address.status().unwrap().owes);
         }
         let (input, _exchange) = take(&mailbox);
         assert!(matches!(
             (parent, input),
             (true, Input::Message(_)) | (false, Input::Human(_))
         ));
-        assert!(address.status().job.is_none());
+        assert!(address.status().unwrap().job.is_none());
         assert!(mailbox.begin());
-        assert!(address.status().working());
+        assert!(address.status().unwrap().working());
         assert!(address.post(message("peer while working", false)).is_ok());
         assert!(matches!(take(&mailbox).0, Input::Wakeup { .. }));
-        assert!(matches!(take(&mailbox).0, Input::Message(message) if !message.from_parent));
+        assert!(
+            matches!(take(&mailbox).0, Input::Message(message) if message.from == AgentId::new(9))
+        );
         settled(&mailbox, false);
         assert!(matches!(
             address.post(message("resting peer", false)),
@@ -194,7 +190,7 @@ fn a_parent_message_racing_the_idle_limit_is_taken_or_refused_ended() {
                 assert_eq!(message.text, "at the deadline");
                 assert!(!exchange.is_cancelled());
                 assert!(mailbox.begin());
-                assert!(address.status().job.is_some());
+                assert!(address.status().unwrap().job.is_some());
             }
             (Err(Refused::Ended), Next::Ended) => {
                 assert_eq!(mailbox.life().cause(), Some(CancelCause::TimedOut));
@@ -206,28 +202,41 @@ fn a_parent_message_racing_the_idle_limit_is_taken_or_refused_ended() {
 
 #[test]
 fn waiting_for_input_and_busy_distinguish_human_wait_from_pending_helpers() {
-    for rest in [
-        QUIET,
-        Rest {
-            pending: true,
-            schedules: false,
-        },
-        Rest {
-            pending: false,
-            schedules: true,
-        },
-    ] {
-        let mailbox = mailbox(Admission::Free);
+    for (pending, schedules) in [(false, false), (true, false), (false, true)] {
+        let rest = Rest { pending };
+        let mailbox = configured_mailbox(
+            Admission::Free,
+            Recorder::none(),
+            DurableRoot::default().child(),
+            None,
+            schedules,
+        );
+        if schedules {
+            mailbox
+                .transact(|txn| {
+                    txn.schedule(
+                        "waiting".into(),
+                        Schedule {
+                            prompt: "wake".into(),
+                            trigger: "after 1h".into(),
+                            cron: None,
+                            next_unix_ms: 3_600_000,
+                            fires: 0,
+                        },
+                    )
+                })
+                .unwrap()
+                .unwrap();
+        }
         let address = mailbox.address();
         let _exchange = start(&mailbox);
-        let job = address.status().job;
-        let (pending, schedules) = (rest.pending, rest.schedules);
+        let job = address.status().unwrap().job;
         if !pending && !schedules {
             settled(&mailbox, false);
         }
         let worker = std::thread::spawn(move || mailbox.next(rest));
         let waiting = wait_until(|| {
-            let status = address.status();
+            let status = address.status().unwrap();
             status.busy == pending && status.waiting_for_input == (!pending && !schedules)
         });
         address.steer("resume".into()).unwrap();
@@ -238,7 +247,7 @@ fn waiting_for_input_and_busy_distinguish_human_wait_from_pending_helpers() {
         assert!(finished);
         assert!(matches!(next, Next::Take { input: Input::Human(text), .. } if text == "resume"));
         if pending || schedules {
-            assert_eq!(address.status().job, job);
+            assert_eq!(address.status().unwrap().job, job);
         }
     }
 }

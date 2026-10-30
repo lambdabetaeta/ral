@@ -27,20 +27,19 @@ fn a_status_record_round_trips() {
             json!({ "failed": "cancelled" }),
         ),
     ] {
-        let record = Forensic::Status {
+        let record = Record::Control(Control::Status {
             status: status.clone(),
-        }
-        .into();
+        });
         let line = commit_line(std::slice::from_ref(&record));
         let wire: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
-            wire["commit"]["records"][0]["Forensic"],
+            wire["commit"]["records"][0]["Control"],
             json!({ "status": { "status": wire_status } })
         );
         let Some((_, records)) = parse_line(&line) else {
             panic!("a status record's line must unseal");
         };
-        let [Record::Forensic(Forensic::Status { status: back })] = records.as_slice() else {
+        let [Record::Control(Control::Status { status: back })] = records.as_slice() else {
             panic!("a status record must round-trip as a status record");
         };
         assert_eq!(back, &status);
@@ -87,62 +86,79 @@ fn job_and_engine_forensics_round_trip() {
     use std::time::Duration;
 
     for (forensic, wire_forensic) in [
-        (Forensic::JobOpened, json!("job_opened")),
+        (Record::Control(Control::JobOpened), json!("job_opened")),
         (
-            Forensic::JobSettled {
+            Record::Control(Control::JobSettled {
                 job: JobId::from(42),
                 stopped: false,
-            },
+            }),
             json!({ "job_settled": { "job": 42, "stopped": false } }),
         ),
         (
-            Forensic::JobSettled {
+            Record::Control(Control::JobSettled {
                 job: JobId::from(42),
                 stopped: true,
-            },
+            }),
             json!({ "job_settled": { "job": 42, "stopped": true } }),
         ),
         (
-            Forensic::EngineSevered {
+            Record::Forensic(Forensic::EngineSevered {
                 cause: Severed::Refused("version mismatch".into()),
-            },
+            }),
             json!({ "engine_severed": { "cause": { "Refused": "version mismatch" } } }),
         ),
         (
-            Forensic::EngineSevered {
+            Record::Forensic(Forensic::EngineSevered {
                 cause: Severed::Closed("unexpected EOF".into()),
-            },
+            }),
             json!({ "engine_severed": { "cause": { "Closed": "unexpected EOF" } } }),
         ),
         (
-            Forensic::EngineSevered {
+            Record::Forensic(Forensic::EngineSevered {
                 cause: Severed::Silent(Duration::from_millis(1500)),
-            },
+            }),
             json!({ "engine_severed": {
                 "cause": { "Silent": { "secs": 1, "nanos": 500_000_000 } }
             } }),
         ),
         (
-            Forensic::EngineSevered {
+            Record::Forensic(Forensic::EngineSevered {
                 cause: Severed::Faulted("invalid frame".into()),
-            },
+            }),
             json!({ "engine_severed": { "cause": { "Faulted": "invalid frame" } } }),
         ),
         (
-            Forensic::TeardownFailed {
+            Record::Forensic(Forensic::TeardownFailed {
                 failure: "engine end was not certified".into(),
-            },
+            }),
             json!({ "teardown_failed": { "failure": "engine end was not certified" } }),
         ),
     ] {
-        let record = Record::Forensic(forensic);
+        let record = forensic;
         let line = commit_line(std::slice::from_ref(&record));
         let wire: serde_json::Value = serde_json::from_slice(&line).unwrap();
-        assert_eq!(wire["commit"]["records"][0]["Forensic"], wire_forensic);
+        assert_eq!(
+            wire["commit"]["records"][0]
+                .as_object()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap(),
+            &wire_forensic
+        );
         let (_, records) = parse_line(&line).expect("a forensic record's line must unseal");
-        let [Record::Forensic(back)] = records.as_slice() else {
+        let [back] = records.as_slice() else {
             panic!("a forensic record must round-trip as a forensic record");
         };
-        assert_eq!(serde_json::to_value(back).unwrap(), wire_forensic);
+        assert_eq!(
+            serde_json::to_value(back)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap(),
+            &wire_forensic
+        );
     }
 }

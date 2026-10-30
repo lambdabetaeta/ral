@@ -35,6 +35,7 @@ pub(crate) fn scripted_host(
         search: false,
         factory,
         bureau: Arc::new(Bureau::scripted([])),
+        max_tokens: None,
         roles: exarch::provider::roles::Roles::default(),
     };
     let engine = RootEngine::Identity {

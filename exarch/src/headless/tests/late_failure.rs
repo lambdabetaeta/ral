@@ -19,8 +19,37 @@ fn headless_recording_failure_ends_the_run_in_both_formats() {
             .expect("a live root");
         wait_ready(&host);
         recorder.fail_after(0);
-        let why = run_frontend(&host, format).expect_err("a failed writer is not a clean finish");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let why = run_to(
+            &host,
+            &SessionInfo {
+                system_size: 0,
+                system_files: &[],
+                base: "dangerous",
+                extend: None,
+                restrict_files: &[],
+                cwd: &ral_core::host::cwd().unwrap(),
+            },
+            &Provider::scripted("test-model", Script::new()),
+            Some("please work".into()),
+            format,
+            (&mut out, &mut err),
+        )
+        .expect_err("a failed writer is not a clean finish");
         assert_eq!(why, recorder.check_available().unwrap_err().to_string());
+        match format {
+            OutputFormat::Json => {
+                let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+                assert_eq!(result["type"], "result");
+                assert_eq!(result["is_error"], true);
+                assert_eq!(result["error"], why);
+            }
+            OutputFormat::Text => assert!(out.is_empty(), "there is no reply to print"),
+        }
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains("Agent log:"), "{err}");
+        assert!(err.contains("[done] 0 turns"), "{err}");
         assert!(!root_handle.is_live());
         assert!(root_handle.steer("later".into()).is_err());
         assert_eq!(
@@ -60,7 +89,7 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
         root_handle.steer("finish first".into()).unwrap();
         let signals = receive_until(&host, |signal| {
             has_fact(signal, root_id, |record| {
-                matches!(record, Record::Forensic(Forensic::Status { .. }))
+                matches!(record, Record::Control(Control::Status { .. }))
             })
         });
         for signal in signals {
@@ -95,7 +124,7 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
         independent.steer("continue independently".into()).unwrap();
         receive_until(&host, |signal| {
             has_fact(signal, independent.id(), |record| {
-                matches!(record, Record::Forensic(Forensic::Status {
+                matches!(record, Record::Control(Control::Status {
                     status: ChildStatus::Replied(FOValue::String { value }),
                 }) if value == "independent work completed")
             })

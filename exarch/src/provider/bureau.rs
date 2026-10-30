@@ -20,7 +20,7 @@ use ral_core::sync::LockExt;
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
 use super::models::{Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
-use super::{Account, Backend, Pool, Provider, Rations, Selection, Tuning, Via, oauth, pricing};
+use super::{Account, Backend, Pool, Provider, Rations, Selected, Tuning, Via, oauth, pricing};
 use crate::app::App;
 
 /// The credentials, model catalog, and allowance record an application shares.
@@ -186,27 +186,32 @@ fn window_via(
 fn selection(
     account: &Account,
     model: String,
+    label: String,
+    context_window: Option<u64>,
     tuning: &Tuning,
     via: Option<Via>,
     max_tokens: Option<u32>,
-) -> Selection {
-    if account.service.shares_a_plan() {
-        Selection {
-            model,
-            max_tokens_override: None,
-            tuning: Tuning {
+) -> Selected {
+    let (tuning, max_tokens) = if account.service.shares_a_plan() {
+        (
+            Tuning {
                 effort: tuning.effort.clone(),
                 ..Tuning::default()
             },
-            via,
-        }
+            None,
+        )
     } else {
-        Selection {
-            model,
-            max_tokens_override: max_tokens,
-            tuning: tuning.clone(),
-            via,
-        }
+        (tuning.clone(), max_tokens)
+    };
+    Selected {
+        model,
+        context_window,
+        label,
+        service: account.service.name.as_str().to_string(),
+        account: account.id.as_str().to_string(),
+        via,
+        tuning,
+        max_tokens,
     }
 }
 
@@ -224,9 +229,9 @@ impl Bureau {
         }
     }
 
-    /// Mint `choice` on this session's engine — the only caller of
-    /// [`Provider::build`], and so the one door every selection passes: its
-    /// account must list its model, and serve it via its upstreams.
+    /// Mint `choice` on this session's engine — the door every
+    /// selection passes (bar [`Provider::scripted`]): its account must list
+    /// its model, and serve it via its upstreams.
     ///
     /// # Errors
     /// If a scripted bureau has no script left, if the account has no
@@ -253,8 +258,15 @@ impl Bureau {
                 return Ok(Arc::new(Provider::build(
                     Backend::Scripted(script),
                     &account,
-                    selection(&account, model, tuning, via, max_tokens),
-                    None,
+                    selection(
+                        &account,
+                        model,
+                        super::identity::label(&account, &[]),
+                        None,
+                        tuning,
+                        via,
+                        max_tokens,
+                    ),
                 )));
             }
         };
@@ -284,8 +296,15 @@ impl Bureau {
         Ok(Arc::new(Provider::build(
             backend,
             &account,
-            selection(&account, model, tuning, via, max_tokens),
-            context_window,
+            selection(
+                &account,
+                model,
+                label,
+                context_window,
+                tuning,
+                via,
+                max_tokens,
+            ),
         )))
     }
 
@@ -352,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listed_window_beats_the_fallback() {
+    fn window_of_prefers_the_listing_to_the_fallback() {
         let models = [listed("m", Some(10))];
         assert_eq!(window_of(&models, "m", "acct", |_| Some(99)), Ok(Some(10)));
     }
@@ -432,12 +451,22 @@ mod tests {
             temperature: Some(0.5),
             top_p: Some(0.9),
         };
-        let pick = |account: &Account| selection(account, "m".into(), &tuning, None, Some(10));
+        let pick = |account: &Account| {
+            selection(
+                account,
+                "m".into(),
+                super::super::identity::label(account, &[]),
+                None,
+                &tuning,
+                None,
+                Some(10),
+            )
+        };
 
         let plan = pick(&Account::login(super::super::Login::Chatgpt, "a", "a@x"));
         assert!(matches!(plan.tuning.effort, Some(ReasoningEffort::Medium)));
         assert_eq!((plan.tuning.temperature, plan.tuning.top_p), (None, None));
-        assert_eq!(plan.max_tokens_override, None);
+        assert_eq!(plan.max_tokens, None);
 
         for account in [
             Account::built_in("openai"),
@@ -451,7 +480,7 @@ mod tests {
             ));
             assert_eq!(selection.tuning.temperature, Some(0.5));
             assert_eq!(selection.tuning.top_p, Some(0.9));
-            assert_eq!(selection.max_tokens_override, Some(10));
+            assert_eq!(selection.max_tokens, Some(10));
         }
     }
 

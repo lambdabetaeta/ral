@@ -509,7 +509,7 @@ fn note_login(app: &mut App, id: &identity::AccountId, label: &str, replaced: bo
     let already_active = app
         .tabs
         .focused_row()
-        .is_some_and(|row| row.pick.choice.account.id == *id);
+        .is_some_and(|row| row.selected.account == id.as_str());
     let action = if replaced {
         "Updated the login for"
     } else {

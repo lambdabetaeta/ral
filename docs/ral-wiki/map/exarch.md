@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-generated_at_date: 2026-10-29
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
 covers_paths: [exarch/src/port.rs, exarch/src/record.rs, exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -322,10 +322,10 @@ agent, so a root, identity fork, and wire child each receive their own surface.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Context management`** (`data/context.md`) teaches the coding workflow:
   evict irrelevant retrievals and failed attempts once retried, each as one
-  run `[from, to]` under a required note that leaves one residue; cut at the
-  bottom or in batch, covering a residue whole or not at all; expect the
+  run `[from, to]` under a required note that leaves one eviction; cut at the
+  bottom or in batch, covering an eviction whole or not at all; expect the
   a forced eviction to take the current prompt too, so evict first under
-  one's own note, saying what was asked; and find residues again with
+  one's own note, saying what was asked; and find evictions again with
   `exarch-transcript`. Each instruction is paired with
   an example call; the operation-by-operation `explain` guides in
   `shell_eval/builtins/harness.rs` own returned shapes, limits, refusals, and
@@ -369,7 +369,7 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   `explain exarch-agents`.
 
 The assembled prompt is a fact of the session: every opening of a log (a root,
-a fork, a `/new` or `/branch` root) records it as `Protocol::System`, and a
+a fork, a `/new` or `/branch` root) records it as `Transcript::System`, and a
 resume records the freshly built prompt only if it differs from the one in
 force. A round-trip reads it off the model fold, so the owner and its address hold no prompt copy.
 
@@ -425,9 +425,12 @@ and [[map/exarch/policy|policy]].
 ## Scheduled wakeups
 
 With `--allow-schedule`, an agent may schedule wakeups through cron or
-`after <dur>`. Timers hold a weak shared mailbox address. Firing coalesces
-queued ids, updates or retires the registry entry and publishes under one
-mailbox transaction; registry epochs invalidate wakeups across clear/report.
+`after <dur>`. `Schedules` folds recorded bookings; the owner holds an
+unlocked timer registry made from them. Timers only ring weak cell addresses,
+recording nothing. The owner answers at rest or before each drain: re-check
+wall time, coalesce queued timer ids, commit the wakeup plus booking update
+or retirement, then retime/drop the timer. Clear/report retire bookings and
+withdraw queued wakeups before dropping timers; late rings are harmless.
 A conversing agent's schedules survive jobs and wake it from rest; a
 returning agent waits for them and clears them on reporting. Stop preserves
 schedules. Synod launches with scheduling and reset-resume off, as policy

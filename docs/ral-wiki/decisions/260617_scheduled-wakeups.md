@@ -4,6 +4,17 @@ status: proposed
 
 # A wakeup schedules the agent, not a worker
 
+> *Amended 2026-10-30*:
+> `Schedules` folds recorded bookings and retirements. Timers on the shared
+> deadline daemon only ring a weak cell address; the owner answers at rest
+> or before a tool-boundary drain and commits the coalesced wakeup plus
+> booking update/retirement. The registry is an unlocked owner resource,
+> not authority. Reports and clear retire bookings and withdraw queued
+> wakeups; late rings are harmless without epochs. Reopen records schedule
+> retirement, not timer revival. The historical lifetime, delivery and
+> registry mechanisms below are superseded by these rules.
+
+
 > *Amended 2026-09-29*: every occurrence is now a wall-clock instant, armed
 > on the reaper at most a minute at a time and re-checked against the wall
 > clock on every wake, so a machine suspend delays a fire by at most a minute.

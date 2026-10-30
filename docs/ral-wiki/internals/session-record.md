@@ -1,15 +1,16 @@
 ---
-verified_at_commit: e5a23909
-verified_at_date: 2026-10-29
-anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Protocol, Display, Forensic, ChildStatus, Forensic::Status, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Forensic::JobOpened, Forensic::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal]
+verified_at_commit: fc0c9fbb
+verified_at_date: 2026-10-30
+anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal]
 ---
 
 # Session record: one seam, one log
 
 **A session has one durable source: `sessions/<id>/record.jsonl`.** Workers
-author facts through one cloneable `record::Emitter`; the model projection, the
-scrollback projection, and an exported transcript are folds or presentations
-of that record, and a fact with a protocol form is recorded once. The bus is delivery, not a second authority.
+author facts through one cloneable `record::Emitter`; the context, shared
+agent facts, scrollback and exported transcript are folds or presentations
+of that record. A posted input and its later transcript admission are distinct
+facts. The bus is delivery, not a second authority.
 This is the
 operational path behind the [[map/exarch/frontend|frontend]],
 [[map/exarch/cards|cards]], and [[map/exarch/io-surface|io-surface]] maps.
@@ -18,9 +19,17 @@ operational path behind the [[map/exarch/frontend|frontend]],
 
 **One commit is one sealed line**
 ([[decisions/261029_a-line-is-a-commit|a-line-is-a-commit]]). `Emitter::commit`
-takes `NonEmpty<Record>` and returns its `Commit` or `Unavailable`; `emit`
-commits one `Protocol`, `Display`, or `Forensic` record and returns its
-`Recorded<Record>`. `Log::append` holds its mutex across:
+takes non-control records and returns their `Commit` or `Unavailable`;
+`emit` commits one `Transcript`, `Display`, or `Forensic` record.
+`Emitter::begin` and `Emitter::commit_to` are the only doors for control
+lines. `begin` appends `SessionStarted` and returns the `Mail`, `Schedules`
+and `Model` that `control::seed(head)` makes. Every later line uses
+`commit_to(Folds, line, tail)`: append, then step the three borrowed folds; a
+failed append steps nothing. `Folds` borrows three mutable references for
+one commit. The cell holds that capability under its lock; reopen holds it
+before cell construction. `Control` has no `Into<Record>`, and ordinary
+`commit` rejects even a hand-built `Record::Control`.
+`Log::append` holds its mutex across:
 
 1. Serialize the records under one timestamp and seal the commit with its `Sum`.
 2. Write the one line to the owned `File`.
@@ -30,7 +39,7 @@ commits one `Protocol`, `Display`, or `Forensic` record and returns its
    through the attached fleet sink before releasing the lock.
 
 **Records are externally tagged, and a line has no depth limit.** `Record`,
-`Protocol`, `Display` and `Forensic` use serde's default external tagging: an
+`Transcript`, `Control`, `Display` and `Forensic` use serde's default external tagging: an
 internally tagged enum buffers through serde's `Content` and replays it on the
 native stack, bypassing the stack-grown reader, so a deep reply value would
 make its session un-resumable. Reader and writer are both stack-grown
@@ -38,9 +47,8 @@ make its session un-resumable. Reader and writer are both stack-grown
 never re-parses. The types still internally tagged inside records
 (`Settlement`, `DoneOutcome`, `Mark`, diff rows) carry no `FOValue`, so their
 depth is bounded by their type. Lines and bodies read as JSON objects alone;
-an array is foreign. Today `Emitter::emit` writes single-record commits; the
-multi-record commit is groundwork for one-transition-one-commit
-(`dev/docs/plans/261028_durable-agent.md`, L3).
+an array is foreign. Reports, schedule fires, mailbox clear and reopen
+commit their related control records together on one line.
 
 **One `Fatal<Unavailable>` holds the writer's first failure.** It is a leaf lock
 beside the append mutex and retains the original `io::Error`; the first
@@ -61,7 +69,7 @@ it. After owner drop, terminal finalization announces it once as
 are surrendered to the OS, not `fsync`ed: process-crash durability is not a
 power-loss guarantee.
 
-Protocol mutations distinguish `Uncommitted::Refused`, which leaves the
+Transcript mutations distinguish `Uncommitted::Refused`, which leaves the
 session usable without recording, from `Uncommitted::Unavailable`, which
 means the writer failed and the session ended.
 
@@ -79,12 +87,12 @@ line or takes a commit number. It publishes the other channel passenger,
 stamped, file-backed half; a `Signal::Transient` is live-only and has no
 replay path.
 
-## Three durable classes, one live edge
+## Four durable classes, one live edge
 
 The outer `Record` vocabulary is closed, and **a fact is recorded in the one
 class that can say it.**
 
-- `Protocol` is the provider-facing history, and every input of every request:
+- `Transcript` is the provider-facing history, and every input of every request:
   the system prompt (`System`), prompts and steering lines each tagged with the
   `Voice` that spoke them (`Human`, `Wakeup`, `Peer`, `Harness`), a
   harness-authored `Import` opening a turn of its own (the resume note), the
@@ -112,17 +120,19 @@ class that can say it.**
   ends and carries no
   `failed`. A verdict is a line count and a flag; the result text is
   `ToolResults`' alone.
-- `Forensic` is durable evidence that is not model context: the session
-  bookends (`SessionStarted`, which names the session and its tree parent,
-  `SessionResumed`, `SessionEnded`) and `SessionClosed`, the one record that
-  says `/close` ended a session for good, so resume skips it (a record that
-  cannot be read at all is an error naming its session, never a silent skip);
-  a child's status transitions (`Status`); the shape a turn's request goes
-  out under — sampling and routing both, beside the id the request will
-  produce (`TurnStarted`), so a retaken request
-  shows the same id twice; usage deltas, cancellation, an overflow-learned window (`WindowNarrowed`),
-  provider/stall/error rows, nudges, and other breadcrumbs. The view fold
-  admits the rows that belong on scrollback; the model fold ignores them.
+- `Control` is the agent's recorded state: the head `SessionStarted`,
+  `SessionResumed`, jobs, status, posts taken or withdrawn, schedule bookings
+  and retirements, model changes and learned windows. `Mail`, `Schedules` and
+  `Model` fold it under the cell's lock, not in the writer or owner body; no
+  type stands over the three. `Transcript` is the class `Context` folds, and
+  `Selected` is nested in records under `provider`. Old log shapes are
+  refused, not migrated.
+- `Forensic` is evidence, not state: `SessionEnded`, `SessionClosed`, request
+  shape (`TurnStarted`, including tuning and route), usage, cancellation,
+  provider/stall/error rows, nudges and diagnostics. No agent-state fold
+  reads it. `live_roots` scans permanent closure directly; an unreadable
+  session is an error naming it, never a silent skip. The view fold admits
+  the rows that belong on scrollback.
 
 Byte strings use lossless base64 in JSON. Audit observations preserve the
 captured prefix and its retention metadata exactly; replay adds no further
@@ -131,66 +141,77 @@ truncation.
 `Transient` is deliberately outside `Record`: token and thinking deltas,
 state changes, boundaries, child lifecycle, stop reasons, live pins/resources,
 and terminal recording failures. These are drawn or routed while the process
-is alive. They are not a hidden fourth record class, and no resume attempts
+is alive. They are not a hidden fifth record class, and no resume attempts
 to reconstruct them.
 
 ## Jobs, reports and teardown evidence
 
-**Busy periods and reports are recorded by the owning agent; the mailbox
-publishes their live state.**
+**The cell holds `Mail`, `Schedules`, `Model` and queued payloads under one
+lock; the owner holds `Context` and resources without a lock.** Transactions
+are closures, never escaping guards. Poison latches the journal and ends life;
+debug builds detect re-entry. Only reporting nests locks, descendant before
+its fixed ancestor; journal and bus channel follow. No transaction spans a
+request, dispatch, join or `Context` access.
 
-- `Forensic::JobOpened`'s commit number names `JobId`. Opening and job
-  registration share the queue lock. `JobSettled { job, stopped }` commits
-  under the lock that finds no queued input or pending work and clears it.
-  A job without settlement ended with life; a job is not cancellable scope.
-- Stop marks the matching open job under that same lock, cancels exchange
-  and recalls human text. Later exchanges can run in the same job; its
-  stopped mark remains until settlement.
-- `Forensic::Status` carries `Replied(FOValue)`, `Failed(String)` or
-  `Stopped`. The owner records before publishing mailbox status. Working
-  is computed for views from parent obligation or an open job, not recorded
-  as a report variant.
-- A helper's mailbox starts owing its parent; parent enqueue sets that flag.
-  Under the helper lock, reporting posts `Child` to the parent iff owed,
-  then retains the obligation only if parent input remains queued. Human-only
-  dealings with a resting helper publish status without notifying the parent.
-- Parent uptake records `Display::SubagentDone` with value-free `Settlement`.
-  `read` fetches the faithful value from the helper's published status. A
-  panicked thread publishes `Failed` through its surviving address; a crash
-  need not have a terminal report in its log.
-- `EngineSevered { cause }` records engine loss captured before intentional
-  end. `TeardownFailed { failure }` records each uncertified engine retirement
-  once in its owner's log; joins propagate that failure without recording it
-  again. `Option<Engine>` is taken at final retirement, so repeated teardown
-  cannot duplicate the end.
-- Model and selection folds ignore these facts. The view fold keeps jobs
-  quiet, renders engine loss as a system note and teardown failure as error.
-  Synod observes job/teardown facts directly before narration.
+- `Control::JobOpened`'s commit number names the mail's `JobId`.
+  `JobSettled { job, stopped }` closes it under the lock that finds no input,
+  pending helper or returning-agent booking. Stop marks the job and cancels
+  exchange under that lock; human gestures also commit `Withdrawn` text.
+- Each accepted input or command commits `Posted(Post)` and queues its
+  payload. The commit number names `PostId`. `next` and `drain` commit
+  `Taken` before handing payloads over; recall and clear commit `Withdrawn`.
+  At every live-cell unlock, queued posts equal `mail.pending()` in order.
+  `Gone` is unrecorded join plumbing and does not split a human post run.
+- `Mail::owes()` derives debt from taken-but-unanswered parent input or
+  pending parent posts, gated by `returns`. A helper owes from birth; a
+  returning root owes at human post time. `Taken` keeps debt, `Withdrawn`
+  takes unread debt away. Human input to helpers and peer messages add none.
+- `Txn::report` commits `Control::Status`, all `Unscheduled`, and withdrawal
+  of queued wakeups (all pending posts after life ends). Still holding the
+  helper cell, it posts `Child` to its parent iff it owed. Observing paid
+  debt cannot overtake delivery. An ended reported helper owes nothing.
+- `Mail::status()` is `Replied(FOValue)`, `Failed(String)` or `Stopped`.
+  Working is a view of debt or open job, not a status variant.
+  Parent uptake records value-free `Display::SubagentDone`; `read` fetches
+  the faithful value from mail, including after departure. A poisoned helper
+  reports `Failed` directly to its parent through its surviving handle.
+- Timers only ring, recording nothing. The owner answers rings before uptake
+  and each drain, committing a coalesced wakeup plus booking update or
+  retirement. Reports and clear retire bookings before dropping timers;
+  late rings cannot post stale wakeups. `Schedules` is the authority, the
+  owner's unlocked timer registry its resource.
+- `EngineSevered` records engine loss before intentional end;
+  `TeardownFailed` records uncertified retirement once in its owner's log.
+  Joins propagate failures without re-recording them. `Option<Engine>` makes
+  retirement consumptive. These remain forensic, not control state.
 
-See [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] for
-linearisation and join laws.
+See [[design/agents|agents]] for F1–F6 and the cell's rules, and
+[[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] for joins.
 
-## The two folds
+## Context, control and view folds
 
-`record::Fold` gives both projections one driver. `record::Log::read` reads
+`record::Fold` drives context and view projections; `control::Replay`
+owns the three shared folds for a file read and rebuilds them from the head:
+seed from `SessionStarted`, step every later `Control`, refuse a second head or
+a transition the live fold would refuse. Replay equals live (F6). `record::Log::read` reads
 one commit at a time and flattens it into its records; `record::replay` calls
 the fold's exhaustive `step` for each. A fold sees no commit boundary; a parse
 error or unrecognised record is a `Refusal`, never a silent skip.
 
 `Fold::step` takes each record by value, and `replay` hands over the ones it
-reads. The model path is `record::Model::step` over `Protocol` records only.
+reads. The context path is `Context::step` over `Transcript` records only.
 During a live turn, `AgentLog::advance` applies that same step immediately after
-the seam returns from `emit`. `AgentLog` authors `Protocol` and its own
-bookends and nothing else; every other worker emits through the agent's
-`Emitter`.
+the seam returns from `emit`. `AgentLog` authors transcript changes and
+bookends, seeds control folds at birth and reconciles them at reopen. Live control operations belong to
+the cell; other workers emit non-control facts through the same seam.
 
 ### One structure, one fold, everything else a projection
 
 The log is the durable structure; `Context` is its fold in memory — the
-vocabulary in `record/model.rs`, the turns and residues in `model/table.rs`, the
-automaton in `model/state.rs`, the fold in `model/fold.rs`, the render in
-`model/render.rs`, the transcript reader in `model/transcript.rs`, resume in
-`model/resume.rs` — and it holds **every turn the lineage has recorded, and
+vocabulary in `record/context.rs`, the turns and evictions in `context/table.rs`, the
+automaton in `context/state.rs`, the fold in `context/fold.rs`, the render in
+`context/render.rs`, the transcript reader in `context/transcript.rs`, resume in
+`context/resume.rs` — and it holds **every turn the lineage has recorded, and
 where each one is**
 ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]):
 
@@ -200,54 +221,50 @@ where each one is**
   prompt is a function of role and order, held nowhere, and the live prompt —
   the newest user-role turn, `current_prompt` — is what a nudge continues
   ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]);
-- a turn's `body` is either `Here { records, origin }`, its records in memory,
-  or `There { at, withdrawn }`, a `Pointer` to the session and byte ranges that
-  hold them: the session by its `AgentId`, resolved against the run's held
-  `sessions/` directory, so a moved run still reads back. A turn that left has left one of two ways: by an eviction, which
-  puts it *under* a residue, or by a *withdrawal*, which is never drawn.
-  Whether a `There` turn is under a residue is a function of `residues`, not
-  stored;
-- `residues: Vec<Residue>`, one `Residue { span, note, by }` per eviction in
-  the order recorded, never removed — exactly what its `Protocol::Evicted {
-  residue }` carries: a span of turn ids and the model's note, `None` for the
-  harness's own ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]);
+- a turn's `body` has three shapes: `Here { records, origin }`,
+  `Evicted { at: Pointer, under: Span }`, or `Withdrawn { at: Pointer }`.
+  A pointer names the session by `AgentId` and the records by their loci,
+  resolved against the run's held `sessions/` directory. Evicted turns keep
+  their smallest covering eviction's span; withdrawal dominates;
+- `evictions: Vec<(Eviction, Location)>`, in recorded order, never removed.
+  Each `Eviction { span, note, by }` is what `Transcript::Evicted(Eviction)`
+  carries; its note is absent for the harness's own. An eviction can itself
+  be evicted, so the pair keeps its full location;
+
 - `source`, this session's own `AgentId`, and `sessions`, the run's `sessions/`
   directory, held: a turn recorded here points at `source` once it leaves, and
   every pointer's session is read from `sessions/<id>/record.jsonl` through that
   handle; the system prompt in force (`Context::system`, set by
-  `Protocol::System`); the protocol's resting state; and the count of records
+  `Transcript::System`); the protocol's resting state; and the count of records
   folded, beside the index of the newest context edit.
 
-Those first three live in a `Table` private to `model/table.rs`, which hands
-the rest of the module a `&[Turn]` and nothing writable. A turn or a residue
+Those first three live in a `Table` private to `context/table.rs`, which hands
+the rest of the module read-only turns and eviction items. A turn or an eviction
 therefore changes where it is only through `Table::evict` and
 `Table::withdraw`, the two functions that move an item from here to there,
-and no row or residue ever leaves the table.
+and no row or eviction ever leaves the table.
 
-**Residues nest by containment, location is stored, and the context is the
-frontier.** A residue *covers* every turn whose id lies in its span, and every
-earlier residue whose span lies within its own, an equal span included — so
+**Evictions nest by containment, location is stored, and the context is the
+frontier.** An eviction *covers* every turn whose id lies in its span, and every
+earlier eviction whose span lies within its own, an equal span included — so
 the same span again rewrites a note. Spans are *laminar*, any two nested or
 disjoint, because an eviction's ends must be item boundaries. Hence:
 
-- an item's location is stamped on it as it departs, a residue's as a
-  turn's: the table holds each residue as a `Standing { residue, departure }`,
-  `departure` saying what a turn's `Body` says without records — `None`
-  while resident, else a `Departure`, `Under(span)` or `Withdrawn`, which a
-  departed turn's `Body::There` carries too. `Departure` is a `Location`
-  that cannot be `Resident`. `Table::evict` stamps `Under` the new span on
-  every resident turn *and residue* within it, a rewritten one included,
-  and stands the new residue resident; `Table::withdraw` stamps `Withdrawn`
-  on every item from its anchor on, whatever held it;
-- the stamp cannot go stale. The residue an item departs under is its
-  *holder*, the smallest later residue covering it, for good: any residue
+- an item's location is stamped on departure. A turn's `Body` says where
+  its records are; an eviction's table pair says `Resident`, `Evicted(span)`
+  or `Withdrawn`. `Table::evict` stamps `Evicted` on every resident turn and
+  eviction within the new span and installs the new eviction resident;
+  `Table::withdraw` stamps `Withdrawn` from its anchor on, whatever held it;
+
+- the stamp cannot go stale. The eviction an item departs under is its
+  *holder*, the smallest later eviction covering it, for good: any eviction
   recorded later that covers the item covers that one whole, by laminarity,
   so it is wider, or equal for a rewrite, and an equal span names the same
   holder. Withdrawal dominates and is permanent;
 - `Table::frontier` is the resident items in index order — disjoint, so in id
   order. Its first item is user-role by construction: the first
-  non-withdrawn turn is a prompt or an import, since nothing leaves without a
-  residue standing where it began, or the first item is that residue, a
+  non-withdrawn turn is a prompt or an import, since nothing leaves without an
+  eviction standing where it began, or the first item is that eviction, a
   user-voice message.
 
 **A span is one type.** `Span { from, to }`, both ends inclusive, has
@@ -261,23 +278,23 @@ ral surface a span stays the named fields `from` and `to`.
 `Turn` and `Body` are private to the module: a turn holds records, so it is
 not a value to hand out. Every reader sees an item as one line, a span:
 `SpanRow { span, role, kind, label, bytes, location }`, `kind` an `ItemKind`
-— `own`, `import`, `inherited` or `residue`. A turn's row has its own id alone;
-a residue's has its span, role `user`, its note (or `forced eviction,
+— `own`, `import`, `inherited` or `eviction`. A turn's row has its own id alone;
+an eviction's has its span, role `user`, its note (or `forced eviction,
 without a note`) as label, and its rendered message's weight. Its `Location`
 is the item's own stamp, read and never derived (`Item::location`): a
 resident item is `Resident`, a withdrawn one `Withdrawn`, and any other
-`Under(span)`, its holder's span. `Context::linked` yields one `Linked { row, at }`
+`Evicted(span)`, its holder's span. `Context::linked` yields one `Linked { row, at }`
 per turn — a `TurnRow` and the address of its transcript copy — for a fork's
-link. `Residue`, `SpanRow`, `ItemKind`, `Location`, `Pointer` and `Linked` are
+link. `Eviction`, `SpanRow`, `ItemKind`, `Location`, `Pointer` and `Linked` are
 the public shapes; `Display::Context` carries `Vec<SpanRow>`.
 
 Everything the model or the human reads off the structure is a pure function
 of it, computed on call and memoised nowhere: `rendered`, `history_bytes`,
 `context_survey` (the frontier's rows), `transcript_index` (every item, by
-`from`, wider span first, later-recorded first, so a residue precedes what it
+`from`, wider span first, later-recorded first, so an eviction precedes what it
 covers), `plan_forced_eviction`, and the transcript reader's `locate_read` and
 `locate_grep`. A read holds only turns; a search holds turns and noted
-residues in index order, so `` `grep ``'s hits come in `` `index ``'s order,
+evictions in index order, so `` `grep ``'s hits come in `` `index ``'s order,
 and the first hundred kept are the oldest.
 `Context::step` is the one
 fold — it judges a record before applying it, so a hand-edited or foreign file
@@ -285,27 +302,31 @@ is refused by the same function that folds a live one, and a resume has
 nothing to compare its result with. `Table::evict` and
 `Table::withdraw` are the two places a turn moves from here to there.
 
-**A recorded eviction is a span.** `Protocol::Evicted { residue }` is
+**A recorded eviction is a span.** `Transcript::Evicted(Eviction)` is
 admitted when both ends of its span are recorded and not withdrawn, neither end falls
-strictly inside a residue — *a run that reaches into a residue must cover it
+strictly inside an eviction — *a run that reaches into an eviction must cover it
 whole* — and the unclosed turn is not within. `Context::resolve_cut` states
 those rules at the writer, each refusal naming the fix, and `judge` states
 them again at replay. The span is the resolved identity: the turns it covers
-are the recorded ids in it at that point of the log, the residues it covers
+are the recorded ids in it at that point of the log, the evictions it covers
 the recorded ones within it, and nothing is re-derived from later records.
-`Table::evict` moves every resident turn and residue within the span there,
-stamped `Under` the span, and pushes the new residue, resident; an item
+`Table::evict` moves every resident turn and eviction within the span there,
+stamped `Location::Evicted(span)`, and pushes the new eviction, resident; an item
 already departed keeps its stamp. `plan_forced_eviction(keep)`
 walks back over the frontier from the newest item, which is never a
 candidate, spending `keep`; the first item that does not fit ends the one
 span it answers, a prefix from the frontier's first item. The live prompt is
-an item like any other, so the span may take it. A prefix that is one residue
-alone is no plan — the harness never rewrites a note — while two or more
-items, residues included, merge
+an item like any other, so the span may take it. Only material items count
+for progress: an eviction is material, a turn
+only if its `Body::Here` contains records. An empty inherited turn is not
+material, regardless of its weight. A prefix with no material or just one
+material eviction is no plan — the harness never rewrites a lone note —
+while ordinary material or two evictions can merge
 ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
 
 **Leaving the context is a change of address, not a deletion.** The table sets
-each departing turn's body to `There { at, departure }`, where `at` is its `origin`
+each departing turn's body to `Evicted { at, under }` or `Withdrawn { at }`,
+where `at` is its `origin`
 if it has one and otherwise this session's `source` id beside the `Locus` of every
 record it held; the records leave memory and nothing durable is touched. The id,
 not a path, is what is stored (and persisted in an `Inherited` link), so a run
@@ -318,29 +339,32 @@ log — is
 refused as the mismatch it is rather than answered with whatever now lies at
 those offsets. The reader reads a turn at a time, so a search never holds more
 than one turn, and it holds one descriptor, reopening only where
-consecutive turns name different sessions. The log is thereby the model's
+consecutive turns name different sessions. A binary part is metadata only:
+its byte estimate is exact for canonical padded base64, floored at zero
+when malformed, and its payload is never searched by grep. The log is
+thereby the model's
 transcript as well as its identity
 ([[decisions/260906_context-rollover|context-rollover]]).
 
 **A turn's transcript copy is where it was first recorded.** A fork's link
-(`Protocol::Inherited { turns: Vec<Linked>, residues }`) carries an address for
-every row, resident, under a residue or withdrawn, and the parent's residues
+(`Transcript::Inherited { turns: Vec<Linked>, evictions }`) carries an address for
+every row, resident, under an eviction or withdrawn, and the parent's evictions
 by value, and the child records no copy of
 the parent's messages: its resident rows are *read back through those
 addresses*, each row's `origin` keeping the original copy, so evicting one in
 the child points there. The lineage is flattened at each fork — a grandchild's
 row already names the grandparent's session — so nothing walks an ancestry, and
 `Context::sourced` is the whole of "seek in the structure, then the file".
-A residue is rendered from its own record, so the link carries nothing
-rendered; the link's judge checks that its residues are laminar and lie
+An eviction is rendered from its own record, so the link carries nothing
+rendered; the link's judge checks that its evictions are laminar and lie
 within its ids, and that every row's `location` agrees with them —
-`location` is redundant with `residues`, and the judge keeps the redundancy
+`location` is redundant with `evictions`, and the judge keeps the redundancy
 honest. `Table::install` takes each turn's location from its row. The link
-carries no residue's location: `Table::install` derives each as the fold
+carries no eviction's location: `Table::install` derives each as the fold
 stamped it, withdrawn with its `from` and otherwise under its `holder`, if
 any. Carrying it instead would add a second redundancy for the judge to
 check, and `holder` would serve that check anyway; it lives in
-`model/table.rs` for these two readings of a link, and the fold never calls
+`context/table.rs` for these two readings of a link, and the fold never calls
 it.
 
 **A link is the one record whose meaning lies in another file.** Its step reads
@@ -358,21 +382,21 @@ needs that session's file to read back.
 ### Withdrawal: `/clear` and `/rewind`
 
 **A clear and a rewind are one operation: the turns leave the context, leaving
-no residue, and stay in the transcript.** `Protocol::Cleared` is
-`Table::withdraw(0)` and `Protocol::Rewound { anchor }` is
+no eviction, and stay in the transcript.** `Transcript::Cleared` is
+`Table::withdraw(0)` and `Transcript::Rewound { anchor }` is
 `Table::withdraw(anchor)`; both keep the system prompt.
 
-- Every turn with `id >= from` becomes `There { at, withdrawn: true }`. A
-  resident turn gets the address `Table::evict` would give it; a turn under a
-  residue keeps its address and sets the flag. Every residue whose span's
+- Every turn with `id >= from` becomes `Withdrawn { at }`. A
+  resident turn gets the address `Table::evict` would give it; a turn under an
+  eviction keeps its address. Every eviction whose span's
   `from` is at least `from` is withdrawn the same way, so no note survives
   for turns the model is meant to have forgotten.
 - **A rewind anchors at an item start.** `Context::rewindable` refuses an
-  anchor strictly inside a resident residue's span, naming the residue's
-  `from` and the turn after its `to`. Hence a residue's turns are all
-  withdrawn or its `from` is not, so withdrawing by `from` takes a residue
-  exactly when it takes its turns. A turn under a residue is rewindable only
-  at that residue's `from`.
+  anchor strictly inside a resident eviction's span, naming the eviction's
+  `from` and the turn after its `to`. Hence an eviction's turns are all
+  withdrawn or its `from` is not, so withdrawing by `from` takes an eviction
+  exactly when it takes its turns. A turn under an eviction is rewindable only
+  at that eviction's `from`.
 - **A withdrawn turn may lie inside a span.** A rewind leaves withdrawn ids
   mid-sequence and a forced eviction must span them, so only a span's
   ends must be non-withdrawn; a withdrawn turn inside stays `Withdrawn` —
@@ -405,13 +429,13 @@ in the transcript for the life of the log.
 `Context::rendered()` builds an owned `Vec<ChatMessage>`, with no render memo
 behind it. Assembly is one walk over the frontier: a turn yields its resident
 messages — a prompt whose answers were interrupted short of a reply included,
-as they lie ([[invariants/turn-ends-ready|exchange-ends-ready]]) — and a
-residue its one message, `ChatMessage::user(render_residue(r))`. `history_bytes`
-is the same walk over the per-turn sums and each residue's message weight,
+as they lie ([[invariants/turn-ends-ready|exchange-ends-ready]]) — and an
+eviction its one message, `ChatMessage::user(render_eviction(r))`. `history_bytes`
+is the same walk over the per-turn sums and each eviction's message weight,
 with no turn rendered at all, and `context_survey` reports it as
 `total-bytes` beside the rows rather than summing them.
 
-`render_residue` is a pure function of the record —
+`render_eviction` is a pure function of the record —
 `[EXARCH // Turns 41–60 have left your context.` (singular for one turn, and
 `… in a forced eviction, without a note.` for a forced eviction), then `Your note:`
 and the note `Debug`-quoted, then the read-back line naming
@@ -433,20 +457,20 @@ it and where it stays: `manufacture` takes `&[ChatMessage]` inside
 [[map/exarch/provider|the provider map]] describes that one place,
 `provider/wire.rs`, where those messages become an owned `genai::ChatRequest`.
 
-**The system prompt is a record, not a field.** `Protocol::System { text }` sets
+**The system prompt is a record, not a field.** `Transcript::System { text }` sets
 `Context::system`; it is sequencing-neutral (`advance` leaves the state alone
 and `admissible` answers `true`), and `into_chat_messages` never renders it, since
 the prompt travels in `Request.system`. A round-trip reads the prompt off the
 fold, so the log holds every input of every request. A log opens in one fixed
 order — `SessionStarted`, then `Inherited` when there is one, then `System` —
-which keeps the link the first protocol record of a fork, and a resume records
+which keeps the link the first transcript record of a fork, and a resume records
 `System` again only when the freshly built prompt differs from the one in force.
 The price is the prompt's size, once per log (about 50 KB), and again on each
 change.
 
 **Resume folds before quarantine, so a refusal leaves the file unchanged.**
-`record::model::resume` checks the root and folds records through `Model::step`
-and `Selection`; `Log::complete_len` answers where whole commits end for reader
+`record::context::resume` checks the head and folds `Context` and `control::Replay` in one
+read-only pass; `Log::complete_len` answers where whole commits end for reader
 and quarantine.
 
 - An unterminated last line, or one with invalid JSON or a failed sum, is
@@ -464,27 +488,42 @@ Read-back is guarded by the sum at the moment of the read. A failed live
 append leaves at most one terminal partial line; live catch-up is bounded by
 the committed byte cursor. A complete valid line written before a crash but
 not yet published is recovered by replay. A missing `record.jsonl` is a named
-refusal, not an invitation to start an empty resumed session. `AgentLog::resume` takes
-the session id alone: the name is `live_roots`', read off the same head record,
+refusal, not an invitation to start an empty resumed session. `AgentLog::reopen` takes
+the session id, launch choice, return role, system prompt and time. The name
+is `live_roots`', read off the same head record,
 and `live_roots` refuses a session whose record does not parse rather than
 hiding it.
 
-**`Selection` is the model in force, folded once.** `SessionStarted` and
-`ModelChanged` name the `(model, provider label)` and the window the catalog
-listed, clearing any narrower window an overflow taught; `SessionResumed` names
-them and keeps what was taught only when the model is unchanged;
-`WindowNarrowed` sets the narrowed window. Resume reads `learned()` off it and
-the view fold reads `model()` and `window()`, so neither keeps a copy.
+**Reopen records the state it cannot revive.** It is one pass and one resume
+line: the single read-only fold above, then the commits below. After quiescing the context,
+`AgentLog::reopen` commits `SessionResumed { selected, returns, at_unix_ms }`,
+`Withdrawn` for every pending post, `JobSettled` for an open job and every
+`Unscheduled`, with an optional forensic `SystemNote` naming withdrawn inputs.
+Then `System` is recorded if changed. The returned folds have no posts, job
+or bookings. Debt for what was taken but not answered survives; debt for
+withdrawn posts does not. No helpers, shell workers or timer resources revive.
 
-The view path is `Blocks::step` over all three classes, with one exhaustive match
-over `Protocol`: a `UserPrompt` or `Steering` draws a prompt block iff its
+**`Model` is the model in force, folded once.** The head seeds it from
+`provider::Selected`; `ModelChanged` installs a choice and clears narrowing.
+`SessionResumed` installs the launch choice, retaining narrowing only for the
+same model name. `WindowNarrowed` must name that model and tighten its window; `Model::narrows`
+is that one rule, used by `Txn::narrow` and the fold alike. Keying by name,
+not account and route, is a deliberate approximation.
+The effective window is the minimum of catalog and narrowing. The cell is the
+agent's authority; the view folds its own model from the same records. Clients
+are immutable resources and one agent's overflow cannot narrow another's.
+
+The view path is `Blocks::try_step` over all four classes (`Blocks::step` is its
+live form and panics on refusal, as every live fold refusal is an exarch bug); control
+records are judged by `Model`'s own step. One exhaustive match
+over `Transcript`: a `UserPrompt` or `Steering` draws a prompt block iff its
 `Voice` is not `Harness` (nudges, reminders, child results and surface notices
 are spoken for elsewhere); a forced `Evicted` draws one line naming its
 span (`[turns 1–40 left the context (harness)]`), while the model's own is drawn
 by its `HarnessCall` act row; `Rewound` truncates the blocks
 from its anchor and opens `BlockKind::Rewound`; `Cleared` drops every block and
 opens `BlockKind::Cleared`, returning `Delta::Cleared`, while usage, the
-selection and the sequences already folded persist; `System`, `Import`,
+model and the sequences already folded persist; `System`, `Import`,
 `Inherited`, `AssistantMessage` and `ToolResults` are `Quiet`. A
 `Display::Verdict` patches its call, and `Forensic::TurnStarted { turn }` opens
 the turn rule. `Blocks::push` joins consecutive records of one lane
@@ -503,7 +542,7 @@ from `BlockKind` off its memo, never from the record vocabulary
 ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
 Beside the blocks the memo holds the ambient facts none of them draws:
 cumulative usage from the forensic deltas, and the model in force, a
-`Selection` stepped by the bookends and `ModelChanged`, so `Blocks::model` is
+`Model` seeded by the head and stepped by control records, so `Blocks::model` is
 total from a session's first record and the context floor a frontend stamps
 prose with reads both of its terms off the fold rather than being told the
 denominator.
@@ -530,12 +569,14 @@ forensic deltas.
 rewrite runs at the exchange boundary. Context readiness and engine rebirth
 are checked before mutation; preparation failure preserves helpers, queue
 and engine. Then the owner dismisses and joins helpers and commits
-`Protocol::Cleared`. A failed commit ends life through the writer latch and
+`Transcript::Cleared`. A failed commit ends life through the writer latch and
 retires the unused prepared engine. Success transfers the life binding to
 the fresh engine, replaces and retires the outgoing engine once, advances
-batch generation and resets pins, schedules and readings. Mailbox clear
-drops reports, departures, wakeups and batches, retaining all human text,
-messages and commands. Epoch/generation checks reject racing stale inputs.
+batch generation and resets pins, timers and readings. `Txn::clear`
+withdraws queued reports, wakeups and surfaces and retires every booking in
+one commit; it drops `Gone` notices already joined. Human text, messages and
+commands remain. Generation checks reject outgoing-engine surfaces; retired
+timers cannot post after clear.
 No fallible boot remains after the commit. The mirror learns from the record,
 retires blocks and resets open lines/scroll state; descendant tabs retire
 through their death signals. The log file and attached bus stay in place.
@@ -572,6 +613,6 @@ the turn's own body as the one statement of where it is, and
 [[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
 for the one edit that moves a turn, and
 [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]] for the
-residue it leaves and the frontier the context is;
+eviction it leaves and the frontier the context is;
 [[map/exarch/provider|provider]] covers the one place that turns those messages into an owned wire
 request.

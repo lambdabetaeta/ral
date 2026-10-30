@@ -62,7 +62,7 @@ impl Fold for Export<'_> {
     type Memo = Self;
 
     fn step(memo: &mut Self, record: Recorded<Record>) -> Result<(), Refusal> {
-        let (_, gone) = memo.mirror.step(&record);
+        let (_, gone) = memo.mirror.try_step(&record)?;
         if memo.failed.is_none() {
             memo.failed = gone
                 .iter()

@@ -1,9 +1,11 @@
 ---
 status: 'superseded in part by [[decisions/260907_the-turn-is-the-atom]] — evict-don''t-summarise, the head marker as one message at 0, evictions as prefix operations, the cache arithmetic, the lineage''s one address space and `transcript` as the door all stand. What resolves otherwise: the atom of a cut is the **turn**, not the exchange; its address is `through`, not `through_exchange`; it is weighed at every turn boundary, not at `deliberate` entry; and the model fold''s `View` / `Eviction` / `EvictedRow` / `span_row` carriers dissolve into one `Turn` table with its `Cut`s. Superseded in part again by [[decisions/261019_an-eviction-is-a-span]]: no head marker, but one residue per eviction, bounded by its note.'
-generated_at_commit: 14c8cae4
+generated_at_commit: fc0c9fbb
 ---
 
 # Context rollover: evict, don't summarise
+
+> *Amended 2026-10-30*: the eviction sense of `Residue` is named `Eviction` (`Transcript::Evicted(Eviction)`, `Inherited.evictions`, `Location::Evicted`); `Protocol` is `Transcript` and the context module is `record::context`; historical text below is retained.
 
 > Superseded in part: a `mnemon` fork references the parent's records through the link's pointers instead of re-recording them, and `/clear` is a `Protocol::Cleared` record in the same file rather than a segment rotation. See [[internals/session-record|session-record]].
 

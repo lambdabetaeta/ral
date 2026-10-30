@@ -14,7 +14,7 @@ use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
 use crate::record::fault::Remedy;
 use crate::record::{
-    self, Blocks, ChildStatus, Delta, Forensic, Record, Recorded, Settlement, Transient,
+    self, Blocks, ChildStatus, Control, Delta, Record, Recorded, Settlement, Transient,
 };
 use crate::shell_eval::user_json;
 use ral_core::data::FOValue;
@@ -216,7 +216,7 @@ impl Sink for Headless<'_> {
             return;
         }
         self.step(rec);
-        if let Record::Forensic(Forensic::Status { status }) = rec.value() {
+        if let Record::Control(Control::Status { status }) = rec.value() {
             self.status = Some(status.clone());
         }
     }
@@ -374,8 +374,8 @@ impl Headless<'_> {
                 self.turns += 1;
                 let _ = writeln!(self.err, "[turn {turn}]");
             }
-            K::Evicted { residue } => {
-                let _ = writeln!(self.err, "{}", residue.evicted_line());
+            K::Evicted { eviction } => {
+                let _ = writeln!(self.err, "{}", eviction.evicted_line());
             }
             K::Rewound { anchor } => {
                 let _ = writeln!(self.err, "[rewound to turn {anchor}]");
@@ -466,9 +466,25 @@ pub fn run(
     seed: Option<String>,
     format: OutputFormat,
 ) -> Result<(), String> {
+    run_to(
+        host,
+        info,
+        p,
+        seed,
+        format,
+        (&mut io::stdout(), &mut io::stderr()),
+    )
+}
+
+fn run_to(
+    host: &Host,
+    info: &SessionInfo<'_>,
+    p: &Provider,
+    seed: Option<String>,
+    format: OutputFormat,
+    (stdout, stderr): (&mut (dyn Write + Send), &mut (dyn Write + Send)),
+) -> Result<(), String> {
     let prompt = seed.ok_or("--headless requires a seed prompt: --prompt or --file")?;
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
     // The account id, not a label: a label is relative to a set this banner
     // does not have, and the id is what `--provider` takes to reproduce the run;
     // `via=` prints what `--via` takes.
@@ -486,15 +502,23 @@ pub fn run(
         _ => return Err("the first signal of a run was not its root's birth".into()),
     };
     let port = host.port();
-    let mut headless = Headless::new(root, &mut stdout, &mut stderr);
-    port.submit(root, prompt)
-        .map_err(|_| "the agent ended before it could take the prompt")?;
-    while !headless.finished() {
+    let mut headless = Headless::new(root, stdout, stderr);
+    let refused = port.submit(root, prompt).is_err();
+    // A refused submit awaits the end, which reports the real fault.
+    let done = |h: &Headless<'_>| if refused { h.ended } else { h.finished() };
+    while !done(&headless) {
         match host.feed().recv_timeout(POLL) {
             Ok(sig) => headless.accept(sig),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+    if refused
+        && headless.status.is_none()
+        && headless.fault.is_none()
+        && headless.terminal_failures.is_empty()
+    {
+        headless.fault = Some("the agent ended before it could take the prompt".into());
     }
     let mut r = headless.verdict();
     headless.usage = port.usage();

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e5a23909
-generated_at_date: 2026-10-29
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -416,9 +416,10 @@ genai `Client`:
 
 ## One owner for construction
 
-`Provider::build` needs a `Pool` and a `Credential`, and a `Provider`
-retains neither — it keeps a built `Transport`. So minting a *second*
-selection has nothing to work from unless the pool and the application's
+`Provider::build(backend, &account, selected)` constructs a client holding its backend,
+account and immutable `Selected` stamp. The bureau builds a live transport using its
+`Pool` and credentials; the client retains no construction authority.
+Minting a *second* selection has nothing to work from unless the pool and the application's
 `Holdings` — credential store, model catalog, allowance record, whose lock
 discipline is stated once on the type — are reachable together.
 `provider/bureau.rs` names them once: `Bureau::Live { engine, holdings }`, or
@@ -427,9 +428,9 @@ pricing catalog over the network, so no unit test may build one). It mirrors
 `Provider`'s own `Backend::{Live, Scripted}` split rather than inventing a
 second idiom.
 
-`Bureau::build` is **the only caller of `Provider::build`**, which is
-`pub(crate)` for that reason; `available`, `admit` (a `/login`'s admission)
-and `with_catalog` are the rest of the surface. The two halves are shared
+`Bureau::build` is **the live constructor of `Provider`**; the scripted
+constructor uses the same stamp-bearing `Provider::build` inside `provider`.
+`available`, `admit` (a `/login`'s admission) and `with_catalog` are the rest of the surface. The two halves are shared
 (`Arc<Mutex<_>>`) rather than owned, so two hosts compose: exarch builds one
 bureau over its own pair in `run()`, while synod keeps the same pair as
 application-wide window state and mints a provider pool per conversation. They are
@@ -498,10 +499,12 @@ disk-caches both paths:
   account's listing once (`models::listing_of`: the cache, else one fetch made
   with the catalog unlocked), refuses a model the listing does not name, and
   resolves the context window from it: the listing's own figure, else the
-  OpenRouter catalog, else unknown. `Provider` owns the
-  value; the record carries it (`SessionStarted`, `SessionResumed`,
-  `ModelChanged`), so a tab's fold reads it without a catalog. The status line
-  draws an unknown window as `?`.
+  OpenRouter catalog, else unknown. The bureau stamps the result in
+  `Selected` with the label snapshot, model, account, service, via, accepted
+  tuning and token cap. The immutable client carries it; installation
+  records it in `Control::SessionStarted`, `SessionResumed` or `ModelChanged`.
+  Agent code reads the cell's `Model`, not the client stamp, thereafter;
+  the view folds the same records without a catalog. Unknown window is `?`.
 - `/login` admits an account mid-session through `provider::admit_login`,
   which runs `CredentialStore::add_login` inside `Holdings::change`: every
   change to the store goes through that one route, which hands the catalog the
@@ -637,12 +640,14 @@ tutorial is [[internals/provider-fault-recovery|provider-fault-recovery]]
 A 4xx whose text matches a known overflow phrasing (vLLM, OpenAI/OpenRouter,
 Anthropic, Gemini), or whose `type`/`code` is `context_length_exceeded`, is
 `Overflow` rather than `Api`: it carries the `sent` and `limit` token counts
-when stated, and is never retried by `retry.rs`. A stated `limit` narrows the
-`Provider`'s interior-mutable window (it only ever shrinks, and dies with a
-`/model` swap), recorded as `Forensic::WindowNarrowed` so every reader agrees;
-`Agent::deliberate` then sheds the older half and retries the turn once.
-A resume replays the learned window for the same model; a model minted with
-a via starts at the least window its upstreams hold.
+when stated, and is never retried by `retry.rs`. `Provider::complete` passes
+it through unchanged. `Agent::relieve` stamps its listed window from the
+cell's `Model` and calls `Txn::narrow`, recording `Control::WindowNarrowed`
+only if that model is still in force and the limit tightens its window.
+Clients have no mutable window: two agents sharing a client learn separately.
+The owner sheds context and retries once. Reopen retains a learned narrowing
+only for the same model name, bounded by the new catalog window; a via starts
+at the least window its upstreams hold.
 
 Each retryable and 4xx variant carries the parsed body (boxed at the error
 boundary) as an optional JSON value, so the renderer can print a

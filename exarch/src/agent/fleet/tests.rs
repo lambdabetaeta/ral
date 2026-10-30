@@ -28,17 +28,17 @@ fn configured_helper_idle_reaches_the_child_mailbox() {
     .unwrap();
     assert_eq!(parent.fleet.launch.idle, Duration::ZERO);
     let helper = forked_child(&parent, "short-lived", "`inherit");
-    let rest = Rest {
-        pending: false,
-        schedules: false,
-    };
+    let rest = Rest { pending: false };
     helper.handle().steer("task".into()).unwrap();
     let Next::Take { exchange, .. } = helper.mailbox.next(rest) else {
         panic!("admitted input takes precedence over the idle limit");
     };
     assert!(helper.mailbox.begin());
     assert!(!exchange.is_cancelled());
-    helper.handle().report(ChildStatus::Replied(FOValue::Unit));
+    helper
+        .handle()
+        .report(ChildStatus::Replied(FOValue::Unit))
+        .unwrap();
     assert!(matches!(helper.mailbox.next(rest), Next::Settled { .. }));
     assert!(
         helper.handle().is_live(),

@@ -5,10 +5,7 @@ use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent, trunk};
 use crate::bus::{Drained, Input, Next, Rest};
 use ral_core::data::FOValue;
 
-const REST: Rest = Rest {
-    pending: false,
-    schedules: false,
-};
+const REST: Rest = Rest { pending: false };
 
 fn root(fleet: &Arc<Fleet>, name: &str) -> TestAgent {
     test_agent(fleet, TestAgentSpec::new(name)).unwrap()
@@ -45,7 +42,7 @@ fn take(owner: &TestAgent) -> Input {
 }
 
 fn report(parent: &TestAgent, helper: &TestAgent, status: &ChildStatus) {
-    helper.report(status.clone());
+    helper.report(status.clone()).unwrap();
     let Input::Child {
         id, status: actual, ..
     } = take(parent)
@@ -70,8 +67,7 @@ fn a_message_posts_parent_provenance_to_a_descendant() {
     assert_eq!(message.from, parent.id());
     assert_eq!(message.from_name, "parent");
     assert_eq!(message.text, "check the lexer");
-    assert!(message.from_parent);
-    assert!(helper.status().owes_parent);
+    assert!(helper.status().unwrap().owes);
 }
 
 #[test]
@@ -100,7 +96,7 @@ fn an_accepted_message_survives_its_senders_end() {
     parent.end();
     assert!(!sender.is_live());
     assert!(matches!(take(&receiver), Input::Message(message)
-        if message.text == "already said" && !message.from_parent));
+        if message.text == "already said" && message.from == sender.id()));
 }
 
 #[test]
@@ -111,7 +107,7 @@ fn one_report_answers_every_parent_message_taken_up() {
         assert!(matches!(take(&helper), Input::Message(_)));
     }
     report(&parent, &helper, &ChildStatus::Replied(FOValue::Unit));
-    assert!(!helper.status().working());
+    assert!(!helper.status().unwrap().working());
     assert!(empty(&parent));
 }
 
@@ -139,7 +135,25 @@ fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
         .handle()
         .message(&parent.handle(), "follow up".into())
         .unwrap();
+    let handle = child.handle();
+    let life = child.mailbox.life();
+    handle
+        .0
+        .address
+        .after_report_commit(move || assert!(life.is_cancelled()));
     drop(child);
+    assert!(!handle.is_live());
+    assert_eq!(
+        handle.status().unwrap().report,
+        Some(ChildStatus::Failed(
+            crate::bus::ENDED_BEFORE_REPORTING.into()
+        ))
+    );
+    assert!(!handle.status().unwrap().owes);
+    assert_eq!(
+        handle.0.address.queued_posts(),
+        Vec::<crate::record::PostId>::new()
+    );
     let inputs = parent.mailbox.drain();
     assert!(
         matches!(&inputs[..], [Drained::Input(Input::Child { status: ChildStatus::Failed(reason), .. })]
@@ -150,7 +164,7 @@ fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
 #[test]
 fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
     use crate::agent::outcome::Outcome;
-    use crate::record::{Forensic, Protocol, Record, Voice};
+    use crate::record::{Forensic, Record, Transcript, Voice};
     let mut owner = trunk(Trunk::Converses);
     owner.handle().steer("taken up".into()).unwrap();
     let Next::Take { input, exchange } = owner.mailbox.next(REST) else {
@@ -159,15 +173,15 @@ fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
     let prompt = owner.admit(input).unwrap();
     assert!(owner.mailbox.begin());
     assert_eq!(
-        owner.handle().stop(owner.handle().status().job.unwrap()),
+        owner
+            .handle()
+            .stop(owner.handle().status().unwrap().job.unwrap()),
         Some(Vec::new())
     );
     let (emit, rx) = crate::bus::dummy_emitter();
-    let provider = owner.body.state.provider.clone();
     let outcome = owner
         .deliberate(
             &exchange,
-            &provider,
             Some((prompt.text, prompt.voice)),
             prompt.continues,
             &emit,
@@ -176,7 +190,7 @@ fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
     assert!(matches!(outcome, Outcome::Cancelled));
     let records = crate::bus::drain_records(&rx);
     assert_eq!(records.iter().filter(|record| matches!(record,
-        Record::Protocol(Protocol::UserPrompt { text, voice: Voice::Human, .. }) if text == "taken up")).count(), 1);
+        Record::Transcript(Transcript::UserPrompt { text, voice: Voice::Human, .. }) if text == "taken up")).count(), 1);
     assert!(
         !records
             .iter()
@@ -227,5 +241,115 @@ fn a_claimed_surface_declines_without_cancelling_the_current_exchange() {
     };
     assert!(owner.admit(surface).is_none());
     assert!(!exchange.is_cancelled());
-    assert!(owner.handle().status().job.is_some());
+    assert!(owner.handle().status().unwrap().job.is_some());
+}
+
+#[test]
+fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (_fleet, parent, helper) = family();
+    assert!(parent.mailbox.begin());
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _result = helper.0.address.transact(|_| panic!("poison the helper"));
+        }))
+        .is_err()
+    );
+    let failure = helper.report(ChildStatus::Stopped).unwrap_err().to_string();
+    assert_eq!(
+        failure,
+        format!(
+            "a thread panicked inside agent {}'s transaction, so its state may no longer match its log; it has ended, and resuming the run rebuilds its state from the log",
+            helper.id()
+        )
+    );
+    assert!(
+        matches!(take(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. }
+        if id == helper.id() && reason == failure)
+    );
+    assert_eq!(
+        parent.mailbox.address().queued_posts(),
+        Vec::<crate::record::PostId>::new()
+    );
+    assert!(matches!(
+        parent.mailbox.next(REST),
+        Next::Settled { stopped: false }
+    ));
+}
+
+#[test]
+fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
+    use crate::record::{Control, RECORD, Record, read_records};
+    let parent = trunk(Trunk::Converses);
+    let helper = parent.fork_named("ended-helper").unwrap();
+    let handle = helper.handle();
+    handle.message(&parent.handle(), "unread".into()).unwrap();
+    let pending = handle.0.address.queued_posts();
+    let mut nursery = crate::agent::nursery::Nursery::default();
+    nursery.adopt(
+        handle.clone(),
+        crate::agent::nursery::Joined::new(std::thread::spawn(|| {
+            crate::agent::nursery::Teardown { failures: vec![] }
+        })),
+    );
+    assert!(nursery.owing());
+    handle.end();
+    handle.report(ChildStatus::Failed("ended".into())).unwrap();
+    assert!(!handle.status().unwrap().owes);
+    assert_eq!(
+        handle.0.address.queued_posts(),
+        Vec::<crate::record::PostId>::new()
+    );
+    assert_eq!(
+        handle.status().unwrap().report,
+        Some(ChildStatus::Failed("ended".into()))
+    );
+    let records = read_records(&handle.log_dir().path().join(RECORD)).unwrap();
+    assert!(matches!(&records[records.len()-2..],
+        [Record::Control(Control::Status { status: ChildStatus::Failed(reason) }),
+         Record::Control(Control::Withdrawn { posts })]
+        if reason == "ended" && posts.iter().copied().collect::<Vec<_>>() == pending));
+    let (_, commits) = helper
+        .body
+        .log
+        .record_emitter()
+        .reader()
+        .since(None)
+        .unwrap();
+    assert_eq!(
+        commits
+            .map(Result::unwrap)
+            .last()
+            .unwrap()
+            .records()
+            .iter()
+            .count(),
+        2
+    );
+    assert!(!nursery.owing());
+    assert!(matches!(parent.mailbox.drain().as_slice(),
+        [Drained::Input(Input::Child { status: ChildStatus::Failed(reason), .. })] if reason == "ended"));
+    parent.mailbox.address().gone(handle.id());
+    assert!(!nursery.owing(), "a queued Gone cannot resurrect paid debt");
+    assert_eq!(nursery.dismiss_all(), Vec::<String>::new());
+}
+
+#[test]
+fn recalling_a_returning_roots_unread_text_leaves_no_teardown_report() {
+    use crate::record::{Control, RECORD, Record, read_records};
+    let owner = trunk(Trunk::Returns);
+    let handle = owner.handle();
+    let fleet = owner.fleet.clone();
+    handle.steer("unread".into()).unwrap();
+    assert!(handle.status().unwrap().owes);
+    assert_eq!(handle.recall(), ["unread"]);
+    assert!(!handle.status().unwrap().owes);
+    drop(owner);
+    assert!(
+        !read_records(&handle.log_dir().path().join(RECORD))
+            .unwrap()
+            .iter()
+            .any(|record| matches!(record, Record::Control(Control::Status { .. })))
+    );
+    drop(fleet);
 }

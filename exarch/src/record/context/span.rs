@@ -1,4 +1,4 @@
-//! A span of turn ids: what a residue stands for, what an item is named by,
+//! A span of turn ids: what an eviction stands for, what an item is named by,
 //! and what an eviction takes.
 
 use serde::{Deserialize, Serialize};

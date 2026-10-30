@@ -1,66 +1,87 @@
 use super::*;
 
+pub(super) fn book(mailbox: &AgentMailbox, label: &str) {
+    assert!(
+        mailbox
+            .transact(|txn| txn.schedule(
+                label.into(),
+                Schedule {
+                    prompt: "wake".into(),
+                    trigger: "* * * * *".into(),
+                    cron: Some("* * * * *".into()),
+                    next_unix_ms: 60_000,
+                    fires: 0,
+                }
+            ))
+            .unwrap()
+            .unwrap()
+    );
+}
+
 #[test]
-fn post_wakeup_with_observes_the_queue_under_the_post_lock() {
+fn a_fire_coalesces_per_schedule_id_and_a_cleared_schedule_does_not_fire() {
     let mailbox = mailbox(Admission::Free);
-    let address = mailbox.address();
     let id = ScheduleId::new(1);
-    address
-        .post_wakeup_with(id, |queued| {
-            assert!(!queued);
-            Some((3, "first".into()))
-        })
-        .unwrap();
-    address
-        .post_wakeup_with(id, |queued| {
-            assert!(queued);
-            None
-        })
-        .unwrap();
-    address
-        .post_wakeup_with(ScheduleId::new(2), |queued| {
-            assert!(!queued);
-            Some((4, "other".into()))
-        })
+    book(&mailbox, "one");
+    book(&mailbox, "other");
+    for text in ["first", "coalesced"] {
+        assert!(
+            mailbox
+                .transact(|txn| txn.fire("one", id, Some(120_000), text.into()))
+                .unwrap()
+                .unwrap()
+        );
+    }
+    mailbox
+        .transact(|txn| txn.fire("other", ScheduleId::new(2), Some(120_000), "other".into()))
+        .unwrap()
         .unwrap();
     assert_eq!(depth(&mailbox, Source::Schedule), 2);
     assert!(
-        matches!(take(&mailbox).0, Input::Wakeup { id: received, epoch: 3, text }
+        matches!(take(&mailbox).0, Input::Wakeup { id: received, text }
         if received == id && text == "first")
     );
-    address
-        .post_wakeup_with(id, |queued| {
-            assert!(!queued);
-            None
-        })
+    mailbox
+        .transact(|txn| txn.unschedule("one"))
+        .unwrap()
         .unwrap();
-    mailbox.clear();
-    address
-        .post_wakeup_with(ScheduleId::new(2), |queued| {
-            assert!(!queued);
-            None
-        })
-        .unwrap();
+    #[allow(
+        clippy::redundant_closure_for_method_calls,
+        reason = "the method item is not general enough for transact's higher-ranked lifetime"
+    )]
+    mailbox.transact(|txn| txn.clear()).unwrap().unwrap();
+    assert!(
+        !mailbox
+            .transact(|txn| txn.fire("other", ScheduleId::new(2), None, "retired".into()))
+            .unwrap()
+            .unwrap()
+    );
     assert_eq!(depth(&mailbox, Source::Schedule), 0);
 }
 
 #[test]
-fn concurrent_wakeup_preparations_enqueue_only_one_delivery_for_the_same_id() {
+fn serialized_fires_enqueue_only_one_delivery_for_the_same_id() {
     for _ in 0..32 {
         let mailbox = mailbox(Admission::Free);
-        let address = mailbox.address();
+        book(&mailbox, "one");
         let barrier = Barrier::new(2);
         std::thread::scope(|scope| {
-            let post = || {
+            let fire = || {
                 barrier.wait();
-                address
-                    .post_wakeup_with(ScheduleId::new(1), |queued| {
-                        (!queued).then(|| (3, "one delivery".into()))
+                mailbox
+                    .transact(|txn| {
+                        txn.fire(
+                            "one",
+                            ScheduleId::new(1),
+                            Some(120_000),
+                            "one delivery".into(),
+                        )
                     })
+                    .unwrap()
                     .unwrap();
             };
-            let first = scope.spawn(post);
-            post();
+            let first = scope.spawn(fire);
+            fire();
             first.join().unwrap();
         });
         assert_eq!(depth(&mailbox, Source::Schedule), 1);
@@ -70,46 +91,15 @@ fn concurrent_wakeup_preparations_enqueue_only_one_delivery_for_the_same_id() {
 }
 
 #[test]
-fn clear_cannot_slip_between_wakeup_preparation_and_publication() {
-    let mailbox = mailbox(Admission::Free);
-    let address = mailbox.address();
-    let (prepared, preparing) = mpsc::channel();
-    let (resume, resumed) = mpsc::channel();
-    let (clearing, clear_started) = mpsc::channel();
-    std::thread::scope(|scope| {
-        let post = scope.spawn(move || {
-            address
-                .post_wakeup_with(ScheduleId::new(1), |queued| {
-                    assert!(!queued);
-                    prepared.send(()).unwrap();
-                    resumed.recv_timeout(WAIT).unwrap();
-                    Some((3, "racing clear".into()))
-                })
-                .unwrap();
-        });
-        preparing.recv_timeout(WAIT).unwrap();
-        let clear = scope.spawn(|| {
-            clearing.send(()).unwrap();
-            mailbox.clear();
-        });
-        clear_started.recv_timeout(WAIT).unwrap();
-        resume.send(()).unwrap();
-        post.join().unwrap();
-        clear.join().unwrap();
-    });
-    assert_eq!(depth(&mailbox, Source::Schedule), 0);
-}
-
-#[test]
-fn an_ended_mailbox_does_not_prepare_a_wakeup() {
+fn an_ended_mailbox_drops_a_ring() {
     let mailbox = mailbox(Admission::Free);
     let address = mailbox.address();
     address.end(CancelCause::Cancelled);
-    let mut prepared = false;
-    let posted = address.post_wakeup_with(ScheduleId::new(1), |_| {
-        prepared = true;
-        Some((3, "late".into()))
-    });
-    assert!(matches!(posted, Err(Refused::Ended)));
-    assert!(!prepared);
+    address.ring("one".into(), ScheduleId::new(1));
+    #[allow(
+        clippy::redundant_closure_for_method_calls,
+        reason = "the method item is not general enough for transact's higher-ranked lifetime"
+    )]
+    let rung = address.transact(|txn| txn.rung()).unwrap();
+    assert!(rung.is_empty());
 }

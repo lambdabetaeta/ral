@@ -1,6 +1,6 @@
 use super::*;
-use crate::bus::{AgentAddress, Drained, Input};
-use crate::record::{ChildStatus, Forensic, Protocol, Record};
+use crate::bus::{Drained, Input};
+use crate::record::{ChildStatus, Forensic, Record, Transcript};
 use ral_core::carrier::Transport as _;
 use ral_core::data::FOValue;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
@@ -78,7 +78,7 @@ fn clear_dismisses_and_joins_helpers_drops_reports_and_keeps_human_and_peer_inpu
         "clear joined the helper and released its name"
     );
     assert!(!parent.rest().pending);
-    assert!(parent.body.state.nursery.named("helper").is_none());
+    assert!(parent.body.nursery.named("helper").is_none());
     assert!(parent.fleet.registry.name("helper").is_ok());
     let inputs = parent.mailbox.drain();
     assert!(
@@ -105,7 +105,7 @@ fn a_batch_from_the_old_generation_is_declined_but_the_new_sink_is_live() {
         panic!("late old batch")
     };
     assert!(agent.admit(input).is_none());
-    assert!(agent.handle().status().job.is_none());
+    assert!(agent.handle().status().unwrap().job.is_none());
     let fresh = crate::shell_eval::deferred_sink(&agent.mailbox.address(), agent.generation);
     fresh.deliver(vec![FOValue::Unit]);
     let Some(Drained::Input(input)) = agent.mailbox.drain().pop() else {
@@ -138,21 +138,15 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
         let child = agent.fork_named("helper").unwrap();
         let helper_engine = identity(&child);
         let helper = launch_child(&mut agent, child, None, &emit);
-        agent
-            .body
-            .state
-            .schedules
-            .schedule(
-                crate::schedule::Trigger::After(Duration::from_hours(1)),
-                "ping".into(),
-                "ping".into(),
-                &agent.mailbox.address(),
-            )
-            .unwrap();
+        crate::agent::testkit::schedule(
+            &mut agent,
+            crate::schedule::Trigger::After(Duration::from_hours(1)),
+            "ping".into(),
+            "ping".into(),
+        );
         agent.seed("keep queued".into());
-        agent.body.state.readings.measure =
-            Some(crate::agent::gauge::Measure { tokens: 17, at: 2 });
-        assert!(agent.body.state.readings.gauges.disk(2, 1).is_some());
+        agent.body.readings.measure = Some(crate::agent::gauge::Measure { tokens: 17, at: 2 });
+        assert!(agent.body.readings.gauges.disk(2, 1).is_some());
         let facts = crate::agent::nudge::Facts {
             must_reply: false,
             pinned: Some("keep".into()),
@@ -161,8 +155,7 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
         {
             let body = &mut *agent.body;
             assert!(
-                body.state
-                    .readings
+                body.readings
                     .nudges
                     .react(
                         Ok(&crate::agent::outcome::Outcome::Complete),
@@ -230,18 +223,17 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
                 .any(|binding| binding.name == "keep" && binding.preview == "1")
         );
         assert!(!entries[0].handle.cancel.is_cancelled());
-        assert_eq!(agent.body.state.schedules.list().len(), 1);
-        assert_eq!(agent.body.state.pins.len(), 1);
+        assert_eq!(crate::agent::testkit::schedules(&agent).len(), 1);
+        assert_eq!(agent.body.pins.len(), 1);
         assert_eq!(
-            agent.body.state.readings.measure.map(|m| (m.tokens, m.at)),
+            agent.body.readings.measure.map(|m| (m.tokens, m.at)),
             Some((17, 2))
         );
-        assert!(agent.body.state.readings.gauges.disk(2, 1).is_none());
+        assert!(agent.body.readings.gauges.disk(2, 1).is_none());
         {
             let body = &mut *agent.body;
             assert!(
-                body.state
-                    .readings
+                body.readings
                     .nudges
                     .react(
                         Ok(&crate::agent::outcome::Outcome::Complete),
@@ -305,24 +297,19 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
     let grandchild = child.fork_named("grandchild").unwrap();
     let helper = launch_child(&mut child, grandchild, None, &emit);
     child.seed("keep queued".into());
-    child
-        .body
-        .state
-        .schedules
-        .schedule(
-            crate::schedule::Trigger::After(Duration::from_hours(1)),
-            "ping".into(),
-            "ping".into(),
-            &child.mailbox.address(),
-        )
-        .unwrap();
+    crate::agent::testkit::schedule(
+        &mut child,
+        crate::schedule::Trigger::After(Duration::from_hours(1)),
+        "ping".into(),
+        "ping".into(),
+    );
     let before = serde_json::to_vec(&child.rendered_messages()).unwrap();
     assert!(child.clear().unwrap_err().contains("new conversation"));
     assert!(helper.is_live());
     assert!(child.rest().pending);
     assert_eq!(child.handle().queued(), ["keep queued"]);
-    assert_eq!(child.body.state.schedules.list().len(), 1);
-    assert_eq!(child.body.state.pins.len(), 1);
+    assert_eq!(crate::agent::testkit::schedules(&child).len(), 1);
+    assert_eq!(child.body.pins.len(), 1);
     assert!(scope_has(&mut child, "keep"));
     assert_eq!(
         serde_json::to_vec(&child.rendered_messages()).unwrap(),
@@ -331,56 +318,30 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
 }
 
 #[test]
-fn a_wakeup_fired_across_clear_is_declined_by_its_old_epoch() {
+fn a_ring_answered_after_clear_posts_no_wakeup() {
     let mut agent = Agent::for_test("system").unwrap();
-    let epoch = agent.body.state.schedules.epoch();
-    agent.clear().unwrap();
-    assert!(
-        agent
-            .admit(Input::Wakeup {
-                id: crate::bus::ScheduleId::new(1),
-                epoch,
-                text: "old".into()
-            })
-            .is_none()
+    crate::agent::testkit::schedule(
+        &mut agent,
+        crate::schedule::Trigger::After(Duration::from_hours(1)),
+        "old".into(),
+        "old".into(),
     );
-    let epoch = agent.body.state.schedules.epoch();
-    assert!(
-        agent
-            .admit(Input::Wakeup {
-                id: crate::bus::ScheduleId::new(2),
-                epoch,
-                text: "fresh".into()
-            })
-            .is_some()
-    );
-}
-
-#[test]
-fn clear_keeps_human_input_posted_by_its_commit_publication() {
-    struct OnClear(AgentAddress, Arc<AtomicU64>);
-    impl crate::record::Publish for OnClear {
-        fn commit(&self, commit: crate::record::Commit) {
-            if commit
-                .records()
-                .iter()
-                .any(|record| matches!(record.value(), Record::Protocol(Protocol::Cleared)))
-            {
-                self.0.steer("during publication".into()).unwrap();
-                self.1.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        fn transient(&self, _transient: crate::record::Transient) {}
-    }
-    let mut agent = Agent::for_test("system").unwrap();
-    agent.seed("old queued".into());
-    let count = Arc::new(AtomicU64::new(0));
-    agent
-        .recorder()
-        .attach(Box::new(OnClear(agent.mailbox.address(), count.clone())));
+    agent.body.schedules.ring("old", &agent.mailbox.address());
     agent.clear().unwrap();
-    assert_eq!(count.load(Ordering::Relaxed), 1);
-    assert_eq!(agent.handle().queued(), ["old queued\nduring publication"]);
+    let commits = |agent: &Agent| {
+        let (_, commits) = agent
+            .body
+            .log
+            .record_emitter()
+            .reader()
+            .since(None)
+            .unwrap();
+        commits.map(Result::unwrap).count()
+    };
+    let before = commits(&agent);
+    agent.fire_schedules().unwrap();
+    assert!(agent.mailbox.drain().is_empty());
+    assert_eq!(commits(&agent), before);
 }
 
 #[test]
@@ -404,14 +365,14 @@ fn clear_appends_to_the_one_record_and_shared_emitters_keep_publishing() {
     assert!(
         records
             .iter()
-            .any(|record| matches!(record, Record::Protocol(Protocol::Cleared)))
+            .any(|record| matches!(record, Record::Transcript(Transcript::Cleared)))
     );
     assert!(records.iter().any(after));
     let published = crate::bus::drain_records(&rx);
     assert!(
         published
             .iter()
-            .any(|record| matches!(record, Record::Protocol(Protocol::Cleared)))
+            .any(|record| matches!(record, Record::Transcript(Transcript::Cleared)))
     );
     assert!(published.iter().any(after));
 }
@@ -433,7 +394,7 @@ fn rewind_validates_the_anchor_and_rearms_nudge_edges() {
     };
     let react = |agent: &mut Agent| {
         let body = &mut *agent.body;
-        body.state.readings.nudges.react(
+        body.readings.nudges.react(
             Ok(&crate::agent::outcome::Outcome::Complete),
             &facts,
             &body.log,
@@ -460,11 +421,10 @@ fn rewind_validates_the_anchor_and_rearms_nudge_edges() {
         vec![1, 2]
     );
     assert!(react(&mut agent).is_some());
-    assert!(
-        crate::bus::drain_records(&rx)
-            .iter()
-            .any(|record| matches!(record, Record::Protocol(Protocol::Rewound { anchor: 3 })))
-    );
+    assert!(crate::bus::drain_records(&rx).iter().any(|record| matches!(
+        record,
+        Record::Transcript(Transcript::Rewound { anchor: 3 })
+    )));
 }
 
 struct ReleaseOnDrop(Arc<AtomicBool>);
@@ -636,7 +596,7 @@ fn clear_preserves_human_input_during_preparation_and_outgoing_teardown() {
             .iter()
             .filter(|r| matches!(
                 r,
-                crate::record::Record::Protocol(crate::record::Protocol::Cleared)
+                crate::record::Record::Transcript(crate::record::Transcript::Cleared)
             ))
             .count(),
         1
@@ -662,20 +622,15 @@ fn clear_resets_pins_schedules_and_readings_without_resetting_the_address() {
         &emit,
     );
     assert!(!result.failed, "{}", result.text);
-    agent
-        .body
-        .state
-        .schedules
-        .schedule(
-            crate::schedule::Trigger::After(Duration::from_hours(1)),
-            "ping".into(),
-            "ping".into(),
-            &agent.mailbox.address(),
-        )
-        .unwrap();
-    let epoch = agent.body.state.schedules.epoch();
-    agent.body.state.readings.measure = Some(crate::agent::gauge::Measure { tokens: 17, at: 2 });
-    assert!(agent.body.state.readings.gauges.disk(2, 1).is_some());
+    crate::agent::testkit::schedule(
+        &mut agent,
+        crate::schedule::Trigger::After(Duration::from_hours(1)),
+        "ping".into(),
+        "ping".into(),
+    );
+
+    agent.body.readings.measure = Some(crate::agent::gauge::Measure { tokens: 17, at: 2 });
+    assert!(agent.body.readings.gauges.disk(2, 1).is_some());
     let facts = crate::agent::nudge::Facts {
         must_reply: false,
         pinned: Some("old goal".into()),
@@ -684,8 +639,7 @@ fn clear_resets_pins_schedules_and_readings_without_resetting_the_address() {
     {
         let body = &mut *agent.body;
         assert!(
-            body.state
-                .readings
+            body.readings
                 .nudges
                 .react(
                     Ok(&crate::agent::outcome::Outcome::Complete),
@@ -698,15 +652,14 @@ fn clear_resets_pins_schedules_and_readings_without_resetting_the_address() {
     agent.clear().unwrap();
     assert!(handle.is_live());
     assert_eq!(agent.id(), handle.id());
-    assert!(agent.body.state.pins.is_empty());
-    assert!(agent.body.state.schedules.list().is_empty());
-    assert_ne!(agent.body.state.schedules.epoch(), epoch);
-    assert!(agent.body.state.readings.measure.is_none());
-    assert!(agent.body.state.readings.gauges.disk(2, 1).is_some());
+    assert!(agent.body.pins.is_empty());
+    assert!(crate::agent::testkit::schedules(&agent).is_empty());
+
+    assert!(agent.body.readings.measure.is_none());
+    assert!(agent.body.readings.gauges.disk(2, 1).is_some());
     let body = &mut *agent.body;
     assert!(
-        body.state
-            .readings
+        body.readings
             .nudges
             .react(
                 Ok(&crate::agent::outcome::Outcome::Complete),
@@ -729,7 +682,7 @@ fn clear_in_one_root_leaves_another_roots_queued_report_alone() {
         crate::agent::spawn::hatch_root(&parent, Memory::Amnemon, Some("branch".into())).unwrap();
     branch.clear().unwrap();
     assert!(helper.is_live());
-    helper.report(ChildStatus::Replied(FOValue::Unit));
+    helper.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
     let inputs = parent.mailbox.drain();
     assert!(
         matches!(&inputs[..], [Drained::Input(Input::Child { id, status: ChildStatus::Replied(FOValue::Unit), .. })] if *id == helper.id())

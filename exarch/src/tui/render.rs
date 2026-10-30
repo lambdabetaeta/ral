@@ -321,10 +321,17 @@ pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Resul
 
 pub(super) fn status_model(app: &App, bureau: &Bureau) -> String {
     app.tabs.focused_row().map_or_else(String::new, |row| {
-        let pick = row.pick;
-        let label = identity::label(&pick.choice.account, &bureau.available());
-        let effort = effort_label(&pick.tuning.effort).unwrap_or("custom");
-        format!("{label}/{} ({effort})", pick.choice.model)
+        let selected = row.selected;
+        let available = bureau.available();
+        let label = available
+            .iter()
+            .find(|account| account.id.as_str() == selected.account)
+            .map_or_else(
+                || selected.label.clone(),
+                |account| identity::label(account, &available),
+            );
+        let effort = effort_label(&selected.tuning.effort).unwrap_or("custom");
+        format!("{label}/{} ({effort})", selected.model)
     })
 }
 

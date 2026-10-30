@@ -4,6 +4,8 @@ status: accepted
 
 # One seam, one log
 
+> *Amended 2026-10-30*: `Protocol` is named `Transcript`, and the context module is `record::context`; historical names below are retained.
+
 > Superseded in part: a `Display` commit is no longer the twin of a protocol fact, and `user.log` and `record.log` are no longer written; a transcript is rendered from `record.jsonl` on demand. See [[internals/session-record|session-record]].
 
 Amended by [[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]: a printer is itself a fold over this log, stepped by the record and acting on the delta that step reports — never handed another fold's memo.

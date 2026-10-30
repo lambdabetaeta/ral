@@ -24,7 +24,7 @@ fn drain_display(rx: &BusReceiver) -> Vec<Display> {
         .into_iter()
         .filter_map(|rec| match rec {
             Record::Display(d) => Some(d),
-            Record::Protocol(_) | Record::Forensic(_) => None,
+            Record::Transcript(_) | Record::Control(_) | Record::Forensic(_) => None,
         })
         .collect()
 }

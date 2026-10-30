@@ -1,4 +1,4 @@
-//! The view fold: folds the [`Protocol`] facts a scrollback draws, the
+//! The view fold: folds the [`Transcript`] facts a scrollback draws, the
 //! [`Display`] records and the [`Forensic`] rows into [`Blocks`] — the memo
 //! `tui` and `headless` each keep their own of, stepped by the record and read
 //! through [`BlockKind`].
@@ -9,8 +9,8 @@
 //! clones nothing.
 
 use super::{
-    BlockId, Display, EditAuthority, Fold, Forensic, ItemKind, Protocol, Record, Recorded, Refusal,
-    Residue, Role, Selection, Seq, Settlement, SpanRow, Spent, Voice,
+    BlockId, Control, Display, EditAuthority, Eviction, Fold, Forensic, ItemKind, Model, Record,
+    Recorded, Refusal, Role, Seq, Settlement, SpanRow, Spent, Transcript, Voice,
 };
 use crate::card::{Card, Change, DoneOutcome, Field, FieldVal, Mark, Role as Ink, Span};
 use crate::provider::{ProviderError, Usage};
@@ -93,7 +93,7 @@ pub enum BlockKind {
         id: u64,
     },
     Evicted {
-        residue: Residue,
+        eviction: Eviction,
     },
     Rewound {
         anchor: u64,
@@ -177,7 +177,7 @@ pub struct Blocks {
     usage: Usage,
     /// The last turn's prompt size — the context gauge's numerator.
     last_input: u64,
-    selection: Selection,
+    model: Option<Model>,
     /// The [`Seq`] of the first block this fold ever held, remembered past
     /// eviction — the door [`Self::blocks`] no longer names once the window
     /// has moved off the session's opening block.
@@ -215,29 +215,47 @@ impl Blocks {
     /// `(model, provider)` in force — total from the session's first record,
     /// its head bookend, onward.
     pub fn model(&self) -> Option<(&str, &str)> {
-        self.selection.model()
+        self.model
+            .as_ref()
+            .map(|model| (model.name(), model.selected().label.as_str()))
     }
 
     /// The context window the model in force was minted with, if known.
     pub fn context_window(&self) -> Option<u64> {
-        self.selection.window()
+        self.model.as_ref().and_then(Model::window)
     }
 
     /// Fold one witnessed fact in, reporting what it moved.  A record the
     /// memo has already folded moves nothing, so the same log stepped twice
     /// and stepped once are the same memo.
+    /// # Panics
+    /// A live-authored record contradicts the model in force.
     pub fn step(&mut self, record: &Recorded<Record>) -> Delta {
+        self.try_step(record)
+            .unwrap_or_else(|why| panic!("live view refused a record: {why}"))
+    }
+
+    /// Fold a record read from disk, refusing invalid control data.
+    /// # Errors
+    /// The record contradicts the model in force.
+    pub fn try_step(&mut self, record: &Recorded<Record>) -> Result<Delta, Refusal> {
         let seq = record.locus().seq();
         if self.seen.is_some_and(|folded| seq <= folded) {
-            return Delta::Quiet;
+            return Ok(Delta::Quiet);
         }
-        self.seen = Some(seq);
-        match record.value() {
-            Record::Protocol(p) => self.step_protocol(seq, p),
-            // Every display block keeps its whole record.
+        let delta = match record.value() {
+            Record::Transcript(p) => self.step_transcript(seq, p),
+            Record::Control(control) => self
+                .step_control(&Recorded::new(record.locus().clone(), control))
+                .map_err(|reason| Refusal::Foreign {
+                    record: Box::new(record.value().clone()),
+                    reason,
+                })?,
             Record::Display(d) => self.step_display(seq, d.clone()),
             Record::Forensic(f) => self.step_forensic(seq, f),
-        }
+        };
+        self.seen = Some(seq);
+        Ok(delta)
     }
 
     /// Drop the oldest resident blocks past [`BLOCKS_WINDOW`], as each block
@@ -290,62 +308,58 @@ impl Blocks {
         Delta::Quiet
     }
 
-    fn step_protocol(&mut self, seq: Seq, p: &Protocol) -> Delta {
+    fn step_transcript(&mut self, seq: Seq, p: &Transcript) -> Delta {
         match p {
-            Protocol::UserPrompt { turn, text, voice } if *voice != Voice::Harness => self.push(
+            Transcript::UserPrompt { turn, text, voice } if *voice != Voice::Harness => self.push(
                 seq,
                 BlockKind::Prompt {
                     text: text.clone(),
                     turn: Some(*turn),
                 },
             ),
-            Protocol::Steering { text, voice } if *voice != Voice::Harness => self.push(
+            Transcript::Steering { text, voice } if *voice != Voice::Harness => self.push(
                 seq,
                 BlockKind::Prompt {
                     text: text.clone(),
                     turn: None,
                 },
             ),
-            Protocol::Evicted {
-                residue:
-                    residue @ Residue {
-                        by: EditAuthority::Harness,
-                        ..
-                    },
-            } => self.push(
+            Transcript::Evicted(
+                eviction @ Eviction {
+                    by: EditAuthority::Harness,
+                    ..
+                },
+            ) => self.push(
                 seq,
                 BlockKind::Evicted {
-                    residue: residue.clone(),
+                    eviction: eviction.clone(),
                 },
             ),
-            Protocol::Rewound { anchor } => {
+            Transcript::Rewound { anchor } => {
                 let from = self.rewind_at(*anchor);
                 let cut = from.map(|at| self.blocks[at].id());
                 self.blocks.truncate(from.unwrap_or(self.blocks.len()));
                 let _ = self.push(seq, BlockKind::Rewound { anchor: *anchor });
                 Delta::Rewound(cut)
             }
-            Protocol::Cleared => {
+            Transcript::Cleared => {
                 self.blocks.clear();
                 self.origin = None;
                 self.last_input = 0;
                 let _ = self.push(seq, BlockKind::Cleared);
                 Delta::Cleared
             }
-            Protocol::Evicted {
-                residue:
-                    Residue {
-                        by: EditAuthority::Model,
-                        ..
-                    },
-            }
-            | Protocol::UserPrompt { .. }
-            | Protocol::Steering { .. }
-            | Protocol::System { .. }
-            | Protocol::Import { .. }
-            | Protocol::Inherited { .. }
-            | Protocol::AssistantMessage { .. }
-            | Protocol::ToolResults { .. } => Delta::Quiet,
+            Transcript::Evicted(Eviction {
+                by: EditAuthority::Model,
+                ..
+            })
+            | Transcript::UserPrompt { .. }
+            | Transcript::Steering { .. }
+            | Transcript::System { .. }
+            | Transcript::Import { .. }
+            | Transcript::Inherited { .. }
+            | Transcript::AssistantMessage { .. }
+            | Transcript::ToolResults { .. } => Delta::Quiet,
         }
     }
 
@@ -410,6 +424,15 @@ impl Blocks {
         }
     }
 
+    fn step_control(&mut self, record: &Recorded<&Control>) -> Result<Delta, String> {
+        if let Control::SessionStarted(started) = record.value() {
+            self.model = Some(Model::new(started.selected.clone()));
+        } else if let Some(model) = &mut self.model {
+            model.step(record)?;
+        }
+        Ok(Delta::Quiet)
+    }
+
     fn step_forensic(&mut self, seq: Seq, f: &Forensic) -> Delta {
         match f {
             Forensic::UsageDelta { usage, .. } => {
@@ -464,16 +487,6 @@ impl Blocks {
                 self.push(seq, BlockKind::HarnessResult { text: text.clone() })
             }
             Forensic::TurnStarted { turn, .. } => self.push(seq, BlockKind::Turn { id: *turn }),
-            // A head bookend opens the session under a model exactly as a
-            // switch names one mid-session: all land in the selection and none
-            // draws a block.
-            Forensic::SessionStarted { .. }
-            | Forensic::SessionResumed { .. }
-            | Forensic::ModelChanged { .. }
-            | Forensic::WindowNarrowed { .. } => {
-                self.selection.step(f);
-                Delta::Quiet
-            }
             // The history informs a resume note; the live register follows the
             // shell boundary and is not restored — so neither is a scrollback
             // block this fold draws.  The tail bookend draws none either.
@@ -484,9 +497,6 @@ impl Blocks {
             | Forensic::Unpin { .. }
             | Forensic::SessionEnded
             | Forensic::SessionClosed
-            | Forensic::JobOpened
-            | Forensic::JobSettled { .. }
-            | Forensic::Status { .. }
             | Forensic::Retried { .. } => Delta::Quiet,
         }
     }
@@ -532,12 +542,12 @@ impl Fold for View {
     type Memo = Blocks;
 
     fn step(memo: &mut Blocks, record: Recorded<Record>) -> Result<(), Refusal> {
-        let _ = memo.step(&record);
+        let _ = memo.try_step(&record)?;
         Ok(())
     }
 }
 
-impl Residue {
+impl Eviction {
     /// The line an eviction leaves in scrollback, `tui` and `headless` alike.
     #[must_use]
     pub fn evicted_line(&self) -> String {
@@ -548,7 +558,7 @@ impl Residue {
 /// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
 /// "context" header: the one rendering `tui`, `headless` and synod all draw from.
 ///
-/// The survey is one row per item, a turn or a residue; the card groups them
+/// The survey is one row per item, a turn or an eviction; the card groups them
 /// at draw time into a prompt and the turns answering it, since two hundred
 /// tool turns under one prompt are one thing the human is reading about. The
 /// newest turn is not flagged as un-evictable: no eviction can name it, so
@@ -581,13 +591,13 @@ pub fn context_rows_card(rows: &[SpanRow]) -> Card {
 struct ContextGroup {
     head: super::Span,
     label: String,
-    /// `None` for a lone residue, whose head already names all it reaches.
+    /// `None` for a lone eviction, whose head already names all it reaches.
     reach: Option<super::Span>,
     bytes: usize,
 }
 
 /// The survey's items grouped as a prompt and the turns answering it: a group
-/// opens at every user-role row, so a residue opens its own, labelled by its
+/// opens at every user-role row, so an eviction opens its own, labelled by its
 /// note. The label is the opening line of whichever row opens the group.
 fn context_groups(rows: &[SpanRow]) -> Vec<ContextGroup> {
     let mut drawn: Vec<(&SpanRow, super::Span, usize)> = Vec::new();
@@ -605,7 +615,7 @@ fn context_groups(rows: &[SpanRow]) -> Vec<ContextGroup> {
         .map(|(first, reach, bytes)| ContextGroup {
             head: first.span,
             label: first.label.clone(),
-            reach: (first.kind != ItemKind::Residue || reach != first.span).then_some(reach),
+            reach: (first.kind != ItemKind::Eviction || reach != first.span).then_some(reach),
             bytes,
         })
         .collect()

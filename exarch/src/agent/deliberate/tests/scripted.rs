@@ -13,13 +13,14 @@
 
 use crate::agent::Agent;
 use crate::agent::outcome::{Fault, Outcome};
+use crate::agent::testkit::set_provider;
 use crate::bus::{Emitter, channel};
 use crate::provider::scripted::{Reply, Script};
 use crate::provider::{CutShort, Provider, ProviderError};
 use crate::record::Recorded;
 use crate::record::{AgentId, AgentState};
-use crate::record::{Display, Forensic, Protocol, Record, Transient, Voice};
-use crate::record::{EditAuthority, Residue};
+use crate::record::{Display, Forensic, Record, Transcript, Transient, Voice};
+use crate::record::{EditAuthority, Eviction};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use ral_core::process::DurableRoot;
 use std::sync::Arc;
@@ -39,13 +40,12 @@ struct Drive {
 
 /// Run one `deliberate` against a fresh `Emitter`/collector pair, draining
 /// the bus into its facts and transients.
-fn drive_deliberate(session: &mut Agent, provider: &Arc<Provider>, prompt: Option<&str>) -> Drive {
+fn drive_deliberate(session: &mut Agent, prompt: Option<&str>) -> Drive {
     let id: AgentId = session.id();
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        provider,
         prompt.map(|p| (p.to_string(), Voice::Human)),
         None,
         &emit,
@@ -101,8 +101,9 @@ fn assert_admissible(session: &Agent) {
 fn plain_text_reaches_quiescence() {
     let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
+    set_provider(&mut session, provider);
 
-    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("hi"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, Some("hi"));
 
     match outcome {
         Ok(Outcome::Complete) => {}
@@ -126,13 +127,14 @@ fn reasoning_commits_ahead_of_every_paragraph_of_the_answer() {
             Reply::text("First paragraph.\n\nSecond paragraph.").thinking("weighing the cases"),
         ),
     );
+    set_provider(&mut session, provider);
 
-    let Drive { facts, .. } = drive_deliberate(&mut session, &provider, Some("hi"));
+    let Drive { facts, .. } = drive_deliberate(&mut session, Some("hi"));
     let kinds: Vec<&Display> = facts
         .iter()
         .filter_map(|record| match record {
             Record::Display(d) => Some(d),
-            Record::Protocol(_) | Record::Forensic(_) => None,
+            Record::Transcript(_) | Record::Control(_) | Record::Forensic(_) => None,
         })
         .collect();
     let thinking = kinds
@@ -167,8 +169,9 @@ fn bindings_persist_across_tool_calls() {
             .then(Reply::tool_calls(vec![ral_call("c2", "echo $[$xv + 1]")]))
             .then(Reply::text("done")),
     );
+    set_provider(&mut session, provider);
 
-    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("compute"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, Some("compute"));
     assert!(matches!(outcome, Ok(Outcome::Complete)));
 
     // The second tool result must show 42 — the binding survived.
@@ -210,9 +213,10 @@ fn truncated_with_tool_calls_runs_and_continues() {
             )]))
             .then(Reply::text("resumed after truncation")),
     );
+    set_provider(&mut session, provider);
 
     let Drive { outcome, facts, .. } =
-        drive_deliberate(&mut session, &provider, Some("do work then get cut off"));
+        drive_deliberate(&mut session, Some("do work then get cut off"));
     match outcome {
         Ok(Outcome::Complete) => {}
         other => panic!("truncated-with-tools must run and complete, got {other:?}"),
@@ -241,9 +245,9 @@ fn stalled_stream_commits_partial_and_truncates() {
         "test-model",
         Script::new().then(Reply::stalled("partial answer before the stall")),
     );
+    set_provider(&mut session, provider);
 
-    let Drive { outcome, facts, .. } =
-        drive_deliberate(&mut session, &provider, Some("answer at length"));
+    let Drive { outcome, facts, .. } = drive_deliberate(&mut session, Some("answer at length"));
     match &outcome {
         Err(Fault::Provider(ProviderError::Truncated { cause })) => match cause.as_ref() {
             CutShort::Stalled(cause) => assert_eq!(
@@ -308,8 +312,9 @@ fn stalled_stream_commits_partial_and_truncates() {
 fn empty_reply_commits_a_stub_not_empty_content() {
     let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::empty()));
+    set_provider(&mut session, provider);
 
-    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("say nothing"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, Some("say nothing"));
     assert!(
         matches!(outcome, Ok(Outcome::Empty)),
         "an empty reply still surfaces as Empty for the nudge"
@@ -329,7 +334,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
 }
 
 /// A forced eviction is weighed at every turn boundary, before the request is
-/// taken, and rewrites the context to the head residue plus the recent
+/// taken, and rewrites the context to the head eviction plus the recent
 /// exchange, verbatim, with no provider round-trip of its own.  `test-model`
 /// has no pricing-catalog entry, so the context window is unknown and the
 /// byte fallback (`digest::EVICT_THRESHOLD`, 500 KiB) is the live trigger:
@@ -345,10 +350,11 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
             .then(Reply::text("ack two"))
             .then(Reply::text("done")),
     );
+    set_provider(&mut session, provider);
 
     let first = format!("EXCHANGE1 {}", "x".repeat(450_000));
     let second = format!("EXCHANGE2 {}", "y".repeat(150_000));
-    let Drive { outcome: acked, .. } = drive_deliberate(&mut session, &provider, Some(&first));
+    let Drive { outcome: acked, .. } = drive_deliberate(&mut session, Some(&first));
     assert!(matches!(acked, Ok(Outcome::Complete)));
     // The second prompt tips the history over the threshold, so its own
     // first turn boundary sheds the first exchange — the prompt in hand
@@ -357,7 +363,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
         outcome: acked,
         transients,
         ..
-    } = drive_deliberate(&mut session, &provider, Some(&second));
+    } = drive_deliberate(&mut session, Some(&second));
     assert!(matches!(acked, Ok(Outcome::Complete)));
     assert!(
         transients
@@ -365,7 +371,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
             .any(|t| matches!(t, Transient::State(AgentState::Evicting))),
         "the eviction must announce its own state"
     );
-    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("after"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, Some("after"));
     match outcome {
         Ok(Outcome::Complete) => {}
         other => panic!("expected Complete, got {other:?}"),
@@ -375,14 +381,14 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     // provider before this line.
     let view = session.rendered_messages();
     assert_eq!(view[0].role, ChatRole::User);
-    let residue = view[0].content.first_text().unwrap_or_default();
+    let eviction = view[0].content.first_text().unwrap_or_default();
     assert!(
-        residue.starts_with("[EXARCH // Turn") && residue.contains("left your context"),
-        "the context must open on the forced eviction's residue, got {residue:?}"
+        eviction.starts_with("[EXARCH // Turn") && eviction.contains("left your context"),
+        "the context must open on the forced eviction's note, got {eviction:?}"
     );
     assert!(
-        residue.contains("in a forced eviction, without a note"),
-        "the residue says it was a forced eviction, got {residue:?}"
+        eviction.contains("in a forced eviction, without a note"),
+        "the eviction says it was a forced eviction, got {eviction:?}"
     );
     let rendered = serde_json::to_string(&view).unwrap();
     assert!(
@@ -415,20 +421,18 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     assert!(
         records.iter().any(|record| matches!(
             record,
-            Record::Protocol(Protocol::UserPrompt { text, .. }) if text.contains("EXCHANGE1")
+            Record::Transcript(Transcript::UserPrompt { text, .. }) if text.contains("EXCHANGE1")
         )),
         "an eviction must not touch the durable record log"
     );
     assert!(
         records.iter().any(|record| matches!(
             record,
-            Record::Protocol(Protocol::Evicted {
-                residue: Residue {
-                    note: None,
-                    by: EditAuthority::Harness,
-                    ..
-                },
-            })
+            Record::Transcript(Transcript::Evicted(Eviction {
+                note: None,
+                by: EditAuthority::Harness,
+                ..
+            }))
         )),
         "a forced eviction must record a harness-authored context edit, and write no note"
     );
@@ -453,8 +457,9 @@ fn malformed_tool_arguments_are_normalised_to_object() {
             .then(Reply::tool_calls(vec![bad_call]))
             .then(Reply::text("recovered")),
     );
+    set_provider(&mut session, provider);
 
-    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("emit a bad call"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, Some("emit a bad call"));
     assert!(matches!(outcome, Ok(Outcome::Complete)));
 
     // Every committed tool call's arguments must be a JSON object.

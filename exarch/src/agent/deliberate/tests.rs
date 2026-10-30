@@ -8,15 +8,16 @@ use crate::agent::nursery::{Joined, Teardown};
 use crate::agent::testkit::*;
 use crate::bus::{Command, Drained, Input, Next, Rest};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{ChildStatus, Commit, Display, Protocol, Publish, Record};
+use crate::record::{ChildStatus, Commit, Display, Publish, Record, Transcript};
 use genai::chat::ChatRole;
-use ral_core::process::{CancelCause, DurableRoot, ScopeNode};
+use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::{Scheme, Ty};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn open_for_drain(session: &Agent) -> crate::bus::Lease {
@@ -24,10 +25,7 @@ fn open_for_drain(session: &Agent) -> crate::bus::Lease {
     let crate::bus::Next::Take {
         input: Input::Human(_),
         exchange,
-    } = session.mailbox.next(crate::bus::Rest {
-        pending: false,
-        schedules: false,
-    })
+    } = session.mailbox.next(crate::bus::Rest { pending: false })
     else {
         panic!("the queued prompt opens an exchange")
     };
@@ -38,6 +36,7 @@ fn open_for_drain(session: &Agent) -> crate::bus::Lease {
 #[test]
 fn public_deliberate_refuses_a_display_first_recording_failure_before_any_request() {
     let mut session = Agent::for_test("system").unwrap();
+    set_provider(&mut session, scripted("must not be called", Script::new()));
     let recorder = session.recorder();
     let before = session.rendered_messages();
     recorder.fail_after(7);
@@ -49,10 +48,8 @@ fn public_deliberate_refuses_a_display_first_recording_failure_before_any_reques
     let bytes = session.log_dir().read("record.jsonl").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = scripted("must not be called", Script::new());
     let result = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("refused".into(), Voice::Human)),
         None,
         &emit,
@@ -85,11 +82,11 @@ fn a_real_tool_display_failure_stops_the_batch_and_the_next_model_request() {
             ]))
             .then(Reply::panicking()),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let result = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("run both".into(), Voice::Human)),
         None,
         &emit,
@@ -114,7 +111,7 @@ fn a_real_tool_display_failure_stops_the_batch_and_the_next_model_request() {
     assert!(
         !records
             .iter()
-            .any(|record| matches!(record, Record::Protocol(Protocol::ToolResults { .. })))
+            .any(|record| matches!(record, Record::Transcript(Transcript::ToolResults { .. })))
     );
 }
 
@@ -144,11 +141,11 @@ fn a_severed_engine_cuts_its_batch_short_and_answers_the_loss() {
             ]))
             .then(Reply::panicking()),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let result = session.deliberate(
         &exchange,
-        &provider,
         Some(("run both".into(), Voice::Human)),
         None,
         &emit,
@@ -173,7 +170,7 @@ fn a_severed_engine_cuts_its_batch_short_and_answers_the_loss() {
     let second = records
         .iter()
         .find_map(|record| match record {
-            Record::Protocol(Protocol::ToolResults { results }) => {
+            Record::Transcript(Transcript::ToolResults { results }) => {
                 results.iter().find(|result| result.id == "second")
             }
             _ => None,
@@ -273,58 +270,35 @@ static T2_CANCEL_BUILTINS: &[BuiltinEntry] = &T2_CANCEL_BUILTINS_ARR;
 
 #[test]
 fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_request() {
-    struct StopOnSteering {
-        handle: crate::agent::AgentHandle,
-        job: crate::record::JobId,
-        exchange: ScopeNode,
-        sink: Box<dyn Publish>,
-    }
-    impl Publish for StopOnSteering {
-        fn commit(&self, commit: Commit) {
-            if commit.records().iter().any(|recorded| matches!(recorded.value(), Record::Protocol(Protocol::Steering { text, voice: Voice::Human }) if text == "first"))
-            {
-                assert_eq!(self.handle.stop(self.job), Some(vec![]));
-                self.exchange.cancel(CancelCause::Cancelled);
-                self.handle.steer("fresh".into()).unwrap();
-            }
-            self.sink.commit(commit);
-        }
-        fn transient(&self, transient: Transient) {
-            self.sink.transient(transient);
-        }
-    }
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     let _opened = open_for_drain(&session);
-    let job = session.handle().status().job.unwrap();
+    let job = session.handle().status().unwrap().job.unwrap();
     let exchange = DurableRoot::default().child();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let recorder = session.recorder();
     let handle = session.handle();
-    let sink = StopOnSteering {
-        handle: handle.clone(),
-        job,
-        exchange: exchange.clone(),
-        sink: emit.fleet_sink(),
-    };
+    let stop_handle = handle.clone();
+    let stop_exchange = exchange.clone();
+    super::AFTER_STEERING.set(Some(Box::new(move || {
+        assert_eq!(stop_handle.stop(job), Some(vec![]));
+        stop_exchange.cancel(CancelCause::Cancelled);
+        stop_handle.steer("fresh".into()).unwrap();
+    })));
+    let sink = emit.fleet_sink();
     T2_ARRIVAL.set(Some(Box::new(move || {
         handle.steer("first".into()).unwrap();
         let _posted = handle.command(Command::Read(crate::bus::Read::Resources));
         handle.steer("second".into()).unwrap();
-        recorder.attach(Box::new(sink));
+        recorder.attach(sink);
     })));
     let provider = scripted(
         "test-model",
         Script::new().then(Reply::tool_calls(vec![ral_call("one", "t2-arrive")])),
     );
+    set_provider(&mut session, provider);
     let outcome = session
-        .deliberate(
-            &exchange,
-            &provider,
-            Some(("go".into(), Voice::Human)),
-            None,
-            &emit,
-        )
+        .deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit)
         .unwrap();
     assert!(matches!(outcome, Outcome::Cancelled));
     assert!(exchange.is_cancelled());
@@ -334,7 +308,7 @@ fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_reque
     let humans: Vec<_> = records
         .iter()
         .filter_map(|record| match record {
-            Record::Protocol(Protocol::Steering {
+            Record::Transcript(Transcript::Steering {
                 text,
                 voice: Voice::Human,
             }) => Some(text.as_str()),
@@ -355,9 +329,9 @@ fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_reque
 fn sub_agent_returns_through_reply() {
     let mut parent = trunk(crate::agent::Trunk::Converses);
     let exchange = open_for_drain(&parent);
-    let job = parent.handle().status().job;
+    let job = parent.handle().status().unwrap().job;
     let mut child = forked_child(&parent, "helper", "`inherit");
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         child.handle(),
         Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
     );
@@ -368,24 +342,23 @@ fn sub_agent_returns_through_reply() {
             "exarch-agents `reply #'# Report\nline one\nline two'#",
         )])),
     );
+    set_provider(&mut child, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     let outcome = child.deliberate(
         &child.mailbox.life().child(),
-        &provider,
         Some(("write a report".into(), Voice::Human)),
         None,
         &emit,
     );
     assert!(matches!(outcome, Ok(Outcome::Replied)), "{outcome:?}");
     assert_eq!(
-        child.handle().status().report,
+        child.handle().status().unwrap().report,
         Some(ChildStatus::Replied(FOValue::String {
             value: "# Report\nline one\nline two".into(),
         }))
     );
-    assert!(!child.body.state.owed);
-    assert!(!child.handle().status().owes_parent);
+    assert!(!child.handle().status().unwrap().owes);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, parent.id());
     let provider = scripted(
@@ -394,16 +367,16 @@ fn sub_agent_returns_through_reply() {
             .then(Reply::tool_calls(vec![ral_call("take-report", "1")]))
             .then(Reply::text("acknowledged")),
     );
+    set_provider(&mut parent, provider);
     let outcome = parent.deliberate(
         &exchange,
-        &provider,
         Some(("parent task".into(), Voice::Human)),
         None,
         &emit,
     );
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     assert_eq!(
-        parent.handle().status().job,
+        parent.handle().status().unwrap().job,
         job,
         "a report is taken up in the same job"
     );
@@ -448,15 +421,15 @@ fn reply_preserves_live_descendants_and_queued_input() {
             "exarch-agents `reply 'done'",
         )])),
     );
+    set_provider(&mut child, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     assert!(matches!(
         child.deliberate(
             &child.mailbox.life().child(),
-            &provider,
             Some(("return early".into(), Voice::Human)),
             None,
-            &emit
+            &emit,
         ),
         Ok(Outcome::Replied)
     ));
@@ -465,7 +438,7 @@ fn reply_preserves_live_descendants_and_queued_input() {
     assert!(sibling.is_live());
     assert_eq!(child.handle().queued(), ["next task"]);
     assert_eq!(
-        child.handle().status().report,
+        child.handle().status().unwrap().report,
         Some(ChildStatus::Replied(FOValue::String {
             value: "done".into()
         }))
@@ -487,15 +460,10 @@ fn steering_typed_during_a_tool_batch_is_committed_between_results_and_reply() {
             .then(Reply::tool_calls(vec![ral_call("c1", "let steer_x = 1")]))
             .then(Reply::text("ok")),
     );
+    set_provider(&mut session, provider);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     let ms = session.rendered_messages();
     assert_eq!(
@@ -513,7 +481,7 @@ fn steering_typed_during_a_tool_batch_is_committed_between_results_and_reply() {
         Some("actually, stop after this\nand report")
     );
     assert!(crate::bus::drain_records(&rx).into_iter().any(|r| matches!(r,
-        Record::Protocol(Protocol::Steering { text, voice: Voice::Human }) if text.contains("and report")
+        Record::Transcript(Transcript::Steering { text, voice: Voice::Human }) if text.contains("and report")
     )));
     assert!(session.is_ready());
 }
@@ -551,11 +519,11 @@ fn pressure_rides_the_steering_channel_once_per_excursion() {
             )]))
             .then(Reply::text("noted")),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("go".into(), Voice::Human)),
         None,
         &emit,
@@ -582,11 +550,11 @@ fn provider_error_mid_deliberation_does_not_wedge_session() {
             )))
             .then(Reply::text("ok")),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let first = session.deliberate(
         &session.mailbox.life().child(),
-        &provider,
         Some(("first exchange".into(), Voice::Human)),
         None,
         &emit,
@@ -595,7 +563,6 @@ fn provider_error_mid_deliberation_does_not_wedge_session() {
     assert!(session.is_ready());
     let second = session.deliberate(
         &session.mailbox.life().child(),
-        &provider,
         Some(("second exchange after error".into(), Voice::Human)),
         None,
         &emit,
@@ -645,17 +612,23 @@ fn an_overflow_narrows_the_window_evicts_and_retries_once() {
         "test-model",
         Script::new().then(overflow()).then(Reply::text("done")),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("go".into(), Voice::Human)),
         None,
         &emit,
     );
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
-    assert_eq!(provider.context_window(), Some(250_000));
+    assert_eq!(
+        session
+            .mailbox
+            .transact(|txn| txn.model().window())
+            .unwrap(),
+        Some(250_000)
+    );
     assert!(
         !session
             .rendered_messages()
@@ -665,18 +638,18 @@ fn an_overflow_narrows_the_window_evicts_and_retries_once() {
 }
 
 #[test]
-fn a_second_overflow_ends_the_exchange_with_the_listed_window_stamped() {
+fn a_second_overflow_ends_the_exchange_with_the_prior_window_stamped() {
     let mut session = Agent::for_test("system").unwrap();
     overflow_context(&mut session);
     let provider = scripted(
         "test-model",
         Script::new().then(overflow()).then(overflow()),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     match session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("go".into(), Voice::Human)),
         None,
         &emit,
@@ -699,7 +672,7 @@ fn stale_token_measure_is_unknown_until_the_next_completion() {
             .unwrap();
     }
     let at = session.body.log.context().log_len();
-    session.body.state.readings.measure = Some(Measure { tokens: 99_000, at });
+    session.body.readings.measure = Some(Measure { tokens: 99_000, at });
     assert_eq!(session.measured_input(), Some(99_000));
     session
         .body
@@ -711,11 +684,11 @@ fn stale_token_measure_is_unknown_until_the_next_completion() {
         "test-model",
         Script::new().then(Reply::text("fresh completion")),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("new context".into(), Voice::Human)),
         None,
         &emit,
@@ -739,26 +712,21 @@ fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation
             ral_call("c2", "t2-cancel-now"),
         ])),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Cancelled)), "{outcome:?}");
-    assert!(session.handle().status().report.is_none());
+    assert!(session.handle().status().unwrap().report.is_none());
     let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::tool_calls(vec![ral_call("c3", "1")]))
             .then(Reply::text("done")),
     );
+    set_provider(&mut session, provider);
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("continue".into(), Voice::Human)),
         None,
         &emit,
@@ -789,36 +757,22 @@ fn stop_keeps_queued_prompts_and_a_later_exchange_keeps_the_context() {
             ]))
             .then(Reply::text("answered")),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
     assert!(matches!(outcome, Ok(Outcome::Cancelled)), "{outcome:?}");
     let Next::Take {
         input: Input::Human(text),
         exchange,
-    } = session.mailbox.next(Rest {
-        pending: false,
-        schedules: false,
-    })
+    } = session.mailbox.next(Rest { pending: false })
     else {
         panic!("a fresh exchange")
     };
     assert_eq!(text, "queued prompt\nfresh prompt");
     assert!(!exchange.is_cancelled());
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some((text, Voice::Human)),
-        None,
-        &emit,
-    );
+    let outcome = session.deliberate(&exchange, Some((text, Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     let rendered = session.rendered_messages();
     let position = |text: &str| {
@@ -853,14 +807,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
     let exchange = open_for_drain(&session);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.body.state.provider.clone();
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
     let signals: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -874,7 +821,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
         })
         .unwrap();
     let answer = signals.iter().position(|sig| matches!(sig,
-        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|rec| matches!(rec.value(), Record::Protocol(Protocol::AssistantMessage { message, .. }) if message.content.first_text() == Some("answered")))
+        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|rec| matches!(rec.value(), Record::Transcript(Transcript::AssistantMessage { message, .. }) if message.content.first_text() == Some("answered")))
     )).unwrap();
     assert!(fold < answer);
     let rendered = session.rendered_messages();
@@ -914,19 +861,12 @@ fn a_read_queued_after_a_prompt_runs_after_it_lands() {
     let exchange = open_for_drain(&session);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.body.state.provider.clone();
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
     let signals: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let prompt = signals.iter().position(|sig| matches!(sig,
-        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|rec| matches!(rec.value(), Record::Protocol(Protocol::Steering { text, .. }) if text == "queued prompt"))
+        crate::bus::Signal::Commit(_, commit) if commit.records().iter().any(|rec| matches!(rec.value(), Record::Transcript(Transcript::Steering { text, .. }) if text == "queued prompt"))
     )).unwrap();
     let fold = signals
         .iter()
@@ -961,7 +901,7 @@ fn stale_batches_never_reach_the_model_after_clear() {
             .is_none()
     );
     assert!(session.rendered_messages().is_empty());
-    assert!(session.handle().status().job.is_none());
+    assert!(session.handle().status().unwrap().job.is_none());
 }
 
 #[test]
@@ -970,7 +910,7 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
         let mut session = Agent::for_test("system").unwrap();
         let exchange = open_for_drain(&session);
         let worker = forked_child(&session, "worker", "`inherit");
-        session.body.state.nursery.adopt(
+        session.body.nursery.adopt(
             worker.handle(),
             Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
         );
@@ -1000,15 +940,10 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
                     "exarch-agents `reply 'done'",
                 )])),
         );
+        set_provider(&mut session, provider.clone());
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id());
-        let outcome = session.deliberate(
-            &exchange,
-            &provider,
-            Some(("go".into(), Voice::Human)),
-            None,
-            &emit,
-        );
+        let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
         assert!(matches!(outcome, Ok(Outcome::Replied)), "{outcome:?}");
         let rendered = serde_json::to_string(&session.rendered_messages()).unwrap();
         assert!(
@@ -1022,14 +957,14 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
         let records = crate::bus::drain_records(&rx);
         let first_tool = records
             .iter()
-            .position(|r| matches!(r, Record::Protocol(Protocol::ToolResults { .. })))
+            .position(|r| matches!(r, Record::Transcript(Transcript::ToolResults { .. })))
             .unwrap();
         let notice = records
             .iter()
             .position(|r| {
                 matches!(
                     r,
-                    Record::Protocol(Protocol::Steering {
+                    Record::Transcript(Transcript::Steering {
                         voice: Voice::Harness,
                         ..
                     })
@@ -1118,7 +1053,15 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
         10,
         &emit,
     );
-    session.mailbox.clear();
+    #[allow(
+        clippy::redundant_closure_for_method_calls,
+        reason = "the method item is not general enough for transact's higher-ranked lifetime"
+    )]
+    session
+        .mailbox
+        .transact(|txn| txn.clear())
+        .unwrap()
+        .unwrap();
     let exchange = open_for_drain(&session);
     let rows = session.engine().read(|t| t.workers()).unwrap();
     assert!(
@@ -1150,13 +1093,8 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
             .then(Reply::tool_calls(vec![ral_call("c1", "1")]))
             .then(Reply::text("done")),
     );
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    set_provider(&mut session, provider);
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     let ms = session.rendered_messages();
     assert_eq!(
@@ -1240,13 +1178,8 @@ fn answer_delivers_current_surfaces_and_drops_old_generation_batches() {
             .then(Reply::tool_calls(vec![ral_call("c1", "1")]))
             .then(Reply::text("done")),
     );
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    set_provider(&mut session, provider);
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     let ms = session.rendered_messages();
     assert_eq!(
@@ -1354,15 +1287,10 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
             )]))
             .then(Reply::text("unreachable")),
     );
+    set_provider(&mut session, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let outcome = session.deliberate(
-        &exchange,
-        &provider,
-        Some(("go".into(), Voice::Human)),
-        None,
-        &emit,
-    );
+    let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(
         matches!(outcome, Err(Fault::Severed(ref c)) if *c == cause),
         "{outcome:?}"
@@ -1379,23 +1307,18 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
             TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
         )
         .unwrap();
-        child.body.state.nursery.adopt(
+        child.body.nursery.adopt(
             (*grandchild).clone(),
             Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
         );
         let address = child.mailbox.address();
-        child
-            .body
-            .state
-            .schedules
-            .schedule(
-                crate::schedule::Trigger::After(Duration::from_hours(1)),
-                "scheduled follow-up".into(),
-                "follow-up".into(),
-                &address,
-            )
-            .unwrap();
-        let epoch = child.body.state.schedules.epoch();
+        crate::agent::testkit::schedule(
+            &mut child,
+            crate::schedule::Trigger::After(Duration::from_hours(1)),
+            "scheduled follow-up".into(),
+            "follow-up".into(),
+        );
+
         let owner = parent.handle();
         let recipient = child.handle();
         let id = grandchild.id();
@@ -1407,7 +1330,7 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
             2 => address
                 .post(Input::Wakeup {
                     id: crate::bus::ScheduleId::new(17),
-                    epoch,
+
                     text: "boundary delivery".into(),
                 })
                 .unwrap(),
@@ -1432,19 +1355,19 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
                     "exarch-agents `reply 'second'",
                 )])),
         );
+        set_provider(&mut child, provider.clone());
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, child.id());
         let outcome = child.deliberate(
             &child.mailbox.life().child(),
-            &provider,
             Some(("original task".into(), Voice::Human)),
             None,
             &emit,
         );
         assert!(matches!(outcome, Ok(Outcome::Replied)), "{outcome:?}");
         assert!(grandchild.is_live(), "reply does not dismiss helpers");
-        assert!(!child.body.state.schedules.armed());
-        assert_ne!(child.body.state.schedules.epoch(), epoch);
+        assert!(crate::agent::testkit::schedules(&child).is_empty());
+
         assert!(
             !serde_json::to_string(&child.rendered_messages())
                 .unwrap()
@@ -1456,21 +1379,16 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
                 .any(|r| matches!(r, Record::Display(Display::SubagentDone { .. })))
         );
         let queued = child.mailbox.drain();
-        assert_eq!(queued.len(), 1, "input stays queued at the reply boundary");
-        let Some(Drained::Input(input)) = queued.into_iter().next() else {
-            panic!("an input stays queued")
-        };
-        let prompt = child.admit(input);
         if source == 2 {
-            assert!(
-                prompt.is_none(),
-                "the returning agent cleared its schedules"
-            );
+            assert!(queued.is_empty(), "report withdraws queued wakeups");
         } else {
-            let prompt = prompt.expect("live input survives reply");
+            assert_eq!(queued.len(), 1, "input stays queued at the reply boundary");
+            let Some(Drained::Input(input)) = queued.into_iter().next() else {
+                panic!("an input stays queued")
+            };
+            let prompt = child.admit(input).expect("live input survives reply");
             let outcome = child.deliberate(
                 &child.mailbox.life().child(),
-                &provider,
                 Some((prompt.text, prompt.voice)),
                 None,
                 &emit,
@@ -1507,41 +1425,29 @@ fn a_rewrite_queued_before_reply_boundary_input_runs_before_admission() {
                 "exarch-agents `reply 'second'",
             )])),
     );
+    set_provider(&mut child, provider);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     assert!(matches!(
         child.deliberate(
             &child.mailbox.life().child(),
-            &provider,
             Some(("before rewind".into(), Voice::Human)),
             None,
-            &emit
+            &emit,
         ),
         Ok(Outcome::Replied)
     ));
-    let Next::Command(command) = child.mailbox.next(Rest {
-        pending: false,
-        schedules: false,
-    }) else {
+    let Next::Command(command) = child.mailbox.next(Rest { pending: false }) else {
         panic!("rewrite precedes later input")
     };
     assert!(child.command(command, &emit).is_continue());
-    let Next::Take { input, exchange } = child.mailbox.next(Rest {
-        pending: false,
-        schedules: false,
-    }) else {
+    let Next::Take { input, exchange } = child.mailbox.next(Rest { pending: false }) else {
         panic!("follow-up input")
     };
     let prompt = child.admit(input).unwrap();
     assert!(child.mailbox.begin());
     assert!(matches!(
-        child.deliberate(
-            &exchange,
-            &provider,
-            Some((prompt.text, prompt.voice)),
-            None,
-            &emit
-        ),
+        child.deliberate(&exchange, Some((prompt.text, prompt.voice)), None, &emit),
         Ok(Outcome::Replied)
     ));
     let view = serde_json::to_string(&child.rendered_messages()).unwrap();
@@ -1566,11 +1472,11 @@ fn a_returning_roots_reply_leaves_arrivals_queued_without_an_extra_request() {
             ]))
             .then(Reply::panicking()),
     );
+    set_provider(&mut root, provider);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, root.id());
     let outcome = root.deliberate(
         &root.mailbox.life().child(),
-        &provider,
         Some(("one task".into(), Voice::Human)),
         None,
         &emit,
@@ -1584,5 +1490,183 @@ fn a_returning_roots_reply_leaves_arrivals_queued_without_an_extra_request() {
             .filter(|r| matches!(r, Record::Forensic(Forensic::TurnStarted { .. })))
             .count(),
         1
+    );
+}
+
+#[test]
+fn two_new_roots_share_a_client_but_only_the_overflowing_root_learns_its_window() {
+    let mut source = trunk(crate::agent::Trunk::Converses);
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(overflow())
+            .then(Reply::text("retried"))
+            .then(Reply::text("untouched")),
+    );
+    set_provider(&mut source, provider.clone());
+    let mut first = crate::agent::spawn::hatch_root(
+        &source,
+        crate::record::Memory::Amnemon,
+        Some("first".into()),
+    )
+    .unwrap();
+    let mut second = crate::agent::spawn::hatch_root(
+        &source,
+        crate::record::Memory::Amnemon,
+        Some("second".into()),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&first.body.client, &second.body.client));
+    overflow_context(&mut first);
+    let (emit, _rx) = crate::bus::dummy_emitter();
+    for agent in [&mut first, &mut second] {
+        assert!(matches!(
+            agent.deliberate(
+                &DurableRoot::default().child(),
+                Some(("go".into(), Voice::Human)),
+                None,
+                &emit
+            ),
+            Ok(Outcome::Complete)
+        ));
+    }
+    assert_eq!(
+        first.handle().status().unwrap().selected.context_window,
+        None
+    );
+    assert_eq!(
+        first.mailbox.transact(|txn| txn.model().window()).unwrap(),
+        Some(250_000)
+    );
+    assert_eq!(
+        second.mailbox.transact(|txn| txn.model().window()).unwrap(),
+        None
+    );
+    for (agent, count) in [(&first, 1), (&second, 0)] {
+        let records =
+            crate::record::read_records(&agent.log_dir().path().join(crate::record::RECORD))
+                .unwrap();
+        assert_eq!(records.iter().filter(|record| matches!(record, Record::Control(crate::record::Control::WindowNarrowed { model, context_window: 250_000 }) if model == "test-model")).count(), count);
+    }
+    assert_eq!(provider.selected().context_window, None);
+}
+
+#[test]
+fn an_old_models_late_overflow_after_switch_records_nothing() {
+    let mut session = trunk(crate::agent::Trunk::Converses);
+    Arc::get_mut(&mut session.fleet).unwrap().launch.bureau =
+        Arc::new(crate::provider::Bureau::scripted([Script::new()]));
+    session.switch_model(crate::provider::Pick {
+        choice: crate::provider::Choice {
+            account: crate::provider::Account::built_in("openai"),
+            model: "new-model".into(),
+            via: None,
+        },
+        tuning: crate::provider::Tuning::default(),
+    });
+    let before = session.log_dir().read(crate::record::RECORD).unwrap();
+    let error = ProviderError::Overflow {
+        model: "test-model".into(),
+        provider: None,
+        sent: Some(101),
+        limit: Some(100),
+        listed: None,
+        body: None,
+    };
+    assert!(matches!(
+        session.relieve(&DurableRoot::default().child(), error, false),
+        Err(Fault::Provider(ProviderError::Overflow { .. }))
+    ));
+    assert_eq!(
+        session.log_dir().read(crate::record::RECORD).unwrap(),
+        before
+    );
+    assert_eq!(
+        session.handle().status().unwrap().selected.model,
+        "new-model"
+    );
+    assert_eq!(
+        session
+            .mailbox
+            .transact(|txn| txn.model().window())
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_ring_pending_through_a_shell_call_is_answered_once_after_its_results() {
+    let mut session = Agent::for_test_with(crate::agent::TestTrunk {
+        allow_schedule: true,
+        installers: dressed(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS)),
+        ..crate::agent::TestTrunk::new("system")
+    })
+    .unwrap();
+    let address = session.mailbox.address();
+    let recorder = session.recorder();
+    T2_CANCEL.set(Some(Box::new(move || {
+        let before = recorder.reader().since(None).unwrap().1.count();
+        assert_eq!(
+            recorder.reader().since(None).unwrap().1.count(),
+            before,
+            "a ring must not commit"
+        );
+        assert!(address.queued_posts().is_empty(), "a ring must not post");
+    })));
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![ral_call("hold", "t2-cancel-now")]))
+            .then(Reply::text("done")),
+    );
+    set_provider(&mut session, provider);
+    crate::agent::testkit::schedule(
+        &mut session,
+        crate::schedule::Trigger::At(jiff::Timestamp::now()),
+        "wake after call".into(),
+        "inside".into(),
+    );
+    // Pending from before the call; the deadline's own ring coalesces with it.
+    session
+        .body
+        .schedules
+        .ring("inside", &session.mailbox.address());
+    let (emit, _rx) = crate::bus::dummy_emitter();
+    assert!(matches!(
+        session.deliberate(
+            &DurableRoot::default().child(),
+            Some(("go".into(), Voice::Human)),
+            None,
+            &emit
+        ),
+        Ok(Outcome::Complete)
+    ));
+    let records =
+        crate::record::read_records(&session.log_dir().path().join(crate::record::RECORD)).unwrap();
+    let result = records
+        .iter()
+        .position(|record| matches!(record, Record::Transcript(Transcript::ToolResults { .. })))
+        .unwrap();
+    let fires: Vec<_> = records.iter().enumerate().filter(|(_, record)| matches!(record, Record::Control(crate::record::Control::Posted(post)) if post.voice == Some(Voice::Wakeup))).collect();
+    assert_eq!(fires.len(), 1);
+    assert!(result < fires[0].0);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record,
+                Record::Transcript(Transcript::Steering {
+                    voice: Voice::Wakeup,
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+    let before = session.log_dir().read(crate::record::RECORD).unwrap();
+    session.fire_schedules().unwrap();
+    assert_eq!(
+        session.log_dir().read(crate::record::RECORD).unwrap(),
+        before
     );
 }

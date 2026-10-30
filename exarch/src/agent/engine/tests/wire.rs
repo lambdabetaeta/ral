@@ -145,14 +145,16 @@ fn wire_engine_enquiry_is_answered_through_the_drain_loop() {
 #[test]
 fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     let (engine, mut child) = wire_engine(Liveness::default());
+    let id = crate::record::AgentId::new(0);
+    let (log, mail, schedules, model) =
+        crate::record::AgentLog::for_test(id, "test-model").unwrap();
     let mailbox = AgentMailbox::new(
+        id,
         DurableRoot::default().child(),
-        crate::record::Emitter::none(),
+        log.record_emitter(),
         Admission::Free,
-        crate::provider::Pick::of(&crate::provider::Provider::scripted(
-            "test-model",
-            crate::provider::scripted::Script::new(),
-        )),
+        None,
+        (mail, schedules, model),
     );
     engine.install(&mailbox.address(), 17);
     let host: Arc<dyn Host> = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
@@ -284,6 +286,7 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
             trunk: Trunk::Converses,
             admission: Admission::Free,
             helper_idle: crate::agent::fleet::HELPER_IDLE,
+            max_tokens: None,
             tools: Toolset::offered(false),
             allow_schedule: false,
             resume_on_reset: false,

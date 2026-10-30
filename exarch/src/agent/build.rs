@@ -12,11 +12,11 @@ use crate::agent::handle::Shared;
 use crate::agent::index::BuiltinIndex;
 use crate::agent::loan::Loanable;
 use crate::agent::nursery::Nursery;
-use crate::agent::{Admission, Agent, AgentHandle, Body, Readings, Role, State};
+use crate::agent::{Admission, Agent, AgentHandle, Body, Readings, Role};
 use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
 use crate::bus::{AgentMailbox, Emitter};
 use crate::provider::{Provider, Toolset};
-use crate::record::{AgentId, AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
+use crate::record::{AgentId, AgentLog, Mail, Memory, Model, Resumed, Schedules, Selected};
 use crate::shell_eval::builtins;
 use ral_core::authority::policy::{Capabilities, GrantStack};
 use ral_core::carrier::{Severed, WireTransport};
@@ -81,6 +81,7 @@ pub struct RootConfig {
     pub admission: Admission,
     pub helper_idle: Duration,
     pub tools: Toolset,
+    pub max_tokens: Option<u32>,
     pub allow_schedule: bool,
     pub resume_on_reset: bool,
     pub disk_warn_bytes: Option<u64>,
@@ -142,6 +143,7 @@ impl Fleet {
             admission,
             helper_idle,
             tools,
+            max_tokens,
             allow_schedule,
             resume_on_reset,
             disk_warn_bytes,
@@ -189,6 +191,7 @@ impl Fleet {
             allow_schedule,
             resume_on_reset,
             tools,
+            max_tokens,
             disk_warn_bytes,
             factory,
             bureau,
@@ -209,10 +212,15 @@ impl Fleet {
     }
 }
 impl Agent {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "construction takes the owner resources and reconciled folds separately"
+    )]
     pub(crate) fn assemble(
         name: Name,
         engine: Engine,
         log: AgentLog,
+        folds: (Mail, Schedules, Model),
         role: Role,
         life: ScopeNode,
         provider: Arc<Provider>,
@@ -235,13 +243,14 @@ impl Agent {
         log.record_emitter().bind(life.clone());
         engine.transport().bind(life.clone());
         let mailbox = AgentMailbox::new(
+            log.id(),
             life,
             log.record_emitter(),
             admission,
-            crate::provider::Pick::of(&provider),
+            role.parent().map(|parent| parent.0.address.clone()),
+            folds,
         );
         engine.install(&mailbox.address(), 0);
-        let owed = role.parent().is_some();
         let handle = AgentHandle(Arc::new(Shared {
             id: log.id(),
             name: name.name().to_string(),
@@ -260,16 +269,13 @@ impl Agent {
             mailbox,
             body: Loanable::new(Body {
                 log,
-                state: State {
-                    provider,
-                    nursery: Nursery::default(),
-                    reply: None,
-                    owed,
-                    failures: Vec::new(),
-                    pins: BTreeMap::default(),
-                    schedules: crate::schedule::ScheduleRegistry::new(),
-                    readings,
-                },
+                client: provider,
+                nursery: Nursery::default(),
+                reply: None,
+                failures: Vec::new(),
+                pins: BTreeMap::default(),
+                schedules: crate::schedule::ScheduleRegistry::new(),
+                readings,
             }),
             engine: Some(engine),
             generation: 0,
@@ -347,27 +353,23 @@ impl Agent {
         id: AgentId,
         provider: Arc<Provider>,
     ) -> io::Result<(Self, Resumed)> {
-        let live = provider.clone();
+        let returns = fleet.launch.trunk.role().returns();
         let (mut agent, resumed) = Self::hatch(
             fleet,
             name,
             engine,
             provider,
-            |sessions, _, account, system| {
-                let mut log = AgentLog::resume(sessions, id)?;
-                let resumed = log.resumed_summary();
-                if let Some((model, window)) = log.learned_window()
-                    && model == live.model()
-                {
-                    live.narrow_window(*window);
-                }
-                log.record_resumed(
-                    &RecordedModel::of(&live),
-                    account,
+            |sessions, selected, system| {
+                let (log, mail, schedules, model) = AgentLog::reopen(
+                    sessions,
+                    id,
+                    selected,
+                    returns,
                     system,
                     crate::app::now_unix_ms(),
                 )?;
-                Ok((log, resumed))
+                let resumed = log.resumed_summary();
+                Ok(((log, mail, schedules, model), resumed))
             },
         )?;
         if let Err(error) = agent
@@ -399,9 +401,17 @@ impl Agent {
             name,
             engine,
             provider,
-            |sessions, model, account, system| {
-                AgentLog::root(sessions, id, TRUNK_NAME, model, account, system, None)
-                    .map(|log| (log, ()))
+            |sessions, selected, system| {
+                AgentLog::root(
+                    sessions,
+                    id,
+                    TRUNK_NAME,
+                    fleet.launch.trunk.role().returns(),
+                    selected,
+                    system,
+                    None,
+                )
+                .map(|log| (log, ()))
             },
         )
         .map(|(agent, ())| agent)
@@ -411,22 +421,30 @@ impl Agent {
         name: Name,
         engine: Engine,
         provider: Arc<Provider>,
-        open: impl FnOnce(&OwnDir, &RecordedModel, &RecordedAccount, &str) -> io::Result<(AgentLog, T)>,
+        open: impl FnOnce(
+            &OwnDir,
+            &Selected,
+            &str,
+        ) -> io::Result<((AgentLog, Mail, Schedules, Model), T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
         let role = launch.trunk.role();
         let system = launch
             .prompt_for(&engine, &role, launch.fuel, name.name())
             .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
-        let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
-        let (log, opened) = open(
-            &launch.sessions_root,
-            &RecordedModel::of(&provider),
-            &account,
-            &system,
-        )?;
+        let ((log, mail, schedules, model), opened) =
+            open(&launch.sessions_root, provider.selected(), &system)?;
         let life = fleet.registry.root.child();
-        let agent = Self::assemble(name, engine, log, role, life, provider, fleet.clone());
+        let agent = Self::assemble(
+            name,
+            engine,
+            log,
+            (mail, schedules, model),
+            role,
+            life,
+            provider,
+            fleet.clone(),
+        );
         Ok((agent, opened))
     }
     pub(crate) fn child_of(
@@ -446,13 +464,11 @@ impl Agent {
         let system = launch
             .prompt_for(&engine, &role, fuel, name.name())
             .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
-        let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
-        let log = parent_log
+        let (log, mail, schedules, model) = parent_log
             .fork(
                 fresh_id(),
                 name.name(),
-                &RecordedModel::of(&provider),
-                &account,
+                provider.selected(),
                 &system,
                 memory,
             )
@@ -461,6 +477,7 @@ impl Agent {
             name,
             engine,
             log,
+            (mail, schedules, model),
             role,
             life,
             provider,
@@ -473,9 +490,9 @@ impl Agent {
             .prepare_clear()
             .map_err(|why| why.to_string())?;
         let fresh = self.engine().prepare_rebirth()?;
-        let failures = self.body.state.nursery.dismiss_all();
-        self.body.state.failures.extend(failures);
-        self.body.state.nursery = Nursery::default();
+        let failures = self.body.nursery.dismiss_all();
+        self.body.failures.extend(failures);
+        self.body.nursery = Nursery::default();
         if let Err(failure) = self.body.log.clear() {
             self.body.retire_engine(&self.handle.0.name, &fresh);
             return Err(failure.to_string());
@@ -489,11 +506,15 @@ impl Agent {
         self.generation += 1;
         self.engine()
             .install(&self.mailbox.address(), self.generation);
-        self.body.state.pins.clear();
-        self.body.state.schedules.clear();
-        self.body.state.readings = self.body.state.readings.reborn();
-        self.mailbox.clear();
-        Ok(())
+        self.body.pins.clear();
+        #[allow(
+            clippy::redundant_closure_for_method_calls,
+            reason = "the method item is not general enough for try_transact's higher-ranked lifetime"
+        )]
+        let cleared = self.mailbox.try_transact(|txn| txn.clear());
+        self.body.schedules.clear();
+        self.body.readings = self.body.readings.reborn();
+        cleared.map_err(|why| why.to_string())
     }
     pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {
         self.couple(emit);
@@ -501,7 +522,7 @@ impl Agent {
             .log
             .rewind(anchor)
             .map_err(|error| error.to_string())?;
-        self.body.state.readings.nudges = self.body.state.readings.nudges.reborn();
+        self.body.readings.nudges = self.body.readings.nudges.reborn();
         Ok(())
     }
     #[cfg(test)]
@@ -531,7 +552,7 @@ impl Agent {
             &self.fleet,
             name,
             engine,
-            self.body.state.provider.clone(),
+            self.body.client.clone(),
             Memory::Amnemon,
         )
     }
@@ -594,6 +615,7 @@ impl Agent {
             admission,
             helper_idle,
             tools,
+            max_tokens: None,
             allow_schedule,
             resume_on_reset,
             disk_warn_bytes,
@@ -652,7 +674,7 @@ impl TestTrunk {
 }
 impl Drop for Agent {
     fn drop(&mut self) {
-        self.body.state.schedules.clear();
+        self.body.schedules.clear();
         // An unwind leaves the fields to end the life and join helpers (A3).
         if !std::thread::panicking() {
             let _unclaimed = self.teardown();

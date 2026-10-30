@@ -9,7 +9,7 @@ pub(crate) use crate::bus::{MERGE_TEXT_CAP, WORKER_PANIC_PREFIX};
 use crate::agent::AgentHandle;
 use crate::agent::fleet::Registry;
 use crate::bus::UsageMeter;
-use crate::provider::{Pick, Usage};
+use crate::provider::{Selected, Usage};
 use crate::record::{AgentId, JobId};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +29,7 @@ pub struct AgentRow {
     pub waiting_for_input: bool,
     /// Since its last exchange, or its birth.
     pub idle: Duration,
-    pub pick: Pick,
+    pub selected: Selected,
 }
 
 impl Port {
@@ -39,12 +39,12 @@ impl Port {
 
     /// The live agents, in id order.
     pub fn roster(&self) -> Vec<AgentRow> {
-        self.registry.live().iter().map(row_of).collect()
+        self.registry.live().iter().filter_map(row_of).collect()
     }
 
     /// `agent`'s row while it lives.
     pub fn row(&self, agent: AgentId) -> Option<AgentRow> {
-        self.registry.get(agent).as_ref().map(row_of)
+        self.registry.get(agent).as_ref().and_then(row_of)
     }
 
     /// Whether `agent` still lives, without reading its status.
@@ -103,16 +103,16 @@ impl Port {
     }
 }
 
-fn row_of(handle: &AgentHandle) -> AgentRow {
-    let status = handle.status();
-    AgentRow {
+fn row_of(handle: &AgentHandle) -> Option<AgentRow> {
+    let status = handle.status().ok()?;
+    Some(AgentRow {
         id: handle.id(),
         waiting_for_input: status.waiting_for_input,
         idle: status
             .last_exchange
             .map_or_else(|| handle.elapsed(), |at| at.elapsed()),
-        pick: status.pick,
-    }
+        selected: status.selected,
+    })
 }
 
 #[cfg(test)]

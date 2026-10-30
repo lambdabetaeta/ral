@@ -2,10 +2,10 @@
 //! as a [`Record`]. A record lands in a [`Commit`], one line of the log,
 //! alone or beside the records it must not be seen without.
 //!
-//! A `Record` is one of three classes: [`Protocol`] (verbatim payloads the
-//! model fold folds), [`Display`] (presentation the view fold folds), [`Forensic`]
-//! (breadcrumbs neither fold projects but which are worth keeping).  Nothing
-//! outside this module tree may mint a fourth class, invent a variant absent
+//! A `Record` is one of four classes: [`Transcript`] (verbatim payloads the
+//! context folds), [`Control`] (the mail, schedules and model), [`Display`]
+//! (presentation), and [`Forensic`] (evidence and diagnostics; it folds nothing). Nothing
+//! outside this module tree may mint a fifth class, invent a variant absent
 //! from the disposition, or read the log back except through [`replay()`].
 //!
 //! [`Transient`] is the disjoint, unrecorded half of the channel: deltas, the
@@ -14,13 +14,16 @@
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::wildcard_enum_match_arm)]
 
+pub(crate) mod context;
+mod control;
 pub mod fault;
 mod log;
-pub(crate) mod model;
+mod mail;
+mod model;
 mod non_empty;
 mod replay;
+mod schedules;
 mod seam;
-mod selection;
 mod session;
 pub(crate) mod stream;
 mod view;
@@ -29,15 +32,19 @@ mod view;
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
 
+pub use crate::provider::Selected;
+pub use context::{Eviction, ItemKind, Linked, Location, Pointer, Span, SpanRow, TurnRow};
+pub(crate) use control::{Folds, Replay};
 pub use log::Unavailable;
 #[cfg(test)]
 pub(crate) use log::{commit_line, parse_line};
-pub use model::{ItemKind, Linked, Location, Pointer, Residue, Span, SpanRow, TurnRow};
+pub use mail::Mail;
+pub use model::Model;
 pub use non_empty::NonEmpty;
 pub use replay::{Refusal, replay};
+pub use schedules::Schedules;
 pub(crate) use seam::Emitter;
 pub use seam::Reader;
-pub use selection::Selection;
 pub(crate) use session::{AgentLog, role_label};
 pub use session::{
     GrepAnswer, GrepHit, Inherited, Resumed, TranscriptMessage, TranscriptPart, TranscriptTurn,
@@ -50,7 +57,7 @@ pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View, context_ro
 pub use crate::app::RECORD;
 
 use crate::card::{Card, Change, DoneOutcome};
-use crate::provider::{Provider, ProviderError, Tuning, Usage, Via};
+use crate::provider::{ProviderError, Tuning, Usage, Via};
 use genai::chat::ChatMessage;
 use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
@@ -170,21 +177,22 @@ pub(crate) trait Publish: Send {
     fn transient(&self, t: Transient);
 }
 
-/// One fact a session recorded, in one of three classes.
+/// One fact a session recorded, in one of four classes.
 ///
 /// Externally tagged, as is each class: an internally tagged enum buffers
 /// through serde's `Content`, whose replay recurses natively, so the log
 /// could not read back a value as deep as it wrote.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Record {
-    Protocol(Protocol),
+    Transcript(Transcript),
+    Control(Control),
     Display(Display),
     Forensic(Forensic),
 }
 
-impl From<Protocol> for Record {
-    fn from(p: Protocol) -> Self {
-        Self::Protocol(p)
+impl From<Transcript> for Record {
+    fn from(p: Transcript) -> Self {
+        Self::Transcript(p)
     }
 }
 impl From<Display> for Record {
@@ -198,33 +206,138 @@ impl From<Forensic> for Record {
     }
 }
 
-impl Forensic {
-    /// The selection a landed model switch saves for the next launch.
+impl Record {
+    pub(crate) fn is_control(&self) -> bool {
+        matches!(self, Self::Control(_))
+    }
+}
+
+impl Control {
+    /// Only a landed switch saves a choice for the next launch.
     pub(crate) fn switched_to(&self) -> Option<crate::provider::state::State> {
-        let Self::ModelChanged {
-            model,
-            label,
-            account,
-            via,
-            ..
-        } = self
-        else {
+        let Self::ModelChanged { selected } = self else {
             return None;
         };
         Some(crate::provider::state::State {
-            provider: account.clone(),
-            provider_name: label.clone(),
-            model: model.clone(),
-            via: via.clone(),
+            provider: selected.account.clone(),
+            provider_name: selected.label.clone(),
+            model: selected.model.clone(),
+            via: selected.via.clone(),
         })
     }
 }
 
-/// Verbatim payloads the model fold needs — the provider's exact `ChatMessage`
-/// and tool-call ids — and every fact with a protocol form, recorded once.
+/// The agent's own state, folded by `Mail`, `Schedules` and `Model`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum Protocol {
+pub enum Control {
+    /// The head of every log and nowhere else.
+    SessionStarted(Started),
+    SessionResumed {
+        selected: Selected,
+        /// May change on resume.
+        returns: bool,
+        at_unix_ms: u64,
+    },
+    /// Its commit names the job.
+    JobOpened,
+    JobSettled {
+        job: JobId,
+        stopped: bool,
+    },
+    Status {
+        status: ChildStatus,
+    },
+    /// Its commit names the post.
+    Posted(Post),
+    /// Each became a prompt or a command, and keeps its debt until a `Status`.
+    Taken {
+        posts: NonEmpty<PostId>,
+    },
+    /// Left unread, and takes its debt with it.
+    Withdrawn {
+        posts: NonEmpty<PostId>,
+    },
+    Scheduled {
+        label: String,
+        schedule: Schedule,
+    },
+    Unscheduled {
+        label: String,
+    },
+    ModelChanged {
+        selected: Selected,
+    },
+    /// `model` is the model in force.
+    WindowNarrowed {
+        model: String,
+        context_window: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Started {
+    pub session_id: AgentId,
+    pub name: String,
+    /// `None` for every root.
+    pub parent: Option<AgentId>,
+    pub returns: bool,
+    pub selected: Selected,
+    pub log_dir: PathBuf,
+    pub at_unix_ms: u64,
+}
+
+/// The commit that posted an item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PostId(u64);
+
+impl PostId {
+    /// The post `commit` names: its commit number.
+    pub(crate) fn of(commit: &Commit) -> Self {
+        Self(commit.number())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Post {
+    /// `None` is a command, never a prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<Voice>,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<AgentId>,
+}
+
+impl Post {
+    /// The word a log note uses for this post's voice.
+    pub(crate) fn voice_word(&self) -> &'static str {
+        match self.voice {
+            Some(Voice::Human) => "human",
+            Some(Voice::Peer) => "peer",
+            Some(Voice::Harness) => "harness",
+            Some(Voice::Wakeup) => "wakeup",
+            None => "command",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Schedule {
+    pub prompt: String,
+    pub trigger: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    pub next_unix_ms: u64,
+    pub fires: u64,
+}
+
+/// What was said in the conversation and done to it; the `Context` folds it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Transcript {
     /// The system prompt every later request goes out under, until the next.
     System {
         text: String,
@@ -248,16 +361,16 @@ pub enum Protocol {
     },
     /// The link a `mnemon` child opens with: the parent's whole turn table,
     /// each row carrying the address its transcript copy lies at, and its
-    /// residues.
+    /// evictions.
     Inherited {
         /// The parent's table at the fork, every row `kind: Inherited` and
         /// `location` as the parent had it, beside where that turn was first
         /// recorded.  The child's context, survey and index are the same
         /// projections of it.
-        turns: Vec<model::Linked>,
-        /// The parent's residues in creation order: a resident one is
+        turns: Vec<context::Linked>,
+        /// The parent's evictions in creation order: a resident one is
         /// rendered from its own record, so the link carries nothing rendered.
-        residues: Vec<model::Residue>,
+        evictions: Vec<context::Eviction>,
     },
     AssistantMessage {
         /// This turn's id, minted by the log.
@@ -269,10 +382,8 @@ pub enum Protocol {
     ToolResults {
         results: Vec<ToolResult>,
     },
-    /// One eviction: the residue it leaves standing, as the table keeps it.
-    Evicted {
-        residue: model::Residue,
-    },
+    /// An eviction as the table keeps it: the span it stands for, and its note.
+    Evicted(context::Eviction),
     /// `/rewind`: turn `anchor` and every turn after it are withdrawn.
     Rewound {
         anchor: u64,
@@ -364,7 +475,7 @@ pub enum Display {
         payload: String,
         failed: bool,
     },
-    /// What a call's result told it; the text itself is `Protocol::ToolResults`'.
+    /// What a call's result told it; the text itself is `Transcript::ToolResults`'.
     Verdict {
         call: BlockId,
         verdict: Verdict,
@@ -399,68 +510,28 @@ pub enum Display {
         outcome: DoneOutcome,
     },
     Context {
-        rows: Vec<model::SpanRow>,
+        rows: Vec<context::SpanRow>,
     },
 }
 
-/// Breadcrumbs that determine no model projection but are worth keeping.
+/// Evidence and diagnostics; no fold derives state from it.
 ///
 /// `Error`, `Nudge`, and `ProviderError` are each the one record their
 /// dual-write sites emit for a single fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Forensic {
-    /// Head bookend, carrying enough metadata that the file reads on its own.
-    SessionStarted {
-        session_id: AgentId,
-        /// The fleet name the session answers to.
-        name: String,
-        /// The tree parent; `None` for every root, whatever opened it.
-        parent: Option<AgentId>,
-        model: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context_window: Option<u64>,
-        /// What the account was called when the session started — a
-        /// snapshot, the right thing for a log to hold even once a sibling
-        /// account arrives or a plan changes.
-        #[serde(rename = "provider")]
-        label: String,
-        service: String,
-        account: String,
-        log_dir: PathBuf,
-        at_unix_ms: u64,
-    },
-    SessionResumed {
-        model: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context_window: Option<u64>,
-        #[serde(rename = "provider")]
-        label: String,
-        service: String,
-        account: String,
-        at_unix_ms: u64,
-    },
     /// Tail bookend.
     SessionEnded,
     /// `/close`: the session is over for good, and a resume skips it.
     /// [`Self::SessionEnded`] is written on every drop and says no such thing.
     SessionClosed,
-    /// The agent left rest; this record's commit names the job.
-    JobOpened,
-    JobSettled {
-        job: JobId,
-        stopped: bool,
-    },
     EngineSevered {
         cause: ral_core::carrier::Severed,
     },
     /// An engine this agent stopped using ended without certified teardown.
     TeardownFailed {
         failure: String,
-    },
-    /// A child's status changed.
-    Status {
-        status: ChildStatus,
     },
     /// The meta half of taking a turn: the shape the request goes out under,
     /// sampling and upstreams both.  `turn` is the id the request will produce,
@@ -532,24 +603,6 @@ pub enum Forensic {
         names: Vec<String>,
         idle_calls: Vec<u64>,
     },
-    /// A mid-session model switch — the context-floor denominator, absent
-    /// from `SessionStarted` once the run outlives its first selection.
-    ModelChanged {
-        model: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context_window: Option<u64>,
-        #[serde(rename = "provider")]
-        label: String,
-        service: String,
-        account: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        via: Option<Via>,
-    },
-    /// An overflow taught the selection a tighter window than its catalog
-    /// listed.
-    WindowNarrowed {
-        context_window: u64,
-    },
 }
 
 /// An agent's birth facts, announced whole on the channel by the minting of
@@ -587,7 +640,7 @@ pub enum Transient {
     Died {
         failures: Vec<String>,
     },
-    /// The durable copy already rides [`Protocol::AssistantMessage`].
+    /// The durable copy already rides [`Transcript::AssistantMessage`].
     StopReason(String),
     /// Drawn, not recorded.
     Resources {
@@ -696,71 +749,6 @@ impl TurnKind {
 pub struct Spent {
     pub used: u32,
     pub max: u32,
-}
-
-/// A session's provider identity, snapshotted for the record.
-///
-/// What the account was called, and which service and account it was, at the
-/// moment the session began. `Clone` because [`AgentLog::fork`] carries it
-/// into every child's own `SessionStarted` bookend unchanged.
-#[derive(Clone, Debug)]
-pub struct RecordedAccount {
-    pub label: String,
-    pub service: String,
-    pub id: String,
-}
-
-impl RecordedAccount {
-    /// The snapshot of `account`, labelled as it reads among `available` —
-    /// the one place a live account becomes a log header.
-    pub fn of(account: &crate::provider::Account, available: &[crate::provider::Account]) -> Self {
-        Self {
-            label: crate::provider::identity::label(account, available),
-            service: account.service.name.as_str().to_string(),
-            id: account.id.as_str().to_string(),
-        }
-    }
-
-    /// A snapshot for tests that only care that *something* is recorded.
-    /// Not `#[cfg(test)]`: integration test binaries link the library built
-    /// without it, so a fixture they share with the unit tests must be an
-    /// ordinary function, as `Agent::for_test` already is.
-    #[doc(hidden)]
-    pub fn for_test(name: &str) -> Self {
-        Self {
-            label: name.to_string(),
-            service: name.to_string(),
-            id: name.to_string(),
-        }
-    }
-}
-
-/// A session's model, snapshotted for the record: its name and the context
-/// window its provider reported when the selection was minted.
-#[derive(Clone, Debug)]
-pub struct RecordedModel {
-    pub name: String,
-    pub context_window: Option<u64>,
-}
-
-impl RecordedModel {
-    /// The one place a live selection becomes a log header's model.
-    pub fn of(provider: &Provider) -> Self {
-        Self {
-            name: provider.model().to_string(),
-            context_window: provider.context_window(),
-        }
-    }
-
-    /// A snapshot for tests that only care that *something* is recorded; not
-    /// `#[cfg(test)]` for the reason [`RecordedAccount::for_test`] is not.
-    #[doc(hidden)]
-    pub fn for_test(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            context_window: None,
-        }
-    }
 }
 
 /// A record's place in the log: its commit (the line it was appended in,

@@ -1,10 +1,12 @@
 ---
 status: accepted
-generated_at_commit: ddde6ebc
+generated_at_commit: fc0c9fbb
 generated_at_date: 2026-10-19
 ---
 
 # An eviction is a span
+
+> *Amended 2026-10-30*: the eviction sense of `Residue` is named `Eviction` (`Transcript::Evicted(Eviction)`, `Inherited.evictions`, `Location::Evicted`); `Protocol` is `Transcript` and the context module is `record::context`; historical text below is retained.
 
 **An eviction takes one contiguous run of the context — resident turns and
 resident residues alike, in id order — and leaves one *residue* standing in

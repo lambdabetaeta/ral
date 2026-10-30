@@ -1,9 +1,11 @@
 ---
 status: 'accepted; superseded in part by [[decisions/261019_an-eviction-is-a-span]] — a cut is a run, not a set, and one residue stands for it'
-generated_at_commit: ced3518c
+generated_at_commit: fc0c9fbb
 ---
 
 # An eviction is a set of turns
+
+> *Amended 2026-10-30*: the eviction sense of `Residue` is named `Eviction` (`Transcript::Evicted(Eviction)`, `Inherited.evictions`, `Location::Evicted`); `Protocol` is `Transcript` and the context module is `record::context`; historical text below is retained.
 
 > Superseded in part: `Display::Rewound` is gone, and `/rewind` withdraws turns instead of truncating the table, so the 261007 note below is reversed on readability (withdrawn turns stay readable through `exarch-transcript`) and on re-minting the anchor (ids stay lineage-monotone). See [[internals/session-record|session-record]].
 

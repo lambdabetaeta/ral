@@ -12,6 +12,7 @@ mod mailbox;
 mod post;
 mod signal;
 mod sink;
+mod transaction;
 
 pub use channel::BusReceiver;
 #[cfg(any(test, feature = "test-util"))]
@@ -27,8 +28,10 @@ pub(crate) use channel::MERGE_TEXT_CAP;
 pub(crate) use emitter::{FleetBus, UsageMeter};
 pub(crate) use lease::Lease;
 pub(crate) use mailbox::{
-    AgentAddress, AgentMailbox, Drained, Input, Next, Refused, Rest, Status, WeakAgentAddress,
+    AgentAddress, AgentMailbox, Drained, Input, Next, Refused, Rest, Status, Txn, WeakAgentAddress,
 };
+#[cfg(test)]
+pub(crate) use post::Source;
 pub(crate) use post::{AgentMessage, ENDED_BEFORE_REPORTING, notice, surface_notice};
 pub(crate) use signal::WORKER_PANIC_PREFIX;
 #[cfg(test)]

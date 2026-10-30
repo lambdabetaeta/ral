@@ -155,7 +155,7 @@ impl Scrollback {
                 if !keep(&commit) {
                     break;
                 }
-                cleared |= self.step(&commit);
+                cleared |= self.try_step(&commit).map_err(std::io::Error::other)?;
             }
             Ok(())
         });
@@ -652,19 +652,24 @@ impl Scrollback {
     /// Mirror `commit` whole and move the cursor past it. Reports whether any
     /// of its records was a clear.
     fn step(&mut self, commit: &Commit) -> bool {
-        self.cursor = self.cursor.map(|cursor| cursor.past(commit));
+        self.try_step(commit)
+            .unwrap_or_else(|why| panic!("live scrollback refused a record: {why}"))
+    }
+
+    fn try_step(&mut self, commit: &Commit) -> Result<bool, record::Refusal> {
         let mut cleared = false;
         for rec in commit.records() {
-            cleared |= self.absorb(rec);
+            cleared |= self.absorb(rec)?;
         }
-        cleared
+        self.cursor = self.cursor.map(|cursor| cursor.past(commit));
+        Ok(cleared)
     }
 
     /// Step the mirror and account for what left it: the screen rows and
     /// blocks it retired, and — on a clear — the open lines and scroll state,
     /// under the opening again.  Reports whether the record was a clear.
-    fn absorb(&mut self, rec: &Recorded<Record>) -> bool {
-        let (delta, gone) = self.mirror.step(rec);
+    fn absorb(&mut self, rec: &Recorded<Record>) -> Result<bool, record::Refusal> {
+        let (delta, gone) = self.mirror.try_step(rec)?;
         let all: usize = screen(gone.iter().chain(&self.mirror.blocks))
             .map(|(_, rows)| rows.len())
             .sum();
@@ -683,7 +688,7 @@ impl Scrollback {
                     .insert(0, Block::chrome(Chrome::Opening(card), None));
             }
         }
-        cleared
+        Ok(cleared)
     }
 }
 

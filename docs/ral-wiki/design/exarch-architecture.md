@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: fc0c9fbb
 ---
 
 # exarch: an agent as a provider loop over one `ral` tool
@@ -16,6 +16,12 @@ round-trips, repeated until the model emits no tool call
 - stream a reply;
 - dispatch any tool calls;
 - append the results.
+
+**Every enduring agent fact is a fold of its log.** The owner holds the
+transcript's `Context`; the cell holds head-seeded `Mail`, `Schedules` and
+`Model` under one lock. The immutable client and unlocked timers are resources
+made from those facts, not rival authorities; timers ring and the owner fires.
+See [[design/agents|agents]].
 
 **The sandbox is not invented; it is ral's.** The engine's session holds the
 profile's layers, pushed once by the host at boot, and every run evaluates
@@ -34,7 +40,7 @@ that context bounded and isolated:
 - **persistence.** `let`, `cd`, and env carry across tool calls;
 - **eviction.** Long autonomous runs stay bounded — when the context fills,
   its older half leaves at the next **turn**
-  boundary with a residue standing in its place, and stays readable in the log through `exarch-transcript`
+  boundary with an eviction standing in its place, and stays readable in the log through `exarch-transcript`
   ([[decisions/260906_context-rollover|context-rollover]],
   [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]); a nudge
   policy decides whether to stop or loop with a synthetic next prompt;

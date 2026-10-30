@@ -143,7 +143,10 @@ impl Agent {
         rows.extend(pressure_rows(
             self.measured_input(),
             history_bytes,
-            self.body.state.provider.context_window(),
+            self.mailbox
+                .transact(|txn| txn.model().window())
+                .ok()
+                .flatten(),
         ));
 
         rows.push(ProbeRow::new(
@@ -196,7 +199,7 @@ impl Agent {
             .live()
             .iter()
             .filter(|agent| !agent.is_root())
-            .filter_map(|agent| agent.status().rest)
+            .filter_map(|agent| agent.status().ok()?.rest)
             .map(|rest| idle.saturating_sub(rest.elapsed()))
             .min();
         rows.push(ProbeRow::new(

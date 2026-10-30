@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use exarch::port::{Ended, Signal};
     use exarch::provider::scripted::{Reply, Script};
-    use exarch::record::{Forensic, JobId, Record};
+    use exarch::record::{Control, JobId, Record};
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -268,10 +268,10 @@ mod tests {
             {
                 for recorded in commit.records() {
                     match recorded.value() {
-                        Record::Forensic(Forensic::JobOpened) => {
+                        Record::Control(Control::JobOpened) => {
                             assert!(opened.replace(JobId::from(commit.number())).is_none());
                         }
-                        Record::Forensic(Forensic::JobSettled { job, stopped }) => {
+                        Record::Control(Control::JobSettled { job, stopped }) => {
                             assert_eq!(Some(*job), opened);
                             assert!(!stopped);
                             break 'job;

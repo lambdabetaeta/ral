@@ -2,11 +2,11 @@
 //! what it weighs.
 
 use super::table::Item;
-use super::{Context, Residue, message_bytes, resident_messages};
+use super::{Context, Eviction, message_bytes, resident_messages};
 use genai::chat::ChatMessage;
 
 impl Context {
-    /// The provider-facing context: the frontier in id order, each residue as
+    /// The provider-facing context: the frontier in id order, each eviction as
     /// its one message and every resident turn as it lies.
     ///
     /// A turn interrupted short of a reply renders whole too — it is the work
@@ -41,7 +41,7 @@ impl Context {
             .iter()
             .map(|item| match item {
                 Item::Turn(turn) => turn.records().len(),
-                Item::Residue(..) => 1,
+                Item::Eviction(..) => 1,
             })
             .sum()
     }
@@ -51,29 +51,29 @@ impl Item<'_> {
     fn messages(&self) -> Vec<ChatMessage> {
         match self {
             Self::Turn(turn) => resident_messages(turn.records()),
-            Self::Residue(standing) => {
-                vec![ChatMessage::user(render_residue(&standing.residue))]
+            Self::Eviction((eviction, _)) => {
+                vec![ChatMessage::user(render_eviction(eviction))]
             }
         }
     }
 
-    /// The item's weight as sent: a turn's own sum, or its residue's message.
+    /// The item's weight as sent: a turn's own sum, or its eviction's message.
     pub(super) fn bytes(&self) -> usize {
         match self {
             Self::Turn(turn) => turn.bytes,
-            Self::Residue(..) => message_bytes(&self.messages()),
+            Self::Eviction(..) => message_bytes(&self.messages()),
         }
     }
 }
 
-/// A residue's one message: a pure function of the record, so it is
+/// An eviction's one message: a pure function of the record, so it is
 /// byte-stable and the provider's prompt cache survives it.
 ///
 /// In the user's voice, bracketed: the harness may state a fact about the
 /// conversation, never speak in the model's own voice. The note is
 /// `Debug`-quoted, so it cannot add a line.
-pub(super) fn render_residue(residue: &Residue) -> String {
-    let Residue { span, note, .. } = residue;
+pub(super) fn render_eviction(eviction: &Eviction) -> String {
+    let Eviction { span, note, .. } = eviction;
     let turns = span.capitalised();
     let (have, they, them) = if span.is_single() {
         ("has", "It is", "it")
@@ -91,9 +91,9 @@ pub(super) fn render_residue(residue: &Residue) -> String {
     )
 }
 
-/// A residue's label in rows: the note bare, or what stands for its absence.
-pub(super) fn residue_label(residue: &Residue) -> String {
-    residue
+/// An eviction's label in rows: the note bare, or what stands for its absence.
+pub(super) fn eviction_label(eviction: &Eviction) -> String {
+    eviction
         .note
         .clone()
         .unwrap_or_else(|| "forced eviction, without a note".into())

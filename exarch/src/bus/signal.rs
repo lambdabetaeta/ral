@@ -8,6 +8,10 @@ use crate::record::{AgentId, Born, Commit, Transient};
 ///
 /// One channel, so the TUI's single per-fleet dispatch loop routes all of it
 /// by [`AgentId`] without restructuring.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a commit travels whole on the channel without an extra allocation"
+)]
 pub enum Signal {
     /// A commit, its records stamped with the loci its append gave them;
     /// one signal, so a frontend absorbs it whole.

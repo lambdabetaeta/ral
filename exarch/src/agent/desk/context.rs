@@ -1,7 +1,7 @@
 //! The context family of the desk.
 
 use crate::enquiry::{Evict, Note, Survey};
-use crate::record::model::ContextSurvey;
+use crate::record::context::ContextSurvey;
 use crate::record::{AgentLog, EditAuthority};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;

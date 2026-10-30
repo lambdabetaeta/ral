@@ -1,9 +1,11 @@
 ---
 status: 'active; amended in carrier — the same decision carried through to residency: one `Context` holding every turn and *where* it is, `Held` a projection off it. See *Amended: the context is one structure*. Superseded in part by [[decisions/261019_an-eviction-is-a-span]]: an eviction leaves a residue over a span; one id space stands.'
-generated_at_commit: 14c8cae4
+generated_at_commit: fc0c9fbb
 ---
 
 # The turn is the atom of eviction
+
+> *Amended 2026-10-30*: the eviction sense of `Residue` is named `Eviction` (`Transcript::Evicted(Eviction)`, `Inherited.evictions`, `Location::Evicted`); `Protocol` is `Transcript` and the context module is `record::context`; historical text below is retained.
 
 > Superseded in part: a fork no longer re-records the parent's messages as `ContextMessage`s; its link is read back through digest-checked pointers into the parent's file, and a turn may also leave the context by *withdrawal* (`/clear`, `/rewind`). See [[internals/session-record|session-record]].
 

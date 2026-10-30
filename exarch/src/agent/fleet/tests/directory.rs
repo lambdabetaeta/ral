@@ -7,10 +7,7 @@ use ral_core::data::FOValue;
 use ral_core::process::CancelCause;
 use std::sync::Barrier;
 
-const REST: Rest = Rest {
-    pending: false,
-    schedules: false,
-};
+const REST: Rest = Rest { pending: false };
 
 #[test]
 fn a_reserved_name_counts_construction_until_it_is_dropped() {
@@ -245,7 +242,9 @@ fn the_summary_counts_only_resting_replies_to_the_reader() {
     let before = roster::summary(&mid, &fleet);
     assert_eq!(before.live, 3);
     assert_eq!(before.replied, 0);
-    child.report(ChildStatus::Replied(FOValue::Int { value: 1 }));
+    child
+        .report(ChildStatus::Replied(FOValue::Int { value: 1 }))
+        .unwrap();
     let answered = roster::summary(&mid, &fleet);
     assert_eq!(answered.live, 3, "a report does not end its owner");
     assert_eq!(answered.replied, 1);
@@ -259,7 +258,7 @@ fn the_summary_counts_only_resting_replies_to_the_reader() {
         RosterState::Busy
     ));
     assert!(matches!(child.mailbox.next(REST), Next::Settled { .. }));
-    child.report(ChildStatus::Stopped);
+    child.report(ChildStatus::Stopped).unwrap();
     assert_eq!(roster::summary(&mid, &fleet).replied, 0);
 }
 
@@ -301,20 +300,20 @@ fn a_second_root_is_outside_the_first_roots_tree_and_roots_are_sorted() {
 fn beginning_an_exchange_stamps_its_clock_without_observation_renewing_rest() {
     let fleet = Fleet::for_test();
     let root = agent(&fleet, "root", None);
-    let resting = root.status().rest;
-    assert!(root.status().last_exchange.is_none());
+    let resting = root.status().unwrap().rest;
+    assert!(root.status().unwrap().last_exchange.is_none());
     root.steer("hi".into()).unwrap();
-    assert!(root.status().last_exchange.is_none());
-    assert_eq!(root.status().rest, resting);
+    assert!(root.status().unwrap().last_exchange.is_none());
+    assert_eq!(root.status().unwrap().rest, resting);
     assert!(matches!(
         root.mailbox.next(REST),
         Next::Take { input: Input::Human(text), .. } if text == "hi"
     ));
     assert!(
-        root.status().last_exchange.is_none(),
+        root.status().unwrap().last_exchange.is_none(),
         "a quiet input begins nothing"
     );
     assert!(root.mailbox.begin());
-    assert!(root.status().rest.is_none());
-    assert!(root.status().last_exchange.is_some());
+    assert!(root.status().unwrap().rest.is_none());
+    assert!(root.status().unwrap().last_exchange.is_some());
 }

@@ -668,7 +668,7 @@ fn note_if_running(app: &mut App, id: &str, text: &str) {
         .port()
         .roster()
         .iter()
-        .any(|row| row.pick.choice.account.id.as_str() == id)
+        .any(|row| row.selected.account == id)
     {
         app.push_note(app.tabs.focused(), text);
     }

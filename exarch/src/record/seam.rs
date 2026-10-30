@@ -10,7 +10,10 @@
 //! sequence number.
 
 use super::log::Log;
-use super::{Commit, Cursor, NonEmpty, Publish, Record, Recorded, Transient, Unavailable};
+use super::{
+    Commit, Control, Cursor, Folds, Forensic, Mail, Model, NonEmpty, Publish, Record, Recorded,
+    Schedules, Started, Transient, Unavailable,
+};
 use ral_core::own::OwnDir;
 use ral_core::process::ScopeNode;
 use std::fmt;
@@ -138,8 +141,62 @@ impl Emitter {
     ///
     /// # Errors
     /// Propagates a failed append, which latches the writer.
+    /// # Panics
+    /// A hand-built `Record::Control` must go through `commit_to` or `begin`.
     pub fn commit(&self, records: NonEmpty<Record>) -> Result<Commit, Unavailable> {
+        assert!(
+            !records.iter().any(Record::is_control),
+            "Control records must go through commit_to or begin"
+        );
         self.log.append(records)
+    }
+
+    /// Append before stepping: a failed append leaves every fold unchanged.
+    /// # Errors
+    /// The append failed and latched the writer.
+    /// # Panics
+    /// A fold refuses a live record, which is an authorship bug.
+    pub(crate) fn commit_to(
+        &self,
+        mut folds: Folds<'_>,
+        line: NonEmpty<Control>,
+        tail: Vec<Forensic>,
+    ) -> Result<Commit, Unavailable> {
+        let records = NonEmpty {
+            first: Record::Control(line.first),
+            rest: line
+                .rest
+                .into_iter()
+                .map(Record::Control)
+                .chain(tail.into_iter().map(Record::Forensic))
+                .collect(),
+        };
+        let commit = self.log.append(records)?;
+        for record in commit.records() {
+            folds
+                .step(record)
+                .unwrap_or_else(|refusal| panic!("control fold refused a live record: {refusal}"));
+        }
+        Ok(commit)
+    }
+
+    /// Append the head and return the folds of that one-line log.
+    /// # Errors
+    /// The append failed and latched the writer.
+    pub(crate) fn begin(&self, started: Started) -> Result<(Mail, Schedules, Model), Unavailable> {
+        let folds = super::control::seed(&started);
+        drop(
+            self.log
+                .append(NonEmpty::one(Record::Control(Control::SessionStarted(
+                    started,
+                ))))?,
+        );
+        Ok(folds)
+    }
+
+    /// End the bound life when its cell can no longer be trusted.
+    pub(crate) fn cell_poisoned(&self, why: String) -> Unavailable {
+        self.log.cell_poisoned(why)
     }
 
     /// [`Self::commit`] of one record.

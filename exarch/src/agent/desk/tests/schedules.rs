@@ -88,7 +88,10 @@ fn a_duplicate_schedule_is_refused_and_tiers_its_act_row() {
             .ask(add_req("1s", "nightly", "wake"))
             .expect_err("a duplicate label must be refused");
         assert!(err.message.contains("nightly"), "got: {}", err.message);
-        assert_eq!(desk.loan.get().unwrap().state.schedules.list().len(), 1);
+        assert_eq!(
+            table(desk.ask(Request::Schedules(Schedules::List)).unwrap()).len(),
+            1
+        );
 
         let acts: Vec<(String, bool)> = crate::bus::drain_records(&rx)
             .into_iter()
@@ -113,6 +116,28 @@ fn a_duplicate_schedule_is_refused_and_tiers_its_act_row() {
             acts[1].0.starts_with("refused: "),
             "a refusal states itself in the payload: {:?}",
             acts[1].0
+        );
+    });
+}
+
+#[test]
+#[allow(
+    clippy::redundant_closure_for_method_calls,
+    reason = "method items do not satisfy try_transact's higher-ranked lifetime"
+)]
+fn schedules_list_reads_the_cell_even_when_the_timer_resource_is_empty() {
+    with_granted_desk(|desk, agent| {
+        desk.ask(add_req("2h", "fold-backed", "wake")).unwrap();
+        // Dropping timers changes no recorded booking.
+        desk.loan.get().unwrap().schedules.clear();
+        let rows = table(desk.ask(Request::Schedules(Schedules::List)).unwrap());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_field(&rows[0], "label"), Some("fold-backed"));
+        assert_eq!(str_field(&rows[0], "trigger"), Some("after 2h"));
+        agent.mailbox.try_transact(|txn| txn.clear()).unwrap();
+        assert_eq!(
+            table(desk.ask(Request::Schedules(Schedules::List)).unwrap()),
+            Vec::<FOValue>::new()
         );
     });
 }

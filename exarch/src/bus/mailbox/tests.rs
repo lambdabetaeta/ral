@@ -1,10 +1,11 @@
 use super::*;
-use crate::record::{Memory, RECORD, Record, read_records};
+use crate::record::{Control, Forensic, Memory, RECORD, Record, Started, read_records};
 use ral_core::own::OwnDir;
 use ral_core::process::DurableRoot;
 use ral_core::test_helper::eventually;
 use std::sync::{Barrier, mpsc};
 
+mod acceptance;
 mod admission;
 mod integration;
 mod jobs;
@@ -12,10 +13,7 @@ mod queue;
 mod reports;
 mod wakeups;
 
-const QUIET: Rest = Rest {
-    pending: false,
-    schedules: false,
-};
+const QUIET: Rest = Rest { pending: false };
 const WAIT: Duration = Duration::from_secs(5);
 
 fn mailbox(admission: Admission) -> AgentMailbox {
@@ -23,23 +21,62 @@ fn mailbox(admission: Admission) -> AgentMailbox {
 }
 
 fn recorded_mailbox(admission: Admission, record: Recorder) -> AgentMailbox {
-    let life = DurableRoot::default().child();
-    record.bind(life.clone());
-    AgentMailbox::new(
-        life,
-        record,
+    configured_mailbox(
         admission,
-        crate::provider::Pick::of(&crate::provider::Provider::scripted(
-            "test-model",
-            crate::provider::scripted::Script::new(),
-        )),
+        record,
+        DurableRoot::default().child(),
+        None,
+        matches!(admission, Admission::Parent { .. }),
     )
+}
+
+fn configured_mailbox(
+    admission: Admission,
+    record: Recorder,
+    life: ScopeNode,
+    parent: Option<AgentAddress>,
+    returns: bool,
+) -> AgentMailbox {
+    record.bind(life.clone());
+    let helper = matches!(admission, Admission::Parent { .. });
+    let id = AgentId::new(if helper { 8 } else { 7 });
+    let folds = record
+        .begin(Started {
+            session_id: id,
+            name: if helper { "helper" } else { "parent" }.into(),
+            parent: helper.then_some(AgentId::new(7)),
+            returns,
+            selected: Selected::for_test("test-model"),
+            log_dir: std::path::PathBuf::default(),
+            at_unix_ms: 0,
+        })
+        .unwrap();
+    AgentMailbox::new(id, life, record, admission, parent, folds)
 }
 
 fn helper() -> AgentMailbox {
     mailbox(Admission::Parent {
         idle: Duration::from_secs(60),
     })
+}
+
+fn helper_of(parent: &AgentMailbox) -> AgentMailbox {
+    configured_mailbox(
+        Admission::Parent {
+            idle: Duration::from_secs(60),
+        },
+        Recorder::none(),
+        parent.life().child(),
+        Some(parent.address()),
+        true,
+    )
+}
+
+fn publish(address: &AgentAddress, status: ChildStatus) {
+    address
+        .transact(|txn| txn.report(status, child))
+        .unwrap()
+        .unwrap();
 }
 
 fn take(mailbox: &AgentMailbox) -> (Input, Lease) {
@@ -57,12 +94,11 @@ fn start(mailbox: &AgentMailbox) -> Lease {
     exchange
 }
 
-fn message(text: &str, from_parent: bool) -> Input {
+fn message(text: &str, parent: bool) -> Input {
     Input::Message(AgentMessage {
-        from: AgentId::new(7),
+        from: AgentId::new(if parent { 7 } else { 9 }),
         from_name: "review".into(),
         text: text.into(),
-        from_parent,
     })
 }
 
@@ -78,7 +114,6 @@ fn child(status: ChildStatus) -> Input {
 fn wakeup(id: u64, text: &str) -> Input {
     Input::Wakeup {
         id: ScheduleId::new(id),
-        epoch: 3,
         text: text.into(),
     }
 }
@@ -101,7 +136,7 @@ fn depth(mailbox: &AgentMailbox, source: Source) -> u64 {
 
 fn settled(mailbox: &AgentMailbox, stopped: bool) {
     assert!(matches!(mailbox.next(QUIET), Next::Settled { stopped: mark } if mark == stopped));
-    let status = mailbox.address().status();
+    let status = mailbox.address().status().unwrap();
     assert!(status.job.is_none());
     assert!(status.rest.is_some());
 }

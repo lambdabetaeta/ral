@@ -6,13 +6,13 @@
 use super::state::admissible_prefix;
 use super::table::Item;
 use super::{
-    Body, Context, ItemKind, Linked, Location, Pointer, Span, Standing, Turn, chat_messages,
+    Body, Context, ItemKind, Linked, Location, Pointer, Span, Turn, chat_messages,
     not_recorded_refusal_turn,
 };
 use crate::provider::tools::{COMMAND, RAL_TOOL};
 use crate::record::log::LocusReader;
 use crate::record::{
-    AgentId, GrepAnswer, GrepHit, Locus, Protocol, RECORD, Record, Recorded, Refusal, Role,
+    AgentId, GrepAnswer, GrepHit, Locus, RECORD, Record, Recorded, Refusal, Role, Transcript,
     TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
 };
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
@@ -35,11 +35,11 @@ fn record_name(sessions: &OwnDir, source: AgentId) -> PathBuf {
     sessions.path().join(source.to_string()).join(RECORD)
 }
 
-fn read_at(reader: &mut LocusReader, locus: &Locus) -> io::Result<Protocol> {
+fn read_at(reader: &mut LocusReader, locus: &Locus) -> io::Result<Transcript> {
     match reader.record(locus)? {
-        Record::Protocol(p) => Ok(p.clone()),
-        Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
-            "a pointer named a non-protocol record: a turn's address no longer \
+        Record::Transcript(p) => Ok(p.clone()),
+        Record::Control(_) | Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
+            "a pointer named a non-transcript record: a turn's address no longer \
              names the records it was measured over",
         )),
     }
@@ -48,7 +48,7 @@ fn read_at(reader: &mut LocusReader, locus: &Locus) -> io::Result<Protocol> {
 /// Where one turn's records are: in hand, or at the address to read them
 /// back by.
 enum Source {
-    Held(Vec<Protocol>),
+    Held(Vec<Transcript>),
     Located(Pointer),
 }
 
@@ -77,7 +77,8 @@ impl Placed {
             Body::Here {
                 origin: Some(at), ..
             }
-            | Body::There { at, .. } => Source::Located(at.clone()),
+            | Body::Evicted { at, .. }
+            | Body::Withdrawn { at } => Source::Located(at.clone()),
         };
         Self {
             id: turn.id,
@@ -87,14 +88,14 @@ impl Placed {
     }
 }
 
-/// What a search covers: a turn's material, or a residue's note.
+/// What a search covers: a turn's material, or an eviction's note.
 enum Searchable {
     Turn(TurnKind, Placed),
     Note(Span, String),
 }
 
 /// One turn's own material, wherever the lineage keeps it.
-fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
+fn turn_messages(records: &[Transcript]) -> Vec<ChatMessage> {
     records.iter().flat_map(chat_messages).collect()
 }
 
@@ -187,7 +188,7 @@ impl TranscriptSearch {
         for item in items {
             let (span, kind, messages) = match item {
                 Searchable::Note(span, note) => {
-                    (span, ItemKind::Residue, vec![ChatMessage::user(note)])
+                    (span, ItemKind::Eviction, vec![ChatMessage::user(note)])
                 }
                 Searchable::Turn(kind, turn) => match material(&mut open, &sessions, &turn) {
                     Ok(messages) => (Span::single(turn.id), ItemKind::Turn(kind), messages),
@@ -211,7 +212,7 @@ fn read_pointer(
     sessions: &OwnDir,
     source: AgentId,
     loci: &[Locus],
-) -> io::Result<Vec<Protocol>> {
+) -> io::Result<Vec<Transcript>> {
     if open.as_ref().is_none_or(|(id, _)| *id != source) {
         // Closed before the next is opened.
         drop(open.take());
@@ -226,7 +227,7 @@ fn read_pointer(
 pub(super) fn read_seeds(
     sessions: &OwnDir,
     turns: &[Linked],
-) -> Result<Vec<Vec<Recorded<Protocol>>>, Refusal> {
+) -> Result<Vec<Vec<Recorded<Transcript>>>, Refusal> {
     let mut open = None;
     turns
         .iter()
@@ -315,7 +316,7 @@ impl Context {
         Ok(named.into_iter().collect())
     }
 
-    /// Search the closed turns' text and the residues' notes: the ones a
+    /// Search the closed turns' text and the evictions' notes: the ones a
     /// narrowing names, or the whole transcript. Each file is read in one
     /// pass in locus order, and every hit names the item it lies in.
     ///
@@ -341,8 +342,8 @@ impl Context {
     /// lies, resolved under the caller's lock and borrowing nothing.
     ///
     /// With no narrowing at all, every turn bar the one in hand and every
-    /// noted residue; with one, the turns named and every noted residue all
-    /// of whose turns are named. A forced eviction's residue has no note to search.
+    /// noted eviction; with one, the turns named and every noted eviction all
+    /// of whose turns are named. A forced eviction's eviction has no note to search.
     ///
     /// # Errors
     /// Refuses whatever `Self::grep_transcript` refuses at location time.
@@ -374,17 +375,17 @@ impl Context {
                 Item::Turn(turn) => {
                     searched(turn.id).then(|| Searchable::Turn(turn.kind, Placed::of(turn)))
                 }
-                Item::Residue(Standing { residue, .. }) => residue
+                Item::Eviction((eviction, _)) => eviction
                     .note
                     .clone()
                     .filter(|_| {
                         self.table
                             .turns()
                             .iter()
-                            .filter(|turn| residue.span.contains(turn.id))
+                            .filter(|turn| eviction.span.contains(turn.id))
                             .all(|turn| searched(turn.id))
                     })
-                    .map(|note| Searchable::Note(residue.span, note)),
+                    .map(|note| Searchable::Note(eviction.span, note)),
             })
             .collect();
         Ok(TranscriptSearch {
@@ -531,14 +532,14 @@ fn transcript_binary(binary: &Binary) -> TranscriptPart {
     }
 }
 
-/// The decoded byte length of a binary payload. A URL source names no local
-/// bytes at all, so it reports zero rather than the length of the URL text.
+/// Exact for canonical padded base64, a floored estimate otherwise; not a validator.
+/// A URL names no local bytes.
 fn binary_payload_bytes(source: &BinarySource) -> usize {
     match source {
         BinarySource::Url(_) => 0,
         BinarySource::Base64(data) => {
-            let padding = data.chars().rev().take_while(|&c| c == '=').count();
-            (data.len() / 4) * 3 - padding
+            let padding = data.bytes().rev().take_while(|&c| c == b'=').count();
+            ((data.len() / 4) * 3).saturating_sub(padding)
         }
     }
 }

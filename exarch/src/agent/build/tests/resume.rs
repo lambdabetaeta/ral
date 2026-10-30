@@ -4,12 +4,12 @@ use super::*;
 fn resumed_agent_adds_only_the_fresh_shell_note() {
     let dir = tmp("resume-agent");
     let sessions = dir.make_dir("sessions").unwrap();
-    let mut log = AgentLog::root(
+    let (mut log, _, _, _) = AgentLog::root(
         &sessions,
         AgentId::new(0),
         "main",
-        &RecordedModel::for_test("old-model"),
-        &RecordedAccount::for_test("old-provider"),
+        false,
+        &Selected::for_test("old-model"),
         "system",
         None,
     )
@@ -55,7 +55,7 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
     let records = crate::record::read_records(&dir.path().join("sessions/0/record.jsonl")).unwrap();
     assert!(records.iter().any(|record| matches!(
         record,
-        crate::record::Record::Forensic(crate::record::Forensic::SessionResumed { .. })
+        crate::record::Record::Control(crate::record::Control::SessionResumed { .. })
     )));
 }
 
@@ -63,12 +63,12 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
 fn resume_seeds_child_ids_past_existing_session_directories() {
     let dir = tmp("resume-id-seed");
     let sessions = dir.make_dir("sessions").unwrap();
-    let log = AgentLog::root(
+    let (log, _, _, _) = AgentLog::root(
         &sessions,
         AgentId::new(0),
         "main",
-        &RecordedModel::for_test("old-model"),
-        &RecordedAccount::for_test("old-provider"),
+        false,
+        &Selected::for_test("old-model"),
         "system",
         None,
     )
@@ -90,30 +90,40 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
 }
 
 #[test]
-fn resumed_roots_do_not_mistake_a_historical_reply_for_a_live_report() {
-    use crate::record::{ChildStatus, Forensic, Record, read_records};
+fn resumed_roots_keep_their_recorded_report_without_reporting_again() {
+    use crate::record::{ChildStatus, Record, read_records};
     use ral_core::data::FOValue;
     for trunk in [Trunk::Returns, Trunk::Converses] {
         let dir = tmp("resume-published-status");
         let sessions = dir.make_dir("sessions").unwrap();
-        let log = AgentLog::root(
+        let (log, mail, schedules, model) = AgentLog::root(
             &sessions,
             AgentId::new(0),
             "main",
-            &RecordedModel::for_test("old-model"),
-            &RecordedAccount::for_test("old-provider"),
+            false,
+            &Selected::for_test("old-model"),
             "system",
             None,
         )
         .unwrap();
         let status = ChildStatus::Replied(FOValue::Int { value: 1 });
-        drop(
-            log.record_emitter()
-                .emit(Forensic::Status {
-                    status: status.clone(),
-                })
-                .unwrap(),
+        let life = ral_core::process::DurableRoot::default().child();
+        let mailbox = crate::bus::AgentMailbox::new(
+            log.id(),
+            life,
+            log.record_emitter(),
+            Admission::Free,
+            None,
+            (mail, schedules, model),
         );
+        mailbox
+            .try_transact(|txn| {
+                txn.report(status.clone(), |_| {
+                    crate::bus::Input::Human("unused".into())
+                })
+            })
+            .unwrap();
+        drop(mailbox);
         let record = log.dir().path().join(RECORD);
         drop(log);
         let (root, _) = Agent::resume(
@@ -126,14 +136,14 @@ fn resumed_roots_do_not_mistake_a_historical_reply_for_a_live_report() {
         )
         .unwrap()
         .remove(0);
-        assert_eq!(root.handle().status().report, None);
-        assert!(!root.body.state.owed);
+        assert_eq!(root.handle().status().unwrap().report, Some(status.clone()));
+        assert!(!root.handle().status().unwrap().owes);
         drop(root);
         let statuses = read_records(&record)
             .unwrap()
             .into_iter()
             .filter_map(|record| match record {
-                Record::Forensic(Forensic::Status { status }) => Some(status),
+                Record::Control(crate::record::Control::Status { status }) => Some(status),
                 _ => None,
             })
             .collect::<Vec<_>>();

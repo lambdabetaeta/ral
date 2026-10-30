@@ -80,10 +80,8 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     );
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &session.mailbox.life().child(),
-        &provider,
         Some(("compute then crash".into(), Voice::Human)),
         None,
         &emit,
@@ -100,9 +98,9 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     );
     assert!(session.is_ready());
     let provider = scripted("test-model", Script::new().then(Reply::text("ok")));
+    set_provider(&mut session, provider);
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("continue".into(), Voice::Human)),
         None,
         &emit,
@@ -258,10 +256,8 @@ fn panic_after_prune_does_not_resurrect_binding() {
                 .then(Reply::text("recovered")),
         ),
     );
-    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &session.mailbox.life().child(),
-        &provider,
         Some(("compute then crash".into(), Voice::Human)),
         None,
         &emit,

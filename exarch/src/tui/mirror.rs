@@ -9,7 +9,7 @@ use super::fidelity::Fidelity;
 use super::group;
 use super::palette::AgentSlot;
 use crate::card::{self, Card, Change, Landed, observation_card, observation_spans};
-use crate::record::{self, BlockId, Blocks, Delta, Record, Recorded, Seq};
+use crate::record::{self, BlockId, Blocks, Delta, Record, Recorded, Refusal, Seq};
 use ral_core::data::datum::Datum as _;
 use ral_core::shell::runtime::{Observation, Observed};
 use std::time::Duration;
@@ -18,7 +18,7 @@ pub(super) struct Mirror {
     /// Oldest block first: the mirror of the fold's own window, and the only
     /// thing between the fold and the screen.
     pub(super) blocks: Vec<Block>,
-    /// This mirror's own view-fold memo, stepped by every [`Self::step`].
+    /// This mirror's own view-fold memo, stepped by every [`Self::try_step`].
     /// Its window is the one window: a block leaves the mirror exactly as the
     /// block it was built from leaves the fold.
     pub(super) fold: Blocks,
@@ -65,8 +65,11 @@ impl Mirror {
     /// so a second hand-rolled projection cannot compile.  Returns the blocks
     /// that left the mirror: the head [`Self::trim`] drops and, on a clear,
     /// everything held before it.  A rewind's blocks are gone, not retired.
-    pub(super) fn step(&mut self, rec: &Recorded<Record>) -> (Delta, Vec<Block>) {
-        let delta = self.fold.step(rec);
+    pub(super) fn try_step(
+        &mut self,
+        rec: &Recorded<Record>,
+    ) -> Result<(Delta, Vec<Block>), Refusal> {
+        let delta = self.fold.try_step(rec)?;
         let mut gone = Vec::new();
         match delta {
             Delta::Opened(_) => self.opened(),
@@ -87,7 +90,7 @@ impl Mirror {
             Delta::Quiet => {}
         }
         gone.extend(self.trim());
-        (delta, gone)
+        Ok((delta, gone))
     }
 
     /// What the mirror still holds, once the last record is in.
@@ -384,7 +387,7 @@ impl Mirror {
             K::Stalled { error } => chrome(Chrome::Stalled(error.clone())),
             K::SystemNote { text } => note(text),
             K::Turn { .. } => vec![Item::Member(Member::Turn)],
-            K::Evicted { residue } => note(&residue.evicted_line()),
+            K::Evicted { eviction } => note(&eviction.evicted_line()),
             K::Rewound { anchor } => note(&format!("[rewound to turn {anchor}]")),
             K::Cleared => note("[cleared]"),
         }

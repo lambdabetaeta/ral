@@ -1,5 +1,5 @@
 use super::*;
-use crate::record::{ChildStatus, Display, Forensic, Seq};
+use crate::record::{ChildStatus, Control, Display, Forensic, Seq};
 use ral_core::data::FOValue;
 use ral_core::own::TestDir;
 
@@ -199,7 +199,7 @@ fn deep_record_round_trips() {
     };
     let dir = temp_dir("deep");
     let path = dir.path().join(RECORD);
-    let record = Record::Forensic(Forensic::Status {
+    let record = Record::Control(Control::Status {
         status: ChildStatus::Replied(replied()),
     });
     let commit =
@@ -216,7 +216,7 @@ fn deep_record_round_trips() {
     for record in [back[0].value(), line.records().first.value()] {
         assert!(matches!(
             record,
-            Record::Forensic(Forensic::Status { status: ChildStatus::Replied(got) }) if *got == replied()
+            Record::Control(Control::Status { status: ChildStatus::Replied(got) }) if *got == replied()
         ));
     }
 }

@@ -1,10 +1,10 @@
 ---
 status: active
-generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-generated_at_date: 2026-10-29
-verified_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-verified_at_date: 2026-10-29
-anchors: [Port, AgentRow, Registry, Host, Reader, Pick, Agent::switch_model, Tabs::settled, Leaving]
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
+verified_at_commit: fc0c9fbb
+verified_at_date: 2026-10-30
+anchors: [Port, AgentRow, Registry, Host, Reader, Selected, Agent::switch_model, Tabs::settled, Leaving]
 amends: [261029_an-agent-is-a-thread]
 ---
 
@@ -19,9 +19,9 @@ clients, including Synod.
 - **P1 — One reach.** Frontends name agents by `AgentId` and act only through
   `Port`. The TUI names neither `agent`, `bus` nor `host`; headless names
   neither `agent` nor `bus`. The layering test pins this reach rule.
-- **P2 — Published, not shared.** An agent owns its provider in
-  `State.provider`. The port reads mailbox `Status`, including the `Pick`
-  published at birth and each switch, never the owner's state.
+- **P2 — Folded, not copied.** An agent owns its immutable client in
+  `Body.client`. The port reads cell `Status`, including the mail's debt
+  and `Model::selected()`, exposed as `AgentRow.selected`, never the client.
 - **P3 — Frontends never write a log.** `Born.reader` permits TUI catch-up,
   not append. `Emitter` and `AgentLog` are crate-private; model switches are
   recorded by the agent, not its frontend.
@@ -44,18 +44,18 @@ clients, including Synod.
   `policy`, `prompt`, `provider`, `record` and `wallet` remain public launch
   support: hiding them would redesign Synod's construction, not isolate agents.
 - `Command::Model(Pick)` asks the owner to build. Success records
-  `ModelChanged` (including `via`) **before** replacing the provider and
-  publishing `Pick::of(&built)`. Plan-billed accounts discard sampling, so
-  the built selection, not the requested one, is published. A failed build
-  records an error but changes neither provider nor pick; failed recording
-  ends life and prevents the switch.
+  `Control::ModelChanged { selected }` **before** replacing the client.
+  The bureau's immutable `Selected` stamp, not the requested `Pick`, is
+  installed in the cell's model fold. Plan-billed accounts discard sampling.
+  A failed build records an error but changes neither client nor model;
+  failed recording ends life and prevents the switch.
 - The TUI persists a selection only from a live commit's `ModelChanged`,
   using that record's account, label, model and `via`. Asking saves nothing;
   replay/catch-up does not change project selection. Login/provider notes
   are view chrome and do not appear in record-backed exports.
-- A switch takes effect at the next attempt. The attempt in flight retains
-  its provider; the next attempt, including a nudge, reads state afresh.
-  Helpers using `Selection::Inherit` read that state too.
+- A switch takes effect at the next request, even in the same deliberation.
+  An in-flight request retains its client; the next reads `Body.client`
+  afresh. Helpers using `enquiry::Selection::Inherit` inherit that client.
 - `Port::end(agent)` ends that agent and its descendants; their owners still
   join them. There is no port operation to end a fleet. The host owns its
   single feed and fleet-wide end; the port offers no feed subscription.
@@ -66,14 +66,23 @@ clients, including Synod.
 
 ## Amendment and limits
 
-This amends [[261029_an-agent-is-a-thread]]: provider selection is owner
-state, not a shared register, and P5 replaces A8's `Host::is_finished`
-completion criterion. The host still joins and collects failures.
+This amends [[261029_an-agent-is-a-thread]]: the immutable client is owner-held,
+while recorded selection belongs to the cell's `Model`, and P5 replaces
+A8's `Host::is_finished` completion criterion. The host still joins and collects failures.
 
 The wire, broadcast subscriptions, `Port::since`/history and idempotent
 submission are not implemented here. Resume does not restore the last
-`ModelChanged` as its provider. A CLI token cap dropped by a plan-billed
-provider does not survive a switch away from it.
+`ModelChanged` as its client. A switch uses the launch's CLI token cap
+wherever the new account admits it.
+
+## Amendment — 2026-10-30: the port reads the folds
+
+[[design/agents|agents]] amends P2 and switching above:
+`AgentRow.selected` replaces a published `Pick`; model, account and tuning
+come from the cell, and each agent learns its own window. The TUI labels a
+currently available account dynamically, falling back to `selected.label`
+when it cannot find it. Only a live `ModelChanged` persists a next-launch
+choice; birth and reopen do not.
 
 ## Where
 

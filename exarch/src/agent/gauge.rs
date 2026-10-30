@@ -8,7 +8,7 @@ pub(crate) mod ration;
 
 use crate::agent::Agent;
 use crate::latch::Latch;
-use crate::provider::{Provider, Served, Usage};
+use crate::provider::{Served, Usage};
 use crate::record::{Forensic, Span, Unavailable};
 use crate::site::{Silent, site};
 use ral_core::carrier::Severed;
@@ -196,7 +196,7 @@ impl Agent {
             log.context().log_len()
         };
         if let Some(tokens) = usage.measured_input() {
-            self.body.state.readings.measure = Some(Measure { tokens, at });
+            self.body.readings.measure = Some(Measure { tokens, at });
         }
         Ok(())
     }
@@ -205,25 +205,25 @@ impl Agent {
     /// reported for the context as it now stands: a count measured before an
     /// edit says nothing about what is left.
     pub(crate) fn measured_input(&self) -> Option<u64> {
-        let Measure { tokens, at } = self.body.state.readings.measure?;
+        let Measure { tokens, at } = self.body.readings.measure?;
         (!self.body.log.context().token_measure_is_stale(at)).then_some(tokens)
     }
 
     /// Forced eviction tracks real context pressure: the tokens the model last
     /// saw against its window, firing once they grow into the reserve.  An
     /// unknown window falls back to the byte heuristic.
-    pub(super) fn must_force_evict(&self, provider: &Provider) -> bool {
-        match provider.context_window() {
+    pub(super) fn must_force_evict(&self) -> Result<bool, Unavailable> {
+        Ok(match self.mailbox.transact(|txn| txn.model().window())? {
             Some(window) => self
                 .measured_input()
                 .is_some_and(|tokens| forced_eviction_due(tokens, window)),
             None => self.body.log.context().history_bytes() >= EVICT_THRESHOLD,
-        }
+        })
     }
 
     /// The span an eviction would take were it to run now, `None` when
     /// nothing is old enough to shed.
-    /// [`crate::record::model::Context::plan_forced_eviction`] never names the
+    /// [`crate::record::context::Context::plan_forced_eviction`] never names the
     /// newest item, so neither does this.
     pub(super) fn planned_forced_eviction(&self) -> Option<Span> {
         let log = &self.body.log;
@@ -252,24 +252,24 @@ impl Agent {
     ///
     /// # Errors
     /// The engine's severance, from the disk probe.
-    pub(super) fn climbed(&mut self, provider: &Provider) -> Result<Vec<Warning>, Severed> {
-        let pressure = self.pressure(provider);
+    pub(super) fn climbed(&mut self) -> Result<Vec<Warning>, crate::agent::outcome::Fault> {
+        let pressure = self.pressure()?;
         let mut climbed: Vec<Warning> = self
             .body
-            .state
             .readings
             .gauges
             .pressure(pressure)
             .into_iter()
             .collect();
         climbed.extend(self.disk_warning()?);
+        let provider = self.body.client.clone();
         let account = provider.account();
         climbed.extend(ration::told(
             account,
             &provider.climb_allowances(ration::USER_HEARS),
         ));
         let resumes = self.resumes_at_reset();
-        climbed.extend(self.body.state.readings.gauges.ration.climb(
+        climbed.extend(self.body.readings.gauges.ration.climb(
             account,
             &provider.allowances(),
             resumes,
@@ -282,32 +282,33 @@ impl Agent {
     /// falls back to the byte heuristic against
     /// [`PRESSURE_THRESHOLD_FALLBACK`].  Either way the reading carries the
     /// cut [`Agent::planned_forced_eviction`] would make, so the reminder can name it.
-    fn pressure(&self, provider: &Provider) -> Pressure {
-        let (used, total, trigger, unit) = match provider.context_window() {
-            Some(window) if window > 0 => {
-                let Some(tokens) = self.measured_input() else {
-                    return Pressure::Unknown;
-                };
-                if !pressure_due(tokens, window) {
-                    return Pressure::Under;
+    fn pressure(&self) -> Result<Pressure, Unavailable> {
+        let (used, total, trigger, unit) =
+            match self.mailbox.transact(|txn| txn.model().window())? {
+                Some(window) if window > 0 => {
+                    let Some(tokens) = self.measured_input() else {
+                        return Ok(Pressure::Unknown);
+                    };
+                    if !pressure_due(tokens, window) {
+                        return Ok(Pressure::Under);
+                    }
+                    (tokens, Some(window), eviction_trigger(window), Unit::Tokens)
                 }
-                (tokens, Some(window), eviction_trigger(window), Unit::Tokens)
-            }
-            _ => {
-                let bytes = self.body.log.context().history_bytes();
-                if bytes < PRESSURE_THRESHOLD_FALLBACK {
-                    return Pressure::Under;
+                _ => {
+                    let bytes = self.body.log.context().history_bytes();
+                    if bytes < PRESSURE_THRESHOLD_FALLBACK {
+                        return Ok(Pressure::Under);
+                    }
+                    (bytes as u64, None, EVICT_THRESHOLD as u64, Unit::Bytes)
                 }
-                (bytes as u64, None, EVICT_THRESHOLD as u64, Unit::Bytes)
-            }
-        };
-        Pressure::Over(Load {
+            };
+        Ok(Pressure::Over(Load {
             used,
             total,
             trigger,
             unit,
             planned: self.planned_forced_eviction(),
-        })
+        }))
     }
 
     /// The disk-warn ceiling's verdict, once per excursion — nothing is ever
@@ -320,14 +321,14 @@ impl Agent {
         let Some(ceiling) = self.fleet.launch.disk_warn_bytes else {
             return Ok(None);
         };
-        if !self.body.state.readings.gauges.disk_due() {
+        if !self.body.readings.gauges.disk_due() {
             return Ok(None);
         }
         let mut total = ral_core::path::tree::bytes(self.body.log.dir().path());
         if let Some((_, bytes)) = self.scratch_bytes()? {
             total += bytes;
         }
-        Ok(self.body.state.readings.gauges.disk(total, ceiling))
+        Ok(self.body.readings.gauges.disk(total, ceiling))
     }
 }
 

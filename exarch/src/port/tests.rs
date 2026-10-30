@@ -4,7 +4,7 @@ use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{self, TestAgentSpec, scripted, set_provider, test_agent};
 use crate::bus::{Next, Rest};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Forensic, Record};
+use crate::record::{Control, Forensic, Record, Selected};
 use std::time::Instant;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -33,20 +33,21 @@ fn ended_agents_refuse_every_port_operation_even_while_their_names_remain() {
 }
 
 #[test]
-fn roster_orders_live_mailbox_rows_by_id_with_their_published_pick_and_waiting_state() {
+fn roster_orders_live_mailbox_rows_by_id_with_their_recorded_selection_and_waiting_state() {
     let fleet = Fleet::for_test();
     let first = test_agent(&fleet, TestAgentSpec::new("z-first")).unwrap();
     let second = test_agent(&fleet, TestAgentSpec::new("a-second")).unwrap();
     let ended = test_agent(&fleet, TestAgentSpec::new("ended")).unwrap();
     ended.end();
-    let pick = Pick::of(&scripted("published-model", Script::new()));
-    second.mailbox.publish_pick(pick.clone());
+    let selected = Selected::for_test("published-model");
+    second
+        .mailbox
+        .transact(|txn| txn.change_model(selected.clone()))
+        .unwrap()
+        .unwrap();
     let port = Port::new(fleet.registry.clone(), UsageMeter::default());
     port.submit(second.id(), "working".into()).unwrap();
-    let Next::Take { exchange, .. } = second.mailbox.next(Rest {
-        pending: false,
-        schedules: false,
-    }) else {
+    let Next::Take { exchange, .. } = second.mailbox.next(Rest { pending: false }) else {
         panic!("the second agent takes its queued prompt")
     };
     assert!(second.mailbox.begin());
@@ -56,9 +57,9 @@ fn roster_orders_live_mailbox_rows_by_id_with_their_published_pick_and_waiting_s
         [first.id(), second.id()]
     );
     assert!(rows[0].waiting_for_input);
-    assert_eq!(rows[0].pick, first.status().pick);
+    assert_eq!(rows[0].selected, first.status().unwrap().selected);
     assert!(!rows[1].waiting_for_input);
-    assert_eq!(rows[1].pick, pick);
+    assert_eq!(rows[1].selected, selected);
     assert!(port.row(ended.id()).is_none());
     drop(exchange);
 }
@@ -91,7 +92,7 @@ fn a_port_retained_across_host_end_keeps_final_run_usage_but_no_live_rows() {
             for record in commit.records() {
                 match record.value() {
                     Record::Forensic(Forensic::UsageDelta { usage, .. }) => expected += *usage,
-                    Record::Forensic(Forensic::JobSettled { .. }) => settled = true,
+                    Record::Control(Control::JobSettled { .. }) => settled = true,
                     _ => {}
                 }
             }

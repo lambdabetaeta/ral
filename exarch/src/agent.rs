@@ -67,21 +67,16 @@ pub struct Agent {
 
 pub(crate) struct Body {
     pub(crate) log: AgentLog,
-    pub(crate) state: State,
-}
-
-pub(crate) type Pins = BTreeMap<String, PinDigest>;
-pub(crate) struct State {
-    pub(crate) provider: Arc<Provider>,
+    pub(crate) client: Arc<Provider>,
     pub(crate) nursery: Nursery,
     pub(crate) reply: Option<FOValue>,
-    /// A5: a reply is owed to the parent, or to a headless root's human.
-    pub(crate) owed: bool,
     pub(crate) failures: Vec<String>,
     pub(crate) pins: Pins,
     pub(crate) schedules: ScheduleRegistry,
     pub(crate) readings: Readings,
 }
+
+pub(crate) type Pins = BTreeMap<String, PinDigest>;
 
 pub(crate) enum Role {
     Converses,

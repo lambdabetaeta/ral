@@ -57,7 +57,7 @@ impl ExarchDesk {
     ) -> Result<Arc<Provider>, Error> {
         let s = &self.call;
         match model {
-            Selection::Inherit => Ok(body.state.provider.clone()),
+            Selection::Inherit => Ok(body.client.clone()),
             Selection::Role(name) => s
                 .fleet
                 .launch
@@ -143,14 +143,14 @@ impl ExarchDesk {
         let thread = child.launch(born, Some(prompt.clone()), &call.emit);
         call.commit_act(body, DeskAct::Spawn, Some(name), prompt, thread.is_err());
         let thread = thread.map_err(|error| {
-            body.state.failures.extend(error.failures);
+            body.failures.extend(error.failures);
             Error::new(format!(
                 "could not spawn a worker thread for agent '{}': {}",
                 handle.id(),
                 error.cause
             ))
         })?;
-        body.state.nursery.adopt(handle, thread);
+        body.nursery.adopt(handle, thread);
         Ok(self.summary())
     }
 
@@ -191,12 +191,12 @@ impl ExarchDesk {
 
     pub(super) fn agent_dismiss(&self, name: &str) -> Result<FOValue, Error> {
         let mut body = self.loan.get().ok_or_else(super::no_desk)?;
-        let verdict = match body.state.nursery.named(name).cloned() {
+        let verdict = match body.nursery.named(name).cloned() {
             Some(helper) => {
-                let ended = !body.state.nursery.holds(helper.id());
+                let ended = !body.nursery.holds(helper.id());
                 helper.end();
-                let failures = body.state.nursery.join(helper.id());
-                body.state.failures.extend(failures);
+                let failures = body.nursery.join(helper.id());
+                body.failures.extend(failures);
                 let outcome = if ended {
                     "had already ended"
                 } else {
@@ -291,34 +291,40 @@ impl ExarchDesk {
         };
         // No subject: a returning agent has exactly one recipient.
         s.commit_act(&body, DeskAct::Reply, None, payload, false);
-        body.state.reply = Some(value);
+        body.reply = Some(value);
         Ok(self.summary())
     }
 
     pub(super) fn agent_read(&self, name: String) -> Result<FOValue, Error> {
         let body = self.loan.get().ok_or_else(super::no_desk)?;
-        let content = match body.state.nursery.named(&name) {
+        let content = match body.nursery.named(&name) {
             None => Err(format!(
                 "you started no agent named '{name}'; {} reads only your own helpers, and a clear forgets earlier ones",
                 ral_core::text::code("exarch-agents `read")
             )),
             Some(helper) => {
                 let live = helper.is_live();
-                let status = helper.status();
-                if live && status.working() {
-                    Err(format!(
-                        "agent '{name}' has not replied yet: it is still working; wait for its notice instead of polling"
-                    ))
-                } else {
-                    match status.report {
-                        Some(ChildStatus::Replied(reply)) => Ok(reply),
-                        Some(ChildStatus::Failed(reason)) => Err(format!(
-                            "agent '{name}' failed without a reply to read: {reason}"
-                        )),
-                        Some(ChildStatus::Stopped) => Err(format!(
-                            "agent '{name}' stopped without a reply to read; message it to continue"
-                        )),
-                        None => Err(format!("agent '{name}' has no reply to read")),
+                match helper.status() {
+                    Err(why) => Err(format!(
+                        "agent '{name}' has ended and its state is unavailable: {why}"
+                    )),
+                    Ok(status) => {
+                        if live && status.working() {
+                            Err(format!(
+                                "agent '{name}' has not replied yet: it is still working; wait for its notice instead of polling"
+                            ))
+                        } else {
+                            match status.report {
+                                Some(ChildStatus::Replied(reply)) => Ok(reply),
+                                Some(ChildStatus::Failed(reason)) => Err(format!(
+                                    "agent '{name}' failed without a reply to read: {reason}"
+                                )),
+                                Some(ChildStatus::Stopped) => Err(format!(
+                                    "agent '{name}' stopped without a reply to read; message it to continue"
+                                )),
+                                None => Err(format!("agent '{name}' has no reply to read")),
+                            }
+                        }
                     }
                 }
             }

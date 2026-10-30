@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-generated_at_date: 2026-10-29
-covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
+covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/transaction.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
 # Map: exarch / agent
@@ -10,23 +10,28 @@ covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarc
 through `Port`.** `AgentHandle` is the crate-private address. The laws are
 [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] and
 [[decisions/261029_a-frontend-holds-a-port|a-frontend-holds-a-port]];
-roles, snapshots and authority are [[design/agents|agents]]'s.
+[[design/agents|agents]] fixes state ownership (F1–F6), roles, snapshots and
+authority.
 
 ## Owner, address and loan
 
 - `agent.rs::Agent` owns `AgentMailbox`, `Loanable<Body>`, `Option<Engine>`,
   engine generation, fleet and reserved `Name`, in teardown-safe field order.
-  `Body` holds `AgentLog` and `State`: nursery, staged reply, report obligation,
-  failures, pins, schedules, readings and the owned `Arc<Provider>`.
+  `Body` directly holds `AgentLog` (seam and `Context`), immutable
+  `Arc<Provider>` client, nursery, timer registry, pins, readings, staged
+  reply and failures. Shared facts are the cell's `Mail`, `Schedules` and
+  `Model`, not another owner-state register.
 - `agent/handle.rs::AgentHandle(Arc<Shared>)` holds identity, directories,
   start time, fixed role/ancestry, fuel, search and
   `AgentAddress`. It retains no engine or attending owner.
 - `Role::{Converses, Returns, Child { parent }}` fixes whom the agent answers.
   `Trunk::{Converses, Returns}` chooses a root's role; `Admission` separately
   chooses which inputs may open a job at rest.
-- `State.provider` owns model selection. Each attempt clones it once;
-  `Status.pick` publishes `Pick::of(&provider)` at birth and each switch.
-  Helpers inherit the current state provider or use a launch-bound role.
+- `Body.client` is an immutable resource stamped with `Selected`. Birth,
+  switch and reopen install that stamp in `Model`; subsequent agent reads
+  ask the fold. Each request reads the current client. Helpers inherit it
+  or use a launch-bound role. `Status.selected` and `AgentRow.selected`
+  project the cell's model; learned windows are agent-local.
 - `agent/loan.rs::Loanable::lend` moves the body into `Arc<Loan<Body>>` for
   one foreground dispatch, returning it on success or unwind. `Loan::get`
   refuses after return. Workers and pipeline stages have no desk.
@@ -37,24 +42,31 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
 
 ## Mailbox, exchanges and jobs
 
-**`bus/mailbox.rs` owns the queue and published status under one mutex.**
+**`bus/mailbox.rs` owns three folds and pending payloads under one mutex.**
 
 - `AgentMailbox` is the life-ending owner end; `AgentAddress` is cloneable.
   `WeakAgentAddress` weakens their shared allocation directly.
-- `Input` is human text, message, child report, departure, wakeup or
-  deferred surface batch; a `Command` is queued beside it, in order. `next`
-  yields an `Input` as `Take` and a command as `Command`; the mid-exchange
-  `drain` yields `Drained` (input, read or model switch) and holds at a rewrite.
-  The queue's `Phase` is `Resting { since, released }` or `Working(job)`.
-  `Status` snapshots rest time, job, waiting/busy, latest report, parent
-  obligation, published pick and exchange clock, stamped by `begin`.
+- `Input` carries human text, messages, child reports, wakeups or deferred
+  surface batches. Commands are posts too; `Gone` is separate join plumbing.
+  `Txn::post` commits `Posted` before queuing its payload. Every other
+  commit prunes payloads to `Mail::pending`, the equality at every live unlock.
+  `next` and `drain` commit `Taken` before handing payloads over. Human runs
+  are maximal over posts; `Gone` does not split one.
+- `AgentAddress::transact` and `AgentMailbox::transact` expose closure-scoped
+  `Txn`, never a guard. `Txn` reads folds and offers post, report, schedule,
+  unschedule, fire, model change, narrowing and clear operations, not lines;
+  `Txn::narrow` accepts a window only if `Model::narrows` does.
+  Poison latches the journal and ends life; debug builds detect re-entry.
+  The mail's job determines working/resting; release, Stop and loop clocks
+  are cell plumbing. `Status` reads report, debt, job and selected model from
+  folds beside live loop observations.
 - `AgentMailbox::next` selects admissible input and mints an exchange
   `Lease` under life. Commands run without an exchange. `Agent::admit`
-  rejects stale epochs/generations and already-claimed completions before
+  rejects stale generations and already-claimed completions before
   `begin` commits `JobOpened`; that commit number names the job.
-- With a job open, queued input is taken in order; adjacent human fragments
-  coalesce. `drain` hears input through the first rewrite only while the
-  exchange is live. Human uptake records before polling cancellation.
+- With a job open, queued input is taken in order; human fragments
+  coalesce across intervening `Gone` notices, not across other posts. `drain`
+  hears input through the first rewrite only while the exchange is live. Human uptake records before polling cancellation.
 - `next` commits `JobSettled` and clears the job under the same lock that
   finds the queue empty, no helper pending and no returning-agent schedule
   armed. A post either joins that job or sees rest.
@@ -68,30 +80,42 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
   leaves the queue.
   At rest or for a stale id it does nothing. Helpers and schedules survive;
   later exchanges can run within the same stopped job.
-- Lock order is mailbox → log → channel, or mailbox → schedule registry.
-  Reporting holds two mailboxes, descendant before ancestor.
+- Lock order is descendant cell → ancestor cell → journal → channel.
+  Names and deadline heap are leaves; the timer registry has no lock.
+  Only reporting nests cells; no transaction spans a provider request,
+  dispatch, join or `Context` access.
   The owner reads helper status without holding its own mailbox.
 
 ## Reports and structured teardown
 
 **`agent/nursery.rs::Nursery` owns every helper handle and join guard.**
 
-- `owes_parent` starts true for a helper and is set by each parent message
-  atomically with enqueue. `Agent::report` records `Forensic::Status`, clears
-  the local report obligation and schedules, then publishes through the handle.
-- Under the helper's lock, `AgentAddress::report` publishes its status, posts
-  `Input::Child` iff it owes its parent, then leaves the flag set only if
-  parent input remains queued. Human-only dealings with a resting helper
-  notify no parent model and open no parent job.
+- `Mail::owes` derives debt from taken-but-unanswered parent input and
+  pending parent posts, gated by `returns`. Helpers owe from birth; returning
+  roots owe at human post time. Withdrawal removes unread debt, uptake keeps it.
+- `AgentHandle::report` calls `Txn::report(status, notice)`, where `notice` builds the `Input` from a `ChildStatus`: commit
+  `Control::Status`, schedule retirements and queued-wakeup withdrawals, then
+  post `Input::Child` to the fixed parent iff owed, still under the helper
+  lock. After life ends, every pending post is withdrawn. A poisoned helper
+  reports `Failed` directly to its parent. A failed append notifies iff the
+  pre-append mail owed, leaving the folds unchanged. `AgentAddress::report`
+  owns both fallback paths, guarded by `Shared.failure_noticed`:
+  at most one `Failed` reaches the parent, however often teardown retries.
+  `AgentAddress::try_transact` is `transact` for closures returning
+  `Result<_, Unavailable>`. `failure_noticed` exists because a failed `Status`
+  append leaves the mail owing: teardown's report would fail again and post a
+  second `Failed`.
+  `Agent::report` drops its timers.
 - `Rest::pending` (A10) snapshots `Nursery::owing`: an unjoined helper is
-  pending exactly while it owes its parent. `Status::working` is a view:
+  pending exactly while `Status.owes` is true. An ended reported helper
+  owes nothing, even before `Gone` is joined. `Status::working` is a view:
   parent obligation or open job.
 - A12 reminds an owing agent when no worker runs, `Rest` is empty and no
   `Human`, `Message` or `Child` is queued. Reading `Rest` before the queue
   prevents a reminder from overtaking a helper's report.
-- `Agent::admit(Child)` records `Display::SubagentDone` and supplies the model
-  notice only for an adopted, unjoined helper. `Gone` joins and collects
-  failures without a model prompt. `read` reaches the newest own helper by name.
+- `Agent::admit` on `Input::Child` records `Display::SubagentDone` and
+  supplies the model notice only for an adopted, unjoined helper.
+  `Next::Gone` and `Drained::Gone` join and collect failures without a model prompt. `read` reaches the newest own helper by name.
 - `Agent::teardown` ends life, reports owed failure, dismisses and joins
   helpers, takes `Option<Engine>` and retires it once; a repeat finds no
   engine and does nothing. `Body::retire_engine` records `TeardownFailed` and
@@ -133,12 +157,16 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
   draining repeatedly to include racing `/new` launches. A retained `Port`
   holds registry and usage meter, never the fleet or its engine factory.
 - `/new` and `/branch` launch fresh root engines; branch imports context, not
-  shell state. Resume replays open root logs with fresh engines and registers.
+  shell state. `AgentLog::reopen` folds context and control before quarantine,
+  quiesces and commits one resume line withdrawing pending posts, settling
+  the open job and retiring bookings, with a note naming withdrawn inputs.
+  It returns reconciled folds for a fresh cell, preserving only taken debt
+  and a same-model narrowing. Engines and working memory are fresh.
   Headless requires one open root; the run lock belongs to the launcher.
 
 ## Attend and gestures
 
-- `agent/attend.rs::Agent::run` handles `Take`, `Command`, `Settled` and
+- `agent/attend.rs::Agent::run` handles `Take`, `Command`, `Settled`, `Gone`, `Rung` and
   `Ended` for every role. Pending helpers publish `WaitingOnAgents`, otherwise
   `Ready`. Nudges are exchange-local continuations; no nudge enters the queue.
 - `agent/deliberate.rs` streams provider output, records the assistant turn
@@ -154,31 +182,36 @@ roles, snapshots and authority are [[design/agents|agents]]'s.
   mutation, then dismisses helpers and commits `Cleared`. Commit failure
   retires the prepared engine and ends life. Success transfers the life
   binding, replaces/retires the outgoing engine, advances generation, resets
-  registers and drops queued reports/wakeups/batches. Human text, messages
+  registers, commits queued-report/wakeup/surface withdrawals and schedule
+  retirements through `Txn::clear`, then drops timers and joined `Gone`s.
+  Human text, messages
   and commands survive; preparation failure changes nothing.
 - `agent/command.rs::Agent::switch_model` handles `Command::Model(Pick)`
-  at rest or a mid-exchange drain. It builds through `Bureau`, records
-  `ModelChanged` with `via`, then replaces state and publishes the built
-  pick. Build failure records an error without switching; recording failure
-  ends life without switching. The current attempt keeps its provider;
-  `attend.rs::attempt` reads the new state on the next attempt, nudges included.
+  at rest or a mid-exchange drain. It builds through `Bureau` with launch
+  `max_tokens`, commits `Txn::change_model(built.selected())`, then swaps
+  `Body.client`. Build failure changes nothing; append failure ends life.
+  The next request uses the new client, even in the same deliberation.
 - `/rewind` withdraws context and rebirths nudges, not shell effects.
   `/close` records `SessionClosed` and ends life; `/quit` returns from the TUI
   before `lib::run` ends and joins the host.
 - A resting helper ends itself under the mailbox lock after `launch.idle`
   with no admissible input. `HELPER_IDLE` is five hours; `--helper-idle`
   overrides it. Views, reads and probes renew nothing.
-- `schedule.rs::ScheduleRegistry` timers retain `WeakAgentAddress`, backed
-  by `Weak<Shared>`. `fire_at` uses `post_wakeup_with`: queued-id check,
-  registry update/retirement and publication are one mailbox transaction.
-  Epoch changes invalidate wakeups across clear/report. Conversing schedules
-  survive jobs; returning schedules hold a job open until reporting.
+- `schedule.rs::ScheduleRegistry` is an unlocked owner resource, one timer
+  per booked label. A deadline upgrades `WeakAgentAddress` and only rings;
+  the owner calls `fire` in a transaction on `Next::Rung` and before every
+  deliberation drain. It ignores superseded ids, checks wall time, commits a
+  coalesced wakeup plus booking update/retirement and retimes/drops the timer.
+  List and rest read `Schedules`. Clear/report retire before timer drop, so
+  stale rings need no epochs. Conversing schedules survive jobs; returning
+  schedules hold a job open until reporting.
 - `signals::face` stops current root exchanges on SIGINT and ends the fleet
   on shutdown; cancellation never writes to an engine from the cancelling thread.
 
 ## Context and accounting
 
-- `gauge.rs` measures pressure, forced eviction and disk/scratch readings;
+- `gauge.rs` measures pressure and forced eviction against the cell's model
+  window, plus disk/scratch readings;
   `nudge.rs` owns wording and repair budgets; `latch.rs` owns rung changes.
 - `/resources` is an owner-thread read over transport and local mailbox/log
   probes; the frontend contributes only its own accumulators.

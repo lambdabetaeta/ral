@@ -16,13 +16,13 @@ two kinds of phase:
 
 **`is_ready` is the single predicate for "a fresh prompt is admissible", and it
 is weaker than `ReadyForUser`.** A record that opens a turn — a
-`Protocol::UserPrompt`, an imported `Protocol::Import` — is admissible
+`Transcript::UserPrompt`, an imported `Transcript::Import` — is admissible
 in every phase but `AwaitingToolResults`: an exchange the model never replied to
 is *abandoned* by the next prompt, not closed by a fabricated one. Only
 outstanding tool calls hold the log, because their answer is genuinely owed and
 a dangling tool-call block is not a legal request
 ([[invariants/transcript-admission|transcript-admission]]). `admissible` and
-`is_ready`, both in `record/model/state.rs`, read the same rule, so what a live
+`is_ready`, both in `record/context/state.rs`, read the same rule, so what a live
 door accepts and what a replayed log admits cannot drift.
 
 What the phases sequence is *tool-call pairing*, not strict user/assistant
@@ -87,7 +87,7 @@ system prompt instead.
 Eviction is not stated at this granularity at all. The rule is that **no
 edit touches the unclosed turn** — the one being written, which exists only
 while a turn is open, so at `ReadyForUser` nothing is unclosed
-and a user rewind or clear (`Protocol::Rewound` and `Protocol::Cleared`, withdrawals
+and a user rewind or clear (`Transcript::Rewound` and `Transcript::Cleared`, withdrawals
 rather than cuts, admitted whenever a new turn is) may empty the context. `Context::resolve_cut` refuses a
 run with that turn within, and `plan_forced_eviction` walks back from the
 newest-but-one frontier item, so a forced eviction cannot name it either

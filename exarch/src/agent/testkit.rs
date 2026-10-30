@@ -180,11 +180,24 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
     let life = life.unwrap_or_else(|| fleet.registry.root.child());
     let recorder = crate::record::Emitter::none();
     recorder.bind(life.clone());
+    let folds = recorder
+        .begin(crate::record::Started {
+            session_id: id,
+            name: name.clone(),
+            parent: role.parent().map(AgentHandle::id),
+            returns: role.returns(),
+            selected: crate::provider::Selected::for_test("test-model"),
+            log_dir: fleet.launch.run_dir().path().to_path_buf(),
+            at_unix_ms: 0,
+        })
+        .expect("a synthetic agent's head");
     let mailbox = AgentMailbox::new(
+        id,
         life,
         recorder,
         admission,
-        crate::provider::Pick::of(&scripted("test-model", Script::new())),
+        role.parent().map(|parent| parent.0.address.clone()),
+        folds,
     );
     let handle = AgentHandle(Arc::new(Shared {
         id,
@@ -261,11 +274,42 @@ pub(crate) fn tmp(tag: &str) -> TestDir {
     OwnDir::for_test(&format!("a4-{tag}")).expect("test scratch dir")
 }
 
-/// Set a fixture's provider before launch and publish its pick.
+/// Install a fixture's choice and its client before the next request.
 pub(crate) fn set_provider(session: &mut Agent, provider: Arc<Provider>) {
-    let pick = crate::provider::Pick::of(&provider);
-    session.body.state.provider = provider;
-    session.mailbox.publish_pick(pick);
+    session
+        .mailbox
+        .try_transact(|txn| txn.change_model(provider.selected().clone()))
+        .expect("a fixture's model change records");
+    session.body.client = provider;
+}
+
+pub(crate) fn schedule(
+    session: &mut Agent,
+    trigger: crate::schedule::Trigger,
+    prompt: String,
+    label: String,
+) -> crate::schedule::ScheduleReceipt {
+    let body = &mut *session.body;
+    session
+        .mailbox
+        .transact(|txn| body.schedules.schedule(txn, trigger, prompt, label))
+        .map_err(|why| why.to_string())
+        .flatten()
+        .expect("a fixture's schedule records")
+}
+
+pub(crate) fn schedules(session: &Agent) -> Vec<crate::schedule::ScheduleInfo> {
+    session
+        .mailbox
+        .transact(|txn| {
+            txn.schedules()
+                .iter()
+                .map(|(label, schedule)| {
+                    crate::schedule::ScheduleInfo::of(label, schedule, jiff::Timestamp::now())
+                })
+                .collect()
+        })
+        .expect("a fixture's available cell")
 }
 
 pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
@@ -381,7 +425,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         &parent.fleet,
         reserved,
         engine,
-        parent.body.state.provider.clone(),
+        parent.body.client.clone(),
         memory,
     )
     .expect("an adopted child is born")
@@ -410,14 +454,14 @@ pub(crate) fn launch_child(
         reader: child.recorder().reader(),
     };
     let thread = child.launch(born, first, emit).unwrap_or_else(|error| {
-        parent.body.state.failures.extend(error.failures);
+        parent.body.failures.extend(error.failures);
         panic!(
             "could not launch test child {}: {}",
             handle.id(),
             error.cause
         )
     });
-    parent.body.state.nursery.adopt(handle.clone(), thread);
+    parent.body.nursery.adopt(handle.clone(), thread);
     handle
 }
 

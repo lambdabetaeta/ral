@@ -1,8 +1,8 @@
 use super::*;
 use crate::card::{Card, Mark};
 use crate::record::{
-    BlockId, Display, Emitter as Recorder, Forensic, Locus, NonEmpty, Protocol, Record, Recorded,
-    Seq, Verdict, Voice,
+    BlockId, Display, Emitter as Recorder, Forensic, Locus, NonEmpty, Record, Recorded, Seq,
+    Transcript, Verdict, Voice,
 };
 
 fn scrollback() -> Scrollback {
@@ -28,7 +28,8 @@ impl Stream {
     fn land(&mut self, sb: &mut Scrollback, record: Record) -> Seq {
         self.0 += 1;
         let seq = Seq::new(self.0, 0);
-        sb.absorb(&Recorded::new(Locus::placeholder(seq), record));
+        sb.absorb(&Recorded::new(Locus::placeholder(seq), record))
+            .unwrap();
         seq
     }
 
@@ -321,7 +322,7 @@ fn the_mirror_draws_what_the_fold_reports() {
     let mut log = Stream::new();
     let _ = log.land(
         &mut sb,
-        Record::Protocol(Protocol::UserPrompt {
+        Record::Transcript(Transcript::UserPrompt {
             turn: 1,
             text: "hello".into(),
             voice: Voice::Human,
@@ -444,7 +445,7 @@ fn chrome_holds_its_place_among_the_records() {
     let mut log = Stream::new();
     let _ = log.land(
         &mut sb,
-        Record::Protocol(Protocol::UserPrompt {
+        Record::Transcript(Transcript::UserPrompt {
             turn: 1,
             text: "one".into(),
             voice: Voice::Human,
@@ -453,7 +454,7 @@ fn chrome_holds_its_place_among_the_records() {
     sb.push_chrome(Chrome::Note("between".into()));
     let _ = log.land(
         &mut sb,
-        Record::Protocol(Protocol::UserPrompt {
+        Record::Transcript(Transcript::UserPrompt {
             turn: 3,
             text: "two".into(),
             voice: Voice::Human,
@@ -480,8 +481,8 @@ fn chrome_holds_its_place_among_the_records() {
 
 // ── the log ─────────────────────────────────────────────────────────────
 
-fn prompt(text: &str) -> Protocol {
-    Protocol::UserPrompt {
+fn prompt(text: &str) -> Transcript {
+    Transcript::UserPrompt {
         turn: 1,
         text: text.into(),
         voice: Voice::Human,
@@ -592,7 +593,7 @@ fn a_cleared_record_starts_the_mirror_over_and_keeps_the_cursor() {
     let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.reader(), Some(opening));
     sb.catch_up();
     assert!(text(&mut sb).contains("before"));
-    let _recorded = recorder.emit(Protocol::Cleared).expect("the log appends");
+    let _recorded = recorder.emit(Transcript::Cleared).expect("the log appends");
     let _recorded = recorder.emit(prompt("after")).expect("the log appends");
     let mut live = heard(&rx);
     let after = live.pop().expect("the prompt after the clear");

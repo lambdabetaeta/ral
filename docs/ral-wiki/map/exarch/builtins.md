@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e5a23909
-generated_at_date: 2026-10-29
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -197,10 +197,10 @@ The `explain` guides in `shell_eval/builtins/harness.rs` document each
 operation with examples, return shapes, limits, and recovery advice.
 `data/context.md` keeps the working strategy: evict irrelevant retrievals and
 failed attempts once retried, each as a run `[from, to]` under a required
-note; cut at the bottom or in batch; cover a residue whole or not at all;
-expect the a forced eviction to take the current prompt too, so evict
+note; cut at the bottom or in batch; cover an eviction whole or not at all;
+expect a forced eviction to take the current prompt too, so evict
 first under one's own note, saying what was asked; and read
-residues back through `exarch-transcript`. The command reference explicitly
+evictions back through `exarch-transcript`. The command reference explicitly
 distinguishes bytes from tokens, requires nonempty single-line UTF-8
 eviction notes, and warns that transcript reads are unbounded.
 
@@ -216,7 +216,7 @@ with the tool results it called for. The turns *answering* a prompt — those
 after it, up to the next prompt — are a function of role and order, named in
 no answer
 ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
-An eviction leaves a **residue** standing for its run: a span `[from, to]` of
+An **eviction** stands for its run: a span `[from, to]` of
 turn ids, both inclusive, and the model's note, addressed by the ids it covers
 and never by an id of its own ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
 Every `ral` tool result ends with `TURN: <id>`, the id of the turn it closes,
@@ -229,39 +229,39 @@ so the model has the address before it asks for one.
   tag answers the survey afterwards. That is not a shared prefix collapsed but
   the rule the registries already follow, and it fits this surface better than
   either, because an edit changes *what is addressable* — an evicted run
-  becomes one residue — so the edit is also the resurvey the
+  becomes one eviction — so the edit is also the resurvey the
   next edit must be written against.
   - `` `survey `` describes the context, one span row per frontier item — a
     resident turn (`from == to`, `kind` `own`, `import` or `inherited`) or a
-    resident residue (`kind` `residue`, role `user`, its note as `label`) —
+    resident eviction (`kind` `eviction`, role `user`, its note as `label`) —
     the very rows `` exarch-transcript `index `` answers with, less
     `location`, beside `total-bytes`, which is what is actually sent rather
-    than the sum of the rows. What lies under a residue is
+    than the sum of the rows. What lies under an eviction is
     `` transcript `index ``'s to say. It changes nothing.
   - `` `evict [from, to, note] `` is the one context edit: it takes one
-    contiguous run of the context — turns and residues alike, both ends
-    inclusive — and leaves one bracketed user-voice residue standing for it,
+    contiguous run of the context — turns and evictions alike, both ends
+    inclusive — and leaves one bracketed user-voice eviction standing for it,
     carrying the note and how to read the run back
     ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
-    `[from: 41, to: 60]` names turns 41–60 and is the address of the residue
-    it leaves. A run that reaches into a residue must cover it whole; a
+    `[from: 41, to: 60]` names turns 41–60 and is the address of the eviction
+    it leaves. A run that reaches into an eviction must cover it whole; a
     larger run that does replaces the old notes with the new one, and the
-    same span over one residue rewrites its note. Refused by name: an end
+    same span over one eviction rewrites its note. Refused by name: an end
     the transcript never recorded, an end already withdrawn, a run with the
-    **unclosed** turn — the one being written — within, and a run cutting a
-    residue (`turns 41–60 stand together under one note: name from: 41, to:
+    **unclosed** turn — the one being written — within, and a run cutting an
+    eviction (`turns 41–60 stand together under one note: name from: 41, to:
     60 whole, or leave it`). A prompt may be evicted, the live one included;
     the note should say what was asked. `note` is the model's own line to
     its future self and is **required**: a forced eviction is this
     same edit under another authority and the only one without a note;
-    `/rewind` is a different record, `Protocol::Rewound`, which withdraws
-    turns and leaves no residue at all. The desk refuses an empty note, and
+    `/rewind` is a different record, `Transcript::Rewound`, which withdraws
+    turns and leaves no eviction at all. The desk refuses an empty note, and
     its size and shape are the desk's too — at most `Note::CAP` (240) bytes
-    and no line break, since the residue keeps one short line, the whole of
+    and no line break, since the eviction keeps one short line, the whole of
     what an eviction leaves in the context.
 
-  The edit records a `Protocol::Evicted { residue }` model event
-  (`Residue { span, note, by }`) at the desk immediately, under `DeskAct::ContextEvict`, whose subject is the span —
+  The edit records a `Transcript::Evicted(Eviction)` model event
+  (`Eviction { span, note, by }`) at the desk immediately, under `DeskAct::ContextEvict`, whose subject is the span —
   `turns 41–60` — and whose result says the turns now stand under the note,
   with the context's serialized bytes. There is no byte-delta
   receipt: the decision-relevant number is `total-bytes` now against the
@@ -276,13 +276,13 @@ so the model has the address before it asks for one.
   ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
   Both records are **closed**; `` `grep ``'s `turns` is `` `all `` or
   `` `only [Int] ``, absence being data.
-  - `` `index `` → the survey's own rows over every turn and every residue
-    the transcript holds, plus `location` — `` `resident ``, `` `under [from:
-    Int, to: Int] `` naming the innermost residue over the item, a named
+  - `` `index `` → the survey's own rows over every turn and every eviction
+    the transcript holds, plus `location` — `` `resident ``, `` `evicted [from:
+    Int, to: Int] `` naming the innermost eviction over the item, a named
     record like every other span, or `` `withdrawn `` — ordered
-    by `from`, wider span first, later-recorded first, so a residue precedes
+    by `from`, wider span first, later-recorded first, so an eviction precedes
     what it covers. `kind` is `own`, `import`, `inherited` (an ancestor's) or
-    `residue`. A departed turn is listed at the weight it carried when it
+    `eviction`. A departed turn is listed at the weight it carried when it
     left.
   - `` `read [turns: [Int]] `` →
     `[[turn: Int, role: Str, messages: [Message]]]`, one element per turn
@@ -291,18 +291,18 @@ so the model has the address before it asks for one.
     reader had to re-parse. A turn's material is what the model was sent,
     whether it is resident, departed to this log's file, or an ancestor's
     (`Placed::of` finds its records, `turn_messages` renders them). `!{range a b}` is half-open, so the turns under
-    `[from: 41, to: 60]` are `!{range 41 61}`; a residue itself is never
+    `[from: 41, to: 60]` are `!{range 41 61}`; an eviction itself is never
     read, its note being the whole of it.
   - `` `grep [pattern, turns] `` → `[hits: [[from: Int, to: Int, kind: Str,
     role: Str, line: Int, text: Str]], total: Int]`. A Rust regex —
     ral's own `re-*`
     dialect, compiled at the desk so a bad pattern is refused in the regex
     crate's words — over prompts, programs, results, and reasoning, per line,
-    and over every model residue's note (`line: 1`; never the residue's
-    boilerplate, and a harness residue has nothing to search). A hit names
+    and over every model eviction's note (`line: 1`; never the eviction's
+    boilerplate, and a harness eviction has nothing to search). A hit names
     the item it lies in, a turn hit being `from == to`.
     `` `turns: `all `` searches every turn but the one in hand and every
-    noted residue; `` `only `` narrows it to the turns named and the residues
+    noted eviction; `` `only `` narrows it to the turns named and the evictions
     whose ids are all named. At
     most `GREP_HITS` (100)
     hits, in `` `index ``'s order, each line clipped at 200 bytes, with `total` the true
@@ -328,7 +328,7 @@ so the model has the address before it asks for one.
   itself: the script source for exarch's own tool, or a name and argument
   keys for any other), `` `result ``, `` `reasoning ``, `` `binary `` (media
   metadata only), `` `custom `` — matched exhaustively in
-  `exarch/src/record/model/transcript.rs`, so a genai variant this arm list
+  `exarch/src/record/context/transcript.rs`, so a genai variant this arm list
   has not met is a compile error rather than a serialization of the provider's
   struct leaking through as content. `` `ThoughtSignature `` carries no part at all:
   an opaque continuation token, dropped rather than rendered. Narrowing this
@@ -337,7 +337,7 @@ so the model has the address before it asks for one.
   `` exarch-tasks `list `` puts querying on the caller rather than the kit
   ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]
   for the transcript-as-value law this reads under: a turn's own recorded
-  `Protocol` material, converted rather than re-rendered). `` `grep `` searches that
+  `Transcript` material, converted rather than re-rendered). `` `grep `` searches that
   same narrowing — `` `text ``,
   `` `program ``'s source, `` `result ``, `` `reasoning ``, a binary payload
   and a provider extension carrying no text a pattern could mean — so nothing

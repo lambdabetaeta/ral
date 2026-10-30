@@ -164,10 +164,9 @@ mod tests {
         let fleet = crate::agent::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
         trunk.steer("open an exchange".into()).unwrap();
-        let crate::bus::Next::Take { exchange, .. } = trunk.mailbox.next(crate::bus::Rest {
-            pending: false,
-            schedules: false,
-        }) else {
+        let crate::bus::Next::Take { exchange, .. } =
+            trunk.mailbox.next(crate::bus::Rest { pending: false })
+        else {
             panic!("the queued prompt must mint an exchange");
         };
         assert!(trunk.mailbox.begin());

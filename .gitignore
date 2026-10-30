@@ -59,3 +59,5 @@ synod/ui/js/bindings/
 
 # Tauri regenerates its permission schemas for the build target.
 synod/gen/
+/.agents
+/.claude

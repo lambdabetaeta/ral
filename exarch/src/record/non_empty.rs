@@ -19,6 +19,15 @@ impl<T> NonEmpty<T> {
         }
     }
 
+    /// `None` when `items` is empty.
+    pub fn collect(items: impl IntoIterator<Item = T>) -> Option<Self> {
+        let mut items = items.into_iter();
+        Some(Self {
+            first: items.next()?,
+            rest: items.collect(),
+        })
+    }
+
     pub fn iter(&self) -> Chain<Once<&T>, slice::Iter<'_, T>> {
         iter::once(&self.first).chain(&self.rest)
     }

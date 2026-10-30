@@ -25,8 +25,8 @@ fn transcript_grep_request(pattern: &str, turns: Option<&[u64]>) -> Request {
     }))
 }
 
-/// One row per frontier item by its span: a residue where the run was, then
-/// the turns no residue covers.
+/// One row per frontier item by its span: an eviction where the run was, then
+/// the turns no eviction covers.
 #[test]
 fn context_survey_rows_every_item_in_the_context() {
     with_desk(|desk, _agent| {
@@ -64,7 +64,7 @@ fn context_survey_rows_every_item_in_the_context() {
         assert_eq!(
             rows,
             vec![
-                (1, 2, "residue"),
+                (1, 2, "eviction"),
                 (3, 3, "own"),
                 (4, 4, "own"),
                 (5, 5, "import"),
@@ -289,9 +289,9 @@ fn context_evict_answers_the_survey_it_leaves_behind_and_commits_the_act() {
                 ))
                 .collect::<Vec<_>>(),
             vec![(1, 2, "user"), (3, 3, "user"), (4, 4, "assistant")],
-            "one residue stands where the run was"
+            "one eviction stands where the run was"
         );
-        assert_eq!(str_field(&rows[0], "kind"), Some("residue"));
+        assert_eq!(str_field(&rows[0], "kind"), Some("eviction"));
         assert_eq!(str_field(&rows[0], "label"), Some("the parser is fixed"));
         assert_eq!(str_field(&rows[1], "kind"), Some("own"));
         let audit = desk.call.audit().expect("a landed eviction leaves an act");
@@ -310,7 +310,7 @@ fn survey_rows(answer: &FOValue) -> &[FOValue] {
         .expect("a context answer carries its survey rows")
 }
 
-/// The residue keeps a note as one short line for the rest of the session,
+/// The eviction keeps a note as one short line for the rest of the session,
 /// so an empty one, an overlong one, and one that breaks a line are refused
 /// at decode rather than drawn.
 #[test]
@@ -322,16 +322,16 @@ fn context_evict_refuses_a_note_that_is_not_one_short_line() {
             append_prompt_and_answer(log, "one", "answer");
             append_prompt_and_answer(log, "two", "answer");
         }
-        let single_line = "`note: text must be a single line: the residue keeps one short line";
+        let single_line = "`note: text must be a single line: the eviction keeps one short line";
         let cases = [
             (
                 "",
-                "`note: text must not be empty: the residue keeps one short line, and it is the \
+                "`note: text must not be empty: the eviction keeps one short line, and it is the \
              only trace of the run left in your context",
             ),
             (
                 &*"x".repeat(241),
-                "`note: text is 241 bytes; the residue keeps one short line: 240 at most. What is \
+                "`note: text is 241 bytes; the eviction keeps one short line: 240 at most. What is \
              the one thing your future self needs to know?",
             ),
             ("line one\nline two", single_line),
@@ -381,9 +381,9 @@ fn context_evict_refuses_a_field_it_does_not_read() {
     });
 }
 
-/// The index rows every item the lineage recorded by its span, a residue
+/// The index rows every item the lineage recorded by its span, an eviction
 /// before what it covers, each naming what holds it; a grep hit on a note
-/// names the residue's whole span.
+/// names the eviction's whole span.
 #[test]
 fn the_index_and_grep_name_items_by_span() {
     with_desk(|desk, _agent| {
@@ -414,7 +414,7 @@ fn the_index_and_grep_name_items_by_span() {
             vec![
                 (1, 1, "own"),
                 (2, 2, "own"),
-                (3, 4, "residue"),
+                (3, 4, "eviction"),
                 (3, 3, "own"),
                 (4, 4, "own")
             ]
@@ -424,7 +424,7 @@ fn the_index_and_grep_name_items_by_span() {
         assert_eq!(
             index[3].field("location"),
             Some(&tag(
-                "under",
+                "evicted",
                 Some(FOValue::Map {
                     entries: vec![("from".into(), int(3)), ("to".into(), int(4))]
                 })
@@ -448,7 +448,7 @@ fn the_index_and_grep_name_items_by_span() {
                 str_field(hit, "kind"),
                 int_field(hit, "line")
             ),
-            (3, 4, Some("residue"), 1)
+            (3, 4, Some("eviction"), 1)
         );
     });
 }

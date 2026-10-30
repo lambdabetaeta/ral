@@ -70,7 +70,7 @@ fn headless_reply_runs_through_the_host_feed_in_both_formats() {
         println!("\n{EXPECTED_LOG}{}", root_handle.log_dir());
         run_frontend(&host, format).expect("a deliberate reply succeeds");
         assert!(matches!(
-            root_handle.status().report,
+            root_handle.status().expect("the cell is available").report,
             Some(ChildStatus::Replied(FOValue::Map { .. }))
         ));
         assert_eq!(host.end(), [] as [String; 0]);
@@ -91,7 +91,7 @@ fn headless_no_reply_runs_through_the_host_feed_in_both_formats() {
             Err("ended without calling `reply`".into())
         );
         assert_eq!(
-            root_handle.status().report,
+            root_handle.status().expect("the cell is available").report,
             Some(ChildStatus::Failed("ended without calling `reply`".into()))
         );
         assert_eq!(host.end(), [] as [String; 0]);
@@ -113,9 +113,16 @@ fn headless_stopped_runs_through_the_host_feed_in_both_formats() {
             move || handle.end()
         });
         let stopper = std::thread::spawn(move || {
-            until(|| handle.status().job.is_some());
+            until(|| {
+                handle
+                    .status()
+                    .expect("the cell is available")
+                    .job
+                    .is_some()
+            });
             let job = handle
                 .status()
+                .expect("the cell is available")
                 .job
                 .expect("the blocking exchange stays open");
             assert_eq!(handle.stop(job), Some(Vec::new()));
@@ -126,7 +133,10 @@ fn headless_stopped_runs_through_the_host_feed_in_both_formats() {
         );
         stopper.join().unwrap();
         drop(watchdog);
-        assert_eq!(root_handle.status().report, Some(ChildStatus::Stopped));
+        assert_eq!(
+            root_handle.status().expect("the cell is available").report,
+            Some(ChildStatus::Stopped)
+        );
         assert!(root_handle.is_live(), "Stop does not end the root's life");
         assert_eq!(host.end(), [] as [String; 0]);
     }
@@ -183,26 +193,42 @@ fn a_report_takes_precedence_over_a_fault_and_a_fault_over_the_missing_reply() {
     );
     assert_eq!(
         verdict_after_fault(blocking_root(), fault, |handle| {
-            until(|| handle.status().job.is_some());
+            until(|| {
+                handle
+                    .status()
+                    .expect("the cell is available")
+                    .job
+                    .is_some()
+            });
             assert!(handle.stop_current());
         }),
         Err("the agent was stopped".to_string())
     );
-    for fault in [None, Some("channel lost its facts")] {
-        let gated = Agent::for_test_with(TestTrunk {
-            admission: Admission::Gated,
-            ..TestTrunk::new("system")
-        })
-        .unwrap();
-        assert_eq!(
-            verdict_after_fault(gated, fault, |handle| {
-                until(|| !handle.queued().is_empty());
-                handle.end();
-            }),
-            Err(fault
-                .unwrap_or("the agent ended without a reply")
+    for returns in [true, false] {
+        for fault in [None, Some("channel lost its facts")] {
+            let gated = Agent::for_test_with(TestTrunk {
+                trunk: if returns {
+                    Trunk::Returns
+                } else {
+                    Trunk::Converses
+                },
+                admission: Admission::Gated,
+                ..TestTrunk::new("system")
+            })
+            .unwrap();
+            assert_eq!(
+                verdict_after_fault(gated, fault, |handle| {
+                    until(|| !handle.queued().is_empty());
+                    handle.end();
+                }),
+                Err(if returns {
+                    "ended before reporting"
+                } else {
+                    fault.unwrap_or("the agent ended without a reply")
+                }
                 .to_string())
-        );
+            );
+        }
     }
 }
 
@@ -235,11 +261,14 @@ fn converse_carries_context_from_one_job_into_the_next() {
         .expect("a live root");
     root_handle.steer("first message".into()).unwrap();
     let first = wait_settled(&host);
-    assert_eq!(root_handle.status().report, None);
+    assert_eq!(
+        root_handle.status().expect("the cell is available").report,
+        None
+    );
     assert!(root_handle.is_live());
     assert!(!first.iter().any(|signal| {
         has_fact(signal, root_handle.id(), |record| {
-            matches!(record, Record::Forensic(Forensic::Status { .. }))
+            matches!(record, Record::Control(Control::Status { .. }))
         })
     }));
     root_handle.steer("second message".into()).unwrap();
@@ -252,7 +281,7 @@ fn converse_carries_context_from_one_job_into_the_next() {
         })
         .flatten()
         .filter_map(|rec| match rec.value() {
-            Record::Protocol(Protocol::ToolResults { results }) => Some(results),
+            Record::Transcript(Transcript::ToolResults { results }) => Some(results),
             _ => None,
         })
         .flatten()
@@ -375,6 +404,7 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
     });
     let job = root
         .status()
+        .expect("the cell is available")
         .job
         .expect("pending helper keeps the job open");
     assert_eq!(root.stop(job), Some(Vec::new()));
@@ -390,7 +420,7 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
     }));
     assert!(tail.iter().any(|signal| {
         has_fact(signal, root.id(), |record| {
-            matches!(record, Record::Forensic(Forensic::JobSettled { job: settled, stopped: true })
+            matches!(record, Record::Control(Control::JobSettled { job: settled, stopped: true })
                 if *settled == job)
         })
     }));
@@ -400,14 +430,14 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
             .chain(&tail)
             .filter(|signal| {
                 has_fact(signal, root.id(), |record| {
-                    matches!(record, Record::Forensic(Forensic::JobOpened))
+                    matches!(record, Record::Control(Control::JobOpened))
                 })
             })
             .count(),
         1
     );
     assert_eq!(
-        helper.status().report,
+        helper.status().expect("the cell is available").report,
         Some(ChildStatus::Replied(FOValue::Int { value: 42 }))
     );
     assert_eq!(
@@ -472,7 +502,7 @@ fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
     assert!(handle.release());
     let first = wait_settled(&host);
     assert_eq!(
-        handle.status().report,
+        handle.status().expect("the cell is available").report,
         None,
         "a conversing root returns no report"
     );
@@ -484,7 +514,7 @@ fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
         })
         .flatten()
         .find_map(|record| match record.value() {
-            Record::Forensic(Forensic::JobSettled { job, .. }) => Some(*job),
+            Record::Control(Control::JobSettled { job, .. }) => Some(*job),
             _ => None,
         })
         .expect("the first job settled");
@@ -494,7 +524,7 @@ fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
     assert!(handle.release());
     let next = wait_settled(&host);
     assert!(next.iter().any(|signal| has_fact(signal, handle.id(), |record| matches!(record,
-        Record::Forensic(Forensic::JobSettled { job: next, stopped: false }) if next.get() > job.get()
+        Record::Control(Control::JobSettled { job: next, stopped: false }) if next.get() > job.get()
     ))));
     assert_eq!(host.end(), [] as [String; 0]);
 }
@@ -546,13 +576,13 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
     helper.steer("help".into()).unwrap();
     wait_settled(&host);
     assert_eq!(
-        helper.status().report,
+        helper.status().expect("the cell is available").report,
         Some(ChildStatus::Replied(FOValue::Int { value: 1 }))
     );
     root_handle.steer("follow up".into()).unwrap();
     wait_settled(&host);
     assert_eq!(
-        helper.status().report,
+        helper.status().expect("the cell is available").report,
         Some(ChildStatus::Replied(FOValue::Int { value: 2 }))
     );
     assert!(helper.is_live());
@@ -571,7 +601,7 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
             signals
                 .iter()
                 .any(|signal| has_fact(signal, helper.id(), |record| {
-                    matches!(record, Record::Protocol(Protocol::ToolResults { results })
+                    matches!(record, Record::Transcript(Transcript::ToolResults { results })
                 if results.iter().any(|result| result.id == call))
                 })),
             "both exchanges use the original helper feed: {call}"

@@ -106,7 +106,7 @@ pub(super) fn pick_model(app: &mut App, ctx: &CommandCtx<'_>) {
     let tuning = app
         .tabs
         .focused_row()
-        .map(|row| row.pick.tuning)
+        .map(|row| row.selected.tuning)
         .unwrap_or_default();
     let Some(session) = open(ctx.bureau, ctx.bureau.available(), &tuning) else {
         return;
@@ -192,7 +192,7 @@ fn apply_model_switch(app: &mut App, tab: AgentId, pick: Pick) {
 /// A switch that landed is the selection the next launch opens on.
 pub(super) fn persist_landed(app: &mut App, commit: &Commit) {
     for saved in commit.records().iter().filter_map(|r| match r.value() {
-        Record::Forensic(forensic) => forensic.switched_to(),
+        Record::Control(control) => control.switched_to(),
         _ => None,
     }) {
         let persisted = app

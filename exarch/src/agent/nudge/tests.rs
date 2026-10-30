@@ -3,12 +3,9 @@ use crate::provider::{Limit, Refusal};
 use crate::record::AgentId;
 
 fn fresh_log() -> AgentLog {
-    AgentLog::for_test(
-        AgentId::new(0),
-        "test",
-        &crate::record::RecordedAccount::for_test("test"),
-    )
-    .expect("session log")
+    AgentLog::for_test(AgentId::new(0), "test")
+        .expect("session log")
+        .0
 }
 
 fn facts() -> Facts {
@@ -470,7 +467,7 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
     use crate::agent::Trunk;
     use crate::agent::testkit::{host, ral_call, scripted, set_provider, trunk};
     use crate::provider::scripted::{Reply, Script};
-    use crate::record::{ChildStatus, Protocol, Record, Voice};
+    use crate::record::{ChildStatus, Record, Transcript, Voice};
     use std::time::{Duration, Instant};
 
     let mut root = trunk(Trunk::Returns);
@@ -503,10 +500,12 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
                     .iter()
                     .map(|recorded| recorded.value().clone()),
             );
-            if records
-                .iter()
-                .any(|r| matches!(r, Record::Forensic(Forensic::JobSettled { .. })))
-            {
+            if records.iter().any(|r| {
+                matches!(
+                    r,
+                    Record::Control(crate::record::Control::JobSettled { .. })
+                )
+            }) {
                 break;
             }
         }
@@ -515,11 +514,11 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
     assert_eq!(host.end(), Vec::<String>::new());
     let opening = records
         .iter()
-        .position(|r| matches!(r, Record::Forensic(Forensic::JobOpened)))
+        .position(|r| matches!(r, Record::Control(crate::record::Control::JobOpened)))
         .unwrap();
     let prompt = records
         .iter()
-        .position(|r| matches!(r, Record::Protocol(Protocol::UserPrompt { .. })))
+        .position(|r| matches!(r, Record::Transcript(Transcript::UserPrompt { .. })))
         .unwrap();
     assert!(
         opening < prompt,
@@ -527,11 +526,14 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
     );
     let count = |predicate: fn(&Record) -> bool| records.iter().filter(|r| predicate(r)).count();
     assert_eq!(
-        count(|r| matches!(r, Record::Forensic(Forensic::JobOpened))),
+        count(|r| matches!(r, Record::Control(crate::record::Control::JobOpened))),
         1
     );
     assert_eq!(
-        count(|r| matches!(r, Record::Forensic(Forensic::JobSettled { .. }))),
+        count(|r| matches!(
+            r,
+            Record::Control(crate::record::Control::JobSettled { .. })
+        )),
         1
     );
     assert_eq!(
@@ -541,7 +543,7 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
     assert_eq!(
         count(|r| matches!(
             r,
-            Record::Protocol(Protocol::UserPrompt {
+            Record::Transcript(Transcript::UserPrompt {
                 voice: Voice::Human,
                 ..
             })
@@ -551,7 +553,7 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
     assert_eq!(
         count(|r| matches!(
             r,
-            Record::Protocol(Protocol::UserPrompt {
+            Record::Transcript(Transcript::UserPrompt {
                 voice: Voice::Harness,
                 ..
             })
@@ -560,14 +562,14 @@ fn a_self_nudge_continues_one_prompt_inside_one_job() {
     );
     assert_eq!(
         count(
-            |r| matches!(r, Record::Protocol(Protocol::Steering { text, voice: Voice::Harness }) if text.contains("no text and no tool calls"))
+            |r| matches!(r, Record::Transcript(Transcript::Steering { text, voice: Voice::Harness }) if text.contains("no text and no tool calls"))
         ),
         1
     );
     assert_eq!(
         count(|r| matches!(
             r,
-            Record::Forensic(Forensic::Status {
+            Record::Control(crate::record::Control::Status {
                 status: ChildStatus::Replied(_)
             })
         )),

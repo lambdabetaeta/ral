@@ -1,10 +1,10 @@
 ---
 status: active
-generated_at_commit: 7eab51c3
-generated_at_date: 2026-10-29
-verified_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-verified_at_date: 2026-10-29
-anchors: [Agent, AgentMailbox, AgentAddress, WeakAgentAddress, Admission, JobId, Loanable, Loan, Nursery, Joined, Host, Port, Registry, LaunchError, Body::retire_engine, AgentAddress::post_wakeup_with]
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
+verified_at_commit: fc0c9fbb
+verified_at_date: 2026-10-30
+anchors: [Agent, AgentMailbox, AgentAddress, WeakAgentAddress, Admission, JobId, Loanable, Loan, Nursery, Joined, Host, Port, Registry, LaunchError, Body::retire_engine, AgentAddress::transact, Txn, Mail, Schedules, Model]
 amended_by: [261029_a-frontend-holds-a-port]
 supersedes: [261028_one-scope-tree-one-inbox, 260806_exchange-ends-at-fleet-quiescence, 260826_reply-parks]
 amends: [261027_a-host-holds-a-helm, 261029_a-child-is-a-status]
@@ -18,8 +18,10 @@ they do not drive exchanges.
 
 ## The laws
 
-- **A1 — One owner.** The attending thread owns the log, engine and state;
-  only a foreground shell call may borrow the body (A7).
+- **A1 — One owner.** The attending thread owns `Context` and resources
+  (engine, client, nursery and timers); the cell owns `Mail`, `Schedules`
+  and `Model` under one lock. Only a foreground shell call borrows the
+  body (A7).
 - **A2 — Scopes nest.** Fleet root contains root lives; a parent's life
   contains its helpers' lives; each life contains its exchanges. Stop cancels
   only an exchange with `Interrupted`; stronger gestures end lives.
@@ -29,26 +31,27 @@ they do not drive exchanges.
   the body's nursery, then the engine and name. This holds on unwind too.
   `Host::end` and `Host::drop` end and join every root; no thread is detached.
 - **A4 — Jobs are linear.** A job is an agent's observed busy period, not a
-  cancellation scope. Under the mailbox lock, `begin` commits `JobOpened`
-  and registers its commit number as `JobId`. Settlement commits
+  cancellation scope. Under the cell lock, `begin` commits `Control::JobOpened`;
+  its commit number names the job held by `Mail`. Settlement commits
   `JobSettled` and clears the job only with an empty queue and nothing
   pending. Stop takes that same lock, marks the open job stopped, cancels
   its latest exchange. Human gestures additionally recall queued text in the
   same critical section; desk Stop and SIGINT leave it queued. Stale ids do nothing;
   a job without settlement ended with its life.
-- **A5 — A parent is owed a reply.** A helper owes its parent from birth
-  (its task) and from each accepted parent message. The owner holds this as
-  `State::owed`; the mailbox's `owes_parent` decides the post. A headless
-  root owes from each human input. Human input to a helper and peer messages
-  create no debt. `report` records `Forensic::Status`, publishes, clears
-  `State::owed`, and posts `Input::Child` under the helper's lock iff
-  `owes_parent`. It then resets `owes_parent` to whether parent input remains
-  queued. A job that settles owing reports `Stopped` if stopped, else
-  `Failed`. The helper's thread posts `Died`, then `Gone`, last. A parent
-  admits a `Child` only from a helper it holds unjoined.
+- **A5 — A parent is owed a reply.** The mail derives debt for every
+  returning agent: what it took up and has not answered, or pending posts
+  by its parent. A helper owes from birth and parent messages; a returning
+  root owes from human posts, before admission. Human input to helpers and
+  peers add none. `Taken` keeps debt; `Withdrawn` takes unread debt away.
+  `Txn::report` commits `Control::Status`, retires schedules and withdraws
+  queued wakeups (all pending posts after life ends), then posts `Child`
+  iff it owed, under the helper lock. A job settling owing reports `Stopped`
+  if stopped, otherwise `Failed`. The helper posts `Died`, then `Gone`,
+  last. A parent admits `Child` only from an adopted, unjoined helper.
 - **A6 — Admission.** At rest, `Free` admits any input, `Gated` admits any
-  after a release (given at rest; ignored while working) consumed by job opening, and `Parent` admits human and
-  parent input. Commands, `Child` and `Gone` are quiet: never held and do not
+  after a release (`released` is cell plumbing, set only at rest and
+  consumed by job opening; a release while working is ignored), and `Parent`
+  admits human and parent input. Commands, `Child` and `Gone` are quiet: never held and do not
   themselves open jobs at rest. Other inputs retain their place. A resting
   helper refuses peer messages; while working it accepts them.
 - **A7 — Loans.** The body lives in the call's host during dispatch and
@@ -66,11 +69,11 @@ they do not drive exchanges.
   admissible input. A racing post either wins or is refused. Default:
   `HELPER_IDLE`, five hours; `--helper-idle` overrides it.
 - **A10 — Rest owes nothing.** An unjoined helper is pending exactly while
-  it owes its parent. `owes_parent` clears only in `report`, after the
-  `Child` is queued at the parent. So `Rest::pending`, read before the
-  parent's lock, stays current until some post reaches the parent, which
-  wakes it. A helper that ended after reporting owes nothing, and its `Gone`
-  joins it in or out of a job.
+  `Mail::owes()` is true. Reporting holds its cell across the status commit
+  and parent post, so observing paid debt means the notice was delivered.
+  `Rest::pending`, read before the parent's lock, cannot overtake it. A report
+  after life ends withdraws every pending post: an ended reported helper
+  owes nothing by construction, and `Gone` joins it in or out of a job.
 - **A11 — Engines end once.** An agent holds `Option<Engine>`; final teardown
   takes it before retirement, so repeated teardown cannot retire it again.
   Clear retires the outgoing engine, or the prepared engine on commit
@@ -82,28 +85,27 @@ they do not drive exchanges.
 
 - **A12 — Reminders.** At the end of an exchange, an owing agent is reminded
   to reply iff no worker runs, `Rest` is empty, and no `Human`, `Message` or
-  `Child` is queued. `Rest` is read before the queue. A helper queues its
-  `Child` before clearing its flag, so a debt seen paid means the report is
-  already queued, and the reminder never overtakes a report.
+  `Child` is queued. `Rest` is read before the queue.
 
 ## Delivery and replacement
 
-**The mailbox is the transaction boundary; the owner keeps the state.**
+**The cell is the transaction boundary; the owner keeps the context and resources.**
 
 - A popped input receives an exchange lease under life. Only accepted input
-  opens a job; stale wakeups and already-claimed batches open nothing.
+  opens a job; stale-generation or already-claimed batches open nothing.
   Nudges continue the exchange locally, never through the queue.
-- Scheduled firing uses `post_wakeup_with`: under the mailbox lock, inspect
-  queued wakeups, lock the registry leaf, validate the entry and epoch,
-  coalesce, rearm or retire, and publish. A final firing cannot disappear
-  between registry retirement and job settlement. Timers retain
-  `WeakAgentAddress(Weak<Shared>)`, not a weak outer address wrapper.
+- A timer retains `WeakAgentAddress(Weak<Shared>)` and only rings its cell,
+  recording nothing. The owner answers `Next::Rung` and rings before drains,
+  reads `Schedules`, coalesces queued timer ids and commits the fire before
+  retiming or dropping its timer. The registry is owner-held and unlocked;
+  retiring a booking makes late rings harmless, without epochs.
 - A conversing agent's schedules survive jobs and can wake it from rest;
   a returning agent waits for armed schedules and clears them on reporting.
 - `/clear` prepares without mutation, then dismisses and joins helpers,
   commits `Cleared`, transfers the life binding to the fresh engine and
   retires the outgoing one. It resets pins, readings and schedules, advances
-  engine generation, and drops queued reports, wakeups and batches; all human
+  engine generation, commits queued-report/wakeup/batch withdrawals and
+  booking retirements, then drops their timers; all human
   text, messages and commands remain. Preparation failure changes nothing;
   commit failure ends life and retires the prepared engine.
 - Stop preserves helpers, schedules and loose shell workers. Further input
@@ -114,7 +116,8 @@ they do not drive exchanges.
 - `` exarch-agents `stop `` targets a descendant's exchange;
   `` `dismiss `` ends and joins only one's own helper.
 
-**Lock order:** mailbox → log → bus channel; mailbox → schedule registry.
+**Lock order:** descendant cell → ancestor cell → journal → bus channel.
+The timer registry has no lock; the deadline heap is a leaf.
 Names are a leaf: clone handles out before notification. Hold at most one
 mailbox, except reporting from descendant to ancestor. Read helper status
 without holding the parent's mailbox.
@@ -133,17 +136,26 @@ without holding the parent's mailbox.
   **Stop < end**, including Synod: Stop no longer ends helpers.
 - [[261029_a-child-is-a-status]] is amended: `ChildStatus` has no `Working`;
   reports are messages posted only while the helper mailbox owes its parent.
-  Published mailbox status serves `read` and views.
+  The mail's recorded status serves `read` and views.
 
 ## Amendment — 2026-10-29: a frontend holds a port
 
 [[261029_a-frontend-holds-a-port]] amends the boundary without changing the
-thread and join laws. The provider is owned `State.provider`; frontends read
-the mailbox's published `Pick` through `Port`, not a shared provider register.
+thread and join laws. The immutable client is owned by `Body`; frontends
+read `AgentRow.selected` from the cell through `Port`, not the client.
 Its P5 replaces A8's completion criterion: after a drain to empty, every known
 root tab must have received `Died`. `Host::is_finished` is removed;
-`Host::end` still joins and collects failures. The laws above retain the
-original decision's wording.
+`Host::end` still joins and collects failures. The laws above include the
+fold amendment below.
+
+## Amendment — 2026-10-30: an agent is the fold of its log
+
+[[design/agents|agents]] supplies the cell and F1–F6.
+A1, A4–A6, A10 and A12 above state their amended rules: no separate debt
+flag, published pick, registry epoch or registry lock. Closure transactions
+keep poison; a poisoned cell ends life and its helper still reports failure.
+`commit_to` appends and steps together. The context remains owner-held,
+not locked with the shared folds.
 
 ## Where
 

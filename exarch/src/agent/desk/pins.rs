@@ -13,12 +13,11 @@ impl ExarchDesk {
         let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         match &card {
             Some(card) => {
-                body.state
-                    .pins
+                body.pins
                     .insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
             }
             None => {
-                body.state.pins.remove(&key);
+                body.pins.remove(&key);
             }
         }
         let surface = match card {
@@ -31,7 +30,7 @@ impl ExarchDesk {
 
     pub(super) fn pin_read(&self, key: &str) -> Result<FOValue, Error> {
         let body = self.loan.get().ok_or_else(super::no_desk)?;
-        Ok(match body.state.pins.get(key) {
+        Ok(match body.pins.get(key) {
             Some(digest) => FOValue::Variant {
                 label: "some".into(),
                 payload: Some(Box::new(encode_card(&digest.card))),
@@ -45,6 +44,6 @@ impl ExarchDesk {
 
     pub(super) fn pin_list(&self) -> Result<FOValue, Error> {
         let body = self.loan.get().ok_or_else(super::no_desk)?;
-        Ok(Vec::from_iter(body.state.pins.keys().cloned()).encode())
+        Ok(Vec::from_iter(body.pins.keys().cloned()).encode())
     }
 }

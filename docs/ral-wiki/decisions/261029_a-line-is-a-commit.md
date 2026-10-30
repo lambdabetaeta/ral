@@ -1,10 +1,10 @@
 ---
 status: active
-generated_at_commit: 8cc1d0d9
-generated_at_date: 2026-10-29
-verified_at_commit: 34266ac0
-verified_at_date: 2026-10-29
-anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::complete_len, Log::extent, log::Reader, Reader::record, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, model::resume]
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
+verified_at_commit: fc0c9fbb
+verified_at_date: 2026-10-30
+anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::complete_len, Log::extent, log::Reader, Reader::record, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, context::resume]
 ---
 
 # A line is a commit
@@ -33,7 +33,7 @@ folds still step them individually. This is the unit of a write-ahead log
   and keep loci small. It is no defence against an editor who can replace
   both value and sum.
 - Hex survives JSON tools that cannot exactly represent integers above 2⁵³.
-- **Records are externally tagged at every level down to a value.** `Protocol`,
+- **Records are externally tagged at every level down to a value.** `Transcript`, `Control`,
   `Display` and `Forensic` carry no `tag = "kind"`: an internally tagged enum
   buffers through serde's `Content` and replays it on the native stack,
   bypassing the stack-grown reader, so a deep reply value would make its
@@ -42,11 +42,12 @@ folds still step them individually. This is the unit of a write-ahead log
   depth is bounded by their type.
 - Reader and writer are both unbounded in depth and stack-grown
   (`serde_stacker`); `seal` serializes through an adapter into a `RawValue`
-  and never re-parses. A test round-trips a 5000-deep `Forensic::Status`
+  and never re-parses. A test round-trips a 5000-deep `Control::Status`
   carrying a reply on a 2 MiB thread.
 - Several records on one line are groundwork for the durable-agent plan
   (`dev/docs/plans/261028_durable-agent.md`, L3 "one transition, one commit");
-  today `Emitter::emit` writes single-record commits.
+  `Emitter::emit` writes single-record commits; control transactions
+  use multi-record lines.
 
 ## Torn, corrupt, foreign
 
@@ -64,7 +65,7 @@ folds still step them individually. This is the unit of a write-ahead log
   wherever it stands. Damage may coincidentally produce valid JSON of another
   shape, such as a bit-flipped key (`"sun"`); refusing it rather than
   quarantining it fails closed.
-- Resume folds and checks selection before quarantine, so a refused resume
+- Resume folds context and all three control folds before quarantine, so a refused resume
   leaves the file as found. `Log::complete_len` supplies the whole-commit
   extent to both reader and quarantine.
 - `Log::append_to` refuses a log whose tail is not a whole sealed commit
@@ -108,11 +109,23 @@ folds still step them individually. This is the unit of a write-ahead log
 - Logs using legacy `{at_unix_ms, record}` envelopes are refused at their
   first line.
 
+## Amendment — 2026-10-30: four classes, one control door
+
+[[design/agents|agents]] names the classes `Transcript`,
+`Control`, `Display` and `Forensic`. `Emitter::begin` appends the head and
+returns its seeded folds. Every later control line uses `commit_to`: append
+and publish, then step borrowed `Mail`, `Schedules` and `Model`, under the
+cell lock (or before it exists at reopen). Failed append steps nothing;
+ordinary `commit` rejects control records. Reports, fires, clear and reopen
+now put related transitions on one line. Synod narrates no `Control` record,
+so each such commit yields at most one narrated event; no webview batching
+change is needed. A commit introducing two narrated events still requires it.
+
 ## Where
 
 - `exarch/src/record.rs`: `Seq`, `Sum`, `Locus`, `Commit`, `Cursor`, `Publish`.
 - `exarch/src/record/non_empty.rs`, `record/log.rs`, `record/seam.rs`,
-  `record/model/resume.rs`.
+  `record/context/resume.rs`.
 - `exarch/src/bus/signal.rs`, `exarch/src/tui/scrollback.rs`.
 
 See [[internals/session-record|session-record]] and

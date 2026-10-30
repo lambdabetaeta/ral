@@ -1,7 +1,11 @@
 use super::BlockId;
 use super::*;
 use crate::provider::Tuning;
-use crate::record::{ChildStatus, JobId};
+use crate::record::{ChildStatus, JobId, Locus};
+
+fn at(control: &Control) -> Recorded<&Control> {
+    Recorded::new(Locus::placeholder(Seq::new(1, 0)), control)
+}
 
 /// A block that never joins the one before it, so a test about the window
 /// counts blocks rather than the lanes that grow.
@@ -17,12 +21,12 @@ fn push(memo: &mut Blocks, seq: u64, text: &str) -> Delta {
 #[test]
 fn a_rewind_cuts_from_the_anchors_first_block() {
     let prompt = |text: &str, turn| match turn {
-        Some(turn) => Protocol::UserPrompt {
+        Some(turn) => Transcript::UserPrompt {
             turn,
             text: text.into(),
             voice: Voice::Human,
         },
-        None => Protocol::Steering {
+        None => Transcript::Steering {
             text: text.into(),
             voice: Voice::Human,
         },
@@ -34,15 +38,15 @@ fn a_rewind_cuts_from_the_anchors_first_block() {
     };
     let answer = |text: &str| Display::Answer { text: text.into() };
     let mut memo = Blocks::default();
-    let _ = memo.step_protocol(Seq::new(1, 0), &prompt("one", Some(1)));
+    let _ = memo.step_transcript(Seq::new(1, 0), &prompt("one", Some(1)));
     let _ = memo.step_forensic(Seq::new(2, 0), &started(2));
     let _ = memo.step_display(Seq::new(3, 0), answer("two"));
-    let _ = memo.step_protocol(Seq::new(4, 0), &prompt("three", Some(3)));
+    let _ = memo.step_transcript(Seq::new(4, 0), &prompt("three", Some(3)));
     let _ = memo.step_forensic(Seq::new(5, 0), &started(4));
-    let _ = memo.step_protocol(Seq::new(6, 0), &prompt("steer", None));
+    let _ = memo.step_transcript(Seq::new(6, 0), &prompt("steer", None));
     let _ = memo.step_forensic(Seq::new(7, 0), &started(5));
     let _ = memo.step_display(Seq::new(8, 0), answer("four"));
-    let _ = memo.step_protocol(Seq::new(9, 0), &prompt("five", Some(6)));
+    let _ = memo.step_transcript(Seq::new(9, 0), &prompt("five", Some(6)));
     assert_eq!(
         memo.prompts().collect::<Vec<_>>(),
         [(1, "one"), (3, "three"), (6, "five")],
@@ -67,7 +71,7 @@ fn a_rewind_cuts_from_the_anchors_first_block() {
         "turn 2's own breadcrumb, its prompt kept"
     );
     assert_eq!(
-        memo.step_protocol(Seq::new(10, 0), &Protocol::Rewound { anchor: 3 }),
+        memo.step_transcript(Seq::new(10, 0), &Transcript::Rewound { anchor: 3 }),
         Delta::Rewound(Some(BlockId::new(Seq::new(4, 0))))
     );
     assert!(matches!(
@@ -75,7 +79,7 @@ fn a_rewind_cuts_from_the_anchors_first_block() {
         [_, _, _, b] if matches!(b.kind, BlockKind::Rewound { anchor: 3 })
     ));
     assert_eq!(
-        memo.step_protocol(Seq::new(11, 0), &Protocol::Rewound { anchor: 1 }),
+        memo.step_transcript(Seq::new(11, 0), &Transcript::Rewound { anchor: 1 }),
         Delta::Rewound(Some(BlockId::new(Seq::new(1, 0))))
     );
     assert_eq!(memo.blocks().len(), 1);
@@ -92,22 +96,22 @@ fn a_prompt_is_drawn_unless_the_harness_spoke_it() {
         (Voice::Harness, false),
     ] {
         let mut memo = Blocks::default();
-        let prompt = Protocol::UserPrompt {
+        let prompt = Transcript::UserPrompt {
             turn: 1,
             text: "hi".into(),
             voice,
         };
-        let steering = Protocol::Steering {
+        let steering = Transcript::Steering {
             text: "also".into(),
             voice,
         };
         assert_eq!(
-            memo.step_protocol(Seq::new(1, 0), &prompt) != Delta::Quiet,
+            memo.step_transcript(Seq::new(1, 0), &prompt) != Delta::Quiet,
             drawn,
             "{voice:?} prompt"
         );
         assert_eq!(
-            memo.step_protocol(Seq::new(2, 0), &steering) != Delta::Quiet,
+            memo.step_transcript(Seq::new(2, 0), &steering) != Delta::Quiet,
             drawn,
             "{voice:?} steering"
         );
@@ -127,20 +131,20 @@ fn a_prompt_is_drawn_unless_the_harness_spoke_it() {
 /// draws a marker.
 #[test]
 fn only_a_forced_eviction_draws() {
-    let evicted = |by| Protocol::Evicted {
-        residue: Residue {
+    let evicted = |by| {
+        Transcript::Evicted(Eviction {
             span: crate::record::Span::single(1),
             note: None,
             by,
-        },
+        })
     };
     let mut memo = Blocks::default();
     assert_eq!(
-        memo.step_protocol(Seq::new(1, 0), &evicted(EditAuthority::Model)),
+        memo.step_transcript(Seq::new(1, 0), &evicted(EditAuthority::Model)),
         Delta::Quiet
     );
     assert_eq!(
-        memo.step_protocol(Seq::new(2, 0), &evicted(EditAuthority::Harness)),
+        memo.step_transcript(Seq::new(2, 0), &evicted(EditAuthority::Harness)),
         Delta::Opened(BlockId::new(Seq::new(2, 0)))
     );
     assert!(matches!(
@@ -148,7 +152,7 @@ fn only_a_forced_eviction_draws() {
         [b] if matches!(
             b.kind,
             BlockKind::Evicted {
-                residue: Residue {
+                eviction: Eviction {
                     by: EditAuthority::Harness,
                     ..
                 }
@@ -180,7 +184,7 @@ fn a_clear_leaves_its_marker_and_the_usage() {
         },
     );
     assert_eq!(
-        memo.step_protocol(Seq::new(3, 0), &Protocol::Cleared),
+        memo.step_transcript(Seq::new(3, 0), &Transcript::Cleared),
         Delta::Cleared
     );
     assert!(matches!(
@@ -279,9 +283,9 @@ fn a_verdict_patches_the_call_it_names() {
             summary: Some("look at x".into()),
         },
     );
-    let _ = memo.step_protocol(
+    let _ = memo.step_transcript(
         Seq::new(2, 0),
-        &Protocol::UserPrompt {
+        &Transcript::UserPrompt {
             turn: 1,
             text: "on".into(),
             voice: Voice::Human,
@@ -346,18 +350,29 @@ fn the_window_bounds_the_fold_as_blocks_land() {
 
 #[test]
 fn a_model_change_carries_its_window_and_a_bare_one_clears_it() {
-    let change = |window| Forensic::ModelChanged {
-        model: "m".into(),
+    let selected = |window| crate::record::Selected {
         context_window: window,
-        label: "p".into(),
-        service: "s".into(),
-        account: "a".into(),
-        via: None,
+        ..crate::record::Selected::for_test("m")
     };
     let mut memo = Blocks::default();
-    let _ = memo.step_forensic(Seq::new(1, 0), &change(Some(200_000)));
+    let started = crate::record::Started {
+        session_id: crate::record::AgentId::new(0),
+        name: "main".into(),
+        parent: None,
+        returns: false,
+        selected: selected(Some(200_000)),
+        log_dir: crate::record::fixture_dir().path().to_path_buf(),
+        at_unix_ms: 0,
+    };
+    let _ = memo
+        .step_control(&at(&Control::SessionStarted(started)))
+        .unwrap();
     assert_eq!(memo.context_window(), Some(200_000));
-    let _ = memo.step_forensic(Seq::new(2, 0), &change(None));
+    let _ = memo
+        .step_control(&at(&Control::ModelChanged {
+            selected: selected(None),
+        }))
+        .unwrap();
     assert_eq!(memo.context_window(), None);
 }
 
@@ -382,20 +397,20 @@ fn last_input_is_the_latest_turn_while_usage_sums() {
 fn job_records_and_published_reports_draw_nothing() {
     let mut memo = Blocks::default();
     for forensic in [
-        Forensic::JobOpened,
-        Forensic::JobSettled {
+        Control::JobOpened,
+        Control::JobSettled {
             job: JobId::from(42),
             stopped: false,
         },
-        Forensic::JobSettled {
+        Control::JobSettled {
             job: JobId::from(42),
             stopped: true,
         },
-        Forensic::Status {
+        Control::Status {
             status: ChildStatus::Stopped,
         },
     ] {
-        assert_eq!(memo.step_forensic(Seq::new(1, 0), &forensic), Delta::Quiet);
+        assert_eq!(memo.step_control(&at(&forensic)), Ok(Delta::Quiet));
         assert!(memo.blocks().is_empty());
         assert_eq!(memo.origin(), None);
     }

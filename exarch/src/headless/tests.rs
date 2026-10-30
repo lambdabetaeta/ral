@@ -2,7 +2,7 @@ use super::*;
 use crate::agent::testkit::{self, ral_call, scripted, set_provider};
 use crate::agent::{Agent, Trunk};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Commit, Display, NonEmpty, Protocol};
+use crate::record::{Commit, Display, Forensic, NonEmpty, Transcript};
 use std::time::Duration;
 
 mod host;
@@ -75,7 +75,7 @@ fn wait_settled(host: &Host) -> Vec<Signal> {
     let root = host.roots()[0];
     receive_until(host, |signal| {
         has_fact(signal, root, |record| {
-            matches!(record, Record::Forensic(Forensic::JobSettled { .. }))
+            matches!(record, Record::Control(Control::JobSettled { .. }))
         })
     })
 }
@@ -94,7 +94,7 @@ fn status_signal(id: AgentId, status: ChildStatus) -> Signal {
         id,
         Commit::placeholder(
             1,
-            NonEmpty::one(Record::Forensic(Forensic::Status { status })),
+            NonEmpty::one(Record::Control(Control::Status { status })),
         ),
     )
 }

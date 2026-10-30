@@ -4,6 +4,8 @@ status: accepted
 
 # Recording follows the event, not its emitter
 
+> *Amended 2026-10-30*: `Protocol` is named `Transcript`, and the context module is `record::context`; historical names below are retained.
+
 **Amended by [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]]**: `transcript.jsonl`,
 the second record this page mints, is deleted outright rather than folded —
 its one genuinely unique field, a per-line clock, becomes `record.jsonl`'s

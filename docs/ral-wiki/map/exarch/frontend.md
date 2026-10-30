@@ -1,15 +1,15 @@
 ---
-generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-generated_at_date: 2026-10-29
-verified_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-verified_at_date: 2026-10-29
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
+verified_at_commit: fc0c9fbb
+verified_at_date: 2026-10-30
 covers_paths: [exarch/src/port.rs, exarch/src/lib.rs, exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/host.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
 
 # Map: exarch / frontend
 
 **A frontend addresses agents by id through `Port` and observes the host's
-feed.** The port reads published mailbox status, never owner state, and holds
+feed.** The port reads the cell's folds, never owner resources, and holds
 only the fleet's `Registry` and usage meter, not its launch. The owner is
 `Agent`; `Host` owns launch and joined end
 ([[map/exarch/agent|agent]],
@@ -17,29 +17,39 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
 
 ## Inbound: one mailbox
 
-**`bus/mailbox.rs` linearises queue, published status, jobs and Stop.**
+**`bus/mailbox.rs` linearises the three control folds and their payloads.**
 
-- `AgentMailbox` is the owner end; `AgentAddress` shares its queue and life.
-  Inputs are human text, messages, child reports/departures, epoch-stamped
-  wakeups, generation-stamped worker batches and commands.
-- `next` selects admissible input and mints its exchange lease under life.
-  `Agent::admit` checks stale epochs/generations and claimed workers before
-  `begin` records `JobOpened`. A declined input opens no job.
-- Human fragments coalesce only while adjacent. `drain` hears ordered input
-  through the first rewrite while the exchange is live. A drawn human line
-  is recorded before cancellation is polled.
-- `Free` admits any input at rest; `Gated` consumes one release per job;
-  `Parent` admits the human and parent, refusing resting peer messages.
-  Commands and child reports/departures are quiet and never held.
-- Pending helpers owe their parent or have ended without joining. A report
-  queues `Child` before clearing that obligation; `Gone` joins quietly.
-  Published status serves views and `read`, not a second shared register.
-- `post_wakeup_with` orders coalescing, registry updates/terminal retirement
-  and enqueue in one mailbox transaction. Timers hold a weak shared address.
-  Mailbox → registry is the lock order. Returning agents wait on schedules;
-  conversing schedules may open later jobs. Reports and clear invalidate epochs.
-- Clear drops queued reports, wakeups and batches, retaining all human text,
-  messages and commands. Generation checks reject outgoing-engine batches.
+- `AgentMailbox` is the owner end; `AgentAddress` shares cell and life.
+  `Mail`, `Schedules` and `Model` live under one mutex. `transact` lends a
+  closure-scoped `Txn`; poison ends life instead of recovering memory that
+  may disagree with the log. The port reads fold-backed status, not a copy.
+- `Txn::post` records every accepted human text, message, child report,
+  wakeup, generation-stamped surface batch or command as `Posted`. `next`
+  and `drain` commit `Taken` before handing over payloads. Queued posts equal
+  `mail.pending()` at every live unlock; `Gone` is unrecorded join plumbing.
+- `Agent::admit` checks stale generations and claimed workers before
+  `begin` records the mail's `JobOpened`; a declined input opens no job.
+  Human fragments coalesce over maximal post runs, ignoring `Gone`, but
+  not other posts. Drain stops at the first rewrite.
+- `Free` admits any input at rest; `Gated` consumes one release per job,
+  set only at rest; `Parent` admits the human and parent, refusing resting
+  peers. Commands, child reports and departures are quiet and never held.
+- Pending helpers are those whose mail `owes`. A report holds the helper
+  cell across status commit and parent notice; paid debt cannot overtake
+  delivery. A report after life ends withdraws every pending post, so a dead
+  reported helper owes nothing. `Gone` joins quietly.
+- Timers only ring weak cell addresses, recording nothing. `Next::Rung`
+  and the boundary before each drain let the owner `fire`: read `Schedules`,
+  ignore obsolete timer ids, re-check wall time, commit a coalesced wakeup
+  plus booking update/retirement, then retime/drop the unlocked timer.
+  Returning agents wait on bookings; conversing schedules can open later jobs.
+- Report and clear retire bookings and withdraw queued wakeups before timer
+  drop. Late rings cannot post; there is no epoch admission. Clear also
+  withdraws reports and surfaces, retaining human text, messages and commands.
+  Generation checks reject outgoing-engine batches.
+- Lock order: descendant cell → ancestor cell → journal → bus channel.
+  Only reporting nests cells. The timer registry has no lock; transactions
+  never span provider requests, dispatch, joins or the owner's `Context`.
 
 `tui/commands.rs::route_submit` classifies input once:
 
@@ -53,7 +63,8 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
   `Port::command(agent, Command::Rewrite)` and hold subsequent input until
   the exchange boundary.
 - `/model` posts `Command::Model(Pick)` to the tab that opened the picker.
-  The owner builds, records and publishes the normalized selection.
+  The owner builds, commits `ModelChanged` through `Txn::change_model`,
+  then swaps its immutable client; the next request reads it afresh.
   `model_picker::persist_landed`, called by `App::commit`, saves project
   selection from live `ModelChanged` records alone, including `via`.
   Asking and catch-up save nothing; login/provider notes are view chrome.
@@ -71,7 +82,9 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
 
 - `record/seam.rs::Emitter::commit` appends one commit to `record.jsonl`
   and publishes it whole under the writer's mutex; `emit` commits one record.
-  `Protocol`, `Display` and `Forensic` are disjoint durable classes;
+  `Transcript`, `Control`, `Display` and `Forensic` are durable classes.
+  `begin` seeds the head; `commit_to` appends and steps shared control
+  folds together; ordinary `commit` rejects control records;
   `Transient` has no sequence or durable form. The writer owns a `File`
   directly. The first uncommitted append (write, encoding or append-lock
   poison), or durable record refused by the fold, latches `Unavailable`
@@ -162,8 +175,15 @@ elapsed time, actual ending and how to use `await` / `workers`.
   `tui/export.rs::export_to` replays it through `Mirror` and a `Format`,
   creating a new destination rather than overwriting. `/export` and
   `exarch export` share this door.
-- `Protocol::Cleared` and `Rewound` withdraw context in the same file.
+- `Transcript::Cleared` and `Rewound` withdraw context in the same file.
   Resource readings are live diagnostic cards, not pressure histories.
+
+Reopen folds `Context` and control in one read-only pass before quarantine,
+then records pending withdrawals, open-job settlement and schedule retirements
+with `SessionResumed` and a note naming unread input. Its new cell is empty;
+taken-but-unanswered debt and a same-model narrowed window survive. The view
+reads all four classes; Synod narrates no `Control`, and each new multi-record
+commit yields at most one event it narrates.
 
 ## TUI: a view per address
 
@@ -183,7 +203,9 @@ elapsed time, actual ending and how to use `await` / `workers`.
 - `tui/tabs.rs::Tabs` is an id-ordered forest of birth facts and
   `Status` / `Life`; there is no special root tab. It holds a `Port`;
   `row` / `focused_row` read published `AgentRow`s and `rows` takes one
-  roster per call. Model/effort/account chrome reads the published `pick`.
+  roster per call. Model/effort/account chrome reads `AgentRow.selected`
+  from the cell. A known account is labelled against current availability;
+  an unavailable account uses its recorded label snapshot.
 - `Transient::Died` is the final owner presentation cue, after availability
   classification, failure reporting and retirement. Terminal delivery uses
   the owner's fleet sink even when append state is poisoned; the poisoned
@@ -345,7 +367,7 @@ See [[internals/cancellation|cancellation]] for scope propagation.
 checks the first `Born` against `host.roots()[0]`, retaining that root's log
 directory for “Agent log:”. It submits the seed and reads usage through a
 port, folds only the root's records into one `Blocks` memo, and
-finishes on root `Forensic::Status` or `Died`. Helper facts do not print;
+finishes on root `Control::Status` or `Died`. Helper facts do not print;
 helper faults remain visible and usage includes the fleet. `Replied(v)`
 writes faithful ral text or JSON to stdout; Failed, Stopped or death without
 a reply fail honestly. `lib::run` ends the host afterwards and includes

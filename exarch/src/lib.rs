@@ -364,6 +364,7 @@ fn root_config(
         },
         admission: agent::Admission::Free,
         helper_idle: c.helper_idle,
+        max_tokens: c.max_tokens,
         tools: if c.chat {
             provider::Toolset::default()
         } else {

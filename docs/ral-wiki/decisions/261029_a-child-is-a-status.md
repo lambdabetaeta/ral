@@ -1,11 +1,11 @@
 ---
 status: active
 amended_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
-generated_at_commit: 7eab51c3
-generated_at_date: 2026-10-29
-verified_at_commit: e5a23909
-verified_at_date: 2026-10-29
-anchors: [ChildStatus, Settlement, Forensic::Status, AgentHandle::report, Nursery::owing, Status::working]
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
+verified_at_commit: fc0c9fbb
+verified_at_date: 2026-10-30
+anchors: [ChildStatus, Settlement, Control::Status, Mail::status, Txn::report, AgentHandle::report, Nursery::owing, Status::working]
 ---
 
 # A child is a status
@@ -119,11 +119,26 @@ status, not a sum of owed answers.** This reverses the debt mechanism of
 - Current work retains every child's status and reply value; retirement
   releases the record seam, not the status.
 
+## Amendment — 2026-10-30: status belongs to the mail
+
+[[design/agents|agents]] makes the latest report
+`Mail::status()`, folded from `Control::Status`. `Txn::report` commits status,
+schedule retirements and queued-wakeup withdrawals (every pending post after
+life ends), then posts the parent notice iff `Mail::owes()` was true, still
+under the helper lock. No reader sees paid debt before delivery. A poisoned
+helper reports `Failed` directly to its parent. A failed report append also
+notifies iff the pre-append mail owed, without changing the child's folds.
+These fallback paths share `Shared.failure_noticed`, so reporting and
+teardown post at most one `Failed`; the flag stores neither debt nor status.
+The original shared-cell mechanism above remains historical, not a second
+status authority.
+
 ## Where
 
-- `exarch/src/record.rs`: `ChildStatus`, `Settlement`, `Forensic::Status`.
-- `exarch/src/bus/mailbox.rs`: `Status::working`, `AgentAddress::report`,
-  mailbox publication and parent obligation; `agent/handle.rs`: `AgentHandle::report`.
+- `exarch/src/record.rs`, `record/mail.rs`: `ChildStatus`, `Settlement`,
+  `Control::Status`, `Mail::status`.
+- `exarch/src/bus/mailbox.rs`: `Status::working`, `Txn::report`,
+  recorded status and derived parent debt; `agent/handle.rs`: `AgentHandle::report`.
 - `exarch/src/agent/nursery.rs`: `Nursery::owing`, retained helper handles
   and joins; `agent/desk/agents.rs`: newest own helper's `read`.
 - `exarch/src/agent/{attend,arrival,spawn}.rs`: recording reports, parent

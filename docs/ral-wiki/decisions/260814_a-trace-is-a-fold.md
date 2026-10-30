@@ -4,6 +4,8 @@ status: accepted
 
 # A trace is a fold, not a second file
 
+> *Amended 2026-10-30*: `Protocol` is named `Transcript`, and the context module is `record::context`; historical names below are retained.
+
 **A session keeps one durable record.** The operational trace that stood beside
 it, `transcript.jsonl`, is *deleted outright* rather than retired to a filtered
 projection of the log: an operational view is a fold of `record.jsonl` like

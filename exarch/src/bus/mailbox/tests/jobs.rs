@@ -6,7 +6,7 @@ fn begin_records_one_job_before_its_exchange_records_and_settles_the_same_id() {
     let record = Recorder::create(&dir).unwrap();
     let mailbox = recorded_mailbox(Admission::Free, record.clone());
     let _first = start(&mailbox);
-    let id = mailbox.address().status().job.unwrap();
+    let id = mailbox.address().status().unwrap().job.unwrap();
     let _recorded = record
         .emit(Forensic::SystemNote {
             text: "first exchange".into(),
@@ -15,16 +15,34 @@ fn begin_records_one_job_before_its_exchange_records_and_settles_the_same_id() {
     mailbox.address().steer("mid-job".into()).unwrap();
     let (_input, _second) = take(&mailbox);
     assert!(mailbox.begin());
-    assert_eq!(mailbox.address().status().job, Some(id));
+    assert_eq!(mailbox.address().status().unwrap().job, Some(id));
     settled(&mailbox, false);
     let records = read_records(&dir.path().join(RECORD)).unwrap();
-    assert!(matches!(records.as_slice(), [
-        Record::Forensic(Forensic::JobOpened),
+    let jobs: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                Record::Control(Control::JobOpened | Control::JobSettled { .. })
+                    | Record::Forensic(Forensic::SystemNote { .. })
+            )
+        })
+        .collect();
+    assert!(matches!(jobs.as_slice(), [
+        Record::Control(Control::JobOpened),
         Record::Forensic(Forensic::SystemNote { text }),
-        Record::Forensic(Forensic::JobSettled { job, stopped: false }),
+        Record::Control(Control::JobSettled { job, stopped: false }),
     ] if text == "first exchange" && *job == id));
-    let (_, mut commits) = record.reader().since(None).unwrap();
-    let opened = commits.next().unwrap().unwrap();
+    let (_, commits) = record.reader().since(None).unwrap();
+    let opened = commits
+        .map(Result::unwrap)
+        .find(|commit| {
+            commit
+                .records()
+                .iter()
+                .any(|record| matches!(record.value(), Record::Control(Control::JobOpened)))
+        })
+        .unwrap();
     assert_eq!(id, JobId::from(opened.number()));
 }
 
@@ -33,10 +51,10 @@ fn stop_with_a_stale_id_leaves_the_job_exchange_and_queued_text_unchanged() {
     let mailbox = mailbox(Admission::Free);
     let address = mailbox.address();
     let _first = start(&mailbox);
-    let stale = address.status().job.unwrap();
+    let stale = address.status().unwrap().job.unwrap();
     settled(&mailbox, false);
     let current = start(&mailbox);
-    let id = address.status().job.unwrap();
+    let id = address.status().unwrap().job.unwrap();
     assert_ne!(id, stale);
     address.steer("keep".into()).unwrap();
     assert_eq!(address.stop(stale), None);
@@ -54,7 +72,7 @@ fn stop_between_a_mid_job_pop_and_exchange_execution_cancels_the_minted_exchange
     address.steer("next".into()).unwrap();
     let (input, exchange) = take(&mailbox);
     assert!(matches!(input, Input::Human(text) if text == "next"));
-    let id = address.status().job.unwrap();
+    let id = address.status().unwrap().job.unwrap();
     assert_eq!(address.stop(id), Some(Vec::new()));
     assert_eq!(exchange.cause(), Some(CancelCause::Interrupted));
     assert!(!first.is_cancelled(), "Stop names the latest exchange only");
@@ -74,7 +92,7 @@ fn stop_at_rest_including_after_a_pop_before_begin_is_refused() {
     assert!(!address.stop_current());
     assert!(!exchange.is_cancelled());
     assert_eq!(address.queued(), ["queued"]);
-    assert!(address.status().job.is_none());
+    assert!(address.status().unwrap().job.is_none());
 }
 
 #[test]
@@ -84,7 +102,7 @@ fn stop_recalls_only_human_text_and_preserves_helpers_and_the_job() {
     let address = mailbox.address();
     let helper_life = mailbox.life().child();
     let helper_exchange = Lease::under(&helper_life);
-    let job = address.status().job;
+    let job = address.status().unwrap().job;
     let id = job.unwrap();
     address.steer("first".into()).unwrap();
     address.post(surface()).unwrap();
@@ -100,7 +118,7 @@ fn stop_recalls_only_human_text_and_preserves_helpers_and_the_job() {
     assert!(address.is_live());
     assert!(!helper_life.is_cancelled());
     assert!(!helper_exchange.is_cancelled());
-    assert_eq!(address.status().job, job);
+    assert_eq!(address.status().unwrap().job, job);
     let (_batch, _exchange) = take(&mailbox);
     assert!(matches!(
         mailbox.drain().as_slice(),
@@ -113,7 +131,7 @@ fn stop_recalls_only_human_text_and_preserves_helpers_and_the_job() {
         .post(child(ChildStatus::Replied(FOValue::Unit)))
         .unwrap();
     assert!(matches!(take(&mailbox).0, Input::Child { .. }));
-    assert_eq!(address.status().job, job);
+    assert_eq!(address.status().unwrap().job, job);
     settled(&mailbox, true);
 }
 
@@ -122,15 +140,15 @@ fn queued_input_after_stop_runs_a_live_exchange_but_settlement_stays_stopped() {
     let mailbox = helper();
     let first = start(&mailbox);
     let address = mailbox.address();
-    let job = address.status().job;
+    let job = address.status().unwrap().job;
     address.post(message("follow up", true)).unwrap();
     assert_eq!(address.stop(job.unwrap()), Some(Vec::new()));
     let (input, exchange) = take(&mailbox);
-    assert!(matches!(input, Input::Message(message) if message.from_parent));
+    assert!(matches!(input, Input::Message(message) if message.from == AgentId::new(7)));
     assert!(first.is_cancelled());
     assert!(!exchange.is_cancelled());
     assert!(mailbox.begin());
-    assert_eq!(address.status().job, job);
+    assert_eq!(address.status().unwrap().job, job);
     settled(&mailbox, true);
 }
 
@@ -140,7 +158,7 @@ fn peer_message_racing_settlement_is_taken_in_the_job_or_refused_at_rest() {
         let mailbox = helper();
         let _exchange = start(&mailbox);
         let address = mailbox.address();
-        let job = address.status().job;
+        let job = address.status().unwrap().job;
         let barrier = Barrier::new(2);
         let (posted, next) = std::thread::scope(|scope| {
             let post = scope.spawn(|| {
@@ -160,11 +178,11 @@ fn peer_message_racing_settlement_is_taken_in_the_job_or_refused_at_rest() {
                 },
             ) => {
                 assert_eq!(message.text, "peer");
-                assert_eq!(address.status().job, job);
+                assert_eq!(address.status().unwrap().job, job);
                 settled(&mailbox, false);
             }
             (Err(Refused::Resting), Next::Settled { stopped: false }) => {
-                assert!(address.status().job.is_none());
+                assert!(address.status().unwrap().job.is_none());
             }
             _ => panic!("a peer post and settlement must linearize under the same lock"),
         }
@@ -194,7 +212,7 @@ fn every_post_kind_racing_settlement_is_taken_in_the_job_or_opens_the_next() {
             let mailbox = mailbox(Admission::Free);
             let _exchange = start(&mailbox);
             let address = mailbox.address();
-            let job = address.status().job.unwrap();
+            let job = address.status().unwrap().job.unwrap();
             let barrier = Barrier::new(2);
             let next = std::thread::scope(|scope| {
                 let poster = scope.spawn(|| {
@@ -209,14 +227,14 @@ fn every_post_kind_racing_settlement_is_taken_in_the_job_or_opens_the_next() {
             match next {
                 Next::Take { input, .. } => {
                     assert!(expected(&input));
-                    assert_eq!(address.status().job, Some(job));
+                    assert_eq!(address.status().unwrap().job, Some(job));
                     settled(&mailbox, false);
                 }
                 Next::Settled { stopped: false } => {
                     let (input, _exchange) = take(&mailbox);
                     assert!(expected(&input), "a post racing settlement is not lost");
                     assert!(mailbox.begin());
-                    assert_ne!(address.status().job, Some(job));
+                    assert_ne!(address.status().unwrap().job, Some(job));
                 }
                 _ => panic!("a post and settlement must linearize under the same lock"),
             }
@@ -230,24 +248,18 @@ fn helper_and_parent_traffic_in_both_directions_never_deadlocks() {
     std::thread::spawn(move || {
         for _ in 0..200 {
             let parent = mailbox(Admission::Free);
-            let helper = helper();
+            let helper = helper_of(&parent);
             let (up, down) = (parent.address(), helper.address());
             let barrier = Barrier::new(4);
             std::thread::scope(|scope| {
                 scope.spawn(|| {
                     barrier.wait();
-                    down.report(
-                        ChildStatus::Replied(FOValue::Unit),
-                        Some((&up, child(ChildStatus::Replied(FOValue::Unit)))),
-                    );
+                    publish(&down, ChildStatus::Replied(FOValue::Unit));
                 });
                 scope.spawn(|| {
                     barrier.wait();
                     down.end(CancelCause::Cancelled);
-                    down.report(
-                        ChildStatus::Failed("ended".into()),
-                        Some((&up, child(ChildStatus::Stopped))),
-                    );
+                    publish(&down, ChildStatus::Failed("ended".into()));
                 });
                 scope.spawn(|| {
                     barrier.wait();
@@ -256,7 +268,7 @@ fn helper_and_parent_traffic_in_both_directions_never_deadlocks() {
                 scope.spawn(|| {
                     barrier.wait();
                     let _ = up.post(child(ChildStatus::Stopped));
-                    let _ = up.status();
+                    let _ = up.status().unwrap();
                 });
             });
         }
@@ -274,7 +286,7 @@ fn stop_racing_settlement_has_the_same_verdict_as_the_settled_record() {
         let mailbox = mailbox(Admission::Free);
         let _exchange = start(&mailbox);
         let address = mailbox.address();
-        let id = address.status().job.unwrap();
+        let id = address.status().unwrap().job.unwrap();
         let barrier = Barrier::new(2);
         let (stop, next) = std::thread::scope(|scope| {
             let stop = scope.spawn(|| {
@@ -286,7 +298,7 @@ fn stop_racing_settlement_has_the_same_verdict_as_the_settled_record() {
             (stop.join().unwrap(), next)
         });
         assert!(matches!(next, Next::Settled { stopped } if stopped == stop.is_some()));
-        assert!(address.status().job.is_none());
+        assert!(address.status().unwrap().job.is_none());
         assert_eq!(address.stop(id), None);
     }
 }
@@ -300,7 +312,7 @@ fn a_failed_job_open_or_settlement_ends_the_bound_life() {
         if fail_on_open {
             record.fail_after(0);
             assert!(!mailbox.begin());
-            assert!(mailbox.address().status().job.is_none());
+            assert!(mailbox.address().status().unwrap().job.is_none());
         } else {
             let _exchange = start(&mailbox);
             record.fail_after(0);
@@ -312,7 +324,7 @@ fn a_failed_job_open_or_settlement_ends_the_bound_life() {
             !read_records(&dir.path().join(RECORD))
                 .unwrap()
                 .iter()
-                .any(|record| { matches!(record, Record::Forensic(Forensic::JobSettled { .. })) })
+                .any(|record| { matches!(record, Record::Control(Control::JobSettled { .. })) })
         );
     }
 }

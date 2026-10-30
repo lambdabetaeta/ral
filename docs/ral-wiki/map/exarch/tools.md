@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e5a23909
-generated_at_date: 2026-10-29
+generated_at_commit: fc0c9fbb
+generated_at_date: 2026-10-30
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
@@ -48,7 +48,7 @@ can see what it sent.
   search backward for its tool row. `Verdict::of(content, failed)` is the result's
   line count and `failed` — rejected, raised, nonzero, or severed — which the
   view fold settles onto the call, and the TUI draws a failed call's script in
-  solid red; the result text itself is recorded once, in `Protocol::ToolResults`.
+  solid red; the result text itself is recorded once, in `Transcript::ToolResults`.
   Malformed JSON uses `<invalid input>` as the
   call label but still gets a paired diagnostic verdict; if the call row itself
   cannot be appended, the seam reports a transient fault and cannot invent a

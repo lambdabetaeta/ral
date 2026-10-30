@@ -8,7 +8,7 @@ use super::palette::{AGENT_HUES, AgentSlot};
 use super::resources::ViewFigures;
 use crate::card::Card;
 use crate::port::{AgentRow, Port};
-use crate::record::{AgentId, AgentState, Born, Commit, Forensic, JobId, Record};
+use crate::record::{AgentId, AgentState, Born, Commit, Control, JobId, Record};
 use ral_core::own::OwnDir;
 
 use super::dial::Detail;
@@ -286,10 +286,10 @@ impl Tabs {
         };
         for record in commit.records() {
             match record.value() {
-                Record::Forensic(Forensic::JobOpened) => {
+                Record::Control(Control::JobOpened) => {
                     tab.job = Some(JobId::from(commit.number()));
                 }
-                Record::Forensic(Forensic::JobSettled { .. }) => tab.job = None,
+                Record::Control(Control::JobSettled { .. }) => tab.job = None,
                 _ => {}
             }
         }

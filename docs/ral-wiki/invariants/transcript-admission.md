@@ -20,12 +20,12 @@ disagree with the first, and nothing for a resume to compare
 
 Sequencing is **not** strict user/assistant alternation, and never was.
 Consecutive same-role messages are routine: a session that has evicted sends
-one **residue** — a bracketed user-voice message carrying the eviction's note —
-where each evicted run began, between items and never inside a turn, so a
-residue adjacent to a prompt puts two user-voice messages in a row, whether
+one **eviction** — a bracketed user-voice message carrying the eviction's note —
+where each evicted run began, between items and never inside a turn, so an
+eviction adjacent to a prompt puts two user-voice messages in a row, whether
 it stands before the oldest surviving prompt or mid-history
 ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]). A
-residue is never the last message while a request is built: the unclosed
+eviction is never the last message while a request is built: the unclosed
 turn is never in a cut, and a forced eviction never names the newest item.
 Its user voice is also what makes a prompt's eviction
 legal to the provider: the frontier opens with a user-role item whether its
@@ -87,7 +87,7 @@ Three adjacent obligations keep the invariant whole:
   prompt under its own note
   ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
 - **`Inherited` stands only at a fork's opening.** `Context::step` refuses
-  `Protocol::Inherited` anywhere but the first protocol record of a child log —
+  `Transcript::Inherited` anywhere but the first protocol record of a child log —
   the position *is* the rule, `len == 0`, needing no flag and no reading of
   the table. The record is
   sequencing-neutral — it commits no message and advances no state — so the
@@ -95,10 +95,10 @@ Three adjacent obligations keep the invariant whole:
   what makes "a log has at most one ancestry, fixed at the fork that opened it"
   a property of the file rather than a habit of the writer
   ([[decisions/260906_context-rollover|context-rollover]]). What the link
-  carries — the parent's whole table and its residues — is
+  carries — the parent's whole table and its evictions — is
   [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]'s and
   [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]'s, the
-  judge refusing residues that are not laminar or rows whose `location`
+  judge refusing evictions that are not laminar or rows whose `location`
   disagrees with them. It is also
   the one record whose meaning lies in another file: its step reads each
   resident row's records back through sum-checked pointers, keeping each
@@ -106,13 +106,13 @@ Three adjacent obligations keep the invariant whole:
   spawning batch reaches the child's wire, and an unreadable parent refuses
   the record before the table changes
   ([[internals/session-record|session-record]]).
-- **`System` and `Cleared` are edits, not messages.** `Protocol::System` sets the
+- **`System` and `Cleared` are edits, not messages.** `Transcript::System` sets the
   prompt every later request goes out under and, like `Inherited`, is
   sequencing-neutral; it never enters the transcript, the prompt travelling in
-  `Request.system`. `Protocol::Cleared` withdraws every turn and, like
+  `Request.system`. `Transcript::Cleared` withdraws every turn and, like
   `Rewound`, is admitted whenever a new turn is, so it too is refused only
   while tool results are owed.
-- **A harness-authored turn is an `Import`.** `Protocol::Import { turn, message }`
+- **A harness-authored turn is an `Import`.** `Transcript::Import { turn, message }`
   always opens a fresh turn under a newly minted id, and a stale one is refused;
   it carries no inherited material.
 - **A JSON-body 4xx is classified, not lost (X3).** `json_status_code` reads

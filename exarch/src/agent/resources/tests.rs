@@ -242,7 +242,6 @@ fn resource_rows_survey_the_agents_accumulators() {
             from: crate::record::AgentId::new(90),
             from_name: "peer".into(),
             text: "go on".into(),
-            from_parent: false,
         }))
         .unwrap();
     let depths_before = session.mailbox.source_depths();

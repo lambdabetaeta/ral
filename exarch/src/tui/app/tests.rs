@@ -5,6 +5,7 @@ use crate::bus::Signal;
 use crate::bus::UsageMeter;
 use crate::card::Mark;
 use crate::record::AgentState;
+use crate::record::Control;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
 use crate::tui::status::StateSpan;
@@ -60,17 +61,14 @@ pub(in crate::tui) fn app_for_host(host: &crate::host::Host) -> App {
     )
 }
 
-const REST: crate::bus::Rest = crate::bus::Rest {
-    pending: false,
-    schedules: false,
-};
+const REST: crate::bus::Rest = crate::bus::Rest { pending: false };
 
-fn job_commit(app: &mut App, id: AgentId, number: u64, fact: crate::record::Forensic) {
+fn job_commit(app: &mut App, id: AgentId, number: u64, fact: crate::record::Control) {
     app.commit(
         id,
         &Commit::placeholder(
             number,
-            crate::record::NonEmpty::one(crate::record::Record::Forensic(fact)),
+            crate::record::NonEmpty::one(crate::record::Record::Control(fact)),
         ),
     );
 }
@@ -82,13 +80,12 @@ fn open_exchange(app: &mut App, root: &TestAgent) -> crate::bus::Lease {
         panic!("the queued prompt starts an exchange");
     };
     assert!(root.mailbox.begin());
-    let job = root.status().job.expect("begin records a job");
-    job_commit(
-        app,
-        root.id(),
-        job.get(),
-        crate::record::Forensic::JobOpened,
-    );
+    let job = root
+        .status()
+        .expect("the cell is available")
+        .job
+        .expect("begin records a job");
+    job_commit(app, root.id(), job.get(), crate::record::Control::JobOpened);
     exchange
 }
 
@@ -183,7 +180,7 @@ fn recording_failure_with_independent_root(poison: bool) {
     use crate::agent::Trunk;
     use crate::agent::outcome::Outcome;
     use crate::agent::spawn::hatch_root;
-    use crate::agent::testkit::{scripted, trunk};
+    use crate::agent::testkit::{scripted, set_provider, trunk};
     use crate::bus::FleetBus;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Memory, Voice};
@@ -276,10 +273,10 @@ fn recording_failure_with_independent_root(poison: bool) {
         "test-model",
         Script::new().then(Reply::text("still usable")),
     );
+    set_provider(&mut other, provider);
     assert!(matches!(
         other.deliberate(
             &DurableRoot::default().child(),
-            &provider,
             Some(("independent work".into(), Voice::Human)),
             None,
             &bus.emitter(other.id()),
@@ -352,7 +349,7 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
             .unwrap();
         assert!(
             eventually(Duration::from_secs(5), || {
-                let status = handle.status();
+                let status = handle.status().expect("the cell is available");
                 (status.job.is_none() && matches!(status.report, Some(ChildStatus::Replied(_))))
                     .then_some(())
             })
@@ -439,10 +436,10 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
             "test-model",
             Script::new().then(Reply::text("still usable")),
         );
+        set_provider(&mut parent, provider.clone());
         assert!(matches!(
             parent.deliberate(
                 &DurableRoot::default().child(),
-                &provider,
                 Some(("independent work".into(), Voice::Human)),
                 None,
                 &bus.emitter(parent.id()),
@@ -479,7 +476,6 @@ fn live_vi_completion_escape_undo_and_redo_restore_the_partial_command() {
 #[test]
 fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
     use crate::bus::{Command, Input, Next, Read};
-    use crate::record::Forensic;
     use ral_core::process::CancelCause;
 
     for helper_focused in [false, true] {
@@ -541,7 +537,7 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
                 &mut app,
                 focused.id(),
                 job.get() + 1,
-                Forensic::JobSettled { job, stopped: true },
+                Control::JobSettled { job, stopped: true },
             );
             assert_eq!(app.tabs.focused_job(), None);
             app.key(key, &ctx());
@@ -601,7 +597,7 @@ fn a_root_parked_on_a_working_helper_reads_as_waiting_on_agents() {
 #[test]
 fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_continues_the_job() {
     use crate::bus::{Input, Next};
-    use crate::record::{ChildStatus, Forensic};
+    use crate::record::ChildStatus;
     use ral_core::process::CancelCause;
 
     let (mut app, _rx, root, fleet) = app_in_fleet(&Born::for_test("main", None));
@@ -612,14 +608,20 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
     .unwrap();
     born(&mut app, helper.id(), "helper", root.id());
     let root_exchange = open_exchange(&mut app, &root);
-    let job = root.status().job.expect("the root's job is open");
+    let job = root
+        .status()
+        .expect("the cell is available")
+        .job
+        .expect("the root's job is open");
 
     app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx());
 
     assert_eq!(root_exchange.cause(), Some(CancelCause::Interrupted));
     assert!(helper.is_live(), "Stop preserves helpers");
     assert!(!helper.mailbox.life().is_cancelled());
-    helper.report(ChildStatus::Stopped);
+    helper
+        .report(ChildStatus::Stopped)
+        .expect("the helper reports");
     let Next::Take {
         input: Input::Child { id, .. },
         exchange,
@@ -630,7 +632,11 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
     assert_eq!(id, helper.id());
     assert!(!exchange.is_cancelled(), "the report runs a live exchange");
     assert!(root.mailbox.begin());
-    assert_eq!(root.status().job, Some(job), "the same job continues");
+    assert_eq!(
+        root.status().expect("the cell is available").job,
+        Some(job),
+        "the same job continues"
+    );
     assert!(matches!(
         root.mailbox.next(REST),
         Next::Settled { stopped: true }
@@ -639,7 +645,7 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
         &mut app,
         root.id(),
         job.get() + 1,
-        Forensic::JobSettled { job, stopped: true },
+        Control::JobSettled { job, stopped: true },
     );
     assert_eq!(app.tabs.focused_job(), None);
 }
@@ -647,7 +653,6 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
 #[test]
 fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
     use crate::bus::Next;
-    use crate::record::Forensic;
 
     let (mut app, _, root) = app();
     let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
@@ -659,13 +664,13 @@ fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
         panic!("queued input");
     };
     assert!(root.mailbox.begin());
-    let job = root.status().job.unwrap();
+    let job = root.status().expect("the cell is available").job.unwrap();
     app.key(esc, &ctx());
     assert!(
         !exchange.is_cancelled(),
         "the UI has not observed JobOpened"
     );
-    job_commit(&mut app, root.id(), job.get(), Forensic::JobOpened);
+    job_commit(&mut app, root.id(), job.get(), Control::JobOpened);
     app.key(esc, &ctx());
     assert!(exchange.is_cancelled());
     assert!(matches!(
@@ -676,7 +681,7 @@ fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
         &mut app,
         root.id(),
         job.get() + 1,
-        Forensic::JobSettled { job, stopped: true },
+        Control::JobSettled { job, stopped: true },
     );
     root.steer("future prompt".into()).unwrap();
     app.key(esc, &ctx());
@@ -686,29 +691,54 @@ fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
 
 #[test]
 fn popup_and_overlay_own_escape_before_stop() {
-    use crate::record::{NonEmpty, Protocol, Record, Voice};
+    use crate::record::{NonEmpty, Record, Transcript, Voice};
 
-    let (mut app, _, root) = app();
-    let exchange = open_exchange(&mut app, &root);
-    root.steer("queued".into()).unwrap();
+    let root = crate::agent::Agent::for_test("system").unwrap();
+    let born = Born {
+        log_dir: root.log_dir().clone(),
+        name: "main".into(),
+        parent: None,
+        resumed: None,
+        reader: root.recorder().reader(),
+    };
+    let mut app = App::new(
+        root.id(),
+        &born,
+        Port::new(root.fleet.registry.clone(), UsageMeter::default()),
+        Err("no project in this fixture".into()),
+        prompt(false),
+        Card(Vec::new()),
+        mpsc::channel().0,
+    );
+    let (tx, rx) = crate::bus::channel();
+    let emit = crate::bus::Emitter::new(tx, root.id());
+    root.recorder().attach(emit.fleet_sink());
+    let handle = root.handle();
+    handle.steer("busy".into()).unwrap();
+    let crate::bus::Next::Take { exchange, .. } = root.mailbox.next(REST) else {
+        panic!("the queued prompt starts an exchange");
+    };
+    assert!(root.mailbox.begin());
+    handle.steer("queued".into()).unwrap();
+    for signal in rx.drain_pending() {
+        apply_signal(&mut app, &rx, signal);
+    }
     app.prompt_state.set_prompt("/th");
     app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx());
     assert!(app.prompt_state.menu().is_none());
     assert!(!exchange.is_cancelled());
-    assert_eq!(root.queued(), ["queued"]);
+    assert_eq!(handle.queued(), ["queued"]);
     assert_eq!(app.prompt_state.prompt_text(), "/th");
 
-    app.commit(
-        root.id(),
-        &Commit::placeholder(
-            2,
-            NonEmpty::one(Record::Protocol(Protocol::UserPrompt {
-                turn: 1,
-                text: "hello".into(),
-                voice: Voice::Human,
-            })),
-        ),
-    );
+    let commit = root
+        .recorder()
+        .commit(NonEmpty::one(Record::Transcript(Transcript::UserPrompt {
+            turn: 1,
+            text: "hello".into(),
+            voice: Voice::Human,
+        })))
+        .unwrap();
+    app.commit(root.id(), &commit);
     for cancel in [
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
@@ -718,7 +748,7 @@ fn popup_and_overlay_own_escape_before_stop() {
         app.key(cancel, &ctx());
         assert!(app.overlay.is_none());
         assert!(!exchange.is_cancelled());
-        assert_eq!(root.queued(), ["queued"]);
+        assert_eq!(handle.queued(), ["queued"]);
         assert_eq!(app.prompt_state.prompt_text(), "/th");
     }
 }
@@ -1260,7 +1290,7 @@ fn a_dying_tab_admits_no_straggler() {
 #[test]
 fn a_clear_wipes_the_pins_and_the_state() {
     use crate::bus::Signal;
-    use crate::record::{Emitter as Recorder, Protocol, Voice};
+    use crate::record::{Emitter as Recorder, Transcript, Voice};
 
     let dir = ral_core::own::OwnDir::for_test("clear").expect("a test directory");
     let recorder = Recorder::create(&dir).expect("a record log");
@@ -1289,7 +1319,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
     };
 
     let _recorded = recorder
-        .emit(Protocol::UserPrompt {
+        .emit(Transcript::UserPrompt {
             turn: 1,
             text: "before".into(),
             voice: Voice::Human,
@@ -1316,7 +1346,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
         ) && !status.pins().is_empty()
     );
 
-    let _recorded = recorder.emit(Protocol::Cleared).expect("the log appends");
+    let _recorded = recorder.emit(Transcript::Cleared).expect("the log appends");
     hear(&mut app);
 
     let status = app.tabs.status(root.id()).expect("root has a status");
@@ -1337,7 +1367,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
 #[test]
 fn rewind_acts_on_the_tab_it_was_opened_on() {
     use crate::bus::{Command, Next, Rewrite};
-    use crate::record::{Commit, NonEmpty, Protocol, Record, Voice};
+    use crate::record::{Commit, NonEmpty, Record, Transcript, Voice};
 
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
@@ -1356,7 +1386,7 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
         root.id(),
         &Commit::placeholder(
             1,
-            NonEmpty::one(Record::Protocol(Protocol::UserPrompt {
+            NonEmpty::one(Record::Transcript(Transcript::UserPrompt {
                 turn: 1,
                 text: "hello".into(),
                 voice: Voice::Human,
@@ -1611,14 +1641,12 @@ fn editor_search_owns_enter_escape_and_external_editor_shortcuts() {
 
 #[test]
 fn stale_escape_reaches_vi_editor_but_ctrl_c_does_not() {
-    use crate::record::Forensic;
-
     for esc in [true, false] {
         let (mut app, _, root) = app();
         app.prompt_state = prompt(true);
         app.prompt_state.set_prompt("abc");
         let stale = crate::record::JobId::from(999);
-        job_commit(&mut app, root.id(), stale.get(), Forensic::JobOpened);
+        job_commit(&mut app, root.id(), stale.get(), Control::JobOpened);
         let key = if esc {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
         } else {

@@ -1,15 +1,16 @@
 use super::*;
 use crate::record::RECORD;
 use crate::record::{
-    BlockId, Display, EditAuthority, Emitter as Recorder, Protocol, Residue, Span, Verdict, Voice,
+    BlockId, Display, EditAuthority, Emitter as Recorder, Eviction, Span, Transcript, Verdict,
+    Voice,
 };
 use ral_core::data::datum::Datum as _;
 use ral_core::fact::Read;
 use ral_core::own::OwnDir;
 use ral_core::shell::runtime::{Observation, Observed};
 
-fn prompt(turn: u64, text: &str) -> Protocol {
-    Protocol::UserPrompt {
+fn prompt(turn: u64, text: &str) -> Transcript {
+    Transcript::UserPrompt {
         turn,
         text: text.into(),
         voice: Voice::Human,
@@ -64,16 +65,14 @@ fn session(dir: &OwnDir) -> (Recorder, std::path::PathBuf) {
         .into(),
     );
     let _ = emit(
-        Protocol::Evicted {
-            residue: Residue {
-                span: Span::single(1),
-                note: None,
-                by: EditAuthority::Harness,
-            },
-        }
+        Transcript::Evicted(Eviction {
+            span: Span::single(1),
+            note: None,
+            by: EditAuthority::Harness,
+        })
         .into(),
     );
-    let _ = emit(Protocol::Cleared.into());
+    let _ = emit(Transcript::Cleared.into());
     let _ = emit(prompt(2, "second prompt").into());
     (recorder, path)
 }
@@ -116,4 +115,55 @@ fn a_torn_tail_is_ignored() {
     file.write_all(br#"{"sum":"0123456789abcdef","commit":{"at_unix_ms":0,"records":[{"Pro"#)
         .expect("a torn write");
     assert_eq!(rendered(&path), whole);
+}
+
+#[test]
+fn export_refuses_mismatched_and_non_tightening_window_records() {
+    use crate::record::{AgentId, Control, Selected, Started};
+
+    for (model, context_window) in [("n", 50), ("m", 100), ("m", 101)] {
+        let dir = OwnDir::for_test("export-invalid-window").unwrap();
+        let path = dir.path().join(RECORD);
+        let mut selected = Selected::for_test("m");
+        selected.context_window = Some(100);
+        let records = [
+            Record::Control(Control::SessionStarted(Started {
+                session_id: AgentId::new(0),
+                name: "main".into(),
+                parent: None,
+                returns: true,
+                selected,
+                log_dir: dir.path().to_path_buf(),
+                at_unix_ms: 0,
+            })),
+            Record::Control(Control::WindowNarrowed {
+                model: model.into(),
+                context_window,
+            }),
+        ];
+        let mut file = std::fs::File::create(&path).unwrap();
+        for record in records {
+            file.write_all(&crate::record::commit_line(&[record]))
+                .unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        drop(file);
+        let error = export(
+            std::fs::File::open(&path).unwrap(),
+            &path,
+            &mut Vec::new(),
+            Format::Plain,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("refused a foreign record"),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("the limit must narrow that model"),
+            "{error}"
+        );
+    }
 }

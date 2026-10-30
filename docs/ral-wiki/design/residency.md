@@ -6,7 +6,7 @@ and a resident has exactly four facets: an identity in the session's
 ownership tree, a typed capability that reaches it, a lease, and a probe.**
 The session keeps one *ledger* of residents, in chapters that keep their own
 representations, and every management surface — listing, the exit story,
-cancellation cascade, `/clear`'s clear-epoch, `/resources` — is a fold over
+cancellation cascade, `/clear`'s withdrawals, `/resources` — is a fold over
 that ledger, written once. Lifetime moves along one order of residency
 grades, and the two halves of the system are its two traversal disciplines:
 interactive work *discovers* its lifetime after the fact, agent work
@@ -111,11 +111,14 @@ against it:
   loose shell workers. Schedules clear on report or reset and their timers
   retain only weak shared mailbox addresses.
 - **delivery** — mailbox admission controls rest; a helper's parent obligation
-  orders its report before parent settlement. Engine generations and schedule
-  epochs reject batches and wakeups across reset. Scheduled firing updates
-  its registry and enqueues atomically under the mailbox lock. One tab's
+  orders its report before parent settlement. Engine generations reject
+  outgoing batches. `Schedules` folds recorded bookings; timers only ring,
+  and their owner commits wakeups and booking updates together under the
+  cell lock. Report/reset retires bookings and withdraws queued wakeups;
+  late rings are harmless without epochs. One tab's
   clear changes only its owned state and helper subtree
-  ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
+  ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]],
+  [[design/agents|agents]]).
 - **probe** — the `/resources` projection, over residents and accumulators
   alike.
 

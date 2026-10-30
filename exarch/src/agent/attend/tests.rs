@@ -4,7 +4,7 @@ use crate::agent::{TestTrunk, Trunk};
 use crate::bus::{Input, Signal};
 use crate::provider::Refusal;
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Display, Memory, Protocol, Record, Voice};
+use crate::record::{Display, Memory, Record, Transcript, Voice};
 use ral_core::carrier::{Severed, Transport};
 use ral_core::data::FOValue;
 use ral_core::process::{CancelCause, DurableRoot};
@@ -22,7 +22,7 @@ fn human_exchange(session: &mut Agent, text: &str, emit: &Emitter) -> AgentOutco
     };
     let prompt = session.admit(input).unwrap();
     assert!(session.mailbox.begin());
-    session.body.state.readings.nudges.reset();
+    session.body.readings.nudges.reset();
     session.exchange(&exchange, prompt, emit)
 }
 
@@ -148,7 +148,7 @@ fn a_recording_failure_is_announced_even_when_the_life_was_already_ended() {
             .to_string();
         let (emit, rx) = emitter(&parent);
         let helper = launch_child(&mut parent, child, None, &emit);
-        let failures = parent.body.state.nursery.join(helper.id());
+        let failures = parent.body.nursery.join(helper.id());
         assert_eq!(failures, vec![failure.clone()]);
         let faults: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|signal| match signal {
@@ -167,10 +167,11 @@ fn a_recording_failure_is_announced_even_when_the_life_was_already_ended() {
                 ..
             }
         ));
-        assert!(matches!(
-            handle.status().report,
-            Some(ChildStatus::Failed(_))
-        ));
+        assert_eq!(
+            handle.status().unwrap().report,
+            None,
+            "a failed append cannot manufacture a committed Status"
+        );
     }
 }
 
@@ -207,7 +208,7 @@ fn stop_after_a_mid_job_pop_records_the_prompt_without_running_a_turn() {
         panic!("human input")
     };
     let prompt = session.admit(input).unwrap();
-    let job = session.handle().status().job.unwrap();
+    let job = session.handle().status().unwrap().job.unwrap();
     assert_eq!(session.handle().stop(job), Some(vec![]));
     session.handle().steer("fresh".into()).unwrap();
     assert!(matches!(
@@ -219,7 +220,7 @@ fn stop_after_a_mid_job_pop_records_the_prompt_without_running_a_turn() {
     assert!(session.is_ready());
     let records = crate::bus::drain_records(&rx);
     assert_eq!(records.iter().filter(|record| matches!(record,
-        Record::Protocol(Protocol::UserPrompt { text, voice: Voice::Human, .. }) if text == "old"
+        Record::Transcript(Transcript::UserPrompt { text, voice: Voice::Human, .. }) if text == "old"
     )).count(), 1);
     assert!(
         !records
@@ -274,7 +275,7 @@ fn a_child_without_reply_is_renudged_then_publishes_failure_at_rest() {
     assert!(matches!(&outcome, AgentOutcome::Failed(reason) if reason == NO_REPLY_REASON));
     settle(&mut child, outcome);
     assert!(
-        matches!(child.handle().status().report, Some(ChildStatus::Failed(reason)) if reason == NO_REPLY_REASON)
+        matches!(child.handle().status().unwrap().report, Some(ChildStatus::Failed(reason)) if reason == NO_REPLY_REASON)
     );
     assert!(child.is_ready());
     assert_eq!(
@@ -383,7 +384,7 @@ fn pin_reminder_does_not_relivelock_a_conversing_root() {
     );
     let outcome = human_exchange(&mut session, "go", &emit);
     settle(&mut session, outcome);
-    assert!(session.handle().status().job.is_none());
+    assert!(session.handle().status().unwrap().job.is_none());
     assert_eq!(
         crate::bus::drain_records(&rx)
             .iter()
@@ -416,7 +417,7 @@ fn chat_trunk_never_nudges() {
 }
 
 fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Agent {
-    let session = Agent::for_test_with(TestTrunk {
+    let mut session = Agent::for_test_with(TestTrunk {
         resume_on_reset,
         ..TestTrunk::new("system")
     })
@@ -432,14 +433,23 @@ fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Agent {
 
 #[test]
 fn a_deferred_refusal_arms_only_one_resume_wakeup() {
-    let session = refused_twice(true, Duration::from_hours(5));
-    assert!(session.body.state.schedules.unschedule(RESUME_LABEL));
-    assert!(!session.body.state.schedules.armed());
+    let mut session = refused_twice(true, Duration::from_hours(5));
+    let body = &mut *session.body;
+    assert!(
+        session
+            .mailbox
+            .transact(|txn| body.schedules.unschedule(txn, RESUME_LABEL))
+            .unwrap()
+            .unwrap()
+    );
+    assert!(crate::agent::testkit::schedules(&session).is_empty());
 }
 
 #[test]
 fn only_a_resuming_root_arms_a_resume_past_the_in_place_wait() {
-    let armed = |resumes, delay| refused_twice(resumes, delay).body.state.schedules.armed();
+    let armed = |resumes, delay| {
+        !crate::agent::testkit::schedules(&refused_twice(resumes, delay)).is_empty()
+    };
     assert!(!armed(false, Duration::from_hours(5)));
     assert!(!armed(true, Duration::from_secs(5)));
 }
@@ -473,7 +483,7 @@ fn an_already_claimed_worker_batch_replays_cards_but_opens_no_job() {
             })
             .is_none()
     );
-    assert!(session.handle().status().job.is_none());
+    assert!(session.handle().status().unwrap().job.is_none());
     let records = crate::bus::drain_records(&rx);
     assert!(
         records
@@ -488,7 +498,7 @@ fn an_already_claimed_worker_batch_replays_cards_but_opens_no_job() {
     assert!(
         !records
             .iter()
-            .any(|record| matches!(record, Record::Forensic(Forensic::JobOpened)))
+            .any(|record| matches!(record, Record::Control(crate::record::Control::JobOpened)))
     );
 }
 
@@ -575,20 +585,14 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     })
     .unwrap();
     let mut child = parent.fork_named("helper").unwrap();
-    child
-        .body
-        .state
-        .schedules
-        .schedule(
-            Trigger::After(Duration::from_hours(2)),
-            "continue".into(),
-            "continuation".into(),
-            &child.mailbox.address(),
-        )
-        .unwrap();
-    assert!(child.rest().schedules);
-    assert!(child.body.state.owed);
-    assert!(child.handle().status().owes_parent);
+    crate::agent::testkit::schedule(
+        &mut child,
+        Trigger::After(Duration::from_hours(2)),
+        "continue".into(),
+        "continuation".into(),
+    );
+    assert!(!crate::agent::testkit::schedules(&child).is_empty());
+    assert!(child.handle().status().unwrap().owes);
     assert!(!child.rest().pending);
     assert!(!child.mailbox.has_input());
     assert!(child.mailbox.drain().is_empty());
@@ -615,15 +619,14 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     );
     assert!(!records.iter().any(|record| matches!(
         record,
-        Record::Forensic(Forensic::Nudge { .. } | Forensic::Status { .. })
+        Record::Forensic(Forensic::Nudge { .. })
+            | Record::Control(crate::record::Control::Status { .. })
     )));
-    assert!(child.body.state.owed);
-    assert!(child.handle().status().owes_parent);
-    assert!(child.rest().schedules);
+    assert!(child.handle().status().unwrap().owes);
+    assert!(!crate::agent::testkit::schedules(&child).is_empty());
     child.report(ChildStatus::Replied(FOValue::Unit));
-    assert!(!child.rest().schedules);
-    assert!(!child.body.state.owed);
-    assert!(!child.handle().status().owes_parent);
+    assert!(crate::agent::testkit::schedules(&child).is_empty());
+    assert!(!child.handle().status().unwrap().owes);
     let parent_handle = parent.handle();
     let _parent_timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
         parent_handle.end();
@@ -648,7 +651,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     )
     .unwrap();
     let handle = (*grandchild).clone();
-    child.body.state.nursery.adopt(
+    child.body.nursery.adopt(
         handle.clone(),
         crate::agent::nursery::Joined::new(std::thread::spawn(move || {
             wait_until("grandchild ended", || !grandchild.is_live());
@@ -657,8 +660,8 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
         })),
     );
     assert!(child.rest().pending);
-    handle.report(ChildStatus::Replied(FOValue::Unit));
-    assert!(!handle.status().owes_parent);
+    handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
+    assert!(!handle.status().unwrap().owes);
     assert!(!child.rest().pending);
     let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
         panic!("grandchild report")
@@ -666,8 +669,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     assert!(matches!(&input, Input::Child { id, .. } if *id == handle.id()));
     let prompt = child.admit(input).unwrap();
     assert!(child.mailbox.begin());
-    assert!(!child.body.state.owed);
-    assert!(!child.handle().status().owes_parent);
+    assert!(!child.handle().status().unwrap().owes);
     set_provider(
         &mut child,
         scripted(
@@ -687,19 +689,144 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
     );
     assert!(!records.iter().any(|record| matches!(
         record,
-        Record::Forensic(Forensic::Nudge { .. } | Forensic::Status { .. })
+        Record::Forensic(Forensic::Nudge { .. })
+            | Record::Control(crate::record::Control::Status { .. })
     )));
-    assert!(!child.body.state.owed);
-    assert!(!child.handle().status().owes_parent);
-    assert!(!child.handle().status().working());
+    assert!(!child.handle().status().unwrap().owes);
+    assert!(!child.handle().status().unwrap().working());
     assert!(matches!(
-        child.handle().status().report,
+        child.handle().status().unwrap().report,
         Some(ChildStatus::Replied(FOValue::Unit))
     ));
     assert!(parent.mailbox.drain().is_empty());
-    let failures = child.body.state.nursery.dismiss_all();
+    let failures = child.body.nursery.dismiss_all();
     assert_eq!(failures, Vec::<String>::new());
     assert!(!child.rest().pending);
 }
 
 mod lifecycle;
+
+#[test]
+fn a_failed_status_append_delivers_one_terminal_failure_only_when_owed() {
+    for owed in [false, true] {
+        let parent = trunk(Trunk::Converses);
+        let mut child = parent.fork().unwrap();
+        let handle = child.handle();
+        if !owed {
+            handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
+            assert_eq!(parent.mailbox.drain().len(), 1);
+        }
+        handle.steer("unread local input".into()).unwrap();
+        crate::agent::testkit::schedule(
+            &mut child,
+            crate::schedule::Trigger::After(Duration::from_hours(1)),
+            "later".into(),
+            "later".into(),
+        );
+        let before = handle.status().unwrap();
+        assert_eq!(before.owes, owed);
+        let pending = handle.0.address.queued_posts();
+        let recorder = child.recorder();
+        let bytes = child.log_dir().read(crate::record::RECORD).unwrap();
+        recorder.fail_after(0);
+        let failure = handle
+            .report(ChildStatus::Replied(FOValue::Unit))
+            .unwrap_err();
+        let after = handle.status().unwrap();
+        assert_eq!(after.report, before.report);
+        assert_eq!(after.owes, before.owes);
+        assert_eq!(after.job, before.job);
+        assert_eq!(after.selected, before.selected);
+        assert_eq!(handle.0.address.queued_posts(), pending);
+        assert_eq!(crate::agent::testkit::schedules(&child).len(), 1);
+        assert_eq!(child.log_dir().read(crate::record::RECORD).unwrap(), bytes);
+        let _teardown = child.teardown();
+        assert!(handle.report(ChildStatus::Stopped).is_err());
+        let notices = parent.mailbox.drain();
+        assert_eq!(notices.len(), usize::from(owed));
+        if owed {
+            assert!(
+                matches!(&notices[..], [crate::bus::Drained::Input(Input::Child {
+                id, status: ChildStatus::Failed(reason), ..
+            })] if *id == handle.id() && reason == &failure.to_string())
+            );
+        }
+        assert!(parent.handle().is_live());
+        assert!(parent.check_available().is_ok());
+    }
+}
+
+#[test]
+fn a_poison_report_then_owner_teardown_delivers_only_one_failure() {
+    let parent = trunk(Trunk::Converses);
+    let mut child = parent.fork().unwrap();
+    let handle = child.handle();
+    let crate::agent::engine::EngineKind::Identity(engine) = child.engine().kind() else {
+        panic!("an identity test engine");
+    };
+    assert!(parent.mailbox.begin());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _result = handle
+                .0
+                .address
+                .transact(|_| panic!("poison before reporting"));
+        }))
+        .is_err()
+    );
+    let failure = handle
+        .report(ChildStatus::Replied(FOValue::Unit))
+        .unwrap_err();
+    let _teardown = child.teardown();
+    assert!(engine.session_ended().unwrap().is_some());
+    assert!(!handle.is_live());
+    assert!(handle.report(ChildStatus::Stopped).is_err());
+    let notices = parent.mailbox.drain();
+    assert!(
+        matches!(&notices[..], [crate::bus::Drained::Input(Input::Child {
+        id, status: ChildStatus::Failed(reason), ..
+    })] if *id == handle.id() && reason == &failure.to_string())
+    );
+    assert!(matches!(
+        parent.mailbox.next(parent.rest()),
+        Next::Settled { stopped: false }
+    ));
+    assert!(parent.mailbox.drain().is_empty());
+}
+
+#[test]
+fn cell_poison_does_not_replace_an_earlier_recording_failure() {
+    let parent = trunk(Trunk::Converses);
+    let mut child = parent.fork().unwrap();
+    let handle = child.handle();
+    let recorder = child.recorder();
+    recorder.fail_after(0);
+    let first = recorder
+        .emit(Display::Answer {
+            text: "lost".into(),
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(first.starts_with("recording to "));
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _result = handle
+                .0
+                .address
+                .transact(|_| panic!("poison after recording failed"));
+        }))
+        .is_err()
+    );
+    assert_eq!(handle.status().err().unwrap().to_string(), first);
+    assert_eq!(
+        handle.report(ChildStatus::Stopped).unwrap_err().to_string(),
+        first
+    );
+    let _teardown = child.teardown();
+    assert!(
+        matches!(&parent.mailbox.drain()[..], [crate::bus::Drained::Input(Input::Child {
+        status: ChildStatus::Failed(reason), ..
+    })] if reason == &first)
+    );
+    assert_eq!(recorder.check_available().unwrap_err().to_string(), first);
+}

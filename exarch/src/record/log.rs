@@ -255,32 +255,41 @@ pub(crate) fn parse_line(line: &[u8]) -> Option<(Sum, Vec<Record>)> {
 pub struct Unavailable(Arc<Failure>);
 
 #[derive(Debug)]
-struct Failure {
-    /// `None` for a fileless test log.
-    record: Option<PathBuf>,
-    cause: io::Error,
+enum Failure {
+    Recording {
+        /// `None` for a fileless test log.
+        record: Option<PathBuf>,
+        cause: io::Error,
+    },
+    CellPoisoned(String),
 }
 
 impl Unavailable {
     fn new(record: Option<PathBuf>, cause: io::Error) -> Self {
-        Self(Arc::new(Failure { record, cause }))
+        Self(Arc::new(Failure::Recording { record, cause }))
     }
 
     pub fn kind(&self) -> io::ErrorKind {
-        self.0.cause.kind()
+        match &*self.0 {
+            Failure::Recording { cause, .. } => cause.kind(),
+            Failure::CellPoisoned(_) => io::ErrorKind::Other,
+        }
     }
 }
 
 impl fmt::Display for Unavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0.record {
+        let (record, cause) = match &*self.0 {
+            Failure::Recording { record, cause } => (record, cause),
+            Failure::CellPoisoned(why) => return f.write_str(why),
+        };
+        match record {
             Some(path) => write!(f, "recording to {} failed", ral_core::path::shown(path))?,
             None => f.write_str("recording failed")?,
         }
         write!(
             f,
-            ": {}; this session has ended, since it can record nothing more. Its record keeps everything before the failure, so the run can be resumed once the cause is fixed.",
-            self.0.cause
+            ": {cause}; this session has ended, since it can record nothing more. Its record keeps everything before the failure, so the run can be resumed once the cause is fixed."
         )
     }
 }
@@ -478,6 +487,11 @@ impl Log {
     pub(super) fn fail(&self, cause: io::Error) -> Unavailable {
         self.failure
             .latch(Unavailable::new(self.record.clone(), cause))
+    }
+
+    pub(super) fn cell_poisoned(&self, why: String) -> Unavailable {
+        self.failure
+            .latch(Unavailable(Arc::new(Failure::CellPoisoned(why))))
     }
 
     /// End `life` when this writer fails, at once if it has.

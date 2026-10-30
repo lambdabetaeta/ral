@@ -34,6 +34,12 @@ impl Agent {
             }
             match self.mailbox.next(rest) {
                 Next::Ended => break,
+                Next::Rung => {
+                    if self.fire_schedules().is_err() {
+                        break;
+                    }
+                }
+                Next::Gone(id) => self.gone(id),
                 Next::Settled { stopped } => self.settled(stopped, last.take()),
                 Next::Command(command) => {
                     if self.command(command, emit).is_break() {
@@ -47,7 +53,7 @@ impl Agent {
                     if !self.mailbox.begin() {
                         break;
                     }
-                    self.body.state.readings.nudges.reset();
+                    self.body.readings.nudges.reset();
                     last = Some(self.exchange(&exchange, prompt, emit));
                 }
             }
@@ -56,10 +62,9 @@ impl Agent {
     }
 
     pub(super) fn rest(&self) -> Rest {
-        let nursery = &self.body.state.nursery;
+        let nursery = &self.body.nursery;
         Rest {
             pending: nursery.owing(),
-            schedules: self.handle.0.role.returns() && self.body.state.schedules.armed(),
         }
     }
 
@@ -87,6 +92,14 @@ impl Agent {
             let final_outcome = agent_outcome(&outcome);
             // A12: read debts before checking the queue.
             let rest = self.rest();
+            let Ok((must_reply, schedules)) = self.mailbox.transact(|txn| {
+                (
+                    txn.mail().owes(),
+                    txn.mail().returns() && !txn.schedules().is_empty(),
+                )
+            }) else {
+                return final_outcome;
+            };
             if exchange.is_cancelled() || self.mailbox.has_input() {
                 return final_outcome;
             }
@@ -99,13 +112,12 @@ impl Agent {
                 }
             };
             let facts = nudge::Facts {
-                must_reply: self.body.state.owed,
+                must_reply,
                 pinned: self.pinned_digest(),
-                quiet: workers_idle && !rest.pending && !rest.schedules,
+                quiet: workers_idle && !rest.pending && !schedules,
             };
             let body = &mut *self.body;
             let Some(text) = body
-                .state
                 .readings
                 .nudges
                 .react(outcome.as_ref(), &facts, &body.log)
@@ -132,11 +144,9 @@ impl Agent {
         prompt: Prompt,
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
-        let active = self.body.state.provider.clone();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.deliberate(
                 exchange,
-                &active,
                 Some((prompt.text, prompt.voice)),
                 prompt.continues,
                 emit,
@@ -152,16 +162,16 @@ impl Agent {
     }
 
     pub(super) fn report(&mut self, status: ChildStatus) {
-        self.recorder().emit_or_end(Forensic::Status {
-            status: status.clone(),
-        });
-        self.body.state.owed = false;
-        self.body.state.schedules.clear();
-        self.handle.report(status);
+        let _reported = self.handle.report(status);
+        self.body.schedules.clear();
     }
 
     fn settled(&mut self, stopped: bool, last: Option<AgentOutcome>) {
-        if self.body.state.owed {
+        if self
+            .mailbox
+            .transact(|txn| txn.mail().owes())
+            .unwrap_or(false)
+        {
             self.report(if stopped {
                 ChildStatus::Stopped
             } else {
@@ -180,17 +190,21 @@ impl Agent {
                 failures: Vec::new(),
             };
         };
-        self.body.state.schedules.clear();
+        self.body.schedules.clear();
         self.handle.end();
-        if self.body.state.owed || self.handle.status().owes_parent {
+        if self
+            .mailbox
+            .transact(|txn| txn.mail().owes())
+            .unwrap_or_else(|_| self.handle.0.role.parent().is_some())
+        {
             let reason = severed.as_ref().map_or_else(
                 || ENDED_BEFORE_REPORTING.to_string(),
                 |cause| EngineLost::running(cause, self.run_dir()).to_string(),
             );
             self.report(ChildStatus::Failed(reason));
         }
-        let failures = self.body.state.nursery.dismiss_all();
-        self.body.state.failures.extend(failures);
+        let failures = self.body.nursery.dismiss_all();
+        self.body.failures.extend(failures);
         if let Some(cause) = severed {
             self.recorder()
                 .emit_or_end(Forensic::EngineSevered { cause });
@@ -198,14 +212,13 @@ impl Agent {
         let engine = self.engine.take().expect("teardown found the engine");
         self.body.retire_engine(&self.handle.0.name, &engine);
         Teardown {
-            failures: std::mem::take(&mut self.body.state.failures),
+            failures: std::mem::take(&mut self.body.failures),
         }
     }
 
     fn pinned_digest(&self) -> Option<String> {
         let lines: Vec<_> = self
             .body
-            .state
             .pins
             .values()
             .map(|pin| crate::card::summary_line(&pin.card))
@@ -213,7 +226,7 @@ impl Agent {
         (!lines.is_empty()).then(|| lines.join("; "))
     }
 
-    fn record_failure(&self, error: &ProviderError) {
+    fn record_failure(&mut self, error: &ProviderError) {
         self.recorder().emit_or_end(Forensic::ProviderError {
             error: error.clone(),
         });
@@ -225,20 +238,26 @@ impl Agent {
         }
     }
 
-    fn resume_at(&self, resets_at: jiff::Timestamp, limit: Limit) {
+    fn resume_at(&mut self, resets_at: jiff::Timestamp, limit: Limit) {
         let now = jiff::Timestamp::now();
         let prompt = format!(
             "The provider refused requests at {} until {}; that time has passed. Carry on where you left off.",
             clock::local(now),
             clock::local(resets_at)
         );
-        self.body.state.schedules.unschedule(RESUME_LABEL);
-        match self.body.state.schedules.schedule(
-            Trigger::At(resets_at),
-            prompt,
-            RESUME_LABEL.into(),
-            &self.mailbox.address(),
-        ) {
+        let body = &mut *self.body;
+        let scheduled = self
+            .mailbox
+            .transact(|txn| {
+                body.schedules
+                    .unschedule(txn, RESUME_LABEL)
+                    .map_err(|why| why.to_string())?;
+                body.schedules
+                    .schedule(txn, Trigger::At(resets_at), prompt, RESUME_LABEL.into())
+            })
+            .map_err(|why| why.to_string())
+            .flatten();
+        match scheduled {
             Ok(_) => self.note(format!(
                 "{}: resuming {}, in {}",
                 limit.label(),
@@ -250,6 +269,12 @@ impl Agent {
                 limit.label()
             )),
         }
+    }
+
+    pub(crate) fn fire_schedules(&mut self) -> Result<(), Unavailable> {
+        let body = &mut *self.body;
+        self.mailbox
+            .try_transact(|txn| body.schedules.fire(txn, jiff::Timestamp::now()))
     }
 
     pub(super) fn abort_unready(&mut self) -> Result<(), Unavailable> {

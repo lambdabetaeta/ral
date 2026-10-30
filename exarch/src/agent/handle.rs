@@ -5,7 +5,7 @@ mod tests;
 
 use super::Role;
 use crate::bus::{AgentAddress, AgentMessage, Command, Input, Refused, Status};
-use crate::record::{AgentId, ChildStatus, JobId};
+use crate::record::{AgentId, ChildStatus, JobId, Unavailable};
 use ral_core::own::OwnDir;
 use ral_core::process::CancelCause;
 use std::{
@@ -79,25 +79,19 @@ impl AgentHandle {
             from: from.id(),
             from_name: from.0.name.clone(),
             text,
-            from_parent: self.parent().is_some_and(|parent| parent.id() == from.id()),
         };
         self.0.address.post(Input::Message(message))
     }
-    pub(crate) fn report(&self, status: ChildStatus) {
-        let parent = self.parent().map(|parent| {
-            (
-                &parent.0.address,
-                Input::Child {
-                    id: self.id(),
-                    name: Arc::from(self.0.name.as_str()),
-                    status: status.clone(),
-                    elapsed: self.elapsed(),
-                },
-            )
-        });
-        self.0.address.report(status, parent);
+    pub(crate) fn report(&self, status: ChildStatus) -> Result<(), Unavailable> {
+        let notice = |status| Input::Child {
+            id: self.id(),
+            name: Arc::from(self.0.name.as_str()),
+            status,
+            elapsed: self.elapsed(),
+        };
+        self.0.address.report(status, notice)
     }
-    pub(crate) fn status(&self) -> Status {
+    pub(crate) fn status(&self) -> Result<Status, Unavailable> {
         self.0.address.status()
     }
     pub(crate) fn parent(&self) -> Option<&Self> {

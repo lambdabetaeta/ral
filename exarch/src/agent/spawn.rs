@@ -2,7 +2,7 @@
 
 use crate::agent::nursery::{Joined, Teardown};
 use crate::agent::{Agent, AgentHandle};
-use crate::bus::{Emitter, Input, WORKER_PANIC_PREFIX, panic_msg};
+use crate::bus::{Emitter, WORKER_PANIC_PREFIX, panic_msg};
 use crate::record::{AgentLog, Born, ChildStatus, Forensic, Memory, Transient, Unavailable};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,7 +41,7 @@ impl Drop for Terminal {
             }),
         });
         if let Some(parent) = self.handle.parent() {
-            let _posted = parent.0.address.post(Input::Gone(self.handle.id()));
+            parent.0.address.gone(self.handle.id());
         }
     }
 }
@@ -111,7 +111,7 @@ fn live(agent: Agent, emit: Emitter) -> Teardown {
                 terminal.recorder.emit_or_end(Forensic::Error {
                     text: failure.clone(),
                 });
-                terminal.handle.report(ChildStatus::Failed(failure.clone()));
+                let _reported = terminal.handle.report(ChildStatus::Failed(failure.clone()));
                 Teardown {
                     failures: vec![failure],
                 }
@@ -158,11 +158,19 @@ pub(crate) fn hatch_root(
         &session.fleet,
         reserved,
         engine,
-        session.body.state.provider.clone(),
-        |sessions, model, account, system| {
+        session.body.client.clone(),
+        |sessions, selected, system| {
             let id = crate::agent::fresh_id();
-            AgentLog::root(sessions, id, &name, model, account, system, inherited)
-                .map(|log| (log, ()))
+            AgentLog::root(
+                sessions,
+                id,
+                &name,
+                session.fleet.launch.trunk.role().returns(),
+                selected,
+                system,
+                inherited,
+            )
+            .map(|log| (log, ()))
         },
     )
     .map(|(root, ())| root)
@@ -202,7 +210,7 @@ pub(crate) fn spawn_root(
     let thread = match root.launch(born, None, emit) {
         Ok(thread) => thread,
         Err(error) => {
-            session.body.state.failures.extend(error.failures);
+            session.body.failures.extend(error.failures);
             return Err(format!(
                 "could not spawn a worker thread for agent {}: {}",
                 handle.id(),

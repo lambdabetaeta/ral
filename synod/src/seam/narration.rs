@@ -8,7 +8,8 @@ use exarch::provider::ProviderError;
 use exarch::record::fault::Readout;
 use exarch::record::{AgentId, Born};
 use exarch::record::{
-    Display, Forensic, Protocol, Record, Recorded, Settlement, Transient, Voice, context_rows_card,
+    Display, Forensic, Record, Recorded, Settlement, Transcript, Transient, Voice,
+    context_rows_card,
 };
 use std::collections::BTreeSet;
 
@@ -37,27 +38,27 @@ fn provider_error_severity(record: &ProviderError) -> Severity {
 }
 
 /// Only the trunk's human messages reach the transcript.
-fn project_protocol(role: Role, protocol: &Protocol) -> Option<SynodEvent> {
-    match protocol {
-        Protocol::UserPrompt {
+fn project_transcript(role: Role, transcript: &Transcript) -> Option<SynodEvent> {
+    match transcript {
+        Transcript::UserPrompt {
             text,
             voice: Voice::Human,
             ..
         }
-        | Protocol::Steering {
+        | Transcript::Steering {
             text,
             voice: Voice::Human,
         } if role == Role::Trunk => Some(SynodEvent::Human { text: text.clone() }),
-        Protocol::UserPrompt { .. }
-        | Protocol::Steering { .. }
-        | Protocol::System { .. }
-        | Protocol::Import { .. }
-        | Protocol::Inherited { .. }
-        | Protocol::AssistantMessage { .. }
-        | Protocol::ToolResults { .. }
-        | Protocol::Evicted { .. }
-        | Protocol::Rewound { .. }
-        | Protocol::Cleared => None,
+        Transcript::UserPrompt { .. }
+        | Transcript::Steering { .. }
+        | Transcript::System { .. }
+        | Transcript::Import { .. }
+        | Transcript::Inherited { .. }
+        | Transcript::AssistantMessage { .. }
+        | Transcript::ToolResults { .. }
+        | Transcript::Evicted(_)
+        | Transcript::Rewound { .. }
+        | Transcript::Cleared => None,
     }
 }
 
@@ -134,17 +135,10 @@ fn forensic(role: Role, forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::Reap { .. }
         | Forensic::Prune { .. }
         | Forensic::Unpin { .. }
-        | Forensic::ModelChanged { .. }
-        | Forensic::WindowNarrowed { .. }
-        | Forensic::SessionStarted { .. }
-        | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
         | Forensic::SessionClosed
-        | Forensic::JobOpened
-        | Forensic::JobSettled { .. }
         | Forensic::EngineSevered { .. }
         | Forensic::TeardownFailed { .. }
-        | Forensic::Status { .. }
         | Forensic::Retried { .. }
         | Forensic::UsageDelta { .. }
         | Forensic::TurnStarted { .. } => None,
@@ -153,7 +147,8 @@ fn forensic(role: Role, forensic: &Forensic) -> Option<SynodEvent> {
 
 fn project(role: Role, record: &Record) -> Option<SynodEvent> {
     match record {
-        Record::Protocol(protocol) => project_protocol(role, protocol),
+        Record::Transcript(transcript) => project_transcript(role, transcript),
+        Record::Control(_) => None,
         Record::Display(record) => display(role, record),
         Record::Forensic(record) => forensic(role, record),
     }
@@ -223,9 +218,10 @@ impl Router {
                     elapsed_secs,
                 })
             }
-            Record::Protocol(_) | Record::Display(_) | Record::Forensic(_) => {
-                project(self.role(id), fact)
-            }
+            Record::Transcript(_)
+            | Record::Control(_)
+            | Record::Display(_)
+            | Record::Forensic(_) => project(self.role(id), fact),
         }
     }
 
@@ -323,19 +319,19 @@ mod tests {
 
     #[test]
     fn a_trunk_human_prompt_projects_as_human() {
-        for protocol in [
-            Protocol::UserPrompt {
+        for transcript in [
+            Transcript::UserPrompt {
                 turn: 1,
                 text: "hello".into(),
                 voice: Voice::Human,
             },
-            Protocol::Steering {
+            Transcript::Steering {
                 text: "hello".into(),
                 voice: Voice::Human,
             },
         ] {
             assert!(matches!(
-                project(Role::Trunk, &Record::Protocol(protocol)),
+                project(Role::Trunk, &Record::Transcript(transcript)),
                 Some(SynodEvent::Human { text }) if text == "hello"
             ));
         }
@@ -343,18 +339,18 @@ mod tests {
 
     #[test]
     fn a_helper_prompt_projects_nothing() {
-        for protocol in [
-            Protocol::UserPrompt {
+        for transcript in [
+            Transcript::UserPrompt {
                 turn: 1,
                 text: "hello".into(),
                 voice: Voice::Human,
             },
-            Protocol::Steering {
+            Transcript::Steering {
                 text: "hello".into(),
                 voice: Voice::Human,
             },
         ] {
-            assert!(project(Role::Helper, &Record::Protocol(protocol)).is_none());
+            assert!(project(Role::Helper, &Record::Transcript(transcript)).is_none());
         }
     }
 
@@ -745,5 +741,79 @@ mod tests {
             panic!("a plumbing fault must still reach the window");
         };
         assert_eq!(message, "record.jsonl: permission denied");
+    }
+
+    #[test]
+    fn report_fire_clear_and_resume_lines_each_project_at_most_one_event() {
+        use exarch::record::{Control, Record};
+        use serde_json::json;
+
+        let selected = exarch::provider::Selected::for_test("m");
+        let post = json!({"voice": "wakeup", "text": "wake"});
+        let schedule =
+            json!({"prompt": "wake", "trigger": "after 1s", "next_unix_ms": 1000, "fires": 1});
+        let lines = [
+            (
+                "report",
+                vec![
+                    json!({"status": {"status": {"failed": "ended"}}}),
+                    json!({"unscheduled": {"label": "wake"}}),
+                    json!({"withdrawn": {"posts": [2, 3]}}),
+                ],
+            ),
+            (
+                "recurring fire",
+                vec![
+                    json!({"posted": post}),
+                    json!({"scheduled": {"label": "wake", "schedule": schedule}}),
+                ],
+            ),
+            (
+                "terminal fire",
+                vec![
+                    json!({"posted": post}),
+                    json!({"unscheduled": {"label": "wake"}}),
+                ],
+            ),
+            (
+                "clear",
+                vec![
+                    json!({"withdrawn": {"posts": [2, 3]}}),
+                    json!({"unscheduled": {"label": "one"}}),
+                    json!({"unscheduled": {"label": "two"}}),
+                ],
+            ),
+            (
+                "resume",
+                vec![
+                    json!({"session_resumed": {"selected": selected, "returns": true, "at_unix_ms": 1}}),
+                    json!({"withdrawn": {"posts": [2, 3]}}),
+                    json!({"job_settled": {"job": 1, "stopped": false}}),
+                    json!({"unscheduled": {"label": "wake"}}),
+                ],
+            ),
+        ];
+        for (name, controls) in lines {
+            let mut records: Vec<Record> = controls
+                .into_iter()
+                .map(|value| {
+                    Record::Control(
+                        serde_json::from_value::<Control>(value).expect("production control shape"),
+                    )
+                })
+                .collect();
+            if name == "resume" {
+                records.push(Record::Forensic(Forensic::SystemNote {
+                    text: "the restart withdrew two queued inputs".into(),
+                }));
+            }
+            for role in [Role::Trunk, Role::Helper] {
+                let events: Vec<_> = records
+                    .iter()
+                    .filter_map(|record| project(role, record))
+                    .collect();
+                assert!(events.len() <= 1, "{name} produced {} events", events.len());
+            }
+        }
     }
 }

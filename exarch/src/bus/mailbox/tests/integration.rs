@@ -3,7 +3,7 @@ use crate::agent::Trunk;
 use crate::agent::testkit::{host, scripted, set_provider, trunk};
 use crate::bus::Signal;
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Display, Protocol};
+use crate::record::{Display, Transcript};
 
 #[test]
 fn run_commits_job_opened_before_the_first_prompt_record() {
@@ -26,12 +26,10 @@ fn run_commits_job_opened_before_the_first_prompt_record() {
         };
         if let Signal::Commit(id, commit) = signal
             && id == handle.id()
-            && commit.records().iter().any(|record| {
-                matches!(
-                    record.value(),
-                    Record::Forensic(Forensic::JobSettled { .. })
-                )
-            })
+            && commit
+                .records()
+                .iter()
+                .any(|record| matches!(record.value(), Record::Control(Control::JobSettled { .. })))
         {
             settled = true;
             break;
@@ -43,17 +41,17 @@ fn run_commits_job_opened_before_the_first_prompt_record() {
     let records = read_records(&log).unwrap();
     let opened = records
         .iter()
-        .position(|record| matches!(record, Record::Forensic(Forensic::JobOpened)))
+        .position(|record| matches!(record, Record::Control(Control::JobOpened)))
         .unwrap();
     let prompt = records
         .iter()
-        .position(|record| matches!(record, Record::Protocol(Protocol::UserPrompt { .. })))
+        .position(|record| matches!(record, Record::Transcript(Transcript::UserPrompt { .. })))
         .unwrap();
     assert!(opened < prompt);
     assert_eq!(
         records
             .iter()
-            .filter(|record| matches!(record, Record::Forensic(Forensic::JobOpened)))
+            .filter(|record| matches!(record, Record::Control(Control::JobOpened)))
             .count(),
         1
     );
@@ -101,6 +99,6 @@ fn run_declines_a_stale_worker_batch_at_rest_without_opening_a_job() {
     assert!(failures.is_empty(), "{failures:?}");
     assert!(!read_records(&log).unwrap().iter().any(|record| matches!(
         record,
-        Record::Forensic(Forensic::JobOpened | Forensic::JobSettled { .. })
+        Record::Control(Control::JobOpened | Control::JobSettled { .. })
     )));
 }

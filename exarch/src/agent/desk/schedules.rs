@@ -1,6 +1,9 @@
 //! The schedules family of the desk.
 
+use crate::bus::Txn;
 use crate::enquiry::Add;
+use crate::schedule::ScheduleInfo;
+use jiff::Timestamp;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::shell::runtime::Error;
@@ -36,18 +39,25 @@ impl ExarchDesk {
         }: Add,
     ) -> Result<FOValue, Error> {
         self.require_schedule_grant("exarch-schedules `add")?;
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         let call = &self.call;
 
         // The row goes up after the registry call, so a refusal tiers instead
         // of reading as one that landed.
         let described = trigger.describe();
-        let result =
-            body.state
-                .schedules
-                .schedule(trigger, prompt, label.clone(), &call.handle.0.address);
+        let result = call
+            .handle
+            .0
+            .address
+            .transact(|txn| {
+                body.schedules
+                    .schedule(txn, trigger, prompt, label.clone())
+                    .map(|receipt| (receipt, live_table(txn)))
+            })
+            .map_err(|why| why.to_string())
+            .flatten();
         let (payload, content) = match &result {
-            Ok(receipt) => (
+            Ok((receipt, _)) => (
                 described,
                 format!(
                     "scheduled '{}' ({}s to first fire)",
@@ -69,29 +79,41 @@ impl ExarchDesk {
             .emit_or_end(crate::record::Forensic::HarnessResult {
                 text: content.clone(),
             });
-        match result {
-            Ok(_) => Ok(body.state.schedules.list().encode()),
-            Err(_) => Err(Error::new(content)),
-        }
+        result
+            .map(|(_, table)| table)
+            .map_err(|_| Error::new(content))
     }
 
     /// A snapshot of this agent's live wakeups — every `` `exarch-schedules ``
     /// tag's answer.
     pub(super) fn schedule_table(&self) -> Result<FOValue, Error> {
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
-        Ok(body.state.schedules.list().encode())
+        let _body = self.loan.get().ok_or_else(super::no_desk)?;
+        self.call
+            .handle
+            .0
+            .address
+            .transact(live_table)
+            .map_err(|why| Error::new(why.to_string()))
     }
 
     /// `` `remove `` — take one scheduled wakeup off the table by label. Only
-    /// the grant refusal raises; a label that was never there is a successful
+    /// a grant refusal or recording failure raises; an absent label is a successful
     /// call answering a table that does not carry it.
     pub(super) fn unschedule(&self, label: &str) -> Result<FOValue, Error> {
         self.require_schedule_grant("exarch-schedules `remove")?;
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         let call = &self.call;
         // The rail's payload column spells out the miss the table only implies,
         // since the verb has no argument of its own to show there.
-        let removed = body.state.schedules.unschedule(label);
+        let (removed, table) = call
+            .handle
+            .0
+            .address
+            .try_transact(|txn| {
+                let removed = body.schedules.unschedule(txn, label)?;
+                Ok((removed, live_table(txn)))
+            })
+            .map_err(|why| Error::new(why.to_string()))?;
         let (payload, content) = if removed {
             (String::new(), format!("unscheduled '{label}'"))
         } else {
@@ -104,6 +126,15 @@ impl ExarchDesk {
         body.log
             .record_emitter()
             .emit_or_end(crate::record::Forensic::HarnessResult { text: content });
-        Ok(body.state.schedules.list().encode())
+        Ok(table)
     }
+}
+
+fn live_table(txn: &mut Txn<'_>) -> FOValue {
+    let now = Timestamp::now();
+    txn.schedules()
+        .iter()
+        .map(|(label, schedule)| ScheduleInfo::of(label, schedule, now))
+        .collect::<Vec<_>>()
+        .encode()
 }

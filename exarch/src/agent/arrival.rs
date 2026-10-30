@@ -1,6 +1,6 @@
 //! Admission owns the meaning of inputs, including quiet and stale ones.
 
-use crate::agent::{Agent, Role};
+use crate::agent::Agent;
 use crate::bus::{Input, notice, surface_notice};
 use crate::record::{Display, Voice};
 use crate::shell_eval::surface;
@@ -14,23 +14,22 @@ pub(super) struct Prompt {
 }
 
 impl Agent {
-    pub(super) fn admit(&mut self, input: Input) -> Option<Prompt> {
+    pub(super) fn gone(&mut self, id: crate::record::AgentId) {
+        let failures = self.body.nursery.join(id);
+        self.body.failures.extend(failures);
+    }
+
+    pub(super) fn admit(&self, input: Input) -> Option<Prompt> {
         let (text, voice) = match input {
-            Input::Human(text) => {
-                self.body.state.owed |= matches!(self.handle.0.role, Role::Returns);
-                (text, Voice::Human)
-            }
-            Input::Message(message) => {
-                self.body.state.owed |= message.from_parent;
-                (message.render(), Voice::Peer)
-            }
+            Input::Human(text) => (text, Voice::Human),
+            Input::Message(message) => (message.render(), Voice::Peer),
             Input::Child {
                 id,
                 name,
                 status,
                 elapsed,
             } => {
-                if !self.body.state.nursery.holds(id) {
+                if !self.body.nursery.holds(id) {
                     return None;
                 }
                 let settled = status.settlement();
@@ -41,17 +40,7 @@ impl Agent {
                 });
                 (notice(&name, &settled, elapsed), Voice::Harness)
             }
-            Input::Gone(id) => {
-                let failures = self.body.state.nursery.join(id);
-                self.body.state.failures.extend(failures);
-                return None;
-            }
-            Input::Wakeup { epoch, text, .. } => {
-                if epoch != self.body.state.schedules.epoch() {
-                    return None;
-                }
-                (text, Voice::Wakeup)
-            }
+            Input::Wakeup { text, .. } => (text, Voice::Wakeup),
             Input::Surface { generation, values } => {
                 if generation != self.generation {
                     return None;

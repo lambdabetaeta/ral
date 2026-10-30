@@ -48,12 +48,11 @@ fn kind_contains(blocks: &Blocks, needle: &str) -> bool {
     })
 }
 
-fn drive(session: &mut Agent, provider: &Arc<Provider>, prompt: &str) {
+fn drive(session: &mut Agent, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        provider,
         Some((prompt.to_string(), Voice::Human)),
         None,
         &emit,
@@ -68,6 +67,7 @@ fn root_config(run_dir: &OwnDir) -> RootConfig {
         trunk: Trunk::Converses,
         admission: Admission::Free,
         helper_idle: HELPER_IDLE,
+        max_tokens: None,
         tools: Toolset::offered(false),
         allow_schedule: false,
         resume_on_reset: false,
@@ -135,7 +135,7 @@ fn scripted_run_kill_resume_and_continue() {
         Agent::resume_for_test(
             root_config(&child_dir),
             identity_engine("resume-parent"),
-            &scripted("test-model", Script::new()),
+            &scripted("test-model", Script::new().then(Reply::text("continued"))),
         )
         .expect("resume child ledger"),
     )
@@ -162,11 +162,7 @@ fn scripted_run_kill_resume_and_continue() {
         "the view fold must carry the pre-kill exchange across the crash and resume too"
     );
 
-    drive(
-        &mut resumed,
-        &scripted("test-model", Script::new().then(Reply::text("continued"))),
-        "continue after the crash",
-    );
+    drive(&mut resumed, "continue after the crash");
     assert!(resumed.is_ready());
     assert!(
         resumed
@@ -289,14 +285,13 @@ fn resume_child() {
     let mut session = Agent::root_for_test(
         root_config(&dir),
         identity_engine("resume-child"),
-        scripted("test-model", Script::new()),
+        scripted("test-model", Script::new().then(Reply::text("before kill"))),
     )
     .expect("child agent");
-    let provider = scripted("test-model", Script::new().then(Reply::text("before kill")));
-    drive(&mut session, &provider, "before the kill");
+    drive(&mut session, "before the kill");
 
     // The first exchange spent ids 1 and 2, so the next prompt is 3.
-    let record = crate::record::Record::Protocol(crate::record::Protocol::UserPrompt {
+    let record = crate::record::Record::Transcript(crate::record::Transcript::UserPrompt {
         turn: 3,
         text: "crash prompt".into(),
         voice: Voice::Human,

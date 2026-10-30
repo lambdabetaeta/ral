@@ -1,8 +1,10 @@
 //! Resume from disk: fold `record.jsonl`, then quarantine a torn tail.
 
-use super::{Context, Model};
+use super::Context;
 use crate::record::log::Log;
-use crate::record::{AgentId, Fold as _, Forensic, RECORD, Record, Selection};
+use crate::record::{
+    AgentId, Control, Fold as _, Mail, Model, RECORD, Record, Refusal, Replay, Schedules,
+};
 use ral_core::own::OwnDir;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -39,7 +41,7 @@ fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
 
 /// Fold `record.jsonl` into a fresh [`Context`], then quarantine a torn tail,
 /// so a refused resume leaves the file as it found it. Check the first record
-/// heads a root and hand records to [`Model::step`] and [`Selection`].
+/// heads a root and hand records to [`Context::step`] and the control replay.
 ///
 /// There is nothing to compare the result with, and nothing to check it
 /// against: the law is that the fold refuses what it cannot admit, and what
@@ -56,44 +58,41 @@ fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
 /// Returns an error if the file cannot be read, cannot be quarantined, is not
 /// headed by a root's `SessionStarted { parent: None, .. }`, or holds a
 /// protocol record the fold refuses.
-pub fn resume(sessions: &OwnDir, id: AgentId) -> io::Result<(Context, Selection)> {
+pub fn resume(sessions: &OwnDir, id: AgentId) -> io::Result<(Context, (Mail, Schedules, Model))> {
     let session = sessions.dir(&id.to_string())?;
     let path: PathBuf = session.path().join(RECORD);
-    let mut context = Context::new(id, sessions.clone());
-    let mut selection = Selection::default();
-    for (n, record) in Log::read(session.open(RECORD)?, &path)?.enumerate() {
-        let record = record?;
-        if n == 0 {
-            match record.value() {
-                Record::Forensic(Forensic::SessionStarted { parent: None, .. }) => {}
-                Record::Forensic(Forensic::SessionStarted {
-                    session_id, parent, ..
-                }) => {
-                    return Err(io::Error::other(format!(
-                        "cannot resume {}: the first record starts session {session_id} with parent {parent:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a child log?",
-                        ral_core::path::shown(&path)
-                    )));
-                }
-                other @ (Record::Protocol(_) | Record::Display(_) | Record::Forensic(_)) => {
-                    return Err(io::Error::other(format!(
-                        "cannot resume {}: the first record is {other:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a copied child log?",
-                        ral_core::path::shown(&path)
-                    )));
-                }
-            }
-        }
-        if let Record::Forensic(forensic) = record.value() {
-            selection.step(forensic);
-        }
-        Model::step(&mut context, record)
-            .map_err(|refusal| io::Error::other(refusal.to_string()))?;
-    }
-    if selection.model().is_none() {
-        return Err(io::Error::other(format!(
+    let refused = |refusal: Refusal| io::Error::other(refusal.to_string());
+    let mut records = Log::read(session.open(RECORD)?, &path)?;
+    let head = records.next().transpose()?.ok_or_else(|| {
+        io::Error::other(format!(
             "cannot resume {}: no complete session records were found; is the file truncated?",
             ral_core::path::shown(&path)
+        ))
+    })?;
+    let mut replay = Replay::open(&head).map_err(|refusal| match refusal {
+        Refusal::Foreign { record, .. } => io::Error::other(format!(
+            "cannot resume {}: the first record is {record:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a copied child log?",
+            ral_core::path::shown(&path)
+        )),
+        Refusal::Unreadable(_) => refused(refusal),
+    })?;
+    if let Record::Control(Control::SessionStarted(started)) = head.value()
+        && started.parent.is_some()
+    {
+        return Err(io::Error::other(format!(
+            "cannot resume {}: the first record starts session {} with parent {:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a child log?",
+            ral_core::path::shown(&path),
+            started.session_id,
+            started.parent
         )));
     }
+    let mut context = Context::new(id, sessions.clone());
+    Context::step(&mut context, head).map_err(refused)?;
+    for record in records {
+        let record = record?;
+        replay.step(&record).map_err(refused)?;
+        Context::step(&mut context, record).map_err(refused)?;
+    }
     quarantine_tail(&session)?;
-    Ok((context, selection))
+    Ok((context, replay.finish()))
 }

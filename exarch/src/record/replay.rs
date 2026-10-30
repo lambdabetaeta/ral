@@ -1,6 +1,6 @@
 //! The one generic replay driver: `records.try_fold(seed, F::step)`,
 //! carrying the `fold == memo` proof once for every [`Fold`]
-//! rather than once per consumer.  No fold lives here — `record::model` and
+//! rather than once per consumer.  No fold lives here — `record::context` and
 //! `record::view` bring their own `step` in a later parcel — only the
 //! driver and the error it can refuse a session with.
 

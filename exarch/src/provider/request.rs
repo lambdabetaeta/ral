@@ -2,7 +2,7 @@
 
 use super::pricing::{self, ModelCaps, Param};
 use super::tls::{STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT};
-use super::{Toolset, Via};
+use super::{Selected, Toolset, Via};
 use genai::chat::{ChatMessage, ChatOptions, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 
@@ -152,12 +152,7 @@ fn via_body(via: &Via) -> serde_json::Value {
 /// regardless of `tuning`: `step_out_from_end` in `stream.rs` reads usage,
 /// content, tool calls, and reasoning back off every `StreamEnd`. The stream's
 /// liveness bounds are set on every request.
-pub(super) fn complete_options(
-    cache_key: &str,
-    max_tokens_override: Option<u32>,
-    tuning: &Tuning,
-    via: Option<&Via>,
-) -> ChatOptions {
+pub(super) fn complete_options(cache_key: &str, selected: &Selected) -> ChatOptions {
     let mut options = ChatOptions::default()
         .with_capture_usage(true)
         .with_capture_content(true)
@@ -166,19 +161,19 @@ pub(super) fn complete_options(
         .with_stream_header_timeout(STREAM_HEADER_TIMEOUT)
         .with_stream_read_timeout(STREAM_READ_TIMEOUT)
         .with_prompt_cache_key(cache_key);
-    if let Some(max_tokens) = max_tokens_override {
+    if let Some(max_tokens) = selected.max_tokens {
         options = options.with_max_tokens(max_tokens);
     }
-    if let Some(effort) = &tuning.effort {
+    if let Some(effort) = &selected.tuning.effort {
         options = options.with_reasoning_effort(effort.clone());
     }
-    if let Some(temperature) = tuning.temperature {
+    if let Some(temperature) = selected.tuning.temperature {
         options = options.with_temperature(temperature);
     }
-    if let Some(top_p) = tuning.top_p {
+    if let Some(top_p) = selected.tuning.top_p {
         options = options.with_top_p(top_p);
     }
-    if let Some(via) = via {
+    if let Some(via) = &selected.via {
         options = options.with_extra_body(via_body(via));
     }
     options
@@ -187,6 +182,7 @@ pub(super) fn complete_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{Account, Bureau, Choice, Login, scripted::Script};
 
     #[test]
     fn for_model_with_no_effort_keeps_the_thinking_on_default() {
@@ -253,7 +249,7 @@ mod tests {
 
     #[test]
     fn complete_options_leave_auto_controls_unset() {
-        let options = complete_options("cache", None, &Tuning::default(), None);
+        let options = complete_options("cache", &Selected::for_test("m"));
         assert_eq!(options.max_tokens, None);
         assert_eq!(options.temperature, None);
         assert_eq!(options.top_p, None);
@@ -266,7 +262,13 @@ mod tests {
     #[test]
     fn a_via_orders_its_upstreams_without_fallback() {
         let via = Via::parse("deepinfra/fp8,novita").unwrap();
-        let options = complete_options("cache", None, &Tuning::default(), Some(&via));
+        let options = complete_options(
+            "cache",
+            &Selected {
+                via: Some(via),
+                ..Selected::for_test("m")
+            },
+        );
         assert_eq!(
             options.extra_body,
             Some(serde_json::json!({
@@ -294,5 +296,31 @@ mod tests {
         let err = effort_by_label("extreme").unwrap_err();
         assert!(err.contains("extreme"), "got: {err}");
         assert!(err.contains("xhigh"), "got: {err}");
+    }
+
+    #[test]
+    fn launch_cap_applies_only_to_the_metered_request() {
+        let bureau = Bureau::scripted([Script::new(), Script::new()]);
+        for (account, expected) in [
+            (
+                Account::login(Login::Chatgpt, "plan", "plan@example.test"),
+                None,
+            ),
+            (Account::built_in("openai"), Some(731)),
+        ] {
+            let client = bureau
+                .build(
+                    Choice {
+                        account,
+                        model: "m".into(),
+                        via: None,
+                    },
+                    &Tuning::default(),
+                    Some(731),
+                )
+                .unwrap();
+            let options = complete_options("launch-cap", client.selected());
+            assert_eq!(options.max_tokens, expected);
+        }
     }
 }

@@ -142,11 +142,11 @@ fn job_opened_and_settled_update_only_the_named_tab() {
     let child = AgentId::new(root.id().get() + 1);
     born(&mut tabs, child, "child", Some(root.id()));
     let fact =
-        |number, forensic| Commit::placeholder(number, NonEmpty::one(Record::Forensic(forensic)));
+        |number, control| Commit::placeholder(number, NonEmpty::one(Record::Control(control)));
     assert_eq!(tabs.focused_job(), None);
-    tabs.commit_job(root.id(), &fact(7, Forensic::JobOpened));
+    tabs.commit_job(root.id(), &fact(7, Control::JobOpened));
     assert_eq!(tabs.focused_job(), Some(JobId::from(7)));
-    tabs.commit_job(child, &fact(11, Forensic::JobOpened));
+    tabs.commit_job(child, &fact(11, Control::JobOpened));
     assert_eq!(tabs.focused_job(), Some(JobId::from(7)));
     tabs.set_focus(child);
     assert_eq!(tabs.focused_job(), Some(JobId::from(11)));
@@ -154,7 +154,7 @@ fn job_opened_and_settled_update_only_the_named_tab() {
         root.id(),
         &fact(
             8,
-            Forensic::JobSettled {
+            Control::JobSettled {
                 job: JobId::from(7),
                 stopped: true,
             },
@@ -165,7 +165,7 @@ fn job_opened_and_settled_update_only_the_named_tab() {
         child,
         &fact(
             12,
-            Forensic::JobSettled {
+            Control::JobSettled {
                 job: JobId::from(11),
                 stopped: false,
             },

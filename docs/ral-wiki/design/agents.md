@@ -5,6 +5,57 @@ address admits messages and publishes status, never retaining the engine or
 attending owner. A fleet is a forest of lives, owned through root and helper
 join guards ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
 
+## Every enduring fact is a fold of the log
+
+**Every fact about an agent that outlives its engine and threads is a fold of
+its log, held in exactly one place.** Resources are made from those facts;
+working memory (readings, staged reply, teardown diagnostics) starts empty at
+launch. The owner holds `Context` and resources; the cell holds `Mail`,
+`Schedules`, `Model` and the pending payloads under one lock. Engine,
+immutable client, helper threads and timers are resources.
+
+- **F1 One home.** A mutable fact has exactly one holder. Identity, name,
+  parent and fuel are immutable and may be read anywhere.
+- **F2 A class names its folds.** `Context` folds `Transcript`; `Mail`,
+  `Schedules` and `Model` fold `Control`. `Display` and `Forensic` derive no
+  agent state. A log is its head, `SessionStarted`, and what follows:
+  `rest.fold(seed(head), step)`.
+- **F3 Commit and step together.** One call appends a line and steps the
+  three folds; a failed append steps nothing. Only the locked cell and
+  reopen hold that capability.
+- **F4 The queue is the pending posts.** At every unlock the queued payloads
+  equal `mail.pending()`, in order. Only `Txn::post` adds one.
+- **F5 Facts are read from the folds:** model, window, schedules, debt,
+  status, job. A client's `Selected` stamp is read at installation only.
+- **F6 Replay equals live.** Replaying the file yields the `Context`, `Mail`,
+  `Schedules` and `Model` live at that commit.
+
+**The three `Control` folds share a lock, not a meaning; no type stands over
+them.** `Mail` holds parent, `returns`, pending posts, whether answering,
+latest status and open job. `Schedules` holds bookings by label. `Model`
+holds `Selected` and an optional learned narrowing. The head seeds all three;
+a second head is foreign. `SessionEnded` and `SessionClosed` stay forensic: no
+fold needs a closed flag. Record shapes: [[internals/session-record|session-record]].
+
+### The cell: one lock, four rules
+
+1. **A closure, not a guard.** `transact` locks, runs, unlocks, then notifies.
+   No transaction spans a provider request, dispatch, join or `Context`
+   access.
+2. **A poisoned cell is a dead agent.** Poison latches the journal and ends
+   life; the file remains the truth. Posts become `Refused::Ended`, and a
+   poisoned helper tells its parent `Failed` itself, at most once
+   ([[map/exarch/agent|agent]]).
+3. **Nothing re-entrant leaks.** A `Txn` exposes no strong address; timers get
+   a weak one. Only a report takes a second cell lock, its fixed parent's.
+   Debug builds panic on same-thread re-entry.
+4. **The capability is a borrow.** The folds have no `Clone` or constructor
+   outside `record`; `tests/layering.rs` checks the boundary.
+
+A live fold refusal is an exarch bug and panics; replay judges every line and
+refuses foreign transitions. **Lock order:** descendant cell, ancestor cell,
+journal, bus channel. Names and the deadline heap are leaves.
+
 ## Role and admission are independent
 
 - `Converses` answers in conversation; `Returns` owes its caller a value;
@@ -71,13 +122,17 @@ fleet root
 
 **A helper's published status and its obligation are different facts.**
 
-- A returning agent owes a report from its task and parent messages, or,
-  for a headless root, human input.
-  Human input to a helper creates no debt. Reports are `Replied(FOValue)`,
-  `Failed(reason)` or `Stopped`, recorded in its log and published in its mailbox.
-- A helper's mailbox starts owing its parent. Parent enqueue sets that flag
-  atomically; reporting posts `Child` to the parent under the helper lock,
-  then retains the flag only if another parent message remains queued.
+- Debt is the mail's derived fact: `returns && (answering || pending
+  parent post)`. A helper owes from birth and parent messages; a returning
+  root owes from human post time, a conversing root never. Debt is counted
+  at post time for every agent; unread human input at end earns
+  `ENDED_BEFORE_REPORTING` unless recalled. Human input to helpers, peer
+  messages, steering, reports, wakeups and surfaces create no debt.
+- `Taken` keeps a post's parent debt until `Status`; `Withdrawn` removes it
+  unread. A report commits status, booking retirements and queued-wakeup
+  withdrawals, then posts `Child` iff owed, still holding the helper cell.
+  After life ends it withdraws every pending post: an ended reported helper
+  owes nothing, even before its `Gone` is joined.
 - The parent cannot rest between seeing the obligation and hearing the
   report. `Gone`, the helper thread's last post, joins without a model prompt.
 - Human-only dealings with a resting helper are quiet to its parent: views
@@ -99,14 +154,18 @@ are notes; peer debts could form cycles.
 
 - `/new` opens blank context; `/branch` imports context, not shell state.
   `/close` records permanent closure; `/quit` leaves roots resumable.
-  Resume folds open root logs with fresh shell state, not restored workers,
-  pins or schedules. Headless requires one open root.
+  Reopen folds context and control before quarantine, then records
+  pending withdrawals (unread posts are withdrawn with a note), open-job settlement and booking retirements with
+  `SessionResumed` and a note naming unread posts. The cell starts empty;
+  debt for taken-but-unanswered input survives, not withdrawn debt. Shell
+  state, workers, pins and timers are fresh. Headless requires one open root.
 - Names are reserved before construction and removed after owner teardown,
   before `Died`. `Gone` follows death. Retained addresses retain no engine.
 - `/clear` preflights context and prepares an eligible identity-root engine
   before mutation. Failure changes nothing. Then it joins helpers, commits
   `Cleared`, transfers the life binding, replaces and retires the outgoing
-  engine, resets registers and invalidates batches/wakeups. It keeps every
+  engine, resets working memory, retires bookings and withdraws queued
+  reports, wakeups and surfaces. Outgoing batches fail the generation check. It keeps every
   queued human input, message and command. A failed commit ends life and
   retires the unused prepared engine.
 - `Option<Engine>` makes final retirement consumptive and repeated teardown
@@ -151,8 +210,8 @@ asynchronous: construct, adopt and launch the child, then return a summary;
 `type` selects model memory, not shell isolation:
 
 - `` `amnemon `` imports no history; only snapshot and prompt cross.
-- `` `mnemon `` imports the parent's turn table and residues through
-  `Protocol::Inherited` pointers, retaining lineage ids and file addresses,
+- `` `mnemon `` imports the parent's turn table and evictions through
+  `Transcript::Inherited` pointers, retaining lineage ids and file addresses,
   then appends the new prompt. An unanswered tool-call frame is omitted.
   Views are projections of that structure, not copied rendered messages.
 
@@ -160,8 +219,12 @@ asynchronous: construct, adopt and launch the child, then return a summary;
 `` `role <name> `` selects one the human bound at launch with `--role`
 (and provider/via qualifiers). Roles carry providers, never grants or
 personae. The model discovers no catalog or account. Tuning is fixed at
-launch for roles; a later `/model` changes only its addressed agent.
-`provider::Bureau` mints selections over a shared `Pool` and credentials
+launch for roles; a later `/model` changes only its addressed agent,
+from the next request even within one deliberation. The switch uses the
+launch token cap wherever the new account admits it. Learned windows belong
+to each agent's `Model`, not its shared client; old-model overflows narrow nothing.
+`provider::Bureau` mints immutable clients stamped with `Selected` over
+a shared `Pool` and credentials
 ([[map/exarch/provider|provider]]).
 
 Selective delegation is ordinary data flow: bind transcript slices silently,
@@ -182,8 +245,12 @@ not again interpolated into prose
   that obligation while the follow-up remains queued.
 - With scheduling authority, a conversing agent's wakeup may open a later
   job; a returning agent waits for armed schedules and clears them on report.
-  Epochs invalidate queued wakeups across reset. Firing, coalescing and final
-  registry retirement occur in one mailbox transaction, preventing false rest.
+  Timers only ring weak cell addresses; the shared deadline daemon records
+  nothing and steps no fold, so it cannot panic in one. The owner answers at rest and
+  before each tool-boundary drain, coalescing and committing wakeup plus
+  booking update/retirement together, then retiming or dropping its timer.
+  The unlocked registry is a resource of `Schedules`; retirement makes late
+  rings harmless without epochs.
 - Timers retain a weak reference to mailbox shared state, never a temporary
   address wrapper or an owner. Focus and diagnostic reads mutate no lifecycle.
 

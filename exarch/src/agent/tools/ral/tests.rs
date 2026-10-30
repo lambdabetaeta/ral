@@ -189,13 +189,13 @@ fn dispatch_stages_a_reply_through_the_loan_and_returns_the_body() {
     assert_eq!(result.id, "reply");
     assert!(result.content.contains("EXIT: 0"), "{}", result.content);
     assert_eq!(
-        session.body.state.reply,
+        session.body.reply,
         Some(FOValue::String {
             value: "loaned".into()
         })
     );
     assert!(
-        session.handle().status().report.is_none(),
+        session.handle().status().unwrap().report.is_none(),
         "only the batch boundary publishes a reply"
     );
     assert!(crate::bus::drain_records(&rx).iter().any(|record| matches!(

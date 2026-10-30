@@ -2,7 +2,7 @@
 //! [`Context::step`] runs, and the readings of it the agent asks for.
 
 use super::Context;
-use crate::record::{Protocol, QuiesceReason, Recorded, ToolResult};
+use crate::record::{QuiesceReason, Recorded, ToolResult, Transcript};
 use genai::chat::{ChatMessage, ChatRole};
 use std::collections::HashSet;
 
@@ -19,8 +19,8 @@ pub(super) enum State {
 
 impl Context {
     /// Whether a record that opens or extends a turn — a
-    /// [`Protocol::UserPrompt`], a [`Protocol::Steering`] line, a
-    /// [`Protocol::Import`] — is admissible here. Weaker than [`State::ReadyForUser`]: work that
+    /// [`Transcript::UserPrompt`], a [`Transcript::Steering`] line, a
+    /// [`Transcript::Import`] — is admissible here. Weaker than [`State::ReadyForUser`]: work that
     /// never reached a reply is abandoned by the next prompt rather than
     /// closed by a fabricated one, so only outstanding tool calls hold the
     /// log.
@@ -85,64 +85,64 @@ impl Context {
     /// The records a [`QuiesceReason`] quiesce still owes, for the caller to
     /// record through the seam itself — this fold only knows how to compute
     /// them, never to author them.
-    pub(crate) fn quiesce_records(&self, reason: QuiesceReason) -> Vec<Protocol> {
+    pub(crate) fn quiesce_records(&self, reason: QuiesceReason) -> Vec<Transcript> {
         quiesce_records(&self.state, reason, self.next_id())
     }
 }
 
-pub(super) fn advance(state: &State, protocol: &Protocol) -> State {
+pub(super) fn advance(state: &State, protocol: &Transcript) -> State {
     match protocol {
-        Protocol::UserPrompt { .. } | Protocol::Steering { .. } => {
+        Transcript::UserPrompt { .. } | Transcript::Steering { .. } => {
             State::AwaitingAssistantAfterUser
         }
-        Protocol::AssistantMessage {
+        Transcript::AssistantMessage {
             pending_tool_ids, ..
         } if !pending_tool_ids.is_empty() => State::AwaitingToolResults {
             pending_ids: pending_tool_ids.clone(),
         },
-        Protocol::AssistantMessage { .. } => State::ReadyForUser,
-        Protocol::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
-        Protocol::System { .. }
-        | Protocol::Import { .. }
-        | Protocol::Evicted { .. }
-        | Protocol::Rewound { .. }
-        | Protocol::Cleared
-        | Protocol::Inherited { .. } => state.clone(),
+        Transcript::AssistantMessage { .. } => State::ReadyForUser,
+        Transcript::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
+        Transcript::System { .. }
+        | Transcript::Import { .. }
+        | Transcript::Evicted(_)
+        | Transcript::Rewound { .. }
+        | Transcript::Cleared
+        | Transcript::Inherited { .. } => state.clone(),
     }
 }
 
 /// Where the automaton rests after one turn's records, the turn having
 /// opened from rest — what a withdrawal leaves it at.
-pub(super) fn resting(records: &[Recorded<Protocol>]) -> State {
+pub(super) fn resting(records: &[Recorded<Transcript>]) -> State {
     records.iter().fold(State::default(), |state, record| {
         advance(&state, record.value())
     })
 }
 
-/// Protocol sequencing legality.
-pub(super) fn admissible(state: &State, protocol: &Protocol) -> bool {
+/// Transcript sequencing legality.
+pub(super) fn admissible(state: &State, protocol: &Transcript) -> bool {
     match protocol {
-        Protocol::UserPrompt { .. } | Protocol::Steering { .. } | Protocol::Import { .. } => {
+        Transcript::UserPrompt { .. } | Transcript::Steering { .. } | Transcript::Import { .. } => {
             admits_new_turn(state)
         }
-        Protocol::AssistantMessage { message, .. } => {
+        Transcript::AssistantMessage { message, .. } => {
             message.role == ChatRole::Assistant
                 && matches!(
                     state,
                     State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults,
                 )
         }
-        Protocol::ToolResults { results } => {
+        Transcript::ToolResults { results } => {
             if let State::AwaitingToolResults { pending_ids } = state {
                 validate_result_ids(pending_ids, results).is_ok()
             } else {
                 false
             }
         }
-        Protocol::Rewound { .. } | Protocol::Cleared => admits_new_turn(state),
+        Transcript::Rewound { .. } | Transcript::Cleared => admits_new_turn(state),
         // Sequencing-neutral; where a link may stand is its own rule in
         // [`Context::judge`], needing more than a [`State`].
-        Protocol::System { .. } | Protocol::Evicted { .. } | Protocol::Inherited { .. } => true,
+        Transcript::System { .. } | Transcript::Evicted(_) | Transcript::Inherited { .. } => true,
     }
 }
 
@@ -155,7 +155,7 @@ fn admits_new_turn(state: &State) -> bool {
 
 /// The length of the longest prefix of `records` that owes no tool result:
 /// all of a closed turn, less the tail of one cut off mid-batch.
-pub(super) fn admissible_prefix(records: &[Recorded<Protocol>]) -> usize {
+pub(super) fn admissible_prefix(records: &[Recorded<Transcript>]) -> usize {
     let mut state = State::default();
     let mut end = 0;
     for (index, record) in records.iter().enumerate() {
@@ -186,7 +186,7 @@ const UNRUN_TOOL_CALL: &str = "[EXARCH // No result: the deliberation ended befo
 /// Nothing else is synthesised. A deliberation that stopped before any reply is
 /// left exactly as it lies and rendered as it lies, so the model never reads
 /// a turn it never took.
-fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Protocol> {
+fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Transcript> {
     let mut records = Vec::new();
     let mut state = state.clone();
     if let State::AwaitingToolResults { pending_ids } = &state {
@@ -197,12 +197,12 @@ fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Proto
                 content: UNRUN_TOOL_CALL.into(),
             })
             .collect();
-        let record = Protocol::ToolResults { results };
+        let record = Transcript::ToolResults { results };
         state = advance(&state, &record);
         records.push(record);
     }
     if matches!(reason, QuiesceReason::Replied) && !matches!(state, State::ReadyForUser) {
-        records.push(Protocol::AssistantMessage {
+        records.push(Transcript::AssistantMessage {
             turn,
             message: ChatMessage::assistant("[EXARCH // Deliberation ended: replied to parent.]"),
             pending_tool_ids: Vec::new(),

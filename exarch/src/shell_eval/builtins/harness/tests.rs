@@ -25,8 +25,8 @@ fn trunk() -> Agent {
     Agent::for_test("system").unwrap()
 }
 
-fn schedules(session: &Agent) -> &crate::schedule::ScheduleRegistry {
-    &session.body.state.schedules
+fn schedules(session: &Agent) -> Vec<crate::schedule::ScheduleInfo> {
+    crate::agent::testkit::schedules(session)
 }
 
 fn no_children(session: &Agent) {
@@ -206,7 +206,7 @@ fn start_child(session: &mut Agent, name: &str, prompt: &str, command: &str) -> 
                     .registry
                     .resolve(name)
                     .expect("the replying helper is live");
-                while helper.status().working() {
+                while helper.status().unwrap().working() {
                     assert!(
                         std::time::Instant::now() < deadline,
                         "the helper never rested"
@@ -256,7 +256,7 @@ fn agents_dismiss_joins_before_its_summary_excludes_the_helper() {
     assert!(result.contains("EXIT: 0"), "{result}");
     assert!(result.contains("live: 0"), "{result}");
     assert!(!helper.is_live());
-    assert!(!session.body.state.nursery.holds(helper.id()));
+    assert!(!session.body.nursery.holds(helper.id()));
     assert!(session.fleet.registry.resolve("doomed").is_none());
 }
 
@@ -268,7 +268,7 @@ fn bad_cron_expr_errors_before_any_enquiry_crosses() {
         "exarch-schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
     );
     assert!(result.contains("five fields"), "{result}");
-    assert!(schedules(&session).list().is_empty());
+    assert!(schedules(&session).is_empty());
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn bad_duration_errors_before_any_enquiry_crosses() {
         "exarch-schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
     );
     assert!(result.contains("duration"), "{result}");
-    assert!(schedules(&session).list().is_empty());
+    assert!(schedules(&session).is_empty());
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
     );
     assert!(result.contains("cron"), "{result}");
     assert!(result.contains("after"), "{result}");
-    assert!(schedules(&session).list().is_empty());
+    assert!(schedules(&session).is_empty());
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn missing_spec_field_errors_statically_naming_the_field() {
         result.contains("missing a field named 'prompt'"),
         "{result}"
     );
-    assert!(schedules(&session).list().is_empty());
+    assert!(schedules(&session).is_empty());
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn unknown_extra_spec_field_errors_statically_naming_the_field() {
         "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
     );
     assert!(result.contains("no field named 'extra'"), "{result}");
-    assert!(schedules(&session).list().is_empty());
+    assert!(schedules(&session).is_empty());
 }
 
 fn granted_trunk() -> Agent {
@@ -345,16 +345,16 @@ fn schedule_full_stack_round_trip_answers_the_table_and_posts_a_wakeup() {
     );
     assert!(result.contains("EXIT: 0"), "{result}");
     assert!(result.contains("next-s"), "{result}");
-    let live = schedules(&session).list();
+    let live = schedules(&session);
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].label, "nightly");
     assert!(result.contains("nightly"), "{result}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
+        session.fire_schedules().unwrap();
         if let Some(input) = session.mailbox.drain().into_iter().next() {
-            if let Drained::Input(Input::Wakeup { text, epoch, .. }) = input {
+            if let Drained::Input(Input::Wakeup { text, .. }) = input {
                 assert!(text.contains("wake"), "{text}");
-                assert_eq!(epoch, schedules(&session).epoch());
                 return;
             }
             panic!("expected a scheduled wakeup");
@@ -372,11 +372,11 @@ fn schedule_remove_full_stack_disarms_by_label() {
     let mut session = granted_trunk();
     let result = eval(&mut session, NIGHTLY);
     assert!(result.contains("EXIT: 0"), "{result}");
-    assert_eq!(schedules(&session).list().len(), 1);
+    assert_eq!(schedules(&session).len(), 1);
     let result = eval(&mut session, "exarch-schedules `remove 'nightly'");
     assert!(result.contains("EXIT: 0"), "{result}");
     assert!(!result.contains("nightly"), "{result}");
-    assert!(schedules(&session).list().is_empty());
+    assert!(schedules(&session).is_empty());
     let miss = eval(&mut session, "exarch-schedules `remove 'nightly'");
     assert!(miss.contains("EXIT: 0"), "{miss}");
 }
@@ -437,10 +437,8 @@ fn double_reply_in_one_exchange_is_last_wins() {
     );
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
-    let provider = session.body.state.provider.clone();
     let outcome = session.deliberate(
         &DurableRoot::default().child(),
-        &provider,
         Some(("go".into(), Voice::Human)),
         None,
         &emit,
@@ -448,7 +446,7 @@ fn double_reply_in_one_exchange_is_last_wins() {
     match outcome {
         Ok(crate::agent::outcome::Outcome::Replied) => {
             assert_eq!(
-                session.handle().status().report,
+                session.handle().status().unwrap().report,
                 Some(ChildStatus::Replied(ral_core::data::FOValue::String {
                     value: "second".into()
                 })),
@@ -739,7 +737,7 @@ fn index_and_grep_answer_their_own_shapes() {
            echo $listed[0][from] $listed[0][to] $listed[0][role] $listed[0][kind]
            case $listed[0][location] [
              `resident: { |_| echo location=resident },
-             `under: { |_| echo location=under },
+             `evicted: { |_| echo location=evicted },
              `withdrawn: { |_| echo location=withdrawn },
            ]
            let matched = exarch-transcript `grep [pattern: 'first (prompt|answer)', turns: `all]

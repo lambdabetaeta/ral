@@ -1,6 +1,6 @@
 use super::*;
 
-fn model_pick() -> crate::provider::Pick {
+pub(super) fn model_pick() -> crate::provider::Pick {
     crate::provider::Pick::of(&crate::provider::Provider::scripted(
         "queued-model",
         crate::provider::scripted::Script::new(),
@@ -95,9 +95,9 @@ fn drain_takes_messages_batches_reads_and_wakeups_until_the_first_rewrite() {
         .unwrap();
     address.steer("after".into()).unwrap();
     assert!(
-        matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Message(message)), Drained::Input(Input::Surface { generation: 4, .. }), Drained::Input(Input::Wakeup { epoch: 3, .. }), Drained::Read(Read::Resources), Drained::Model(model), Drained::Input(Input::Human(text))]
-        if model == &pick && message.from == AgentId::new(7) && message.from_name == "review"
-        && message.render() == "[EXARCH AGENT 7 MESSAGE: review]\nplease inspect the parser\n[/EXARCH]"
+        matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Message(message)), Drained::Input(Input::Surface { generation: 4, .. }), Drained::Input(Input::Wakeup { .. }), Drained::Read(Read::Resources), Drained::Model(model), Drained::Input(Input::Human(text))]
+        if model == &pick && message.from == AgentId::new(9) && message.from_name == "review"
+        && message.render() == "[EXARCH AGENT 9 MESSAGE: review]\nplease inspect the parser\n[/EXARCH]"
         && text == "before")
     );
     assert!(mailbox.drain().is_empty());
@@ -133,13 +133,17 @@ fn clear_drops_reports_gone_wakeups_and_batches_but_keeps_all_typed_input() {
     let address = mailbox.address();
     address.steer("old".into()).unwrap();
     address.post(child(ChildStatus::Stopped)).unwrap();
-    address.post(Input::Gone(AgentId::new(8))).unwrap();
+    address.gone(AgentId::new(8));
     address.post(wakeup(1, "tick")).unwrap();
     address.post(surface()).unwrap();
     address.post(message("peer", false)).unwrap();
     address.command(Command::Rewrite(Rewrite::Clear)).unwrap();
     address.steer("new".into()).unwrap();
-    mailbox.clear();
+    #[allow(
+        clippy::redundant_closure_for_method_calls,
+        reason = "the method item is not general enough for transact's higher-ranked lifetime"
+    )]
+    mailbox.transact(|txn| txn.clear()).unwrap().unwrap();
     assert!(
         matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Human(text)), Drained::Input(Input::Message(message))]
         if text == "old" && message.text == "peer")
@@ -160,7 +164,7 @@ fn source_depths_count_every_kind_without_changing_the_queue() {
     address.steer("b".into()).unwrap();
     address.post(wakeup(1, "tick")).unwrap();
     address.post(child(ChildStatus::Stopped)).unwrap();
-    address.post(Input::Gone(AgentId::new(8))).unwrap();
+    address.gone(AgentId::new(8));
     address.post(message("peer", false)).unwrap();
     address.post(surface()).unwrap();
     address.command(Command::Read(Read::Context)).unwrap();
@@ -225,7 +229,7 @@ fn ending_refuses_posts_and_ignores_queued_work() {
 fn dropping_the_mailbox_ends_retained_addresses_and_their_exchange() {
     let mailbox = mailbox(Admission::Free);
     let address = mailbox.address();
-    let weak = address.downgrade();
+    let weak = address.transact(|txn| txn.weak()).unwrap();
     let exchange = start(&mailbox);
     drop(mailbox);
     assert!(!address.is_live());
@@ -239,15 +243,7 @@ fn dropping_the_mailbox_ends_retained_addresses_and_their_exchange() {
 #[test]
 fn a_parked_owner_observes_ancestor_cancellation() {
     let root = DurableRoot::default();
-    let mailbox = AgentMailbox::new(
-        root.child(),
-        Recorder::none(),
-        Admission::Free,
-        crate::provider::Pick::of(&crate::provider::Provider::scripted(
-            "test-model",
-            crate::provider::scripted::Script::new(),
-        )),
-    );
+    let mailbox = configured_mailbox(Admission::Free, Recorder::none(), root.child(), None, false);
     let address = mailbox.address();
     let worker = std::thread::spawn(move || mailbox.next(QUIET));
     root.cancel(CancelCause::Cancelled);

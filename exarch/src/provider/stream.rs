@@ -6,7 +6,7 @@ use super::retry::{Attempt, retry_with_backoff, wait_for_cancel};
 use super::transport::{Pool, Transport};
 use super::usage::{Usage, usage_from};
 use super::wire::{manufacture, tool_defs};
-use super::{ProviderError, Selection};
+use super::{ProviderError, Selected};
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
@@ -85,20 +85,15 @@ impl Pool {
     pub(super) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         transport: &Transport,
-        selection: &Selection,
+        selected: &Selected,
         request: Request<'_>,
         on_delta: &mut F,
         cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
-        let model = selection.model.as_str();
+        let model = selected.model.as_str();
         let adapter = transport.adapter();
         let tools = tool_defs(adapter, transport.live_search(), request);
-        let options = complete_options(
-            self.cache_key(),
-            selection.max_tokens_override,
-            &selection.tuning,
-            selection.via.as_ref(),
-        );
+        let options = complete_options(self.cache_key(), selected);
 
         let mut heard = false;
         self.block_on(retry_with_backoff(

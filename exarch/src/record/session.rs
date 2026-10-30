@@ -8,10 +8,11 @@
 //! `tui::scrollback` folds the same log's `Display`/`Forensic` classes into the
 //! scrollback.
 
-use super::model::{Context, ItemKind, Linked, Model, Residue, Span, validate_result_ids};
+use super::context::{Context, Eviction, ItemKind, Linked, Span, validate_result_ids};
 use super::{
-    EditAuthority, Fold as _, Forensic, Memory, Protocol, QuiesceReason, RECORD, Record, Recorded,
-    RecordedAccount, RecordedModel, Refusal, Role, ToolResult, Unavailable, Voice,
+    Control, EditAuthority, Fold as _, Folds, Forensic, Mail, Memory, Model, NonEmpty, Post,
+    QuiesceReason, RECORD, Record, Recorded, Refusal, Role, Schedules, Selected, Started,
+    ToolResult, Transcript, Unavailable, Voice,
 };
 use crate::record::AgentId;
 use genai::chat::{ChatMessage, ChatRole};
@@ -115,8 +116,6 @@ pub struct AgentLog {
     /// query in this file answers from; advanced inline through
     /// [`Self::advance`] on every protocol fact this log authors.
     context: Context,
-    /// The `(model, window)` a prior run's overflow taught; set by `resume`.
-    learned: Option<(String, u64)>,
     /// The one seam: every fact this log authors crosses here as a `Record` —
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
     /// `Agent::couple` has attached, in that order, under one lock.
@@ -149,7 +148,7 @@ impl From<Unavailable> for Uncommitted {
     }
 }
 
-/// What a `mnemon` child is forked with: its parent's turn table and residues.
+/// What a `mnemon` child is forked with: its parent's turn table and evictions.
 ///
 /// The table is turn by turn under the parent's own ids, each row carrying
 /// the address that makes it readable whoever recorded it first.
@@ -157,9 +156,9 @@ pub struct Inherited {
     /// The parent's table at the fork, each row beside the address its
     /// transcript copy lies at.
     pub turns: Vec<Linked>,
-    /// The parent's residues: the child folds them in, so its context is
+    /// The parent's evictions: the child folds them in, so its context is
     /// the same projection the parent's was.
-    pub residues: Vec<Residue>,
+    pub evictions: Vec<Eviction>,
 }
 
 impl AgentLog {
@@ -174,14 +173,15 @@ impl AgentLog {
         sessions_root: &OwnDir,
         session_id: AgentId,
         name: &str,
-        model: &RecordedModel,
-        account: &RecordedAccount,
+        returns: bool,
+        selected: &Selected,
         system: &str,
         inherited: Option<Inherited>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Mail, Schedules, Model)> {
         let mut log = Self::open_fresh(sessions_root.clone(), session_id)?;
-        log.open(None, name, model, account, system, inherited)?;
-        Ok(log)
+        let (mail, schedules, model) =
+            log.open(None, name, returns, selected, system, inherited)?;
+        Ok((log, mail, schedules, model))
     }
 
     /// A root log in a directory of its own, deleted when the log is.
@@ -195,25 +195,27 @@ impl AgentLog {
     pub(crate) fn for_test(
         session_id: AgentId,
         model: &str,
-        account: &RecordedAccount,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Mail, Schedules, Model)> {
         let scratch = OwnDir::for_test("agent-log")?;
-        let model = RecordedModel::for_test(model);
-        let log = Self::root(&scratch, session_id, "test", &model, account, "", None)?;
-        Ok(Self {
-            _scratch: Some(scratch),
-            ..log
-        })
+        let selected = Selected::for_test(model);
+        let (log, mail, schedules, model) =
+            Self::root(&scratch, session_id, "test", false, &selected, "", None)?;
+        Ok((
+            Self {
+                _scratch: Some(scratch),
+                ..log
+            },
+            mail,
+            schedules,
+            model,
+        ))
     }
 
     /// Build a forked child log, inheriting `sessions_root` and recording this
     /// log's id as the child's parent.  A `mnemon` child opens with a link to
     /// this log's whole turn table.
     ///
-    /// `model` and `account` are the child's *own*, handed in rather than
-    /// copied off this log: a spawn may name another selection, and this log's
-    /// pair was fixed at session start, so a `/model` since would make a
-    /// copied header a lie.
+    /// `selected` is the child's own choice, not this log's opening choice.
     ///
     /// # Errors
     /// Creating the child's directory, or writing its opening records, failed
@@ -222,20 +224,21 @@ impl AgentLog {
         &self,
         child_id: AgentId,
         name: &str,
-        model: &RecordedModel,
-        account: &RecordedAccount,
+        selected: &Selected,
         system: &str,
         memory: Memory,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Mail, Schedules, Model)> {
         self.seam.check_available()?;
         let mut log = Self::open_fresh(self.sessions_root.clone(), child_id)?;
         let inherited = (memory == Memory::Mnemon).then(|| self.inherited_context());
-        log.open(Some(self.id), name, model, account, system, inherited)?;
-        Ok(log)
+        let (mail, schedules, model) =
+            log.open(Some(self.id), name, true, selected, system, inherited)?;
+        Ok((log, mail, schedules, model))
     }
 
-    /// Fold `record.jsonl` into the turn table, quarantining a torn tail, and
-    /// reopen the seam in append mode.
+    /// Fold the context and the three control folds from `record.jsonl`,
+    /// quiesce an unready context, and commit the resume line reconciling
+    /// them, then `System` if it changed.
     ///
     /// A session recorded before `record.jsonl` existed cannot be resumed —
     /// an accepted loss named in
@@ -246,7 +249,14 @@ impl AgentLog {
     /// # Errors
     /// Returns an error when the log is missing, malformed, foreign, or
     /// cannot be reopened after validation.
-    pub fn resume(sessions_root: &OwnDir, session_id: AgentId) -> io::Result<Self> {
+    pub fn reopen(
+        sessions_root: &OwnDir,
+        session_id: AgentId,
+        selected: &Selected,
+        returns: bool,
+        system: &str,
+        at_unix_ms: u64,
+    ) -> io::Result<(Self, Mail, Schedules, Model)> {
         let dir = sessions_root.dir(&session_id.to_string())?;
         let record_path = dir.path().join(RECORD);
         if dir.stat(RECORD).is_none() {
@@ -256,8 +266,8 @@ impl AgentLog {
                 dir
             )));
         }
-        let (context, selection) = crate::record::model::resume(sessions_root, session_id)
-            .map_err(|error| {
+        let (context, (mut mail, mut schedules, mut model)) =
+            crate::record::context::resume(sessions_root, session_id).map_err(|error| {
                 io::Error::new(
                     error.kind(),
                     format!(
@@ -275,17 +285,49 @@ impl AgentLog {
             _scratch: None,
             context,
             seam,
-            learned: selection.learned(),
         };
         if !resumed.context.is_ready() {
             resumed.quiesce(QuiesceReason::Aborted)?;
         }
-        Ok(resumed)
-    }
-
-    /// The `(model, window)` a prior run's overflow taught its provider.
-    pub fn learned_window(&self) -> Option<&(String, u64)> {
-        self.learned.as_ref()
+        let pending: Vec<_> = mail.pending().collect();
+        let mut line = NonEmpty::one(Control::SessionResumed {
+            selected: selected.clone(),
+            returns,
+            at_unix_ms,
+        });
+        let withdrawn = if let Some(posts) = NonEmpty::collect(pending.iter().map(|&(id, _)| id)) {
+            line.rest.push(Control::Withdrawn { posts });
+            Some(withdrawn_note(
+                &pending.iter().map(|&(_, post)| post).collect::<Vec<_>>(),
+            ))
+        } else {
+            None
+        };
+        if let Some(job) = mail.job() {
+            line.rest.push(Control::JobSettled {
+                job,
+                stopped: false,
+            });
+        }
+        line.rest
+            .extend(schedules.iter().map(|(label, _)| Control::Unscheduled {
+                label: label.to_string(),
+            }));
+        drop(resumed.seam.commit_to(
+            Folds {
+                mail: &mut mail,
+                schedules: &mut schedules,
+                model: &mut model,
+            },
+            line,
+            withdrawn.into_iter().collect(),
+        )?);
+        if *system != **resumed.context.system() {
+            resumed.record_transcript(Transcript::System {
+                text: system.to_string(),
+            })?;
+        }
+        Ok((resumed, mail, schedules, model))
     }
 
     pub fn resumed_summary(&self) -> Resumed {
@@ -296,44 +338,13 @@ impl AgentLog {
         }
     }
 
-    /// Record the live model selection and the shared resume boundary stamp,
-    /// and the system prompt iff it differs from the one the log last held.
-    ///
-    /// # Errors
-    /// Returns an error if a record cannot be appended.
-    pub fn record_resumed(
-        &mut self,
-        model: &RecordedModel,
-        account: &RecordedAccount,
-        system: &str,
-        at_unix_ms: u64,
-    ) -> io::Result<()> {
-        self.seam
-            .emit(Forensic::SessionResumed {
-                model: model.name.clone(),
-                context_window: model.context_window,
-                label: account.label.clone(),
-                service: account.service.clone(),
-                account: account.id.clone(),
-                at_unix_ms,
-            })
-            .map(drop)?;
-        if *system == **self.context.system() {
-            return Ok(());
-        }
-        self.record_protocol(Protocol::System {
-            text: system.to_string(),
-        })
-        .map_err(io::Error::from)
-    }
-
     /// Advance the model fold for one witnessed record — called immediately
     /// after every [`crate::record::Emitter::emit`] this log makes itself.
     ///
     /// # Errors
     /// A link's ancestor file will not read back.
     fn advance(&mut self, record: Recorded<Record>) -> io::Result<()> {
-        Model::step(&mut self.context, record).map_err(|refusal| match refusal {
+        Context::step(&mut self.context, record).map_err(|refusal| match refusal {
             Refusal::Unreadable(error) => error,
             // Live authorship is typestate-correct by construction, so a
             // foreign record here is a caller bug; skipping it would desync
@@ -434,7 +445,7 @@ impl AgentLog {
     pub fn inherited_context(&self) -> Inherited {
         Inherited {
             turns: self.context.linked(),
-            residues: self.context.residues(),
+            evictions: self.context.evictions(),
         }
     }
 
@@ -451,11 +462,11 @@ impl AgentLog {
             )));
         }
         let turn = self.context.next_id();
-        self.record_protocol(Protocol::Import { turn, message })
+        self.record_transcript(Transcript::Import { turn, message })
             .map_err(Uncommitted::from)
     }
 
-    // ── Protocol mutations ────────────────────────────────────────────────
+    // ── Transcript mutations ────────────────────────────────────────────────
 
     /// Commit a top-level user prompt, opening a turn of its own — or
     /// extending the turn `continues` names, where that prompt is still the
@@ -478,15 +489,15 @@ impl AgentLog {
         // A continuation is honoured only while the turn it names is in the
         // context and is the prompt it answers.
         let record = if continues.is_some_and(|id| self.context.live_prompt() == Some(id)) {
-            Protocol::Steering { text, voice }
+            Transcript::Steering { text, voice }
         } else {
-            Protocol::UserPrompt {
+            Transcript::UserPrompt {
                 turn: self.context.next_id(),
                 text,
                 voice,
             }
         };
-        self.record_protocol(record).map_err(Uncommitted::from)
+        self.record_transcript(record).map_err(Uncommitted::from)
     }
 
     /// Append a user message between a complete tool-result batch and the next
@@ -508,7 +519,7 @@ impl AgentLog {
                 "cannot accept a steering prompt: no turn is being written".into(),
             ));
         }
-        self.record_protocol(Protocol::Steering { text, voice })
+        self.record_transcript(Transcript::Steering { text, voice })
             .map_err(Uncommitted::from)
     }
 
@@ -536,7 +547,7 @@ impl AgentLog {
             )));
         }
         let turn = self.context.next_id();
-        self.record_protocol(Protocol::AssistantMessage {
+        self.record_transcript(Transcript::AssistantMessage {
             turn,
             message,
             pending_tool_ids,
@@ -557,7 +568,7 @@ impl AgentLog {
             )));
         };
         validate_result_ids(&pending_ids, &results).map_err(Uncommitted::Refused)?;
-        self.record_protocol(Protocol::ToolResults { results })
+        self.record_transcript(Transcript::ToolResults { results })
             .map_err(Uncommitted::from)
     }
 
@@ -570,7 +581,7 @@ impl AgentLog {
     /// A required record failed: the writer has failed and the session has ended.
     pub fn quiesce(&mut self, reason: QuiesceReason) -> Result<(), Unavailable> {
         for record in self.context.quiesce_records(reason) {
-            self.record_protocol(record)?;
+            self.record_transcript(record)?;
         }
         // Only a cancellation earns its own breadcrumb; an abort's marker is
         // the `ProviderError` already on disk.
@@ -580,7 +591,7 @@ impl AgentLog {
         Ok(())
     }
 
-    /// Take the run `span` out of the context, leaving one residue standing
+    /// Take the run `span` out of the context, leaving one eviction standing
     /// for it with `note`. Its row on screen is the caller's to author.
     ///
     /// # Errors
@@ -594,10 +605,8 @@ impl AgentLog {
         self.context
             .resolve_cut(span)
             .map_err(Uncommitted::Refused)?;
-        self.record_protocol(Protocol::Evicted {
-            residue: Residue { span, note, by },
-        })
-        .map_err(Uncommitted::from)
+        self.record_transcript(Transcript::Evicted(Eviction { span, note, by }))
+            .map_err(Uncommitted::from)
     }
 
     /// `/rewind`: turn `anchor` and every turn after it are withdrawn from
@@ -610,7 +619,7 @@ impl AgentLog {
         self.context
             .rewindable(anchor)
             .map_err(Uncommitted::Refused)?;
-        self.record_protocol(Protocol::Rewound { anchor })
+        self.record_transcript(Transcript::Rewound { anchor })
             .map_err(Uncommitted::from)
     }
 
@@ -635,7 +644,7 @@ impl AgentLog {
     /// Refused as not ready (`Refused`), or the writer failed (`Unavailable`).
     pub(crate) fn clear(&mut self) -> Result<(), Uncommitted> {
         self.prepare_clear()?;
-        self.record_protocol(Protocol::Cleared)
+        self.record_transcript(Transcript::Cleared)
             .map_err(Uncommitted::from)
     }
 
@@ -653,7 +662,6 @@ impl AgentLog {
             sessions_root,
             #[cfg(test)]
             _scratch: None,
-            learned: None,
             seam,
         })
     }
@@ -664,44 +672,63 @@ impl AgentLog {
         &mut self,
         parent: Option<AgentId>,
         name: &str,
-        model: &RecordedModel,
-        account: &RecordedAccount,
+        returns: bool,
+        selected: &Selected,
         system: &str,
         inherited: Option<Inherited>,
-    ) -> io::Result<()> {
-        self.seam
-            .emit(Forensic::SessionStarted {
-                session_id: self.id,
-                name: name.to_string(),
-                parent,
-                model: model.name.clone(),
-                context_window: model.context_window,
-                label: account.label.clone(),
-                service: account.service.clone(),
-                account: account.id.clone(),
-                log_dir: self.dir.path().to_path_buf(),
-                at_unix_ms: crate::app::now_unix_ms(),
-            })
-            .map(drop)?;
-        if let Some(Inherited { turns, residues }) = inherited {
-            // A refused link refuses construction; this log dies with it.
-            let link = self.seam.emit(Protocol::Inherited { turns, residues })?;
+    ) -> io::Result<(Mail, Schedules, Model)> {
+        let folds = self.seam.begin(Started {
+            session_id: self.id,
+            name: name.to_string(),
+            parent,
+            returns,
+            selected: selected.clone(),
+            log_dir: self.dir.path().to_path_buf(),
+            at_unix_ms: crate::app::now_unix_ms(),
+        })?;
+        if let Some(Inherited { turns, evictions }) = inherited {
+            let link = self.seam.emit(Transcript::Inherited { turns, evictions })?;
             self.advance(link)?;
         }
-        self.record_protocol(Protocol::System {
+        self.record_transcript(Transcript::System {
             text: system.to_string(),
-        })
-        .map_err(io::Error::from)
+        })?;
+        Ok(folds)
     }
 
     /// Emit a protocol fact and advance the fold on its witnessed result.
     ///
     /// # Errors
     /// The writer failed, or the fold refused a durable record, breaking agreement.
-    fn record_protocol(&mut self, p: Protocol) -> Result<(), Unavailable> {
+    fn record_transcript(&mut self, p: Transcript) -> Result<(), Unavailable> {
         let recorded = self.seam.emit(p)?;
         self.advance(recorded)
             .map_err(|error| self.seam.fail(error))
+    }
+}
+
+/// What a restart tells the log about the inputs it withdrew unread.
+fn withdrawn_note(pending: &[&Post]) -> Forensic {
+    let descriptions = pending
+        .iter()
+        .map(|post| {
+            let line: String = post
+                .text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect();
+            format!("{}: {line}", post.voice_word())
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Forensic::SystemNote {
+        text: format!(
+            "the restart withdrew {} queued input(s) no one had read: {descriptions}",
+            pending.len()
+        ),
     }
 }
 
@@ -723,9 +750,9 @@ fn live_root(sessions: &OwnDir, id: AgentId) -> io::Result<Option<String>> {
     let Some(head) = records.next().transpose()? else {
         return Ok(None);
     };
-    let Record::Forensic(Forensic::SessionStarted {
+    let Record::Control(Control::SessionStarted(Started {
         parent: None, name, ..
-    }) = head.value()
+    })) = head.value()
     else {
         return Ok(None);
     };

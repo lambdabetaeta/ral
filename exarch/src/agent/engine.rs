@@ -153,7 +153,7 @@ impl Body {
                 .emit_or_end(Forensic::TeardownFailed {
                     failure: failure.clone(),
                 });
-            self.state.failures.push(failure);
+            self.failures.push(failure);
         }
     }
 }

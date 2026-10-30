@@ -2,7 +2,7 @@
 
 use crate::wire::{JobId, WindowReport};
 use exarch::port::{BusReceiver, Signal, Sink};
-use exarch::record::{AgentId, Forensic, Record, Transient};
+use exarch::record::{AgentId, Control, Forensic, Record, Transient};
 use ral_core::carrier::Severed;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -79,12 +79,12 @@ pub(crate) fn run(
         {
             for rec in commit.records() {
                 match rec.value() {
-                    Record::Forensic(Forensic::JobOpened) => {
+                    Record::Control(Control::JobOpened) => {
                         if !stage.job_began(exarch::record::JobId::from(commit.number()).into()) {
                             return Ok(());
                         }
                     }
-                    Record::Forensic(Forensic::JobSettled { job, stopped }) => {
+                    Record::Control(Control::JobSettled { job, stopped }) => {
                         settlement = Some((*job, *stopped));
                     }
                     _ => {}

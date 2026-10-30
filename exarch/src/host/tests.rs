@@ -10,7 +10,7 @@ use crate::agent::{Admission, TestTrunk};
 use crate::bus::Input;
 use crate::bus::{Command, Read, Rewrite, Signal, WORKER_PANIC_PREFIX};
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{ChildStatus, Forensic, Memory, Protocol, Record, Voice};
+use crate::record::{ChildStatus, Forensic, Memory, Record, Transcript, Voice};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -172,7 +172,7 @@ fn until_settled(host: &Host) -> Vec<Record> {
             let settled = commit.records().iter().any(|record| {
                 matches!(
                     record.value(),
-                    Record::Forensic(Forensic::JobSettled { .. })
+                    Record::Control(crate::record::Control::JobSettled { .. })
                 )
             });
             records.extend(
@@ -205,6 +205,7 @@ fn a_retained_port_does_not_retain_the_factory_after_end() {
         trunk: Trunk::Converses,
         admission: crate::agent::Admission::Free,
         helper_idle: crate::agent::fleet::HELPER_IDLE,
+        max_tokens: None,
         tools: crate::provider::Toolset::offered(false),
         allow_schedule: false,
         resume_on_reset: false,
@@ -252,7 +253,7 @@ fn host_end_returns_a_final_session_end_recording_failure() {
 fn job_opened(records: &[Record]) -> usize {
     records
         .iter()
-        .filter(|record| matches!(record, Record::Forensic(Forensic::JobOpened)))
+        .filter(|record| matches!(record, Record::Control(crate::record::Control::JobOpened)))
         .count()
 }
 
@@ -292,7 +293,7 @@ fn a_scheduled_wakeup_opens_a_job_at_rest_through_the_host() {
         "the wakeup at rest opens its own job"
     );
     assert!(second.iter().any(|record| matches!(record,
-        Record::Protocol(Protocol::UserPrompt { voice: Voice::Wakeup, text, .. })
+        Record::Transcript(Transcript::UserPrompt { voice: Voice::Wakeup, text, .. })
             if text.contains("stir")
     )));
     assert_eq!(host.end(), [] as [String; 0]);
@@ -335,7 +336,7 @@ fn clear_through_the_host_ends_helpers_drops_reports_and_keeps_human_text() {
     let cleared = |signal: &Signal| {
         matches!(signal, Signal::Commit(agent, commit) if *agent == id
             && commit.records().iter().any(|record|
-                matches!(record.value(), Record::Protocol(Protocol::Cleared))))
+                matches!(record.value(), Record::Transcript(Transcript::Cleared))))
     };
     loop {
         let signal = host.feed().recv_timeout(WAIT).expect("the root clears");
@@ -351,7 +352,7 @@ fn clear_through_the_host_ends_helpers_drops_reports_and_keeps_human_text() {
     let prompts: Vec<_> = records
         .iter()
         .filter_map(|record| match record {
-            Record::Protocol(Protocol::UserPrompt { text, voice, .. }) => {
+            Record::Transcript(Transcript::UserPrompt { text, voice, .. }) => {
                 Some((text.as_str(), *voice))
             }
             _ => None,

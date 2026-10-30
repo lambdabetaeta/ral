@@ -11,14 +11,13 @@ use crate::agent::gauge::Warning;
 use crate::agent::outcome::{Fault, Outcome};
 use crate::agent::tools;
 use crate::bus::{Drained, Emitter};
-use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
+use crate::provider::{Delta, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::stream::Stream;
 use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient, Voice};
 use ral_core::data::FOValue;
 use ral_core::process::Scope;
 use std::ops::ControlFlow;
-use std::sync::Arc;
 
 /// What one round-trip leaves the deliberation with.
 enum Turn {
@@ -31,8 +30,7 @@ enum Turn {
 
 impl Agent {
     /// Run one deliberation: optionally commit `prompt` and its voice, then drive
-    /// round-trips to quiescence over `provider`, read once by the caller so a
-    /// `/model` swap lands on the next item rather than mid-item.
+    /// round-trips to quiescence, reading the client at each request.
     ///
     /// # Errors
     /// A provider round-trip failed, the engine was lost, a session-log mutation
@@ -40,13 +38,12 @@ impl Agent {
     pub fn deliberate(
         &mut self,
         exchange: &Scope,
-        provider: &Arc<Provider>,
         prompt: Option<(String, Voice)>,
         continues: Option<u64>,
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
         self.couple(emit);
-        let deliberated = self.deliberation(exchange, provider, prompt, continues, emit);
+        let deliberated = self.deliberation(exchange, prompt, continues, emit);
         // Every return repairs; an unwind is `attempt`'s.
         self.abort_unready()?;
         deliberated
@@ -55,14 +52,13 @@ impl Agent {
     fn deliberation(
         &mut self,
         exchange: &Scope,
-        provider: &Arc<Provider>,
         prompt: Option<(String, Voice)>,
         continues: Option<u64>,
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
         // Entry is the one point every route into a deliberation crosses, so a
         // reply staged by a batch a cancel or an error cut short dies here.
-        self.body.state.reply = None;
+        self.body.reply = None;
         if let Some((text, voice)) = prompt {
             self.body.log.append_user(text, continues, voice)?;
         }
@@ -73,17 +69,15 @@ impl Agent {
             if exchange.is_cancelled() {
                 return self.halted();
             }
-            if self.must_force_evict(provider) {
+            if self.must_force_evict()? {
                 self.force_eviction();
             }
-            match self.round_trip(exchange, provider, retried)? {
+            match self.round_trip(exchange, retried)? {
                 Turn::Ends(outcome) => return Ok(outcome),
                 Turn::Retry => retried = true,
                 Turn::Calls(calls) => {
                     retried = false;
-                    if let ControlFlow::Break(outcome) =
-                        self.answer(exchange, calls, provider, emit)?
-                    {
+                    if let ControlFlow::Break(outcome) = self.answer(exchange, calls, emit)? {
                         return Ok(outcome);
                     }
                 }
@@ -94,20 +88,16 @@ impl Agent {
     /// One request to the provider, streamed onto the record as it arrives.
     /// `retried` is whether this round-trip already follows an overflow's
     /// eviction, which is never taken twice running.
-    fn round_trip(
-        &mut self,
-        exchange: &Scope,
-        provider: &Provider,
-        retried: bool,
-    ) -> Result<Turn, Fault> {
+    fn round_trip(&mut self, exchange: &Scope, retried: bool) -> Result<Turn, Fault> {
+        let provider = self.body.client.clone();
+        let (tuning, via) = self.mailbox.transact(|txn| {
+            let selected = txn.model().selected();
+            (selected.tuning.clone(), selected.via.clone())
+        })?;
         let recorder = self.recorder();
         let turn = self.body.log.context().next_id();
         recorder
-            .emit(Forensic::TurnStarted {
-                turn,
-                tuning: provider.tuning().clone(),
-                via: provider.via().cloned(),
-            })
+            .emit(Forensic::TurnStarted { turn, tuning, via })
             .map(drop)?;
         let messages = self.body.log.render_messages().map_err(Fault::Refused)?;
         let system = self.body.log.context().system().clone();
@@ -149,7 +139,7 @@ impl Agent {
         match taken {
             _ if cancelled => self.halted().map(Turn::Ends),
             Ok(step) => self.settle_turn(step),
-            Err(error) => self.relieve(exchange, error, provider, retried),
+            Err(error) => self.relieve(exchange, error, retried),
         }
     }
 
@@ -157,20 +147,22 @@ impl Agent {
     fn relieve(
         &mut self,
         exchange: &Scope,
-        error: ProviderError,
-        provider: &Provider,
+        mut error: ProviderError,
         retried: bool,
     ) -> Result<Turn, Fault> {
-        let ProviderError::Overflow { listed, .. } = &error else {
+        let ProviderError::Overflow {
+            model,
+            listed,
+            limit,
+            ..
+        } = &mut error
+        else {
             return Err(error.into());
         };
-        if let Some(window) = provider.context_window()
-            && *listed != Some(window)
-        {
-            self.recorder().emit_or_end(Forensic::WindowNarrowed {
-                context_window: window,
-            });
-        }
+        self.mailbox.try_transact(|txn| {
+            *listed = txn.model().window();
+            limit.map_or(Ok(false), |limit| txn.narrow(model, limit))
+        })?;
         if retried || exchange.is_cancelled() || !self.force_eviction() {
             return Err(error.into());
         }
@@ -253,13 +245,12 @@ impl Agent {
         &mut self,
         exchange: &Scope,
         calls: Vec<ToolCall>,
-        provider: &Provider,
         emit: &Emitter,
     ) -> Result<ControlFlow<Outcome>, Fault> {
         let results = self.run_batch(exchange, calls, emit);
         self.body.log.append_tool_results(results)?;
-        self.body.state.readings.nudges.reset();
-        let reply = self.body.state.reply.take();
+        self.body.readings.nudges.reset();
+        let reply = self.body.reply.take();
         // A cancelled batch admits nothing: a read run or a steer recorded
         // here would belong to the exchange being dropped.
         if exchange.is_cancelled() {
@@ -272,13 +263,19 @@ impl Agent {
         // Arrivals are taken in the order typed: a read runs against the
         // context as it stands at its place in the queue, a delivery lands as
         // a steering line of its own.  The warnings trail them.
+        self.fire_schedules()?;
         for drained in self.mailbox.drain() {
             match drained {
+                Drained::Gone(id) => self.gone(id),
                 Drained::Read(read) => self.read(&read, emit),
                 Drained::Model(pick) => self.switch_model(pick),
                 Drained::Input(input) => {
                     if let Some(prompt) = self.admit(input) {
                         self.body.log.append_steering(prompt.text, prompt.voice)?;
+                        #[cfg(test)]
+                        if let Some(hook) = AFTER_STEERING.take() {
+                            hook();
+                        }
                     }
                 }
             }
@@ -286,7 +283,7 @@ impl Agent {
         if exchange.is_cancelled() {
             return self.halted().map(ControlFlow::Break);
         }
-        let climbed = self.climbed(provider)?;
+        let climbed = self.climbed()?;
         let steering = self.tell(climbed);
         if !steering.is_empty() {
             self.body
@@ -306,12 +303,9 @@ impl Agent {
                     self.note(line);
                     None
                 }
-                Warning::Model(reminder) => self
-                    .body
-                    .state
-                    .readings
-                    .nudges
-                    .remind(&reminder, &self.body.log),
+                Warning::Model(reminder) => {
+                    self.body.readings.nudges.remind(&reminder, &self.body.log)
+                }
             })
             .collect()
     }
@@ -455,6 +449,13 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
     if !substantive {
         msg.content = genai::chat::MessageContent::from_text(EMPTY_ASSISTANT_STUB);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once, after the next drained line is recorded.
+    static AFTER_STEERING: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

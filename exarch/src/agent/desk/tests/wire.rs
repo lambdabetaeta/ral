@@ -212,7 +212,7 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
             (&wire_peer, "note for wire"),
         ] {
             assert!(
-                matches!(next_input(&peer.mailbox), Input::Message(message) if message.text == expected && message.from_parent)
+                matches!(next_input(&peer.mailbox), Input::Message(message) if message.text == expected)
             );
         }
     });

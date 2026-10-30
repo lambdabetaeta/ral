@@ -9,7 +9,7 @@ use super::{
     Context, Location, Span, Turn, chat_messages, message_bytes, message_label, message_role,
     not_recorded_refusal_turn, opening_line,
 };
-use crate::record::{Protocol, Record, Recorded, Refusal, Role, TurnKind};
+use crate::record::{Record, Recorded, Refusal, Role, Transcript, TurnKind};
 
 impl Context {
     /// Whether an eviction may take the run `span`: the one place its rules
@@ -17,7 +17,7 @@ impl Context {
     ///
     /// # Errors
     /// Refuses an end never recorded or withdrawn, a run holding the turn
-    /// being written now, and one that cuts a residue.
+    /// being written now, and one that cuts an eviction.
     pub(crate) fn resolve_cut(&self, span: Span) -> Result<(), String> {
         for id in [span.from(), span.to()] {
             let Some(turn) = self.turn(id) else {
@@ -39,7 +39,7 @@ impl Context {
             .table
             .straddling(span.from())
             .or_else(|| self.table.straddling(span.to().saturating_add(1)))
-            .map(|residue| residue.span)
+            .map(|eviction| eviction.span)
         {
             return Err(format!(
                 "{straddled} stand together under one note: name from: {}, to: {} whole, or \
@@ -70,10 +70,10 @@ impl Context {
                 "turn {anchor} was already rewound or cleared away; {earliest}"
             ));
         }
-        if let Some(residue) = self.table.straddling(anchor) {
-            let span = residue.span;
+        if let Some(eviction) = self.table.straddling(anchor) {
+            let span = eviction.span;
             return Err(format!(
-                "turn {anchor} lies under the residue over {span}: rewind to turn {} or turn {}",
+                "turn {anchor} lies under the eviction over {span}: rewind to turn {} or turn {}",
                 span.from(),
                 span.to() + 1
             ));
@@ -93,8 +93,8 @@ impl Context {
     ///
     /// A walk back over the frontier from the newest item, which is never a
     /// candidate: the first item that does not fit ends a prefix. A prefix
-    /// that is one residue alone is no plan: rewriting it without a note
-    /// would save nothing.
+    /// plans nothing when it holds no material item or its only material item
+    /// is an eviction: rewriting that without a note would save nothing.
     pub(crate) fn plan_forced_eviction(&self, keep: usize) -> Option<Span> {
         let items = self.table.frontier();
         let (last, candidates) = items.split_last()?;
@@ -108,8 +108,12 @@ impl Context {
             }
         }
         let through = through?;
-        if let [Item::Residue(..)] = candidates[..=through] {
-            return None;
+        let mut material = candidates[..=through]
+            .iter()
+            .filter(|item| item.is_material());
+        match (material.next(), material.next()) {
+            (None, _) | (Some(Item::Eviction(_)), None) => return None,
+            _ => {}
         }
         Some(candidates[0].span().hull(candidates[through].span()))
     }
@@ -125,24 +129,24 @@ impl Context {
     /// Returns [`Refusal::Foreign`] for a record no live session could have
     /// written at this point in the log, and [`Refusal::Unreadable`] for a
     /// link whose ancestor's file will not read back.
-    pub(crate) fn step(&mut self, record: Recorded<Protocol>) -> Result<(), Refusal> {
+    pub(crate) fn step_transcript(&mut self, record: Recorded<Transcript>) -> Result<(), Refusal> {
         let index = self.len;
         self.judge(index, record.value())?;
         let (locus, protocol) = record.into_parts();
         let mut state = advance(&self.state, &protocol);
         match &protocol {
-            Protocol::System { text } => self.system = text.as_str().into(),
-            Protocol::Inherited { turns, residues } => {
+            Transcript::System { text } => self.system = text.as_str().into(),
+            Transcript::Inherited { turns, evictions } => {
                 // Read first: a failure leaves the structure as it was.
                 let seeds = read_seeds(self.table.sessions(), turns)?;
-                self.table.install(turns, residues, seeds);
+                self.table.install(turns, evictions, seeds);
             }
-            Protocol::Evicted { residue } => {
-                self.table.evict(residue.clone());
+            Transcript::Evicted(eviction) => {
+                self.table.evict(eviction.clone());
                 self.newest_edit = Some(index);
             }
-            Protocol::Rewound { .. } | Protocol::Cleared => {
-                let from = if let Protocol::Rewound { anchor } = protocol {
+            Transcript::Rewound { .. } | Transcript::Cleared => {
+                let from = if let Transcript::Rewound { anchor } = protocol {
                     anchor
                 } else {
                     0
@@ -152,11 +156,11 @@ impl Context {
                 state = resting(self.resident().last().map_or(&[], Turn::records));
                 self.newest_edit = Some(index);
             }
-            Protocol::UserPrompt { .. }
-            | Protocol::Steering { .. }
-            | Protocol::Import { .. }
-            | Protocol::AssistantMessage { .. }
-            | Protocol::ToolResults { .. } => {}
+            Transcript::UserPrompt { .. }
+            | Transcript::Steering { .. }
+            | Transcript::Import { .. }
+            | Transcript::AssistantMessage { .. }
+            | Transcript::ToolResults { .. } => {}
         }
         self.len = index + 1;
         self.state = state;
@@ -168,10 +172,10 @@ impl Context {
     }
 
     /// What no live session could have written here.
-    fn judge(&self, index: usize, protocol: &Protocol) -> Result<(), Refusal> {
+    fn judge(&self, index: usize, protocol: &Transcript) -> Result<(), Refusal> {
         let n = index + 1;
         let foreign = |reason: String| Refusal::Foreign {
-            record: Box::new(Record::Protocol(protocol.clone())),
+            record: Box::new(Record::Transcript(protocol.clone())),
             reason,
         };
         if !admissible(&self.state, protocol) {
@@ -184,7 +188,7 @@ impl Context {
                 "record {n} names turn {id}, which the log had already moved past; no live session records a stale id"
             )));
         }
-        if let Protocol::Inherited { turns, residues } = protocol {
+        if let Transcript::Inherited { turns, evictions } = protocol {
             // The position is the rule: a link stands as the first protocol
             // record of a fork's log, and nowhere else.
             if index != 0 {
@@ -202,17 +206,17 @@ impl Context {
                 )));
             }
             let carried = |id: u64| turns.iter().any(|linked| linked.row.id == id);
-            if let Some(span) = residues
+            if let Some(span) = evictions
                 .iter()
-                .map(|residue| residue.span)
+                .map(|eviction| eviction.span)
                 .find(|span| !carried(span.from()) || !carried(span.to()))
             {
                 return Err(foreign(format!(
-                    "record {n} links a residue over {span}, whose ends are not a run of turns the link carries; was this log's opening record hand-edited?"
+                    "record {n} links an eviction over {span}, whose ends are not a run of turns the link carries; was this log's opening record hand-edited?"
                 )));
             }
-            let crossed = residues.iter().enumerate().find_map(|(i, earlier)| {
-                residues[i + 1..]
+            let crossed = evictions.iter().enumerate().find_map(|(i, earlier)| {
+                evictions[i + 1..]
                     .iter()
                     .find(|later| {
                         let (earlier, later) = (earlier.span, later.span);
@@ -224,7 +228,7 @@ impl Context {
             });
             if let Some((earlier, later)) = crossed {
                 return Err(foreign(format!(
-                    "record {n} links a residue over {earlier} and a later one over {later}, which no sequence of evictions leaves: a later residue covers an earlier one whole or lies apart from it; was this log's opening record hand-edited?"
+                    "record {n} links an eviction over {earlier} and a later one over {later}, which no sequence of evictions leaves: a later eviction covers an earlier one whole or lies apart from it; was this log's opening record hand-edited?"
                 )));
             }
             let contradicted = turns.iter().map(|linked| &linked.row).find(|row| {
@@ -232,19 +236,19 @@ impl Context {
                     && row.location
                         != holder(
                             Span::single(row.id),
-                            residues.iter().map(|residue| residue.span),
+                            evictions.iter().map(|eviction| eviction.span),
                         )
-                        .map_or(Location::Resident, Location::Under)
+                        .map_or(Location::Resident, Location::Evicted)
             });
             if let Some(row) = contradicted {
                 return Err(foreign(format!(
-                    "record {n} links turn {} as {}, which its residues contradict; was this log's opening record hand-edited?",
+                    "record {n} links turn {} as {}, which its evictions contradict; was this log's opening record hand-edited?",
                     row.id,
                     row.location.as_str()
                 )));
             }
         }
-        if let Protocol::Rewound { anchor } = protocol
+        if let Transcript::Rewound { anchor } = protocol
             && let Some(gone) = match self.turn(*anchor) {
                 None => Some("was never recorded"),
                 Some(turn) => turn
@@ -256,23 +260,23 @@ impl Context {
                 "record {n} rewinds to turn {anchor}, which {gone}; was record.jsonl hand-edited?"
             )));
         }
-        if let Protocol::Rewound { anchor } = protocol
-            && let Some(residue) = self.table.straddling(*anchor)
+        if let Transcript::Rewound { anchor } = protocol
+            && let Some(eviction) = self.table.straddling(*anchor)
         {
             return Err(foreign(format!(
-                "record {n} rewinds to turn {anchor}, inside the residue over {}; was record.jsonl hand-edited?",
-                residue.span
+                "record {n} rewinds to turn {anchor}, inside the eviction over {}; was record.jsonl hand-edited?",
+                eviction.span
             )));
         }
-        if let Protocol::Evicted { residue } = protocol
-            && let Err(reason) = self.resolve_cut(residue.span)
+        if let Transcript::Evicted(eviction) = protocol
+            && let Err(reason) = self.resolve_cut(eviction.span)
         {
             return Err(foreign(format!(
                 "record {n} evicts {}, which no live session could: {reason}; was record.jsonl hand-edited?",
-                residue.span
+                eviction.span
             )));
         }
-        if matches!(protocol, Protocol::Steering { .. }) && self.table.turns().is_empty() {
+        if matches!(protocol, Transcript::Steering { .. }) && self.table.turns().is_empty() {
             return Err(foreign(format!(
                 "record {n} steers a turn, but no turn has been recorded; was record.jsonl hand-edited?"
             )));
@@ -288,34 +292,36 @@ impl Context {
 
     /// An id the log had already moved past: a prompt, an import and an
     /// assistant message each open a turn under a freshly minted id.
-    fn stale(&self, protocol: &Protocol) -> Option<u64> {
+    fn stale(&self, protocol: &Transcript) -> Option<u64> {
         match protocol {
-            Protocol::UserPrompt { turn, .. }
-            | Protocol::AssistantMessage { turn, .. }
-            | Protocol::Import { turn, .. } => Some(*turn).filter(|id| Some(*id) <= self.reach()),
-            Protocol::System { .. }
-            | Protocol::Steering { .. }
-            | Protocol::ToolResults { .. }
-            | Protocol::Evicted { .. }
-            | Protocol::Rewound { .. }
-            | Protocol::Cleared
-            | Protocol::Inherited { .. } => None,
+            Transcript::UserPrompt { turn, .. }
+            | Transcript::AssistantMessage { turn, .. }
+            | Transcript::Import { turn, .. } => Some(*turn).filter(|id| Some(*id) <= self.reach()),
+            Transcript::System { .. }
+            | Transcript::Steering { .. }
+            | Transcript::ToolResults { .. }
+            | Transcript::Evicted(_)
+            | Transcript::Rewound { .. }
+            | Transcript::Cleared
+            | Transcript::Inherited { .. } => None,
         }
     }
 
     /// The turn a record's material would extend, where it opens none: the
     /// newest row.
-    fn extends(&self, protocol: &Protocol) -> Option<&Turn> {
+    fn extends(&self, protocol: &Transcript) -> Option<&Turn> {
         match protocol {
-            Protocol::Steering { .. } | Protocol::ToolResults { .. } => self.table.turns().last(),
-            Protocol::System { .. }
-            | Protocol::UserPrompt { .. }
-            | Protocol::Import { .. }
-            | Protocol::AssistantMessage { .. }
-            | Protocol::Evicted { .. }
-            | Protocol::Rewound { .. }
-            | Protocol::Cleared
-            | Protocol::Inherited { .. } => None,
+            Transcript::Steering { .. } | Transcript::ToolResults { .. } => {
+                self.table.turns().last()
+            }
+            Transcript::System { .. }
+            | Transcript::UserPrompt { .. }
+            | Transcript::Import { .. }
+            | Transcript::AssistantMessage { .. }
+            | Transcript::Evicted(_)
+            | Transcript::Rewound { .. }
+            | Transcript::Cleared
+            | Transcript::Inherited { .. } => None,
         }
     }
 
@@ -324,34 +330,34 @@ impl Context {
     ///
     /// A prompt or an import opens a turn of its own; a steering line extends
     /// the newest.
-    fn place(&mut self, protocol: &Protocol) -> Option<usize> {
+    fn place(&mut self, protocol: &Transcript) -> Option<usize> {
         match protocol {
-            Protocol::UserPrompt { turn, text, .. } => {
+            Transcript::UserPrompt { turn, text, .. } => {
                 Some(
                     self.table
                         .open(*turn, Role::User, TurnKind::Own, opening_line(text)),
                 )
             }
-            Protocol::AssistantMessage { turn, message, .. } => Some(self.table.open(
+            Transcript::AssistantMessage { turn, message, .. } => Some(self.table.open(
                 *turn,
                 Role::Assistant,
                 TurnKind::Own,
                 message_label(message),
             )),
-            Protocol::Import { turn, message } => Some(self.table.open(
+            Transcript::Import { turn, message } => Some(self.table.open(
                 *turn,
                 message_role(message),
                 TurnKind::Import,
                 message_label(message),
             )),
-            Protocol::Steering { .. } | Protocol::ToolResults { .. } => {
+            Transcript::Steering { .. } | Transcript::ToolResults { .. } => {
                 self.table.turns().len().checked_sub(1)
             }
-            Protocol::System { .. }
-            | Protocol::Evicted { .. }
-            | Protocol::Rewound { .. }
-            | Protocol::Cleared
-            | Protocol::Inherited { .. } => None,
+            Transcript::System { .. }
+            | Transcript::Evicted(_)
+            | Transcript::Rewound { .. }
+            | Transcript::Cleared
+            | Transcript::Inherited { .. } => None,
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::agent::loan::Loanable;
 use crate::agent::nursery::Nursery;
 use crate::agent::roster::summary;
 use crate::agent::testkit::{TestAgent, ral_call};
-use crate::agent::{Body, Readings, Role, State};
+use crate::agent::{Body, Readings, Role};
 use crate::bus::FleetSink;
 use crate::bus::{Input, Next, Rest};
 use crate::bus::{Signal, channel};
@@ -32,12 +32,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 fn fresh_log() -> AgentLog {
-    AgentLog::for_test(
-        AgentId::new(0),
-        "test",
-        &crate::record::RecordedAccount::for_test("test"),
-    )
-    .expect("session log")
+    AgentLog::for_test(AgentId::new(0), "test")
+        .expect("session log")
+        .0
 }
 
 fn with_fleet_desk<R>(
@@ -52,16 +49,13 @@ fn with_fleet_desk<R>(
     let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
     let mut owner = Loanable::new(Body {
         log: fresh_log(),
-        state: State {
-            provider: Arc::new(Provider::scripted("test-model", Script::new())),
-            nursery: Nursery::default(),
-            reply: None,
-            owed: false,
-            failures: Vec::new(),
-            pins: BTreeMap::default(),
-            schedules: crate::schedule::ScheduleRegistry::new(),
-            readings: Readings::new(true),
-        },
+        client: Arc::new(Provider::scripted("test-model", Script::new())),
+        nursery: Nursery::default(),
+        reply: None,
+        failures: Vec::new(),
+        pins: BTreeMap::default(),
+        schedules: crate::schedule::ScheduleRegistry::new(),
+        readings: Readings::new(true),
     });
     let (emit, _rx) = crate::bus::dummy_emitter();
     owner.lend(|loan| {
@@ -78,7 +72,7 @@ fn with_fleet_desk<R>(
         };
         let answer = f(desk, fleet, agent);
         let mut body = loan.get().expect("the test still owns its dispatch");
-        let failures = body.state.nursery.dismiss_all();
+        let failures = body.nursery.dismiss_all();
         assert!(failures.is_empty(), "helper teardown failed: {failures:?}");
         answer
     })
@@ -211,10 +205,7 @@ fn next_input(mailbox: &crate::bus::AgentMailbox) -> Input {
             address.end(ral_core::process::CancelCause::TimedOut);
         }
     });
-    let next = mailbox.next(Rest {
-        pending: true,
-        schedules: false,
-    });
+    let next = mailbox.next(Rest { pending: true });
     let _ = done.send(());
     watchdog.join().expect("the input watchdog joins");
     match next {
@@ -225,7 +216,7 @@ fn next_input(mailbox: &crate::bus::AgentMailbox) -> Input {
 
 fn wait_at_rest(helper: &crate::agent::AgentHandle) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while helper.status().working() {
+    while helper.status().unwrap().working() {
         assert!(helper.is_live(), "the helper ended before resting");
         assert!(Instant::now() < deadline, "the helper never rested");
         std::thread::sleep(Duration::from_millis(2));
@@ -491,7 +482,7 @@ fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
     assert!(
         matches!(report, ral_core::protocol::Report::Ran { ending, .. } if ending.status() == 0)
     );
-    assert_eq!(agent.body.state.reply, Some(text("returned state")));
+    assert_eq!(agent.body.reply, Some(text("returned state")));
     let error = host
         .enquire(Request::Agents(Agents::List).encode())
         .unwrap_err();
@@ -523,7 +514,7 @@ fn an_unwinding_desk_dispatch_returns_the_mutated_body() {
         });
     }));
     assert!(panic.is_err());
-    assert_eq!(agent.body.state.reply, Some(text("before panic")));
+    assert_eq!(agent.body.reply, Some(text("before panic")));
     let error = retained
         .unwrap()
         .ask(Request::Agents(Agents::List))

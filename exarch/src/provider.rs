@@ -51,8 +51,8 @@ pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
 use allowance::{Allowance, LiveMeters};
 use ral_core::process::Scope;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use transport::Transport;
 
 /// Every file on this computer holding one of our own credentials, as
@@ -74,25 +74,48 @@ pub(crate) fn credential_files() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// The model and the knobs a selection fixes, apart from the account.
-pub(crate) struct Selection {
-    pub(crate) model: String,
-    pub(crate) max_tokens_override: Option<u32>,
-    pub(crate) tuning: Tuning,
-    /// `Some` only on a service that routes — [`Bureau::build`] refuses it
-    /// elsewhere.
-    pub(crate) via: Option<Via>,
+/// A model as chosen, recorded: what requests go out under.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selected {
+    pub model: String,
+    /// The catalog's window at the choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// The account's label at the choice.
+    pub label: String,
+    pub service: String,
+    pub account: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<Via>,
+    pub tuning: Tuning,
+    /// Shared plans carry no output cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
-/// A session's chosen model, tuning, and upstreams, plus the backend its
-/// requests run on.
+impl Selected {
+    #[doc(hidden)]
+    pub fn for_test(model: &str) -> Self {
+        let account = Account::of_service(scripted_service());
+        Self {
+            model: model.to_string(),
+            context_window: None,
+            label: identity::label(&account, &[]),
+            service: account.service.name.as_str().to_string(),
+            account: account.id.as_str().to_string(),
+            via: None,
+            tuning: Tuning::default(),
+            max_tokens: None,
+        }
+    }
+}
+
+/// An immutable client minted from a choice.
 pub struct Provider {
     backend: Backend,
     account: Account,
-    selection: Selection,
-    /// Resolved when the bureau mints this selection, then only ever narrowed
-    /// by an overflow; 0 for unknown.
-    context_window: AtomicU64,
+    selected: Selected,
 }
 
 /// A live transport over the shared [`Pool`], or a scripted replay so
@@ -118,14 +141,12 @@ impl Provider {
     pub(in crate::provider) fn build(
         backend: Backend,
         account: &Account,
-        selection: Selection,
-        context_window: Option<u64>,
+        selected: Selected,
     ) -> Self {
         Self {
             backend,
             account: account.clone(),
-            selection,
-            context_window: AtomicU64::new(context_window.unwrap_or(0)),
+            selected,
         }
     }
 
@@ -134,29 +155,22 @@ impl Provider {
         Self::build(
             Backend::Scripted(script),
             &Account::of_service(scripted_service()),
-            Selection {
-                model: model.to_string(),
-                max_tokens_override: None,
-                tuning: Tuning::default(),
-                via: None,
-            },
-            None,
+            Selected::for_test(model),
         )
     }
 
-    /// The user-supplied output cap, or `None` for the adapter default.
-    pub fn max_tokens_override(&self) -> Option<u32> {
-        self.selection.max_tokens_override
+    pub fn selected(&self) -> &Selected {
+        &self.selected
     }
 
     /// The request tuning bound to this selection.
     pub fn tuning(&self) -> &Tuning {
-        &self.selection.tuning
+        &self.selected.tuning
     }
 
     /// The resolved model name.
     pub fn model(&self) -> &str {
-        &self.selection.model
+        &self.selected.model
     }
 
     /// The account this selection authenticates as.
@@ -167,15 +181,15 @@ impl Provider {
     /// The upstreams this selection is served via; `None` leaves the choice
     /// to the service.
     pub fn via(&self) -> Option<&Via> {
-        self.selection.via.as_ref()
+        self.selected.via.as_ref()
     }
 
     /// The account, model and via this selection was minted for.
     pub fn choice(&self) -> Choice {
         Choice {
             account: self.account.clone(),
-            model: self.selection.model.clone(),
-            via: self.selection.via.clone(),
+            model: self.selected.model.clone(),
+            via: self.selected.via.clone(),
         }
     }
 
@@ -197,21 +211,6 @@ impl Provider {
         }
     }
 
-    /// This model's context window: the catalog's figure, or a tighter one an
-    /// overflow taught.
-    pub fn context_window(&self) -> Option<u64> {
-        Some(self.context_window.load(Ordering::Relaxed)).filter(|&w| w > 0)
-    }
-
-    /// Learn that the endpoint holds only `limit`; whether that narrowed the window.
-    pub(crate) fn narrow_window(&self, limit: u64) -> bool {
-        self.context_window
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
-                (w == 0 || w > limit).then_some(limit)
-            })
-            .is_ok()
-    }
-
     /// Stream one assistant turn; `on_delta` fires per chunk, prose and
     /// reasoning in arrival order. Raced against `cancel`, so an interrupt
     /// need not wait on the next network chunk.
@@ -221,7 +220,7 @@ impl Provider {
         on_delta: &mut F,
         cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
-        let outcome = match &self.backend {
+        match &self.backend {
             Backend::Live {
                 engine,
                 transport,
@@ -229,22 +228,12 @@ impl Provider {
                 rations,
             } => {
                 rations.admit(&self.account, self.model(), meters)?;
-                let outcome =
-                    engine.complete(transport, &self.selection, request, on_delta, cancel);
+                let outcome = engine.complete(transport, &self.selected, request, on_delta, cancel);
                 rations.settle(&self.account.id, self.model(), &outcome);
                 outcome
             }
             Backend::Scripted(script) => script.complete(self.model(), on_delta),
-        };
-        outcome.map_err(|mut error| {
-            if let ProviderError::Overflow { limit, listed, .. } = &mut error {
-                *listed = self.context_window();
-                if let Some(l) = *limit {
-                    self.narrow_window(l);
-                }
-            }
-            error
-        })
+        }
     }
 }
 

@@ -104,7 +104,6 @@ pub(crate) struct AgentMessage {
     pub from: AgentId,
     pub from_name: String,
     pub text: String,
-    pub from_parent: bool,
 }
 impl AgentMessage {
     pub(crate) fn render(&self) -> String {

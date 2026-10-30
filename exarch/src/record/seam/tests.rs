@@ -1,22 +1,30 @@
 use super::*;
 use crate::bus::{FleetSink, Signal, UsageMeter, channel};
-use crate::record::{AgentId, Display, Forensic, Locus, RECORD, log::Log, model};
+use crate::record::{AgentId, Display, Forensic, Locus, RECORD, context, log::Log};
 use ral_core::process::DurableRoot;
 use std::fs;
 
-fn opening(dir: &OwnDir, id: AgentId) -> Forensic {
-    Forensic::SessionStarted {
+fn opening(dir: &OwnDir, id: AgentId) -> Started {
+    Started {
         session_id: id,
         name: "main".into(),
         parent: None,
-        model: "model".into(),
-        context_window: None,
-        label: "provider".into(),
-        service: "provider".into(),
-        account: "provider".into(),
+        returns: false,
+        selected: crate::record::Selected::for_test("model"),
         log_dir: dir.path().to_path_buf(),
         at_unix_ms: 0,
     }
+}
+
+fn head(emit: &Emitter, dir: &OwnDir, id: AgentId) -> Commit {
+    drop(emit.begin(opening(dir, id)).unwrap());
+    emit.reader()
+        .since(None)
+        .unwrap()
+        .1
+        .next()
+        .unwrap()
+        .unwrap()
 }
 
 fn assert_locus(bytes: &[u8], locus: &Locus) {
@@ -27,6 +35,12 @@ fn assert_locus(bytes: &[u8], locus: &Locus) {
     assert_eq!(line.last(), Some(&b'\n'));
     let (sum, _) = crate::record::parse_line(&line[..line.len() - 1]).unwrap();
     assert_eq!(sum, locus.sum());
+}
+
+#[test]
+#[should_panic(expected = "Control records must go through commit_to or begin")]
+fn commit_panics_on_a_hand_built_control_record() {
+    drop(Emitter::none().commit(NonEmpty::one(Record::Control(Control::JobOpened))));
 }
 
 #[test]
@@ -94,9 +108,7 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
             meter: UsageMeter::default(),
         }));
         emit.check_available().unwrap();
-        let head = emit
-            .commit(NonEmpty::one(opening(&dir, id).into()))
-            .unwrap();
+        let head = head(&emit, &dir, id);
         let retained = first
             .commit(NonEmpty::one(
                 Display::Answer {
@@ -175,7 +187,7 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
 
         drop((emit, first, second));
         assert_eq!(fs::read(&path).unwrap(), failed);
-        let (context, _) = model::resume(&sessions, id).unwrap();
+        let (context, _) = context::resume(&sessions, id).unwrap();
         assert!(context.is_ready());
         assert_eq!(fs::read(&path).unwrap(), committed);
         let crash = dir.path().join("record.jsonl.crash");
@@ -216,7 +228,7 @@ fn a_torn_last_commit_is_quarantined_whole() {
         let dir = sessions.make_dir(&id.to_string()).unwrap();
         let path = dir.path().join(RECORD);
         let emit = Emitter::create(&dir).unwrap();
-        let head = emit.emit(opening(&dir, id)).unwrap();
+        let head = head(&emit, &dir, id).into_records().first;
         let start = usize::try_from(head.locus().bytes().end).unwrap();
         let _commit = emit
             .commit(NonEmpty {
@@ -244,7 +256,7 @@ fn a_torn_last_commit_is_quarantined_whole() {
             bytes[at] = b'S';
         }
         fs::write(&path, &bytes).unwrap();
-        let (_context, _selection) = model::resume(&sessions, id).unwrap();
+        let (_context, _selection) = context::resume(&sessions, id).unwrap();
         assert_eq!(fs::read(&path).unwrap(), bytes[..start]);
         assert_eq!(
             fs::read(dir.path().join("record.jsonl.crash")).unwrap(),
@@ -266,7 +278,7 @@ fn a_refused_resume_leaves_the_record_as_it_found_it() {
     let dir = sessions.make_dir(&id.to_string()).unwrap();
     let path = dir.path().join(RECORD);
     let emit = Emitter::create(&dir).unwrap();
-    let _head = emit.emit(opening(&dir, id)).unwrap();
+    let _head = head(&emit, &dir, id).into_records().first;
     let _a = emit
         .commit(NonEmpty {
             first: Forensic::Error {
@@ -294,7 +306,7 @@ fn a_refused_resume_leaves_the_record_as_it_found_it() {
     let start = usize::try_from(b.bytes().start).unwrap();
     bytes.truncate(start + (bytes.len() - start) / 2);
     fs::write(&path, &bytes).unwrap();
-    let refusal = model::resume(&sessions, id)
+    let refusal = context::resume(&sessions, id)
         .err()
         .expect("corrupt interior refused")
         .to_string();
@@ -312,12 +324,12 @@ fn a_log_of_an_older_exarch_is_refused_by_name() {
     let dir = sessions.make_dir(&id.to_string()).unwrap();
     let path = dir.path().join(RECORD);
     let mut bytes = serde_json::to_vec(&serde_json::json!({
-        "at_unix_ms": 0, "record": Record::Forensic(opening(&dir, id))
+        "at_unix_ms": 0, "record": Record::Control(Control::SessionStarted(opening(&dir, id)))
     }))
     .unwrap();
     bytes.push(b'\n');
     fs::write(&path, &bytes).unwrap();
-    let refusal = model::resume(&sessions, id)
+    let refusal = context::resume(&sessions, id)
         .err()
         .expect("older log refused")
         .to_string();
@@ -387,9 +399,7 @@ fn a_serialization_failure_latches_the_writer_without_writing() {
     let path = dir.path().join(RECORD);
     let emit = Emitter::create(&dir).unwrap();
     let mut record = opening(&dir, AgentId::new(7));
-    let Forensic::SessionStarted { log_dir, .. } = &mut record else {
-        panic!("the opening record carries a path")
-    };
+    let Started { log_dir, .. } = &mut record;
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt as _;
@@ -401,7 +411,7 @@ fn a_serialization_failure_latches_the_writer_without_writing() {
         *log_dir = std::ffi::OsString::from_wide(&[0xd800]).into();
     }
 
-    let failure = emit.emit(record).unwrap_err();
+    let failure = emit.begin(record).unwrap_err();
     assert_eq!(
         emit.check_available().unwrap_err().to_string(),
         failure.to_string()

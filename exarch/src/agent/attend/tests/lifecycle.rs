@@ -3,7 +3,7 @@
 use super::*;
 use crate::agent::Admission;
 use crate::agent::nursery::Joined;
-use crate::bus::{ENDED_BEFORE_REPORTING, Refused};
+use crate::bus::{ENDED_BEFORE_REPORTING, Refused, Source};
 use crate::record::{ChildStatus, RECORD, Settlement, read_records};
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ fn a_returned_helper_accepts_a_second_human_message_without_focus() {
     let (emit, _rx) = emitter(&parent);
     let helper = launch_child(&mut parent, child, Some("first task".into()), &emit);
     wait_until("initial report", || {
-        !helper.status().working() && helper.status().report.is_some()
+        !helper.status().unwrap().working() && helper.status().unwrap().report.is_some()
     });
     assert!(matches!(
         next_child(&parent),
@@ -42,18 +42,15 @@ fn a_returned_helper_accepts_a_second_human_message_without_focus() {
     helper.steer("second task".into()).unwrap();
     wait_until("human follow-up report", || {
         matches!(
-            helper.status().report,
+            helper.status().unwrap().report,
             Some(ChildStatus::Replied(FOValue::Int { value: 2 }))
-        ) && !helper.status().working()
+        ) && !helper.status().unwrap().working()
     });
     assert!(
         parent.mailbox.drain().is_empty(),
         "human follow-ups owe the parent nothing"
     );
-    assert_eq!(
-        parent.body.state.nursery.dismiss_all(),
-        Vec::<String>::new()
-    );
+    assert_eq!(parent.body.nursery.dismiss_all(), Vec::<String>::new());
 }
 
 #[test]
@@ -78,14 +75,11 @@ fn helper_idle_limits_rest_not_work() {
     let (emit, _rx) = emitter(&parent);
     let helper = launch_child(&mut parent, child, Some("work".into()), &emit);
     wait_until("helper did not open a job", || {
-        helper.status().job.is_some()
+        helper.status().unwrap().job.is_some()
     });
     std::thread::sleep(Duration::from_millis(100));
     assert!(helper.is_live(), "idle must not bound working time");
-    assert_eq!(
-        parent.body.state.nursery.dismiss_all(),
-        Vec::<String>::new()
-    );
+    assert_eq!(parent.body.nursery.dismiss_all(), Vec::<String>::new());
     assert!(matches!(next_child(&parent), (_, ChildStatus::Failed(_))));
 }
 
@@ -109,12 +103,12 @@ fn helper_ends_after_resting_and_does_not_repeat_its_report() {
         (_, ChildStatus::Replied(FOValue::Int { value: 42 }))
     ));
     wait_until("resting helper did not time out", || !helper.is_live());
-    let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
+    let Next::Gone(gone) = parent.mailbox.next(parent.rest()) else {
         panic!("Gone")
     };
-    assert!(matches!(input, Input::Gone(gone) if gone == id));
-    assert!(parent.admit(input).is_none());
-    assert!(!parent.body.state.nursery.holds(id));
+    assert_eq!(gone, id);
+    parent.gone(gone);
+    assert!(!parent.body.nursery.holds(id));
     assert!(parent.mailbox.drain().is_empty());
 }
 
@@ -153,7 +147,7 @@ fn a_previous_reply_does_not_suppress_followup_repairs() {
         };
         let prompt = child.admit(input).unwrap();
         assert!(child.mailbox.begin());
-        child.body.state.readings.nudges.reset();
+        child.body.readings.nudges.reset();
         let outcome = child.exchange(&exchange, prompt, &emit);
         assert!(matches!(outcome, AgentOutcome::Replied));
         settle(&mut child, outcome);
@@ -161,7 +155,7 @@ fn a_previous_reply_does_not_suppress_followup_repairs() {
             next_child(&parent),
             (_, ChildStatus::Replied(FOValue::Int { value: 2 }))
         ));
-        assert!(!child.handle().status().working());
+        assert!(!child.handle().status().unwrap().working());
         assert!(child.is_ready());
     }
 }
@@ -203,16 +197,16 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
         };
         let prompt = child.admit(input).unwrap();
         assert!(child.mailbox.begin());
-        child.body.state.readings.nudges.reset();
+        child.body.readings.nudges.reset();
         let outcome = child.exchange(&exchange, prompt, &emit);
         let reason = outcome.clone().reason();
         settle(&mut child, outcome);
         let (_, status) = next_child(&parent);
         assert!(matches!(status, ChildStatus::Failed(ref failure) if failure == &reason));
         assert!(
-            matches!(child.handle().status().report, Some(ChildStatus::Failed(failure)) if failure == reason)
+            matches!(child.handle().status().unwrap().report, Some(ChildStatus::Failed(failure)) if failure == reason)
         );
-        assert!(!child.handle().status().working());
+        assert!(!child.handle().status().unwrap().working());
         assert!(child.is_ready());
     }
 }
@@ -222,7 +216,7 @@ fn status_records_publish_reports_without_a_working_compatibility_record() {
     let parent = trunk(Trunk::Converses);
     let mut child = parent.fork_named("helper").unwrap();
     let log = child.log_dir().path().join(RECORD);
-    assert!(child.handle().status().working());
+    assert!(child.handle().status().unwrap().working());
     child.report(ChildStatus::Replied(FOValue::Int { value: 1 }));
     assert!(matches!(
         next_child(&parent),
@@ -232,23 +226,23 @@ fn status_records_publish_reports_without_a_working_compatibility_record() {
         .handle()
         .message(&parent.handle(), "follow up".into())
         .unwrap();
-    assert!(child.handle().status().working());
+    assert!(child.handle().status().unwrap().working());
     assert!(matches!(
-        child.handle().status().report,
+        child.handle().status().unwrap().report,
         Some(ChildStatus::Replied(FOValue::Int { value: 1 }))
     ));
     let _teardown = child.teardown();
     let (_, status) = next_child(&parent);
     assert!(matches!(status, ChildStatus::Failed(ref why) if why == ENDED_BEFORE_REPORTING));
     assert!(
-        matches!(child.handle().status().report, Some(ChildStatus::Failed(ref why)) if why == ENDED_BEFORE_REPORTING)
+        matches!(child.handle().status().unwrap().report, Some(ChildStatus::Failed(ref why)) if why == ENDED_BEFORE_REPORTING)
     );
     drop(child);
     let records = read_records(&log).unwrap();
     let reports: Vec<_> = records
         .iter()
         .filter_map(|record| match record {
-            Record::Forensic(Forensic::Status { status }) => Some(status),
+            Record::Control(crate::record::Control::Status { status }) => Some(status),
             _ => None,
         })
         .collect();
@@ -256,7 +250,12 @@ fn status_records_publish_reports_without_a_working_compatibility_record() {
     assert!(matches!(reports[1], ChildStatus::Failed(why) if why == ENDED_BEFORE_REPORTING));
     let last_report = records
         .iter()
-        .rposition(|record| matches!(record, Record::Forensic(Forensic::Status { .. })))
+        .rposition(|record| {
+            matches!(
+                record,
+                Record::Control(crate::record::Control::Status { .. })
+            )
+        })
         .unwrap();
     let ended = records
         .iter()
@@ -271,7 +270,7 @@ fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() 
     let child = parent.fork_named("helper").unwrap();
     let helper = child.handle();
     let (release, ready) = std::sync::mpsc::channel();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         helper.clone(),
         Joined::new(std::thread::spawn(move || {
             ready.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -280,13 +279,13 @@ fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() 
         })),
     );
     assert!(parent.mailbox.begin());
-    let job = parent.handle().status().job.unwrap();
+    let job = parent.handle().status().unwrap().job.unwrap();
     helper
         .message(&parent.handle(), "follow up".into())
         .unwrap();
-    helper.report(ChildStatus::Replied(FOValue::Unit));
+    helper.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
     assert!(
-        helper.status().owes_parent,
+        helper.status().unwrap().owes,
         "queued parent input is still owed"
     );
     assert!(parent.rest().pending);
@@ -295,9 +294,9 @@ fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() 
     };
     assert!(matches!(input, Input::Child { .. }));
     assert!(parent.admit(input).is_some());
-    assert_eq!(parent.handle().status().job, Some(job));
+    assert_eq!(parent.handle().status().unwrap().job, Some(job));
     release.send(()).unwrap();
-    let failures = parent.body.state.nursery.join(helper.id());
+    let failures = parent.body.nursery.join(helper.id());
     assert_eq!(failures, Vec::<String>::new());
     assert!(matches!(next_child(&parent), (_, ChildStatus::Failed(_))));
     assert!(parent.handle().is_live());
@@ -313,7 +312,7 @@ fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
         )
         .unwrap();
         let handle = (*helper).clone();
-        parent.body.state.nursery.adopt(
+        parent.body.nursery.adopt(
             handle.clone(),
             Joined::new(std::thread::spawn(move || {
                 wait_until("helper ended", || !helper.is_live());
@@ -331,13 +330,16 @@ fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
         };
         let prompt = parent.admit(input).unwrap();
         assert!(parent.mailbox.begin());
-        assert_eq!(parent.body.state.owed, kind == Trunk::Returns);
-        handle.report(ChildStatus::Replied(FOValue::Unit));
+        assert_eq!(
+            parent.handle().status().unwrap().owes,
+            kind == Trunk::Returns
+        );
+        handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
         assert!(
             !parent.rest().pending,
             "report is already queued when the debt clears"
         );
-        assert!(!handle.status().owes_parent);
+        assert!(!handle.status().unwrap().owes);
         assert!(parent.mailbox.has_input());
         set_provider(
             &mut parent,
@@ -390,7 +392,7 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
         })
         .unwrap();
         let mut child = parent.fork_named("helper").unwrap();
-        parent.body.state.nursery.adopt(
+        parent.body.nursery.adopt(
             child.handle(),
             Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
         );
@@ -411,10 +413,10 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
         };
         let prompt = child.admit(input).unwrap();
         assert!(child.mailbox.begin());
-        assert!(child.handle().status().working());
-        assert!(!child.handle().status().owes_parent);
+        assert!(child.handle().status().unwrap().working());
+        assert!(!child.handle().status().unwrap().owes);
         assert!(parent.mailbox.drain().is_empty());
-        assert!(parent.handle().status().job.is_none());
+        assert!(parent.handle().status().unwrap().job.is_none());
         set_provider(
             &mut child,
             scripted("test-model", Script::new().then(reply("2"))),
@@ -422,47 +424,42 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
         let outcome = child.exchange(&exchange, prompt, &child_emit);
         settle(&mut child, outcome);
         assert!(matches!(
-            child.handle().status().report,
+            child.handle().status().unwrap().report,
             Some(ChildStatus::Replied(FOValue::Int { value: 2 }))
         ));
-        assert!(!child.handle().status().working());
+        assert!(!child.handle().status().unwrap().working());
         assert!(parent.mailbox.drain().is_empty());
         assert!(parent.rendered_messages().is_empty());
         assert!(
             !crate::bus::drain_records(&rx).iter().any(|record| matches!(
                 record,
-                Record::Forensic(Forensic::JobOpened)
+                Record::Control(crate::record::Control::JobOpened)
                     | Record::Display(Display::SubagentDone { .. })
             )),
             "the parent's recorder receives nothing about human-only work"
         );
         let _records = crate::bus::drain_records(&child_rx);
-        assert!(!child.body.state.owed);
-        assert!(!child.handle().status().owes_parent);
+        assert!(!child.handle().status().unwrap().owes);
         assert!(!parent.rest().pending);
         child.handle().steer("human note".into()).unwrap();
-        assert!(!child.body.state.owed);
-        assert!(!child.handle().status().owes_parent);
+        assert!(!child.handle().status().unwrap().owes);
         assert!(!parent.rest().pending);
         let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
             panic!("second human input")
         };
         let prompt = child.admit(input).unwrap();
         assert!(child.mailbox.begin());
-        assert!(!child.body.state.owed);
-        assert!(!child.handle().status().owes_parent);
+        assert!(!child.handle().status().unwrap().owes);
         assert!(!parent.rest().pending);
         set_provider(
             &mut child,
             scripted("test-model", Script::new().then(Reply::text("noted"))),
         );
         let outcome = child.exchange(&exchange, prompt, &child_emit);
-        assert!(!child.body.state.owed);
-        assert!(!child.handle().status().owes_parent);
+        assert!(!child.handle().status().unwrap().owes);
         assert!(!parent.rest().pending);
         settle(&mut child, outcome);
-        assert!(!child.body.state.owed);
-        assert!(!child.handle().status().owes_parent);
+        assert!(!child.handle().status().unwrap().owes);
         assert!(!parent.rest().pending);
         let records = crate::bus::drain_records(&child_rx);
         assert_eq!(
@@ -474,16 +471,17 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
         );
         assert!(!records.iter().any(|record| matches!(
             record,
-            Record::Forensic(Forensic::Nudge { .. } | Forensic::Status { .. })
+            Record::Forensic(Forensic::Nudge { .. })
+                | Record::Control(crate::record::Control::Status { .. })
         )));
         assert!(matches!(
-            child.handle().status().report,
+            child.handle().status().unwrap().report,
             Some(ChildStatus::Replied(FOValue::Int { value: 2 }))
         ));
-        assert!(!child.handle().status().working());
+        assert!(!child.handle().status().unwrap().working());
         assert!(!parent.mailbox.has_input());
         assert!(parent.mailbox.drain().is_empty());
-        assert!(parent.handle().status().job.is_none());
+        assert!(parent.handle().status().unwrap().job.is_none());
         assert!(parent.rendered_messages().is_empty());
         assert!(crate::bus::drain_records(&rx).is_empty());
     }
@@ -498,7 +496,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     )
     .unwrap();
     let handle = (*helper).clone();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         handle.clone(),
         Joined::new(std::thread::spawn(move || {
             wait_until("parent teardown ends helper", || !helper.is_live());
@@ -512,7 +510,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     };
     assert!(parent.admit(input).is_some());
     assert!(parent.mailbox.begin());
-    let job = parent.handle().status().job.unwrap();
+    let job = parent.handle().status().unwrap().job.unwrap();
     parent.handle().steer("queued one".into()).unwrap();
     parent.handle().steer("queued two".into()).unwrap();
     assert_eq!(
@@ -521,8 +519,10 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     );
     assert!(exchange.is_cancelled());
     assert!(handle.is_live());
-    assert!(handle.status().owes_parent);
-    handle.report(ChildStatus::Replied(FOValue::Int { value: 42 }));
+    assert!(handle.status().unwrap().owes);
+    handle
+        .report(ChildStatus::Replied(FOValue::Int { value: 42 }))
+        .unwrap();
     let Next::Take {
         input,
         exchange: resumed,
@@ -532,7 +532,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     };
     let prompt = parent.admit(input).unwrap();
     assert!(parent.mailbox.begin());
-    assert_eq!(parent.handle().status().job, Some(job));
+    assert_eq!(parent.handle().status().unwrap().job, Some(job));
     assert!(!resumed.is_cancelled());
     set_provider(
         &mut parent,
@@ -566,7 +566,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
             panic!("first input")
         };
         assert!(child.admit(input).is_some());
-        let job = child.handle().status().job.unwrap();
+        let job = child.handle().status().unwrap().job.unwrap();
         if followup {
             child
                 .handle()
@@ -591,7 +591,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
             let prompt = child.admit(input).unwrap();
             assert!(child.mailbox.begin());
             assert!(!exchange.is_cancelled());
-            child.body.state.readings.nudges.reset();
+            child.body.readings.nudges.reset();
             child.exchange(&exchange, prompt, &emit)
         } else {
             AgentOutcome::Cancelled
@@ -599,7 +599,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
         settle(&mut child, outcome);
         assert!(matches!(next_child(&parent), (_, ChildStatus::Stopped)));
         assert!(matches!(
-            child.handle().status().report,
+            child.handle().status().unwrap().report,
             Some(ChildStatus::Stopped)
         ));
     }
@@ -615,7 +615,7 @@ fn ending_a_parent_joins_helper_engines_before_ending_its_own() {
     };
     let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ended = observed.clone();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         helper.clone(),
         Joined::new(std::thread::spawn(move || {
             wait_until("parent life did not end helper", || {
@@ -639,7 +639,7 @@ fn ending_a_parent_joins_helper_engines_before_ending_its_own() {
     assert!(observed.load(std::sync::atomic::Ordering::Acquire));
     assert!(!helper.is_live());
     assert!(engine.session_ended().unwrap().is_some());
-    assert!(!parent.body.state.nursery.holds(helper.id()));
+    assert!(!parent.body.nursery.holds(helper.id()));
 }
 
 #[test]
@@ -651,7 +651,7 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
     )
     .unwrap();
     let id = helper.id();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         (*helper).clone(),
         Joined::new(std::thread::spawn(move || {
             drop(helper);
@@ -660,12 +660,9 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
             }
         })),
     );
-    assert!(parent.admit(Input::Gone(id)).is_none());
-    assert!(!parent.body.state.nursery.holds(id));
-    assert_eq!(
-        parent.body.state.failures,
-        vec!["helper's certified failure"]
-    );
+    parent.gone(id);
+    assert!(!parent.body.nursery.holds(id));
+    assert_eq!(parent.body.failures, vec!["helper's certified failure"]);
     assert!(
         parent
             .admit(Input::Child {
@@ -690,13 +687,13 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
 fn a_stopped_notice_has_the_new_settlement_not_a_legacy_failure() {
     let mut parent = trunk(Trunk::Converses);
     let child = parent.fork_named("helper").unwrap();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         child.handle(),
         Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
     );
     let (emit, rx) = emitter(&parent);
     parent.couple(&emit);
-    child.handle().report(ChildStatus::Stopped);
+    child.handle().report(ChildStatus::Stopped).unwrap();
     let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
         panic!("report")
     };
@@ -803,7 +800,7 @@ fn a_job_settles_when_an_ended_helper_has_no_debt() {
     .unwrap();
     let handle = (*helper).clone();
     let (release, receiver) = std::sync::mpsc::channel();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         handle.clone(),
         Joined::new(std::thread::spawn(move || {
             receiver.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -812,7 +809,7 @@ fn a_job_settles_when_an_ended_helper_has_no_debt() {
         })),
     );
     assert!(parent.mailbox.begin());
-    handle.report(ChildStatus::Replied(FOValue::Unit));
+    handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
     let _report = next_child(&parent);
     life.cancel(CancelCause::Cancelled);
     assert!(!parent.rest().pending);
@@ -825,8 +822,8 @@ fn a_job_settles_when_an_ended_helper_has_no_debt() {
         Next::Settled { stopped: false }
     ));
     release.send(()).unwrap();
-    assert!(parent.admit(Input::Gone(handle.id())).is_none());
-    assert!(!parent.body.state.nursery.holds(handle.id()));
+    parent.gone(handle.id());
+    assert!(!parent.body.nursery.holds(handle.id()));
 }
 
 #[test]
@@ -838,7 +835,7 @@ fn read_uses_a_helpers_published_status_even_before_its_report_is_taken_up() {
     )
     .unwrap();
     let handle = (*helper).clone();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         handle.clone(),
         Joined::new(std::thread::spawn(move || {
             wait_until("parent must end the helper", || !helper.is_live());
@@ -855,9 +852,11 @@ fn read_uses_a_helpers_published_status_even_before_its_report_is_taken_up() {
     );
     assert!(working.failed);
     assert!(working.text.contains("working"), "{}", working.text);
-    handle.report(ChildStatus::Replied(FOValue::String {
-        value: "published answer".into(),
-    }));
+    handle
+        .report(ChildStatus::Replied(FOValue::String {
+            value: "published answer".into(),
+        }))
+        .unwrap();
     let answer = parent.ral(
         &DurableRoot::default().child(),
         "exarch-agents `read 'helper'",
@@ -881,7 +880,7 @@ fn clear_joins_a_retiring_helper_before_discarding_its_notification() {
     let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = joined.clone();
     let (release, waiting) = std::sync::mpsc::channel();
-    parent.body.state.nursery.adopt(
+    parent.body.nursery.adopt(
         handle.clone(),
         Joined::new(std::thread::spawn(move || {
             waiting.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -1016,7 +1015,7 @@ fn a_parent_messaging_at_the_idle_deadline_gets_a_report_or_a_refusal_never_sile
     ));
     assert!(matches!(
         parent.mailbox.next(parent.rest()),
-        Next::Take { input: Input::Gone(id), .. } if id == helper.id()
+        Next::Gone(id) if id == helper.id()
     ));
     assert!(parent.fleet.registry.resolve("helper").is_none());
 }
@@ -1047,7 +1046,7 @@ fn dropping_an_unrun_parent_joins_its_working_helper_before_ending_its_engine() 
     };
     let grandchild = launch_child(&mut parent, grandchild, Some("work".into()), &emit);
     wait_until("grandchild did not start work", || {
-        grandchild.status().job.is_some()
+        grandchild.status().unwrap().job.is_some()
     });
     let crate::agent::engine::EngineKind::Identity(engine) = parent.engine().kind() else {
         panic!("identity")
@@ -1076,4 +1075,171 @@ fn dropping_an_unrun_parent_joins_its_working_helper_before_ending_its_engine() 
         order.join().unwrap(),
         "the parent's engine ended before its helper's"
     );
+}
+
+#[test]
+fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
+    let mut root = trunk(Trunk::Returns);
+    let handle = root.handle();
+    handle.steer("never admitted".into()).unwrap();
+    assert!(handle.status().unwrap().job.is_none());
+    assert!(handle.status().unwrap().owes);
+    let pending = handle.0.address.queued_posts();
+    let life = root.mailbox.life();
+    handle
+        .0
+        .address
+        .after_report_commit(move || assert!(life.is_cancelled()));
+    assert_eq!(root.teardown().failures, [] as [String; 0]);
+    assert_eq!(
+        handle.status().unwrap().report,
+        Some(ChildStatus::Failed(ENDED_BEFORE_REPORTING.into()))
+    );
+    assert!(!handle.status().unwrap().owes);
+    assert_eq!(
+        handle.0.address.queued_posts(),
+        [] as [crate::record::PostId; 0]
+    );
+    let reader = root.recorder().reader();
+    let _run_owner = root.fleet.clone();
+    drop(root);
+    let commits: Vec<_> = reader.since(None).unwrap().1.map(Result::unwrap).collect();
+    let reports: Vec<_> = commits
+        .iter()
+        .filter(|commit| {
+            commit.records().iter().any(|record| {
+                matches!(
+                    record.value(),
+                    Record::Control(crate::record::Control::Status { .. })
+                )
+            })
+        })
+        .collect();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Withdrawn { posts }) if posts.iter().copied().collect::<Vec<_>>() == pending)));
+}
+
+#[test]
+fn human_gone_human_is_one_real_prompt_and_the_gone_still_joins_its_helper() {
+    let mut parent = trunk(Trunk::Converses);
+    let mut child = parent.fork_named("helper").unwrap();
+    child.report(ChildStatus::Replied(FOValue::Unit));
+    let _initial_report = next_child(&parent);
+    parent.handle().steer("first fragment".into()).unwrap();
+    child.handle().end();
+    let (emit, _rx) = emitter(&parent);
+    let helper = launch_child(&mut parent, child, None, &emit);
+    wait_until("helper did not depart", || {
+        parent.fleet.registry.resolve("helper").is_none()
+    });
+    wait_until("Gone was not posted", || {
+        parent
+            .mailbox
+            .source_depths()
+            .iter()
+            .any(|(source, depth)| *source == Source::Agent && *depth == 1)
+    });
+    parent.handle().steer("second fragment".into()).unwrap();
+    assert_eq!(
+        parent.handle().queued(),
+        ["first fragment\nsecond fragment"]
+    );
+    let Next::Take { input, exchange } = parent.mailbox.next(parent.rest()) else {
+        panic!("coalesced human prompt")
+    };
+    let prompt = parent.admit(input).unwrap();
+    assert_eq!(prompt.text, "first fragment\nsecond fragment");
+    assert!(parent.body.nursery.holds(helper.id()));
+    assert!(parent.mailbox.begin());
+    set_provider(
+        &mut parent,
+        scripted("test-model", Script::new().then(Reply::text("one answer"))),
+    );
+    let outcome = parent.exchange(&exchange, prompt, &emit);
+    let records = read_records(&parent.log_dir().path().join(RECORD)).unwrap();
+    let prompts: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Transcript(
+                Transcript::UserPrompt {
+                    text,
+                    voice: Voice::Human,
+                    ..
+                }
+                | Transcript::Steering {
+                    text,
+                    voice: Voice::Human,
+                },
+            ) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts, ["first fragment\nsecond fragment"]);
+    assert!(matches!(parent.mailbox.next(parent.rest()), Next::Gone(id) if id == helper.id()));
+    parent.gone(helper.id());
+    assert!(!parent.body.nursery.holds(helper.id()));
+    assert_eq!(parent.body.failures, [] as [String; 0]);
+    settle(&mut parent, outcome);
+}
+
+#[test]
+fn a_dead_helpers_unread_parent_post_is_paid_before_the_parents_reply_reminder_with_gone_pending() {
+    let mut parent = trunk(Trunk::Returns);
+    let mut child = parent.fork_named("helper").unwrap();
+    child.report(ChildStatus::Replied(FOValue::Unit));
+    let _initial_report = next_child(&parent);
+    // Establish the returning parent's human debt without invoking the provider yet.
+    parent.handle().steer("work".into()).unwrap();
+    let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
+        panic!("human")
+    };
+    assert!(parent.admit(input).is_some());
+    assert!(parent.mailbox.begin());
+    child
+        .handle()
+        .message(&parent.handle(), "unread follow-up".into())
+        .unwrap();
+    let pending = child.handle().0.address.queued_posts();
+    let journal = child.recorder().reader();
+    child.handle().end();
+    let (emit, rx) = emitter(&parent);
+    let helper = launch_child(&mut parent, child, None, &emit);
+    wait_until("failure notice and Gone were not posted", || {
+        parent
+            .mailbox
+            .source_depths()
+            .iter()
+            .any(|(source, depth)| *source == Source::Agent && *depth == 2)
+    });
+    assert!(!helper.status().unwrap().owes);
+    assert!(!parent.rest().pending);
+    let records = read_records(&helper.log_dir().path().join(RECORD)).unwrap();
+    let commits: Vec<_> = journal.since(None).unwrap().1.map(Result::unwrap).collect();
+    let failure_commit = commits.iter().find(|commit| commit.records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == ENDED_BEFORE_REPORTING))).unwrap();
+    assert!(failure_commit.records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Withdrawn { posts }) if posts.iter().copied().collect::<Vec<_>>() == pending)));
+    assert_eq!(records.iter().filter(|record| matches!(record, Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == ENDED_BEFORE_REPORTING)).count(), 1);
+    assert!(records.iter().any(|record| matches!(record, Record::Control(crate::record::Control::Withdrawn { posts }) if posts.iter().copied().collect::<Vec<_>>() == pending)));
+    let Next::Take { input, exchange } = parent.mailbox.next(parent.rest()) else {
+        panic!("failure before Gone")
+    };
+    assert!(
+        matches!(&input, Input::Child { status: ChildStatus::Failed(reason), .. } if reason == ENDED_BEFORE_REPORTING)
+    );
+    let prompt = parent.admit(input).unwrap();
+    set_provider(
+        &mut parent,
+        scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::text("noted the failure"))
+                .then(reply("'parent answer'")),
+        ),
+    );
+    let outcome = parent.exchange(&exchange, prompt, &emit);
+    assert!(matches!(outcome, AgentOutcome::Replied));
+    assert!(crate::bus::drain_records(&rx).iter().any(|record| matches!(record, Record::Forensic(Forensic::Nudge { cause, .. }) if cause == "no-reply finish (returning agent)")));
+    assert!(parent.body.nursery.holds(helper.id()));
+    assert!(matches!(parent.mailbox.next(parent.rest()), Next::Gone(id) if id == helper.id()));
+    parent.gone(helper.id());
+    settle(&mut parent, outcome);
 }

@@ -45,7 +45,7 @@ fn ended_helpers_without_debt_are_not_pending_and_failures_are_taken_once() {
         })),
     );
     assert!(nursery.owing(), "birth owes a report");
-    handle.report(ChildStatus::Replied(FOValue::Unit));
+    handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
     assert!(!nursery.owing(), "a live resting helper owes nothing");
     handle.end();
     assert!(
@@ -157,4 +157,132 @@ fn newest_name_remains_discoverable_after_join() {
     assert_eq!(nursery.join(new_handle.id()), Vec::<String>::new());
     assert_eq!(nursery.named("helper").unwrap().id(), new_handle.id());
     assert!(nursery.named("missing").is_none());
+}
+
+#[test]
+fn report_commit_holds_the_helper_cell_until_its_parent_notice_is_posted() {
+    use crate::record::{Control, RECORD, Record, Voice, read_records};
+    use std::sync::mpsc;
+    const WAIT: Duration = Duration::from_secs(5);
+    for crossing_message in [false, true] {
+        let parent = trunk(Trunk::Converses);
+        let helper = parent.fork_named("barrier-helper").unwrap();
+        let handle = helper.handle();
+        let address = handle.0.address.clone();
+        let mut nursery = Nursery::default();
+        let (finish, finishing) = mpsc::channel();
+        nursery.adopt(
+            handle.clone(),
+            Joined::new(std::thread::spawn(move || {
+                finishing.recv_timeout(WAIT).unwrap();
+                Teardown { failures: vec![] }
+            })),
+        );
+        let (paused, pausing) = mpsc::channel();
+        let (resume, resuming) = mpsc::channel();
+        address.after_report_commit(move || {
+            paused.send(()).unwrap();
+            resuming.recv_timeout(WAIT).unwrap();
+        });
+        nursery = std::thread::scope(|scope| {
+            let report =
+                scope.spawn(|| handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap());
+            pausing.recv_timeout(WAIT).unwrap();
+            let records = read_records(&handle.log_dir().path().join(RECORD)).unwrap();
+            assert!(matches!(
+                records.last(),
+                Some(Record::Control(Control::Status { .. }))
+            ));
+            assert_eq!(
+                parent.handle().0.address.queued_posts(),
+                Vec::<crate::record::PostId>::new()
+            );
+            let (started, starting) = mpsc::channel();
+            let (status_done, status_finished) = mpsc::channel();
+            let (owing_done, owing_finished) = mpsc::channel();
+            let (post_done, post_finished) = mpsc::channel();
+            let started_status = started.clone();
+            let parent_address = parent.handle().0.address.clone();
+            let status_address = &address;
+            let status = scope.spawn(move || {
+                started_status.send(()).unwrap();
+                let status = status_address.status().unwrap();
+                status_done.send(()).unwrap();
+                (status, parent_address.queued_posts().len())
+            });
+            let started_owing = started.clone();
+            let owing_parent = parent.handle().0.address.clone();
+            let owing = scope.spawn(move || {
+                started_owing.send(()).unwrap();
+                let pending = nursery.owing();
+                owing_done.send(()).unwrap();
+                (nursery, pending, owing_parent.queued_posts().len())
+            });
+            let handle_ref = &handle;
+            let parent_handle = parent.handle();
+            let post = crossing_message.then(|| {
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    handle_ref
+                        .message(&parent_handle, "crossing follow up".into())
+                        .unwrap();
+                    post_done.send(()).unwrap();
+                })
+            });
+            for _ in 0..(2 + usize::from(crossing_message)) {
+                starting.recv_timeout(WAIT).unwrap();
+            }
+            for finished in [&status_finished, &owing_finished] {
+                assert!(matches!(
+                    finished.recv_timeout(Duration::from_millis(50)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+            }
+            if crossing_message {
+                assert!(matches!(
+                    post_finished.recv_timeout(Duration::from_millis(50)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+            }
+            resume.send(()).unwrap();
+            report.join().unwrap();
+            let (status, delivered) = status.join().unwrap();
+            assert_eq!(status.report, Some(ChildStatus::Replied(FOValue::Unit)));
+            assert_eq!(
+                delivered, 1,
+                "status cannot observe payment before delivery"
+            );
+            let (nursery, pending, delivered) = owing.join().unwrap();
+            assert_eq!(delivered, 1, "owing cannot observe payment before delivery");
+            if !crossing_message {
+                assert!(!pending);
+                assert!(!status.owes);
+            }
+            if let Some(post) = post {
+                post.join().unwrap();
+            }
+            nursery
+        });
+        assert_eq!(handle.status().unwrap().owes, crossing_message);
+        if crossing_message {
+            let records = read_records(&handle.log_dir().path().join(RECORD)).unwrap();
+            let status = records
+                .iter()
+                .position(|record| matches!(record, Record::Control(Control::Status { .. })))
+                .unwrap();
+            let message = records
+                .iter()
+                .position(|record| {
+                    matches!(record, Record::Control(Control::Posted(post))
+                if post.voice == Some(Voice::Peer) && post.text.contains("crossing follow up"))
+                })
+                .unwrap();
+            assert!(
+                status < message,
+                "the crossing message records after the report"
+            );
+        }
+        finish.send(()).unwrap();
+        assert_eq!(nursery.dismiss_all(), Vec::<String>::new());
+    }
 }

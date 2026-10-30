@@ -6,7 +6,7 @@
 //! ill-shaped request is refused in the same words at either end.
 
 use crate::card::{Card, encode_card, value_to_card};
-use crate::record::model::ContextSurvey;
+use crate::record::context::ContextSurvey;
 use crate::record::{Location, Memory, Span, SpanRow, TranscriptPart};
 use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_duration};
 use ral_core::SpawnGrant;
@@ -813,7 +813,7 @@ impl Family for Context {
 }
 
 /// The run `[from, to]` that leaves, both ends inclusive, and the note its
-/// residue keeps in its place. An inverted run is refused here, once.
+/// eviction keeps in its place. An inverted run is refused here, once.
 pub(crate) struct Evict {
     pub(crate) span: Span,
     pub(crate) note: Note,
@@ -845,7 +845,7 @@ impl Datum for Evict {
     }
 }
 
-/// An eviction's note: one short line, since the residue keeps it in place
+/// An eviction's note: one short line, since the eviction keeps it in place
 /// of the run for the rest of the session.
 pub(crate) struct Note(pub(crate) String);
 
@@ -868,21 +868,21 @@ impl Datum for Note {
         let note = String::decode(v)?;
         if note.is_empty() {
             return Err(
-                "text must not be empty: the residue keeps one short line, and it is the only \
+                "text must not be empty: the eviction keeps one short line, and it is the only \
                  trace of the run left in your context"
                     .into(),
             );
         }
         if note.len() > Self::CAP {
             return Err(format!(
-                "text is {} bytes; the residue keeps one short line: {} at most. What is the one \
+                "text is {} bytes; the eviction keeps one short line: {} at most. What is the one \
                  thing your future self needs to know?",
                 note.len(),
                 Self::CAP
             ));
         }
         if note.contains(['\n', '\r']) {
-            return Err("text must be a single line: the residue keeps one short line".into());
+            return Err("text must be a single line: the eviction keeps one short line".into());
         }
         Ok(Self(note))
     }
@@ -900,7 +900,7 @@ record!(typed Survey {
     total_bytes: "total-bytes",
 });
 
-/// One item, turn or residue, by its span.
+/// One item, turn or eviction, by its span.
 pub(crate) struct Row {
     pub(crate) from: u64,
     pub(crate) to: u64,
@@ -1087,12 +1087,12 @@ impl Datum for Span {
     }
 }
 
-/// `` `resident ``, `` `under [from: Int, to: Int] `` naming the smallest
-/// later residue over the item, or `` `withdrawn ``.
+/// `` `resident ``, `` `evicted [from: Int, to: Int] `` naming the smallest
+/// later eviction over the item, or `` `withdrawn ``.
 impl Datum for Location {
     fn encode(self) -> FOValue {
         match self {
-            Self::Under(span) => tag("under", Some(span.encode())),
+            Self::Evicted(span) => tag("evicted", Some(span.encode())),
             location => tag(location.as_str(), None),
         }
     }
@@ -1101,9 +1101,9 @@ impl Datum for Location {
         match untag(v) {
             Some(("resident", None)) => Ok(Self::Resident),
             Some(("withdrawn", None)) => Ok(Self::Withdrawn),
-            Some(("under", Some(span))) => Span::decode(span).map(Self::Under),
+            Some(("evicted", Some(span))) => Span::decode(span).map(Self::Evicted),
             _ => Err(format!(
-                "expected `resident, `under [from: Int, to: Int] or `withdrawn, got {}",
+                "expected `resident, `evicted [from: Int, to: Int] or `withdrawn, got {}",
                 v.shape()
             )),
         }
@@ -1569,7 +1569,7 @@ mod tests {
         family::<Context>(&tag("evict", Some(FOValue::Map { entries })))
     }
 
-    /// A residue stands on its note, so an eviction without one never reaches
+    /// An eviction stands on its note, so an eviction without one never reaches
     /// the host; nor does the old `turns` address. The scheme closes the
     /// record, so the decoder is the second line of defence.
     #[test]
@@ -1592,7 +1592,7 @@ mod tests {
         );
     }
 
-    /// `location` is a variant, and `under` names the holder's span.
+    /// `location` is a variant, and `evicted` names the holder's span.
     #[test]
     fn an_index_row_encodes_its_span_and_holder() {
         let row = Indexed::from(SpanRow {
@@ -1601,7 +1601,7 @@ mod tests {
             kind: crate::record::ItemKind::Turn(crate::record::TurnKind::Own),
             label: "first".into(),
             bytes: 7,
-            location: Location::Under(Span::new(3, 4).unwrap()),
+            location: Location::Evicted(Span::new(3, 4).unwrap()),
         })
         .encode();
         let int = |value| FOValue::Int { value };
@@ -1610,7 +1610,7 @@ mod tests {
         assert_eq!(
             row.field("location"),
             Some(&tag(
-                "under",
+                "evicted",
                 Some(FOValue::Map {
                     entries: vec![("from".into(), int(3)), ("to".into(), int(4))]
                 })
@@ -1619,13 +1619,76 @@ mod tests {
         assert!(Vec::<Indexed>::decode(&FOValue::List { items: vec![row] }).is_ok());
     }
 
-    /// A hit names its item, a residue's note by its whole span.
+    #[test]
+    fn transcript_index_matches_the_context_guide_example() {
+        use crate::record::{AgentId, AgentLog, EditAuthority, Voice};
+        use genai::chat::ChatMessage;
+
+        let mut log = AgentLog::for_test(AgentId::new(0), "m").unwrap().0;
+        for _ in 0..30 {
+            log.import_note(ChatMessage::user("earlier")).unwrap();
+        }
+        let label = "Reject duplicate flags in parse_options";
+        let mut prompt = format!("{label}\n");
+        let bytes = serde_json::to_vec(&ChatMessage::user(prompt.clone()))
+            .unwrap()
+            .len();
+        prompt.push_str(&"x".repeat(1208 - bytes));
+        for (prompt, answer) in [
+            (prompt, "fixed"),
+            ("check".into(), "checked"),
+            ("review".into(), "reviewed"),
+        ] {
+            log.append_user(prompt, None, Voice::Human).unwrap();
+            log.append_assistant(ChatMessage::assistant(answer), vec![], None)
+                .unwrap();
+        }
+        let note =
+            "Duplicate check added in parse_options. Regression test needed; checks not run.";
+        log.evict(
+            Span::new(31, 36).unwrap(),
+            Some(note.into()),
+            EditAuthority::Model,
+        )
+        .unwrap();
+        let rows: Vec<_> = log
+            .context()
+            .transcript_index()
+            .into_iter()
+            .filter(|row| row.span.from() == 31)
+            .map(Indexed::from)
+            .collect::<Vec<_>>();
+        // No FOValue printer exists: spell each real row by hand and require the guide to contain it.
+        let guide = include_str!("../data/context.md");
+        let doc_rows: String = guide
+            .lines()
+            .skip_while(|line| !line.contains("exarch-transcript `index"))
+            .skip(1)
+            .take_while(|line| line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rows.len(), 2, "the fixture yields the guide's two rows");
+        for row in &rows {
+            let location = match &row.location {
+                Location::Resident => "`resident".to_string(),
+                Location::Evicted(s) => format!("`evicted [from: {}, to: {}]", s.from(), s.to()),
+                Location::Withdrawn => "`withdrawn".to_string(),
+            };
+            let text = format!(
+                "[from: {}, to: {}, role: #'{}'#, kind: #'{}'#, label: #'{}'#, bytes: {}, location: {location}]",
+                row.from, row.to, row.role, row.kind, row.label, row.bytes
+            );
+            assert!(doc_rows.contains(&text), "context.md lacks `{text}`");
+        }
+    }
+
+    /// A hit names its item, an eviction's note by its whole span.
     #[test]
     fn a_hit_encodes_its_item() {
         let hits = Hits::from(crate::record::GrepAnswer {
             hits: vec![crate::record::GrepHit {
                 span: Span::new(3, 4).unwrap(),
-                kind: crate::record::ItemKind::Residue,
+                kind: crate::record::ItemKind::Eviction,
                 role: genai::chat::ChatRole::User,
                 line: 1,
                 text: "the parser is fixed".into(),
@@ -1636,7 +1699,7 @@ mod tests {
         let hit = &hits.field("hits").and_then(FOValue::as_list).expect("hits")[0];
         assert_eq!(hit.field("from"), Some(&FOValue::Int { value: 3 }));
         assert_eq!(hit.field("to"), Some(&FOValue::Int { value: 4 }));
-        assert_eq!(hit.field("kind"), Some(&"residue".to_string().encode()));
+        assert_eq!(hit.field("kind"), Some(&"eviction".to_string().encode()));
     }
 
     /// A tag that reads nothing refuses a payload rather than dropping it.

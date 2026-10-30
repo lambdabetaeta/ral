@@ -2,7 +2,7 @@ use super::*;
 use crate::agent::testkit::*;
 use crate::bus::Emitter;
 use crate::provider::scripted::Script;
-use crate::record::{AgentId, AgentLog, Memory, RECORD, RecordedAccount, RecordedModel, Voice};
+use crate::record::{AgentId, AgentLog, Memory, RECORD, Selected, Voice};
 use genai::chat::ChatMessage;
 use ral_core::process::DurableRoot;
 use std::fs;
@@ -17,6 +17,7 @@ fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
         trunk: Trunk::Converses,
         admission: Admission::Free,
         helper_idle: HELPER_IDLE,
+        max_tokens: None,
         tools: Toolset::offered(false),
         allow_schedule: false,
         resume_on_reset: false,
@@ -83,10 +84,28 @@ fn fork_inherits_its_provider_independently_of_later_parent_changes() {
     let mut parent = Agent::for_test("system").unwrap();
     set_provider(&mut parent, scripted("p-a", Script::new()));
     let child = parent.fork().unwrap();
-    assert_eq!(child.body.state.provider.model(), "p-a");
+    assert_eq!(
+        child
+            .mailbox
+            .transact(|txn| txn.model().name().to_string())
+            .unwrap(),
+        "p-a"
+    );
     set_provider(&mut parent, scripted("p-b", Script::new()));
-    assert_eq!(parent.body.state.provider.model(), "p-b");
-    assert_eq!(child.body.state.provider.model(), "p-a");
+    assert_eq!(
+        parent
+            .mailbox
+            .transact(|txn| txn.model().name().to_string())
+            .unwrap(),
+        "p-b"
+    );
+    assert_eq!(
+        child
+            .mailbox
+            .transact(|txn| txn.model().name().to_string())
+            .unwrap(),
+        "p-a"
+    );
 }
 
 #[test]
@@ -123,7 +142,15 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
     let id = child.id();
     let before = child.rendered_messages();
     drop(child);
-    let resumed = AgentLog::resume(&sessions, id).unwrap();
+    let (resumed, _, _, _) = AgentLog::reopen(
+        &sessions,
+        id,
+        parent.body.client.selected(),
+        false,
+        parent.body.log.context().system(),
+        crate::app::now_unix_ms(),
+    )
+    .unwrap();
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered()).unwrap(),
         serde_json::to_vec(&before).unwrap()
@@ -186,19 +213,17 @@ fn agent_drop_cancels_its_own_unclosed_workers() {
 
 #[test]
 fn agent_drop_clears_its_own_armed_schedules() {
-    let agent = Agent::for_test("system").unwrap();
-    let schedules = agent.body.state.schedules.clone();
-    schedules
-        .schedule(
-            crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
-            "ping".into(),
-            "ping".into(),
-            &agent.mailbox.address(),
-        )
-        .unwrap();
-    assert_eq!(schedules.list().len(), 1);
+    let mut agent = Agent::for_test("system").unwrap();
+    crate::agent::testkit::schedule(
+        &mut agent,
+        crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
+        "ping".into(),
+        "ping".into(),
+    );
+    assert_eq!(crate::agent::testkit::schedules(&agent).len(), 1);
+    let handle = agent.handle();
     drop(agent);
-    assert!(schedules.list().is_empty());
+    assert!(!handle.is_live());
 }
 
 #[test]
@@ -392,21 +417,19 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
 }
 
 #[test]
-fn unwind_clears_non_owing_agents_schedules_with_a_retained_clone() {
-    let agent = trunk(Trunk::Converses);
-    let schedules = agent.body.state.schedules.clone();
-    schedules
-        .schedule(
-            crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
-            "ping".into(),
-            "ping".into(),
-            &agent.mailbox.address(),
-        )
-        .unwrap();
+fn unwind_ends_non_owing_agents_with_schedules() {
+    let mut agent = trunk(Trunk::Converses);
+    crate::agent::testkit::schedule(
+        &mut agent,
+        crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
+        "ping".into(),
+        "ping".into(),
+    );
+    let handle = agent.handle();
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _agent = agent;
         panic!("unwind the owner");
     }));
     assert!(unwind.is_err());
-    assert!(schedules.list().is_empty());
+    assert!(!handle.is_live());
 }

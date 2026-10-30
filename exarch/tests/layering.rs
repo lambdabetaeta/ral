@@ -178,3 +178,22 @@ fn frontends_reach_agents_through_the_port() {
         }
     }
 }
+
+#[test]
+fn control_commits_belong_to_record_and_bus() {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    sources(&src, &mut files);
+    let capability = Regex::new(r"\bcommit_to\s*\(|\bFolds\s*\{").unwrap();
+    for file in files {
+        if file.starts_with(src.join("record")) || file.starts_with(src.join("bus")) {
+            continue;
+        }
+        let code = production_code(&std::fs::read_to_string(&file).unwrap());
+        assert!(
+            !capability.is_match(&code),
+            "{} constructs a control commit outside record/ and bus/",
+            file.display()
+        );
+    }
+}
