@@ -21,7 +21,7 @@ fn next_child(parent: &Agent) -> (crate::record::AgentId, ChildStatus) {
 
 #[test]
 fn a_returned_helper_accepts_a_second_human_message_without_focus() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let mut child = parent.fork_named("helper").unwrap();
     set_provider(
         &mut child,
@@ -55,10 +55,10 @@ fn a_returned_helper_accepts_a_second_human_message_without_focus() {
 
 #[test]
 fn helper_idle_limits_rest_not_work() {
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         helper_idle: Duration::from_millis(25),
         installers: dressed(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS)),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut child = forked_child(&parent, "helper", "`inherit");
@@ -85,9 +85,9 @@ fn helper_idle_limits_rest_not_work() {
 
 #[test]
 fn helper_ends_after_resting_and_does_not_repeat_its_report() {
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         helper_idle: Duration::from_millis(50),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut child = parent.fork_named("helper").unwrap();
@@ -121,14 +121,14 @@ fn a_previous_reply_does_not_suppress_followup_repairs() {
         Reply::truncated_with_tool_calls(vec![]),
         Reply::stalled("partial response"),
     ] {
-        let parent = trunk(Trunk::Converses);
+        let parent = trunk(false);
         let mut child = parent.fork_named("helper").unwrap();
         let (emit, _rx) = emitter(&child);
         set_provider(
             &mut child,
             scripted("test-model", Script::new().then(reply("1"))),
         );
-        let first = human_exchange(&mut child, "first task", &emit);
+        let first = task_exchange(&mut child, "first task", &emit);
         settle(&mut child, first);
         assert!(matches!(
             next_child(&parent),
@@ -177,14 +177,14 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
         })),
         Script::new().then(Reply::panicking()),
     ] {
-        let parent = trunk(Trunk::Converses);
+        let parent = trunk(false);
         let mut child = parent.fork_named("helper").unwrap();
         let (emit, _rx) = emitter(&child);
         set_provider(
             &mut child,
             scripted("test-model", Script::new().then(reply("1"))),
         );
-        let first = human_exchange(&mut child, "first task", &emit);
+        let first = task_exchange(&mut child, "first task", &emit);
         settle(&mut child, first);
         let _report = next_child(&parent);
         set_provider(&mut child, scripted("test-model", failure));
@@ -213,8 +213,9 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
 
 #[test]
 fn status_records_publish_reports_without_a_working_compatibility_record() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let mut child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     let log = child.log_dir().path().join(RECORD);
     assert!(child.handle().status().unwrap().working());
     child.report(ChildStatus::Replied(FOValue::Int { value: 1 }));
@@ -266,7 +267,7 @@ fn status_records_publish_reports_without_a_working_compatibility_record() {
 
 #[test]
 fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
     let helper = child.handle();
     let (release, ready) = std::sync::mpsc::channel();
@@ -304,13 +305,14 @@ fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() 
 
 #[test]
 fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
-    for kind in [Trunk::Converses, Trunk::Returns] {
+    for kind in [false, true] {
         let mut parent = trunk(kind);
         let helper = test_agent(
             &parent.fleet,
             TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
         )
         .unwrap();
+        take_task(&helper, &helper.mailbox);
         let handle = (*helper).clone();
         parent.body.nursery.adopt(
             handle.clone(),
@@ -330,10 +332,7 @@ fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
         };
         let prompt = parent.admit(input).unwrap();
         assert!(parent.mailbox.begin());
-        assert_eq!(
-            parent.handle().status().unwrap().owes,
-            kind == Trunk::Returns
-        );
+        assert_eq!(parent.handle().status().unwrap().owes, kind);
         handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
         assert!(
             !parent.rest().pending,
@@ -385,13 +384,14 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
             idle: Duration::from_hours(5),
         },
     ] {
-        let mut parent = Agent::for_test_with(TestTrunk {
-            trunk: Trunk::Converses,
+        let mut parent = Agent::for_test_with(TestLaunch {
+            returns: false,
             admission,
-            ..TestTrunk::new("system")
+            ..TestLaunch::new("system")
         })
         .unwrap();
         let mut child = parent.fork_named("helper").unwrap();
+        take_task(&child.handle(), &child.mailbox);
         parent.body.nursery.adopt(
             child.handle(),
             Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
@@ -489,12 +489,13 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
 
 #[test]
 fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
         TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
     )
     .unwrap();
+    take_task(&helper, &helper.mailbox);
     let handle = (*helper).clone();
     parent.body.nursery.adopt(
         handle.clone(),
@@ -558,10 +559,19 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
 #[test]
 fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
     for followup in [false, true] {
-        let parent = trunk(Trunk::Converses);
+        let parent = trunk(false);
         let mut child = parent.fork_named("helper").unwrap();
         assert!(child.mailbox.begin());
-        child.handle().steer("first".into()).unwrap();
+        child
+            .handle()
+            .0
+            .address
+            .post(Input::Task(crate::bus::AgentMessage {
+                from: parent.id(),
+                from_name: parent.handle().0.name.clone(),
+                text: "first".into(),
+            }))
+            .unwrap();
         let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
             panic!("first input")
         };
@@ -607,7 +617,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
 
 #[test]
 fn ending_a_parent_joins_helper_engines_before_ending_its_own() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
     let helper = child.handle();
     let crate::agent::engine::EngineKind::Identity(parent_engine) = parent.engine().kind() else {
@@ -644,7 +654,7 @@ fn ending_a_parent_joins_helper_engines_before_ending_its_own() {
 
 #[test]
 fn gone_joins_failures_without_recording_them_again_in_the_parent() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
         TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
@@ -685,8 +695,9 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
 
 #[test]
 fn a_stopped_notice_has_the_new_settlement_not_a_legacy_failure() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     parent.body.nursery.adopt(
         child.handle(),
         Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
@@ -725,9 +736,9 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
         }
     }
 
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         installers: dressed(|_| {}),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let release = Release(Arc::new(AtomicBool::new(false)));
@@ -791,13 +802,14 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
 
 #[test]
 fn a_job_settles_when_an_ended_helper_has_no_debt() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let life = DurableRoot::default().child();
     let helper = test_agent(
         &parent.fleet,
         TestAgentSpec::child("helper", &parent.handle(), life.clone()),
     )
     .unwrap();
+    take_task(&helper, &helper.mailbox);
     let handle = (*helper).clone();
     let (release, receiver) = std::sync::mpsc::channel();
     parent.body.nursery.adopt(
@@ -828,12 +840,13 @@ fn a_job_settles_when_an_ended_helper_has_no_debt() {
 
 #[test]
 fn read_uses_a_helpers_published_status_even_before_its_report_is_taken_up() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
         TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
     )
     .unwrap();
+    take_task(&helper, &helper.mailbox);
     let handle = (*helper).clone();
     parent.body.nursery.adopt(
         handle.clone(),
@@ -870,7 +883,7 @@ fn read_uses_a_helpers_published_status_even_before_its_report_is_taken_up() {
 
 #[test]
 fn clear_joins_a_retiring_helper_before_discarding_its_notification() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
         TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
@@ -911,9 +924,9 @@ fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
             self.0.store(true, Ordering::Release);
         }
     }
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         installers: dressed(|_| {}),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let release = Release(Arc::new(AtomicBool::new(false)));
@@ -982,9 +995,9 @@ fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
 #[test]
 fn a_parent_messaging_at_the_idle_deadline_gets_a_report_or_a_refusal_never_silence() {
     let idle = Duration::from_millis(25);
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         helper_idle: idle,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut child = parent.fork_named("helper").unwrap();
@@ -1022,9 +1035,9 @@ fn a_parent_messaging_at_the_idle_deadline_gets_a_report_or_a_refusal_never_sile
 
 #[test]
 fn dropping_an_unrun_parent_joins_its_working_helper_before_ending_its_engine() {
-    let root = Agent::for_test_with(TestTrunk {
+    let root = Agent::for_test_with(TestLaunch {
         installers: dressed(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS)),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut parent = forked_child(&root, "parent", "`inherit");
@@ -1079,7 +1092,7 @@ fn dropping_an_unrun_parent_joins_its_working_helper_before_ending_its_engine() 
 
 #[test]
 fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
-    let mut root = trunk(Trunk::Returns);
+    let mut root = trunk(true);
     let handle = root.handle();
     handle.steer("never admitted".into()).unwrap();
     assert!(handle.status().unwrap().job.is_none());
@@ -1121,8 +1134,9 @@ fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
 
 #[test]
 fn human_gone_human_is_one_real_prompt_and_the_gone_still_joins_its_helper() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let mut child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     child.report(ChildStatus::Replied(FOValue::Unit));
     let _initial_report = next_child(&parent);
     parent.handle().steer("first fragment".into()).unwrap();
@@ -1184,8 +1198,9 @@ fn human_gone_human_is_one_real_prompt_and_the_gone_still_joins_its_helper() {
 
 #[test]
 fn a_dead_helpers_unread_parent_post_is_paid_before_the_parents_reply_reminder_with_gone_pending() {
-    let mut parent = trunk(Trunk::Returns);
+    let mut parent = trunk(true);
     let mut child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     child.report(ChildStatus::Replied(FOValue::Unit));
     let _initial_report = next_child(&parent);
     // Establish the returning parent's human debt without invoking the provider yet.

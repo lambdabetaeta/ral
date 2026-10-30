@@ -16,7 +16,7 @@ pub enum EnginePhase {
 /// A short fixed sentence for the window, plus the run directory to read.
 ///
 /// The engine's own words and [`Severed::code`] go to the log through
-/// [`Self::logged`].  An [`Error`](std::error::Error), so `Agent::root` can
+/// [`Self::logged`].  An [`Error`](std::error::Error), so `Fleet::found` can
 /// carry it whole inside an [`io::Error`](std::io::Error) for a front-end to
 /// downcast.
 #[derive(Debug)]

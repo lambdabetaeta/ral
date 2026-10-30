@@ -39,7 +39,7 @@ pub(crate) fn face(registry: &Arc<Registry>) -> AmbientForward {
     let registry = Arc::clone(registry);
     ral_core::process::forward_ambient(move |ambient| match ambient {
         Ambient::Interrupt => {
-            for root in registry.roots() {
+            for root in registry.human_children() {
                 let _ = root.stop_current();
             }
         }

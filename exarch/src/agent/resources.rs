@@ -198,7 +198,7 @@ impl Agent {
             .registry
             .live()
             .iter()
-            .filter(|agent| !agent.is_root())
+            .filter(|agent| agent.parent().is_some())
             .filter_map(|agent| agent.status().ok()?.rest)
             .map(|rest| idle.saturating_sub(rest.elapsed()))
             .min();

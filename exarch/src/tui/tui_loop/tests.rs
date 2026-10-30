@@ -1,7 +1,7 @@
 use super::{Pass, drain_signals};
-use crate::agent::spawn::hatch_root;
+use crate::agent::testkit::human_child;
 use crate::agent::testkit::{self, scripted};
-use crate::host::{Admission, HELPER_IDLE, Host, RootConfig, RootEngine, Trunk};
+use crate::host::{Admission, HELPER_IDLE, Host, LaunchConfig, RootEngine};
 use crate::port::{Command, Read, Signal};
 use crate::provider::{Bureau, Toolset, roles::Roles, scripted::Script};
 use crate::record::{AgentId, Memory, Transient};
@@ -41,7 +41,7 @@ fn died(signal: &Signal, agent: AgentId) -> bool {
 
 #[test]
 fn quit_leaves_the_real_fleet_alive_for_its_host_to_end() {
-    let host = testkit::host(testkit::trunk(Trunk::Converses));
+    let host = testkit::host(testkit::trunk(false));
     let mut app = app_for_host(&host);
     let root = app.tabs.focused();
 
@@ -53,10 +53,10 @@ fn quit_leaves_the_real_fleet_alive_for_its_host_to_end() {
 
 #[test]
 fn settlement_waits_for_the_last_root_including_a_new_root_born_before_its_creator_dies() {
-    let first = testkit::trunk(Trunk::Converses);
-    let second = hatch_root(&first, Memory::Amnemon, Some("second".into())).unwrap();
+    let first = testkit::trunk(false);
+    let second = human_child(&first, Memory::Amnemon, Some("second".into())).unwrap();
     let host = Host::adopt(vec![(first, None), (second, None)]).unwrap();
-    let [first, second] = *host.roots() else {
+    let [first, second] = *host.children().as_slice() else {
         panic!("two initial roots")
     };
     let mut app = app_for_host(&host);
@@ -114,10 +114,10 @@ fn settlement_waits_for_the_last_root_including_a_new_root_born_before_its_creat
 #[test]
 fn drain_observes_the_queued_second_resumed_root_before_idle_and_settlement() {
     let run = OwnDir::for_test("tui-resumed-roots").unwrap();
-    let config = || RootConfig {
+    let config = || LaunchConfig {
         system: "system".into(),
         run_dir: (*run).clone(),
-        trunk: Trunk::Converses,
+        returns: false,
         admission: Admission::Free,
         helper_idle: HELPER_IDLE,
         tools: Toolset::offered(false),
@@ -141,7 +141,7 @@ fn drain_observes_the_queued_second_resumed_root_before_idle_and_settlement() {
     let host = Host::found(config(), engine(), provider.clone()).unwrap();
     host.port()
         .command(
-            host.roots()[0],
+            host.children()[0],
             Command::Read(Read::Hatch {
                 memory: Memory::Amnemon,
                 name: Some("second".into()),
@@ -157,7 +157,7 @@ fn drain_observes_the_queued_second_resumed_root_before_idle_and_settlement() {
     assert_eq!(host.end(), [] as [String; 0]);
 
     let host = Host::resume(config(), engine(), &provider).unwrap();
-    let [first, second] = *host.roots() else {
+    let [first, second] = *host.children().as_slice() else {
         panic!("both recorded roots resume")
     };
     let mut app = app_for_host(&host);

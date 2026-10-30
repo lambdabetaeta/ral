@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fc0c9fbb
+generated_at_commit: 64ecd691
 generated_at_date: 2026-10-30
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
@@ -443,7 +443,7 @@ thread never holds either while waiting on an agent thread. `Bureau::admit` is
 the one call that takes both at once, store first. The `/model` overlay's
 `drive` therefore takes the catalog per fold — to open the `Listing`,
 to pump it, to record endpoints, to clone the fetch seam — and never around
-the fetch itself; `Bureau` carries `Arc<Bureau>` on `RootConfig` and from
+the fetch itself; `Bureau` carries `Arc<Bureau>` on `LaunchConfig` and from
 there on the fleet's `Launch`, the one place a run's host settings live,
 beside `factory`.
 
@@ -468,7 +468,7 @@ disk-caches both paths:
   (`Tuning::initial` plus `--effort`) and `--max-tokens`; a later `/model`
   changes only the switching agent's own provider. Roles are flags only, never
   persisted, and absent by default: with none, every child inherits and the
-  system prompt says nothing of roles. `Roles` rides `RootConfig` into
+  system prompt says nothing of roles. `Roles` rides `LaunchConfig` into
   `Launch`; the desk's `child_provider` resolves `` `role <name> `` against it,
   and the `Roles` prompt section (`data/roles.md` plus one `name: model` line
   per role) is taught only to an agent that spawns. The agent never lists

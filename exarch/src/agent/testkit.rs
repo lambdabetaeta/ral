@@ -1,9 +1,10 @@
 //! Fixtures shared by two or more `mod tests` across the crate; a helper only
 //! one of them needs belongs in that file instead.
 
+use crate::agent::build::Parent;
 use crate::agent::fleet::{Fleet, Name, Unborn};
 use crate::agent::handle::Shared;
-use crate::agent::{Admission, Agent, AgentHandle, Role, TestTrunk, Trunk};
+use crate::agent::{Admission, Agent, AgentHandle, TestLaunch};
 use crate::bus::{AgentMailbox, Emitter};
 use crate::host::Host;
 use crate::provider::Toolset;
@@ -86,9 +87,9 @@ pub(crate) fn dressed_trunk_over(
     runtime: impl FnOnce(&mut Runtime) + 'static,
     shell: impl FnOnce(&mut Shell) + 'static,
 ) -> Agent {
-    Agent::for_test_with(crate::agent::TestTrunk {
+    Agent::for_test_with(crate::agent::TestLaunch {
         installers: dressed_over(runtime, shell),
-        ..crate::agent::TestTrunk::new("system")
+        ..crate::agent::TestLaunch::new("system")
     })
     .expect("dressed test trunk")
 }
@@ -109,7 +110,8 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
 /// A synthetic owner without an engine or session log.
 pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
-    pub(crate) role: Role,
+    pub(crate) parent: Option<AgentHandle>,
+    pub(crate) returns: bool,
     pub(crate) admission: Admission,
     pub(crate) life: Option<ScopeNode>,
     pub(crate) elapsed: Duration,
@@ -121,7 +123,8 @@ impl TestAgentSpec {
     pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            role: Role::Converses,
+            parent: None,
+            returns: false,
             admission: Admission::Free,
             life: None,
             elapsed: Duration::ZERO,
@@ -132,9 +135,8 @@ impl TestAgentSpec {
 
     pub(crate) fn child(name: &str, parent: &AgentHandle, life: ScopeNode) -> Self {
         Self {
-            role: Role::Child {
-                parent: parent.clone(),
-            },
+            parent: Some(parent.clone()),
+            returns: true,
             admission: Admission::Parent {
                 idle: crate::agent::fleet::HELPER_IDLE,
             },
@@ -165,7 +167,8 @@ impl std::ops::Deref for TestAgent {
 pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<TestAgent, Unborn> {
     let TestAgentSpec {
         name,
-        role,
+        parent,
+        returns,
         admission,
         life,
         elapsed,
@@ -184,8 +187,8 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         .begin(crate::record::Started {
             session_id: id,
             name: name.clone(),
-            parent: role.parent().map(AgentHandle::id),
-            returns: role.returns(),
+            parent: parent.as_ref().map(AgentHandle::id),
+            returns,
             selected: crate::provider::Selected::for_test("test-model"),
             log_dir: fleet.launch.run_dir().path().to_path_buf(),
             at_unix_ms: 0,
@@ -196,7 +199,7 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         life,
         recorder,
         admission,
-        role.parent().map(|parent| parent.0.address.clone()),
+        parent.as_ref().map(|parent| parent.0.address.clone()),
         folds,
     );
     let handle = AgentHandle(Arc::new(Shared {
@@ -205,7 +208,7 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         log_dir: fleet.launch.run_dir().clone(),
         run_dir: fleet.launch.run_dir().clone(),
         started,
-        role,
+        parent,
         fuel,
         search,
         address: mailbox.address(),
@@ -325,10 +328,10 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
 }
 
 /// An owned root, not yet launched.
-pub(crate) fn trunk(trunk: Trunk) -> Agent {
-    Agent::for_test_with(TestTrunk {
-        trunk,
-        ..TestTrunk::new("system")
+pub(crate) fn trunk(returns: bool) -> Agent {
+    Agent::for_test_with(TestLaunch {
+        returns,
+        ..TestLaunch::new("system")
     })
     .expect("test trunk")
 }
@@ -339,10 +342,10 @@ pub(crate) fn host(root: Agent) -> Host {
 
 /// The toolless, conversing `--chat` root.
 pub(crate) fn chat_trunk() -> Agent {
-    Agent::for_test_with(TestTrunk {
-        trunk: Trunk::Converses,
+    Agent::for_test_with(TestLaunch {
+        returns: false,
         tools: Toolset::default(),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .expect("chat test trunk")
 }
@@ -350,9 +353,9 @@ pub(crate) fn chat_trunk() -> Agent {
 /// A trunk whose network policy denies hosted search — the ceiling a fork inherits,
 /// in the direction the ordinary fixture does not cover.
 pub(crate) fn searchless_trunk() -> Agent {
-    Agent::for_test_with(crate::agent::TestTrunk {
+    Agent::for_test_with(crate::agent::TestLaunch {
         search: false,
-        ..crate::agent::TestTrunk::new("system")
+        ..crate::agent::TestLaunch::new("system")
     })
     .expect("searchless test trunk")
 }
@@ -419,16 +422,61 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         .unwrap()
         .take()
         .unwrap_or_else(|| panic!("the run never forked a child: {report:?}"));
-    Agent::child_of(
-        (&parent.handle, parent.mailbox.life().child()),
-        &parent.body.log,
+    Agent::born(
         &parent.fleet,
+        Parent::Agent(&parent.handle, parent.mailbox.life().child()),
         reserved,
         engine,
         parent.body.client.clone(),
-        memory,
+        (memory == Memory::Mnemon).then(|| parent.body.log.inherited_context()),
     )
     .expect("an adopted child is born")
+}
+
+/// An unlaunched child of the human, with a fresh engine.
+pub(crate) fn human_child(
+    session: &Agent,
+    memory: crate::record::Memory,
+    name: Option<String>,
+) -> Result<Agent, String> {
+    let registry = &session.fleet.registry;
+    let name = name
+        .map_or_else(|| Ok(registry.unnamed()), |name| registry.name(&name))
+        .map_err(|error| error.to_string())?;
+    let engine = session
+        .fleet
+        .launch
+        .engine()
+        .map_err(|error| error.to_string())?;
+    Agent::born(
+        &session.fleet,
+        Parent::Human,
+        name,
+        engine,
+        session.body.client.clone(),
+        (memory == crate::record::Memory::Mnemon).then(|| session.body.log.inherited_context()),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Take up the parent's opening task without running an exchange.
+pub(crate) fn take_task(handle: &AgentHandle, mailbox: &AgentMailbox) {
+    let parent = handle
+        .parent()
+        .expect("a task's sender is the agent's parent");
+    handle
+        .0
+        .address
+        .post(crate::bus::Input::Task(crate::bus::AgentMessage {
+            from: parent.id(),
+            from_name: parent.0.name.clone(),
+            text: "task".into(),
+        }))
+        .unwrap();
+    assert!(matches!(
+        &mailbox.drain()[..],
+        [crate::bus::Drained::Input(crate::bus::Input::Task(_))]
+    ));
 }
 
 /// Launch a child and put its joined thread in the parent's nursery.
@@ -453,6 +501,13 @@ pub(crate) fn launch_child(
         resumed: None,
         reader: child.recorder().reader(),
     };
+    let first = first.map(|text| {
+        crate::bus::Input::Task(crate::bus::AgentMessage {
+            from: parent.id(),
+            from_name: parent.handle.0.name.clone(),
+            text,
+        })
+    });
     let thread = child.launch(born, first, emit).unwrap_or_else(|error| {
         parent.body.failures.extend(error.failures);
         panic!(

@@ -22,10 +22,8 @@ impl AgentInfo {
         Some(Self {
             name: agent.0.name.clone(),
             spawner: agent
-                .0
-                .role
                 .parent()
-                .map_or(Spawner::Root, |up| Spawner::Agent(up.0.name.clone())),
+                .map_or(Spawner::Human, |up| Spawner::Agent(up.0.name.clone())),
             log_dir: agent.0.log_dir.path().to_path_buf(),
             elapsed: agent.elapsed(),
             state,
@@ -34,22 +32,22 @@ impl AgentInfo {
     }
 }
 pub(crate) fn listing(reader: &AgentHandle, fleet: &Fleet) -> Vec<AgentInfo> {
-    let root = reader.root().id();
+    let founder = reader.founder().id();
     fleet
         .registry
         .live()
         .iter()
-        .filter(|node| node.root().id() == root)
+        .filter(|node| node.founder().id() == founder)
         .filter_map(AgentInfo::of)
         .collect()
 }
 pub(crate) fn summary(reader: &AgentHandle, fleet: &Fleet) -> Summary {
-    let root = reader.root().id();
+    let founder = reader.founder().id();
     let counted: Vec<_> = fleet
         .registry
         .live()
         .into_iter()
-        .filter(|node| node.root().id() == root)
+        .filter(|node| node.founder().id() == founder)
         .filter_map(|node| {
             let status = node.status().ok()?;
             Some((node, status))

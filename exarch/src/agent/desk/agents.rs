@@ -1,12 +1,13 @@
 //! The agents family of the desk.
 
+use crate::agent::build::Parent;
 use crate::agent::engine::{Engine, EngineKind};
 use crate::agent::roster::summary;
 use crate::agent::{Agent, Body};
-use crate::bus::Refused;
+use crate::bus::{AgentMessage, Input, Refused};
 use crate::enquiry::{Deposit, ForkClaim, Message, Name, Selection, Start};
 use crate::provider::Provider;
-use crate::record::{Born, ChildStatus};
+use crate::record::{Born, ChildStatus, Memory};
 use crate::shell_eval;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
@@ -20,6 +21,9 @@ impl ExarchDesk {
     pub(super) fn launch(&self, Start { spec, fork }: Start) -> Result<FOValue, Error> {
         let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         let call = &self.call;
+        body.log
+            .check_available()
+            .map_err(|why| Error::new(why.to_string()))?;
         let Name(name) = spec.name;
         if call.handle.0.fuel == 0 {
             return Err(Error::new(
@@ -35,14 +39,14 @@ impl ExarchDesk {
             .name(&name)
             .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}")))?;
         let provider = self.child_provider(&body, &spec.model)?;
-        let child = Agent::child_of(
-            (&call.handle, call.life.child()),
-            &body.log,
+        let inherited = (spec.memory == Memory::Mnemon).then(|| body.log.inherited_context());
+        let child = Agent::born(
             &call.fleet,
+            Parent::Agent(&call.handle, call.life.child()),
             reserved,
             self.fork_engine(fork)?,
             provider,
-            spec.memory,
+            inherited,
         )
         .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}")))?;
         self.spawn_child(&mut body, child, &name, spec.prompt)
@@ -107,7 +111,7 @@ impl ExarchDesk {
         let s = &self.call;
         let factory = s.fleet.launch.factory.as_ref().ok_or(
             "this wire session has no engine factory: a construction bug, since a fuelled wire \
-             trunk is refused at Agent::root without one",
+             launch is refused at Fleet::found without one",
         )?;
         let stream = factory
             .engine()
@@ -140,7 +144,12 @@ impl ExarchDesk {
             resumed: None,
             reader: child.recorder().reader(),
         };
-        let thread = child.launch(born, Some(prompt.clone()), &call.emit);
+        let task = Input::Task(AgentMessage {
+            from: call.handle.id(),
+            from_name: call.handle.0.name.clone(),
+            text: prompt.clone(),
+        });
+        let thread = child.launch(born, Some(task), &call.emit);
         call.commit_act(body, DeskAct::Spawn, Some(name), prompt, thread.is_err());
         let thread = thread.map_err(|error| {
             body.failures.extend(error.failures);
@@ -275,12 +284,17 @@ impl ExarchDesk {
     pub(super) fn agent_reply(&self, value: FOValue) -> Result<FOValue, Error> {
         let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         let s = &self.call;
-        if !s.handle.0.role.returns() {
+        let returns = s
+            .handle
+            .0
+            .address
+            .transact(|txn| txn.mail().returns())
+            .map_err(|why| Error::new(why.to_string()))?;
+        if !returns {
             return Err(Error::new(
-                "exarch-agents `reply` refused: you converse with the user; you do not return. \
-                 `reply` hands a spawned or headless agent's answer to whoever launched it; \
-                 an interactive root instead keeps talking, turn after turn, and holds no \
-                 `reply` to call.",
+                "exarch-agents `reply` refused: you converse with the human; you do not return. \
+                 `reply` hands a spawned or headless agent's answer to whoever started it; \
+                 a conversing agent keeps talking, turn after turn, and holds no `reply` to call.",
             ));
         }
         let display = shell_eval::ral_value_to_text(&value).unwrap_or_default();

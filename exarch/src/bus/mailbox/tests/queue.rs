@@ -77,6 +77,30 @@ fn recall_extracts_only_human_text_preserving_other_inputs() {
 }
 
 #[test]
+fn recall_preserves_an_untaken_parent_task_and_its_debt() {
+    let dir = OwnDir::for_test("recall-task").unwrap();
+    let journal = Recorder::create(&dir).unwrap();
+    let mailbox = recorded_mailbox(Admission::Parent { idle: WAIT }, journal.clone());
+    let address = mailbox.address();
+    assert!(!address.status().unwrap().owes);
+    address.post(task("first line\nsecond line")).unwrap();
+    super::acceptance::replay_is_cell(&mailbox, &journal);
+    let pending = address.queued_posts();
+    assert_eq!(depth(&mailbox, Source::Message), 1);
+    assert!(mailbox.has_input());
+    assert_eq!(address.recall(), [] as [String; 0]);
+    assert_eq!(address.queued(), [] as [String; 0]);
+    assert_eq!(address.queued_posts(), pending);
+    super::acceptance::replay_is_cell(&mailbox, &journal);
+    assert!(address.status().unwrap().owes);
+    assert!(matches!(take(&mailbox).0,
+        Input::Task(message) if message.text == "first line\nsecond line"
+            && message.from == AgentId::new(7)));
+    assert!(address.status().unwrap().owes);
+    super::acceptance::replay_is_cell(&mailbox, &journal);
+}
+
+#[test]
 fn drain_takes_messages_batches_reads_and_wakeups_until_the_first_rewrite() {
     let mailbox = mailbox(Admission::Free);
     let _exchange = start(&mailbox);
@@ -137,6 +161,7 @@ fn clear_drops_reports_gone_wakeups_and_batches_but_keeps_all_typed_input() {
     address.post(wakeup(1, "tick")).unwrap();
     address.post(surface()).unwrap();
     address.post(message("peer", false)).unwrap();
+    address.post(task("opening task")).unwrap();
     address.command(Command::Rewrite(Rewrite::Clear)).unwrap();
     address.steer("new".into()).unwrap();
     #[allow(
@@ -145,8 +170,8 @@ fn clear_drops_reports_gone_wakeups_and_batches_but_keeps_all_typed_input() {
     )]
     mailbox.transact(|txn| txn.clear()).unwrap().unwrap();
     assert!(
-        matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Human(text)), Drained::Input(Input::Message(message))]
-        if text == "old" && message.text == "peer")
+        matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Human(text)), Drained::Input(Input::Message(message)), Drained::Input(Input::Task(task))]
+        if text == "old" && message.text == "peer" && task.text == "opening task")
     );
     assert!(matches!(
         mailbox.next(QUIET),

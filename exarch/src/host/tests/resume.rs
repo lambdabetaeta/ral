@@ -3,7 +3,7 @@
 
 use crate::agent::fleet::HELPER_IDLE;
 use crate::agent::outcome::Outcome;
-use crate::agent::{Admission, Agent, RootConfig, RootEngine, Trunk};
+use crate::agent::{Admission, Agent, LaunchConfig, RootEngine};
 use crate::app::{EXARCH, Scratch};
 use crate::bus::{Emitter, Signal, channel};
 use crate::host::Host;
@@ -60,11 +60,11 @@ fn drive(session: &mut Agent, prompt: &str) {
     assert!(matches!(outcome, Ok(Outcome::Complete)));
 }
 
-fn root_config(run_dir: &OwnDir) -> RootConfig {
-    RootConfig {
+fn launch_config(run_dir: &OwnDir) -> LaunchConfig {
+    LaunchConfig {
         system: "system".into(),
         run_dir: OwnDir::clone(run_dir),
-        trunk: Trunk::Converses,
+        returns: false,
         admission: Admission::Free,
         helper_idle: HELPER_IDLE,
         max_tokens: None,
@@ -133,7 +133,7 @@ fn scripted_run_kill_resume_and_continue() {
     let (_state, child_dir) = crashed_run();
     let [(mut resumed, _)] = <[_; 1]>::try_from(
         Agent::resume_for_test(
-            root_config(&child_dir),
+            launch_config(&child_dir),
             identity_engine("resume-parent"),
             &scripted("test-model", Script::new().then(Reply::text("continued"))),
         )
@@ -194,16 +194,16 @@ fn scripted_run_kill_resume_and_continue() {
 fn the_host_resumes_a_crashed_run_and_carries_on() {
     let (_state, child_dir) = crashed_run();
     let host = Host::resume(
-        root_config(&child_dir),
+        launch_config(&child_dir),
         identity_engine("resume-host"),
         &scripted("test-model", Script::new().then(Reply::text("continued"))),
     )
     .expect("resume the crashed run");
-    let [root] = host.roots() else {
-        panic!("one open session, got {}", host.roots().len())
+    let [root] = *host.children().as_slice() else {
+        panic!("one open session, got {}", host.children().len())
     };
     host.port()
-        .submit(*root, "continue after the crash".into())
+        .submit(root, "continue after the crash".into())
         .unwrap();
 
     let (mut resumed, mut answered) = (None, false);
@@ -213,8 +213,8 @@ fn the_host_resumes_a_crashed_run_and_carries_on() {
             .recv_timeout(Duration::from_secs(10))
             .expect("the resumed root settles its job")
         {
-            Signal::Born(id, born) if id == *root => resumed = born.resumed,
-            Signal::Commit(id, commit) if id == *root => {
+            Signal::Born(id, born) if id == root => resumed = born.resumed,
+            Signal::Commit(id, commit) if id == root => {
                 answered = commit.records().iter().any(|record| {
                     matches!(record.value(), record::Record::Display(record::Display::Answer { text })
                         if text == "continued")
@@ -282,8 +282,8 @@ fn resume_child() {
         .own(XdgKind::State)
         .and_then(|app| app.dir(CHILD_RUN))
         .expect("the run dir the parent made");
-    let mut session = Agent::root_for_test(
-        root_config(&dir),
+    let mut session = Agent::born_for_test(
+        launch_config(&dir),
         identity_engine("resume-child"),
         scripted("test-model", Script::new().then(Reply::text("before kill"))),
     )

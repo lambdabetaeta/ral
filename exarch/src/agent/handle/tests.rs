@@ -1,5 +1,4 @@
 use super::*;
-use crate::agent::Trunk;
 use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{TestAgent, TestAgentSpec, test_agent, trunk};
 use crate::bus::{Drained, Input, Next, Rest};
@@ -82,10 +81,10 @@ fn the_scope_climb_refuses_self_and_non_descendants() {
         parent.descendant(&grandchild).unwrap().id(),
         grandchild.id()
     );
-    assert_eq!(grandchild.root().id(), parent.id());
-    assert_eq!(parent.root().id(), parent.id());
-    assert!(parent.is_root());
-    assert!(!grandchild.is_root());
+    assert_eq!(grandchild.founder().id(), parent.id());
+    assert_eq!(parent.founder().id(), parent.id());
+    assert!(parent.parent().is_none());
+    assert!(grandchild.parent().is_some());
 }
 
 #[test]
@@ -113,7 +112,7 @@ fn one_report_answers_every_parent_message_taken_up() {
 
 #[test]
 fn owner_drop_ends_the_tree_and_releases_names_without_handles_retaining_it() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let child = parent.fork_named("child").unwrap();
     let grandchild = child.fork_named("grandchild").unwrap();
     let fleet = parent.fleet.clone();
@@ -129,7 +128,7 @@ fn owner_drop_ends_the_tree_and_releases_names_without_handles_retaining_it() {
 
 #[test]
 fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
     child
         .handle()
@@ -165,7 +164,7 @@ fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
 fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
     use crate::agent::outcome::Outcome;
     use crate::record::{Forensic, Record, Transcript, Voice};
-    let mut owner = trunk(Trunk::Converses);
+    let mut owner = trunk(false);
     owner.handle().steer("taken up".into()).unwrap();
     let Next::Take { input, exchange } = owner.mailbox.next(REST) else {
         panic!("human exchange")
@@ -206,7 +205,7 @@ fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
 
 #[test]
 fn a_claimed_surface_declines_without_cancelling_the_current_exchange() {
-    let mut owner = trunk(Trunk::Converses);
+    let mut owner = trunk(false);
     owner.handle().steer("opening".into()).unwrap();
     let Next::Take { exchange, .. } = owner.mailbox.next(REST) else {
         panic!("an exchange")
@@ -248,6 +247,7 @@ fn a_claimed_surface_declines_without_cancelling_the_current_exchange() {
 fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let (_fleet, parent, helper) = family();
+    crate::agent::testkit::take_task(&helper, &helper.mailbox);
     assert!(parent.mailbox.begin());
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
@@ -280,7 +280,7 @@ fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() 
 #[test]
 fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
     use crate::record::{Control, RECORD, Record, read_records};
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let helper = parent.fork_named("ended-helper").unwrap();
     let handle = helper.handle();
     handle.message(&parent.handle(), "unread".into()).unwrap();
@@ -337,7 +337,7 @@ fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
 #[test]
 fn recalling_a_returning_roots_unread_text_leaves_no_teardown_report() {
     use crate::record::{Control, RECORD, Record, read_records};
-    let owner = trunk(Trunk::Returns);
+    let owner = trunk(true);
     let handle = owner.handle();
     let fleet = owner.fleet.clone();
     handle.steer("unread".into()).unwrap();

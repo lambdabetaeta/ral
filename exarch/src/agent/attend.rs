@@ -195,7 +195,7 @@ impl Agent {
         if self
             .mailbox
             .transact(|txn| txn.mail().owes())
-            .unwrap_or_else(|_| self.handle.0.role.parent().is_some())
+            .unwrap_or_else(|_| self.handle.parent().is_some())
         {
             let reason = severed.as_ref().map_or_else(
                 || ENDED_BEFORE_REPORTING.to_string(),

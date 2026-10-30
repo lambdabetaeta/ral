@@ -1,12 +1,11 @@
 mod resume;
 
 use super::*;
-use crate::agent::Trunk;
 use crate::agent::engine::EngineKind;
 use crate::agent::nursery::{Joined, Teardown};
-use crate::agent::spawn::hatch_root;
+use crate::agent::testkit::human_child;
 use crate::agent::testkit::{self, ral_call, scripted, set_provider, trunk};
-use crate::agent::{Admission, TestTrunk};
+use crate::agent::{Admission, TestLaunch};
 use crate::bus::Input;
 use crate::bus::{Command, Read, Rewrite, Signal, WORKER_PANIC_PREFIX};
 use crate::provider::scripted::{Reply, Script};
@@ -16,16 +15,16 @@ use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(10);
 
-fn roots() -> Vec<(Agent, Option<Resumed>)> {
-    let first = trunk(Trunk::Converses);
-    let second = hatch_root(&first, Memory::Amnemon, Some("second".into()))
+fn initial_children() -> Vec<(Agent, Option<Resumed>)> {
+    let first = trunk(false);
+    let second = human_child(&first, Memory::Amnemon, Some("second".into()))
         .expect("another root in the same fleet");
     vec![(first, None), (second, None)]
 }
 
 #[test]
 fn dropping_a_host_joins_every_root_without_end() {
-    let roots = roots();
+    let roots = initial_children();
     let fleet = roots[0].0.fleet.clone();
     let engines: Vec<_> = roots
         .iter()
@@ -36,7 +35,7 @@ fn dropping_a_host_joins_every_root_without_end() {
         .collect();
     let host = Host::adopt(roots).expect("launch both roots");
     let handles: Vec<_> = host
-        .roots()
+        .children()
         .iter()
         .map(|id| fleet.registry.get(*id).expect("a live root"))
         .collect();
@@ -50,43 +49,98 @@ fn dropping_a_host_joins_every_root_without_end() {
     );
     assert_eq!(Arc::strong_count(&fleet), 1);
     assert!(engines.iter().all(|engine| engine.upgrade().is_none()));
-    assert!(fleet.join_roots().is_empty(), "drop consumes every join");
+    assert!(fleet.join_children().is_empty(), "drop consumes every join");
 }
 
-#[test]
-fn end_joins_initial_roots_and_a_root_opened_by_a_command() {
-    let host = Host::adopt(roots()).expect("launch both roots");
-    let fleet = host.fleet().clone();
+fn open_unnamed(host: &Host, expected_name: &str) -> AgentHandle {
+    let main = host.children()[0];
     host.port()
         .command(
-            host.roots()[0],
+            main,
             Command::Read(Read::Hatch {
                 memory: Memory::Amnemon,
-                name: Some("third".into()),
+                name: None,
             }),
         )
         .unwrap();
     let deadline = Instant::now() + WAIT;
+    let mut child = None;
     loop {
-        if let Signal::Born(_, born) = host
+        match host
             .feed()
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .expect("the command launches a third root")
-            && born.name == "third"
+            .expect("the unnamed child is adopted and acknowledged")
+        {
+            Signal::Born(id, born) if born.name == expected_name => {
+                assert!(born.parent.is_none());
+                child = Some(id);
+            }
+            Signal::Commit(id, commit) if id == main => {
+                if let Some(child) = child
+                    && commit.records().iter().any(|record| {
+                        matches!(record.value(),
+                        Record::Forensic(Forensic::SystemNote { text })
+                            if *text == format!("session {expected_name} opened (agent {child})"))
+                    })
+                {
+                    return host.fleet().registry.get(child).unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn unnamed_children_are_adopted_in_order_and_end_joins_all_three() {
+    let host = Host::adopt(vec![(trunk(false), None)]).unwrap();
+    let fleet = host.fleet().clone();
+    let main = fleet.registry.get(host.children()[0]).unwrap();
+    assert_eq!(main.0.name, "main");
+    let first = open_unnamed(&host, "agent-1");
+    assert_eq!(host.children(), [main.id(), first.id()]);
+    let second = open_unnamed(&host, "agent-2");
+    let children = [main.id(), first.id(), second.id()];
+    assert_eq!(host.children(), children);
+
+    host.port()
+        .command(first.id(), Command::Rewrite(Rewrite::Close))
+        .unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if matches!(host.feed()
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("the first unnamed child ends"),
+            Signal::Transient(id, crate::record::Transient::Died { .. }) if id == first.id())
         {
             break;
         }
     }
-    let handles = fleet.registry.live();
-    assert_eq!(handles.len(), 3);
+    assert!(!first.is_live());
+    assert_eq!(host.children(), children, "ended children remain adopted");
 
     let failures = host.end();
 
     assert!(failures.is_empty(), "{failures:?}");
-    assert!(handles.iter().all(|handle| !handle.is_live()));
+    assert!([main, first, second].iter().all(|handle| !handle.is_live()));
     assert!(fleet.registry.is_empty());
     assert_eq!(Arc::strong_count(&fleet), 1);
-    assert!(fleet.join_roots().is_empty(), "end consumes every join");
+    assert!(fleet.join_children().is_empty(), "end consumes every join");
+}
+
+#[test]
+fn an_unnamed_human_child_skips_a_live_helpers_name() {
+    let mut main = trunk(false);
+    let child = main.fork_named("agent-1").unwrap();
+    let (emit, _feed) = crate::bus::dummy_emitter();
+    let helper = testkit::launch_child(&mut main, child, None, &emit);
+    let host = Host::adopt(vec![(main, None)]).unwrap();
+    assert!(helper.is_live());
+    let child = open_unnamed(&host, "agent-2");
+    assert_eq!(host.children(), [host.children()[0], child.id()]);
+    assert!(helper.is_live());
+    assert_eq!(host.end(), [] as [String; 0]);
+    assert!(!helper.is_live());
 }
 
 #[test]
@@ -94,15 +148,19 @@ fn end_preserves_join_failures() {
     let fleet = Fleet::for_test();
     let bus = FleetBus::session();
     let (release, gate) = mpsc::channel();
-    fleet.adopt_root(Joined::new(std::thread::spawn(move || {
-        gate.recv_timeout(WAIT)
-            .expect("release the retained root thread");
-        Teardown {
-            failures: vec!["uncertified teardown".into()],
-        }
-    })));
+    let owner = testkit::test_agent(&fleet, testkit::TestAgentSpec::new("retained")).unwrap();
+    fleet.adopt(
+        (*owner).clone(),
+        Joined::new(std::thread::spawn(move || {
+            drop(owner);
+            gate.recv_timeout(WAIT)
+                .expect("release the retained root thread");
+            Teardown {
+                failures: vec!["uncertified teardown".into()],
+            }
+        })),
+    );
     let host = Host {
-        roots: Vec::new(),
         bus,
         signals: None,
         fleet: fleet.clone(),
@@ -116,21 +174,21 @@ fn end_preserves_join_failures() {
 
 #[test]
 fn a_job_settles_on_the_feed_while_a_sender_is_retained() {
-    let mut root = trunk(Trunk::Converses);
+    let mut root = trunk(false);
     set_provider(
         &mut root,
         scripted("test-model", Script::new().then(Reply::text("done"))),
     );
     let host = Host::adopt(vec![(root, None)]).expect("launch root");
-    let _sender = host.bus.emitter(host.roots()[0]);
-    host.port().submit(host.roots()[0], "go".into()).unwrap();
+    let _sender = host.bus.emitter(host.children()[0]);
+    host.port().submit(host.children()[0], "go".into()).unwrap();
     let records = until_settled(&host);
     assert!(records.iter().any(|record| matches!(
         record,
         Record::Display(crate::record::Display::Answer { text, .. }) if text == "done"
     )));
     assert!(
-        host.port().is_live(host.roots()[0]),
+        host.port().is_live(host.children()[0]),
         "settlement does not end the host"
     );
     assert_eq!(host.end(), Vec::<String>::new());
@@ -138,13 +196,13 @@ fn a_job_settles_on_the_feed_while_a_sender_is_retained() {
 
 #[test]
 fn a_recovered_provider_panic_reaches_the_feed_as_a_forensic_error() {
-    let mut root = trunk(Trunk::Converses);
+    let mut root = trunk(false);
     set_provider(
         &mut root,
         scripted("test-model", Script::new().then(Reply::panicking())),
     );
     let host = Host::adopt(vec![(root, None)]).expect("launch root");
-    host.port().submit(host.roots()[0], "go".into()).unwrap();
+    host.port().submit(host.children()[0], "go".into()).unwrap();
     let records = until_settled(&host);
     assert!(
         records.iter().any(|record| matches!(
@@ -199,10 +257,10 @@ fn a_retained_port_does_not_retain_the_factory_after_end() {
     let factory = Arc::new(UnusedFactory);
     let weak_factory = Arc::downgrade(&factory);
     let dir = ral_core::own::OwnDir::for_test("host-factory").unwrap();
-    let cfg = RootConfig {
+    let cfg = LaunchConfig {
         system: "system".into(),
         run_dir: (*dir).clone(),
-        trunk: Trunk::Converses,
+        returns: false,
         admission: crate::agent::Admission::Free,
         helper_idle: crate::agent::fleet::HELPER_IDLE,
         max_tokens: None,
@@ -226,7 +284,7 @@ fn a_retained_port_does_not_retain_the_factory_after_end() {
     };
     let host = Host::found(cfg, engine, scripted("test-model", Script::new())).unwrap();
     let port = host.port();
-    let root = host.roots()[0];
+    let root = host.children()[0];
 
     assert_eq!(host.end(), Vec::<String>::new());
     assert!(port.roster().is_empty());
@@ -241,7 +299,7 @@ fn a_retained_port_does_not_retain_the_factory_after_end() {
 
 #[test]
 fn host_end_returns_a_final_session_end_recording_failure() {
-    let root = trunk(Trunk::Converses);
+    let root = trunk(false);
     let recorder = root.recorder();
     let host = Host::adopt(vec![(root, None)]).unwrap();
     recorder.fail_after(0);
@@ -259,10 +317,10 @@ fn job_opened(records: &[Record]) -> usize {
 
 #[test]
 fn a_scheduled_wakeup_opens_a_job_at_rest_through_the_host() {
-    let mut root = Agent::for_test_with(TestTrunk {
-        trunk: Trunk::Converses,
+    let mut root = Agent::for_test_with(TestLaunch {
+        returns: false,
         allow_schedule: true,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     set_provider(
@@ -280,7 +338,7 @@ fn a_scheduled_wakeup_opens_a_job_at_rest_through_the_host() {
     );
     let host = testkit::host(root);
     host.port()
-        .submit(host.roots()[0], "arm a wakeup".into())
+        .submit(host.children()[0], "arm a wakeup".into())
         .unwrap();
     let first = until_settled(&host);
     assert_eq!(job_opened(&first), 1);
@@ -301,10 +359,10 @@ fn a_scheduled_wakeup_opens_a_job_at_rest_through_the_host() {
 
 #[test]
 fn clear_through_the_host_ends_helpers_drops_reports_and_keeps_human_text() {
-    let mut root = Agent::for_test_with(TestTrunk {
-        trunk: Trunk::Converses,
+    let mut root = Agent::for_test_with(TestLaunch {
+        returns: false,
         admission: Admission::Gated,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     set_provider(
@@ -330,7 +388,7 @@ fn clear_through_the_host_ends_helpers_drops_reports_and_keeps_human_text() {
     let root = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     let id = root.id();
     let cleared = |signal: &Signal| {

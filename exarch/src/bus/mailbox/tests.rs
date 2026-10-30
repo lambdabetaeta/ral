@@ -94,6 +94,14 @@ fn start(mailbox: &AgentMailbox) -> Lease {
     exchange
 }
 
+fn task(text: &str) -> Input {
+    Input::Task(AgentMessage {
+        from: AgentId::new(7),
+        from_name: "parent".into(),
+        text: text.into(),
+    })
+}
+
 fn message(text: &str, parent: bool) -> Input {
     Input::Message(AgentMessage {
         from: AgentId::new(if parent { 7 } else { 9 }),

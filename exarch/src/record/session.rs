@@ -10,9 +10,9 @@
 
 use super::context::{Context, Eviction, ItemKind, Linked, Span, validate_result_ids};
 use super::{
-    Control, EditAuthority, Fold as _, Folds, Forensic, Mail, Memory, Model, NonEmpty, Post,
-    QuiesceReason, RECORD, Record, Recorded, Refusal, Role, Schedules, Selected, Started,
-    ToolResult, Transcript, Unavailable, Voice,
+    Control, EditAuthority, Fold as _, Folds, Forensic, Mail, Model, NonEmpty, Post, QuiesceReason,
+    RECORD, Record, Recorded, Refusal, Role, Schedules, Selected, Started, ToolResult, Transcript,
+    Unavailable, Voice,
 };
 use crate::record::AgentId;
 use genai::chat::{ChatMessage, ChatRole};
@@ -107,7 +107,7 @@ pub struct Resumed {
 pub struct AgentLog {
     id: AgentId,
     dir: OwnDir,
-    /// `<run>/sessions/`, under which `fork` makes each child's dir.
+    #[cfg(test)]
     sessions_root: OwnDir,
     /// The directory a test's log has to itself, dropped with the log.
     #[cfg(test)]
@@ -161,26 +161,24 @@ pub struct Inherited {
     pub evictions: Vec<Eviction>,
 }
 
+pub(crate) struct Opening<'a> {
+    pub parent: Option<AgentId>,
+    pub name: &'a str,
+    pub returns: bool,
+    pub selected: &'a Selected,
+    pub system: &'a str,
+    pub inherited: Option<Inherited>,
+}
+
 impl AgentLog {
-    /// Build a fresh root session log.  Wipes any prior directory with the
-    /// same session id, so `record.jsonl` starts empty.
-    ///
-    /// # Errors
-    /// Re-creating the session directory, or writing the opening records,
-    /// failed — or `inherited` names a turn its ancestor's file will not read
-    /// back.
-    pub fn root(
+    /// Create a fresh session log with its opening records.
+    pub(crate) fn create(
         sessions_root: &OwnDir,
-        session_id: AgentId,
-        name: &str,
-        returns: bool,
-        selected: &Selected,
-        system: &str,
-        inherited: Option<Inherited>,
+        id: AgentId,
+        opening: Opening<'_>,
     ) -> io::Result<(Self, Mail, Schedules, Model)> {
-        let mut log = Self::open_fresh(sessions_root.clone(), session_id)?;
-        let (mail, schedules, model) =
-            log.open(None, name, returns, selected, system, inherited)?;
+        let mut log = Self::open_fresh(sessions_root, id)?;
+        let (mail, schedules, model) = log.open(opening)?;
         Ok((log, mail, schedules, model))
     }
 
@@ -198,8 +196,18 @@ impl AgentLog {
     ) -> io::Result<(Self, Mail, Schedules, Model)> {
         let scratch = OwnDir::for_test("agent-log")?;
         let selected = Selected::for_test(model);
-        let (log, mail, schedules, model) =
-            Self::root(&scratch, session_id, "test", false, &selected, "", None)?;
+        let (log, mail, schedules, model) = Self::create(
+            &scratch,
+            session_id,
+            Opening {
+                parent: None,
+                name: "test",
+                returns: false,
+                selected: &selected,
+                system: "",
+                inherited: None,
+            },
+        )?;
         Ok((
             Self {
                 _scratch: Some(scratch),
@@ -209,31 +217,6 @@ impl AgentLog {
             schedules,
             model,
         ))
-    }
-
-    /// Build a forked child log, inheriting `sessions_root` and recording this
-    /// log's id as the child's parent.  A `mnemon` child opens with a link to
-    /// this log's whole turn table.
-    ///
-    /// `selected` is the child's own choice, not this log's opening choice.
-    ///
-    /// # Errors
-    /// Creating the child's directory, or writing its opening records, failed
-    /// — or this log's turns will not read back for the link.
-    pub(crate) fn fork(
-        &self,
-        child_id: AgentId,
-        name: &str,
-        selected: &Selected,
-        system: &str,
-        memory: Memory,
-    ) -> io::Result<(Self, Mail, Schedules, Model)> {
-        self.seam.check_available()?;
-        let mut log = Self::open_fresh(self.sessions_root.clone(), child_id)?;
-        let inherited = (memory == Memory::Mnemon).then(|| self.inherited_context());
-        let (mail, schedules, model) =
-            log.open(Some(self.id), name, true, selected, system, inherited)?;
-        Ok((log, mail, schedules, model))
     }
 
     /// Fold the context and the three control folds from `record.jsonl`,
@@ -280,6 +263,7 @@ impl AgentLog {
         let mut resumed = Self {
             id: session_id,
             dir,
+            #[cfg(test)]
             sessions_root: sessions_root.clone(),
             #[cfg(test)]
             _scratch: None,
@@ -360,6 +344,10 @@ impl AgentLog {
         self.seam.clone()
     }
 
+    pub(crate) fn check_available(&self) -> Result<(), Unavailable> {
+        self.seam.check_available()
+    }
+
     pub fn id(&self) -> AgentId {
         self.id
     }
@@ -381,19 +369,18 @@ impl AgentLog {
         Ok(ids)
     }
 
-    /// The roots a resume reopens: every session whose record opens with a
-    /// root's `SessionStarted` and holds no `SessionClosed`, in id order, with
-    /// the name it was recorded under.
+    /// The human's children a resume reopens: sessions with no recorded parent
+    /// and no `SessionClosed`, in id order, with their recorded names.
     ///
     /// # Errors
     /// `sessions_root` exists but cannot be read, or a session's record
     /// cannot: one unreadable record is named rather than skipped, since
     /// skipping it would resume the others as if it had never been open.
-    pub fn live_roots(sessions_root: &OwnDir) -> io::Result<Vec<(AgentId, String)>> {
+    pub fn human_children(sessions_root: &OwnDir) -> io::Result<Vec<(AgentId, String)>> {
         Self::session_ids(sessions_root)?
             .into_iter()
             .filter_map(|id| {
-                live_root(sessions_root, id)
+                human_child(sessions_root, id)
                     .map_err(|error| {
                         io::Error::new(
                             error.kind(),
@@ -650,7 +637,7 @@ impl AgentLog {
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
-    fn open_fresh(sessions_root: OwnDir, session_id: AgentId) -> io::Result<Self> {
+    fn open_fresh(sessions_root: &OwnDir, session_id: AgentId) -> io::Result<Self> {
         let name = session_id.to_string();
         sessions_root.remove(&name)?;
         let dir = sessions_root.make_dir(&name)?;
@@ -659,7 +646,8 @@ impl AgentLog {
             id: session_id,
             dir,
             context: Context::new(session_id, sessions_root.clone()),
-            sessions_root,
+            #[cfg(test)]
+            sessions_root: sessions_root.clone(),
             #[cfg(test)]
             _scratch: None,
             seam,
@@ -670,12 +658,14 @@ impl AgentLog {
     /// there is one, then the system prompt.
     fn open(
         &mut self,
-        parent: Option<AgentId>,
-        name: &str,
-        returns: bool,
-        selected: &Selected,
-        system: &str,
-        inherited: Option<Inherited>,
+        Opening {
+            parent,
+            name,
+            returns,
+            selected,
+            system,
+            inherited,
+        }: Opening<'_>,
     ) -> io::Result<(Mail, Schedules, Model)> {
         let folds = self.seam.begin(Started {
             session_id: self.id,
@@ -738,7 +728,7 @@ fn withdrawn_note(pending: &[&Post]) -> Forensic {
 /// # Errors
 /// The record exists but cannot be opened, or holds a line that is not a
 /// record.
-fn live_root(sessions: &OwnDir, id: AgentId) -> io::Result<Option<String>> {
+fn human_child(sessions: &OwnDir, id: AgentId) -> io::Result<Option<String>> {
     let opened = sessions
         .dir(&id.to_string())
         .and_then(|session| session.open(RECORD).map(|file| (session, file)));

@@ -22,6 +22,7 @@ impl Agent {
     pub(super) fn admit(&self, input: Input) -> Option<Prompt> {
         let (text, voice) = match input {
             Input::Human(text) => (text, Voice::Human),
+            Input::Task(message) => (message.text, Voice::Peer),
             Input::Message(message) => (message.render(), Voice::Peer),
             Input::Child {
                 id,

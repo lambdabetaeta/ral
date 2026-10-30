@@ -25,6 +25,7 @@ mod tests;
 
 pub(crate) enum Input {
     Human(String),
+    Task(AgentMessage),
     Message(AgentMessage),
     Child {
         id: AgentId,
@@ -179,6 +180,9 @@ impl Queued {
     pub(crate) fn posted(&self) -> Post {
         let (voice, text, from) = match self {
             Self::Input(Input::Human(text)) => (Some(Voice::Human), text.clone(), None),
+            Self::Input(Input::Task(message)) => {
+                (Some(Voice::Peer), message.text.clone(), Some(message.from))
+            }
             Self::Input(Input::Message(message)) => {
                 (Some(Voice::Peer), message.render(), Some(message.from))
             }
@@ -204,7 +208,7 @@ impl Queued {
     fn source(&self) -> Source {
         match self {
             Self::Input(Input::Human(_)) => Source::User,
-            Self::Input(Input::Message(_)) => Source::Message,
+            Self::Input(Input::Task(_) | Input::Message(_)) => Source::Message,
             Self::Input(Input::Child { .. }) => Source::Agent,
             Self::Input(Input::Wakeup { .. }) => Source::Schedule,
             Self::Input(Input::Surface { .. }) => Source::Surface,
@@ -883,7 +887,12 @@ impl AgentMailbox {
                     item,
                     Item::Posted(
                         _,
-                        Queued::Input(Input::Human(_) | Input::Message(_) | Input::Child { .. })
+                        Queued::Input(
+                            Input::Human(_)
+                                | Input::Task(_)
+                                | Input::Message(_)
+                                | Input::Child { .. }
+                        )
                     )
                 )
             })

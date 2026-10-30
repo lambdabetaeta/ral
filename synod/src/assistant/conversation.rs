@@ -11,7 +11,7 @@ use crate::folder::{
 };
 use crate::wire::{Choice, Opening, WindowReport};
 use exarch::app::SYNOD;
-use exarch::host::{Admission, EngineLost, HELPER_IDLE, Trunk};
+use exarch::host::{Admission, EngineLost, HELPER_IDLE};
 use exarch::port::{BusReceiver, Port};
 use exarch::provider::{self, Bureau, Holdings, Pool};
 use exarch::record::AgentId;
@@ -100,12 +100,12 @@ impl Conversation {
             None,
         )?;
 
-        let config = exarch::host::RootConfig {
+        let config = exarch::host::LaunchConfig {
             system,
             run_dir,
             allow_schedule: false,
             resume_on_reset: false,
-            trunk: Trunk::Converses,
+            returns: false,
             admission: Admission::Gated,
             helper_idle: HELPER_IDLE,
             tools: exarch::provider::Toolset::offered(false),

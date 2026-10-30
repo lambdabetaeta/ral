@@ -118,9 +118,9 @@ fn a_batch_from_the_old_generation_is_declined_but_the_new_sink_is_live() {
 fn failed_clear_preparation_preserves_helpers_workers_history_and_registers() {
     use genai::chat::{ContentPart, ToolCall};
     for failure in ["unready", "unavailable", "boot"] {
-        let mut agent = Agent::for_test_with(TestTrunk {
+        let mut agent = Agent::for_test_with(TestLaunch {
             installers: &INSTALLERS,
-            ..TestTrunk::new("system")
+            ..TestLaunch::new("system")
         })
         .unwrap();
         let (emit, _rx) = crate::bus::dummy_emitter();
@@ -136,6 +136,7 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
         let entries = workers(&agent);
         assert_eq!(entries.len(), 1);
         let child = agent.fork_named("helper").unwrap();
+        take_task(&child.handle(), &child.mailbox);
         let helper_engine = identity(&child);
         let helper = launch_child(&mut agent, child, None, &emit);
         crate::agent::testkit::schedule(
@@ -252,9 +253,9 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
 
 #[test]
 fn failed_clear_commit_keeps_the_outgoing_engine_and_ends_the_life() {
-    let mut agent = Agent::for_test_with(TestTrunk {
+    let mut agent = Agent::for_test_with(TestLaunch {
         installers: &INSTALLERS,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let outgoing = identity(&agent);
@@ -295,6 +296,7 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
     );
     assert!(!result.failed, "{}", result.text);
     let grandchild = child.fork_named("grandchild").unwrap();
+    take_task(&grandchild.handle(), &grandchild.mailbox);
     let helper = launch_child(&mut child, grandchild, None, &emit);
     child.seed("keep queued".into());
     crate::agent::testkit::schedule(
@@ -678,8 +680,10 @@ fn clear_in_one_root_leaves_another_roots_queued_report_alone() {
         TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
     )
     .unwrap();
+    take_task(&helper, &helper.mailbox);
     let mut branch =
-        crate::agent::spawn::hatch_root(&parent, Memory::Amnemon, Some("branch".into())).unwrap();
+        crate::agent::testkit::human_child(&parent, Memory::Amnemon, Some("branch".into()))
+            .unwrap();
     branch.clear().unwrap();
     assert!(helper.is_live());
     helper.report(ChildStatus::Replied(FOValue::Unit)).unwrap();

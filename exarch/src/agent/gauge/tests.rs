@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::TestTrunk;
+use crate::agent::TestLaunch;
 use crate::record::Span;
 
 fn load() -> Load {
@@ -96,9 +96,9 @@ fn disk_warning_unconfigured_never_walks_or_warns() {
 /// and the file alone crosses it.
 #[test]
 fn disk_warning_walks_the_log_dir() {
-    let mut session = Agent::for_test_with(TestTrunk {
+    let mut session = Agent::for_test_with(TestLaunch {
         disk_warn_bytes: Some(64 * 1024),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .expect("a trunk under a disk-warn ceiling");
     std::fs::write(

@@ -1,6 +1,6 @@
 use super::*;
+use crate::agent::Agent;
 use crate::agent::testkit::{self, ral_call, scripted, set_provider};
-use crate::agent::{Agent, Trunk};
 use crate::provider::scripted::{Reply, Script};
 use crate::record::{Commit, Display, Forensic, NonEmpty, Transcript};
 use std::time::Duration;
@@ -10,14 +10,14 @@ mod late_failure;
 
 const WAIT: Duration = Duration::from_secs(5);
 
-fn frontend_root(script: Script, trunk: Trunk) -> Agent {
-    let mut root = testkit::trunk(trunk);
+fn frontend_root(script: Script, returns: bool) -> Agent {
+    let mut root = testkit::trunk(returns);
     set_provider(&mut root, scripted("test-model", script));
     root
 }
 
-fn frontend_host(script: Script, trunk: Trunk) -> Host {
-    Host::adopt(vec![(frontend_root(script, trunk), None)]).expect("frontend host")
+fn frontend_host(script: Script, returns: bool) -> Host {
+    Host::adopt(vec![(frontend_root(script, returns), None)]).expect("frontend host")
 }
 
 fn reply_script(value: &str) -> Script {
@@ -72,7 +72,7 @@ fn has_fact(signal: &Signal, id: AgentId, predicate: impl Fn(&Record) -> bool) -
 }
 
 fn wait_settled(host: &Host) -> Vec<Signal> {
-    let root = host.roots()[0];
+    let root = host.children()[0];
     receive_until(host, |signal| {
         has_fact(signal, root, |record| {
             matches!(record, Record::Control(Control::JobSettled { .. }))
@@ -311,7 +311,7 @@ fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
     assert_eq!(seed, None, "a blank seed must never reach the model");
 
     let err = run(
-        &frontend_host(Script::new(), Trunk::Returns),
+        &frontend_host(Script::new(), true),
         &SessionInfo {
             system_size: 0,
             system_files: &[],

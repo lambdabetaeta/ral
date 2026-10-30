@@ -5,7 +5,7 @@ use crate::agent::loan::Loanable;
 use crate::agent::nursery::Nursery;
 use crate::agent::roster::summary;
 use crate::agent::testkit::{TestAgent, ral_call};
-use crate::agent::{Body, Readings, Role};
+use crate::agent::{Body, Readings};
 use crate::bus::FleetSink;
 use crate::bus::{Input, Next, Rest};
 use crate::bus::{Signal, channel};
@@ -45,7 +45,7 @@ fn with_fleet_desk<R>(
     let fleet = Fleet::new(launch);
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
     spec.fuel = fuel;
-    spec.role = Role::Returns;
+    spec.returns = true;
     let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
     let mut owner = Loanable::new(Body {
         log: fresh_log(),

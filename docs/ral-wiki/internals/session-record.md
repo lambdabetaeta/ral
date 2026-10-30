@@ -1,7 +1,7 @@
 ---
-verified_at_commit: fc0c9fbb
+verified_at_commit: 64ecd691
 verified_at_date: 2026-10-30
-anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal]
+anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal, AgentLog::human_children, Mail::owes]
 ---
 
 # Session record: one seam, one log
@@ -75,7 +75,7 @@ means the writer failed and the session ended.
 
 Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
-can catch up. Each root or helper attaches its log to the host session bus.
+can catch up. Each agent attaches its log to the host session bus.
 What a log appends with no sink attached reaches no channel; a mirror
 reads it from the file with `Emitter::since`. Redelivery is safe because the
 view fold ignores a `Seq` it has already folded: a resumed memo seeded from
@@ -130,8 +130,8 @@ class that can say it.**
 - `Forensic` is evidence, not state: `SessionEnded`, `SessionClosed`, request
   shape (`TurnStarted`, including tuning and route), usage, cancellation,
   provider/stall/error rows, nudges and diagnostics. No agent-state fold
-  reads it. `live_roots` scans permanent closure directly; an unreadable
-  session is an error naming it, never a silent skip. The view fold admits
+  reads it. `AgentLog::human_children` scans permanent closure directly;
+  an unreadable session is an error naming it, never a silent skip. The view fold admits
   the rows that belong on scrollback.
 
 Byte strings use lossless base64 in JSON. Audit observations preserve the
@@ -162,10 +162,17 @@ request, dispatch, join or `Context` access.
   `Taken` before handing payloads over; recall and clear commit `Withdrawn`.
   At every live-cell unlock, queued posts equal `mail.pending()` in order.
   `Gone` is unrecorded join plumbing and does not split a human post run.
+- A helper's opening `Input::Task(AgentMessage)` is its parent's post:
+  `Posted` carries `voice: Peer`, `from: parent` and the task verbatim.
+  Uptake admits its text bare; later `Input::Message` text is wrapped with
+  the sender's name. Recall and human Stop return only human text, never
+  a helper's task.
 - `Mail::owes()` derives debt from taken-but-unanswered parent input or
-  pending parent posts, gated by `returns`. A helper owes from birth; a
-  returning root owes at human post time. `Taken` keeps debt, `Withdrawn`
-  takes unread debt away. Human input to helpers and peer messages add none.
+  pending parent posts, gated by `returns`. Every mail starts with
+  `answering: false` and no debt. A helper owes from its task's post and
+  later parent posts; a returning child of the human owes at human post
+  time. `Taken` keeps debt, `Withdrawn` takes unread debt away. Human input
+  to helpers and peer messages add none; a conversing agent never owes.
 - `Txn::report` commits `Control::Status`, all `Unscheduled`, and withdrawal
   of queued wakeups (all pending posts after life ends). Still holding the
   helper cell, it posts `Child` to its parent iff it owed. Observing paid
@@ -489,10 +496,10 @@ append leaves at most one terminal partial line; live catch-up is bounded by
 the committed byte cursor. A complete valid line written before a crash but
 not yet published is recovered by replay. A missing `record.jsonl` is a named
 refusal, not an invitation to start an empty resumed session. `AgentLog::reopen` takes
-the session id, launch choice, return role, system prompt and time. The name
-is `live_roots`', read off the same head record,
-and `live_roots` refuses a session whose record does not parse rather than
-hiding it.
+the session id, launch choice, `returns`, system prompt and time. The name
+is read by `AgentLog::human_children` from the same head record, selecting
+unclosed sessions whose parent is the human. It refuses a session whose
+record does not parse rather than hiding it.
 
 **Reopen records the state it cannot revive.** It is one pass and one resume
 line: the single read-only fold above, then the commits below. After quiescing the context,

@@ -1,9 +1,11 @@
 use super::*;
+use crate::agent::fleet::Name;
 use crate::agent::{AgentHandle, roster};
 use crate::bus::{Input, Next, Rest};
-use crate::enquiry::{RosterState, Spawner};
+use crate::enquiry::RosterState;
 use crate::record::ChildStatus;
 use ral_core::data::FOValue;
+use ral_core::data::datum::{Datum, tag};
 use ral_core::process::CancelCause;
 use std::sync::Barrier;
 
@@ -17,7 +19,7 @@ fn a_reserved_name_counts_construction_until_it_is_dropped() {
     assert_eq!(name.name(), "building");
     assert!(!fleet.registry.is_empty());
     assert!(fleet.registry.live().is_empty());
-    assert!(fleet.registry.roots().is_empty());
+    assert!(fleet.registry.human_children().is_empty());
     assert!(fleet.registry.resolve("building").is_none());
     assert_eq!(
         fleet.registry.name("building").err(),
@@ -26,6 +28,47 @@ fn a_reserved_name_counts_construction_until_it_is_dropped() {
     drop(name);
     assert!(fleet.registry.is_empty());
     assert!(fleet.registry.name("building").is_ok());
+}
+
+#[test]
+fn unnamed_reserves_the_least_free_name_and_reuses_released_reservations() {
+    let fleet = Fleet::for_test();
+    let reserved = fleet.registry.name("agent-2").unwrap();
+    assert!(fleet.registry.live().is_empty());
+    let first = fleet.registry.unnamed();
+    let third = fleet.registry.unnamed();
+    assert_eq!(first.name(), "agent-1");
+    assert_eq!(third.name(), "agent-3");
+    assert!(matches!(
+        fleet.registry.name("agent-1"),
+        Err(Unborn::NameTaken(_))
+    ));
+    drop(first);
+    let reused = fleet.registry.unnamed();
+    assert_eq!(reused.name(), "agent-1");
+    drop(reserved);
+    let second = fleet.registry.unnamed();
+    assert_eq!(second.name(), "agent-2");
+}
+
+#[test]
+fn racing_unnamed_reservations_have_distinct_owners() {
+    let fleet = Fleet::for_test();
+    let start = Barrier::new(2);
+    let names = std::thread::scope(|scope| {
+        let reserve = || {
+            start.wait();
+            fleet.registry.unnamed()
+        };
+        let first = scope.spawn(reserve);
+        let second = scope.spawn(reserve);
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    let mut spellings = names.iter().map(Name::name).collect::<Vec<_>>();
+    spellings.sort_unstable();
+    assert_eq!(spellings, ["agent-1", "agent-2"]);
+    drop(names);
+    assert!(fleet.registry.is_empty());
 }
 
 #[test]
@@ -205,7 +248,7 @@ fn stopping_an_exchange_spares_the_helper_subtree_and_the_next_exchange() {
 }
 
 #[test]
-fn every_roster_row_names_who_started_it() {
+fn every_roster_row_encodes_the_human_or_its_parent_agent() {
     let fleet = Fleet::for_test();
     let root = agent(&fleet, "root", None);
     let mid = agent(&fleet, "mid", Some(&root));
@@ -213,21 +256,22 @@ fn every_roster_row_names_who_started_it() {
     let edges: Vec<_> = roster::listing(&root, &fleet)
         .into_iter()
         .map(|row| {
-            (
-                row.name,
-                match row.spawner {
-                    Spawner::Root => None,
-                    Spawner::Agent(up) => Some(up),
-                },
-            )
+            let name = row.name.clone();
+            (name, row.encode().field("spawner").unwrap().clone())
         })
         .collect();
     assert_eq!(
         edges,
         vec![
-            ("root".into(), None),
-            ("mid".into(), Some("root".into())),
-            ("leaf".into(), Some("mid".into())),
+            ("root".into(), tag("human", None)),
+            (
+                "mid".into(),
+                tag("agent", Some("root".to_string().encode()))
+            ),
+            (
+                "leaf".into(),
+                tag("agent", Some("mid".to_string().encode()))
+            ),
         ]
     );
 }
@@ -286,14 +330,14 @@ fn a_second_root_is_outside_the_first_roots_tree_and_roots_are_sorted() {
     assert_eq!(
         fleet
             .registry
-            .roots()
+            .human_children()
             .iter()
             .map(AgentHandle::id)
             .collect::<Vec<_>>(),
         [root.id(), branch.id()]
     );
     branch.end();
-    assert_eq!(fleet.registry.roots().len(), 1);
+    assert_eq!(fleet.registry.human_children().len(), 1);
 }
 
 #[test]

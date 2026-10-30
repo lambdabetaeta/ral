@@ -327,10 +327,11 @@ fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_reque
 
 #[test]
 fn sub_agent_returns_through_reply() {
-    let mut parent = trunk(crate::agent::Trunk::Converses);
+    let mut parent = trunk(false);
     let exchange = open_for_drain(&parent);
     let job = parent.handle().status().unwrap().job;
     let mut child = forked_child(&parent, "helper", "`inherit");
+    take_task(&child.handle(), &child.mailbox);
     parent.body.nursery.adopt(
         child.handle(),
         Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
@@ -1495,7 +1496,7 @@ fn a_returning_roots_reply_leaves_arrivals_queued_without_an_extra_request() {
 
 #[test]
 fn two_new_roots_share_a_client_but_only_the_overflowing_root_learns_its_window() {
-    let mut source = trunk(crate::agent::Trunk::Converses);
+    let mut source = trunk(false);
     let provider = scripted(
         "test-model",
         Script::new()
@@ -1504,13 +1505,13 @@ fn two_new_roots_share_a_client_but_only_the_overflowing_root_learns_its_window(
             .then(Reply::text("untouched")),
     );
     set_provider(&mut source, provider.clone());
-    let mut first = crate::agent::spawn::hatch_root(
+    let mut first = crate::agent::testkit::human_child(
         &source,
         crate::record::Memory::Amnemon,
         Some("first".into()),
     )
     .unwrap();
-    let mut second = crate::agent::spawn::hatch_root(
+    let mut second = crate::agent::testkit::human_child(
         &source,
         crate::record::Memory::Amnemon,
         Some("second".into()),
@@ -1553,7 +1554,7 @@ fn two_new_roots_share_a_client_but_only_the_overflowing_root_learns_its_window(
 
 #[test]
 fn an_old_models_late_overflow_after_switch_records_nothing() {
-    let mut session = trunk(crate::agent::Trunk::Converses);
+    let mut session = trunk(false);
     Arc::get_mut(&mut session.fleet).unwrap().launch.bureau =
         Arc::new(crate::provider::Bureau::scripted([Script::new()]));
     session.switch_model(crate::provider::Pick {
@@ -1596,10 +1597,10 @@ fn an_old_models_late_overflow_after_switch_records_nothing() {
 
 #[test]
 fn a_ring_pending_through_a_shell_call_is_answered_once_after_its_results() {
-    let mut session = Agent::for_test_with(crate::agent::TestTrunk {
+    let mut session = Agent::for_test_with(crate::agent::TestLaunch {
         allow_schedule: true,
         installers: dressed(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS)),
-        ..crate::agent::TestTrunk::new("system")
+        ..crate::agent::TestLaunch::new("system")
     })
     .unwrap();
     let address = session.mailbox.address();

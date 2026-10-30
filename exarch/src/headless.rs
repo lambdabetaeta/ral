@@ -496,7 +496,7 @@ fn run_to(
         p.model(),
         info.base
     );
-    let root = host.roots()[0];
+    let root = host.children()[0];
     let log_dir = match host.feed().recv() {
         Ok(Signal::Born(id, born)) if id == root => born.log_dir,
         _ => return Err("the first signal of a run was not its root's birth".into()),

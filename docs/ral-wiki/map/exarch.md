@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fc0c9fbb
+generated_at_commit: 64ecd691
 generated_at_date: 2026-10-30
 covers_paths: [exarch/src/port.rs, exarch/src/record.rs, exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -26,7 +26,10 @@ assembled.
 **Other crates reach agents through `host` and `port` only.**
 
 - `host` exports `Host`, launch/admission types and engine construction.
-  The host owns the feed and joined fleet end; `roots` returns launch-order ids.
+  `LaunchConfig` holds launch policy, including `returns` (true headless,
+  false for conversation). The host owns the feed and joined fleet end;
+  `Host::children()` lists every child the human adopted in birth order,
+  joined or not, including `/new` and `/branch` births.
 - `port` exports `Port`, published `AgentRow`s and command/signal types.
   Operations address an `AgentId`; `end` ends only that agent's subtree.
   A retained port keeps registry and usage, not the launch or engine factory.
@@ -95,16 +98,17 @@ exit code.
   ([[map/exarch/provider|provider]]). Then `run` composes the capability lattice
   (`policy::for_invocation`, passing `sandbox::pinned_arg0()` for its self layer;
   → [[map/exarch/policy|policy]]),
-  assembles the system prompt (`prompt::assemble`), builds the first root
+  assembles the system prompt (`prompt::assemble`), builds the human's first
   [[map/exarch/agent|agent]] through
-  `Host::found(RootConfig, RootEngine, provider)`
-  — or, for the TUI under `--resume`, every live root of the run via
+  `Host::found(LaunchConfig, RootEngine, provider)`
+  — or, under `--resume`, the run's unclosed children of the human via
   `Host::resume` — the exarch binary uses `RootEngine::Identity`; a wire
   engine runs remotely, and synod reuses the same construction — and hands off to one frontend — the inline TUI or the
   pipe-friendly headless runner, selected explicitly by `--headless` or
   implicitly by `--prompt` (which refuses to resume a run with more than one
-  open session) — which observes the host's feed. Roots use `Admission::Free`; `Trunk::Returns`
-  selects headless, `Converses` the TUI. `--helper-idle` sets helpers' rest
+  open session) — which observes the host's feed. The human's children use
+  `Admission::Free`; `LaunchConfig.returns` is true headless, false for the
+  TUI. `--helper-idle` sets helpers' rest
   timeout (default five hours). After the frontend returns, `Host::end` joins
   the fleet and contributes teardown failures to the result. A successful
   TUI return carries `Leaving`; its closing report prints after that join,
@@ -268,7 +272,8 @@ walked by one uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`
 `Tasks`, `Context management`, `Host`, [`Workspace`], [`Skills`],
 [`Surfacing`]**. The builtin placeholder and the late sections are resolved
 once per constructed
-agent, so a root, identity fork, and wire child each receive their own surface.
+agent, so a human child, identity helper and wire helper each receive their
+own surface.
 
 - **Persona** (`data/system.md`, unheaded — it sets the tone, not a topic) frames
   the session as *one continuing shell script*: definitions, working directory,
@@ -316,7 +321,7 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   `help`/`explain`, so the prompt cannot drift. `assemble` bakes a
   *placeholder* here: the real per-agent list — filtered to the harness verbs
   that agent holds — is resolved by `BuiltinIndex::apply` (`agent/index.rs`)
-  once the agent's own grants — its `Role`, `allow_schedule`, `spawns`
+  once the agent's own grants — `spawned`, `returns`, `allow_schedule`, `spawns`
   (`fuel > 0`) — are in reach,
   without a live `Shell`; zero-fuel agents omit `agents` alone.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
@@ -356,11 +361,11 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
   → [[map/exarch/cards|cards]]). Per-agent resolution then appends
   **`Agents`** (`data/agents.md`) iff `fuel > 0`, then **`Spawned`**
-  (`data/spawned.md`) iff the agent is a child, then **`Reply`**
+  (`data/spawned.md`) iff its parent is an agent, then **`Reply`**
   (`data/reply.md`) iff it returns at all. `Reply` says only what is true of
   any receiver; `Spawned` carries the spawner's snapshot, its binding the
-  reply, and the idle wait for follow-ups. A headless root therefore gets
-  `Reply` but never `Spawned`. `Agents` uses point/call examples: pass bindings,
+  reply, and the idle wait for follow-ups. A headless child of the human
+  therefore gets `Reply` but never `Spawned`. `Agents` uses point/call examples: pass bindings,
   request a reply shape, assign disjoint write grants, wait without polling,
   read, follow up, stop an exchange, and dismiss an own helper. **`Roles`** (`data/roles.md` plus one
   `name: model` line per `--role`) follows `Agents`, iff the agent spawns and
@@ -368,9 +373,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   The detailed permissions, schemas, and fan-out examples live in
   `explain exarch-agents`.
 
-The assembled prompt is a fact of the session: every opening of a log (a root,
-a fork, a `/new` or `/branch` root) records it as `Transcript::System`, and a
-resume records the freshly built prompt only if it differs from the one in
+The assembled prompt is a fact of the session: every fresh birth
+through `Agent::born` and `AgentLog::create` records it as
+`Transcript::System`, and a resume records the freshly built prompt only if it differs from the one in
 force. A round-trip reads it off the model fold, so the owner and its address hold no prompt copy.
 
 `--system FILE...` replaces *only* the persona slot with the user-supplied files;
@@ -380,7 +385,7 @@ the per-agent index and optional sections still resolve from the stored base.
 
 - [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the attend loop
   (provider round-trips, tool-call batches with prompt-queue steering, context eviction,
-  the nudge-retry policy, sub-agent fork), the `Role` each node is born with, the owned
+  the nudge-retry policy, sub-agent fork), parent-derived construction terms, the owned
   hot-swappable provider, dynamic focus, and the life/exchange scope tree.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry
   driver, prompt caching, usage and dollar accounting.
@@ -393,7 +398,7 @@ the per-agent index and optional sections still resolve from the stored base.
   relay beside it; `provider/tools.rs` holds the wire half (a static `ToolSpec` and a
   `Copy` `Toolset` the agent carries, with no registry) and `agent/tools.rs` the dispatch. Every other harness verb — the
   `` exarch-agents `start `` spawn (one record-spec tag, `` `amnemon ``/`` `mnemon ``
-  by field, fuel-gated, `` `reply ``/`` `read `` gated on a returning `Role`), the schedule family — is a builtin reached
+  by field, fuel-gated, `` `reply `` gated on `Mail::returns`), the schedule family — is a builtin reached
   through it, answered by the desk. The sub-agent model is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms and the harness
   verbs: the hash-addressed edit primitives, the spawn/schedule/reply

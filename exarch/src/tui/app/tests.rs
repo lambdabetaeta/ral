@@ -177,19 +177,18 @@ fn recording_failure_ends_only_its_tab_and_leaves_an_independent_root_usable() {
 }
 
 fn recording_failure_with_independent_root(poison: bool) {
-    use crate::agent::Trunk;
     use crate::agent::outcome::Outcome;
-    use crate::agent::spawn::hatch_root;
+    use crate::agent::testkit::human_child;
     use crate::agent::testkit::{scripted, set_provider, trunk};
     use crate::bus::FleetBus;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Memory, Voice};
     use ral_core::process::DurableRoot;
 
-    let root = trunk(Trunk::Converses);
+    let root = trunk(false);
     let id = root.id();
     let fleet = root.fleet.clone();
-    let mut other = hatch_root(&root, Memory::Amnemon, Some("independent".into()))
+    let mut other = human_child(&root, Memory::Amnemon, Some("independent".into()))
         .expect("an independent root");
     let bus = FleetBus::session();
     let emit = bus.emitter(id);
@@ -214,7 +213,13 @@ fn recording_failure_with_independent_root(poison: bool) {
     }
     let recorder = root.recorder();
     let thread = root
-        .launch(born, Some("must be recorded before sending".into()), &emit)
+        .launch(
+            born,
+            Some(crate::bus::Input::Human(
+                "must be recorded before sending".into(),
+            )),
+            &emit,
+        )
         .expect("the owner thread starts");
     let rx = bus.rx();
     let Signal::Born(born_id, born) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
@@ -293,7 +298,6 @@ fn recording_failure_with_independent_root(poison: bool) {
 
 #[test]
 fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
-    use crate::agent::Trunk;
     use crate::agent::outcome::Outcome;
     use crate::agent::testkit::{ral_call, scripted, set_provider, trunk};
     use crate::bus::{FleetBus, Input, Next};
@@ -303,7 +307,7 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
     use ral_core::test_helper::eventually;
 
     for poison in [false, true] {
-        let mut parent = trunk(Trunk::Converses);
+        let mut parent = trunk(false);
         let fleet = parent.fleet.clone();
         let mut child = parent.fork_named("failing").unwrap();
         let id = child.id();
@@ -345,7 +349,15 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
             reader: recorder.reader(),
         };
         let thread = child
-            .launch(born, Some("reply then rest".into()), &bus.emitter(id))
+            .launch(
+                born,
+                Some(Input::Task(crate::bus::AgentMessage {
+                    from: parent.id(),
+                    from_name: parent.handle().0.name.clone(),
+                    text: "reply then rest".into(),
+                })),
+                &bus.emitter(id),
+            )
             .unwrap();
         assert!(
             eventually(Duration::from_secs(5), || {
@@ -606,6 +618,7 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
         TestAgentSpec::child("helper", &root, root.mailbox.life().child()),
     )
     .unwrap();
+    crate::agent::testkit::take_task(&helper, &helper.mailbox);
     born(&mut app, helper.id(), "helper", root.id());
     let root_exchange = open_exchange(&mut app, &root);
     let job = root

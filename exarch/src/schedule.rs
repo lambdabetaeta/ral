@@ -520,7 +520,7 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::Trunk;
+
     use crate::agent::testkit::{host, ral_call, scripted, set_provider, trunk};
     use crate::bus::{AgentMailbox, Drained, Input, Next, Rest, Signal};
     use crate::provider::scripted::{Reply, Script};
@@ -1089,7 +1089,7 @@ mod tests {
 
     #[test]
     fn a_conversing_roots_schedule_survives_settlement_and_opens_a_job_at_rest() {
-        let mut agent = trunk(Trunk::Converses);
+        let mut agent = trunk(false);
         let address = agent.mailbox.address();
         // `now` rings before the owner starts; the other stays booked.
         for (label, trigger) in [
@@ -1116,7 +1116,7 @@ mod tests {
         let handle = host
             .fleet()
             .registry
-            .get(host.roots()[0])
+            .get(host.children()[0])
             .expect("a live root");
         let records = job_records(&host);
         assert!(records.iter().any(|record| matches!(record,
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn a_returning_agents_schedule_holds_its_job_and_its_report_clears_all_schedules() {
-        let mut agent = trunk(Trunk::Returns);
+        let mut agent = trunk(true);
         let address = agent.mailbox.address();
         for label in ["armed", "still armed"] {
             address
@@ -1217,7 +1217,7 @@ mod tests {
         let handle = host
             .fleet()
             .registry
-            .get(host.roots()[0])
+            .get(host.children()[0])
             .expect("a live root");
         let first_job = wait_for_scheduled_rest(&host);
         assert_eq!(handle.status().unwrap().job, Some(first_job));
@@ -1231,7 +1231,7 @@ mod tests {
         );
         // A due timer would race the rest; the human's post is the next input.
         host.port()
-            .submit(host.roots()[0], "reply now".into())
+            .submit(host.children()[0], "reply now".into())
             .unwrap();
         let records = job_records(&host);
         assert!(
@@ -1255,7 +1255,7 @@ mod tests {
             "the report clears even schedules that have not fired"
         );
         host.port()
-            .submit(host.roots()[0], "fresh prompt".into())
+            .submit(host.children()[0], "fresh prompt".into())
             .unwrap();
         let fresh = job_records(&host);
         assert_ne!(settled_job(&fresh), first_job);
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn a_ring_from_before_clear_posts_nothing_and_opens_no_job() {
-        let mut agent = trunk(Trunk::Converses);
+        let mut agent = trunk(false);
         let address = agent.mailbox.address();
         address
             .transact(|txn| {
@@ -1377,9 +1377,10 @@ mod tests {
     #[test]
     fn report_withdraws_a_queued_recurring_or_already_retired_one_shot_wakeup() {
         for family in [Terminal::After, Terminal::ExhaustedCron] {
-            let parent = trunk(Trunk::Converses);
+            let parent = trunk(false);
             let mut helper = parent.fork_named("scheduled-helper").unwrap();
             let handle = helper.handle();
+            crate::agent::testkit::take_task(&handle, &helper.mailbox);
             let mailbox = &helper.mailbox;
             let body = &mut *helper.body;
             let log = &body.log;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::{Admission, AgentHandle, TestTrunk};
+use crate::agent::{Admission, AgentHandle, TestLaunch};
 use crate::record::AgentState;
 
 fn until(mut ready: impl FnMut() -> bool) {
@@ -61,11 +61,11 @@ fn headless_reply_runs_through_the_host_feed_in_both_formats() {
         return;
     }
     for format in [OutputFormat::Text, OutputFormat::Json] {
-        let host = frontend_host(reply_script("[answer: 42]"), Trunk::Returns);
+        let host = frontend_host(reply_script("[answer: 42]"), true);
         let root_handle = host
             .fleet()
             .registry
-            .get(host.roots()[0])
+            .get(host.children()[0])
             .expect("a live root");
         println!("\n{EXPECTED_LOG}{}", root_handle.log_dir());
         run_frontend(&host, format).expect("a deliberate reply succeeds");
@@ -80,11 +80,11 @@ fn headless_reply_runs_through_the_host_feed_in_both_formats() {
 #[test]
 fn headless_no_reply_runs_through_the_host_feed_in_both_formats() {
     for format in [OutputFormat::Text, OutputFormat::Json] {
-        let host = frontend_host(no_reply_script(), Trunk::Returns);
+        let host = frontend_host(no_reply_script(), true);
         let root_handle = host
             .fleet()
             .registry
-            .get(host.roots()[0])
+            .get(host.children()[0])
             .expect("a live root");
         assert_eq!(
             run_frontend(&host, format),
@@ -105,7 +105,7 @@ fn headless_stopped_runs_through_the_host_feed_in_both_formats() {
         let root_handle = host
             .fleet()
             .registry
-            .get(host.roots()[0])
+            .get(host.children()[0])
             .expect("a live root");
         let handle = root_handle.clone();
         let watchdog = ral_core::process::arm_callback(WAIT, {
@@ -154,7 +154,7 @@ fn verdict_after_fault(
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     wait_ready(&host);
     if let Some(text) = fault {
@@ -180,15 +180,11 @@ fn a_report_takes_precedence_over_a_fault_and_a_fault_over_the_missing_reply() {
         "request refused".into(),
     )));
     assert_eq!(
-        verdict_after_fault(
-            frontend_root(reply_script("42"), Trunk::Returns),
-            fault,
-            |_| {}
-        ),
+        verdict_after_fault(frontend_root(reply_script("42"), true), fault, |_| {}),
         Ok(())
     );
     assert_eq!(
-        verdict_after_fault(frontend_root(refused, Trunk::Returns), fault, |_| {}),
+        verdict_after_fault(frontend_root(refused, true), fault, |_| {}),
         Err("request refused".to_string())
     );
     assert_eq!(
@@ -206,14 +202,10 @@ fn a_report_takes_precedence_over_a_fault_and_a_fault_over_the_missing_reply() {
     );
     for returns in [true, false] {
         for fault in [None, Some("channel lost its facts")] {
-            let gated = Agent::for_test_with(TestTrunk {
-                trunk: if returns {
-                    Trunk::Returns
-                } else {
-                    Trunk::Converses
-                },
+            let gated = Agent::for_test_with(TestLaunch {
+                returns,
                 admission: Admission::Gated,
-                ..TestTrunk::new("system")
+                ..TestLaunch::new("system")
             })
             .unwrap();
             assert_eq!(
@@ -252,12 +244,12 @@ fn converse_carries_context_from_one_job_into_the_next() {
                    say-part $material[1][messages][0][parts][0]"#,
             )]))
             .then(Reply::text("and again")),
-        Trunk::Converses,
+        false,
     );
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     root_handle.steer("first message".into()).unwrap();
     let first = wait_settled(&host);
@@ -301,12 +293,12 @@ fn ordinary_failed_conversation_remains_usable_for_the_next_job() {
                 "request refused".into(),
             )))
             .then(Reply::text("next job succeeds")),
-        Trunk::Converses,
+        false,
     );
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     root_handle.steer("first".into()).unwrap();
     wait_settled(&host);
@@ -323,11 +315,11 @@ fn ordinary_failed_conversation_remains_usable_for_the_next_job() {
 
 #[test]
 fn an_ended_root_refuses_the_headless_prompt() {
-    let host = frontend_host(Script::new(), Trunk::Returns);
+    let host = frontend_host(Script::new(), true);
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     root_handle.end();
     assert_eq!(
@@ -343,22 +335,28 @@ fn a_helper_without_a_reply_reports_failure_before_the_parent_settles() {
         Script::new()
             .then(Reply::text("waiting for help"))
             .then(Reply::text("thanks for the update")),
-        Trunk::Converses,
+        false,
     );
     let mut child = testkit::forked_child(&root, "flaky", "`inherit");
     set_provider(&mut child, scripted("test-model", no_reply_script()));
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
+    testkit::take_task(&child.handle(), &child.mailbox);
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     let host = testkit::host(root);
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     let root_id = root_handle.id();
     root_handle.steer("please help".into()).unwrap();
+    let mut job_opened = false;
     receive_until(&host, |signal| {
-        matches!(signal, Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents))
+        job_opened |= has_fact(signal, root_id, |record| {
+            matches!(record, Record::Control(Control::JobOpened))
+        });
+        job_opened
+            && matches!(signal, Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents))
             if *id == root_id)
     });
     helper.steer("go".into()).unwrap();
@@ -384,22 +382,28 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
         Script::new()
             .then(Reply::text("waiting for help"))
             .then(Reply::text("thanks for the update")),
-        Trunk::Converses,
+        false,
     );
     let mut child = testkit::forked_child(&root, "helper", "`inherit");
     set_provider(&mut child, scripted("test-model", reply_script("42")));
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
+    testkit::take_task(&child.handle(), &child.mailbox);
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     let host = testkit::host(root);
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     let root = root_handle;
     root.steer("please help".into()).unwrap();
+    let mut job_opened = false;
     let opened = receive_until(&host, |signal| {
-        matches!(signal, Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents))
+        job_opened |= has_fact(signal, root.id(), |record| {
+            matches!(record, Record::Control(Control::JobOpened))
+        });
+        job_opened
+            && matches!(signal, Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents))
             if *id == root.id())
     });
     let job = root
@@ -450,8 +454,8 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
 
 #[test]
 fn host_end_joins_other_roots_and_helpers_and_releases_their_names() {
-    let mut root = frontend_root(Script::new(), Trunk::Converses);
-    let other = crate::agent::spawn::hatch_root(
+    let mut root = frontend_root(Script::new(), false);
+    let other = crate::agent::testkit::human_child(
         &root,
         crate::record::Memory::Amnemon,
         Some("other-root".into()),
@@ -476,10 +480,10 @@ fn host_end_joins_other_roots_and_helpers_and_releases_their_names() {
 
 #[test]
 fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
-    let mut root = Agent::for_test_with(TestTrunk {
-        trunk: Trunk::Converses,
+    let mut root = Agent::for_test_with(TestLaunch {
+        returns: false,
         admission: Admission::Gated,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     set_provider(
@@ -495,7 +499,7 @@ fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     let handle = root_handle;
     handle.steer("first".into()).unwrap();
@@ -541,7 +545,7 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
     for _ in 0..3 {
         parent_script = parent_script.then(Reply::text("thanks for the second reply"));
     }
-    let mut root = frontend_root(parent_script, Trunk::Converses);
+    let mut root = frontend_root(parent_script, false);
     let mut child = testkit::forked_child(&root, "helper", "`inherit");
     set_provider(
         &mut child,
@@ -559,19 +563,25 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
         ),
     );
     let (emit, child_feed) = crate::bus::dummy_emitter();
+    testkit::take_task(&child.handle(), &child.mailbox);
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     let host = testkit::host(root);
     let root_handle = host
         .fleet()
         .registry
-        .get(host.roots()[0])
+        .get(host.children()[0])
         .expect("a live root");
     let root_id = root_handle.id();
     root_handle.steer("first".into()).unwrap();
+    let mut job_opened = false;
     receive_until(&host, |signal| {
-        matches!(signal,
-            Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents)) if *id == root_id
-        )
+        job_opened |= has_fact(signal, root_id, |record| {
+            matches!(record, Record::Control(Control::JobOpened))
+        });
+        job_opened
+            && matches!(signal,
+                Signal::Transient(id, Transient::State(AgentState::WaitingOnAgents)) if *id == root_id
+            )
     });
     helper.steer("help".into()).unwrap();
     wait_settled(&host);

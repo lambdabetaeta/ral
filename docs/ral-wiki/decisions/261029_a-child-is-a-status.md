@@ -1,11 +1,11 @@
 ---
 status: active
 amended_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
-generated_at_commit: fc0c9fbb
+generated_at_commit: 64ecd691
 generated_at_date: 2026-10-30
-verified_at_commit: fc0c9fbb
+verified_at_commit: 64ecd691
 verified_at_date: 2026-10-30
-anchors: [ChildStatus, Settlement, Control::Status, Mail::status, Txn::report, AgentHandle::report, Nursery::owing, Status::working]
+anchors: [ChildStatus, Settlement, Control::Status, Mail::status, Txn::report, AgentHandle::report, Nursery::owing, Status::working, Mail::owes]
 ---
 
 # A child is a status
@@ -132,6 +132,15 @@ These fallback paths share `Shared.failure_noticed`, so reporting and
 teardown post at most one `Failed`; the flag stores neither debt nor status.
 The original shared-cell mechanism above remains historical, not a second
 status authority.
+
+## Amendment — 2026-10-30: the task is the parent's post
+
+Every `Mail` starts with `answering: false` and owes nothing. The helper's
+opening task is `Input::Task(AgentMessage)`, recorded as a `Posted` with
+`voice: Peer` and `from: parent`; uptake admits its text bare. Debt begins
+at that post, before the first exchange, by the same parent-post rule as
+later messages. The task is not human input and recall does not return it
+to the human. `returns` is held only by the mail fold, not the handle.
 
 ## Where
 

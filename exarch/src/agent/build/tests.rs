@@ -10,11 +10,11 @@ use std::fs;
 mod clear;
 mod resume;
 
-fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
-    RootConfig {
+fn launch_config(run_dir: &OwnDir, fuel: u32) -> LaunchConfig {
+    LaunchConfig {
         system: "system".into(),
         run_dir: run_dir.clone(),
-        trunk: Trunk::Converses,
+        returns: false,
         admission: Admission::Free,
         helper_idle: HELPER_IDLE,
         max_tokens: None,
@@ -36,6 +36,63 @@ fn identity_engine(tag: &str) -> RootEngine {
         cwd: ral_core::host::cwd().expect("test process has a cwd"),
         grants: GrantStack::default(),
         terminal: ral_core::io::terminal::TerminalState::default(),
+    }
+}
+
+#[test]
+fn parent_terms_lend_launch_policy_or_helper_policy_and_saturating_fuel() {
+    use ral_core::process::CancelCause;
+    use std::time::Duration;
+
+    for returns in [false, true] {
+        let fleet = Fleet::new(Launch {
+            fuel: 19,
+            search: false,
+            admission: Admission::Gated,
+            returns,
+            idle: Duration::from_secs(23),
+            ..Launch::for_test()
+        });
+        let human = Parent::Human.terms(&fleet.launch, &fleet.registry);
+        assert!(human.parent.is_none());
+        assert_eq!(human.fuel, 19);
+        assert!(!human.search);
+        assert_eq!(human.admission, Admission::Gated);
+        assert_eq!(human.returns, returns);
+        assert!(!human.life.is_cancelled());
+
+        for (fuel, expected) in [(0, 0), (4, 3)] {
+            let parent = test_agent(
+                &fleet,
+                TestAgentSpec {
+                    fuel,
+                    search: true,
+                    ..TestAgentSpec::new("parent")
+                },
+            )
+            .unwrap();
+            let life = DurableRoot::default().child();
+            let helper = Parent::Agent(&parent, life.clone()).terms(&fleet.launch, &fleet.registry);
+            assert_eq!(
+                helper.parent.as_ref().map(AgentHandle::id),
+                Some(parent.id())
+            );
+            assert_eq!(helper.fuel, expected);
+            assert!(helper.search);
+            assert_eq!(
+                helper.admission,
+                Admission::Parent {
+                    idle: fleet.launch.idle
+                }
+            );
+            assert!(helper.returns);
+            assert!(!helper.life.is_cancelled());
+            life.cancel(CancelCause::Interrupted);
+            assert_eq!(helper.life.cause(), Some(CancelCause::Interrupted));
+            assert!(parent.is_live());
+        }
+        fleet.registry.root.cancel(CancelCause::Cancelled);
+        assert_eq!(human.life.cause(), Some(CancelCause::Cancelled));
     }
 }
 
@@ -110,7 +167,7 @@ fn fork_inherits_its_provider_independently_of_later_parent_changes() {
 
 #[test]
 fn mnemon_root_imports_context_withholds_reply_and_resumes() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     {
         let log = &mut parent.body.log;
         log.append_user("what did we learn?".into(), None, Voice::Human)
@@ -123,20 +180,27 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
         .unwrap();
     }
     let child =
-        crate::agent::spawn::hatch_root(&parent, Memory::Mnemon, Some("fork".into())).unwrap();
+        crate::agent::testkit::human_child(&parent, Memory::Mnemon, Some("fork".into())).unwrap();
     let view = serde_json::to_string(&child.rendered_messages()).unwrap();
     assert!(view.contains("what did we learn?"));
     assert!(view.contains("the invariant matters"));
     assert!(view.rfind("the invariant matters") > view.rfind("what did we learn?"));
-    assert!(!child.handle.0.role.returns());
-    assert!(child.handle.0.role.parent().is_none());
+    assert!(
+        !child
+            .handle
+            .0
+            .address
+            .transact(|txn| txn.mail().returns())
+            .unwrap()
+    );
+    assert!(child.handle.parent().is_none());
     assert_eq!(
         child.engine().read(|t| t.grants()).unwrap(),
         parent.engine().read(|t| t.grants()).unwrap()
     );
     assert_eq!(child.handle.0.fuel, parent.handle.0.fuel);
     let sessions = parent.fleet.launch.sessions_root.clone();
-    let live = AgentLog::live_roots(&sessions).unwrap();
+    let live = AgentLog::human_children(&sessions).unwrap();
     let names: Vec<_> = live.iter().map(|(_, name)| name.as_str()).collect();
     assert_eq!(names, ["main", "fork"]);
     let id = child.id();
@@ -161,14 +225,14 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
 fn a_closed_root_is_not_resumable() {
     let mut session = Agent::for_test("system").unwrap();
     let sessions = session.fleet.launch.sessions_root.clone();
-    assert_eq!(AgentLog::live_roots(&sessions).unwrap().len(), 1);
+    assert_eq!(AgentLog::human_children(&sessions).unwrap().len(), 1);
     let (emit, _rx) = crate::bus::dummy_emitter();
     assert!(
         session
             .rewrite(&crate::bus::Rewrite::Close, &emit)
             .is_break()
     );
-    assert_eq!(AgentLog::live_roots(&sessions).unwrap(), vec![]);
+    assert_eq!(AgentLog::human_children(&sessions).unwrap(), vec![]);
 }
 
 #[test]
@@ -280,9 +344,9 @@ fn a_root_runs_under_its_launch_grants() {
         }),
         ..Capabilities::default()
     })]);
-    let mut session = Agent::for_test_with(TestTrunk {
+    let mut session = Agent::for_test_with(TestLaunch {
         grants,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let tmp = tempfile::tempdir().unwrap();
@@ -315,7 +379,7 @@ fn a_root_runs_under_its_launch_grants() {
     session.clear().unwrap();
     check(&mut session);
     let mut root =
-        crate::agent::spawn::hatch_root(&session, Memory::Amnemon, Some("new-root".into()))
+        crate::agent::testkit::human_child(&session, Memory::Amnemon, Some("new-root".into()))
             .unwrap();
     check(&mut root);
 }
@@ -366,9 +430,9 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         }),
         ..Capabilities::default()
     })]);
-    let parent = Agent::for_test_with(TestTrunk {
+    let parent = Agent::for_test_with(TestLaunch {
         grants: grants.clone(),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     assert_eq!(
@@ -418,7 +482,7 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
 
 #[test]
 fn unwind_ends_non_owing_agents_with_schedules() {
-    let mut agent = trunk(Trunk::Converses);
+    let mut agent = trunk(false);
     crate::agent::testkit::schedule(
         &mut agent,
         crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),

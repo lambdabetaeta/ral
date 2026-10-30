@@ -1,9 +1,10 @@
-//! Fleet names, launch services, and the root threads the host joins.
+//! Fleet names, launch services, and the human's nursery.
 
+use crate::agent::build::Terms;
 use crate::agent::engine::{Engine, Rebirth};
 use crate::agent::index::{BuiltinIndex, Grants};
-use crate::agent::nursery::{Joined, Teardown};
-use crate::agent::{Admission, AgentHandle, EngineLost, Factory, Role, Trunk};
+use crate::agent::nursery::{Joined, Nursery, Teardown};
+use crate::agent::{Admission, AgentHandle, EngineLost, Factory};
 use crate::enquiry::check_name;
 use crate::provider::{Bureau, Toolset, roles::Roles};
 use crate::record::AgentId;
@@ -22,8 +23,9 @@ use std::{
 
 /// How long a helper rests before ending, unless `--helper-idle` says otherwise.
 pub const HELPER_IDLE: Duration = Duration::from_hours(5);
+#[allow(clippy::struct_excessive_bools, reason = "independent launch policies")]
 pub(crate) struct Launch {
-    pub trunk: Trunk,
+    pub returns: bool,
     pub admission: Admission,
     pub idle: Duration,
     pub allow_schedule: bool,
@@ -61,8 +63,7 @@ impl Launch {
     pub(crate) fn prompt_for(
         &self,
         engine: &Engine,
-        role: &Role,
-        fuel: u32,
+        terms: &Terms,
         name: &str,
     ) -> Result<String, Severed> {
         let own = crate::prompt::with_grant(&self.system, &engine.read(|t| t.grants())?);
@@ -72,9 +73,10 @@ impl Launch {
             self.index.apply(
                 &own,
                 &Grants {
-                    role,
+                    spawned: terms.parent.is_some(),
+                    returns: terms.returns,
                     allow_schedule: self.allow_schedule,
-                    spawns: fuel > 0,
+                    spawns: terms.fuel > 0,
                     roles: &self.roles,
                 },
                 name,
@@ -87,7 +89,7 @@ impl Launch {
     pub(crate) fn for_test() -> Self {
         let scratch = OwnDir::for_test("launch").expect("a test run directory");
         Self {
-            trunk: Trunk::Returns,
+            returns: true,
             admission: Admission::Free,
             idle: HELPER_IDLE,
             allow_schedule: false,
@@ -130,7 +132,7 @@ struct Directory {
 pub(crate) struct Fleet {
     pub(crate) registry: Arc<Registry>,
     pub(crate) launch: Launch,
-    roots: Mutex<Vec<Joined<Teardown>>>,
+    pub(crate) human: Mutex<Nursery>,
 }
 
 /// A reserved directory name, removed when its owner drops.
@@ -162,30 +164,42 @@ impl Fleet {
                 directory: Mutex::default(),
             }),
             launch,
-            roots: Mutex::default(),
+            human: Mutex::default(),
         })
     }
     #[cfg(test)]
     pub(crate) fn for_test() -> Arc<Self> {
         Self::new(Launch::for_test())
     }
-    pub(crate) fn adopt_root(&self, thread: Joined<Teardown>) {
-        self.roots.lock_ignore_poison().push(thread);
+    pub(crate) fn adopt(&self, handle: AgentHandle, thread: Joined<Teardown>) {
+        self.human.lock_ignore_poison().adopt(handle, thread);
     }
-    pub(crate) fn join_roots(&self) -> Vec<String> {
+    pub(crate) fn join_children(&self) -> Vec<String> {
         let mut failures = Vec::new();
         loop {
-            let roots = mem::take(&mut *self.roots.lock_ignore_poison());
-            if roots.is_empty() {
+            let mut children = mem::take(&mut *self.human.lock_ignore_poison());
+            if children.children().next().is_none() {
                 return failures;
             }
-            for root in roots {
-                failures.extend(Teardown::from_join(root.join()).failures);
-            }
+            failures.extend(children.dismiss_all());
         }
     }
 }
 impl Registry {
+    pub(crate) fn unnamed(self: &Arc<Self>) -> Name {
+        let mut directory = self.directory.lock_ignore_poison();
+        let name: Arc<str> = (1..=directory.names.len() + 1)
+            .map(|n| format!("agent-{n}"))
+            .find(|name| !directory.names.contains_key(name.as_str()))
+            .expect("a finite directory leaves an unused name")
+            .into();
+        directory.names.insert(name.clone(), None);
+        drop(directory);
+        Name {
+            registry: Arc::downgrade(self),
+            name,
+        }
+    }
     pub(crate) fn name(self: &Arc<Self>, name: &str) -> Result<Name, Unborn> {
         check_name(name).map_err(Unborn::NameMalformed)?;
         let mut directory = self.directory.lock_ignore_poison();
@@ -238,10 +252,10 @@ impl Registry {
             .cloned()
             .collect()
     }
-    pub(crate) fn roots(&self) -> Vec<AgentHandle> {
+    pub(crate) fn human_children(&self) -> Vec<AgentHandle> {
         self.live()
             .into_iter()
-            .filter(AgentHandle::is_root)
+            .filter(|handle| handle.parent().is_none())
             .collect()
     }
     pub(crate) fn end(&self, cause: CancelCause) {

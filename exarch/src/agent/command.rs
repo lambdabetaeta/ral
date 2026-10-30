@@ -49,7 +49,7 @@ impl Agent {
     pub(crate) fn read(&mut self, cmd: &Read, emit: &Emitter) {
         match cmd {
             Read::Hatch { memory, name } => {
-                match crate::agent::spawn::spawn_root(self, *memory, name.clone(), emit) {
+                match crate::agent::spawn::human_child(self, *memory, name.clone(), emit) {
                     Ok(root) => {
                         self.note(format!(
                             "session {} opened (agent {})",

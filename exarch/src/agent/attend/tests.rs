@@ -1,6 +1,6 @@
 use super::*;
+use crate::agent::TestLaunch;
 use crate::agent::testkit::*;
-use crate::agent::{TestTrunk, Trunk};
 use crate::bus::{Input, Signal};
 use crate::provider::Refusal;
 use crate::provider::scripted::{Reply, Script};
@@ -19,6 +19,27 @@ fn human_exchange(session: &mut Agent, text: &str, emit: &Emitter) -> AgentOutco
     session.handle().steer(text.into()).unwrap();
     let Next::Take { input, exchange } = session.mailbox.next(session.rest()) else {
         panic!("a queued human input is taken up")
+    };
+    let prompt = session.admit(input).unwrap();
+    assert!(session.mailbox.begin());
+    session.body.readings.nudges.reset();
+    session.exchange(&exchange, prompt, emit)
+}
+
+fn task_exchange(session: &mut Agent, text: &str, emit: &Emitter) -> AgentOutcome {
+    let handle = session.handle();
+    let parent = handle.parent().expect("a helper's parent");
+    handle
+        .0
+        .address
+        .post(Input::Task(crate::bus::AgentMessage {
+            from: parent.id(),
+            from_name: parent.0.name.clone(),
+            text: text.into(),
+        }))
+        .unwrap();
+    let Next::Take { input, exchange } = session.mailbox.next(session.rest()) else {
+        panic!("a queued task is taken up")
     };
     let prompt = session.admit(input).unwrap();
     assert!(session.mailbox.begin());
@@ -108,6 +129,7 @@ fn failed_mandatory_repair_ends_the_child_not_its_parent() {
     let parent = Agent::for_test("system").unwrap();
     let mut child = parent.fork().unwrap();
     let descendant = child.fork().unwrap();
+    take_task(&child.handle(), &child.mailbox);
     leave_tool_owed(&mut child);
     child.recorder().fail_after(0);
     assert!(child.abort_unready().is_err());
@@ -132,9 +154,10 @@ fn failed_mandatory_repair_ends_the_child_not_its_parent() {
 #[test]
 fn a_recording_failure_is_announced_even_when_the_life_was_already_ended() {
     for ended in [false, true] {
-        let mut parent = trunk(Trunk::Converses);
+        let mut parent = trunk(false);
         let child = parent.fork().unwrap();
         let handle = child.handle();
+        take_task(&handle, &child.mailbox);
         let recorder = child.recorder();
         if ended {
             handle.end();
@@ -236,9 +259,9 @@ fn stop_after_a_mid_job_pop_records_the_prompt_without_running_a_turn() {
 
 #[test]
 fn reply_is_refused_identically_for_every_conversing_root() {
-    let mut root = trunk(Trunk::Converses);
+    let mut root = trunk(false);
     let (emit, _rx) = emitter(&root);
-    let refusal = "you converse with the user; you do not return";
+    let refusal = "you converse with the human; you do not return";
     let result = root
         .ral(
             &DurableRoot::default().child(),
@@ -249,7 +272,7 @@ fn reply_is_refused_identically_for_every_conversing_root() {
         .text;
     assert!(result.contains(refusal), "{result}");
     let mut other =
-        crate::agent::spawn::hatch_root(&root, Memory::Amnemon, Some("other".into())).unwrap();
+        crate::agent::testkit::human_child(&root, Memory::Amnemon, Some("other".into())).unwrap();
     let result = other
         .ral(
             &DurableRoot::default().child(),
@@ -259,19 +282,26 @@ fn reply_is_refused_identically_for_every_conversing_root() {
         )
         .text;
     assert!(result.contains(refusal), "{result}");
-    assert!(!other.handle.0.role.returns());
+    assert!(
+        !other
+            .handle
+            .0
+            .address
+            .transact(|txn| txn.mail().returns())
+            .unwrap()
+    );
 }
 
 #[test]
 fn a_child_without_reply_is_renudged_then_publishes_failure_at_rest() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let mut child = parent.fork().unwrap();
     let script = (0..4).fold(Script::new(), |script, _| {
         script.then(Reply::text("prose, no reply"))
     });
     set_provider(&mut child, scripted("test-model", script));
     let (emit, rx) = emitter(&child);
-    let outcome = human_exchange(&mut child, "do the thing", &emit);
+    let outcome = task_exchange(&mut child, "do the thing", &emit);
     assert!(matches!(&outcome, AgentOutcome::Failed(reason) if reason == NO_REPLY_REASON));
     settle(&mut child, outcome);
     assert!(
@@ -365,7 +395,7 @@ fn pinned_state_reminder_reads_the_live_register_and_continues_the_prompt() {
 
 #[test]
 fn pin_reminder_does_not_relivelock_a_conversing_root() {
-    let mut session = trunk(Trunk::Converses);
+    let mut session = trunk(false);
     let (emit, rx) = emitter(&session);
     session.ral(
         &DurableRoot::default().child(),
@@ -417,9 +447,9 @@ fn chat_trunk_never_nudges() {
 }
 
 fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Agent {
-    let mut session = Agent::for_test_with(TestTrunk {
+    let mut session = Agent::for_test_with(TestLaunch {
         resume_on_reset,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     for _ in 0..2 {
@@ -458,7 +488,7 @@ fn only_a_resuming_root_arms_a_resume_past_the_in_place_wait() {
 fn an_already_claimed_worker_batch_replays_cards_but_opens_no_job() {
     use crate::card::testkit::card_value;
     use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
-    let mut session = trunk(Trunk::Converses);
+    let mut session = trunk(false);
     let (emit, rx) = emitter(&session);
     session.couple(&emit);
     session.ral(
@@ -507,7 +537,7 @@ fn ready_workers_and_non_done_surfaces_are_admitted_but_stale_batches_are_not() 
     use crate::card::testkit::card_value;
     use ral_core::protocol::probe::WorkerState;
     use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
-    let mut session = trunk(Trunk::Converses);
+    let mut session = trunk(false);
     let (emit, _rx) = emitter(&session);
     let stale = session.generation;
     session.clear().unwrap();
@@ -579,12 +609,13 @@ fn ready_workers_and_non_done_surfaces_are_admitted_but_stale_batches_are_not() 
 
 #[test]
 fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
-    let parent = Agent::for_test_with(TestTrunk {
+    let parent = Agent::for_test_with(TestLaunch {
         allow_schedule: true,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     crate::agent::testkit::schedule(
         &mut child,
         Trigger::After(Duration::from_hours(2)),
@@ -650,6 +681,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
         TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
     )
     .unwrap();
+    take_task(&grandchild, &grandchild.mailbox);
     let handle = (*grandchild).clone();
     child.body.nursery.adopt(
         handle.clone(),
@@ -709,9 +741,10 @@ mod lifecycle;
 #[test]
 fn a_failed_status_append_delivers_one_terminal_failure_only_when_owed() {
     for owed in [false, true] {
-        let parent = trunk(Trunk::Converses);
+        let parent = trunk(false);
         let mut child = parent.fork().unwrap();
         let handle = child.handle();
+        take_task(&handle, &child.mailbox);
         if !owed {
             handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
             assert_eq!(parent.mailbox.drain().len(), 1);
@@ -758,9 +791,10 @@ fn a_failed_status_append_delivers_one_terminal_failure_only_when_owed() {
 
 #[test]
 fn a_poison_report_then_owner_teardown_delivers_only_one_failure() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let mut child = parent.fork().unwrap();
     let handle = child.handle();
+    take_task(&handle, &child.mailbox);
     let crate::agent::engine::EngineKind::Identity(engine) = child.engine().kind() else {
         panic!("an identity test engine");
     };
@@ -796,9 +830,10 @@ fn a_poison_report_then_owner_teardown_delivers_only_one_failure() {
 
 #[test]
 fn cell_poison_does_not_replace_an_earlier_recording_failure() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let mut child = parent.fork().unwrap();
     let handle = child.handle();
+    take_task(&handle, &child.mailbox);
     let recorder = child.recorder();
     recorder.fail_after(0);
     let first = recorder

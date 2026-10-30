@@ -1,5 +1,5 @@
 ---
-generated_at_commit: afe7087760d4d0bcf314ebaaede068479b0a0c05
+generated_at_commit: 64ecd691
 ---
 
 # Egress: a destination gate
@@ -113,7 +113,7 @@ proxy does not proxy.
 The gate owns the ledger, its only writer.
 Strict mutex poison stops an untrustworthy ledger;
 an interprocess file lock covers size checking, rotation and append.
-Exarch loads the policy and carries only `RootConfig.search`, opening no ledger
+Exarch loads the policy and carries only `LaunchConfig.search`, opening no ledger
 in host mode. The JSON record shape and rotation bound are the gate's.
 
 ## Where authority actually narrows

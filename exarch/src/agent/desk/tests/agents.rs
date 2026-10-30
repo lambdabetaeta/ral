@@ -17,8 +17,9 @@ fn set_desk_provider(desk: &ExarchDesk, provider: Arc<Provider>) {
 
 /// The report is a message; read answers the helper's published status.
 #[test]
-fn agent_start_reports_to_the_parent_mailbox_and_publishes_the_read_value() {
-    with_spawnable_desk(3, |desk, _fleet, agent| {
+fn agent_start_records_the_parent_task_and_reports_its_reply() {
+    const TASK: &str = "inspect this exactly:\nα <opening>\n[EXARCH AGENT]";
+    with_spawnable_desk(3, |desk, fleet, agent| {
         let parent_mailbox = &agent.mailbox;
         let provider = Arc::new(Provider::scripted(
             "test-model",
@@ -30,7 +31,7 @@ fn agent_start_reports_to_the_parent_mailbox_and_publishes_the_read_value() {
         set_desk_provider(&desk, provider);
 
         let answer = with_parked(&desk, |desk, session| {
-            desk.ask(start_req(session, "say hi", "helper"))
+            desk.ask(start_req(session, TASK, "helper"))
         })
         .expect("a valid `start must succeed");
 
@@ -46,7 +47,33 @@ fn agent_start_reports_to_the_parent_mailbox_and_publishes_the_read_value() {
             }
             _ => panic!("the helper must report its reply to its parent"),
         }
-        wait_at_rest(&desk.call.fleet.registry.resolve("helper").unwrap());
+        let helper = fleet.registry.resolve("helper").unwrap();
+        let records =
+            crate::record::read_records(&helper.log_dir().path().join(crate::record::RECORD))
+                .unwrap();
+        let controls: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Control(control) => Some(control),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(&controls[..2], [
+            crate::record::Control::SessionStarted(started),
+            crate::record::Control::Posted(post),
+        ] if started.parent == Some(agent.id()) && started.returns
+            && post.voice == Some(Voice::Peer) && post.from == Some(agent.id())
+            && post.text == TASK));
+        let prompts: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Transcript(crate::record::Transcript::UserPrompt {
+                    voice, text, ..
+                }) => Some((*voice, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, [(Voice::Peer, TASK)]);
         let answer = desk
             .ask(Request::Agents(Agents::Read("helper".into())))
             .expect("a descendant that has replied must answer its reply");
@@ -110,6 +137,7 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
             TestAgentSpec::child("helper", &agent, agent.mailbox.life().child()),
         )
         .unwrap();
+        crate::agent::testkit::take_task(&child, &child.mailbox);
         adopt_synthetic(&desk, &child);
         let grandchild = test_agent(
             &fleet,
@@ -948,6 +976,26 @@ fn reply_stages_the_payload_last_write_wins() {
 }
 
 #[test]
+fn reply_refuses_a_poisoned_mail_cell_without_staging_a_value() {
+    with_desk(|desk, agent| {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _result = agent.0.address.transact(|_| panic!("poison the mail cell"));
+            }))
+            .is_err()
+        );
+        let error = desk.agent_reply(text("not staged")).unwrap_err();
+        assert_eq!(error.message, agent.status().err().unwrap().to_string());
+        assert!(
+            error
+                .message
+                .contains("resuming the run rebuilds its state from the log")
+        );
+        assert!(desk.loan.get().unwrap().reply.is_none());
+    });
+}
+
+#[test]
 fn a_helper_started_with_inherit_after_a_model_switch_runs_on_the_switched_provider() {
     use crate::agent::Agent;
     use crate::provider::{Account, Bureau, Choice, Pick, Tuning, Via};
@@ -974,7 +1022,7 @@ fn a_helper_started_with_inherit_after_a_model_switch_runs_on_the_switched_provi
         .launch
         .bureau = Arc::new(Bureau::scripted([script]));
     let host = crate::agent::testkit::host(parent);
-    let root = host.roots()[0];
+    let root = host.children()[0];
     let port = host.port();
     port.command(root, crate::bus::Command::Model(pick.clone()))
         .unwrap();

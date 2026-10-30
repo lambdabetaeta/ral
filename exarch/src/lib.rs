@@ -232,12 +232,12 @@ pub fn run() -> Result<(), String> {
     // Held for the whole run: the lock is the launcher's, not the node's.
     let (run, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume.take())?;
     if headless && resumes {
-        let open = record::AgentLog::live_roots(&run.dir("sessions")?)
+        let open = record::AgentLog::human_children(&run.dir("sessions")?)
             .map_err(|e| format!("could not inspect {run}: {e}"))?
             .len();
         if open != 1 {
             return Err(format!(
-                "this run has {open} open sessions: resume it in the TUI, which reopens all of them"
+                "a headless run reopens exactly one session; this run has {open} open: resume it in the TUI, which reopens all of them"
             ));
         }
     }
@@ -279,7 +279,7 @@ pub fn run() -> Result<(), String> {
         &state_dir,
         &provider::state::State::of(&provider, &available),
     );
-    let config = root_config(
+    let config = launch_config(
         &c,
         system,
         run.clone(),
@@ -311,10 +311,10 @@ pub fn run() -> Result<(), String> {
     };
     let port = host.port();
     let result = if headless {
-        if host.roots().len() == 1 {
+        if host.children().len() == 1 {
             headless::run(&host, &info, &provider, seed, c.output_format)
         } else {
-            Err("a headless run holds exactly one root".into())
+            Err("a headless run holds exactly one session".into())
         }
         .map(|()| None)
     } else {
@@ -343,8 +343,8 @@ pub fn run() -> Result<(), String> {
     combine_failures(result.map(drop), &failures)
 }
 
-/// The root's configuration under the parsed command line.
-fn root_config(
+/// The launch's configuration under the parsed command line.
+fn launch_config(
     c: &cli::Cli,
     system: String,
     run_dir: OwnDir,
@@ -352,16 +352,12 @@ fn root_config(
     search: bool,
     bureau: &Arc<Bureau>,
     roles: provider::roles::Roles,
-) -> agent::RootConfig {
+) -> agent::LaunchConfig {
     let headless = c.is_headless();
-    agent::RootConfig {
+    agent::LaunchConfig {
         system,
         run_dir,
-        trunk: if headless {
-            agent::Trunk::Returns
-        } else {
-            agent::Trunk::Converses
-        },
+        returns: headless,
         admission: agent::Admission::Free,
         helper_idle: c.helper_idle,
         max_tokens: c.max_tokens,
@@ -457,7 +453,7 @@ fn lock_resumable(run: &OwnDir) -> Result<Result<app::RunLock, Declined>, String
     let open = run
         .dir("sessions")
         .map_err(std::io::Error::from)
-        .and_then(|sessions| record::AgentLog::live_roots(&sessions))
+        .and_then(|sessions| record::AgentLog::human_children(&sessions))
         .map_err(|error| format!("cannot inspect {run}: {error}"))?;
     if open.is_empty() {
         return Ok(Err(Declined::NoOpenSession));
@@ -512,7 +508,7 @@ fn open(
 
 #[cfg(test)]
 mod tests {
-    use super::{Host, combine_failures, root_config};
+    use super::{Host, combine_failures, launch_config};
     use crate::agent::RootEngine;
     use crate::app::{self, Scratch};
     use crate::provider::roles::Roles;
@@ -539,13 +535,13 @@ mod tests {
 
     #[test]
     fn the_parsed_helper_idle_reaches_the_founded_fleet() {
-        let dir = ral_core::own::OwnDir::for_test("root-config").unwrap();
+        let dir = ral_core::own::OwnDir::for_test("launch-config").unwrap();
         let found = |args: &[&str]| {
             let c = crate::cli::Cli::try_parse_from(
                 std::iter::once("exarch").chain(args.iter().copied()),
             )
             .unwrap();
-            let cfg = root_config(
+            let cfg = launch_config(
                 &c,
                 "system".into(),
                 (*dir).clone(),
@@ -555,7 +551,7 @@ mod tests {
                 Roles::default(),
             );
             let engine = RootEngine::Identity {
-                scratch: Arc::new(Scratch::for_test(app::EXARCH, "root-config").unwrap()),
+                scratch: Arc::new(Scratch::for_test(app::EXARCH, "launch-config").unwrap()),
                 cwd: ral_core::host::cwd().unwrap(),
                 grants: ral_core::authority::policy::GrantStack::default(),
                 terminal: ral_core::io::terminal::TerminalState::default(),

@@ -2,8 +2,9 @@
 
 **An agent owns its conversation and shell on one joined thread.** Its
 address admits messages and publishes status, never retaining the engine or
-attending owner. A fleet is a forest of lives, owned through root and helper
-join guards ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
+attending owner. The human's life is the fleet root; the human and agents
+own their children through nurseries and join guards
+([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
 
 ## Every enduring fact is a fold of the log
 
@@ -56,26 +57,34 @@ A live fold refusal is an exarch bug and panics; replay judges every line and
 refuses foreign transitions. **Lock order:** descendant cell, ancestor cell,
 journal, bus channel. Names and the deadline heap are leaves.
 
-## Role and admission are independent
+## Parent and admission are independent
 
-- `Converses` answers in conversation; `Returns` owes its caller a value;
-  `Child { parent }` answers its parent and can rest for follow-ups.
-  `Trunk::{Converses, Returns}` chooses how roots answer.
+**An agent's parent is another agent or the human; there is no rank.** The
+human has no model, log or engine.
+
+- `Agent::born` is every fresh birth; `AgentLog::create` opens its log.
+  `Parent::terms` is the one construction case split. The human lends the
+  launch's fuel, search, admission and `returns`, with life under the fleet
+  root. An agent lends its search and one less fuel, a life under its own,
+  `Parent` admission and `returns: true`.
+- The handle holds fixed `parent: Option<AgentHandle>` (`None`: the human).
+  `returns` belongs only to the mail fold: a conversing agent answers in
+  conversation; a returning agent owes its parent a value.
 - `Free` admits any input at rest. `Gated` consumes one host release per
   job. `Parent` admits the human and parent; a resting helper refuses peers,
   while a working helper accepts anyone. Quiet commands and child reports
   or departures are never held.
 - A helper ends after resting with no admissible input for its idle interval:
   five hours by default, configurable through `--helper-idle`. Reading,
-  focus and probes do not renew it. Roots have no idle timeout.
+  focus and probes do not renew it. The human's children have no idle timeout.
 
 ## Stop < end
 
 **Cancellation has two extents: life contains exchange.**
 
 ```text
-fleet root
-└── root life
+human's life (fleet root)
+└── agent life
     ├── exchange and local nudge continuations
     └── helper life
         ├── exchange
@@ -85,7 +94,8 @@ fleet root
 - An exchange takes up one input through its nudge continuations. Stop —
   Esc, Ctrl-C, Synod Stop, SIGINT or the desk's `` `stop `` — cancels only
   that exchange with `Interrupted`. Human gestures recall queued text;
-  the desk and SIGINT leave it queued.
+  the desk and SIGINT leave it queued. Only human text is recalled; a
+  helper's task belongs to its parent, not the human.
 - Helpers, schedules and loose shell workers survive Stop. Helpers can
   report and wake the agent again within the same busy period.
 - End, `/close`, dismissal, writer failure or engine severance ends life.
@@ -109,8 +119,11 @@ fleet root
   joins it when it arrives.
 - Stop shares this lock and marks the matching job stopped; human gestures recall text;
   stale ids do nothing. Further input may run before that same job settles.
-- `Host` launches roots and owns their feed, then ends and joins all of
-  them on end or drop. Frontends observe; they do not drive agents.
+- `Fleet.human` is the human's nursery, retaining every adopted child and
+  join guard. `Host::children()` lists them in birth order, joined or not,
+  including `/new` and `/branch` births. End or drop ends life and repeatedly
+  drains the nursery to join racing births too. The human receives no
+  `Gone`; frontends observe `Died`, never drive agents.
 - Synod gates each job across its baseline and closing folder walk. A
   release allows human text, wakeups, worker batches or messages to open a
   job. Scheduling and reset-resume remain disabled by Synod policy.
@@ -123,10 +136,13 @@ fleet root
 **A helper's published status and its obligation are different facts.**
 
 - Debt is the mail's derived fact: `returns && (answering || pending
-  parent post)`. A helper owes from birth and parent messages; a returning
-  root owes from human post time, a conversing root never. Debt is counted
-  at post time for every agent; unread human input at end earns
-  `ENDED_BEFORE_REPORTING` unless recalled. Human input to helpers, peer
+  parent post)`. Every agent starts with no debt. A helper's task is its
+  parent's opening post (`Input::Task`): recorded with `Voice::Peer` and
+  `from: parent`, its text admitted bare. Later messages are wrapped with
+  the sender's name. The task's post and later parent posts create debt;
+  a returning child of the human owes from human post time, a conversing
+  one never. Unread human input to a returning child of the human at end
+  earns `ENDED_BEFORE_REPORTING` unless recalled. Human input to helpers, peer
   messages, steering, reports, wakeups and surfaces create no debt.
 - `Taken` keeps a post's parent debt until `Status`; `Withdrawn` removes it
   unread. A report commits status, booking retirements and queued-wakeup
@@ -148,17 +164,23 @@ Debts follow parent edges only: waits descend a finite tree, so a leaf with
 nothing on its way is reminded to reply and frees its parent. Peer messages
 are notes; peer debts could form cycles.
 
-## Roots, replacement and teardown
+## Births by the human, replacement and teardown
 
-**Roots are sessions with fresh engines; helpers are shell snapshots.**
+**The human's children start with fresh engines; helpers start with shell
+snapshots.** Both are born through the same constructor.
 
 - `/new` opens blank context; `/branch` imports context, not shell state.
-  `/close` records permanent closure; `/quit` leaves roots resumable.
+  Both are children of the human. Unnamed births reserve the least unused
+  `agent-N`, `N ≥ 1`, under the name-directory lock; `start` still requires
+  a name. The first child is `main`. `/close` records permanent closure;
+  `/quit` leaves the human's children resumable.
   Reopen folds context and control before quarantine, then records
   pending withdrawals (unread posts are withdrawn with a note), open-job settlement and booking retirements with
   `SessionResumed` and a note naming unread posts. The cell starts empty;
   debt for taken-but-unanswered input survives, not withdrawn debt. Shell
-  state, workers, pins and timers are fresh. Headless requires one open root.
+  state, workers, pins and timers are fresh. `AgentLog::human_children`
+  discovers unclosed sessions whose parent is the human; helper revival is
+  not part of reopen. Headless reopens exactly one session.
 - Names are reserved before construction and removed after owner teardown,
   before `Died`. `Gone` follows death. Retained addresses retain no engine.
 - `/clear` preflights context and prepares an eligible identity-root engine
@@ -185,7 +207,10 @@ The desk refuses a zero-fuel spawn; its prompt omits the dead spawn family.
 `[prompt, name, type, grant, model]`. Missing or misspelled fields are static
 errors; variant decoders enumerate legal runtime tags. It is always
 asynchronous: construct, adopt and launch the child, then return a summary;
-`` exarch-agents `list `` reads the roster.
+`` exarch-agents `list `` reads the roster. A human child's spawner is
+`` `human ``; a helper's is `` `agent <name> ``. The roster is restricted to
+agents sharing the reader's `founder`: the human's child it descends from,
+or itself when its parent is the human.
 
 - `Shell::bequeath` snapshots the **serialisable fragment** of lexical scope,
   dynamic context and builtin table. Every handle becomes an opaque

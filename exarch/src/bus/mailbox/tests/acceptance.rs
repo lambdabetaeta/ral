@@ -15,7 +15,7 @@ fn queue_is_mail(mailbox: &AgentMailbox, seed: u64, turn: usize) {
     );
 }
 
-fn replay_is_cell(mailbox: &AgentMailbox, journal: &Recorder) {
+pub(super) fn replay_is_cell(mailbox: &AgentMailbox, journal: &Recorder) {
     let (_, commits) = journal.reader().since(None).unwrap();
     let records: Vec<_> = commits
         .map(Result::unwrap)

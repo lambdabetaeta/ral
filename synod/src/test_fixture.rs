@@ -17,14 +17,14 @@ pub(crate) fn scripted_host(
     script: exarch::provider::scripted::Script,
 ) -> exarch::host::Host {
     use exarch::app::{SYNOD, Scratch};
-    use exarch::host::{Admission, HELPER_IDLE, RootConfig, RootEngine, Trunk};
+    use exarch::host::{Admission, HELPER_IDLE, LaunchConfig, RootEngine};
     use exarch::provider::{Bureau, Provider, Toolset};
     use std::sync::Arc;
 
-    let config = RootConfig {
+    let config = LaunchConfig {
         system: "system".into(),
         run_dir: ral_core::own::OwnDir::clone(run_dir),
-        trunk: Trunk::Converses,
+        returns: false,
         admission: Admission::Gated,
         helper_idle: HELPER_IDLE,
         tools: Toolset::default(),

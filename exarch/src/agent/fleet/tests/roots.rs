@@ -1,7 +1,7 @@
 use super::*;
+use crate::agent::AgentHandle;
 use crate::agent::nursery::{Joined, Teardown};
 use crate::agent::testkit::trunk;
-use crate::agent::{AgentHandle, Trunk};
 use crate::bus::{Emitter, Signal, WORKER_PANIC_PREFIX, channel};
 use crate::record::{Born, Transient};
 use ral_core::process::CancelCause;
@@ -26,7 +26,7 @@ fn fleet_end_ends_every_agent_and_future_roots_are_born_cancelled() {
     assert!(!late.is_live());
     assert_eq!(late.mailbox.life().cause(), Some(CancelCause::Terminated));
     assert!(fleet.registry.live().is_empty());
-    assert!(fleet.registry.roots().is_empty());
+    assert!(fleet.registry.human_children().is_empty());
     assert!(fleet.registry.resolve("late").is_none());
     assert!(!fleet.registry.is_empty(), "ending is not teardown");
     drop((root, child, other, late));
@@ -37,24 +37,36 @@ fn fleet_end_ends_every_agent_and_future_roots_are_born_cancelled() {
 fn joining_roots_collects_each_failure_and_drains_only_once() {
     let fleet = Fleet::for_test();
     for failure in ["first", "second"] {
-        fleet.adopt_root(Joined::new(std::thread::spawn(move || Teardown {
-            failures: vec![failure.into()],
-        })));
+        let owner = agent(&fleet, failure, None);
+        fleet.adopt(
+            (*owner).clone(),
+            Joined::new(std::thread::spawn(move || {
+                drop(owner);
+                Teardown {
+                    failures: vec![failure.into()],
+                }
+            })),
+        );
     }
-    fleet.adopt_root(Joined::new(std::thread::spawn(|| {
-        panic!("root panic");
-    })));
+    let owner = agent(&fleet, "panicking", None);
+    fleet.adopt(
+        (*owner).clone(),
+        Joined::new(std::thread::spawn(move || {
+            drop(owner);
+            panic!("root panic");
+        })),
+    );
     fleet.registry.end(CancelCause::Cancelled);
     assert_eq!(
-        fleet.join_roots(),
+        fleet.join_children(),
         [
             "first",
             "second",
             &format!("{WORKER_PANIC_PREFIX}root panic")
         ]
     );
-    assert_eq!(fleet.join_roots(), Vec::<String>::new());
-    assert!(fleet.roots.lock_ignore_poison().is_empty());
+    assert_eq!(fleet.join_children(), Vec::<String>::new());
+    assert!(fleet.human.lock_ignore_poison().children().next().is_none());
 }
 
 #[test]
@@ -64,14 +76,17 @@ fn joining_waits_for_a_root_after_its_last_name_leaves() {
     let retained = AgentHandle::clone(&owner);
     let (left, departed) = mpsc::channel();
     let (release, resume) = mpsc::channel();
-    fleet.adopt_root(Joined::new(std::thread::spawn(move || {
-        drop(owner);
-        left.send(()).unwrap();
-        resume.recv_timeout(TIMEOUT).unwrap();
-        Teardown {
-            failures: vec!["late teardown".into()],
-        }
-    })));
+    fleet.adopt(
+        retained.clone(),
+        Joined::new(std::thread::spawn(move || {
+            drop(owner);
+            left.send(()).unwrap();
+            resume.recv_timeout(TIMEOUT).unwrap();
+            Teardown {
+                failures: vec!["late teardown".into()],
+            }
+        })),
+    );
     departed.recv_timeout(TIMEOUT).unwrap();
     assert!(fleet.registry.is_empty());
     assert!(!retained.is_live());
@@ -79,13 +94,15 @@ fn joining_waits_for_a_root_after_its_last_name_leaves() {
     let (done, finished) = mpsc::channel();
     std::thread::scope(|scope| {
         let joining = scope.spawn(|| {
-            done.send(fleet.join_roots()).unwrap();
+            done.send(fleet.join_children()).unwrap();
         });
         assert!(
             eventually(TIMEOUT, || fleet
-                .roots
+                .human
                 .lock_ignore_poison()
-                .is_empty()
+                .children()
+                .next()
+                .is_none()
                 .then_some(()))
             .is_some(),
             "the joiner takes the root thread before waiting on it"
@@ -106,23 +123,37 @@ fn joining_roots_also_joins_a_root_adopted_during_the_join() {
     let fleet = Fleet::for_test();
     let (release, resume) = mpsc::channel();
     let launching = fleet.clone();
-    fleet.adopt_root(Joined::new(std::thread::spawn(move || {
-        resume.recv_timeout(TIMEOUT).unwrap();
-        launching.adopt_root(Joined::new(std::thread::spawn(|| Teardown {
-            failures: vec!["racing root".into()],
-        })));
-        Teardown {
-            failures: vec!["initial root".into()],
-        }
-    })));
+    let initial = agent(&fleet, "initial", None);
+    fleet.adopt(
+        (*initial).clone(),
+        Joined::new(std::thread::spawn(move || {
+            drop(initial);
+            resume.recv_timeout(TIMEOUT).unwrap();
+            let racing = agent(&launching, "racing", None);
+            launching.adopt(
+                (*racing).clone(),
+                Joined::new(std::thread::spawn(move || {
+                    drop(racing);
+                    Teardown {
+                        failures: vec!["racing root".into()],
+                    }
+                })),
+            );
+            Teardown {
+                failures: vec!["initial root".into()],
+            }
+        })),
+    );
     fleet.registry.end(CancelCause::Cancelled);
     std::thread::scope(|scope| {
-        let joining = scope.spawn(|| fleet.join_roots());
+        let joining = scope.spawn(|| fleet.join_children());
         assert!(
             eventually(TIMEOUT, || fleet
-                .roots
+                .human
                 .lock_ignore_poison()
-                .is_empty()
+                .children()
+                .next()
+                .is_none()
                 .then_some(()))
             .is_some(),
             "adopt the racing root only after the first drain"
@@ -130,23 +161,30 @@ fn joining_roots_also_joins_a_root_adopted_during_the_join() {
         release.send(()).unwrap();
         assert_eq!(joining.join().unwrap(), ["initial root", "racing root"]);
     });
-    assert_eq!(fleet.join_roots(), Vec::<String>::new());
+    assert_eq!(fleet.join_children(), Vec::<String>::new());
 }
 
 #[test]
 fn joining_roots_preserves_teardown_failures() {
     let fleet = Fleet::for_test();
-    fleet.adopt_root(Joined::new(std::thread::spawn(|| Teardown {
-        failures: vec!["retained failure".into()],
-    })));
+    let owner = agent(&fleet, "retained", None);
+    fleet.adopt(
+        (*owner).clone(),
+        Joined::new(std::thread::spawn(move || {
+            drop(owner);
+            Teardown {
+                failures: vec!["retained failure".into()],
+            }
+        })),
+    );
     fleet.registry.end(CancelCause::Cancelled);
-    assert_eq!(fleet.join_roots(), ["retained failure"]);
+    assert_eq!(fleet.join_children(), ["retained failure"]);
     assert_eq!(Arc::strong_count(&fleet), 1);
 }
 
 #[test]
 fn a_launched_root_releases_its_name_and_announces_death_once() {
-    let root = trunk(Trunk::Converses);
+    let root = trunk(false);
     let handle = root.handle();
     let fleet = root.fleet.clone();
     let born = Born {
@@ -159,9 +197,9 @@ fn a_launched_root_releases_its_name_and_announces_death_once() {
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, handle.id());
     let thread = root.launch(born, None, &emit).expect("a root thread");
-    fleet.adopt_root(thread);
+    fleet.adopt(handle.clone(), thread);
     fleet.registry.end(CancelCause::Cancelled);
-    assert_eq!(fleet.join_roots(), Vec::<String>::new());
+    assert_eq!(fleet.join_children(), Vec::<String>::new());
     assert!(fleet.registry.is_empty());
     assert!(fleet.registry.resolve(&handle.0.name).is_none());
     assert!(fleet.registry.name(&handle.0.name).is_ok());

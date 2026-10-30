@@ -291,7 +291,7 @@ mod tests {
                 .then(Reply::text("one"))
                 .then(Reply::text("two")),
         );
-        let (port, root) = (host.port(), host.roots()[0]);
+        let (port, root) = (host.port(), host.children()[0]);
         port.submit(root, "first".into()).expect("live root");
         let log = Log::default();
         let mut seat = FakeSeat::new(host.feed(), &log, || host.release(root));

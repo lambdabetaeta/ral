@@ -268,7 +268,7 @@ fn cancelled_within_settles_an_in_flight_wire_run_promptly() {
 
 #[test]
 fn a_wire_root_refuses_resolved_grants_at_founding() {
-    use crate::agent::{Agent, RootConfig, RootEngine, Trunk};
+    use crate::agent::{Agent, LaunchConfig, RootEngine};
     use crate::provider::{Bureau, Provider, Toolset};
     use ral_core::authority::policy::{Capabilities, Net};
 
@@ -279,11 +279,11 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
         ..Capabilities::default()
     })]);
     let run_dir = crate::agent::testkit::tmp("wire-root-grants");
-    let result = Agent::root(
-        RootConfig {
+    let result = Agent::born_for_test(
+        LaunchConfig {
             system: "system".into(),
             run_dir: (*run_dir).clone(),
-            trunk: Trunk::Converses,
+            returns: false,
             admission: Admission::Free,
             helper_idle: crate::agent::fleet::HELPER_IDLE,
             max_tokens: None,

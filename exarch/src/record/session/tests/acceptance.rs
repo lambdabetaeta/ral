@@ -15,14 +15,17 @@ fn cell(log: &AgentLog, folds: (Mail, Schedules, Model)) -> AgentMailbox {
 
 fn live_root(tag: &str, returns: bool, selected: &Selected) -> (TestDir, AgentLog, AgentMailbox) {
     let sessions = sessions_root(tag);
-    let (log, mail, schedules, model) = AgentLog::root(
+    let (log, mail, schedules, model) = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        returns,
-        selected,
-        "sys",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns,
+            selected,
+            system: "sys",
+            inherited: None,
+        },
     )
     .unwrap();
     let mailbox = cell(&log, (mail, schedules, model));

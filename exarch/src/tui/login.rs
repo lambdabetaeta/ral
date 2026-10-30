@@ -598,14 +598,14 @@ mod tests {
     #[test]
     fn an_admitted_login_is_visible_chrome_without_appending_to_the_agents_record() {
         use crate::agent::testkit;
-        use crate::host::Trunk;
+
         use crate::record::RECORD;
         use crate::tui::app::tests::{app_for_host, ctx, text};
         use crossterm::event::{KeyEvent, KeyModifiers};
 
         let admitted = identity::Account::login(Login::Codex, "tui-login", "person@example.test");
         let label = identity::label(&admitted, &[]);
-        let host = testkit::host(testkit::trunk(Trunk::Converses));
+        let host = testkit::host(testkit::trunk(false));
         let mut app = app_for_host(&host);
         let id = app.tabs.focused();
         let log = host

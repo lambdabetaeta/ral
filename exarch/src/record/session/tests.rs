@@ -275,14 +275,17 @@ fn a_transcript_read_answers_one_element_per_turn() {
 #[test]
 fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
     let sessions = sessions_root("rewind");
-    let mut s = AgentLog::root(
+    let mut s = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -365,14 +368,17 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
 #[test]
 fn a_clear_withdraws_every_turn_in_the_same_file() {
     let sessions = sessions_root("clear");
-    let mut s = AgentLog::root(
+    let mut s = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "be brief",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "be brief",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -445,14 +451,17 @@ fn the_newest_withdrawn_turn_reads_back() {
 #[test]
 fn resume_after_a_clear_and_a_rewind_yields_the_live_table() {
     let sessions = sessions_root("resume-withdrawals");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "sys",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "sys",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -546,14 +555,17 @@ fn evict_of_evict_nests_both_evictions_and_keeps_the_suffix() {
 #[test]
 fn head_eviction_is_a_pure_function_of_the_log() {
     let sessions = sessions_root("head-eviction-purity");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1166,14 +1178,17 @@ fn record_jsonl_round_trip_carries_the_cut() {
 #[test]
 fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     let sessions = sessions_root("resume-foreign-eviction");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1232,19 +1247,23 @@ fn diagnostic_records_round_trip_through_record_jsonl() {
 #[test]
 fn a_forked_log_records_the_selection_it_was_handed() {
     let parent = fresh_root();
-    let child = parent
-        .fork(
-            AgentId::new(1),
-            "child",
-            &Selected {
+    let child = AgentLog::create(
+        parent.sessions_root(),
+        AgentId::new(1),
+        Opening {
+            parent: Some(parent.id()),
+            name: "child",
+            returns: true,
+            selected: &Selected {
                 label: "other-provider".into(),
                 ..Selected::for_test("other-model")
             },
-            "",
-            Memory::Amnemon,
-        )
-        .expect("child log")
-        .0;
+            system: "",
+            inherited: None,
+        },
+    )
+    .expect("child log")
+    .0;
     let opened = records(&child)
         .into_iter()
         .find_map(|r| match r {
@@ -1275,14 +1294,17 @@ fn a_departed_turn_keeps_no_resident_state() {
 #[test]
 fn resume_replays_a_scripted_history_and_preserves_the_context() {
     let sessions = sessions_root("resume-round-trip");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1315,14 +1337,17 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
 #[test]
 fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
     let sessions = sessions_root("resume-mid-turn");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1362,14 +1387,17 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
 #[test]
 fn resume_quarantines_only_an_unterminated_final_fragment() {
     let sessions = sessions_root("resume-tail");
-    let live = AgentLog::root(
+    let live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1402,14 +1430,17 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
 #[test]
 fn resume_refuses_a_corrupt_interior_line_without_mutating_the_file() {
     let sessions = sessions_root("resume-garbage");
-    let live = AgentLog::root(
+    let live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1442,7 +1473,7 @@ fn resume_refuses_a_corrupt_interior_line_without_mutating_the_file() {
         "{text}"
     );
     assert!(
-        AgentLog::live_roots(&sessions).is_err(),
+        AgentLog::human_children(&sessions).is_err(),
         "a session that does not parse is named, not hidden"
     );
     assert_eq!(fs::read(&path).unwrap(), before);
@@ -1451,14 +1482,17 @@ fn resume_refuses_a_corrupt_interior_line_without_mutating_the_file() {
 #[test]
 fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
     let sessions = sessions_root("resume-foreign");
-    let live = AgentLog::root(
+    let live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1495,14 +1529,17 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
 #[test]
 fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
     let sessions = sessions_root("resume-steering-no-turn");
-    let live = AgentLog::root(
+    let live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1538,14 +1575,17 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
 #[test]
 fn resume_refuses_a_stale_id_as_foreign_data() {
     let sessions = sessions_root("resume-stale-id");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1584,27 +1624,34 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
 #[test]
 fn resume_refuses_a_child_log() {
     let sessions = sessions_root("resume-child");
-    let parent = AgentLog::root(
+    let parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
-    let child = parent
-        .fork(
-            AgentId::new(1),
-            "child",
-            &Selected::for_test("model"),
-            "",
-            Memory::Amnemon,
-        )
-        .unwrap()
-        .0;
+    let child = AgentLog::create(
+        parent.sessions_root(),
+        AgentId::new(1),
+        Opening {
+            parent: Some(parent.id()),
+            name: "child",
+            returns: true,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
+    )
+    .unwrap()
+    .0;
     drop((parent, child));
     let error = AgentLog::reopen(
         &sessions,
@@ -1650,14 +1697,17 @@ fn resume_refuses_a_pre_plan_session_with_no_record_log() {
 #[test]
 fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
     let sessions = sessions_root("resume-interior-seam");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1709,14 +1759,17 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
 fn resume_matches_live_after_a_small_edit_sequence_family() {
     for pattern in 0..9 {
         let sessions = sessions_root(&format!("resume-edits-{pattern}"));
-        let mut live = AgentLog::root(
+        let mut live = AgentLog::create(
             &sessions,
             AgentId::new(0),
-            "main",
-            false,
-            &Selected::for_test("model"),
-            "",
-            None,
+            crate::record::Opening {
+                parent: None,
+                name: "main",
+                returns: false,
+                selected: &Selected::for_test("model"),
+                system: "",
+                inherited: None,
+            },
         )
         .unwrap()
         .0;
@@ -1796,14 +1849,17 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
 #[test]
 fn resume_rebuilds_the_same_rows_and_evictions() {
     let sessions = sessions_root("fold-equals-memo-evict");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1843,14 +1899,17 @@ fn resume_rebuilds_the_same_rows_and_evictions() {
 #[test]
 fn a_departed_turn_reads_back_after_resume() {
     let sessions = sessions_root("resume-departed-read");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -1892,16 +1951,20 @@ fn a_departed_turn_reads_back_after_resume() {
 /// A `mnemon` child of `parent`: its own log under the same sessions
 /// root, opened with the table and the link the parent hands over.
 fn mnemon(parent: &AgentLog, child_id: AgentId) -> AgentLog {
-    parent
-        .fork(
-            child_id,
-            "child",
-            &Selected::for_test("model"),
-            "",
-            Memory::Mnemon,
-        )
-        .expect("child log")
-        .0
+    AgentLog::create(
+        parent.sessions_root(),
+        child_id,
+        Opening {
+            parent: Some(parent.id()),
+            name: "child",
+            returns: true,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: Some(parent.inherited_context()),
+        },
+    )
+    .expect("child log")
+    .0
 }
 
 fn seed_has_a_tool_call(log: &AgentLog) -> bool {
@@ -1981,14 +2044,17 @@ fn a_seed_cut_never_owes_a_tool_result_with_no_edit() {
 #[test]
 fn a_seeded_turn_reads_back_from_its_origin() {
     let sessions = sessions_root("lineage-origin");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2048,14 +2114,17 @@ fn openings(read: &[TranscriptTurn]) -> Vec<&str> {
 #[test]
 fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
     let sessions = sessions_root("lineage-read");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2107,14 +2176,17 @@ fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
 #[test]
 fn turns_split_across_a_fork_read_back_out_of_both_files() {
     let sessions = sessions_root("lineage-split");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2167,14 +2239,17 @@ fn turns_split_across_a_fork_read_back_out_of_both_files() {
 #[test]
 fn an_empty_parent_context_still_floors_the_childs_first_id() {
     let sessions = sessions_root("lineage-floor");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2196,14 +2271,17 @@ fn an_empty_parent_context_still_floors_the_childs_first_id() {
 #[test]
 fn admission_refuses_inherited_after_the_first_turn() {
     let sessions = sessions_root("lineage-late-link");
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2242,14 +2320,17 @@ fn admission_refuses_inherited_after_the_first_turn() {
 #[test]
 fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
     let sessions = sessions_root("lineage-broken");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2307,14 +2388,17 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
 fn a_moved_run_resumes_and_reads_its_inherited_turns_back() {
     let root = sessions_root("moved-run");
     let sessions = root.make_dir("sessions").unwrap();
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2324,14 +2408,17 @@ fn a_moved_run_resumes_and_reads_its_inherited_turns_back() {
     parent
         .evict(span(1, 2), None, EditAuthority::Harness)
         .unwrap();
-    let branch = AgentLog::root(
+    let branch = AgentLog::create(
         &sessions,
         AgentId::new(1),
-        "branch",
-        false,
-        &Selected::for_test("model"),
-        "",
-        Some(parent.inherited_context()),
+        crate::record::Opening {
+            parent: None,
+            name: "branch",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: Some(parent.inherited_context()),
+        },
     )
     .unwrap()
     .0;
@@ -2365,14 +2452,17 @@ fn a_moved_run_resumes_and_reads_its_inherited_turns_back() {
 #[test]
 fn resume_rebuilds_the_same_rows_and_evictions_across_a_link() {
     let sessions = sessions_root("fold-equals-memo-link");
-    let mut ancestor = AgentLog::root(
+    let mut ancestor = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2387,14 +2477,17 @@ fn resume_rebuilds_the_same_rows_and_evictions_across_a_link() {
         )
         .unwrap();
 
-    let mut live = AgentLog::root(
+    let mut live = AgentLog::create(
         &sessions,
         AgentId::new(1),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        Some(ancestor.inherited_context()),
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: Some(ancestor.inherited_context()),
+        },
     )
     .unwrap()
     .0;
@@ -2437,14 +2530,17 @@ fn resume_rebuilds_the_same_rows_and_evictions_across_a_link() {
 #[test]
 fn transcript_index_carries_the_inherited_table() {
     let sessions = sessions_root("lineage-index");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2487,14 +2583,17 @@ fn transcript_index_carries_the_inherited_table() {
 #[test]
 fn grep_walks_resident_then_freed_then_ancestors() {
     let sessions = sessions_root("lineage-grep");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2537,14 +2636,17 @@ fn grep_walks_resident_then_freed_then_ancestors() {
 #[test]
 fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
     let sessions = sessions_root("lineage-unreadable");
-    let mut parent = AgentLog::root(
+    let mut parent = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2582,16 +2684,20 @@ mod acceptance;
 #[test]
 fn a_log_opens_with_started_then_inherited_then_system() {
     let parent = fresh_root();
-    let child = parent
-        .fork(
-            AgentId::new(1),
-            "child",
-            &Selected::for_test("model"),
-            "child prompt",
-            Memory::Mnemon,
-        )
-        .unwrap()
-        .0;
+    let child = AgentLog::create(
+        parent.sessions_root(),
+        AgentId::new(1),
+        Opening {
+            parent: Some(parent.id()),
+            name: "child",
+            returns: true,
+            selected: &Selected::for_test("model"),
+            system: "child prompt",
+            inherited: Some(parent.inherited_context()),
+        },
+    )
+    .unwrap()
+    .0;
     let kinds: Vec<&str> = records(&child)
         .iter()
         .map(|record| match record {
@@ -2610,14 +2716,17 @@ fn a_log_opens_with_started_then_inherited_then_system() {
 #[test]
 fn reopen_records_the_system_prompt_only_when_it_changed() {
     let sessions = sessions_root("resume-system");
-    let log = AgentLog::root(
+    let log = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("model"),
-        "same",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "same",
+            inherited: None,
+        },
     )
     .unwrap()
     .0;
@@ -2737,14 +2846,17 @@ fn an_unreadable_parent_refuses_the_fork_by_file() {
     let source = record_path(&parent);
     let inherited = parent.inherited_context();
     fs::remove_file(&source).unwrap();
-    let error = AgentLog::root(
+    let error = AgentLog::create(
         parent.sessions_root(),
         AgentId::new(5),
-        "orphan",
-        false,
-        &Selected::for_test("model"),
-        "",
-        Some(inherited),
+        crate::record::Opening {
+            parent: None,
+            name: "orphan",
+            returns: false,
+            selected: &Selected::for_test("model"),
+            system: "",
+            inherited: Some(inherited),
+        },
     )
     .err()
     .expect("the parent's file is gone");

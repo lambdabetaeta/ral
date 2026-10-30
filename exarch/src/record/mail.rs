@@ -10,7 +10,7 @@ pub struct Mail {
     parent: Option<AgentId>,
     returns: bool,
     pending: BTreeMap<PostId, Post>,
-    /// A post by the parent was taken up, or this helper was born, since the last `Status`.
+    /// A post by the parent was taken up since the last `Status`.
     answering: bool,
     status: Option<ChildStatus>,
     job: Option<JobId>,
@@ -24,7 +24,7 @@ impl Mail {
             parent: started.parent,
             returns: started.returns,
             pending: BTreeMap::new(),
-            answering: started.returns && started.parent.is_some(),
+            answering: false,
             status: None,
             job: None,
             named: 0,
@@ -113,5 +113,29 @@ impl Mail {
             self.answering |= taken && self.returns && self.by_parent(&post);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::Selected;
+
+    #[test]
+    fn birth_owes_nothing_for_every_parent_and_return_policy() {
+        for parent in [None, Some(AgentId::new(7))] {
+            for returns in [false, true] {
+                let started = Started {
+                    session_id: AgentId::new(8),
+                    name: "newborn".into(),
+                    parent,
+                    returns,
+                    selected: Selected::for_test("test-model"),
+                    log_dir: std::path::PathBuf::default(),
+                    at_unix_ms: 0,
+                };
+                assert!(!Mail::new(&started).owes(), "{started:?}");
+            }
+        }
     }
 }

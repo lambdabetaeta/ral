@@ -1,6 +1,6 @@
 use super::{Fleet, Unborn};
 use crate::agent::testkit::{TestAgent, TestAgentSpec, forked_child, test_agent};
-use crate::agent::{Agent, TestTrunk};
+use crate::agent::{Agent, TestLaunch};
 use crate::bus::{Next, Rest};
 use crate::record::ChildStatus;
 use ral_core::data::FOValue;
@@ -21,9 +21,9 @@ fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&TestAgent>) -> TestAgen
 
 #[test]
 fn configured_helper_idle_reaches_the_child_mailbox() {
-    let parent = Agent::for_test_with(TestTrunk {
+    let parent = Agent::for_test_with(TestLaunch {
         helper_idle: Duration::ZERO,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     assert_eq!(parent.fleet.launch.idle, Duration::ZERO);

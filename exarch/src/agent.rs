@@ -29,9 +29,11 @@ pub(crate) mod tools;
 
 pub use crate::bus::Admission;
 #[cfg(test)]
-pub(crate) use build::TestTrunk;
+pub(crate) use build::TestLaunch;
+#[cfg(test)]
 pub(crate) use build::fresh_id;
-pub use build::{RootConfig, RootEngine, Trunk};
+pub(crate) use build::{FIRST_NAME, Parent};
+pub use build::{LaunchConfig, RootEngine};
 pub use engine_lost::EngineLost;
 pub use factory::Factory;
 pub use handle::{AgentHandle, Ended};
@@ -78,22 +80,6 @@ pub(crate) struct Body {
 
 pub(crate) type Pins = BTreeMap<String, PinDigest>;
 
-pub(crate) enum Role {
-    Converses,
-    Returns,
-    Child { parent: AgentHandle },
-}
-impl Role {
-    pub(crate) fn returns(&self) -> bool {
-        !matches!(self, Self::Converses)
-    }
-    pub(crate) fn parent(&self) -> Option<&AgentHandle> {
-        match self {
-            Self::Child { parent } => Some(parent),
-            Self::Converses | Self::Returns => None,
-        }
-    }
-}
 pub(crate) struct Readings {
     measure: Option<gauge::Measure>,
     gauges: gauge::Gauges,
@@ -136,7 +122,7 @@ impl Agent {
             .expect("an attending agent owns its engine")
     }
     pub(crate) fn resumes_at_reset(&self) -> bool {
-        self.handle.0.role.parent().is_none() && self.fleet.launch.resume_on_reset
+        self.handle.parent().is_none() && self.fleet.launch.resume_on_reset
     }
     #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {

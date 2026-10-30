@@ -1,8 +1,7 @@
-use crate::agent::{Admission, Agent, TestTrunk};
+use crate::agent::{Admission, Agent, TestLaunch};
 use crate::bus::{Command, Emitter, Read, Rewrite};
 use crate::record::{Forensic, Record};
 
-use crate::agent::Trunk;
 use crate::agent::testkit::{self, ral_call, scripted, set_provider};
 use crate::host::Host;
 use crate::port::{Port, Signal};
@@ -50,9 +49,9 @@ fn commands_after_a_display_first_failure_do_not_open_or_rewrite_sessions() {
 
 #[test]
 fn resources_command_runs_at_gated_rest_once_without_opening_a_job() {
-    let session = Agent::for_test_with(TestTrunk {
+    let session = Agent::for_test_with(TestLaunch {
         admission: Admission::Gated,
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let _posted = session.handle().command(Command::Read(Read::Resources));
@@ -210,12 +209,12 @@ fn model_at_rest_records_its_built_selection_in_its_own_log_then_runs_on_the_pub
             tuning,
         };
         let session = with_minting(
-            testkit::trunk(Trunk::Converses),
+            testkit::trunk(false),
             vec![Script::new().then(Reply::text("minted answer"))],
         );
         let dir = session.log_dir().clone();
         let host = testkit::host(session);
-        let id = host.roots()[0];
+        let id = host.children()[0];
         let port = host.port();
         assert!(!is_pick(&port.row(id).unwrap().selected, &expected));
         port.command(id, Command::Model(requested)).unwrap();
@@ -262,7 +261,7 @@ fn model_at_rest_records_its_built_selection_in_its_own_log_then_runs_on_the_pub
 
 #[test]
 fn a_refused_model_build_records_an_error_and_keeps_the_provider_and_published_pick() {
-    let mut session = with_minting(testkit::trunk(Trunk::Converses), vec![]);
+    let mut session = with_minting(testkit::trunk(false), vec![]);
     set_provider(
         &mut session,
         scripted(
@@ -283,7 +282,7 @@ fn a_refused_model_build_records_an_error_and_keeps_the_provider_and_published_p
         })
         .count();
     let host = testkit::host(session);
-    let id = host.roots()[0];
+    let id = host.children()[0];
     let port = host.port();
     port.command(id, Command::Model(routed_pick())).unwrap();
     let records = until_record(&host, id, |record| {
@@ -372,7 +371,7 @@ fn model_posted_during_a_tool_applies_to_the_next_request() {
     set_provider(&mut session, old);
     let host = testkit::host(session);
     let release = ReleaseModelTool;
-    let id = host.roots()[0];
+    let id = host.children()[0];
     let port = host.port();
     port.submit(id, "begin on the old provider".into()).unwrap();
     wait_until(|| MODEL_TOOL_ENTERED.load(std::sync::atomic::Ordering::Acquire));
@@ -423,7 +422,7 @@ fn model_posted_during_a_tool_applies_to_the_next_request() {
 #[test]
 fn switching_from_a_shared_plan_records_the_launch_cap_not_the_old_clients_cap() {
     let mut session = with_minting(
-        testkit::trunk(Trunk::Converses),
+        testkit::trunk(false),
         vec![Script::new().then(Reply::text("metered answer"))],
     );
     Arc::get_mut(&mut session.fleet).unwrap().launch.max_tokens = Some(731);
@@ -441,7 +440,7 @@ fn switching_from_a_shared_plan_records_the_launch_cap_not_the_old_clients_cap()
     assert_eq!(old.selected().max_tokens, None);
     set_provider(&mut session, old);
     let host = testkit::host(session);
-    let id = host.roots()[0];
+    let id = host.children()[0];
     let port = host.port();
     let pick = routed_pick();
     port.command(id, Command::Model(pick.clone())).unwrap();

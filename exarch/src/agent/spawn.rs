@@ -1,11 +1,11 @@
 //! Every agent attends on its own, joined thread.
 
+use crate::agent::build::Parent;
 use crate::agent::nursery::{Joined, Teardown};
 use crate::agent::{Agent, AgentHandle};
-use crate::bus::{Emitter, WORKER_PANIC_PREFIX, panic_msg};
-use crate::record::{AgentLog, Born, ChildStatus, Forensic, Memory, Transient, Unavailable};
+use crate::bus::{Emitter, Input, WORKER_PANIC_PREFIX, panic_msg};
+use crate::record::{Born, ChildStatus, Forensic, Memory, Transient, Unavailable};
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
@@ -52,7 +52,7 @@ impl Agent {
     pub(crate) fn launch(
         self,
         born: Born,
-        first: Option<String>,
+        first: Option<Input>,
         emit: &Emitter,
     ) -> Result<Joined<Teardown>, LaunchError> {
         let (handoff, receipt) = sync_channel::<(Self, Emitter)>(1);
@@ -77,7 +77,7 @@ impl Agent {
         };
         let emit = emit.child(self.id(), born);
         if let Some(first) = first {
-            let _posted = self.handle.steer(first);
+            let _posted = self.handle.0.address.post(first);
         }
         handoff
             .send((self, emit))
@@ -127,26 +127,16 @@ pub(crate) fn announce(failure: &Unavailable, emit: &Emitter) {
     });
 }
 
-/// Mints `root-{N}` names for an unnamed root; a name need only be
-/// distinguishable from the live ones on screen, so a process-lifetime counter
-/// suffices.
-static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
-
-/// A new root of `session`'s fleet under `name`, or under a minted `root-{N}`
-/// where the human named none: a fresh engine from the launch's recipe, blank
-/// for `Amnemon`, or importing `session`'s model-visible context for
-/// `Mnemon`.
-pub(crate) fn hatch_root(
-    session: &Agent,
+/// Open and launch a new child of the human, with a fresh engine.
+pub(crate) fn human_child(
+    session: &mut Agent,
     memory: Memory,
     name: Option<String>,
-) -> Result<Agent, String> {
-    let name =
-        name.unwrap_or_else(|| format!("root-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)));
-    let reserved = session
-        .fleet
-        .registry
-        .name(&name)
+    emit: &Emitter,
+) -> Result<crate::agent::AgentHandle, String> {
+    let registry = &session.fleet.registry;
+    let reserved = name
+        .map_or_else(|| Ok(registry.unnamed()), |name| registry.name(&name))
         .map_err(|error| error.to_string())?;
     let engine = session
         .fleet
@@ -154,39 +144,15 @@ pub(crate) fn hatch_root(
         .engine()
         .map_err(|error| error.to_string())?;
     let inherited = (memory == Memory::Mnemon).then(|| session.body.log.inherited_context());
-    Agent::hatch(
+    let root = Agent::born(
         &session.fleet,
+        Parent::Human,
         reserved,
         engine,
         session.body.client.clone(),
-        |sessions, selected, system| {
-            let id = crate::agent::fresh_id();
-            AgentLog::root(
-                sessions,
-                id,
-                &name,
-                session.fleet.launch.trunk.role().returns(),
-                selected,
-                system,
-                inherited,
-            )
-            .map(|log| (log, ()))
-        },
+        inherited,
     )
-    .map(|(root, ())| root)
-    .map_err(|e| e.to_string())
-}
-
-/// Open a new root session as a tab ([`hatch_root`]).  A root converses and
-/// parks for the human rather than seeding a first exchange: what to say next
-/// is said to the new tab.
-pub(crate) fn spawn_root(
-    session: &mut Agent,
-    memory: Memory,
-    name: Option<String>,
-    emit: &Emitter,
-) -> Result<crate::agent::AgentHandle, String> {
-    let root = hatch_root(session, memory, name)?;
+    .map_err(|error| error.to_string())?;
     let name = root.handle.0.name.clone();
     let tool = match memory {
         Memory::Amnemon => "/new",
@@ -218,7 +184,7 @@ pub(crate) fn spawn_root(
             ));
         }
     };
-    session.fleet.adopt_root(thread);
+    session.fleet.adopt(handle.clone(), thread);
     Ok(handle)
 }
 

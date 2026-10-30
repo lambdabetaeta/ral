@@ -1,5 +1,4 @@
 use super::*;
-use crate::agent::Trunk;
 use crate::agent::testkit::{host, scripted, set_provider, trunk};
 use crate::bus::Signal;
 use crate::provider::scripted::{Reply, Script};
@@ -7,7 +6,7 @@ use crate::record::{Display, Transcript};
 
 #[test]
 fn run_commits_job_opened_before_the_first_prompt_record() {
-    let mut root = trunk(Trunk::Converses);
+    let mut root = trunk(false);
     set_provider(
         &mut root,
         scripted("test-model", Script::new().then(Reply::text("done"))),
@@ -59,7 +58,7 @@ fn run_commits_job_opened_before_the_first_prompt_record() {
 
 #[test]
 fn run_declines_a_stale_worker_batch_at_rest_without_opening_a_job() {
-    let root = trunk(Trunk::Converses);
+    let root = trunk(false);
     let handle = root.handle();
     let log = handle.log_dir().path().join(RECORD);
     handle

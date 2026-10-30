@@ -1,6 +1,6 @@
 use super::*;
+use crate::agent::TestLaunch;
 use crate::agent::testkit::*;
-use crate::agent::{TestTrunk, Trunk};
 use crate::bus::{Input, Next, Rest, Signal};
 use crate::provider::scripted::{Reply, Script};
 use crate::record::{RECORD, Record, read_records};
@@ -26,9 +26,9 @@ fn next_input(parent: &Agent) -> Input {
 
 #[test]
 fn a_helper_severed_mid_work_reports_failed_then_gone_and_records_the_cause() {
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         installers: dressed(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS)),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut child = forked_child(&parent, "helper", "`inherit");
@@ -75,12 +75,13 @@ fn a_helper_severed_mid_work_reports_failed_then_gone_and_records_the_cause() {
 
 #[test]
 fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         installers: dressed(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS)),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut child = forked_child(&parent, "helper", "`inherit");
+    take_task(&child.handle(), &child.mailbox);
     let mut grandchild = forked_child(&child, "grandchild", "`inherit");
     set_provider(
         &mut grandchild,
@@ -164,8 +165,9 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
 
 #[test]
 fn a_panicked_helper_that_no_longer_owes_its_parent_posts_only_gone() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let mut child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     child.report(ChildStatus::Replied(ral_core::data::FOValue::Unit));
     assert!(matches!(next_input(&parent), Input::Child { .. }));
     crate::agent::attend::hooks::panic_on_run(child.id());
@@ -184,8 +186,9 @@ fn a_panicked_helper_that_no_longer_owes_its_parent_posts_only_gone() {
 
 #[test]
 fn the_name_leaves_the_directory_before_died_is_published() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     child.handle().end();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, parent.id());
@@ -207,7 +210,7 @@ fn the_name_leaves_the_directory_before_died_is_published() {
 
 #[test]
 fn final_session_end_writer_failure_is_in_died_and_the_join_result() {
-    let mut agent = trunk(Trunk::Converses);
+    let mut agent = trunk(false);
     let recorder = agent.recorder();
     let handle = agent.handle();
     let (tx, rx) = crate::bus::channel();
@@ -233,7 +236,7 @@ fn final_session_end_writer_failure_is_in_died_and_the_join_result() {
 
 #[test]
 fn an_uncompleted_terminal_cannot_publish_success() {
-    let agent = trunk(Trunk::Converses);
+    let agent = trunk(false);
     let (tx, rx) = crate::bus::channel();
     let terminal = Terminal {
         emit: Emitter::new(tx, agent.id()),
@@ -249,8 +252,9 @@ fn an_uncompleted_terminal_cannot_publish_success() {
 
 #[test]
 fn an_unwinding_helper_publishes_failure_before_its_parent_settles() {
-    let mut parent = trunk(Trunk::Converses);
+    let mut parent = trunk(false);
     let child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
     crate::agent::attend::hooks::panic_on_run(child.id());
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, parent.id());
@@ -284,9 +288,9 @@ fn an_unwinding_helper_publishes_failure_before_its_parent_settles() {
 
 #[test]
 fn a_poisoned_helper_owner_tears_down_delivers_one_failure_and_lets_the_parent_settle() {
-    let mut parent = Agent::for_test_with(TestTrunk {
+    let mut parent = Agent::for_test_with(TestLaunch {
         installers: dressed(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS)),
-        ..TestTrunk::new("system")
+        ..TestLaunch::new("system")
     })
     .unwrap();
     let mut child = forked_child(&parent, "poisoned-helper", "`inherit");

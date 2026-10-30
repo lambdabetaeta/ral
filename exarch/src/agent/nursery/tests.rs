@@ -1,5 +1,4 @@
 use super::*;
-use crate::agent::Trunk;
 use crate::agent::testkit::{TestAgentSpec, test_agent, trunk};
 use crate::record::ChildStatus;
 use ral_core::data::FOValue;
@@ -25,12 +24,13 @@ fn joined_waits_on_drop_even_during_unwind() {
 
 #[test]
 fn ended_helpers_without_debt_are_not_pending_and_failures_are_taken_once() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
         TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
     )
     .unwrap();
+    crate::agent::testkit::take_task(&helper, &helper.mailbox);
     let handle = (*helper).clone();
     let mut nursery = Nursery::default();
     let (release, receiver) = std::sync::mpsc::channel();
@@ -44,7 +44,7 @@ fn ended_helpers_without_debt_are_not_pending_and_failures_are_taken_once() {
             }
         })),
     );
-    assert!(nursery.owing(), "birth owes a report");
+    assert!(nursery.owing(), "the taken task owes a report");
     handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
     assert!(!nursery.owing(), "a live resting helper owes nothing");
     handle.end();
@@ -63,7 +63,7 @@ fn ended_helpers_without_debt_are_not_pending_and_failures_are_taken_once() {
 
 #[test]
 fn dismiss_all_ends_every_helper_before_joining_any() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let first = test_agent(
         &parent.fleet,
         TestAgentSpec::child("first", &parent.handle(), parent.mailbox.life().child()),
@@ -124,7 +124,7 @@ fn dismiss_all_ends_every_helper_before_joining_any() {
 
 #[test]
 fn newest_name_remains_discoverable_after_join() {
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let mut nursery = Nursery::default();
     let old = test_agent(
         &parent.fleet,
@@ -165,8 +165,9 @@ fn report_commit_holds_the_helper_cell_until_its_parent_notice_is_posted() {
     use std::sync::mpsc;
     const WAIT: Duration = Duration::from_secs(5);
     for crossing_message in [false, true] {
-        let parent = trunk(Trunk::Converses);
+        let parent = trunk(false);
         let helper = parent.fork_named("barrier-helper").unwrap();
+        crate::agent::testkit::take_task(&helper.handle(), &helper.mailbox);
         let handle = helper.handle();
         let address = handle.0.address.clone();
         let mut nursery = Nursery::default();

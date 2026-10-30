@@ -4,14 +4,17 @@ use super::*;
 fn resumed_agent_adds_only_the_fresh_shell_note() {
     let dir = tmp("resume-agent");
     let sessions = dir.make_dir("sessions").unwrap();
-    let (mut log, _, _, _) = AgentLog::root(
+    let (mut log, _, _, _) = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("old-model"),
-        "system",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("old-model"),
+            system: "system",
+            inherited: None,
+        },
     )
     .unwrap();
     log.append_user("before the crash".into(), None, Voice::Human)
@@ -22,7 +25,7 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
     drop(log);
     let [(agent, resumed)] = <[_; 1]>::try_from(
         Agent::resume(
-            root_config(&dir, 0),
+            launch_config(&dir, 0),
             identity_engine("resume-agent"),
             &scripted("new-model", Script::new()),
         )
@@ -63,14 +66,17 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
 fn resume_seeds_child_ids_past_existing_session_directories() {
     let dir = tmp("resume-id-seed");
     let sessions = dir.make_dir("sessions").unwrap();
-    let (log, _, _, _) = AgentLog::root(
+    let (log, _, _, _) = AgentLog::create(
         &sessions,
         AgentId::new(0),
-        "main",
-        false,
-        &Selected::for_test("old-model"),
-        "system",
-        None,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &Selected::for_test("old-model"),
+            system: "system",
+            inherited: None,
+        },
     )
     .unwrap();
     let sentinel = sessions.path().join("1/sentinel");
@@ -78,7 +84,7 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
     fs::write(&sentinel, b"keep").unwrap();
     drop(log);
     let (root, _) = Agent::resume(
-        root_config(&dir, 1),
+        launch_config(&dir, 1),
         identity_engine("resume-id-seed"),
         &scripted("new-model", Script::new()),
     )
@@ -93,17 +99,20 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
 fn resumed_roots_keep_their_recorded_report_without_reporting_again() {
     use crate::record::{ChildStatus, Record, read_records};
     use ral_core::data::FOValue;
-    for trunk in [Trunk::Returns, Trunk::Converses] {
+    for returns in [true, false] {
         let dir = tmp("resume-published-status");
         let sessions = dir.make_dir("sessions").unwrap();
-        let (log, mail, schedules, model) = AgentLog::root(
+        let (log, mail, schedules, model) = AgentLog::create(
             &sessions,
             AgentId::new(0),
-            "main",
-            false,
-            &Selected::for_test("old-model"),
-            "system",
-            None,
+            crate::record::Opening {
+                parent: None,
+                name: "main",
+                returns: false,
+                selected: &Selected::for_test("old-model"),
+                system: "system",
+                inherited: None,
+            },
         )
         .unwrap();
         let status = ChildStatus::Replied(FOValue::Int { value: 1 });
@@ -127,9 +136,9 @@ fn resumed_roots_keep_their_recorded_report_without_reporting_again() {
         let record = log.dir().path().join(RECORD);
         drop(log);
         let (root, _) = Agent::resume(
-            RootConfig {
-                trunk,
-                ..root_config(&dir, 0)
+            LaunchConfig {
+                returns,
+                ..launch_config(&dir, 0)
             },
             identity_engine("resume-published-status"),
             &scripted("new-model", Script::new()),

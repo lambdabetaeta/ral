@@ -475,11 +475,11 @@ List live agents
 
 Returns your whole tree, including you:
 
-    [[name: Str, spawner: `root|`agent Str,
+    [[name: Str, spawner: `human|`agent Str,
       state: `busy|`waiting-on-agents|`replied|`waiting,
       idle-s: Int, elapsed-s: Int, log-dir: Str]]
 
-spawner identifies the parent, or `root. state distinguishes working, waiting
+spawner identifies the parent, or `human. state distinguishes working, waiting
 for descendants, parked with a reply, and parked without one. idle-s counts
 seconds since parking, zero while busy; elapsed-s counts seconds since birth.
 Use list to recover names or inspect the tree, not as a completion poll.

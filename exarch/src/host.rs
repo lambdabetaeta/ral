@@ -1,11 +1,13 @@
-//! The fleet's owner: launch its roots, carry their signals, and join them.
+//! The fleet's owner: launch the human's children, carry their signals, and join them.
 
 use crate::agent::fleet::Fleet;
 pub use crate::agent::fleet::HELPER_IDLE;
 use crate::agent::spawn::LaunchError;
-pub use crate::agent::{Admission, EngineLost, Factory, RootConfig, RootEngine, SPAWN_FUEL, Trunk};
+pub use crate::agent::{Admission, EngineLost, Factory, LaunchConfig, RootEngine, SPAWN_FUEL};
+use crate::agent::{FIRST_NAME, Parent};
+use ral_core::sync::LockExt;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentHandle};
 use crate::bus::{BusReceiver, FleetBus};
 use crate::port::Port;
 use crate::provider::Provider;
@@ -14,29 +16,40 @@ use ral_core::own::OwnDir;
 use ral_core::process::{AmbientForward, CancelCause};
 use std::{io, sync::Arc};
 
-/// Owns a fleet whose roots attend on their own threads.
+/// Owns a fleet and joins the human's children.
 pub struct Host {
-    roots: Vec<AgentId>,
     bus: FleetBus,
     signals: Option<AmbientForward>,
     fleet: Arc<Fleet>,
 }
 
 impl Host {
-    /// Found a fleet and launch its first root.
+    /// Found a fleet and launch the human's first child.
     ///
     /// # Errors
-    /// The root's engine, log, or thread could not be started.
-    pub fn found(cfg: RootConfig, engine: RootEngine, provider: Arc<Provider>) -> io::Result<Self> {
-        Self::adopt(vec![(Agent::root(cfg, engine, provider)?, None)])
+    /// The agent's engine, log, or thread could not be started.
+    pub fn found(
+        cfg: LaunchConfig,
+        engine: RootEngine,
+        provider: Arc<Provider>,
+    ) -> io::Result<Self> {
+        let (fleet, engine) = Fleet::found(cfg, engine, &crate::INSTALLERS)?;
+        let name = fleet
+            .registry
+            .name(FIRST_NAME)
+            .map_err(|why| io::Error::other(why.to_string()))?;
+        Self::adopt(vec![(
+            Agent::born(&fleet, Parent::Human, name, engine, provider, None)?,
+            None,
+        )])
     }
 
-    /// Reopen and launch every open root in a recorded run.
+    /// Reopen and launch the human's open children in a recorded run.
     ///
     /// # Errors
-    /// A root could not be reopened or its thread could not be started.
+    /// An agent could not be reopened or its thread could not be started.
     pub fn resume(
-        cfg: RootConfig,
+        cfg: LaunchConfig,
         engine: RootEngine,
         provider: &Arc<Provider>,
     ) -> io::Result<Self> {
@@ -57,7 +70,6 @@ impl Host {
                 .fleet,
         );
         let mut host = Self {
-            roots: roots.iter().map(|(root, _)| root.id()).collect(),
             bus: FleetBus::session(),
             signals: Some(crate::signals::face(&fleet.registry)),
             fleet,
@@ -72,8 +84,9 @@ impl Host {
                 resumed,
                 reader: root.recorder().reader(),
             };
+            let handle = root.handle();
             match root.launch(born, None, &host.bus.emitter(id)) {
-                Ok(thread) => host.fleet.adopt_root(thread),
+                Ok(thread) => host.fleet.adopt(handle, thread),
                 Err(LaunchError { cause, failures }) => {
                     let failures: Vec<_> =
                         std::iter::once(format!("could not start root agent {id}: {cause}"))
@@ -88,9 +101,14 @@ impl Host {
         Ok(host)
     }
 
-    /// The roots it launched, in launch order.
-    pub fn roots(&self) -> &[AgentId] {
-        &self.roots
+    /// Every child the human adopted, in birth order, joined or not.
+    pub fn children(&self) -> Vec<AgentId> {
+        self.fleet
+            .human
+            .lock_ignore_poison()
+            .children()
+            .map(AgentHandle::id)
+            .collect()
     }
 
     pub fn feed(&self) -> &BusReceiver {
@@ -101,7 +119,7 @@ impl Host {
         Port::new(self.fleet.registry.clone(), self.bus.meter())
     }
 
-    /// Admit one job on a gated root; `false` once it has ended.
+    /// Admit one job on a gated child of the human; `false` once it has ended.
     pub fn release(&self, root: AgentId) -> bool {
         self.fleet
             .registry
@@ -113,7 +131,7 @@ impl Host {
         self.fleet.launch.run_dir()
     }
 
-    /// End the fleet and join every root, returning their teardown failures.
+    /// End the fleet and join the human's children, returning their teardown failures.
     pub fn end(mut self) -> Vec<String> {
         self.finish()
     }
@@ -126,7 +144,7 @@ impl Host {
     fn finish(&mut self) -> Vec<String> {
         self.fleet.registry.end(CancelCause::Cancelled);
         drop(self.signals.take());
-        self.fleet.join_roots()
+        self.fleet.join_children()
     }
 }
 

@@ -1,7 +1,40 @@
 use super::*;
 
+fn take_task(mailbox: &AgentMailbox) -> Lease {
+    assert!(!mailbox.address().status().unwrap().owes);
+    mailbox.address().post(task("task")).unwrap();
+    assert!(mailbox.address().status().unwrap().owes);
+    let (input, exchange) = take(mailbox);
+    assert!(matches!(input, Input::Task(_)));
+    exchange
+}
+
 #[test]
-fn a_helpers_birth_report_is_published_and_taken_up_in_the_parents_job() {
+fn human_prompts_repeatedly_create_debt_only_for_returning_agents() {
+    for returns in [false, true] {
+        let mailbox = configured_mailbox(
+            Admission::Free,
+            Recorder::none(),
+            DurableRoot::default().child(),
+            None,
+            returns,
+        );
+        let address = mailbox.address();
+        assert!(!address.status().unwrap().owes);
+        for prompt in ["launch prompt", "human follow up", "another prompt"] {
+            address.steer(prompt.into()).unwrap();
+            assert_eq!(address.status().unwrap().owes, returns);
+            let (input, _exchange) = take(&mailbox);
+            assert!(matches!(input, Input::Human(text) if text == prompt));
+            assert_eq!(address.status().unwrap().owes, returns);
+            publish(&address, ChildStatus::Replied(FOValue::Unit));
+            assert!(!address.status().unwrap().owes);
+        }
+    }
+}
+
+#[test]
+fn a_helpers_task_report_is_published_and_taken_up_in_the_parents_job() {
     for status in [
         ChildStatus::Replied(FOValue::Unit),
         ChildStatus::Failed("failed".into()),
@@ -11,6 +44,7 @@ fn a_helpers_birth_report_is_published_and_taken_up_in_the_parents_job() {
         let _exchange = start(&parent);
         let job = parent.address().status().unwrap().job;
         let helper = helper_of(&parent);
+        let _task = take_task(&helper);
         let address = helper.address();
         assert!(address.status().unwrap().owes);
         publish(&address, status.clone());
@@ -32,6 +66,7 @@ fn a_follow_up_crossing_a_report_keeps_owing_until_the_follow_up_reports() {
         let parent = mailbox(Admission::Free);
         let _exchange = start(&parent);
         let helper = helper_of(&parent);
+        let _task = take_task(&helper);
         let _helper_exchange = start(&helper);
         let address = helper.address();
         let barrier = Barrier::new(2);
@@ -122,7 +157,9 @@ fn queued_parent_messages_keep_owing_through_multiple_reports() {
     let _exchange = start(&parent);
     let helper = helper_of(&parent);
     let address = helper.address();
+    assert!(!address.status().unwrap().owes);
     address.post(message("first", true)).unwrap();
+    assert!(address.status().unwrap().owes);
     address.post(message("second", true)).unwrap();
     publish(&address, ChildStatus::Replied(FOValue::Unit));
     assert!(address.status().unwrap().owes);
@@ -142,6 +179,7 @@ fn a_parent_waking_after_report_publication_cannot_settle_with_its_report_unread
         let parent_address = parent.address();
         let _exchange = start(&parent);
         let helper = helper_of(&parent);
+        let _task = take_task(&helper);
         let address = helper.address();
         let barrier = Barrier::new(2);
         let next = std::thread::scope(|scope| {
@@ -179,6 +217,7 @@ fn an_ended_helper_can_still_publish_the_failure_it_owes() {
     let parent = mailbox(Admission::Free);
     let _exchange = start(&parent);
     let helper = helper_of(&parent);
+    let _task = take_task(&helper);
     let address = helper.address();
     publish(&address, ChildStatus::Replied(FOValue::Unit));
     let (_input, _exchange) = take(&parent);
@@ -207,11 +246,13 @@ fn a_human_resuming_a_helper_publishes_status_without_notifying_its_parent() {
         let parent = mailbox(admission);
         let parent_address = parent.address();
         let helper = helper_of(&parent);
+        let _task = take_task(&helper);
         let address = helper.address();
         publish(&address, ChildStatus::Replied(FOValue::Unit));
-        let (_birth_report, _exchange) = take(&parent);
+        let (_task_report, _exchange) = take(&parent);
         assert!(!address.status().unwrap().working());
         address.steer("human follow up".into()).unwrap();
+        assert!(!address.status().unwrap().owes);
         let (_input, _exchange) = take(&helper);
         assert!(helper.begin());
         assert!(address.status().unwrap().working());
@@ -229,6 +270,7 @@ fn a_human_resuming_a_helper_publishes_status_without_notifying_its_parent() {
 fn peer_messages_in_a_working_helper_do_not_create_a_parent_obligation() {
     let parent = mailbox(Admission::Free);
     let helper = helper_of(&parent);
+    let _task = take_task(&helper);
     let address = helper.address();
     publish(&address, ChildStatus::Replied(FOValue::Unit));
     let (_input, _exchange) = take(&parent);
@@ -257,9 +299,10 @@ fn reporting_to_an_ended_parent_still_updates_the_helpers_published_status() {
 fn an_ended_helper_refuses_follow_ups_and_leaves_both_mailboxes_unchanged() {
     let parent = mailbox(Admission::Free);
     let helper = helper_of(&parent);
+    let _task = take_task(&helper);
     let address = helper.address();
     publish(&address, ChildStatus::Replied(FOValue::Unit));
-    let (_birth_report, _exchange) = take(&parent);
+    let (_task_report, _exchange) = take(&parent);
     address.end(CancelCause::Cancelled);
     assert!(matches!(
         address.post(message("too late", true)),

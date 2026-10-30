@@ -1,4 +1,4 @@
-//! Helpers remain owned until their threads have joined.
+//! Children remain owned until their threads have joined.
 
 use crate::agent::AgentHandle;
 use crate::bus::{WORKER_PANIC_PREFIX, panic_msg};
@@ -8,6 +8,10 @@ use std::thread::JoinHandle;
 #[derive(Default)]
 pub(crate) struct Nursery(Vec<(AgentHandle, Option<Joined<Teardown>>)>);
 impl Nursery {
+    pub(crate) fn children(&self) -> impl Iterator<Item = &AgentHandle> {
+        self.0.iter().map(|(handle, _)| handle)
+    }
+
     pub(crate) fn adopt(&mut self, handle: AgentHandle, thread: Joined<Teardown>) {
         self.0.push((handle, Some(thread)));
     }

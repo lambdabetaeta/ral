@@ -9,13 +9,13 @@ use std::sync::{Arc, Mutex, mpsc};
 #[test]
 fn headless_recording_failure_ends_the_run_in_both_formats() {
     for format in [OutputFormat::Text, OutputFormat::Json] {
-        let root = frontend_root(Script::new(), Trunk::Returns);
+        let root = frontend_root(Script::new(), true);
         let recorder = root.recorder();
         let host = testkit::host(root);
         let root_handle = host
             .fleet()
             .registry
-            .get(host.roots()[0])
+            .get(host.children()[0])
             .expect("a live root");
         wait_ready(&host);
         recorder.fail_after(0);
@@ -63,9 +63,9 @@ fn headless_recording_failure_ends_the_run_in_both_formats() {
 #[test]
 fn a_late_recording_fault_keeps_the_already_published_report() {
     for script in [reply_script("42"), no_reply_script()] {
-        let root = frontend_root(script, Trunk::Returns);
+        let root = frontend_root(script, true);
         let recorder = root.recorder();
-        let mut other = crate::agent::spawn::hatch_root(
+        let mut other = crate::agent::testkit::human_child(
             &root,
             crate::record::Memory::Amnemon,
             Some("independent".into()),
@@ -80,7 +80,7 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
         let root_handle = host
             .fleet()
             .registry
-            .get(host.roots()[0])
+            .get(host.children()[0])
             .expect("a live root");
         let root_id = root_handle.id();
         let mut out = Vec::new();
@@ -167,9 +167,9 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
         .into();
         runtime.install_captured_builtins(&entries);
     });
-    let mut root = Agent::for_test_with(crate::agent::TestTrunk {
+    let mut root = Agent::for_test_with(crate::agent::TestLaunch {
         installers,
-        ..crate::agent::TestTrunk::new("system")
+        ..crate::agent::TestLaunch::new("system")
     })
     .unwrap();
     set_provider(&mut root, scripted("test-model", reply_script("42")));

@@ -3,7 +3,6 @@
 #[cfg(test)]
 mod tests;
 
-use super::Role;
 use crate::bus::{AgentAddress, AgentMessage, Command, Input, Refused, Status};
 use crate::record::{AgentId, ChildStatus, JobId, Unavailable};
 use ral_core::own::OwnDir;
@@ -23,7 +22,7 @@ pub(crate) struct Shared {
     pub(crate) log_dir: OwnDir,
     pub(crate) run_dir: OwnDir,
     pub(crate) started: Instant,
-    pub(crate) role: Role,
+    pub(crate) parent: Option<AgentHandle>,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
     pub(crate) address: AgentAddress,
@@ -95,28 +94,25 @@ impl AgentHandle {
         self.0.address.status()
     }
     pub(crate) fn parent(&self) -> Option<&Self> {
-        self.0.role.parent()
-    }
-    pub(crate) fn is_root(&self) -> bool {
-        self.parent().is_none()
+        self.0.parent.as_ref()
     }
     #[cfg(test)]
     pub(crate) fn log_dir(&self) -> &OwnDir {
         &self.0.log_dir
     }
     pub(crate) fn descendant(&self, target: &Self) -> Option<Self> {
-        let mut above = target.0.role.parent();
+        let mut above = target.parent();
         while let Some(node) = above {
             if node.id() == self.id() {
                 return Some(target.clone());
             }
-            above = node.0.role.parent();
+            above = node.parent();
         }
         None
     }
-    pub(crate) fn root(&self) -> Self {
+    pub(crate) fn founder(&self) -> Self {
         let mut here = self.clone();
-        while let Some(parent) = here.0.role.parent().cloned() {
+        while let Some(parent) = here.parent().cloned() {
             here = parent;
         }
         here

@@ -1,5 +1,4 @@
 use super::*;
-use crate::agent::Trunk;
 use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{self, TestAgentSpec, scripted, set_provider, test_agent};
 use crate::bus::{Next, Rest};
@@ -66,7 +65,7 @@ fn roster_orders_live_mailbox_rows_by_id_with_their_recorded_selection_and_waiti
 
 #[test]
 fn a_port_retained_across_host_end_keeps_final_run_usage_but_no_live_rows() {
-    let mut root = testkit::trunk(Trunk::Converses);
+    let mut root = testkit::trunk(false);
     set_provider(
         &mut root,
         scripted(
@@ -77,7 +76,7 @@ fn a_port_retained_across_host_end_keeps_final_run_usage_but_no_live_rows() {
         ),
     );
     let host = testkit::host(root);
-    let id = host.roots()[0];
+    let id = host.children()[0];
     let port = host.port();
     port.submit(id, "go".into()).unwrap();
     let deadline = Instant::now() + WAIT;

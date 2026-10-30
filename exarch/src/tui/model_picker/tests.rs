@@ -1,6 +1,6 @@
 use super::apply_model_switch;
 use crate::agent::testkit;
-use crate::host::{Host, Trunk};
+use crate::host::Host;
 use crate::port::Signal;
 use crate::provider::{
     Account, Bureau, Choice, Pick, ReasoningEffort, Tuning, Via, scripted::Script, state,
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 const WAIT: Duration = Duration::from_secs(10);
 
 fn host(scripts: Vec<Script>) -> Host {
-    let mut root = testkit::trunk(Trunk::Converses);
+    let mut root = testkit::trunk(false);
     Arc::get_mut(&mut root.fleet).unwrap().launch.bureau = Arc::new(Bureau::scripted(scripts));
     testkit::host(root)
 }
@@ -168,8 +168,19 @@ fn births_and_reopens_do_not_persist_a_next_launch_selection() {
     let id = app.tabs.focused();
     let sessions = OwnDir::for_test("tui-selection-sessions").unwrap();
     let selected = crate::provider::Selected::for_test("born-model");
-    let (log, _, _, _) =
-        AgentLog::root(&sessions, id, "main", false, &selected, "system", None).unwrap();
+    let (log, _, _, _) = AgentLog::create(
+        &sessions,
+        id,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &selected,
+            system: "system",
+            inherited: None,
+        },
+    )
+    .unwrap();
     let born = Born {
         log_dir: log.dir().clone(),
         name: "main".into(),

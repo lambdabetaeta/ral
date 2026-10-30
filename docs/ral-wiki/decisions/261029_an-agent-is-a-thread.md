@@ -1,10 +1,10 @@
 ---
 status: active
-generated_at_commit: fc0c9fbb
+generated_at_commit: 64ecd691
 generated_at_date: 2026-10-30
-verified_at_commit: fc0c9fbb
+verified_at_commit: 64ecd691
 verified_at_date: 2026-10-30
-anchors: [Agent, AgentMailbox, AgentAddress, WeakAgentAddress, Admission, JobId, Loanable, Loan, Nursery, Joined, Host, Port, Registry, LaunchError, Body::retire_engine, AgentAddress::transact, Txn, Mail, Schedules, Model]
+anchors: [Agent, AgentMailbox, AgentAddress, WeakAgentAddress, Admission, JobId, Loanable, Loan, Nursery, Joined, Host, Port, Registry, LaunchError, Body::retire_engine, AgentAddress::transact, Txn, Mail, Schedules, Model, Agent::born, AgentLog::create, Parent::terms, Host::children]
 amended_by: [261029_a-frontend-holds-a-port]
 supersedes: [261028_one-scope-tree-one-inbox, 260806_exchange-ends-at-fleet-quiescence, 260826_reply-parks]
 amends: [261027_a-host-holds-a-helm, 261029_a-child-is-a-status]
@@ -22,14 +22,16 @@ they do not drive exchanges.
   (engine, client, nursery and timers); the cell owns `Mail`, `Schedules`
   and `Model` under one lock. Only a foreground shell call borrows the
   body (A7).
-- **A2 — Scopes nest.** Fleet root contains root lives; a parent's life
+- **A2 — Scopes nest.** The human's life is the fleet root, containing its
+  children's lives; a parent's life
   contains its helpers' lives; each life contains its exchanges. Stop cancels
   only an exchange with `Interrupted`; stronger gestures end lives.
   Cancellation never resets.
 - **A3 — A life ends whole.** Teardown joins helpers before ending its engine.
   `Joined` joins on drop; field order drops the life-ending mailbox before
   the body's nursery, then the engine and name. This holds on unwind too.
-  `Host::end` and `Host::drop` end and join every root; no thread is detached.
+  `Host::end` and `Host::drop` end and join every child of the human; no
+  thread is detached.
 - **A4 — Jobs are linear.** A job is an agent's observed busy period, not a
   cancellation scope. Under the cell lock, `begin` commits `Control::JobOpened`;
   its commit number names the job held by `Mail`. Settlement commits
@@ -40,8 +42,9 @@ they do not drive exchanges.
   a job without settlement ended with its life.
 - **A5 — A parent is owed a reply.** The mail derives debt for every
   returning agent: what it took up and has not answered, or pending posts
-  by its parent. A helper owes from birth and parent messages; a returning
-  root owes from human posts, before admission. Human input to helpers and
+  by its parent. Every agent starts owing nothing. A helper owes from its
+  task's post and later parent messages; a returning child of the human
+  owes from human posts, before admission. Human input to helpers and
   peers add none. `Taken` keeps debt; `Withdrawn` takes unread debt away.
   `Txn::report` commits `Control::Status`, retires schedules and withdraws
   queued wakeups (all pending posts after life ends), then posts `Child`
@@ -61,8 +64,8 @@ they do not drive exchanges.
 - **A8 — Teardown.** Ending life reports `Failed` if a report is owed,
   joins helpers, retires the engine and returns failures to the joiner.
   Name removal precedes `Died`; `Gone` follows it. Directory emptiness is not
-  producer completion: `Host::is_finished` also requires every retained root
-  thread finished before the TUI's final drain/frame. `Host::end` still joins
+  producer completion: `Host::is_finished` also requires every retained
+  human child's thread finished before the TUI's final drain/frame. `Host::end` still joins
   and collects failures.
 - **A9 — Helpers' rest is bounded.** Under the mailbox lock, `next` ends a
   `Parent`-admitted life with `TimedOut` after its idle interval with no
@@ -84,8 +87,8 @@ they do not drive exchanges.
   agent; `LaunchError` returns both the spawn cause and teardown failures.
 
 - **A12 — Reminders.** At the end of an exchange, an owing agent is reminded
-  to reply iff no worker runs, `Rest` is empty, and no `Human`, `Message` or
-  `Child` is queued. `Rest` is read before the queue.
+  to reply iff no worker runs, `Rest` is empty, and no `Human`, `Task`,
+  `Message` or `Child` is queued. `Rest` is read before the queue.
 
 ## Delivery and replacement
 
@@ -144,8 +147,8 @@ without holding the parent's mailbox.
 thread and join laws. The immutable client is owned by `Body`; frontends
 read `AgentRow.selected` from the cell through `Port`, not the client.
 Its P5 replaces A8's completion criterion: after a drain to empty, every known
-root tab must have received `Died`. `Host::is_finished` is removed;
-`Host::end` still joins and collects failures. The laws above include the
+tab for a child of the human must have received `Died`.
+`Host::is_finished` is removed; `Host::end` still joins and collects failures. The laws above include the
 fold amendment below.
 
 ## Amendment — 2026-10-30: an agent is the fold of its log
@@ -157,6 +160,23 @@ keep poison; a poisoned cell ends life and its helper still reports failure.
 `commit_to` appends and steps together. The context remains owner-held,
 not locked with the shared folds.
 
+## Amendment — 2026-10-30: one kind of agent
+
+The human has no model, log or engine. Its life is the fleet root and
+`Fleet.human: Mutex<Nursery>` owns its children's handles and joins, as an
+agent's nursery owns its helpers. `Host::children()` lists every adopted
+child in birth order, joined or not, including `/new` and `/branch` births;
+end repeatedly drains the nursery to include racing births. The human is
+not sent `Gone`; frontends already observe `Died`.
+
+`Agent::born` and `AgentLog::create` are the one birth and log opening.
+`Parent::terms` is the one construction case split: the human lends launch
+terms; an agent lends search, one less fuel, nested life, `Parent` admission
+and `returns: true`. The handle holds only fixed parentage; `returns` is
+read from `Mail`. The helper's opening task is its parent's `Peer` post,
+with bare text, and debt begins at that post, not birth. A2 and A5 above
+include these rules.
+
 ## Where
 
 - `exarch/src/agent.rs`, `agent/{attend,build,spawn,engine,loan,nursery}.rs`:
@@ -164,8 +184,8 @@ not locked with the shared folds.
 - `exarch/src/bus/{mailbox,lease}.rs`, `schedule.rs`: admission, observed
   jobs, Stop, reports and scheduled-firing transactions.
 - `exarch/src/{host,port}.rs`, `agent/fleet.rs`, `headless.rs`,
-  `tui/{app,prompt,tabs,tui_loop}.rs`: joined roots, registry-backed ports and
-  observed root deaths, including lossless Stop restoration.
+  `tui/{app,prompt,tabs,tui_loop}.rs`: the human's nursery, registry-backed
+  ports and observed child deaths, including lossless Stop restoration.
 - `synod/src/assistant/{guest,conversation}.rs`, `window/conversation.rs`:
   gated jobs, folder walks and machine recovery after joins.
 
@@ -175,4 +195,4 @@ not locked with the shared folds.
 
 The terminal verdict includes recording failure through the final `SessionEnded` append. A missing terminal completion is a failure, not a successful teardown.
 
-Headless observes helper panic verdicts received before its root report; it does not continue consuming the bus after that report. Joined teardown failures still reach the process result.
+Headless observes helper panic verdicts received before the returning agent's report; it does not continue consuming the bus after that report. Joined teardown failures still reach the process result.

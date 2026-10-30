@@ -7,16 +7,17 @@ use crate::agent::engine::Engine;
 use crate::agent::factory::Factory;
 #[cfg(test)]
 use crate::agent::fleet::HELPER_IDLE;
-use crate::agent::fleet::{Fleet, Launch, Name};
+use crate::agent::fleet::{Fleet, Launch, Name, Registry};
 use crate::agent::handle::Shared;
 use crate::agent::index::BuiltinIndex;
 use crate::agent::loan::Loanable;
 use crate::agent::nursery::Nursery;
-use crate::agent::{Admission, Agent, AgentHandle, Body, Readings, Role};
+use crate::agent::{Admission, Agent, AgentHandle, Body, Readings};
 use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
 use crate::bus::{AgentMailbox, Emitter};
 use crate::provider::{Provider, Toolset};
-use crate::record::{AgentId, AgentLog, Mail, Memory, Model, Resumed, Schedules, Selected};
+use crate::record::Opening;
+use crate::record::{AgentId, AgentLog, Inherited, Mail, Model, Resumed, Schedules, Selected};
 use crate::shell_eval::builtins;
 use ral_core::authority::policy::{Capabilities, GrantStack};
 use ral_core::carrier::{Severed, WireTransport};
@@ -54,30 +55,55 @@ fn with_teardown_failures(error: io::Error, failures: &[String]) -> io::Error {
         io::Error::other(format!("{error}\n{}", failures.join("\n")))
     }
 }
-const TRUNK_NAME: &str = "main";
+pub(crate) const FIRST_NAME: &str = "main";
 const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindings, workers, and \
     cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths \
     in the old context are dead), pinned state and scheduled events are gone (exarch-pins `list \
     and exarch-schedules `list to confirm), and any sub-agents from before have ended.";
 
-/// How a root answers: in conversation, or with one `reply` value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Trunk {
-    Converses,
-    Returns,
+/// Whom a new agent answers. Every other difference is in [`Parent::terms`].
+pub(crate) enum Parent<'a> {
+    Human,
+    /// The parent and the life the child's is cut from.
+    Agent(&'a AgentHandle, ScopeNode),
 }
-impl Trunk {
-    pub(crate) fn role(self) -> Role {
+
+/// What a parent lends its child.
+pub(crate) struct Terms {
+    pub(crate) parent: Option<AgentHandle>,
+    life: ScopeNode,
+    pub(crate) fuel: u32,
+    search: bool,
+    admission: Admission,
+    pub(crate) returns: bool,
+}
+impl Parent<'_> {
+    fn terms(self, launch: &Launch, registry: &Registry) -> Terms {
         match self {
-            Self::Converses => Role::Converses,
-            Self::Returns => Role::Returns,
+            Self::Human => Terms {
+                parent: None,
+                life: registry.root.child(),
+                fuel: launch.fuel,
+                search: launch.search,
+                admission: launch.admission,
+                returns: launch.returns,
+            },
+            Self::Agent(parent, life) => Terms {
+                parent: Some(parent.clone()),
+                life,
+                fuel: parent.0.fuel.saturating_sub(1),
+                search: parent.0.search,
+                admission: Admission::Parent { idle: launch.idle },
+                returns: true,
+            },
         }
     }
 }
-pub struct RootConfig {
+#[allow(clippy::struct_excessive_bools, reason = "independent launch policies")]
+pub struct LaunchConfig {
     pub system: String,
     pub run_dir: OwnDir,
-    pub trunk: Trunk,
+    pub returns: bool,
     pub admission: Admission,
     pub helper_idle: Duration,
     pub tools: Toolset,
@@ -132,14 +158,14 @@ impl RootEngine {
 }
 impl Fleet {
     pub(crate) fn found(
-        cfg: RootConfig,
+        cfg: LaunchConfig,
         root_engine: RootEngine,
         installers: &'static [EngineInstaller],
     ) -> io::Result<(Arc<Self>, Engine)> {
-        let RootConfig {
+        let LaunchConfig {
             system,
             run_dir,
-            trunk,
+            returns,
             admission,
             helper_idle,
             tools,
@@ -155,7 +181,7 @@ impl Fleet {
         } = cfg;
         if matches!(&root_engine, RootEngine::Wire { .. }) && fuel > 0 && factory.is_none() {
             return Err(io::Error::other(
-                "a wire root with spawn fuel needs an engine factory to make helper engines with: pass one via RootConfig::factory, or build this root with fuel: 0",
+                "a wire root with spawn fuel needs an engine factory to make helper engines with: pass one via LaunchConfig::factory, or build this root with fuel: 0",
             ));
         }
         if let RootEngine::Wire { attach, .. } = &root_engine
@@ -185,7 +211,7 @@ impl Fleet {
             .map_err(lost)?
             .ok_or_else(|| io::Error::other(format!("the engine names no ${SCRATCH_VAR}")))?;
         let fleet = Self::new(Launch {
-            trunk,
+            returns,
             admission,
             idle: helper_idle,
             allow_schedule,
@@ -221,25 +247,18 @@ impl Agent {
         engine: Engine,
         log: AgentLog,
         folds: (Mail, Schedules, Model),
-        role: Role,
-        life: ScopeNode,
+        terms: Terms,
         provider: Arc<Provider>,
         fleet: Arc<Fleet>,
     ) -> Self {
-        let (fuel, search, admission) = match &role {
-            Role::Child { parent } => (
-                parent.0.fuel.saturating_sub(1),
-                parent.0.search,
-                Admission::Parent {
-                    idle: fleet.launch.idle,
-                },
-            ),
-            Role::Converses | Role::Returns => (
-                fleet.launch.fuel,
-                fleet.launch.search,
-                fleet.launch.admission,
-            ),
-        };
+        let Terms {
+            parent,
+            life,
+            fuel,
+            search,
+            admission,
+            ..
+        } = terms;
         log.record_emitter().bind(life.clone());
         engine.transport().bind(life.clone());
         let mailbox = AgentMailbox::new(
@@ -247,7 +266,7 @@ impl Agent {
             life,
             log.record_emitter(),
             admission,
-            role.parent().map(|parent| parent.0.address.clone()),
+            parent.as_ref().map(|parent| parent.0.address.clone()),
             folds,
         );
         engine.install(&mailbox.address(), 0);
@@ -257,7 +276,7 @@ impl Agent {
             log_dir: log.dir().clone(),
             run_dir: fleet.launch.run_dir().clone(),
             started: Instant::now(),
-            role,
+            parent,
             fuel,
             search,
             address: mailbox.address(),
@@ -283,21 +302,56 @@ impl Agent {
             _name: name,
         }
     }
-    /// # Errors
-    /// Refuses an engine or session log that cannot be opened.
-    pub(crate) fn root(
-        cfg: RootConfig,
-        engine: RootEngine,
+    /// A new agent under `parent`, in a fresh log.
+    pub(crate) fn born(
+        fleet: &Arc<Fleet>,
+        parent: Parent<'_>,
+        name: Name,
+        engine: Engine,
         provider: Arc<Provider>,
+        inherited: Option<Inherited>,
     ) -> io::Result<Self> {
-        Self::first(fresh_id(), cfg, engine, provider, &crate::INSTALLERS)
+        let id = fresh_id();
+        let terms = parent.terms(&fleet.launch, &fleet.registry);
+        let parent = terms.parent.as_ref().map(AgentHandle::id);
+        let returns = terms.returns;
+        let log_name = name.name().to_string();
+        Self::hatch(
+            fleet,
+            terms,
+            name,
+            engine,
+            provider,
+            |sessions, selected, system| {
+                AgentLog::create(
+                    sessions,
+                    id,
+                    Opening {
+                        parent,
+                        name: &log_name,
+                        returns,
+                        selected,
+                        system,
+                        inherited,
+                    },
+                )
+                .map(|log| (log, ()))
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("could not open the session log of agent '{log_name}': {error}"),
+                    )
+                })
+            },
+        )
+        .map(|(agent, ())| agent)
     }
-    /// Reopen every root not closed with `/close`, with fresh engines.
+    /// Reopen the human's children not closed with `/close`, with fresh engines.
     ///
     /// # Errors
     /// Refuses chat, wire engines, missing sessions, or failed construction.
     pub(crate) fn resume(
-        cfg: RootConfig,
+        cfg: LaunchConfig,
         engine: RootEngine,
         provider: &Arc<Provider>,
     ) -> io::Result<Vec<(Self, Resumed)>> {
@@ -313,7 +367,7 @@ impl Agent {
         }
         let sessions_root = cfg.run_dir.dir("sessions")?;
         seed_id_counter(&sessions_root)?;
-        let mut live = AgentLog::live_roots(&sessions_root)?.into_iter();
+        let mut live = AgentLog::human_children(&sessions_root)?.into_iter();
         let Some(first) = live.next() else {
             return Err(io::Error::other(format!(
                 "cannot resume {}: no session is open there; were they all closed with /close?",
@@ -353,9 +407,11 @@ impl Agent {
         id: AgentId,
         provider: Arc<Provider>,
     ) -> io::Result<(Self, Resumed)> {
-        let returns = fleet.launch.trunk.role().returns();
+        let terms = Parent::Human.terms(&fleet.launch, &fleet.registry);
+        let returns = terms.returns;
         let (mut agent, resumed) = Self::hatch(
             fleet,
+            terms,
             name,
             engine,
             provider,
@@ -384,40 +440,9 @@ impl Agent {
         }
         Ok((agent, resumed))
     }
-    pub(crate) fn first(
-        id: AgentId,
-        cfg: RootConfig,
-        engine: RootEngine,
-        provider: Arc<Provider>,
-        installers: &'static [EngineInstaller],
-    ) -> io::Result<Self> {
-        let (fleet, engine) = Fleet::found(cfg, engine, installers)?;
-        let name = fleet
-            .registry
-            .name(TRUNK_NAME)
-            .map_err(|why| io::Error::other(why.to_string()))?;
-        Self::hatch(
-            &fleet,
-            name,
-            engine,
-            provider,
-            |sessions, selected, system| {
-                AgentLog::root(
-                    sessions,
-                    id,
-                    TRUNK_NAME,
-                    fleet.launch.trunk.role().returns(),
-                    selected,
-                    system,
-                    None,
-                )
-                .map(|log| (log, ()))
-            },
-        )
-        .map(|(agent, ())| agent)
-    }
-    pub(crate) fn hatch<T>(
+    fn hatch<T>(
         fleet: &Arc<Fleet>,
+        terms: Terms,
         name: Name,
         engine: Engine,
         provider: Arc<Provider>,
@@ -428,61 +453,21 @@ impl Agent {
         ) -> io::Result<((AgentLog, Mail, Schedules, Model), T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
-        let role = launch.trunk.role();
         let system = launch
-            .prompt_for(&engine, &role, launch.fuel, name.name())
+            .prompt_for(&engine, &terms, name.name())
             .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
         let ((log, mail, schedules, model), opened) =
             open(&launch.sessions_root, provider.selected(), &system)?;
-        let life = fleet.registry.root.child();
         let agent = Self::assemble(
             name,
             engine,
             log,
             (mail, schedules, model),
-            role,
-            life,
+            terms,
             provider,
             fleet.clone(),
         );
         Ok((agent, opened))
-    }
-    pub(crate) fn child_of(
-        (parent, life): (&AgentHandle, ScopeNode),
-        parent_log: &AgentLog,
-        fleet: &Arc<Fleet>,
-        name: Name,
-        engine: Engine,
-        provider: Arc<Provider>,
-        memory: Memory,
-    ) -> Result<Self, String> {
-        let launch = &fleet.launch;
-        let fuel = parent.0.fuel.saturating_sub(1);
-        let role = Role::Child {
-            parent: parent.clone(),
-        };
-        let system = launch
-            .prompt_for(&engine, &role, fuel, name.name())
-            .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
-        let (log, mail, schedules, model) = parent_log
-            .fork(
-                fresh_id(),
-                name.name(),
-                provider.selected(),
-                &system,
-                memory,
-            )
-            .map_err(|error| format!("could not fork child session log: {error}"))?;
-        Ok(Self::assemble(
-            name,
-            engine,
-            log,
-            (mail, schedules, model),
-            role,
-            life,
-            provider,
-            fleet.clone(),
-        ))
     }
     pub(crate) fn clear(&mut self) -> Result<(), String> {
         self.body
@@ -546,31 +531,36 @@ impl Agent {
             .launch
             .engine()
             .map_err(|error| error.to_string())?;
-        Self::child_of(
-            (&self.handle, self.mailbox.life().child()),
-            &self.body.log,
+        Self::born(
             &self.fleet,
+            Parent::Agent(&self.handle, self.mailbox.life().child()),
             name,
             engine,
             self.body.client.clone(),
-            Memory::Amnemon,
+            None,
         )
+        .map_err(|error| error.to_string())
     }
     /// # Errors
     /// Refuses an engine or session log that cannot be opened.
     #[cfg(test)]
-    pub fn root_for_test(
-        cfg: RootConfig,
+    pub fn born_for_test(
+        cfg: LaunchConfig,
         engine: RootEngine,
         provider: Arc<Provider>,
     ) -> io::Result<Self> {
-        Self::root(cfg, engine, provider)
+        let (fleet, engine) = Fleet::found(cfg, engine, &crate::INSTALLERS)?;
+        let name = fleet
+            .registry
+            .name(FIRST_NAME)
+            .map_err(|why| io::Error::other(why.to_string()))?;
+        Self::born(&fleet, Parent::Human, name, engine, provider, None)
     }
     /// # Errors
     /// Refuses chat, wire engines, missing sessions, or failed construction.
     #[cfg(test)]
     pub fn resume_for_test(
-        cfg: RootConfig,
+        cfg: LaunchConfig,
         engine: RootEngine,
         provider: &Arc<Provider>,
     ) -> io::Result<Vec<(Self, Resumed)>> {
@@ -580,38 +570,34 @@ impl Agent {
     /// Refuses a scratch directory or session log that cannot be created.
     #[cfg(test)]
     pub fn for_test(system: &str) -> io::Result<Self> {
-        Self::for_test_with(TestTrunk::new(system))
+        Self::for_test_with(TestLaunch::new(system))
     }
     /// # Errors
     /// Refuses a scratch directory or session log that cannot be created.
     /// # Panics
     /// If the test process has no cwd.
     #[cfg(test)]
-    pub(crate) fn for_test_with(cfg: TestTrunk) -> io::Result<Self> {
-        let TestTrunk {
+    pub(crate) fn for_test_with(cfg: TestLaunch) -> io::Result<Self> {
+        let TestLaunch {
             system,
             allow_schedule,
             resume_on_reset,
             search,
             disk_warn_bytes,
             helper_idle,
-            trunk,
+            returns,
             admission,
             tools,
             fuel,
             installers,
             grants,
         } = cfg;
-        let id = fresh_id();
-        let scratch = Arc::new(Scratch::for_test(
-            crate::app::EXARCH,
-            &format!("agent-{id}"),
-        )?);
+        let scratch = Arc::new(Scratch::for_test(crate::app::EXARCH, "agent")?);
         let run_dir = scratch.test_sibling("run")?;
-        let config = RootConfig {
+        let config = LaunchConfig {
             system,
             run_dir,
-            trunk,
+            returns,
             admission,
             helper_idle,
             tools,
@@ -635,11 +621,17 @@ impl Agent {
             "test-model",
             crate::provider::scripted::Script::new(),
         ));
-        Self::first(id, config, engine, provider, installers)
+        let (fleet, engine) = Fleet::found(config, engine, installers)?;
+        let name = fleet
+            .registry
+            .name(FIRST_NAME)
+            .map_err(|why| io::Error::other(why.to_string()))?;
+        Self::born(&fleet, Parent::Human, name, engine, provider, None)
     }
 }
 #[cfg(test)]
-pub(crate) struct TestTrunk {
+#[allow(clippy::struct_excessive_bools, reason = "independent launch policies")]
+pub(crate) struct TestLaunch {
     pub(crate) system: String,
     pub(crate) grants: GrantStack,
     pub(crate) allow_schedule: bool,
@@ -647,14 +639,14 @@ pub(crate) struct TestTrunk {
     pub(crate) search: bool,
     pub(crate) disk_warn_bytes: Option<u64>,
     pub(crate) helper_idle: Duration,
-    pub(crate) trunk: Trunk,
+    pub(crate) returns: bool,
     pub(crate) admission: Admission,
     pub(crate) tools: Toolset,
     pub(crate) fuel: u32,
     pub(crate) installers: &'static [EngineInstaller],
 }
 #[cfg(test)]
-impl TestTrunk {
+impl TestLaunch {
     pub(crate) fn new(system: &str) -> Self {
         Self {
             system: system.to_string(),
@@ -664,7 +656,7 @@ impl TestTrunk {
             search: true,
             disk_warn_bytes: None,
             helper_idle: HELPER_IDLE,
-            trunk: Trunk::Returns,
+            returns: true,
             admission: Admission::Free,
             tools: Toolset::offered(false),
             fuel: SPAWN_FUEL,

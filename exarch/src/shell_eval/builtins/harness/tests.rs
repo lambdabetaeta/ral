@@ -320,9 +320,9 @@ fn unknown_extra_spec_field_errors_statically_naming_the_field() {
 }
 
 fn granted_trunk() -> Agent {
-    Agent::for_test_with(crate::agent::TestTrunk {
+    Agent::for_test_with(crate::agent::TestLaunch {
         allow_schedule: true,
-        ..crate::agent::TestTrunk::new("system")
+        ..crate::agent::TestLaunch::new("system")
     })
     .expect("a granted test trunk")
 }

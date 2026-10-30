@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7d763da239ed430e39fb38e1c104b59fd2ecc966
-generated_at_date: 2026-10-29
+generated_at_commit: 64ecd691
+generated_at_date: 2026-10-30
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
 
@@ -322,8 +322,11 @@ is judged; shared machinery stays with exarch and vm-manager.
   implements exarch's `Factory` through `Machine::dial_engine`; the mutex
   supplies `Sync`. `exarch::app::SCRATCH_VAR` names the guest scratch variable.
 - `Guest` holds `factory`, `host: Host` and `net`. `Host::found` launches
-  its conversing root with `Admission::Gated`; `root`, `port` and `feed`
-  expose id, frontend reach and signals. Launch types come from
+  the human's first child with `LaunchConfig { returns: false, admission:
+  Admission::Gated, … }`. `Guest::root` reads `Host::children()[0]`; the host
+  lists every adopted human child in birth order, joined or not, including
+  `/new` and `/branch` births. `port` and `feed` expose frontend reach and
+  signals. Launch types come from
   `exarch::host`; commands/signals come from `exarch::port`. Helper idle is
   `HELPER_IDLE`.
 - `Conversation::settle_baseline` joins the opening walk before Ready.
@@ -342,8 +345,8 @@ is judged; shared machinery stays with exarch and vm-manager.
 - `engine_lost` captures `EngineLost` into `engine.log` while the machine
   exists. `Guest::capture` reads the loss and run directory without borrowing
   the root. Capture failure is secondary to the original loss.
-- `Guest::end` calls `Host::end`, ending and joining all roots and their
-  helpers before uniquely recovering `MachineFactory`. A retained port holds
+- `Guest::end` calls `Host::end`, ending and joining the human's children
+  and their helpers before uniquely recovering `MachineFactory`. A retained port holds
   the registry, not the factory-bearing launch, so cannot prevent recovery
   ([[decisions/261029_a-frontend-holds-a-port|a-frontend-holds-a-port]]).
   It stops/joins netgate and shuts down the machine afterwards. `Conversation::end` drops

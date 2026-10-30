@@ -25,6 +25,7 @@ mod replay;
 mod schedules;
 mod seam;
 mod session;
+pub(crate) use session::Opening;
 pub(crate) mod stream;
 mod view;
 

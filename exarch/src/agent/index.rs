@@ -1,15 +1,16 @@
 //! Per-agent resolution of the launch's prompt: the builtin index filtered by
 //! the agent's own grants, its name, and the sections those grants teach.
 
-use crate::agent::Role;
 use crate::prompt::{BUILTIN_INDEX_PLACEHOLDER, NAME_PLACEHOLDER};
 use crate::provider::roles::Roles;
 use std::borrow::Cow;
 
 /// One agent's construction-fixed authorities — the same facts the desk reads
 /// when refusing, so prompt and refusal cannot disagree.
+#[allow(clippy::struct_excessive_bools, reason = "independent prompt grants")]
 pub(crate) struct Grants<'a> {
-    pub role: &'a Role,
+    pub spawned: bool,
+    pub returns: bool,
     pub allow_schedule: bool,
     pub spawns: bool,
     pub roles: &'a Roles,
@@ -29,7 +30,7 @@ pub(crate) struct Grants<'a> {
 /// gate on their own grant alone.
 type Section = Option<(&'static str, Cow<'static, str>)>;
 fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 6] {
-    let returns = g.role.returns();
+    let returns = g.returns;
     [
         (g.allow_schedule, &["exarch-schedules"], None),
         (g.spawns || returns, &["exarch-agents"], None),
@@ -47,7 +48,7 @@ fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 6] {
             Some(("Roles", Cow::Owned(g.roles.prompt()))),
         ),
         (
-            matches!(g.role, Role::Child { .. }),
+            g.spawned,
             &[],
             Some((
                 "Spawned",
@@ -165,9 +166,9 @@ mod tests {
         let provider = Arc::new(Provider::scripted("small-model", Script::default()));
         let some = Roles(BTreeMap::from([("cheap".into(), provider)]));
         let prompt = |spawns, roles| {
-            let role = Role::Converses;
             let grants = Grants {
-                role: &role,
+                spawned: false,
+                returns: false,
                 allow_schedule: false,
                 spawns,
                 roles,

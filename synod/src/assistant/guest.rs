@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use exarch::host::{EngineLost, Factory, Host, RootConfig, RootEngine};
+use exarch::host::{EngineLost, Factory, Host, LaunchConfig, RootEngine};
 use exarch::port::{BusReceiver, Port};
 use exarch::provider::Provider;
 use exarch::record::AgentId;
@@ -42,7 +42,7 @@ pub(crate) struct Guest {
 impl Guest {
     pub(crate) fn start(
         booted: Booted,
-        mut config: RootConfig,
+        mut config: LaunchConfig,
         ceiling: Capabilities,
         provider: Arc<Provider>,
         net: netgate::Config,
@@ -64,7 +64,7 @@ impl Guest {
     }
 
     pub(crate) fn root(&self) -> AgentId {
-        self.host.roots()[0]
+        self.host.children()[0]
     }
 
     pub(crate) fn port(&self) -> Port {
@@ -213,7 +213,7 @@ mod tests {
         let run_dir = OwnDir::for_test("guest-factory-join").expect("run directory");
         let (factory, shutdown) = machine_factory();
         let host = host_with_factory(&factory, &run_dir);
-        let (port, root) = (host.port(), host.roots()[0]);
+        let (port, root) = (host.port(), host.children()[0]);
         assert!(port.is_live(root));
         assert!(Arc::strong_count(&factory) > 1);
 
@@ -248,7 +248,7 @@ mod tests {
         .expect("network session");
         let guest = Guest { factory, host, net };
         let (port, root) = (guest.port(), guest.root());
-        assert_eq!(root, guest.host.roots()[0]);
+        assert_eq!(root, guest.host.children()[0]);
         assert!(std::ptr::eq(guest.feed(), guest.host.feed()));
         assert_eq!(guest.run_dir().path(), run_dir.path());
 

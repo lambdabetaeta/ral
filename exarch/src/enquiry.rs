@@ -568,26 +568,26 @@ impl Datum for AgentInfo {
 }
 
 /// Who started a listed agent — the edge that keeps a flat fleet listing a
-/// tree.  A root was started by a human, and there is no name to give.
+/// tree. The human has no agent name to give.
 pub enum Spawner {
-    Root,
+    Human,
     Agent(String),
 }
 
 impl Datum for Spawner {
     fn encode(self) -> FOValue {
         match self {
-            Self::Root => tag("root", None),
+            Self::Human => tag("human", None),
             Self::Agent(name) => tag("agent", Some(name.encode())),
         }
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
         match untag(v) {
-            Some(("root", None)) => Ok(Self::Root),
+            Some(("human", None)) => Ok(Self::Human),
             Some(("agent", Some(name))) => String::decode(name).map(Self::Agent),
             _ => Err(format!(
-                "expected `root or `agent <name>, got {}",
+                "expected `human or `agent <name>, got {}",
                 v.shape()
             )),
         }

@@ -109,6 +109,7 @@ fn stop_recalls_only_human_text_and_preserves_helpers_and_the_job() {
     address.steer("second".into()).unwrap();
     address.steer("third".into()).unwrap();
     address.post(message("peer", false)).unwrap();
+    address.post(task("opening task")).unwrap();
     address.post(wakeup(1, "tick")).unwrap();
     assert_eq!(
         address.stop(id),
@@ -124,6 +125,7 @@ fn stop_recalls_only_human_text_and_preserves_helpers_and_the_job() {
         mailbox.drain().as_slice(),
         [
             Drained::Input(Input::Message(_)),
+            Drained::Input(Input::Task(_)),
             Drained::Input(Input::Wakeup { .. })
         ]
     ));

@@ -316,17 +316,16 @@ fn severed_worker_probe_declines_after_replaying_cards() {
 
 #[test]
 fn admission_renders_human_and_peer_inputs_without_changing_debt() {
-    use crate::agent::Trunk;
     use crate::agent::testkit::{forked_child, trunk};
     use crate::bus::AgentMessage;
-    for kind in [Trunk::Converses, Trunk::Returns] {
+    for kind in [false, true] {
         let root = trunk(kind);
         let prompt = root.admit(Input::Human("human task".into())).unwrap();
         assert_eq!(prompt.text, "human task");
         assert_eq!(prompt.voice, crate::record::Voice::Human);
         assert!(!root.handle().status().unwrap().owes);
     }
-    let parent = trunk(Trunk::Converses);
+    let parent = trunk(false);
     let helper = forked_child(&parent, "helper", "`inherit");
     let prompt = helper
         .admit(Input::Message(AgentMessage {
@@ -337,7 +336,7 @@ fn admission_renders_human_and_peer_inputs_without_changing_debt() {
         .unwrap();
     assert_eq!(prompt.voice, crate::record::Voice::Peer);
     assert!(prompt.text.contains("follow-up"));
-    assert!(helper.handle().status().unwrap().owes);
+    assert!(!helper.handle().status().unwrap().owes);
 }
 
 #[test]
@@ -381,6 +380,7 @@ fn gone_joins_and_collects_failures_without_a_model_prompt() {
         TestAgentSpec::child("helper", &session.handle(), session.mailbox.life().child()),
     )
     .unwrap();
+    crate::agent::testkit::take_task(&helper, &helper.mailbox);
     let joined = Joined::new(std::thread::spawn(|| Teardown {
         failures: vec!["helper teardown".into()],
     }));
@@ -388,7 +388,7 @@ fn gone_joins_and_collects_failures_without_a_model_prompt() {
     helper.end();
     assert!(
         session.rest().pending,
-        "birth debt remains pending after the helper ends"
+        "taken task debt remains pending after the helper ends"
     );
     session.gone(helper.id());
     assert!(!session.body.nursery.holds(helper.id()));

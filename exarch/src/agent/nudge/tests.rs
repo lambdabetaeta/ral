@@ -464,13 +464,12 @@ fn pending_helpers_suppress_repairs_without_spending_or_consuming_pin_edges() {
 
 #[test]
 fn a_self_nudge_continues_one_prompt_inside_one_job() {
-    use crate::agent::Trunk;
     use crate::agent::testkit::{host, ral_call, scripted, set_provider, trunk};
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{ChildStatus, Record, Transcript, Voice};
     use std::time::{Duration, Instant};
 
-    let mut root = trunk(Trunk::Returns);
+    let mut root = trunk(true);
     set_provider(
         &mut root,
         scripted(
