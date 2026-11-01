@@ -1,8 +1,8 @@
 class Exarch < Formula
   desc "Coding agent that drives the ral shell under a capability grant"
   homepage "https://github.com/lambdabetaeta/ral"
-  url "https://github.com/lambdabetaeta/ral/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "b0928718a43f968a60e35ae82f91803fa526c72b0cae33380f7fcaa45fb5abdd"
+  url "https://github.com/lambdabetaeta/ral/archive/refs/tags/v0.10.0.tar.gz"
+  sha256 "f50e106ef29a8b0c020da07c6d00c871bfc0d1bf96e5a5933a427b5f80fa20de"
   license any_of: ["MIT", "Apache-2.0"]
   head do
     url "https://github.com/lambdabetaeta/ral.git", branch: "main"
