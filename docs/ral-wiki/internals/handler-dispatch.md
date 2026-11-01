@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d4af249c
-verified_at_date: 2026-09-12
-anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, apply_handler, render_handler_args, Frame::Unmask, WithinUndo]
+verified_at_commit: 96e103a5
+verified_at_date: 2026-11-01
+anchors: [HandlerStack, lookup, HandlerLookup, HandlerStack::over, natives_and_base, strip_matched, restore_matched, step_exec, run_base_frame, render_handler_args, Frame::Unmask, WithinUndo]
 ---
 
 # Handler dispatch: deep, self-masking, by frame
@@ -23,7 +23,7 @@ handler stack alike and reaches the external command directly
 **The stack has two layers.** Above are the *run frames* pushed by `within` and
 `handle`; below is a permanent *base layer* holding the *base-frame manifest*'s
 rows — `echo` and `detach`, each variadic over a list of strings
-(`install_base`). Permanence is representational:
+(`HandlerStack::over`, over the rows `natives_and_base` selects). Permanence is representational:
 the mutators (`strip_matched`, `remove_alias`) index the run frames alone, so no
 operation can name a base frame. The base layer never crosses the wire — the
 wire form is a `Vec<HandlerFrame>` — so a receiving shell's own boot installs

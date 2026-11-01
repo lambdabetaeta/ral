@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc0c9fbb
-generated_at_date: 2026-10-30
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -161,7 +161,7 @@ Sourced into the shell at boot:
 Every verb below is a `BuiltinEntry` in
 `exarch/src/shell_eval/builtins/harness.rs`
 (`HARNESS_BUILTINS`, carried on `host_surface()` beside the atoms above — one
-surface for the boot install and the prompt's `builtin_index` alike), landed by
+surface for the boot install and the prompt's `BuiltinIndex` alike), landed by
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 over the rail [[map/core/engine-protocol|engine-protocol]] built. A verb's
 body reads the model's argument, as first-order data, into a `Request` and
@@ -359,12 +359,13 @@ and ends itself after its idle interval (five hours by default)
   `` `read <name> ``. The acting tags answer `[live: Int, replied: Int]` *afterwards* — other live agents in the reader's tree, and how many of
   its own live helpers have a readable reply. Reading consumes nothing.
   `` `list `` answers the roster rows,
-  `[[name: Str, spawner: <root|agent Str>, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`
+  `[[name: Str, spawner: <human|agent Str>, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`
   — the reader's whole tree, itself among them, since what it may *message* is
-  wider than what it spawned. The climb stops at a root, so one root session
-  never lists another's. `` `read `` answers `[name: Str, reply: α]`,
+  wider than what it spawned. The roster holds only agents sharing the
+  reader's `founder`, so one human child never lists another's. `` `read `` answers `[name: Str, reply: α]`,
   the value published by the newest own helper of that name in the nursery,
-  live or ended. It refuses a live working helper, Failed, Stopped or no
+  live or ended. It refuses a live helper whose reply is still due
+  (`Status::reply_pending`), and Failed, Stopped or no
   report. Parent follow-up makes it pending again; Stop and reply preserve
   the nursery, while clear forgets earlier helpers. Reading consumes nothing
   and reaches no grandchildren. The family's answer type is a bare `α`
@@ -381,14 +382,14 @@ and ends itself after its idle interval (five hours by default)
   `type`/`grant`/`model` rows *inside* that record stay open for the
   same reason one level down. Every family door refuses a block or a handle at
   any depth of its argument (`first_order`), so the type variables its argument
-  mentions are `data` and its row variables deep (`door` in `harness.rs`;
+  mentions are `data` and its row variables deep (`family_scheme` in `harness.rs`;
   [[decisions/260930_operators-are-kinded|operators-are-kinded]]).
   `` `start [prompt: …, name: …, type: …, grant: …, model: …] `` is the one
   spawn: launch-only and always asynchronous, with an owed report notice
   delivered through the parent's mailbox. `name` is the child's identity —
   the tab-bar contract (`check_name`, in `enquiry.rs` beside the rule it belongs
   with), reserved through teardown or the call is refused; this door refuses a
-  malformed one early and in the model's own words, and `Fleet::name` refuses it
+  malformed one early and in the model's own words, and `Registry::name` refuses it
   again for peers that never came through a door
   ([[map/exarch/agent|agent]]);
   `type` is `` `amnemon `` (blank context) or `` `mnemon `` (imports the
@@ -396,7 +397,7 @@ and ends itself after its idle interval (five hours by default)
   one layer the child gets — `` `inherit ``, one of the four spawnable
   [[map/exarch/policy|base]] names (`confined`, `read-only`, `edit-only`,
   `reasonable`), or `` `restrict R `` with `R` a capability record in
-  `grant [...] { body }`'s own vocabulary; the engine reads it off `Launch::split`, and the desk's `Start` carries only the remaining `Spec`. `Grant::decode` (`enquiry.rs`) closes the row,
+  `grant [...] { body }`'s own vocabulary; `Launch` splits the model's record into that `Grant` and the remaining `Spec`; `fork_then_enquire` bequeaths the grant onto the forked shell, and the desk's `Start` carries the `Spec` with its `ForkClaim`. `Grant::decode` (`enquiry.rs`) closes the row,
   naming all six shapes and `R`'s own keys in its refusal and holding `R` to
   first-order data, since the ceiling crosses to the far side as data; the
   record itself is decoded by `decode_capability_map` off the `Form::Grant`

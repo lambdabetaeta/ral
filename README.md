@@ -96,7 +96,8 @@ POSIX command strings and scripts go to `/bin/sh`, so scp and rsync never notice
   sandbox is `grant`.
 - **synod** — exarch for office work: grant it a folder and it does the job
   there, inside a real VM, then reports what changed.
-- **[plugins/](plugins)** — autosuggestions, fzf pickers, zoxide, written in ral.
+- **[plugins/](plugins)** — autosuggestions, fzf pickers, zoxide, written in ral;
+  [docs/PLUGINS.md](docs/PLUGINS.md) is the design.
 - **[editors/](editors)** — tree-sitter grammar and syntax files for most
   editors.
 - **[docs/ral-wiki](docs/ral-wiki)** — design chapters and the decision log.

@@ -15,6 +15,7 @@ pages open straight from the filesystem with no server.
   tutorial.html   docs/TUTORIAL.md rendered to HTML
   spec.html       docs/SPEC.md rendered to HTML
   rationale.html  docs/RATIONALE.md rendered to HTML
+  plugins.html    docs/PLUGINS.md rendered to HTML
 
   exarch/index.html     the exarch landing — shared menubar injected into
                         exarch-index.template.html, its ral listings
@@ -99,6 +100,7 @@ NAV = [
     ("tutorial.html", "Tutorial", "tutorial"),
     ("spec.html", "Spec", "spec"),
     ("rationale.html", "Rationale", "rationale"),
+    ("plugins.html", "Plugins", "plugins"),
     ("examples.html", "Examples", "examples"),
     ("wiki/index.html", "Wiki", "wiki"),
 ]
@@ -148,6 +150,7 @@ PANEL_TILES = [
     ("tutorial.html", "Tutorial", "tutorial", "gold", "&#9637;"),
     ("spec.html", "Spec", "spec", "sea", "&#9638;"),
     ("rationale.html", "Rationale", "rationale", "coral", "&#9639;"),
+    ("plugins.html", "Plugins", "plugins", "teal", "&#9641;"),
     ("examples.html", "Examples", "examples", "orchid", "&#9640;"),
 ]
 
@@ -654,12 +657,14 @@ def render_docs() -> None:
         (DOCS_DIR / "TUTORIAL.md", "tutorial", "tutorial", "tutorial.html"),
         (DOCS_DIR / "SPEC.md", "specification", "spec", "spec.html"),
         (DOCS_DIR / "RATIONALE.md", "rationale", "rationale", "rationale.html"),
+        (DOCS_DIR / "PLUGINS.md", "plugins", "plugins", "plugins.html"),
     ]:
         text = src.read_text(encoding="utf-8")
         # The sources link to each other by repo path; on the site those
         # documents live side by side as pages.
         text = text.replace("SPEC.md", "spec.html")
         text = text.replace("RATIONALE.md", "rationale.html")
+        text = text.replace("PLUGINS.md", "plugins.html")
         body = markdown.markdown(text, extensions=["extra", "sane_lists"])
         body = highlight_doc_blocks(body)
         (SITE / dst).write_text(

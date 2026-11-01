@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-generated_at_date: 2026-10-27
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [ral/src/]
 ---
 
@@ -8,7 +8,7 @@ covers_paths: [ral/src/]
 
 `ral/` is the `ral` binary — a thin front-end over [[map/core|ral-core]].
 **It is argv dispatch into an engine it boots in process and speaks to only
-through the [[design/engine-protocol|engine protocol]], driving one of three
+through the [[design/engine-protocol|engine protocol]], driving one of two
 selectable frontends over the REPL session and plugins;** the language,
 evaluator, and capability machinery all live in core, and neither front-end
 holds a `Shell`.
@@ -51,10 +51,10 @@ REPL makes that state the thing the loop threads.
   `exec.rs`, `host.rs`, `enquiry.rs`, `prompt.rs`, `config*`, `theme.rs`,
   `errfmt.rs`).
 - [[map/repl/frontend|frontend]] — the `Frontend` trait and its two
-  implementations (minimal, rustyline), plus the frontend-neutral prefix-then-fuzzy
-  completion engine and shared highlight table
-  (`ral/src/repl/frontend*`, `completion.rs`, `complete.rs`,
-  `cursor.rs`, `highlight_style.rs`).
+  implementations (minimal, rustyline), the external-editor draft hook, plus
+  the frontend-neutral prefix-then-fuzzy completion engine and shared
+  highlight table (`ral/src/repl/frontend*`, `external_editor.rs`,
+  `completion.rs`, `complete.rs`, `cursor.rs`, `highlight_style.rs`).
 - [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor builtins,
   the plugin load builtins, and the one ordered keybinding router
   (chord, guard, first match, built-in tail) every frontend dispatches

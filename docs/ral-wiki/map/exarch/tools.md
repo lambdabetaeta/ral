@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc0c9fbb
-generated_at_date: 2026-10-30
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
@@ -62,12 +62,12 @@ can see what it sent.
   bare `relayed`. Nothing else happens — no call row, no model-view twin — so a
   model may narrate between calls without ending its turn. A record failure is
   a seam fault, not a tool error: the model still gets its acknowledgement.
-- **`agent/spawn.rs`** — not a tool module but the
-  spawn spine every launch shares: `spawn_async`, `AsyncSpawn`,
-  `SpawnedChild`. The attended roots (`main`, a resumed one, a `/new` or
-  `/branch` root hatched by `spawn_root`) and the desk's
-  `` exarch-agents `start `` handler build on it — either arm of it, in-process or
-  across a wire — so a root and a harness-spawned child run one mechanism
+- **`agent/spawn.rs`** — not a tool module but the launch spine every agent
+  shares: `Agent::launch` gives one agent its own joined thread, and
+  `human_child` hatches the human's `/new` and `/branch` children through
+  `Agent::born(Parent::Human, …)`. The desk's `` exarch-agents `start `` handler
+  launches helpers through the same `launch`, so a human's child and a
+  harness-spawned child run one mechanism
   ([[design/agents|agents]], [[map/exarch/agent|agent]]).
 
 The harness verbs are answered by the `ExarchDesk` (`exarch/src/agent/desk.rs`),

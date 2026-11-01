@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 104cb519
-generated_at_date: 2026-10-26
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -121,7 +121,7 @@ Bodies are grouped by concern, one submodule each:
   `builtin_is_done`, `builtin_first_settled`), and the one
   cancel-aware sweep (`first_ready`) under `await`, `race`, a gather's join and
   `first-settled` (`race` ends its losers and drains any already-`stopping`
-  handles through `end_unclaimed`), and `concurrency/tests.rs` the tests; the
+  handles through `stop_and_drain`, `shell/runtime/handle/brood.rs`), and `concurrency/tests.rs` the tests; the
   worker's deferred surface lives in `shell/runtime/handle/surface.rs`, its
   cradle, brood and `ScopeOwner` in `shell/runtime/handle/brood.rs` (builtins under their bare
   names; `par`, `both` and `first-of` are prelude code over them,
@@ -137,22 +137,22 @@ Bodies are grouped by concern, one submodule each:
   the double-fork in `shell/exec/command/detach.rs`
   ([[map/core/runtime|runtime]]), and it yields a `{pid, desc}` receipt, not a
   `Handle`, so none of the eliminators below apply to it. A handle is one
-  private lock over a four-state `HandleState`: `Running`,
-  `Stopping { cancelled_at }` (cancellation requested while `Running`, worker
-  thread still unwinding), `Ready(CompletedHandle { stdout, stderr, end })`
-  (worker thread finished, result unclaimed), or `Consumed` (result claimed or
-  cancelled worker finished). `HandleInner::new` returns the handle with its one
+  private lock over a `HandleState`: `Running`, `Stopping` (cancellation
+  requested while `Running`, worker thread still unwinding), or
+  `Ended { ended, result }` (worker thread finished), whose `result` cell holds
+  the `CompletedHandle { stdout, stderr, end }` while unclaimed (*ready*) and is
+  taken once claimed (*consumed*).  Observers see these as the four-way `Sample`
+  (`Running`, `Stopping`, `Ready`, `Consumed`). `HandleInner::new` returns the handle with its one
   `CompletionPermit`, which the worker thread owns: `CompletionPermit::finish`
-  drains the buffers, transitions `Running` → `Ready` or `Stopping` →
-  `Consumed`, and sets the end `Stamp` *before* calling
+  drains the buffers, transitions `Running` → ready or `Stopping` →
+  consumed, and sets the end `Stamp` *before* calling
   `DeferredSurface::flush(DoneEvent)`, so a host woken by the deferred batch
   never observes the handle still non-terminal; a `CompletionPermit` dropped
   unfinished — a panic — completes the handle as a panic naming the worker and
   flushes its deferred surface, so `poll`/`race` see a finished block rather
-  than spinning. Observers read a `Sample` — `Running { elapsed }`,
-  `Stopping { elapsed }`, `Ready { completed, elapsed }`, or
-  `Consumed { elapsed }` — or a single consistent `HandleSnapshot` for
-  `workers`/probe rows, and the transitions are `complete` (via
+  than spinning. Observers read a `Sample`, paired with the elapsed time in one
+  consistent `Snapshot` (`HandleInner::snapshot`, `snapshot_io` for `poll`'s
+  byte peeks), which also feeds `workers`/probe rows, and the transitions are `complete` (via
   `CompletionPermit::finish`), `observe` (a read that lends the state to a
   closure under the lock), `claim_ready` (moves a `Ready` result out and leaves
   `Consumed`, in one step) and `claim_and_stop` (`Running` → `Stopping` firing
@@ -253,7 +253,7 @@ Bodies are grouped by concern, one submodule each:
   of ral calls. The expiry records a `Retention`-cause `ReapNotice`, which the
   engine pushes at the next settled run's ready boundary as a `` `notice ``
   surface event (`emit_ready_boundary_notices`; exarch decodes it back via
-  `card::value_to_notice`). An unarmed registry (the REPL) retains `Ready`
+  `Notice::from_surface`). An unarmed registry (the REPL) retains `Ready`
   entries indefinitely; a claimer removes an entry when it transitions to
   `Consumed`, so the sweep only catches `Ready` results nobody claimed. A worker
   runs its thunk on a fresh `std::thread` via `Shell::spawn_thread`
@@ -317,7 +317,10 @@ Bodies are grouped by concern, one submodule each:
   `path`, and `shadows`; absent facts are omitted. `locate_all` returns the
   whole resolution chain, so `explain`
   also names what a name shadows, a PATH binary included, which is the
-  question `which` answers wrongly for every name ral provides;
+  question `which` answers wrongly for every name ral provides. The command
+  head is judged as a launch would be (`Head::select` under the live grant
+  stack): a bundled tool reads `bundled`, a refused head `denied by grant`
+  naming the path as requested;
 - `print.rs` — the value pretty-printer shared by the REPL and exarch's
   tool-result rendering (`PrintParams`; a rendering utility, not a registered
   builtin). One printer, one policy, per-reader numbers: truncation preserves

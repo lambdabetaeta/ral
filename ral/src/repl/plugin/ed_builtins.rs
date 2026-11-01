@@ -313,8 +313,8 @@ fn highlight_req(v: &Value) -> Settled<HighlightReq> {
 /// with the current value and its return becomes the new value, which the
 /// host keeps, so it must be data.
 ///
-/// A boundary: the cell persists across sessions, so the value the host hands
-/// back was decided by whichever program last wrote it, and is admitted against
+/// A boundary: the cell lives until unload, so the value the host hands
+/// back was decided by whichever run last wrote it, and is admitted against
 /// this call's type before the updater runs.  The updater's own result was
 /// produced by typed code and is stored as it is.
 pub fn builtin_ed_state(
@@ -328,8 +328,8 @@ pub fn builtin_ed_state(
     let current = match answer::<Option<Data>>(shell, mooring, "_ed-state", EditorOp::StateGet)? {
         Some(Data(stored)) => {
             let stored = Value::from(stored);
-            // The cell outlives every session, so what it holds was decided by
-            // whichever program last wrote it.
+            // The cell outlives each run, so what it holds was decided by
+            // whichever run last wrote it.
             site.admit(&stored, shell.fixings()).map_err(|mismatch| {
                 mismatch.refusal("_ed-state (the plugin's persistent cell)", shell)
             })?;

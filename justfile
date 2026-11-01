@@ -224,10 +224,13 @@ guest-rootfs $ARCH='arm64':
 smoke-boot KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs/rootfs.img' FOLDER='.':
     cargo run -p vm-manager --example boot-smoke -- {{KERNEL}} {{INITRAMFS}} {{ROOTFS}} {{FOLDER}}
 
+[private]
+_broker-release:
+    cargo build --release -p synod-machine-broker
+
 # Install the machine broker as a LocalSystem Windows service (needs an elevated shell).
 [windows]
-broker-install:
-    cargo build --release -p synod-machine-broker
+broker-install: _broker-release
     sc.exe create SynodMachineBroker binPath= "{{justfile_directory()}}\target\release\synod-machine-broker.exe" DisplayName= "Synod machine broker" type= own start= auto obj= LocalSystem
     sc.exe description SynodMachineBroker "Creates and stops the virtual machines Synod runs its work in. Synod itself runs without privileges; this service holds the one privilege the platform requires for a virtual machine, and nothing else."
     sc.exe start SynodMachineBroker
@@ -251,7 +254,4 @@ synod-app:
     cargo tauri build --config tauri.bundle.conf.json
 
 # Bundle synod into a Windows .msi installer; needs the Tauri CLI and an x86_64 guest image (built from a Unix host).
-[working-directory('synod')]
-synod-msi:
-    cargo build --release -p synod-machine-broker
-    cargo tauri build --config tauri.bundle.conf.json
+synod-msi: _broker-release synod-app

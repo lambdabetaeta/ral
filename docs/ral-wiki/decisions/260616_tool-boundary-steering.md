@@ -1,8 +1,8 @@
 ---
 status: active
-verified_at_commit: c848c533
-verified_at_date: 2026-10-01
-anchors: [drain_mid_exchange, next_or_idle, append_steering, append_tool_results]
+verified_at_commit: 96e103a5
+verified_at_date: 2026-11-01
+anchors: [AgentMailbox::drain, AgentMailbox::next, answer, AgentLog::append_steering, AgentLog::append_tool_results]
 ---
 
 # Tool-boundary steering for the prompt queue
@@ -57,9 +57,9 @@ it steers the next assistant step.
 
 ## Where
 
-- **`exarch/src/bus/inbox.rs`** — `drain_mid_exchange` (the tool-boundary drain: reads and deliveries in typed order, stopping at a rewrite) and `next_or_idle` (the exchange boundary).
-- **`exarch/src/agent/event.rs`** — `append_steering` admits a user message only while an assistant reply is awaited, one record per message.
-- **`exarch/src/agent/deliberate.rs`** — after `append_tool_results`, walks the drained arrivals in order: a read runs, a delivery is appended as steering.
+- **`exarch/src/bus/mailbox.rs`** — `AgentMailbox::drain` (the tool-boundary drain: reads and deliveries in typed order, stopping at a rewrite) and `AgentMailbox::next` (the exchange boundary).
+- **`exarch/src/record/session.rs`** — `AgentLog::append_steering` admits a user message only while an assistant reply is awaited, one record per message; `AgentLog::append_tool_results` closes the batch first.
+- **`exarch/src/agent/deliberate.rs`** — `answer` appends the tool results, then walks the drained arrivals in order: a read runs, a delivery is appended as steering.
 
 ## Covered
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2aba680
-generated_at_date: 2026-10-25
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs]
 ---
 

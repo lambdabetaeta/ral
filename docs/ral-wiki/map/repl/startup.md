@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-generated_at_date: 2026-10-27
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -14,9 +14,9 @@ protocol**. Interactive sessions then hand to the REPL, above a
 pre-clap dispatch that lets the binary re-enter itself in confined or helper
 roles.
 
-`main` itself holds no substance — it refuses to run setuid, adopts
-the process dispositions, asks `startup::identify()` what this process is, and
-runs the session named. `identify` answers with a two-armed `Invocation`:
+`main` itself holds no substance — it refuses to run setuid, lets the
+POSIX bridge claim an `ral-sh` invocation, adopts the process dispositions,
+asks `startup::identify()` what this process is, and runs the session named. `identify` answers with a two-armed `Invocation`:
 `Shell(Mode)`, or `Exit(ExitCode)` for a re-exec child that has already done
 its work — or for an argv that is not text: ral's arguments become strings,
 so one that is not UTF-8 is refused with status 2, never mangled.
@@ -72,10 +72,11 @@ dispositions. Then, per role:
     is: its grant-confined launches need the envelope as much as the shell's.
     `ral` passes `startup::engine::INSTALLERS`, so a wire-engine child boots
     through the very recipes the in-process front-ends boot through. The table
-    holds two `EngineInstaller`s: `repl` (`boot_repl` over the REPL surface,
-    configured by nothing) and `batch`
-    (`boot_batch` over the batch surface, decoding `BatchConfig {args}`), each
-    registering the boot builtin. Both share one grant policy, a refusal
+    holds two `EngineInstaller`s: `repl` (`repl_runtime` and `repl_root` over the
+    REPL surface, configured by nothing) and `batch` (`batch_runtime` and
+    `batch_root` over the batch surface, decoding `BatchConfig {args}`), each
+    registering the boot builtin; the REPL's also registers the
+    `external-editor` hook. Both share one grant policy, a refusal
     (`no_seeded_children`), because the shell spawns no child engines and has
     no base-tag lexicon to resolve a grant against.
   - **Bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool> …`) —
@@ -220,7 +221,7 @@ Builtins are shell-scoped: each mode declares its surface as one
 the runtime surface cannot drift. Batch's surface is core plus
 `WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot builtin, and the same value seeds `--check`'s builtin table
 (`HostSurface::manifest`, the checker's Σ with no live shell); the REPL's
-adds the [[map/repl/plugins|`_ed-*` builtins and the plugin load builtins]], all
-static. Both ral front-ends print a watched worker's lines, so `watch` is the
+adds the [[map/repl/plugins|`_ed-*` builtins and the plugin load builtins]] and
+`_external-editor`, all static. Both ral front-ends print a watched worker's lines, so `watch` is the
 ral hosts' to install
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).

@@ -1,8 +1,8 @@
 ---
 status: active
-verified_at_commit: 61c288f
-verified_at_date: 2026-10-21
-anchors: [DeferredSink, DeferredSurface, CompletionPermit, DoneEvent, SessionEvent::DeferredSurface, Mooring::for_thread, InboxDeferred, Stamped::Surface, Avatar::arrive]
+verified_at_commit: 96e103a5
+verified_at_date: 2026-11-01
+anchors: [DeferredSink, DeferredSurface, CompletionPermit, DoneEvent, SessionEvent::DeferredSurface, Mooring::for_thread, SurfacePoster, Input::Surface, Agent::admit]
 ---
 
 # A worker's `surface` is a second channel, scoped to the session
@@ -115,5 +115,7 @@ a new scope makes a new channel ([[design/engine-protocol|engine-protocol]],
 - `core/src/shell/builtins/concurrency/birth.rs` — `spawn_child`, `CompletionPermit::finish` publishing terminal state before `DeferredSurface::flush`.
 - `core/src/protocol.rs` — `SessionEvent::DeferredSurface`; carried by
   `core/src/carrier/wire/{serve,front}.rs`.
-- `exarch/src/shell_eval.rs` — `InboxDeferred`; `exarch/src/agent/arrival.rs`
-  — `Avatar::arrive`; `exarch/src/bus/post.rs` — the waking notice.
+- `exarch/src/shell_eval.rs` — `SurfacePoster`, the `DeferredSink` posting
+  `Input::Surface` (`exarch/src/bus/mailbox.rs`) to the agent's address;
+  `exarch/src/agent/arrival.rs` — `Agent::admit`, which replays the batch and
+  drops a stale generation; `exarch/src/bus/post.rs` — the waking notice.

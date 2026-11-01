@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ec5a7b9d
-generated_at_date: 2026-10-14
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/elaborator.rs, core/src/elaborator/, core/src/syntax/group.rs]
 ---
 
@@ -84,6 +84,11 @@ bound `App` head, never a bare `Exec`.
 
 A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node of its stages and
 nothing more: every interior edge is a byte pipe allocated from position.
+
+A map literal with a spread or computed key assembles from `MapOperand`s
+(`Elaborator::map_operand`): each key, value and spread elaborates isolated,
+to a plain `Value` or a `Compute`d computation the machine sequences in source
+order, so no operand's effect is hoisted past another.
 
 An arm of `if` and `case` elaborates to a thunk the form forces
 (`Elaborator::elab_arm`): a literal `{ … }` or `{ |p| … }`, or a name holding

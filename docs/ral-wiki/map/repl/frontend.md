@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 578dcf04
-generated_at_date: 2026-10-28
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [ral/src/repl/external_editor.rs, core/src/external_editor.rs, ral/src/startup.rs, ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/cursor.rs, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, core/src/text.rs]
 ---
 
@@ -107,7 +107,7 @@ The minimal frontend has no corresponding raw-key bindings.
   `core/src/external_editor.rs`, shared with exarch, owns the pure contract:
   `EditorCommand::select` chooses nonblank VISUAL, then EDITOR, then `vi`
   (`notepad` on Windows), refuses a NUL anywhere in the chosen spec, and splits
-  quoted argv with `shlex` on Unix or `winsplit` on Windows, without shell
+  quoted argv with `shlex` on Unix or `CommandLineToArgvW` on Windows, without shell
   expansion or evaluation; its errors name the variable. `admit_draft` and
   `read_draft` cap both directions at `MAX_DRAFT_BYTES` (16 MiB) via
   `ral_core::io::read_bounded`; `after_cleanup` never drops a removal failure.

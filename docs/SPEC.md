@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91 -->
+<!-- verified_at_commit: 96e103a5 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -4152,8 +4152,12 @@ language forms and literals, core and host builtins, prelude entries,
 documented host libraries, session bindings, aliases, handlers, and external
 commands. Language entries are short standalone usage guides. The renderer
 heads the entry with the name and its source, prints the prose, then labels the
-facts it has as `usage`, `type`, `path`, and `shadows`; a missing fact is omitted. If
-no exact documented name exists, it searches documented names
+facts it has as `usage`, `type`, `path`, and `shadows`; a missing fact is omitted.
+The source is `language syntax`, `session`, `prelude`, `alias`, `handler`,
+`builtin`, `bundled` for a bundled tool, or the file a command would run. Where
+the active grant refuses a command it reads `denied by grant`, and `path` names
+the refused candidate. Every other place that holds the name is listed under
+`shadows`. If no exact documented name exists, it searches documented names
 case-insensitively. Regex search is used when regex support is compiled in;
 otherwise the search is a substring match.
 
@@ -4555,13 +4559,13 @@ The recognized fields are:
 | `env: Record` | Set environment entries. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
 | `prompt: Block` | Install the zero-argument base-prompt body. |
 | `bindings: Record` | Install lexical values, including functions. |
-| `aliases: Record` | Install block or function values as command aliases; other values become ordinary lexical bindings. |
+| `aliases: Record` | Install block or function values as command aliases; any other value is refused, with a pointer to `bindings:`. |
 | `edit-mode: String` | `emacs` or `vi`; default `emacs`. |
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
 | `surface: String` | `minimal` or `readline`; default `readline`. |
 | `umask: String` | Unix creation mask: 1–4 octal digits, at most `0777`, e.g. `'077'` or `'0022'`. Applies to ral's own creates and every child. Refused on Windows. |
 | `limits: Record` | Unix child soft limits: optional non-negative `Int` keys `open-files`, `core-bytes`, `stack-bytes`, no greater than ral's hard limit. ral's own limits stay unchanged; a grant's limits win. Refused on Windows. |
-| `recursion-limit: Int` | A positive function-call recursion limit; default `100_000`. |
+| `recursion-limit: Int` | A positive function-call recursion limit; default `100000`. |
 | `plugins: Record` | Names each plugin and its options; loaded before the first prompt; see below. |
 | `startup: Block` | A zero-argument block run once after the map is applied. |
 | `theme: Record` | `value-prefix: String` and `value-color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
@@ -4623,8 +4627,8 @@ beginning with `_` are hidden. The lists are sorted.
 
 `explain name` shows the entry's full documentation, inferred or declared type
 where one exists, and where it comes from. For a language entry the full
-documentation is a standalone usage guide. The source heads the entry; the
-other facts are labelled `usage`, `type`, `path`, and `shadows`. When no exact
+documentation is a standalone usage guide. The source heads the entry, as in
+§14.1; the other facts are labelled `usage`, `type`, `path`, and `shadows`. When no exact
 entry resolves, `explain` performs a case-insensitive search and prints matching public
 entries. These commands are informational: a missing query prints a message
 and leaves status zero.
@@ -4639,9 +4643,9 @@ A plugin is an ordinary ral file. Its file-level result is either a manifest
 manifest. No other result shape is accepted.
 
 ```ral
-let change = { |event|
-    let line = $event[line]
-    if $[not !{is-empty $line}] { _ed-ghost ' …' } else { _ed-ghost '' }
+let change = { |_old|
+    let text = !{_ed-get}[text]
+    if $[not !{is-empty $text}] { _ed-ghost ' …' } else { _ed-ghost '' }
 }
 
 return { |options|
@@ -4826,8 +4830,10 @@ facilities and do not depend on raw-mode editing.
 The `_ed-*` builtins are installed only by the interactive `ral` host and are
 hidden from `help`. Except for the pure `_ed-hyperlink` formatter, they require
 the corresponding `editor.read`, `editor.write`, or `editor.tui` authority.
-They also require an active plugin handler; calling one at an ordinary prompt
-or from a batch host is an error.
+They also require an editor context, which only a `buffer-change` hook, a
+`complete` hook, or a keybinding handler carries; calling one from any other
+hook (`pre-exec`, `post-exec`, `chpwd`, `prompt`), at an ordinary prompt, or
+from a batch host is an error.
 
 Cursor and span offsets count Unicode characters, not UTF-8 bytes.
 

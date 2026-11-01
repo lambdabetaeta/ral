@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 34ae1424
-generated_at_date: 2026-10-25
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
 
@@ -19,6 +19,9 @@ sites name it, and nothing in it reads a unifier or a runtime value.
   sets a scheme did not quantify.
 - `ty/exec_arg.rs`: `RefusedArg`, the shapes `execve(2)` has no argument for, one
   match on a `Head`.
+- `ty/typed.rs`: `Typed`, a `Datum` whose encoding has a ral type derived from
+  its own fields, and the record and variant types ral shows for a Rust type
+  ([[map/core/transport|transport]]).
 - `ty/fmt.rs`: `Display` for `Ty` and `Scheme`; one `FmtCtx` names a shared
   variable the same in every type a diagnostic prints. Local unit tests build
   schemes directly to check quantified computation variables and cyclic roots.

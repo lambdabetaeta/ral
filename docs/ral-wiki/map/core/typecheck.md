@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2aba680
-generated_at_date: 2026-10-25
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -241,7 +241,8 @@ a bare head the class the runtime's lookup order gives it: `Binding`,
 a head), or `External`. No separate pass decides capture.
 
 `grade.rs` holds the grade rules. `rhs_bound_ty` (the `Bind` and
-`Phrase::Define` right-hand side) is the bind rule: `Return(Output, _)` records
+`Phrase::Define` right-hand side, and a map literal's `MapOperand::Compute` key or
+value, via `infer_map_operand`) is the bind rule: `Return(Output, _)` records
 the right-hand side's address in `InferCtx::captured` and binds `String`,
 `Return(Value, a)` binds `a`, and `Return(Var(g), a)` binds `g := Value` and
 `a`. `adapt` says how a block meets a demand of the other producer kind — a

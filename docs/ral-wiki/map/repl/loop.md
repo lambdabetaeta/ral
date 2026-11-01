@@ -1,6 +1,6 @@
 ---
-generated_at_commit: efbf42011e7c77f2b8c4f6ba1df0563ef202d650
-generated_at_date: 2026-10-27
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
 
@@ -95,11 +95,13 @@ base, and then no history).
 
 ## The boot, engine-side
 
-The `repl` installer's recipe (`startup::engine::boot_repl`) boots the REPL
-surface — the batch surface plus the [[map/repl/plugins|`_ed-*` builtins and
-the plugin load builtins]] — through `boot_shell`, so the typechecker and the
-runtime see one surface by construction; then exit hints, the
-interactive flag, `$TERMINAL`, and the boot builtin's registration. The umask
+The `repl` installer's recipe (`startup::engine::repl_runtime` and `repl_root`)
+boots the REPL surface — the batch surface plus the [[map/repl/plugins|`_ed-*`
+builtins and the plugin load builtins]] and the `_external-editor` builtin
+([[map/repl/frontend|frontend]]) — through `boot_shell`, so the typechecker and
+the runtime see one surface by construction; then exit hints, the
+interactive flag, `$TERMINAL`, the `external-editor` session hook, and the boot
+builtin's registration. The umask
 is inherited from `login(1)` or PAM unless the rc sets `umask:`.
 
 The boot builtin (`_ral-boot`, one-shot: it unregisters its own hook) does the

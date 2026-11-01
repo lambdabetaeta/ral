@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 64ecd691
-verified_at_date: 2026-10-30
-anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, log::Reader, Reader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal, AgentLog::human_children, Mail::owes]
+verified_at_commit: 96e103a5
+verified_at_date: 2026-11-01
+anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal, AgentLog::human_children, Mail::owes]
 ---
 
 # Session record: one seam, one log
@@ -338,7 +338,7 @@ if it has one and otherwise this session's `source` id beside the `Locus` of eve
 record it held; the records leave memory and nothing durable is touched. The id,
 not a path, is what is stored (and persisted in an `Inherited` link), so a run
 directory can be moved and every pointer in it still reads back. Every
-read-back through `log::Reader` (`Reader::record`) checks that the range still
+read-back through `LocusReader` (`LocusReader::record`) checks that the range still
 holds a line sealed by the `Sum` its `Locus` carries, *before* parsing records,
 and parses each addressed line once across consecutive loci, so a range
 that no longer names what it measured — a copied session directory, an edited

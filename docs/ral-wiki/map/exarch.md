@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 64ecd691
-generated_at_date: 2026-10-30
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [exarch/src/port.rs, exarch/src/record.rs, exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -316,7 +316,7 @@ own surface.
   string-replace over `view-text` (`data/edit-replace.md`, `--edit replace`); only the
   prompt text switches, every reader and editor stays registered
   ([[design/hash-addressed-editing|hash-addressed-editing]]).
-- **`Builtins`** (`builtin_index`) lists every builtin and prelude function by
+- **`Builtins`** (`BUILTIN_INDEX_PLACEHOLDER`) lists every builtin and prelude function by
   *name only* — a progressive-disclosure index the agent expands at runtime with
   `help`/`explain`, so the prompt cannot drift. `assemble` bakes a
   *placeholder* here: the real per-agent list — filtered to the harness verbs
@@ -348,7 +348,7 @@ own surface.
   by `prompt::with_grant` from its own engine's `Probe::Grants` alone: a
   child's layer is resolved in its own engine (`Shell::child_of`), so only
   that engine can name it. `grant_summary` renders every layer in order.
-- **`Workspace`** (`discover_agents`) collects the `AGENTS.md` instruction files,
+- **`Workspace`** (`read_agents`) collects the `AGENTS.md` instruction files,
   outermost first so the deepest file's recency wins: the operator's
   `<config>/AGENTS.md`, then every repo `AGENTS.md` from the git root down to cwd
   (the walk stops at the first `.git` entry; outside a repo, only `cwd/AGENTS.md`).

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 67715a25
-generated_at_date: 2026-10-26
-covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
+covers_paths: [plugins/, ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
 
 # Map: repl / plugins
@@ -39,8 +39,8 @@ engine applies the registered policy: `aside` runs the hook on a
 Ctrl-C struck while a hook runs reaches it, while one aimed at a command
 already in flight is older than every frame the aside mints
 ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]), and
-nothing it does flows back. Plugins run with the host authority the hook run
-carries (`GrantStack::root()`).
+nothing it does flows back. Plugins run under the session's grant stack: the
+root layer plus any `--capabilities` layer pushed at boot.
 
 - **Lifecycle** — `exec.rs::fire(t, host, event, record)` dispatches the event
   on every plugin registering it, with the one event record `{src, status}` or
@@ -264,6 +264,10 @@ earlier, or on a proper prefix wherever loaded.
   plugin's name plus a binding index *within* it, never a position in the
   runtime `Vec` — an unload compacts that vector, so a runtime index would
   address the wrong plugin; a resolution miss re-edits the line unchanged.
+- `plugins/` (repo root) ships the example plugins (`autosuggestion.ral`,
+  `fzf-*.ral`, `zoxide.ral`, the shared `lib/fzf.ral`), each a parameterised
+  manifest factory written against the `_ed-*` builtins; they are data to
+  this runtime, never read by it.
 - `plugin/rustyline.rs` is the runtime's rustyline boundary: `sync_plugins`
   reconciles rustyline's binding table by full unbind-then-rebind,
   registering one `RouterKeyHandler` per distinct bound sequence
@@ -273,3 +277,5 @@ earlier, or on a proper prefix wherever loaded.
   `sync_plugins` by `&mut`. `CtrlDHandler` and the rustyline `chord_to_key_event` conversion
   live here too, over the `RalHelper` editor rustyline adapts against
   ([[map/repl/frontend|frontend]]).
+
+_The design narrative is `docs/PLUGINS.md`; the formal account is `docs/SPEC.md` §15.5-§15.7._

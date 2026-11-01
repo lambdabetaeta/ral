@@ -2,9 +2,9 @@
 status: active
 generated_at_commit: fc0c9fbb
 generated_at_date: 2026-10-30
-verified_at_commit: fc0c9fbb
-verified_at_date: 2026-10-30
-anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::complete_len, Log::extent, log::Reader, Reader::record, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, context::resume]
+verified_at_commit: 96e103a5
+verified_at_date: 2026-11-01
+anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, context::resume]
 ---
 
 # A line is a commit
@@ -124,8 +124,8 @@ change is needed. A commit introducing two narrated events still requires it.
 ## Where
 
 - `exarch/src/record.rs`: `Seq`, `Sum`, `Locus`, `Commit`, `Cursor`, `Publish`.
-- `exarch/src/record/non_empty.rs`, `record/log.rs`, `record/seam.rs`,
-  `record/context/resume.rs`.
+- `exarch/src/record/non_empty.rs`, `record/log.rs` (`LocusReader::record`, the
+  sum-checked read-back), `record/seam.rs`, `record/context/resume.rs`.
 - `exarch/src/bus/signal.rs`, `exarch/src/tui/scrollback.rs`.
 
 See [[internals/session-record|session-record]] and

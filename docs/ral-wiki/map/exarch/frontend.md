@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc0c9fbb
-generated_at_date: 2026-10-30
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 verified_at_commit: fc0c9fbb
 verified_at_date: 2026-10-30
 covers_paths: [exarch/src/port.rs, exarch/src/lib.rs, exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/host.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
@@ -97,7 +97,7 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
   any work. `bus/sink.rs::Sink` consumes `fact` per record within one
   `accept`, and `transient`.
 - `bus/emitter.rs::FleetBus` owns the session-lived channel and usage meter.
-  `host.rs::Host` launches joined roots; frontends receive their signals
+  `host.rs::Host` launches the human's joined children; frontends receive their signals
   without driving agent work. Completion comes from records or terminal
   death, never channel emptiness.
 - `bus/channel.rs` coalesces adjacent same-agent `Token` / `Thinking`
@@ -120,12 +120,13 @@ elapsed time, actual ending and how to use `await` / `workers`.
 
 ## Host and observed jobs
 
-**`Host` owns roots and their bus; hosts gate, never drive.**
+**`Host` owns the human's children and their bus; hosts gate, never drive.**
 
-- `Host::{found, resume}` constructs and launches roots. `roots` exposes
-  launch-order ids; `port`, `feed` and `run_dir` expose reach, signals and
+- `Host::{found, resume}` constructs and launches the human's children.
+  `children` exposes every adopted child's id in birth order, joined or not;
+  `port`, `feed` and `run_dir` expose reach, signals and
   logs. `Port::usage` reads run accounting. `end` and `Drop` end the fleet
-  and join every root, whose teardown joins helpers. The feed stays with the
+  and join the human's children, whose teardown joins helpers. The feed stays with the
   host; `Port` has no subscription operation.
 - Every agent records a busy period: `JobOpened`'s commit number is `JobId`;
   `JobSettled { job, stopped }` closes it. Opening/registration, settlement
@@ -142,7 +143,7 @@ elapsed time, actual ending and how to use `await` / `workers`.
 - Synod uses `Admission::Gated`: release after the baseline and after each
   closing walk admits the next job. Worker batches, wakeups and messages can
   open it as human text does. The host observes records and takes the walk;
-  it never lends a root to a job driver ([[map/synod|synod]]).
+  it never lends a child to a job driver ([[map/synod|synod]]).
 - `EngineSevered` records engine loss; `TeardownFailed` records uncertified
   engine end. Failures propagate through joins to `Host::end`. Synod treats
   teardown failure as terminal, not permission for a folder account.
@@ -168,7 +169,7 @@ elapsed time, actual ending and how to use `await` / `workers`.
   `tui/mirror.rs::Mirror` maintains one rendered block per retained incident;
   `Scrollback::commit` catches up from the log at birth or a commit gap.
   Duplicate commits fold once. Headless/Synod sinks narrate rather than catch up.
-- Resume catches up each root only to its recorded pre-run extent, draws
+- Resume catches up each child only to its recorded pre-run extent, draws
   the resumed note there, then catches up the new run. The bus's usage meter
   plus resumed usage supplies totals, independent of views.
 - A held session directory contains `record.jsonl` alone.
@@ -191,9 +192,9 @@ commit yields at most one event it narrates.
 
 - `tui/tui_loop.rs` drains the feed and UI jobs, polls overlays and routes
   input through `App::key` / `paste`. After a drain to empty,
-  `Tabs::settled` requires every known root's `Died`; queued births are
-  dispatched before this check. Initial births precede `run`, later root
-  births precede their creator's death, and helper deaths precede root death.
+  `Tabs::settled` requires every known human child's `Died`; queued births are
+  dispatched before this check. Initial births precede `run`, later
+  births precede their creator's death, and helper deaths precede their parent's.
   Natural completion gets an uncapped final drain/frame; `App::leaving`
   returns immediately without that frame. `terminal.rs` owns raw mode,
   alternate screen, bracketed paste, mouse capture and panic restoration.
@@ -349,7 +350,7 @@ commit yields at most one event it narrates.
 - Overlays, matrix navigation, searches and selected-text copying consume
   their gestures first. A successful Ctrl-C copy retains the draft; only an
   unclaimed key reaches Stop. Raw-mode keys are local, not process signals.
-- `signals::face` forwards SIGINT to each root's `stop_current`, shutdown to
+- `signals::face` forwards SIGINT to each human child's `stop_current`, shutdown to
   `Registry::end`. Windows handles Ctrl-C/Ctrl-Break before ral's escalating
   handler; repeated interactive gestures never tick the force-exit ladder.
 - Provider waits poll the exchange; ral dispatchers strike their own id.
@@ -364,11 +365,11 @@ See [[internals/cancellation|cancellation]] for scope propagation.
 
 ## One-shot headless
 
-**`headless.rs::run` observes a returning root through `Host::feed`.** It
-checks the first `Born` against `host.roots()[0]`, retaining that root's log
+**`headless.rs::run` observes its one returning agent through `Host::feed`.** It
+checks the first `Born` against `host.children()[0]`, retaining that agent's log
 directory for “Agent log:”. It submits the seed and reads usage through a
-port, folds only the root's records into one `Blocks` memo, and
-finishes on root `Control::Status` or `Died`. Helper facts do not print;
+port, folds only that agent's records into one `Blocks` memo, and
+finishes on its `Control::Status` or `Died`. Helper facts do not print;
 helper faults remain visible and usage includes the fleet. `Replied(v)`
 writes faithful ral text or JSON to stdout; Failed, Stopped or death without
 a reply fail honestly. `lib::run` ends the host afterwards and includes

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3dbbe8f3
-generated_at_date: 2026-10-27
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/protocol.rs, core/src/egress.rs, core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
 ---
 
@@ -9,18 +9,16 @@ covers_paths: [core/src/protocol.rs, core/src/egress.rs, core/src/lib.rs, core/s
 **`core/` is the `ral-core` crate — the language engine — and a host reaches it
 through two narrow crate-root seams: a compile-then-typecheck pipeline that turns
 source into typed IR, and the framed run entry that is the only way into
-evaluation.** It is the bulk of the codebase (~100k lines of Rust); both
+evaluation.** It is the bulk of the codebase (~140k lines of Rust); both
 binaries, `ral` and [[map/exarch|exarch]], embed it.
 
 `core/src/lib.rs` is the crate root. The compilation ladder is *source → tokens →
 flat AST → CBPV IR → typed IR*, bundled as `compile::compile_and_typecheck` (parse →
-elaborate → typecheck, failing with a `CompileError` of `Parse` or `Types`)
-and, crate-privately, `compile`
-(the same ladder without the checker), both returning a `Toplevel` — a sequence of phrases
-(`Define`/`Run`) run by `shell::evaluator::run_phrases`, which replaced the
-flat `Comp`-rooted top level. Evaluation is not on the crate root — `parse`,
-`elaborate`, and `Toplevel` are crate-private, reached by the owning module path
-when a host deliberately steps past the seam
+elaborate → typecheck, failing with a `CompileError` of `Parse` or `Types`),
+returning a `Toplevel` — a sequence of phrases
+(`Define`/`Run`) run by `shell::evaluator::run_phrases`. Evaluation is not on
+the crate root — `parse`, `elaborate`, and `Toplevel` are not re-exported there,
+reached by the owning module path when a host deliberately steps past the seam
 ([[decisions/260618_after-turn-api-simplifications|after-turn-api-simplifications]]).
 
 Reach is enforced rather than intended: an item is `pub` because something
@@ -34,7 +32,7 @@ properties in `shell/builtins/tests.rs`, stored-scheme reseeding in
 `typecheck/session_tests.rs`, and scheme formatting in `ty/fmt.rs`.
 Integration tests' engine reads go through `IdentityTransport::inspect`, the
 one `test-util`-only read of an identity engine's shell; core's unit tests boot
-engines through `engine::testkit` and prelude shells through
+engines through `carrier::testkit` and prelude shells through
 `test_helper::fresh_shell`.
 
 ## The evaluation seam
@@ -97,10 +95,11 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   host to `ral-core` reruns the bake, so the schema-evolution hazard has one guard rather than three that must
   agree ([[decisions/260610_host-embedding-api|host-embedding-api]],
   [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
-- `host` probes the underlying machine: `git()`, `os_name`/`arch`/`family`,
-  wall-clock `now()`, and re-exports of cwd/user/home. It is also the one reader
-  of the host's environment (`var`, `var_os`, `vars_os`, `temp_dir`), and of the
-  XDG bases (`xdg`, with the account's home as the program's own fallback).
+- `host` reports the process's facts: `cwd`, `user`, `home`, `home_dot`. It is
+  also the one reader of the host's environment (`var`, `var_os`, `vars_os`,
+  `temp_dir`), and of the XDG bases (`xdg`, with the account's home as the
+  program's own fallback). `host/login_env.rs` (Unix) writes and reads the
+  POSIX login helper's environment report.
   `host/env.rs` owns the persistent environment overlay, exported as
   `host::{EnvVars, EnvVarsIter}`, shared by shell state, paths and launches.
   Its test-only `host/env/test_support.rs` serialises temporary host-environment
@@ -158,6 +157,12 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
   (`core/src/source.rs`, `diagnostic.rs`, `compile.rs`, `io/terminal.rs`, `io/ansi.rs`).
 - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library
   (`core/src/shell/prelude.ral`).
+
+Beside these sit small shared leaves with no page of their own: `text` (byte↔char
+conversion, plurals, fuzzy ranking), `sync` (the workspace's lock-poison policy,
+`LockExt`), `site` (the typed-site vocabulary), `role` and `invocation`
+(process-role classification and its dispatch), and `external_editor` (the
+editor contract the ral and exarch prompts share).
 
 ## Siblings
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-generated_at_date: 2026-10-25
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/prelude.ral]
 ---
 
@@ -11,10 +11,11 @@ binary at build time. `build.rs` reads it once, scanning its top-level `let`
 bindings into `PRELUDE_EXPORTS` and the `##` summary above each into
 `PRELUDE_DOCS` — the table `help` and `explain` print from
 ([[map/core/builtins|builtins]]), since only values and schemes survive the
-bake — and the consumer build scripts serialise the annotated
-IR — typechecked by the same `bake_prelude` path the runtime uses,
-[[map/core/typecheck|typecheck]] — as a `postcard` blob (the schema hazard
-documented in `core/src/lib.rs`). It
+bake — and each host's build script serialises the annotated
+IR — typechecked by the `typecheck::bake_prelude` pass the runtime also uses,
+[[map/core/typecheck|typecheck]] — as a `postcard` blob via
+`shell::boot::bake_prelude`, which documents the schema hazard
+(`core/src/shell/boot.rs`). The host embeds it with `baked_prelude!`. It
 is evaluated once per bake, on a core-only shell, and its bindings are seated
 whole in every shell by `BakedPrelude::seat`: a prelude that fails to run
 panics rather than seating a partial one.

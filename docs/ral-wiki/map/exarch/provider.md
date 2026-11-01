@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 64ecd691
-generated_at_date: 2026-10-30
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -607,7 +607,7 @@ driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
 - Rate limits get a larger budget and a higher backoff ceiling than transient
   failures, and a named wait is honoured. A `Refused` whose
   reset lies past that ceiling (`Recovery::Deferred`) surfaces on its first
-  attempt, and the terminal trunk resumes it by a wakeup at the reset
+  attempt, and the agent resumes it by a wakeup at the reset
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 
 Transport retry lives here, so the [[map/exarch/agent|nudge]] rules cover

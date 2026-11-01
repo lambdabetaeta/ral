@@ -1,6 +1,6 @@
 ---
-generated_at_commit: bb5bc1a6
-generated_at_date: 2026-10-27
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -77,8 +77,8 @@ format and the `absolute_in` cwd-join helper).
 working directory and scratch from its `FreezeCtx`, as one way of naming the single layer a
 [[design/agents|sub-agent]] spawn pushes. It does not take the parent: the
 desk behind the [[map/exarch/builtins|`` exarch-agents `start `` tag]]
-(`agent/desk/agents.rs`'s `fork_seat`, through core's
-`IdentityTransport::adopt_parked`) takes the parent's forked shell — which
+(`agent/desk/agents.rs`'s `fork_engine`, through core's
+`IdentityTransport::adopt_parked` or a sealed wire seed) takes the parent's forked shell — which
 carries the parent's own `GrantStack` — and pushes this layer onto it
 (`SpawnGrant::narrow_onto`), so the same stack that carries the root's
 authority also carries a spawned child's attenuation. The stack's per-check

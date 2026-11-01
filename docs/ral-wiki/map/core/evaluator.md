@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-generated_at_date: 2026-10-25
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
 
@@ -76,8 +76,8 @@ Internals:
   reserve" is a type; `Frame::abandon` is the one undo for `Unmask`, `Within`,
   `Grant`, `Audit` and `Gather`, shared by the rules and the panic walk. `Focus::Eval` and
   `Terminal::Lambda` hold a computation closure `{ comp, env }`, a type apart
-  from the thunk value's `Closure`; `Frame::To` alone carries an `Env`, and
-  `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` pushes
+  from the thunk value's `Closure`; `Frame::To` and `Frame::Map` alone carry an
+  `Env`, and `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` pushes
   `Frame::Capture`, which holds the sink it replaced, and swaps a fresh buffer
   in as `shell.io.stdout`; on return it restores the sink and yields the buffer
   exactly, as `Value::Bytes`, ignoring the body's own value (`cap : F^w Unit → F
@@ -117,8 +117,11 @@ Internals:
   focus, allocating nothing.
   `CompKind::Assemble` is the one rule that does O(data) work over what looks
   like value syntax — a list/record/map literal with a spread or a computed
-  key, dispatching to `assemble.rs`; a plain literal stays a `Return` and
-  closes for free.
+  key; a plain literal stays a `Return` and closes for free. A list or record
+  assembles atomically in `assemble.rs`; a map pushes `Frame::Map`, whose
+  `MapCursor` walks the entries' `MapOperand`s one at a time (key, value or
+  spread, each a plain value or a computation), so an operand's effect, a
+  cancellation poll and the stack cap all land between operands.
   `CompKind::Exec` classifies the head through the lexical environment and
   dispatches into [[map/core/runtime|shell/exec]]'s `dispatch`.
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
@@ -142,7 +145,7 @@ Internals:
   body is undone on every exit
   ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
 - `pattern.rs` — matching, pure: `destructure(pattern, value)` returns the
-  `(name, value)` pairs a compiled `IrPattern` (wildcard, name, list with
+  `(name, value)` pairs a compiled `Pattern` (wildcard, name, list with
   optional `...rest`, map by key) binds in a `Value`, and `bind` folds them
   into an `Env`. Without a `...rest` tail a list pattern must cover the value
   exactly — a longer list errors rather than silently dropping its extra
@@ -188,14 +191,14 @@ Internals:
   Wrapper captures carry schemes rebuilt from the site's authoritative contract,
   preserving weak identities and the raw computation's grade on re-inference
   ([[map/core/typecheck|typecheck]], [[map/core/ty|ty]]).
-- `assemble.rs` is the `CompKind::Assemble` rule: `eval_list` splices
+- `assemble.rs` is the atomic half of `CompKind::Assemble`: `eval_list` splices
   `...spread` elements (cons/snoc-shaped fast paths reuse the spread's
-  persistent spine; explicit beats spread, first spread wins), `eval_map`
-  is shared by record and map assembly (`MapParts`/`MapPart` read either
-  entry enum uniformly) — explicit entries win over spreads, a computed key
-  must close to a `String`, and a duplicate discovered only here is an error
-  ("key 'k' given twice; which did you mean?", SPEC §4.5), as a *static*
-  duplicate is refused at check time.
+  persistent spine; explicit beats spread, first spread wins), `eval_record`
+  does the same for record entries (explicit fields win over spreads). A map
+  literal's computed keys are the cursor's (`machine.rs`, `return_map`): a
+  computed key must close to a `String`, and a duplicate discovered only
+  there is an error ("key 'k' given twice; which did you mean?", SPEC §4.5), as
+  a *static* duplicate is refused at check time.
 - The command/pipeline machinery — external-command dispatch,
   pipeline planning and execution, and the in-process-vs-sandboxed-child
   dispatch choice — lives in [[map/core/runtime|runtime]], which the machine

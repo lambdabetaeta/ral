@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1f2056b4d00720b668339430fa3ccc87ee1cd528
-generated_at_date: 2026-10-28
-covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/stream.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
+covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/stream.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -57,8 +57,9 @@ The one filter core keeps is its own, and it is the decision rather than a
 flag: a capability *denial* joins the trail whenever one is open, an *allowed*
 check never does, and no `grant` has a dimension to change either — language
 semantics, not presentation ([[design/audit|audit]]). And only an exec refusal
-surfaces a *structured* denial: `Shell::check_exec`
-(`shell/runtime/state/checks.rs`) records it against its call's `Mooring`. The
+surfaces a *structured* denial: `Head::admit`
+(`shell/exec/command/head.rs`) judges the head and `Shell::exec_refused`
+(`shell/runtime/state/checks.rs`) records the refusal against its call's `Mooring`. The
 `fs` checks in `authority/guard/enforce.rs` return domain `Denial`s to the same
 adapter, which records them with no `Mooring` and raises their runtime errors,
 so their denials reach the trail alone. A refused *external* command still
@@ -71,7 +72,7 @@ observation at all, so it pays for neither the `epoch_us()` syscall nor the
 an external's dispatch, a redirect, a birth — and never per builtin
 application, which is no observation at all.
 
-- **Redirects** open through `open_file` and `install_stdin_redirect`
+- **Redirects** open through `open_write`, `open_read` and `install_stdin_redirect`
   (`shell/exec/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
   when the file opens — `Observed::Read { path }`, no outcome — so it precedes
   the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) opens as an
@@ -168,7 +169,7 @@ argv, status, and bytes are the whole of what a reader gets. A `` `check ``'s
 `resource` and `decision` sit beside its `fields` map — a denial is never
 encoded as a status, and never spliced through a nested value. Core already
 names this vocabulary in its capability layer, so reporting its own activity
-adds no concept. `Observation::to_value` is the one projection — the same map
+adds no concept. `Observation`'s `Datum` encoding is the one projection — the same map
 shape the [[design/audit|audit trail]] and `--audit`'s JSON use. On the
 [[map/core/shell-state|sink]], which a kit `` `card `` shares, it rides tagged
 as `` `observed <record> `` (`Observation::to_surface`), so every surfaced
@@ -291,7 +292,7 @@ turn-time data I/O — and surfaces nothing by design.
 
 There is no independent operational trace: the record log
 ([[map/exarch/frontend|frontend]]) carries an observation's total wire form
-as a display commit so a resumed scrollback can rebuild its card, but never
+as a display record so a resumed scrollback can rebuild its card, but never
 the rendered mark tree itself — a rendering is not a fact.
 
 ## One resolver opens everything

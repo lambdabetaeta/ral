@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-generated_at_date: 2026-10-25
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -50,14 +50,15 @@ The two categories:
 - `CompKind::Assemble(Assembly)` is the one rule that builds a collection some
   of whose parts are spread or keyed at run time: a primitive computation, not
   a value, since it costs O(data) and can fail. `Assembly::List(Vec<ValListElem>)`,
-  `::Record(Vec<ValRecordEntry>)`, and `::Map(Vec<ValMapEntry>)` are the spread-
+  `::Record(Vec<ValRecordEntry>)`, and `::Map(Vec<MapEntryV>)` are the spread-
   and computed-key-bearing element enums — `ValRecordEntry::Field(String, …)`
-  against `ValMapEntry::Entry(Val, …)`, so a record cannot hold a key computed
-  at run time and the [[design/records-and-maps|record/map]] classification is
-  settled by the parser rather than re-derived. These three enums live only in
-  `Assembly` and in `Args` (positional call arguments, which always admit a
-  spread); both read as `MapPart`s where the one runtime carrier is built. An
-  entry carries its value's span, because the surface captures no key span.
+  against `MapEntryV::Entry(MapOperand, MapOperand)`, so a record cannot hold a
+  key computed at run time and the [[design/records-and-maps|record/map]]
+  classification is settled by the parser rather than re-derived. A
+  `MapOperand` — key, value or spread — is a plain `Value(Spanned<Val>)` or a
+  `Compute(Arc<Comp>)` the machine sequences in source order. The list and
+  record enums live only in `Assembly` and in `Args` (positional call arguments,
+  which always admit a spread), each entry carrying its value's span.
   The elaborator's literal arms (`elaborator.rs`) emit `Return(Val::…)` for a
   plain literal and `Assemble(…)` otherwise; `hoist` names a non-`Return` comp
   reached in value position, so `[1, ...$xs]` becomes `Assemble(…) to t. …

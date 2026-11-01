@@ -1,8 +1,6 @@
 target/
 target-host/
 .target-linux/
-.build-cache/
-.worktrees/
 
 # Private dev-notes checkout (lambdabetaeta/ral-dev). Kept alongside the source
 # for convenience; deliberately not part of the public repository, so it is
@@ -13,16 +11,7 @@ dev/
 .qmd/
 
 # tree-sitter-ral build artefacts
-editors/tree-sitter-ral/node_modules/
-editors/tree-sitter-ral/build/
-editors/tree-sitter-ral/bindings/
-editors/tree-sitter-ral/.ts-lib/
 editors/tree-sitter-ral/package-lock.json
-editors/tree-sitter-ral/*.wasm
-editors/tree-sitter-ral/*.so
-editors/tree-sitter-ral/*.obj
-editors/tree-sitter-ral/*.lib
-editors/tree-sitter-ral/*.exp
 
 *.swp
 *.swo
@@ -33,6 +22,7 @@ site/examples.html
 site/tutorial.html
 site/spec.html
 site/rationale.html
+site/plugins.html
 site/exarch/index.html
 site/exarch/profiles.html
 site/synod/index.html
@@ -41,8 +31,6 @@ site/wiki/
 
 CLAUDE.md
 AGENTS.md
-
-.letta
 
 # cargo-fuzz builds a separate crate; its lock and target dir are generated,
 # and the fuzz target is a tool for a person to run, not part of the build.

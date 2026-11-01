@@ -1,17 +1,11 @@
 # ~/.config/ral/rc — ral interactive shell configuration
 #
-# Copy to ~/.config/ral/rc (or ~/.ralrc for legacy compatibility).
+# Copy to $XDG_CONFIG_HOME/ral/rc (normally ~/.config/ral/rc), or ~/.ralrc.
 #
-# This file must return a map with optional keys:
-#   env       — Map of environment variables inherited by child processes
-#   prompt    — String or Block returning the prompt string
-#   bindings  — Map of name → value bindings available at the prompt
-#   aliases   — Map of name → command aliases
-#   edit-mode — String: emacs (default) or vi
+# This file must return a record, or `()` to set nothing.  Every key is
+# optional; an unknown key or a wrongly typed value refuses the whole file.
 #
-# The following builtins are available inside a prompt block:
-#   user     — current username
-#   cwd      — current working directory
+# Inside a prompt block, `cwd` and `user` are in scope.
 
 # ANSI escape sequences for prompt colouring.
 let red   = "\e[31m"
@@ -22,14 +16,28 @@ return [
     # Line-editing mode: emacs (default) or vi.
     edit-mode: vi,
 
-    # Environment variables set in every child process spawned from this shell.
+    # Audible bell on a line-editor error (default false).
+    bell: false,
+
+    # Interactive surface: readline (default) or minimal.
+    surface: readline,
+
+    # Maximum function-call recursion depth (default 100000).
+    recursion-limit: 50000,
+
+    # File creation mask, 1-4 octal digits (Unix only).
+    umask: '022',
+
+    # Soft limits for child processes: open-files, core-bytes, stack-bytes (Unix only).
+    limits: [open-files: 4096, core-bytes: 0],
+
+    # Environment variables set in every child process.
     env: [
         EDITOR: vim,
         PAGER:  less,
     ],
 
-    # Extra bindings merged into the top-level scope at startup.
-    # Useful for shorthand paths you type often.
+    # Lexical bindings (functions too) in scope at the prompt.
     bindings: [
         proj: ~/src/project,
     ],
@@ -38,14 +46,29 @@ return [
     prompt: {
         let lbracket = '['
         let rbracket = ']'
-        return "$red$lbracket !{user} $rbracket$reset $blue!{cwd}$reset $ "
+        return "$red$lbracket !{user} $rbracket$reset $blue!{abbreviate-home !{cwd}}$reset $ "
     },
 
-    # Aliases expand before external-command lookup.
+    # Command aliases, expanded before external-command lookup.
     # A block receives any trailing arguments as $args.
     aliases: [
         ll: { |args| ls -lh ...$args },
         la: { |args| ls -lha ...$args },
         g:  { |args| git ...$args },
+    ],
+
+    # Plugins loaded before the first prompt: name (or path) => its options.
+    plugins: [
+        zoxide:         [key: 'alt-z'],
+        autosuggestion: [:],
+    ],
+
+    # Block run once after the rc is applied.
+    startup: { echo 'ready' },
+
+    # Result printing: prefix, and colour (black red green yellow blue magenta cyan white none).
+    theme: [
+        value-prefix: '=> ',
+        value-color:  yellow,
     ],
 ]

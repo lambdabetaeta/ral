@@ -1,11 +1,16 @@
 ---
-status: active
+status: superseded
+superseded_by: "[[261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]"
 verified_at_commit: c848c533
 verified_at_date: 2026-10-01
 anchors: [boot_shell, mint_root, RootGuard, run_turn, Tool::dispatch]
 ---
 
 # A per-root-turn cancellation token for exarch
+
+> Superseded by [[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]: cancellation is a monotone scope tree with no
+> exarch token, and no reset. The tree is carried on by
+> [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]] (life ⊃ exchange).
 
 Cancellation was a single process-global `AtomicBool` cleared at the top of
 *every* `Session::apply`. The deep review (260611 §8, recommendation A11)

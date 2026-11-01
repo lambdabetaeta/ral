@@ -1,9 +1,3 @@
-# Tauri regenerates synod/gen/schemas/*.json on every `cargo tauri build`.
-# On Windows it writes them with CRLF, so without this every Windows build
-# leaves them staged-looking with no content change at all.  Pinning the
-# checkout to LF makes a rebuild a no-op there, as it already is elsewhere.
-synod/gen/schemas/*.json text eol=lf
-
 # A shell script is read by an interpreter, not by a text editor, and every
 # interpreter that reads ours treats a carriage return as part of the word it
 # ends: `set -o pipefail\r` is not an option bash has, and `#!/usr/bin/env

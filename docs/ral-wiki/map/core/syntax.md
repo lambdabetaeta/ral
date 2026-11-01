@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 67715a25
-generated_at_date: 2026-10-26
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/syntax/, editors/]
 ---
 
@@ -85,6 +85,9 @@ sees raw bytes and bare words.
   `Binary`, `Negate`, `Not`, `And`, `Or` are ordinary variants with `Ast`
   operands; `$[…]` itself leaves no node
   ([[decisions/260909_expression-block-is-a-lexical-mode|expression-block-is-a-lexical-mode]]).
+  A command's head is classified once, as `Head` (`Bare`, `^`-`ExternalName`,
+  `Path`, `TildePath`, or a `Value` head), so nothing downstream recovers its
+  meaning from a generic `Ast`.
   `Ast::Redirected` holds a stage's trailing redirects, one node for every stage
   form; `Call` and `Scope` carry none
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).

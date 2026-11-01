@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 64ecd691
-generated_at_date: 2026-10-30
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/transaction.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
@@ -70,7 +70,9 @@ authority.
   hears input through the first rewrite only while the exchange is live. Human uptake records before polling cancellation.
 - `next` commits `JobSettled` and clears the job under the same lock that
   finds the queue empty, no helper pending and no returning-agent schedule
-  armed. A post either joins that job or sees rest.
+  armed. `Next::Settled` carries the debt read in that same transaction, so
+  a post accepted afterwards is never taken for the ended job's. A post
+  either joins that job or sees rest.
 - `Admission::Free` admits any input at rest. `Gated` requires a release,
   consumed by opening one job. `Parent { idle }` admits only human and parent
   input; peer messages to a resting helper are refused. Commands, `Child`
@@ -120,7 +122,8 @@ authority.
   queue prevents a reminder from overtaking a helper's report.
 - `Agent::admit` on `Input::Child` records `Display::SubagentDone` and
   supplies the model notice only for an adopted, unjoined helper.
-  `Next::Gone` and `Drained::Gone` join and collect failures without a model prompt. `read` reaches the newest own helper by name.
+  `Next::Gone` and `Drained::Gone` join and collect failures without a model prompt. `read` reaches the newest own helper by name and refuses only while
+  `Status::reply_pending`: a debt, or a running job that has reported nothing.
 - `Agent::teardown` ends life, reports owed failure, dismisses and joins
   helpers, takes `Option<Engine>` and retires it once; a repeat finds no
   engine and does nothing. `Body::retire_engine` records `TeardownFailed` and

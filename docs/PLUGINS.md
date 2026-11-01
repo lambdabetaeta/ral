@@ -1,266 +1,200 @@
 # ral plugins
 
-A plugin is a ral module (SPEC §15.5) whose return value is either a
-manifest map, or a block that takes an options map and returns a
-manifest map. `load-plugin` (§4) reads the manifest and registers the
-plugin's hooks, keybindings, and aliases. There is no plugin DSL and
-no magic config binding; a plugin's knobs are fields on its options
-map and it extracts them by name.
+A plugin extends an interactive `ral` session. It is an ordinary ral file
+whose result is a manifest: a record naming the hooks, keybindings, and
+aliases it contributes. `load-plugin` reads the manifest and registers
+what it names; `unload-plugin` takes it all back.
 
-## 1 Manifest
+This document is the design narrative. The [SPEC](SPEC.md) is the
+reference: §15.5 (manifest, loading), §15.6 (hooks, key notation,
+dispatch), §15.7 (the `_ed-*` builtins), §12.8 (the `editor` and `shell`
+grants). Where a rule is exact, this document cites it rather than
+restating it. Section numbers below without the word SPEC are this
+document's own.
+
+## 1 What a plugin is
+
+A plugin is data, not a program that registers things. The file computes
+a manifest and returns it; the host reads the manifest and does the
+registering. Four consequences follow.
+
+- **No plugin language.** There is no `register-hook` call, no `plugin`
+  form, no magic config binding. A plugin is written in ral and checked
+  as ral is checked. The manifest has a declared keyset, ascribed to the
+  file before it runs (SPEC §15.5, as for the rc file in §15.3), so a
+  misspelled key is a compile error and the file never executes.
+- **Load is atomic.** The manifest is validated whole, and registration
+  is all or nothing: a rejected load leaves no hooks, keybindings, or
+  aliases behind, and unloading is the exact inverse of loading.
+- **Registration is static.** A plugin cannot add a hook at run time. What
+  it contributes is what its manifest says at load, which is also all
+  that `unload-plugin` has to undo.
+- **No native ABI.** A plugin is ral source and nothing else: no shared
+  object, no bytecode module, no guest interface. The interface it
+  programs against is the set of hook events and `_ed-*` builtins below,
+  all of them ral values and ral builtins.
+
+The file's result is either a manifest, or a factory: a block of exactly
+one parameter, the options map, returning the manifest. Top-level
+bindings in the file are helpers; only the result matters.
 
 ```
-return { |options|
-    let key = get $options key 'ctrl-t'
-    return [
-        name: 'fzf-files',
-        keybindings: [[key: $key, handler: $_handler]],
-    ]
-}
+{ |options| [
+    name: fzf-files,
+    keybindings: [[key: !{get $options key ctrl-t}, handler: { |_| … }]],
+] }
 ```
 
-A plugin that needs no configuration may return the manifest map
-directly:
+A plugin with nothing to configure returns the manifest directly.
+Options are first-order data (SPEC §15.5): they cannot carry blocks or
+handles. A factory chooses its own defaults by reading
+fields by name; there is no options schema.
 
-```
-return [
-    name: 'syntax-highlight',
-    hooks: [buffer-change: $_handler],
-]
-```
+| Field | Meaning |
+|---|---|
+| `name` | required; unique among loaded plugins |
+| `hooks` | `[event: handler, …]` (section 4) |
+| `keybindings` | `[[key: Str, handler: block, guard?: Str], …]` (section 5) |
+| `aliases` | `[name: block, …]` (section 6) |
 
-| Field | Type | Default |
-|---|---|---|
-| `name` | `Str` | required |
-| `hooks` | `[Str: {B}]` | `[:]` |
-| `keybindings` | `[[key: Str, handler: {Returns Unit}, guard?: Str]]` | `[]` |
-| `aliases` | `[Str: {[Str] → Returns Any}]` | `[:]` |
-
-Every unmodified key except `f1`–`f12` requires a `guard`; an
-unguarded binding on such a key is a load-time error (§6).
-
-The `name` must be unique across loaded plugins.  The top-level
-block, if present, takes exactly one argument: the options map.
-Plugins extract fields by name (`get $options key <default>` or
-`$options[key]`) and decide what is required vs. optional.
+The keyset is closed. In particular `capabilities:` is not an unknown key
+but a refused one, with its own message, for the reason in section 2.
 
 ## 2 Authority
 
-Plugins run with host authority. A hook, keybinding handler, or
-plugin-registered alias executes under whatever capabilities the
-caller's grant stack (SPEC §12) already holds — the manifest has no
-field for declaring or narrowing that. A `capabilities:` key in a
-manifest is a load-time error, so a plugin cannot mistake a listed
-capability set for enforcement. Confinement is `grant`, applied at
-the call site, not a manifest declaration.
+A plugin has no authority of its own to declare. A manifest field naming
+capabilities would be decoration: nothing could enforce it against the
+plugin's own code, and a reader would take it for confinement. So the
+key is refused at load, and the advice is the message: wrap the
+invocation in `grant`.
 
-`grant`'s `editor` field, a list of verbs such as ``editor: [`read, `write]``, gates the `_ed-*` builtins (SPEC §12.8):
+What a plugin may do is what the code that runs it may do.
 
-| Verb | Enables |
+- **Hooks and keybinding handlers** run in the session, under the
+  session's grant stack: the root layer, narrowed by any `--capabilities`
+  profile the session started under (SPEC §15.3). They fire from the
+  read-eval loop, not from a user line, so no lexical `grant` encloses
+  them. A plain `ral` withholds nothing; a session under a profile
+  narrows every handler exactly as it narrows everything else. A handler
+  may itself wrap risky work in `grant`.
+- **Aliases** run as commands in a user's line and push no grant of their
+  own, so they run under whatever grant encloses the line that names
+  them. An alias that calls `cd` inside `grant [shell: [`detach]] { … }`
+  is refused like any other `cd`.
+- **Loading** reads the plugin file through the current grant. Each
+  candidate path the grant refuses is passed over for the next, and if
+  all are refused the error names the first. Plugins named in the rc are
+  loaded during bootstrap, before the command-line ceiling narrows the
+  session (SPEC §15.3): the rc is trusted.
+
+Two grant fields exist for plugin machinery (SPEC §12.8). `editor` lists
+verbs gating the `_ed-*` builtins, `shell` lists verbs gating `cd` and
+`detach`:
+
+| Verb | Gates |
 |---|---|
-| `` `read `` | `_ed-get`, `_ed-parse`, `_ed-history`, `_ed-state` |
-| `` `write `` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-state` |
-| `` `tui `` | `_ed-tui` |
+| `` editor: `read `` | `_ed-get`, `_ed-parse`, `_ed-history`, and the read half of `_ed-state` |
+| `` editor: `write `` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-clipboard`, and the write half of `_ed-state` |
+| `` editor: `tui `` | `_ed-tui` |
+| `` shell: `chdir `` | `cd` |
 
-A builtin listed under two verbs needs both, and checks them before it
-does anything.
+A builtin that needs two verbs checks both before its first effect.
+`_ed-state` checks `write` before its updater runs, so a refused call has
+done nothing. `_ed-hyperlink` is a pure formatter and needs no verb.
 
-`grant`'s `shell` field, a list of verbs such as ``shell: [`chdir]``, gates
-shell builtins that modify persistent process state (SPEC §12.8):
+A plugin that needs `cd` from a handler cannot grant it to itself. It
+documents that the session needs `` shell: [`chdir] ``, and lives under
+whatever the operator allows.
 
-| Verb | Enables |
-|---|---|
-| `` `chdir `` | `cd` |
+## 3 Architecture: split at the protocol
 
-Plugin aliases run with ambient authority — no grant is pushed around
-the call — matching the behaviour of `rc` aliases (§7). Hooks and
-keybinding handlers likewise run under whatever `grant` is already in
-force when they fire; a plugin author who needs `cd` from a hook or
-keybinding handler documents that the enclosing session needs
-``shell: [`chdir]``, since the plugin itself cannot grant it.
+The `ral` executable is a host over an engine, and a plugin straddles the
+two. The split is chosen so that the engine keeps no editor state and the
+host keeps no ral values.
 
-## 3 The `_ed-*` family
+- **Engine side.** Hooks, keybinding handlers, and aliases are ral values
+  and live in the shell: the hook table and alias frames, under a
+  per-plugin namespace so that unload and a failed load can remove
+  exactly what was added. Handlers never cross to the host.
+- **Host side.** The editor state, the keybinding router, the per-plugin
+  state cells, and the first-order part of each manifest (name, which
+  events, the key notations and guards) live in the REPL's plugin
+  runtime. Only data crosses.
+- **Between them.** The host drives a handler by dispatching a hook run
+  to the engine. A handler reaches the editor by calling an `_ed-*`
+  builtin, which puts the request to the host as an enquiry.
 
-Plugin handlers only. Called anywhere else (an ordinary prompt, a batch
-host) a builtin raises the host's refusal, which says why. The full
-reference is SPEC §15.5; the summary below is oriented around what
-plugin code needs to know.
+The consequence for plugin authors is a single rule: **the `_ed-*`
+builtins work only inside a handler that carries an editor context**. That
+is a `buffer-change` hook, a `complete` hook, or a keybinding handler.
+Lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`) and `prompt` carry
+none, and an `_ed-*` call there, or at an ordinary prompt, or in a batch
+host, is refused with a message saying so.
 
-| Builtin | Shape | Purpose |
-|---|---|---|
-| `_ed-get` | `Returns [text: Str, cursor: Int, keymap: Str]` | the whole editor state; `keymap` is `emacs` or `vi`; the text left of the cursor is `slice $st[text] 0 $st[cursor]` |
-| `_ed-set` | `[text: `keep\|`set Str, cursor: `keep\|`set Int] → Returns Unit` | partial buffer update |
-| `_ed-set-lbuffer` | `Str → Returns Unit` | replace left-of-cursor, preserve right |
-| `_ed-insert` | `Str → Returns Unit` | insert at cursor, advance |
-| `_ed-push` | `Returns Unit` | save buffer, clear |
-| `_ed-accept` | `Returns Unit` | run buffer on return |
-| `_ed-tui` | `∀ν α. {ν α} → Returns [output: Str, status: Int]` | suspend editor, run body, capture stdout |
-| `_ed-history` | `Str → Int → Returns [Str]` | prefix search (limit 0 = all) |
-| `_ed-parse` | `Returns [words: [Str], current: Int, offset: Int]` | the simple command at the cursor |
-| `_ed-ghost` | `Str → Returns Unit` | set suggestion after cursor |
-| `_ed-highlight` | `[[start: Int, end: Int, style: Str]] → Returns Unit` | set spans |
-| `_ed-state` | `α:data → {α → Returns α} → Returns α` | per-plugin persistent cell |
+## 4 Loading
 
-Indices are character indices, consistent with `length` and `slice`.
+`load-plugin` and `unload-plugin` are host builtins installed on the
+interactive session's table, not core builtins and not prelude wrappers.
+Both take a name. `load-plugin` resolves it in order (SPEC §15.5):
 
-**`_ed-push` + `_ed-accept`.** `_ed-push` saves the current buffer on
-the shell's buffer stack and clears the editor; the next prompt
-restores it. `_ed-accept` marks the buffer for immediate execution as
-if the user had pressed Enter. The pair implements zsh-style
-`push-line; accept-line`.
+1. `<config>/ral/plugins/NAME.ral`, `<config>` being the user
+   configuration directory;
+2. `DIR/NAME.ral` for each `DIR` in `RAL_PATH`;
+3. the literal path, then the literal path with `.ral` appended, read as
+   any written path is (live working directory, `~`).
 
-**`_ed-tui`.** The body runs with the line editor suspended and
-stdout captured. It opens only from a keybinding handler, the one run
-that holds the terminal. On success the return record's `status` is 0 and
-`output` is the captured stdout, decoded lossily after stripping exactly
-one trailing LF or CRLF. A lone CR and any preceding terminator remain.  The body is a command, its value is its output, and the call
-displays a terminal selection rather than computing with it. When the body fails, `status` carries the exit code and
-`output` carries the error message; the call never raises, so plugins
-can discriminate cancellation (fzf 1 = no match, 130 = Esc) from real
-errors without wrapping in `try`. In any other hook, or nested inside
-another `_ed-tui`, the call is reported as status 1 rather than raised,
-its `output` being `_ed-tui: this run holds no terminal to lend (a TUI
-opens from a keybinding handler, and not inside another)`.
+The file is typechecked and evaluated in a fresh scope under the
+manifest's declared table, a factory is applied to its options, and the
+result is parsed: handler arity, hook names, key notation, guard
+regexes, and alias collisions are all checked before anything is
+installed. Hooks and aliases are then committed and the host told; if
+the host refuses the manifest, the whole namespace is rolled back. Errors are reported as
+`plugin 'NAME': …`, with source spans in the plugin file.
 
-**`_ed-history`.** Entries are returned most recent first,
-deduplicated. `_ed-history '' 0` returns the full history.
+`load-plugin` takes no options and so loads a factory with `[:]`. A
+plugin that wants other options is configured through the rc file's
+`plugins:` map (section 8). Handing a non-empty options map to a plugin
+that returns a manifest directly, as from an rc entry giving options to
+one, is an error, since they would be silently dropped.
 
-**`_ed-parse`.** Returns the words of the simple command around the
-cursor: ral's own tokens, split at `|`, `?`, `;`, newlines and braces,
-with any `{` or `[` still open read as closed, since a buffer is
-routinely mid-block. `words[current]` is the word the cursor touches
-and `offset` its character index; a cursor in whitespace stands on a
-fresh `''` spliced in at its own offset, as bash's `COMP_CWORD` does.
-`words` is empty exactly when the buffer does not lex, as inside an
-open quote.
-
-**`ghost`.** Empty string clears. Ghost text is a display artifact,
-not part of `text`. Last writer wins across plugins.
-
-**`highlight`.** Each call replaces that plugin's spans. Valid
-styles are:
-
-```
-command  builtin  prelude  argument  option
-path-exists  path-missing  string  number  comment
-error  match  bracket-1  bracket-2  bracket-3
-```
-
-Unknown style is an error. Out-of-range indices are clamped. Spans
-from multiple plugins are composited by the shell; for overlaps the
-plugin loaded later wins.
-
-**`_ed-state`.** The first call runs the updater with the `default`;
-each subsequent call runs it with the previously stored value. To
-read without changing:
-
-```
-_ed-state $default { |s| return $s }
-```
-
-State is per-plugin and is cleared on unload.
-
-The cell is a boundary: a value in it was written by an earlier run, so its
-shape is not one this handler decided. The call admits the stored value against
-the type the handler uses it at, before the updater runs, and refuses one that
-does not fit (a stale cell from an older version of the plugin), naming the
-field.
-
-## 4 `load-plugin` / `unload-plugin`
-
-`load-plugin` and `unload-plugin` are host builtins the ral REPL
-installs into its own shell's manifest — fixed arity, so they seed
-its base scope as natives — not core builtins and not prelude
-wrappers around anything else.
-
-| Builtin | Shape |
-|---|---|
-| `load-plugin` | `Str → Returns Unit` |
-| `unload-plugin` | `Str → Returns Unit` |
-
-`load-plugin` resolves its argument in order:
-
-1. `XDG_CONFIG_HOME/ral/plugins/$name.ral` (falls back to `~/.config/…`).
-2. Each `$dir/$name.ral` for `$dir` in `RAL_PATH` (colon-separated).
-3. As a literal path, with `.ral` appended if needed.
-
-The module is evaluated with no options (`[:]`). If its return value
-is a block, `[:]` is applied as its single argument; the result must
-then be a manifest map. If the module's return value is already a
-map, that map is the manifest directly. An unknown hook name is a
-load-time error naming the valid events. Invalid key notation in a
-keybinding is a load-time error (§6); a keybinding that can never fire
-loads with a warning naming the binding that claims its keys first.
-Loading a plugin whose name is already registered is
-an error; `unload-plugin` of an unknown plugin is also an error.
-
-```
-load-plugin 'syntax-highlight'
-load-plugin 'fzf-files'
-unload-plugin 'fzf-files'
-```
-
-`load-plugin` takes only a name — there is no way to pass per-plugin
-options through it. A plugin that needs non-default options is
-loaded through `~/.ralrc`'s `plugins:` map (§9), whose value for that
-plugin is forwarded to the plugin's top-level block.
+Loading needs a booted session: from an `aside` run, a worker, or a
+pipeline stage it fails at once. A duplicate name, and unloading a name
+that is not loaded, are errors.
 
 ## 5 Hooks
 
-Declared as `hooks: [event: $handler, …]` in the manifest. Plugins
-cannot register hooks at runtime.
+A hook is a handler for one of six events. Hooks are registered
+statically from the manifest and are never added at run time. The events,
+their records, and their exact semantics are SPEC §15.6; the design
+points are these.
 
-Every hook handler takes exactly one argument. Event hooks receive
-an event record; arity is checked at registration, so a handler of
-any other shape is a load error.
+**One argument.** Every handler takes exactly one: an event record, or
+for `prompt` the prompt string. Registration checks the arity, so a
+handler of any other shape is a load error, not a run-time surprise. A
+record carries only what the event alone knows (`buffer-change` gives the
+old buffer, not the new one); the editor is read through `_ed-*`.
 
-| Event | Handler | Fires |
-|---|---|---|
-| `buffer-change` | `{Map → Returns Unit}` | after buffer or cursor changes |
-| `complete` | `{Map → Returns [Str]}` | on Tab, before ral's own completion |
-| `pre-exec` | `{Map → Returns Str}` | after Enter, before execution |
-| `post-exec` | `{Map → Returns Unit}` | after execution completes |
-| `chpwd` | `{Map → Returns Unit}` | after a line that moved the session's directory |
-| `prompt` | `{Str → Returns Str}` | before each prompt render |
+| Event | Role |
+|---|---|
+| `buffer-change` | observe an edit; set ghost text, highlights |
+| `complete` | claim the word under the cursor at Tab |
+| `pre-exec` | rewrite the line about to run |
+| `post-exec` | observe the line that ran and its status |
+| `chpwd` | observe a change of the session's directory |
+| `prompt` | transform the prompt string |
 
-All handlers for an event run in plugin load order regardless of
-individual failures. A failing handler's error is reported prefixed
-`plugin 'name' hook 'event': `.
+**Three shapes of composition.** Observers (`buffer-change`, `post-exec`,
+`chpwd`) run for every plugin, in load order, and their values are
+ignored. Transformers (`pre-exec`, `prompt`) fold: each handler receives
+what the previous one returned. Claimants (`complete`) are tried in
+order and the first non-empty answer wins, passing to ral's own
+completion when none does.
 
-**`buffer-change`** receives
-`[old: Str]`, the buffer before the change; the buffer, cursor,
-history and keymap are read through `_ed-get` and `_ed-history`.
-Typical uses are highlighting and autosuggestion.
-
-**`complete`** receives `[words: [Str], current: Int, offset: Int]`,
-the record `_ed-parse` returns for the word Tab was pressed on, and
-returns candidates: each a `Str`, or `[replacement: Str, display: Str]`
-(a `Str` is both). The first hook in load order to return a non-empty
-list claims the word, and the candidates replace the text from
-character `offset` to the cursor; later hooks do not run. An empty
-list or `()` passes to the next hook, and finally to ral's own completion.
-Candidates are not filtered further: a hook returns those that
-complete `words[current]`. Tab inserts the candidates' longest common prefix,
-or a lone candidate outright, so a hook offering text that does not extend the
-word (an alias's expansion, say) should return exactly one. A return of any
-other shape passes with a warning. When the buffer does not lex, no hook runs.
-
-`complete` runs aside, like `buffer-change`: its writes to the buffer
-and to ghost text and highlights take no effect, and `_ed-tui` reports
-status 1. Both are braked per plugin and event: a run overrunning its
-budget (100ms for `buffer-change`, 500ms for `complete`), or failing
-three times in a row, disables that hook for the rest of the session,
-with one notice, `plugin 'name': hook 'event' disabled for this
-session (overran its 500ms budget)` or `(failed 3 times in a row)`.
-
-**`pre-exec`** receives `[src: Str]`, the full command line as typed,
-and returns the line to run, or `()` to leave it. The hooks fold over
-the line in load order: each receives what the one before returned,
-and the last line is what runs. A failing hook is reported and the
-line goes on as it was, so no hook can stop every line; a return of
-any other shape is reported with a warning and passed over alike.
-Refusing a line is rewriting it to a failing one; its status reaches
-`post-exec` through the ordinary run:
+**No handler can wedge the shell.** A failing handler is reported with
+the label `plugin 'NAME' hook 'EVENT': ` and the others still run. A
+failing `pre-exec` leaves the line as it was, so no hook can stop every
+line, `unload-plugin` included. A line is refused by rewriting it to one
+that fails, and its status reaches `post-exec` through the ordinary run:
 
 ```
 hooks: [
@@ -268,308 +202,215 @@ hooks: [
         if !{re-match '^rm -rf /' $ev[src]} {
             return "fail [status: 1, message: 'refused']"
         } else { return $ev[src] }
-    }
-]
-```
-
-**`post-exec`** receives `[src: Str, status: Int]`: `src` is the line
-that ran, after any rewrite, and `status` its exit status.
-**`chpwd`** receives `[old: Str, new: Str]`, the
-session's working directory before and after the line. It compares
-the two ends, not the `cd`s between them: `cd a; cd b` on one line
-fires once, while `cd .`, or a `cd` inside `within [dir: …]`, which
-restores the directory on exit, fires nothing.
-
-**`prompt`** is a transformer, not an event record. Each handler
-receives the current prompt string (starting from the shell's base)
-and returns a new one, or prints it: like the session prompt, a
-handler returning `()` has its captured stdout decoded lossily after removing
-one trailing LF or CRLF. A directly returned String is unchanged.
-Handlers compose: the output of handler `n` is the input to handler
-`n+1`. A failing handler leaves the prompt as it was; the faults of
-one render print together, once while they repeat.
-
-```
-# Append a git branch segment.
-hooks: [
-    prompt: { |base|
-        let b = try { return $[!{git-branch}] } { |_| return '' }
-        _if !{is-empty $b} { return $base } { return "$base [$b] " }
-    }
-]
-```
-
-## 6 Keybindings
-
-Declared as `keybindings: [[key: $str, handler: $thunk, guard?: $regex], …]`.
-
-**Key notation:**
-
-```
-notation := chord (' '+ chord)*
-chord    := (modifier '-')* key        each modifier at most once, any order
-modifier := ctrl | alt | shift
-key      := one character | f1…f12 | tab | enter | escape | up | down
-          | left | right | home | end | delete | backspace
-```
-
-So `'a'`, `'ctrl-r'`, `'alt-enter'`, `'ctrl-left'`, `'f5'`,
-`'ctrl-alt-x'` (the same key as `'alt-ctrl-x'`), and `'ctrl--'` (ctrl
-with `-`). Two rules keep one key from having two spellings, and a
-refusal names the spelling to use:
-
-- `shift` goes with a key that is not a character (`'shift-f5'`,
-  `'shift-left'`); for a character, the shifted character is itself the
-  key: `'A'`, not `'shift-a'`.
-- `ctrl` with an uppercase letter is refused: a terminal sends
-  `'ctrl-C'` as `'ctrl-c'`. So are `'ctrl-h'`, `'ctrl-i'`, `'ctrl-m'`
-  and `'ctrl-['`, which a terminal sends as `'backspace'`, `'tab'`,
-  `'enter'` and `'escape'`, and a control character written as the key.
-
-A sequence is chords separated by spaces, pressed in turn:
-`'ctrl-x ctrl-e'`. It must begin with plain `ctrl-x`, the prefix the
-line editor leaves free for sequences.
-
-Invalid notation is a load-time error naming the offending text.
-
-**Dispatch.** Plugin keybindings form one ordered dispatch table
-shared by every REPL frontend: entries in plugin load order (manifest
-order within a plugin), with the editor's built-in action as the
-tail. A key press runs the first entry whose keys match and whose
-`guard` — a regex tested against the text left of the cursor —
-allows; when no entry claims it, the built-in action runs. Several
-guarded bindings on one key or sequence compose as an ordered pattern
-match: `key: 'tab'` with a guard cooperates with built-in completion,
-and unmatched presses complete as usual.
-
-A handler is `{|ev| → Returns Unit}`, where `ev` is
-`[key: Str, mode: Str]`: the binding's key notation, and the editor's
-input mode at the press, `insert`, `command` or `replace` (`insert`
-throughout emacs). `_ed-get`'s `keymap` is the configured one, `emacs`
-or `vi`; `mode` is how a handler tells vi's modes apart. A handler's
-return value carries nothing. The buffer and cursor are read with
-`_ed-get`.
-All effects flow through the `_ed-*` builtins (`_ed-set`,
-`_ed-insert`, `_ed-set-lbuffer`, `_ed-push`, `_ed-accept`, `_ed-tui`,
-…). Whether a binding claims a press is decided entirely by its
-guard, before the handler runs — there is no return-value fallthrough.
-
-**Load-time rules.** Four rules keep the table honest:
-
-- `ctrl-c` and `ctrl-d`, with no other modifier, are reserved
-  (interrupt, end-of-file) and cannot be bound, guard or not, alone or
-  within a sequence.
-- Every unmodified key except `f1`–`f12` carries a ral-owned built-in
-  editing action (typing, cursor movement, deletion, completion,
-  history, accept-line, keymap escape); binding one requires a
-  `guard:`, since an unguarded binding would shadow the action on
-  every press. Modified chords (`ctrl-…`, `alt-…`, `shift-…`) and
-  function keys may be bound unguarded — replacing the underlying
-  editor default (`ctrl-t`, `alt-c`, `ctrl-r`) is the point.
-- A sequence begins with `ctrl-x`.
-- A binding that can never fire loads with a warning naming the
-  binding that claims its keys first: an unguarded binding on the same
-  keys loaded before it, or an unguarded binding on a proper prefix of
-  its sequence, wherever loaded — an unguarded `ctrl-x` kills every
-  `ctrl-x …` sequence. The warning is given when the dead binding or
-  its blocker belongs to the plugin being loaded.
-
-**What a handler may do.** Use `_ed-set` / `_ed-push` / `_ed-accept`
-/ `_ed-ghost` / `_ed-highlight` to mutate editor state. Use `_ed-tui`
-(gated by `grant`'s `` editor: [`tui] ``, §2) to run a fuzzy finder or other
-full-screen program; a keybinding handler is the one place it opens.
-
-After a handler that returns without `accept`, the shell re-enters
-readline with the handler's final buffer and cursor.
-
-## 7 Aliases
-
-Declared as `aliases: [name: $thunk, …]` in the manifest. Each thunk is
-called with a single `$args` list (same calling convention as `rc`
-aliases). Aliases are merged into the shell's alias table at load time.
-
-**Collision policy.** Loading a plugin whose `aliases` map names an
-alias already present (from `rc` or a previously loaded plugin) is an
-error. The load is rejected in full; no aliases from that manifest are
-registered.
-
-**Unload.** `unload-plugin $name` removes exactly the aliases that
-plugin installed. Other aliases are untouched.
-
-**Authority.** Plugin aliases run with ambient authority — no grant is
-pushed around the call. This matches the behaviour of `rc` aliases.
-A plugin alias that calls `cd` therefore always succeeds, regardless
-of the caller's `grant` stack. A *hook* or *keybinding handler* that
-calls `cd`, by contrast, needs the enclosing session to hold
-``shell: [`chdir]`` (§2).
-
-```
-aliases: [
-    z: { |args|
-        if !{is-empty $args} {
-            cd ~
-        } else {
-            let here = !{cwd}
-            let result = try {
-                return !{zoxide query --exclude $here -- ...$args | from-line}
-            } { |_| return "" }
-            if $[not !{is-empty $result}] { cd $result }
-        }
     },
 ]
 ```
 
-## 8 Prelude helpers
+`buffer-change` and `complete` fire on every keystroke and every Tab, so
+they are held to a different standard. They run aside, so nothing they
+do flows back into the session. A `buffer-change` hook's ghost text and
+highlights are its output and are kept; a `complete` hook's writes to the
+buffer, ghost text, and highlights are discarded. They are also braked per
+plugin and event. A run that overruns its budget (100ms, 500ms), or
+three failures in a row, disables that hook for the rest of the session
+with one notice. A slow handler thus costs the user at most one stutter.
 
-The `_ed-*` family is direct builtins (see §3); plugins call them by
-name with no prelude indirection. `load-plugin` and `unload-plugin`
-are likewise direct host builtins (§4), not prelude wrappers. Plugin
-code does reach for one genuine prelude helper:
+`prompt` is the one event that is a transformer of a string rather than
+an event record, and it is read like the session prompt: a returned value
+is the prompt, and otherwise captured output is.
 
 ```
-elem   x items   -- membership test
+hooks: [
+    prompt: { |base|
+        let b = try { return !{git branch --show-current | from-line} } { |_| return '' }
+        if !{is-empty $b} { return $base } else { return "$base [$b] " }
+    },
+]
 ```
 
-## 9 `~/.ralrc`
+`complete` receives what `_ed-parse` returns, so a plugin completes the
+word the way the editor sees it. It claims a word only where it has
+something to say, and returns `[]` elsewhere:
 
-The config map (SPEC §15.3) accepts an optional `plugins` map, from
-plugin name (or path) to that plugin's options map:
+```
+hooks: [complete: { |[words: ws, current: i]|
+    let head = intercalate ' ' !{take 2 $ws}
+    if $[$i == 2 && !{elem $head ['git checkout', 'git switch']}] {
+        let w = last !{take 3 $ws}
+        let branches = try { return !{lines !{git branch '--format=%(refname:short)'}} } { |_| return [] }
+        return !{filter { |b| $[!{slice $b 0 !{length $w}} == $w] } $branches}
+    } else { return [] }
+}]
+```
+
+The minimal frontend, used on dumb terminals, dispatches no
+`buffer-change` or `complete` hooks and no editor keybindings, and shows
+no ghost text or highlights. Aliases and the other four events do not
+depend on raw-mode editing and work there (SPEC §15.6).
+
+## 6 Keybindings
+
+A keybinding is `[key: Str, handler: block, guard?: Str]`. The design
+is one ordered dispatch table shared by every frontend, so that
+precedence is decided once and the frontends cannot disagree: plugins in
+load order, manifest order within a plugin, and the editor's built-in
+action as the tail.
+
+**A guard decides, not the handler.** A press runs the first entry whose
+keys match and whose `guard`, a regex tested against the text left of the
+cursor, allows. Whether a binding claims a press is settled before its
+handler runs, and the handler's return value carries nothing. There is
+no fallthrough protocol for a handler to forget or get wrong. Several
+guarded bindings on one key compose as an ordered pattern match, and an
+unmatched press does the built-in thing: a guarded `tab` cooperates with
+ral's own completion.
+
+**Key notation has one spelling per key** (SPEC §15.6): chords are
+`modifier-…-key`, a sequence is chords separated by spaces. Where a
+terminal cannot distinguish two spellings (`ctrl-h` from `backspace`,
+`ctrl-C` from `ctrl-c`, `shift-a` from `A`), the unreachable one is
+refused, and the refusal names the spelling to use. A key that could be
+written two ways would be bound twice and fire once.
+
+**Load-time rules** keep the table honest:
+
+- `ctrl-c` and `ctrl-d`, alone or in a sequence, are the session's escape
+  hatches and cannot be bound. A wedged handler on either would leave no
+  way to stop it or to leave the shell.
+- An unmodified key other than `f1` to `f12` carries a built-in editing
+  action, so binding it requires a `guard`; otherwise the binding would
+  shadow typing on every press. Modified chords and function keys may be
+  unguarded, since replacing the editor default (`ctrl-t`, `alt-c`,
+  `ctrl-r`) is the point.
+- A sequence begins with `ctrl-x`, the prefix the line editor leaves free.
+- A binding that can never fire loads with a warning naming what claims
+  its keys first: an earlier unguarded binding on the same keys, or an
+  unguarded binding on a proper prefix of the sequence, wherever loaded.
+
+A handler receives `[key: Str, mode: Str]`: the binding's notation and the
+editor's input mode at the press (`insert`, `command`, `replace`; always
+`insert` in emacs). It reads the buffer with `_ed-get` and acts through
+the other `_ed-*` builtins. When it returns without `_ed-accept`, the
+editor re-enters with the handler's final buffer and cursor.
+
+A keybinding handler is the one run that holds the terminal, which is
+what `_ed-tui` needs (section 7).
+
+## 7 The editor interface
+
+The `_ed-*` builtins are the whole of a plugin's access to the editor.
+They are installed only by the interactive host and hidden from `help`.
+Each is its own builtin, not one `_ed` command with an op argument, so
+that the checker sees each op's real return type and arity is fixed per
+op. Signatures and contracts are SPEC §15.7. What a plugin author needs
+to know that the table does not say:
+
+- **Offsets are characters**, as in `length` and `slice`, never bytes.
+  The cursor is clamped into the text after every write.
+- **State is read whole.** `_ed-get` answers text, cursor, and the
+  configured keymap (`emacs` or `vi`); the live vi mode arrives instead
+  with a keybinding's `mode`.
+- **`_ed-push` and `_ed-accept`** are zsh's `push-line` and `accept-line`.
+  The pushed buffer returns at the next prompt, so a handler can run a
+  generated command and give the user back the line they were typing.
+- **`_ed-ghost` and `_ed-highlight`** set display state, not input. Among
+  plugins the last in load order with non-empty ghost text wins. Each
+  highlight call replaces the spans that run had set, spans from several
+  plugins are composited with the later plugin on top, and out-of-range
+  offsets are clamped. The style names are a fixed vocabulary (`command`,
+  `builtin`, `prelude`, `argument`, `option`, `path-exists`,
+  `path-missing`, `string`, `number`, `comment`, `error`, `match`,
+  `bracket-1`, `bracket-2`, `bracket-3`); an unknown one is an error.
+- **`_ed-parse`** is the lexer's simple command at the cursor: its tokens
+  split at `|`, `?`, `;`, newlines, and braces, with an open `{` or `[`
+  read as closed, because a buffer is routinely mid-block. A cursor in
+  whitespace stands on a fresh `''` at its own offset, so
+  `words[current]` is always the word being typed. `words` is empty
+  exactly when the buffer does not lex.
+- **`_ed-history`** returns entries most recent first, deduplicated;
+  limit `0` means all.
+- **`_ed-state`** is the plugin's one persistent cell, held by the host
+  and cleared at unload. The first call runs the updater on the default,
+  later calls on the stored value; to read without changing, return the
+  argument. The cell is a boundary: what it holds was written by an
+  earlier run, so it is admitted against the type this call uses it at,
+  before the updater runs, and refused with the field named when it does
+  not fit. The updater's result must be first-order data.
+- **`_ed-clipboard`** copies natively when ral runs locally and by OSC 52
+  otherwise, and answers whether all of the text landed. It needs
+  `editor: `write`.
+
+**`_ed-tui`** runs a body with the editor suspended, stdout captured, and
+the terminal lent to it, so that a fuzzy finder can draw while its pick
+comes back as a string. The body is a command, its value its output; the
+captured bytes are decoded lossily after stripping exactly one trailing
+LF or CRLF. The call never raises. On success `status` is `0`; when the
+body fails, `status` is its exit code and `output` its error message, so
+a plugin tells cancellation (fzf's 1 and 130) from a real error without
+wrapping in `try`. The terminal is lent only to a keybinding handler.
+From any other hook, or nested inside another `_ed-tui`, the call
+reports status 1 and says why instead of raising, since those runs have
+no terminal to lend.
+
+## 8 Configuration
+
+Plugins are configured, not scripted into place, by the rc file's
+`plugins:` map (SPEC §15.3): from plugin name or path to that plugin's
+options map, forwarded to the plugin's factory as its single argument.
 
 ```
 return [
-    env: [EDITOR: 'nvim'],
     plugins: [
-        syntax-highlight: [:],
-        fzf-files:        [key: 'ctrl-t'],
-        fzf-cd:           [key: 'alt-c'],
-        fzf-history:      [key: 'ctrl-r'],
-        fzf-completion:   [:],
+        autosuggestion: [:],
+        fzf-files:      [key: 'ctrl-t'],
+        zoxide:         [key: 'alt-z'],
     ],
 ]
 ```
 
-A bare hyphenated plugin name needs no quoting; a path does
-(`'/path/to/p.ral': [:]`). Each value is forwarded verbatim to the
-plugin's top-level block as its single argument; `[:]` is the empty
-map, for a plugin taking no options. A value that is not a map is
-reported by name and skipped; the other plugins still load.
+`[:]` is the empty map, for a plugin taking no options. A value that is
+not a map is reported by name and that plugin skipped; the rest load. A
+plugin that fails to load is reported and skipped, never fatal to the
+session. Plugins from `plugins:` load after the rest of the rc has taken
+effect, in alphabetical order of name (ral maps are ordered by key), so
+load order, and with it hook and keybinding precedence, does not depend
+on how the file was written. When order matters, load by hand.
 
-Plugins load in alphabetical order of plugin name after the ralrc
-evaluates — ral maps are sorted by key, so the written order does not
-matter. This is the only path by which a plugin receives non-default
-options — a `load-plugin` call in the ralrc body (see below) always
-loads with `[:]`. For conditional loading with default options, call
-`load-plugin` directly in the body before the final `return`:
+A `load-plugin` call in the rc body loads with default options and
+before the `plugins:` map. It is the way to load conditionally:
 
 ```
-load-plugin 'syntax-highlight'
-_if !{is-executable 'fzf'} {
+load-plugin 'autosuggestion'
+if !{succeeds { which fzf > /dev/null }} {
     load-plugin 'fzf-files'
     load-plugin 'fzf-history'
-} {}
-
-return [env: [...]]
-```
-
-**Receiving configuration in a plugin.** A configurable plugin's
-top-level block takes exactly one parameter: the options map.
-Fields are extracted by name, with defaults via the prelude's `get`:
-
-```
-return { |options|
-    let key = get $options key 'ctrl-r'
-    # ... use $key ...
-    return [name: 'fzf-history', ..., keybindings: [[key: $key, handler: $_handler]]]
 }
+return [env: [EDITOR: 'nvim']]
 ```
 
-Plugins that need no configuration return the manifest map directly
-without a wrapping block.
+## 9 Examples
 
-## 10 Examples
+The plugins shipped in `plugins/` are the working examples, and each is
+loaded in CI (`just plugins-check`).
 
-The fzf plugins port fzf's own `key-bindings.zsh` and `completion.zsh`.
-What those scripts share — the option stack, the fzf-tmux switch, the
-exit statuses — is one module, `plugins/lib/fzf.ral`, which each plugin
-binds with `use` at its top level, where the path resolves beside the
-plugin file.
+- `autosuggestion.ral`: fish-style ghost text from history, one
+  `buffer-change` hook over `_ed-get`, `_ed-history`, and `_ed-ghost`.
+- `zoxide.ral`: aliases (`z`, `zi`), a `chpwd` hook, and a keybinding
+  with `_ed-tui`, with a configurable key.
+- `fzf-files.ral`, `fzf-cd.ral`, `fzf-history.ral`: fzf's `CTRL-T`,
+  `ALT-C`, and `CTRL-R` widgets. They port fzf's own `key-bindings.zsh`,
+  and what those scripts share (the option stack, the `fzf-tmux` switch,
+  the exit statuses) is one module, `plugins/lib/fzf.ral`, bound with
+  `use` at each plugin's top level, where the path resolves beside the
+  plugin file.
+- `fzf-completion.ral`: `**`-trigger completion on a guarded `tab`, so a
+  plain Tab still reaches ral's completer.
 
-### 10.1 The shared module
-
-```
-# What fzf's shell integrations share (__fzf_defaults, __fzfcmd and
-# __fzf_comprun in key-bindings.zsh and completion.zsh), for the fzf-* plugins.
-
-## $name, or `default` when it is unset or empty: sh's ${name:-default}.
-let var = { |name default| let v = get !{env} $name ''; if !{is-empty $v} { $default } else { $v } }
-
-## Run fzf as fzf's own widgets do — `ours` before the user's options file and
-## FZF_DEFAULT_OPTS, `theirs` after, in a tmux popup when $FZF_TMUX asks — over
-## `walk $command (fzf's walker when '') or `items $list, and give `k` the picks.
-let pick = { |ours theirs src args k|
-    let h = var FZF_TMUX_HEIGHT 40%
-    let [output: out, status: s] = _ed-tui {
-        within [
-            env: [
-                FZF_DEFAULT_OPTS: "--height $h --min-height 20+ --bind=ctrl-z:ignore $ours\n!{from-string < !{var FZF_DEFAULT_OPTS_FILE ''} ? ''}\n!{var FZF_DEFAULT_OPTS ''} $theirs",
-                FZF_DEFAULT_OPTS_FILE: '',
-            ],
-            handlers: [fzf: { |a|
-                if $[not !{is-empty !{var TMUX_PANE ''}} && (!{var FZF_TMUX '0'} != '0' || not !{is-empty !{var FZF_TMUX_OPTS ''}})] {
-                    fzf-tmux ...!{posix-split !{var FZF_TMUX_OPTS "-d$h"}} -- ...$a
-                } else { fzf ...$a }
-            }],
-        ] {
-            case $src [
-                `walk:  { |c| within [env: [FZF_DEFAULT_COMMAND: $c]] { fzf --print0 ...$args } },
-                `items: { |xs| to-string !{intercalate "\0" $xs} | fzf --read0 --print0 ...$args },
-            ]
-        }
-    }
-    if $[$s == 0] { k !{re-find-matches '[^\x00]+' $out} } elsif $[$s != 1 && $s != 130] { fail [status: $s, message: "fzf: $out"] }
-}
-```
-
-`pick` stacks fzf's options as upstream's `__fzf_defaults` does: `ours`,
-then the contents of `$FZF_DEFAULT_OPTS_FILE`, then `$FZF_DEFAULT_OPTS`,
-then `theirs`. Upstream's `__fzfcmd` becomes a handler on `fzf`, which
-sends every call to `fzf-tmux` when `$TMUX_PANE` and `$FZF_TMUX` or
-`$FZF_TMUX_OPTS` say so. `` `walk $command `` runs fzf over that command,
-or over fzf's own walker when it is empty; `` `items $list `` feeds the
-list. Items and picks travel NUL-separated, so neither a file name nor
-a multi-line history entry is ever split. `k` runs only on a selection:
-fzf's 1 (no match) and 130 (Esc) leave the line alone, and any other
-status fails.
-
-### 10.2 CTRL-T — insert files at cursor
+`fzf-cd` shows the whole shape: a factory, one keybinding, the shared
+picker with a continuation that runs only on a selection, and the
+`push`, `set`, `accept` triple.
 
 ```
-# fzf-files — CTRL-T puts the picked paths at the cursor, as fzf's
-# key-bindings.zsh does.  Reads $FZF_CTRL_T_COMMAND and $FZF_CTRL_T_OPTS.
-# Options: key (default ctrl-t).
-
-let [pick: pick, var: var] = use 'lib/fzf.ral'
-
-{ |options| [
-    name: fzf-files,
-    keybindings: [[key: !{get $options key ctrl-t}, handler: { |_|
-        pick '--reverse --walker=file,dir,follow,hidden --scheme=path' "!{var FZF_CTRL_T_OPTS ''} -m" `walk !{var FZF_CTRL_T_COMMAND ''} [] { |ps|
-            _ed-insert "!{intercalate ' ' !{map $ral-quote $ps}} "
-        }
-    }]],
-] }
-```
-
-`ral-quote` renders each path as ral source; `posix-quote` would not
-do, since a bare `007` reads back as the number 7.
-
-### 10.3 ALT-C — cd to selected directory
-
-```
-# fzf-cd — ALT-C cds into the picked directory, as fzf's key-bindings.zsh
-# does: the line being typed is pushed, and comes back at the next prompt.
-# Reads $FZF_ALT_C_COMMAND and $FZF_ALT_C_OPTS.  Options: key (default alt-c).
-
 let [pick: pick, var: var] = use 'lib/fzf.ral'
 
 { |options| [
@@ -584,143 +425,49 @@ let [pick: pick, var: var] = use 'lib/fzf.ral'
 ] }
 ```
 
-`+m` makes the pick single, and `{ |[d]| … }` binds it. `_ed-push` and
-`_ed-accept` are zsh's `push-line` and `accept-line`: the `cd` runs at
-once and the line being typed returns at the next prompt.
-`absolute-path` resolves lexically, as zsh's `cd` then `$PWD` does,
-leaving symlinks as written.
-
-### 10.4 CTRL-R — history search
+A small `buffer-change` sketch, dimming everything after a `#`:
 
 ```
-# fzf-history — CTRL-R replaces the line with the picked history entries,
-# newline-joined, as fzf's key-bindings.zsh does; the line so far is the
-# query.  Reads $FZF_CTRL_R_OPTS.  Options: key (default ctrl-r).
-
-let [pick: pick, var: var] = use 'lib/fzf.ral'
-
-{ |options| [
-    name: fzf-history,
-    keybindings: [[key: !{get $options key ctrl-r}, handler: { |_|
-        let st = _ed-get
-        pick '' "--scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi !{var FZF_CTRL_R_OPTS ''}" `items !{_ed-history '' 0} [--query, !{slice $st[text] 0 $st[cursor]}] { |ps|
-            let t = intercalate "\n" !{map { |p| re-replace-all '\n+$' '' $p } $ps}
-            _ed-set [text: `set $t, cursor: `set !{length $t}]
-        }
-    }]],
-] }
-```
-
-Upstream's `-n2..,..` skips an event-number column, and
-`_ed-history` has none to skip.
-
-### 10.5 TAB — `**`-trigger completion
-
-`plugins/fzf-completion.ral` binds `tab` with a guard, so a plain tab
-still reaches ral's own completer and only a word ending in the trigger
-(`**`, or `$FZF_COMPLETION_TRIGGER` at load) claims the key. `_ed-parse`
-supplies the command word, the word before the cursor's, and the word
-itself; a map from command word to completer stands in for upstream's
-`_fzf_complete_<command>` functions, with each of
-`$FZF_COMPLETION_DIR_COMMANDS` mapped to the directory completer and
-path completion as the default:
-
-```
-{ |options|
-    let trigger = get $options trigger !{get !{env} FZF_COMPLETION_TRIGGER '**'}
-    [
-        name: fzf-completion,
-        keybindings: [[
-            key: tab,
-            guard: !{intercalate '' ['\S\s+\S*', !{re-replace-all '[.^$*+?()\[\]{}|\\]' '\$0' $trigger}, '$']},
-            handler: { |_|
-                let [words: ws, current: i, offset: o] = _ed-parse
-                let st = _ed-get
-                let lb = slice $st[text] 0 $st[cursor]
-                let n = $[!{length $lb} - $o - !{length $trigger}]
-                if $[not !{is-empty $ws} && $n >= 0] {
-                    let [cmd, ..._] = $ws
-                    let t = union !{fold { |m d| [...$m, $d: $_dirs] } [:] !{words !{get !{env} FZF_COMPLETION_DIR_COMMANDS 'cd rmdir'}}} $_by_cmd
-                    let complete = if !{has $t $cmd} { $t[$cmd] } else { $_files }
-                    complete [prefix: !{slice $lb $o $n}, prev: !{last ['', ...!{take $i $ws}]}, lbuf: !{slice $lb 0 $o}]
-                }
-            },
-        ]],
-    ]
+let dim-comment = { |_|
+    let text = !{_ed-get}[text]
+    let [code, ...rest] = re-split '#' $text
+    if !{is-empty $rest} { _ed-highlight [] } else {
+        _ed-highlight [[start: !{length $code}, end: !{length $text}, style: 'comment']]
+    }
 }
+return [name: 'dim-comment', hooks: [buffer-change: $dim-comment]]
 ```
 
-Path and directory completion walk below the word's longest existing
-directory, the rest of the word being the query, as upstream's
-`__fzf_generic_path_completion` does. ssh and telnet complete hosts from
-`~/.ssh/config`, `~/.ssh/config.d/*`, `/etc/ssh/ssh_config`,
-`~/.ssh/known_hosts` and `/etc/hosts`, parsed in ral rather than awk;
-kill completes PIDs from `ps`. ral has no `export`, `unset` or
-`unalias` to complete, and plugin options cannot carry blocks, so
-upstream's `_fzf_compgen_*` and `_fzf_comprun` overrides have no
-counterpart.
+## 10 Deliberately not supported
 
-### 10.6 `complete` — git branches
+Each of these is a choice, not a gap.
 
-A `complete` hook claims a word only where it has something to say, and
-returns `[]` elsewhere so that ral's own completion answers. This one
-claims the argument after `git checkout` or `git switch`, offering the
-branches that start with what is typed; outside a repository `git`
-fails, and the hook passes:
+- **A capability manifest.** See section 2. Confinement is `grant` and
+  the session ceiling.
+- **Run-time registration.** Hooks, keybindings, and aliases come from
+  the manifest, so load and unload are inverses.
+- **Return-value fallthrough in keybindings.** A guard claims a press
+  before the handler runs.
+- **Options through `load-plugin`.** Configuration lives in the rc file,
+  as data, in one place.
+- **Non-first-order options.** A plugin that wants a block of its own
+  writes it in the plugin.
+- **Plugins outside the interactive `ral`.** Batch hosts, exarch, and
+  synod install no `load-plugin` and no `_ed-*`; portable code must not
+  assume them (SPEC §15, §15.8).
+- **Key sequences not under `ctrl-x`, and a bindable `ctrl-c` or
+  `ctrl-d`.** See section 6.
 
-```
-return [
-    name: git-branch,
-    hooks: [complete: { |[words: ws, current: i]|
-        let head = intercalate ' ' !{take 2 $ws}
-        if $[$i == 2 && !{elem $head ['git checkout', 'git switch']}] {
-            let w = last !{take 3 $ws}
-            let branches = try { return !{lines !{git branch '--format=%(refname:short)'}} } { |_| return [] }
-            return !{filter { |b| $[!{slice $b 0 !{length $w}} == $w] } $branches}
-        } else { return [] }
-    }],
-]
-```
+Wanted, not built:
 
-### 10.7 Syntax highlight (sketch)
-
-```
-let _handler = { |_ev|
-    let st = _ed-get
-    let new = $st[text]
-    _if !{is-empty $new} { _ed-highlight []; return () } {}
-    let toks  = split '[ \t]+' $new
-    let head  = $toks[0]
-    let style = try { which $head; return 'command' } { |_| return 'error' }
-    _ed-highlight [[start: 0, end: !{length $head}, style: $style]]
-}
-
-return [
-    name: 'syntax-highlight',
-    hooks: [buffer-change: $_handler],
-]
-```
-
-## 11 Future extensions
-
-The following appear in earlier design notes but are not yet
-implemented. They are collected here as candidates for future
-releases.
-
-- **Left/right prompt hooks.** A `prompt` signature taking the side
-  (`"left"`/`"right"`) and returning that side's segment,
-  concatenated by the shell. Today `prompt` is a transformer on the
-  full prompt string, which is adequate for left-prompt decoration
-  but leaves no clean place to contribute to a right-prompt.
-
-- **The parser in `_ed-parse`.** `_ed-parse` splits the lexer's
-  tokens at separators; reading the parser's simple command instead
-  would also see a cursor inside `$[…]`, a list literal, or a redirect
-  target for what it is.
-
-- **Highlight-style overrides.** A `highlight_styles` key in ralrc
-  that remaps each named style to terminal attributes.
-
-- **Async prompt hooks.** A `prompt` handler that runs slow work
-  (`git status`, VCS queries) without blocking the prompt render;
-  current workaround is `spawn` with a cached result.
+- **Left and right prompt hooks.** `prompt` transforms the whole prompt
+  string, which suffices for decorating the left and leaves no clean way
+  to contribute to a right-hand prompt.
+- **Asynchronous prompt segments.** A `prompt` handler runs to
+  completion before the prompt draws; slow work such as VCS queries
+  wants a cached result.
+- **Highlight-style overrides.** The style vocabulary is fixed and the
+  rc keyset has no key to remap it.
+- **`_ed-parse` over the parser.** It splits the lexer's tokens, so a
+  cursor inside `$[…]`, a list literal, or a redirect target is not seen
+  for what it is.

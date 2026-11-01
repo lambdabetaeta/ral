@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e5a23909
-generated_at_date: 2026-10-29
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -60,7 +60,7 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
 - `sink.rs` — `Sink`, byte output and child stdio routing (`ChildStdioPlan`):
   terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
   watched worker's line surface (`Watch`, each whole line handed to a line
-  function the builtin builds around `watch_event`, so `io` knows no deferred
+  function the builtin builds around `WatchEvent`, so `io` knows no deferred
   sink), a stage thread's pipe edge (`Sink::Pipe { writer, edge, stage }`,
   `stage` naming the writing stage's node for its reader-gone stop; the scope
   a write polls is handed in, `write_under`). `child_stdout` / `child_stderr`
@@ -193,7 +193,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   signal handler raises an ambient cause instead — `REQUESTED_ROOT`, an
   absolute `AtomicU8`, or an interrupt on the `INTERRUPTS` count — which no
   scope folds: `forward_ambient` hands each to a host thread, which forwards it
-  to its engine as `Control`
+  to its engine as `Control`; its `AmbientForward` guard, on drop, unregisters,
+  drains the queued causes and joins that thread, so no callback outlives it
   ([[internals/cancellation|cancellation]]).
 - `fatal.rs` — `Fatal<T>`, a terminal failure latched once: the first cause
   stands. Latching cancels the bound `ScopeNode` with `Cancelled` under the

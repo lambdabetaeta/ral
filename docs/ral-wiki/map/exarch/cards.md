@@ -1,7 +1,7 @@
 ---
-generated_at_commit: c2e8e68c0fa65efcf8e4e3c9f20584bffb7b6a2f
-generated_at_date: 2026-10-26
-covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/stream.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
+covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/card/resources.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/stream.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -82,6 +82,15 @@ back as the plain text it already degraded to on the way in. Canonical
 read-back is what makes storage and display one thing: a kit cannot smuggle
 state through a payload the decoder discards, because the only card
 `` exarch-pins `read` `` can ever return is the one the rail already showed.
+
+## Host-composed probe rows — `/resources`
+
+The `/resources` card is composed in Rust, not by a kit: `card/resources.rs`
+holds `ProbeRow` — one accumulator's name, current size, optional enforced cap,
+and a `Policy` (how it is kept bounded, or that it is not) — and `rows_mark`,
+which lays a run of rows out as one aligned `fields` mark. The agent assembles
+its own rows (`agent/resources.rs`) and the frontend appends the rows it owns
+(`tui/resources.rs`), each thread reading only its own figures.
 
 ## Host-composed one-liners — `done`, notices
 
@@ -205,7 +214,7 @@ issued it.
 There is no independent operational trace: `record.jsonl`, written
 through `record::Emitter` at the seam, is the one durable log. A deliberate
 `Display::Card` records the rendered card itself — the mark tree *is* the fact
-here — while every other `Display`/`Forensic` commit carries only the
+here — while every other `Display`/`Forensic` record carries only the
 structured fact a card renders from, rebuilt fresh by whoever draws it. The
 headless stderr condenser (`card_stderr`, `headless.rs`) walks marks
 generically off the live bus.

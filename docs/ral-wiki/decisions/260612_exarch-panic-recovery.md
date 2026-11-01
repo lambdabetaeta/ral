@@ -1,8 +1,8 @@
 ---
 status: active
-verified_at_commit: c848c533
-verified_at_date: 2026-10-01
-anchors: [IoGuard, run_shell, run_turn, catch_unwind]
+verified_at_commit: 96e103a5
+verified_at_date: 2026-11-01
+anchors: [IoLoan, Shell::run_under, run_shell, Fault::Panicked, abort_unready, catch_unwind]
 ---
 
 # Exarch's panic-recovery contract for the persistent shell
@@ -60,12 +60,15 @@ admissible against a shell whose dynamic context is clean.
 
 ## Where
 
-- **`exarch/src/shell_eval.rs`** — `IoGuard` (install + `Drop`); the per-call IO
-  frame.
-- **`exarch/src/session.rs`** — the `durable: Mobile` field, its refresh in
-  `run_shell`, and the rebuild in `run_turn` on `pump` → `Ok(None)`.
-- **`exarch/src/bus.rs`** — `pump`'s `catch_unwind`, returning `Ok(None)` on a
-  caught panic.
+- **`core/src/shell/run.rs`** — `IoLoan` (install + `Drop`): the per-run IO
+  frame, restored on unwind; `Shell::run_under` holds the `catch_unwind`, rolls
+  `(env, context)` back to the checkpoint taken at entry, and reports
+  `RunReport::Faulted`.
+- **`exarch/src/shell_eval.rs`** — `run_shell`, the tool call's one dispatch to
+  the engine.
+- **`exarch/src/agent/attend.rs`** — `Agent::attempt` catches a panic in the
+  deliberation, settles the log with `abort_unready` and returns
+  `Fault::Panicked`.
 
 ## Covered
 

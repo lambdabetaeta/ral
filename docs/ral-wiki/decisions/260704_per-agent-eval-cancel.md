@@ -1,11 +1,17 @@
 ---
-status: active
+status: superseded
+superseded_by: "[[261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]"
 verified_at_commit: c848c533
 verified_at_date: 2026-10-01
 anchors: [Shell::face_signals, Shell::cancel_handle, eval_root, terminate_entry, AgentRegistry::interrupt, Seat::eval_reach, register_self, register_self_named]
 ---
 
 # Per-agent eval-layer cancel; only the trunk publishes the signal slots
+
+> Superseded by [[decisions/261028_one-scope-tree-one-inbox|one-scope-tree-one-inbox]]: the registry cascade over a
+> `Token` plus an eval root is one scope tree, struck once. The tree is carried
+> on by [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]
+> (Stop cancels an exchange; stronger gestures end lives).
 
 > The publication half is superseded by
 > [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]: a handler contributes

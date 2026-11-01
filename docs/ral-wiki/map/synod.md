@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 64ecd691
-generated_at_date: 2026-10-30
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
 
@@ -504,6 +504,13 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   `armillary.js`'s element after the last block. It is an `AsciiEffect`
   armillary sphere, 16 by 7 glyphs, drawn as a pure function of the clock and
   looped only while shown; reduced motion draws one frame.
+- `card-renderer.js::renderMarkCard` draws exarch's mark grammar
+  ([[map/exarch/cards|cards]]). A `diff` card opens at its first
+  `DIFF_PEEK_ROWS` rows, shared across its files; its header cycles the rung
+  through `onCycle`, as exarch's dial does.
+- The webview's own zoom hotkeys scale the window (`zoomHotkeysEnabled` in
+  `tauri.conf.json`, `core:webview:allow-set-webview-zoom` in
+  `capabilities/default.json`).
 - `projector.js` and the helper dial display busy helpers. `prose.js`
   renders a settled markdown prefix once and rebuilds only its open tail;
   `Boundary` or bubble closure settles that tail.

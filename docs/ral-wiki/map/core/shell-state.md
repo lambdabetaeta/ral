@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-generated_at_date: 2026-10-27
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -68,7 +68,7 @@ fact data are reached through their owning modules.
   `audit.rs` — the
   `Audit` collector, over `fact/observation.rs`'s `Observation` / `Observed`
   and `fact::AuditIo` (captured byte prefixes and totals) — data independent of
-  runtime, shared by the trail, the surface rail, `--audit`'s JSON, and the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `data.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
+  runtime, shared by the trail, the surface rail, `--audit`'s JSON, and the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `first_order.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
   fields private and `Closure::new` its one constructor, which `restrict`s
   the environment to the names its body mentions
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
@@ -281,7 +281,7 @@ values, and enumeration renews nothing.
 
 ### The mooring
 
-What a run *fixes* is not on the `Shell` at all. The eight run-invariant
+What a run *fixes* is not on the `Shell` at all. The nine run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
 worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
@@ -293,7 +293,8 @@ wall or a `cancel` strikes, never what is polled), the
 `cleanup_grace` a `guard` cleanup's shield gets from the strike (the host's
 policy, from `Run::cleanup_grace`), the
 `worker_cap` admission bound (`Some(cap)` refuses a spawn while
-`cap` workers are `running`, `stopping`, or reserved; `None` admits freely), and the run's
+`cap` workers are `running`, `stopping`, or reserved; `None` admits freely), the
+`worker_title` `TitlePolicy` (`Required` refuses an untitled spawn), and the run's
 `terminal_access`. It is an owned local on the run's
 own Rust stack frame (`run_built`), and reaches every callee as an explicit
 `&Mooring`, placed immediately before the `&Shell` / `&mut Shell` in every
@@ -337,8 +338,8 @@ run (no surface, no rail, no desk, no fork route, and a scope under a root
 nothing else holds, so cancelling it is how such a caller drives the body's poll points).
 
 A worker or stage thread *rebuilds* rather than sharing
-(`Mooring::for_thread(home, surface)`): it keeps the deferred rail, cleanup
-grace and worker cap, takes the thread's own `home` scope node and `surface`
+(`Mooring::for_thread(parent, node, surface)`): it keeps the deferred rail, cleanup
+grace, worker cap and title policy, takes the thread's own `home` scope node and `surface`
 (a buffering `DeferredSurface` for a session worker, the parent's live surface
 for a gather-owned worker or a pipeline stage thread), and gets neither desk
 nor fork route — both barred to a child thread.
@@ -410,7 +411,8 @@ Methods on `Shell` live by concern, one submodule each:
 - `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];
 - `checks.rs` — the [[map/core/capabilities|authority adapter]]: hands the live
   `GrantStack` to `authority::guard`, converts its `Refusal` to runtime `Error`,
-  and records a `Denial` through `Shell::refused`; also owns the judged path
+  and records a `Denial` through `Shell::refused` (an exec refusal, with its
+  mooring, through `Shell::exec_refused`); also owns the judged path
   doors, sandbox projection and grant-layer scope guards;
 - `cwd.rs` (the one working-directory cell, a `CwdPath` on `Context`: `cd` sets it,
   `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and
@@ -463,7 +465,7 @@ fixings:
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
   from the spawning shell's session, built on the spawning thread; the body's
   capture rides in its closure, and nothing flows back. Both rebuild their
-  mooring through `Mooring::for_thread(home, surface)` on the calling thread
+  mooring through `Mooring::for_thread` on the calling thread
   (so the caller keeps the child's scope) and move it into the
   thread: a worker's `home` is a child of its cradle — the durable root in a
   run, so a run timeout or Esc does not reach it; inside a gather its entry

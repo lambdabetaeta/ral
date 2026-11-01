@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
-generated_at_date: 2026-10-28
+generated_at_commit: 96e103a5
+generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
 
@@ -37,9 +37,9 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 - `redirect.rs` — the functions that open a redirect target (`open_write`,
   `open_read`, `install_stdin_redirect`, and `Shell::atomic_write`, which
-  every host write below the redirect frame shares), over `redirect/stage.rs`'s pure
-  `PendingWrite` and `Located::stage`/`preview`: staging a write is the path's,
-  judging and committing it the shell's. `redirect/scope.rs` is the
+  every host write below the redirect frame shares), over `path`'s
+  `Located::stage` / `open_streaming` (`StagedWrite`, `Streamed`): staging a
+  write is the path's, judging and committing it the shell's. `redirect/scope.rs` is the
   `RedirectState` lifecycle (open, route fd 1/2 through the shell's sinks,
   restore, settle each write) and `with_redirects`.
 - `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
