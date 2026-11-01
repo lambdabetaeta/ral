@@ -183,7 +183,7 @@ fn peer_message_racing_settlement_is_taken_in_the_job_or_refused_at_rest() {
                 assert_eq!(address.status().unwrap().job, job);
                 settled(&mailbox, false);
             }
-            (Err(Refused::Resting), Next::Settled { stopped: false }) => {
+            (Err(Refused::Resting), Next::Settled { stopped: false, .. }) => {
                 assert!(address.status().unwrap().job.is_none());
             }
             _ => panic!("a peer post and settlement must linearize under the same lock"),
@@ -232,7 +232,7 @@ fn every_post_kind_racing_settlement_is_taken_in_the_job_or_opens_the_next() {
                     assert_eq!(address.status().unwrap().job, Some(job));
                     settled(&mailbox, false);
                 }
-                Next::Settled { stopped: false } => {
+                Next::Settled { stopped: false, .. } => {
                     let (input, _exchange) = take(&mailbox);
                     assert!(expected(&input), "a post racing settlement is not lost");
                     assert!(mailbox.begin());
@@ -299,7 +299,7 @@ fn stop_racing_settlement_has_the_same_verdict_as_the_settled_record() {
             let next = mailbox.next(QUIET);
             (stop.join().unwrap(), next)
         });
-        assert!(matches!(next, Next::Settled { stopped } if stopped == stop.is_some()));
+        assert!(matches!(next, Next::Settled { stopped, .. } if stopped == stop.is_some()));
         assert!(address.status().unwrap().job.is_none());
         assert_eq!(address.stop(id), None);
     }

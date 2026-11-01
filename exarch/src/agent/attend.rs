@@ -40,7 +40,7 @@ impl Agent {
                     }
                 }
                 Next::Gone(id) => self.gone(id),
-                Next::Settled { stopped } => self.settled(stopped, last.take()),
+                Next::Settled { stopped, owes } => self.settled(stopped, owes, last.take()),
                 Next::Command(command) => {
                     if self.command(command, emit).is_break() {
                         break;
@@ -166,12 +166,8 @@ impl Agent {
         self.body.schedules.clear();
     }
 
-    fn settled(&mut self, stopped: bool, last: Option<AgentOutcome>) {
-        if self
-            .mailbox
-            .transact(|txn| txn.mail().owes())
-            .unwrap_or(false)
-        {
+    fn settled(&mut self, stopped: bool, owes: bool, last: Option<AgentOutcome>) {
+        if owes {
             self.report(if stopped {
                 ChildStatus::Stopped
             } else {

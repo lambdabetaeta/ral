@@ -5,7 +5,10 @@ use crate::agent::Admission;
 use crate::agent::nursery::Joined;
 use crate::bus::{ENDED_BEFORE_REPORTING, Refused, Source};
 use crate::record::{ChildStatus, RECORD, Settlement, read_records};
+use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
+use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn next_child(parent: &Agent) -> (crate::record::AgentId, ChildStatus) {
     let handle = parent.handle();
@@ -370,7 +373,7 @@ fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
         assert!(parent.admit(input).is_some());
         assert!(matches!(
             parent.mailbox.next(parent.rest()),
-            Next::Settled { stopped: false }
+            Next::Settled { stopped: false, .. }
         ));
     }
 }
@@ -552,7 +555,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     );
     assert!(matches!(
         parent.mailbox.next(parent.rest()),
-        Next::Settled { stopped: true }
+        Next::Settled { stopped: true, .. }
     ));
 }
 
@@ -723,43 +726,65 @@ fn a_stopped_notice_has_the_new_settlement_not_a_legacy_failure() {
     )));
 }
 
-#[test]
-fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
-    use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
-    use std::borrow::Cow;
-    use std::sync::atomic::{AtomicBool, Ordering};
+/// A captured builtin `name` that ignores cancellation until released, and
+/// records that it has been entered.
+struct HeldWorker {
+    entered: Arc<AtomicBool>,
+    released: Arc<AtomicBool>,
+}
 
-    struct Release(Arc<AtomicBool>);
-    impl Drop for Release {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
+impl HeldWorker {
+    fn install(name: &'static str) -> Self {
+        let entered = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let (seen, ready) = (entered.clone(), released.clone());
+        let held: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
+            Cow::Borrowed(name),
+            scheme_test_clear_block_forever,
+            "test-only: hold a worker past engine teardown.",
+            BuiltinBody::Captured(Arc::new(move |_, _, shell| {
+                seen.store(true, Ordering::Release);
+                loop {
+                    if ready.load(Ordering::Acquire) {
+                        shell.poll()?;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })),
+        )]);
+        dressed_over(
+            move |runtime| runtime.install_captured_builtins(&held),
+            |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
+        );
+        Self { entered, released }
     }
 
+    fn entered(&self) {
+        wait_until("the worker never entered its hold", || {
+            self.entered.load(Ordering::Acquire)
+        });
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+    }
+}
+
+// A failing test must not leave the worker holding its thread.
+impl Drop for HeldWorker {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[test]
+fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
     let mut parent = Agent::for_test_with(TestLaunch {
         installers: dressed(|_| {}),
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let release = Release(Arc::new(AtomicBool::new(false)));
-    let ready = release.0.clone();
-    let held: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
-        Cow::Borrowed("test-uncertified-helper-worker"),
-        scheme_test_clear_block_forever,
-        "test-only: hold a worker past engine teardown.",
-        BuiltinBody::Captured(Arc::new(move |_, _, shell| {
-            loop {
-                if ready.load(Ordering::Acquire) {
-                    shell.poll()?;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        })),
-    )]);
-    let _installers = dressed_over(
-        move |runtime| runtime.install_captured_builtins(&held),
-        |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
-    );
+    let worker = HeldWorker::install("test-uncertified-helper-worker");
     let mut child = parent.fork_named("helper").unwrap();
     let log = child.log_dir().path().join(RECORD);
     let (emit, _rx) = emitter(&parent);
@@ -772,6 +797,7 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
     assert!(!result.failed, "{}", result.text);
     let entries = workers(&child);
     assert_eq!(entries.len(), 1);
+    worker.entered();
     let helper = launch_child(&mut parent, child, None, &emit);
     let teardown = parent.teardown();
     assert_eq!(teardown.failures.len(), 1);
@@ -792,7 +818,7 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
             .iter()
             .any(|record| matches!(record, Record::Forensic(Forensic::TeardownFailed { .. })))
     );
-    release.0.store(true, Ordering::Release);
+    worker.release();
     wait_until("held worker did not finish after release", || {
         entries
             .iter()
@@ -831,7 +857,7 @@ fn a_job_settles_when_an_ended_helper_has_no_debt() {
     });
     assert!(matches!(
         parent.mailbox.next(parent.rest()),
-        Next::Settled { stopped: false }
+        Next::Settled { stopped: false, .. }
     ));
     release.send(()).unwrap();
     parent.gone(handle.id());
@@ -914,43 +940,12 @@ fn clear_joins_a_retiring_helper_before_discarding_its_notification() {
 
 #[test]
 fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
-    use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
-    use std::borrow::Cow;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    struct Release(Arc<AtomicBool>);
-    impl Drop for Release {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
     let mut parent = Agent::for_test_with(TestLaunch {
         installers: dressed(|_| {}),
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let release = Release(Arc::new(AtomicBool::new(false)));
-    let ready = release.0.clone();
-    let started = Arc::new(AtomicBool::new(false));
-    let worker_started = started.clone();
-    let held: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
-        Cow::Borrowed("test-uncertified-writer-worker"),
-        scheme_test_clear_block_forever,
-        "test-only: hold a worker past engine teardown.",
-        BuiltinBody::Captured(Arc::new(move |_, _, shell| {
-            worker_started.store(true, Ordering::Release);
-            loop {
-                if ready.load(Ordering::Acquire) {
-                    shell.poll()?;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        })),
-    )]);
-    let _installers = dressed_over(
-        move |runtime| runtime.install_captured_builtins(&held),
-        |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
-    );
+    let worker = HeldWorker::install("test-uncertified-writer-worker");
     let mut child = parent.fork_named("helper").unwrap();
     let (emit, rx) = emitter(&parent);
     let result = child.ral(
@@ -962,9 +957,7 @@ fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
     assert!(!result.failed, "{}", result.text);
     let entries = workers(&child);
     assert_eq!(entries.len(), 1);
-    wait_until("held worker did not start", || {
-        started.load(Ordering::Acquire)
-    });
+    worker.entered();
     child.report(ChildStatus::Replied(FOValue::Unit));
     let recorder = child.recorder();
     recorder.fail_after(0);
@@ -984,7 +977,7 @@ fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
     assert!(rx.drain_pending().iter().any(|signal| matches!(signal,
         Signal::Transient(id, Transient::Died { failures: reported }) if *id == helper.id() && *reported == failures
     )));
-    release.0.store(true, Ordering::Release);
+    worker.release();
     wait_until("held worker did not finish after release", || {
         entries
             .iter()

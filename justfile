@@ -161,12 +161,6 @@ ui-check:
     deno check --unstable-sloppy-imports js/*.js
     deno test --unstable-sloppy-imports tests/
 
-# Agda is not on the CI images, so neither lint nor CI runs this.
-
-# Typecheck the Agda formalisation of the calculus under agda/.
-agda:
-    just --justfile agda/justfile check
-
 # Both run scripts/ci.sh — the same step list GitHub Actions runs, differing
 # only in where cargo runs.  It calls the recipes above rather than spelling
 # out their cargo lines, so `just test` is CI's test and cannot drift from it;

@@ -543,7 +543,7 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
             ));
             assert!(matches!(
                 focused.mailbox.next(REST),
-                Next::Settled { stopped: true }
+                Next::Settled { stopped: true, .. }
             ));
             job_commit(
                 &mut app,
@@ -652,7 +652,7 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
     );
     assert!(matches!(
         root.mailbox.next(REST),
-        Next::Settled { stopped: true }
+        Next::Settled { stopped: true, .. }
     ));
     job_commit(
         &mut app,
@@ -688,7 +688,7 @@ fn escape_waits_for_job_opened_and_does_nothing_after_job_settled() {
     assert!(exchange.is_cancelled());
     assert!(matches!(
         root.mailbox.next(REST),
-        Next::Settled { stopped: true }
+        Next::Settled { stopped: true, .. }
     ));
     job_commit(
         &mut app,

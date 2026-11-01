@@ -147,6 +147,11 @@ impl Status {
     pub(crate) fn working(&self) -> bool {
         self.owes || self.job.is_some()
     }
+
+    /// A reply is still due: a debt is outstanding, or a running job has reported nothing.
+    pub(crate) fn reply_pending(&self) -> bool {
+        self.owes || (self.report.is_none() && self.job.is_some())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -159,7 +164,7 @@ pub(crate) enum Next {
     Command(Command),
     Rung,
     Gone(AgentId),
-    Settled { stopped: bool },
+    Settled { stopped: bool, owes: bool },
     Ended,
 }
 
@@ -826,7 +831,10 @@ impl AgentMailbox {
                     }
                     txn.cell.since = Instant::now();
                     txn.cell.waiting_for_input = false;
-                    return Next::Settled { stopped };
+                    return Next::Settled {
+                        stopped,
+                        owes: txn.mail().owes(),
+                    };
                 }
                 (None, Admission::Parent { idle }) => {
                     let remaining = idle.saturating_sub(txn.cell.since.elapsed());

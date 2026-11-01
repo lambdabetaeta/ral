@@ -582,13 +582,35 @@ impl OwnDir {
     #[cfg(any(test, feature = "test-util"))]
     pub fn for_test(tag: &str) -> Result<TestDir, OwnError> {
         let parent = Self::temp_for_test()?;
-        let name = EntryName::fresh(&format!("ral-test-{tag}-"))
-            .map_err(|e| io_at(Act::Make, &parent.path().join(tag), e.into()))?;
-        let dir = parent.make_entry(&name)?;
+        let (name, dir) = parent.make_fresh_dir(&format!("ral-test-{tag}-"))?;
         Ok(TestDir {
             dir,
             _removal: Removal { parent, name },
         })
+    }
+
+    /// A directory made now under an invented name, exclusively: a taken name
+    /// is never adopted, so the caller is its only owner.
+    ///
+    /// # Errors
+    /// `AlreadyExists` where every name tried was taken; the make's.
+    #[cfg(any(test, feature = "test-util"))]
+    fn make_fresh_dir(&self, prefix: &str) -> Result<(EntryName, Self), OwnError> {
+        let mut tries = 0;
+        loop {
+            let name = EntryName::fresh(prefix)
+                .map_err(|e| io_at(Act::Make, &self.path().join(prefix), e.into()))?;
+            match writing(self.0.dir.absent(name.clone())).create_dir(Visibility::Private) {
+                Ok(dir) => {
+                    let dir = Self::new(writing_dir(dir), self.0.path.join(&name));
+                    return Ok((name, dir));
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries + 1 < MAKE_TRIES => {
+                    tries += 1;
+                }
+                Err(e) => return Err(self.failed(Act::Make, &name, e)),
+            }
+        }
     }
 
     // ── Operations on one entry ──

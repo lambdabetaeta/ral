@@ -323,7 +323,7 @@ impl ExarchDesk {
                         "agent '{name}' has ended and its state is unavailable: {why}"
                     )),
                     Ok(status) => {
-                        if live && status.working() {
+                        if live && status.reply_pending() {
                             Err(format!(
                                 "agent '{name}' has not replied yet: it is still working; wait for its notice instead of polling"
                             ))

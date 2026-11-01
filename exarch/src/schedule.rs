@@ -1441,7 +1441,7 @@ mod tests {
             assert!(mailbox.begin());
             assert!(matches!(
                 mailbox.next(QUIET),
-                Next::Settled { stopped: false }
+                Next::Settled { stopped: false, .. }
             ));
         }
     }

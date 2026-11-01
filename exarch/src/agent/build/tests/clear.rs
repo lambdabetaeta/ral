@@ -211,8 +211,18 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
             assert_eq!(helper_engine.session_ended().unwrap(), None);
         }
         assert_eq!(helper.is_live(), failure != "unavailable");
-        assert!(agent.rest().pending);
-        if failure != "unavailable" {
+        if failure == "unavailable" {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !helper
+                .status()
+                .is_ok_and(|status| matches!(status.report, Some(ChildStatus::Failed(_))))
+            {
+                assert!(Instant::now() < deadline, "ended helper did not report");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(!agent.rest().pending);
+        } else {
+            assert!(agent.rest().pending);
             assert_eq!(agent.handle().queued(), ["keep queued"]);
         }
         assert!(

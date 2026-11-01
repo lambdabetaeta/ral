@@ -273,7 +273,7 @@ fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() 
     );
     assert!(matches!(
         parent.mailbox.next(REST),
-        Next::Settled { stopped: false }
+        Next::Settled { stopped: false, .. }
     ));
 }
 

@@ -48,10 +48,10 @@ fn task_exchange(session: &mut Agent, text: &str, emit: &Emitter) -> AgentOutcom
 }
 
 fn settle(session: &mut Agent, last: AgentOutcome) {
-    let Next::Settled { stopped } = session.mailbox.next(session.rest()) else {
+    let Next::Settled { stopped, owes } = session.mailbox.next(session.rest()) else {
         panic!("an empty job with no pending helpers settles")
     };
-    session.settled(stopped, Some(last));
+    session.settled(stopped, owes, Some(last));
 }
 
 fn leave_tool_owed(session: &mut Agent) {
@@ -823,7 +823,7 @@ fn a_poison_report_then_owner_teardown_delivers_only_one_failure() {
     );
     assert!(matches!(
         parent.mailbox.next(parent.rest()),
-        Next::Settled { stopped: false }
+        Next::Settled { stopped: false, .. }
     ));
     assert!(parent.mailbox.drain().is_empty());
 }

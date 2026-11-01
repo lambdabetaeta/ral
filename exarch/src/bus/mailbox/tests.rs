@@ -143,7 +143,7 @@ fn depth(mailbox: &AgentMailbox, source: Source) -> u64 {
 }
 
 fn settled(mailbox: &AgentMailbox, stopped: bool) {
-    assert!(matches!(mailbox.next(QUIET), Next::Settled { stopped: mark } if mark == stopped));
+    assert!(matches!(mailbox.next(QUIET), Next::Settled { stopped: mark, .. } if mark == stopped));
     let status = mailbox.address().status().unwrap();
     assert!(status.job.is_none());
     assert!(status.rest.is_some());

@@ -353,7 +353,7 @@ fn a_poisoned_helper_owner_tears_down_delivers_one_failure_and_lets_the_parent_s
     assert!(!parent.rest().pending);
     assert!(matches!(
         parent.mailbox.next(parent.rest()),
-        Next::Settled { stopped: false }
+        Next::Settled { stopped: false, .. }
     ));
     assert!(
         parent.mailbox.drain().is_empty(),
