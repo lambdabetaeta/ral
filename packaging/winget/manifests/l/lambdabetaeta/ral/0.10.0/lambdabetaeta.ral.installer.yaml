@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
 PackageIdentifier: lambdabetaeta.ral
-PackageVersion: 0.2.0
+PackageVersion: 0.10.0
 InstallerType: wix
 Commands:
   - ral
@@ -10,7 +10,7 @@ InstallModes:
   - silentWithProgress
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/lambdabetaeta/ral/releases/download/v0.2.0/ral-windows.msi
-    InstallerSha256: 557FBB613F3A1EBA142C4EF817ACB8D8796B76153C69150AF83D42A0E63B389A
+    InstallerUrl: https://github.com/lambdabetaeta/ral/releases/download/v0.10.0/ral-windows.msi
+    InstallerSha256: DDE7750ABE3F35515280839D5D2CDB2B057AAF72ED0B66663512FD541C37EC82
 ManifestType: installer
 ManifestVersion: 1.10.0
