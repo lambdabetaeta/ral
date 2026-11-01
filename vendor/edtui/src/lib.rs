@@ -1,4 +1,5 @@
-//! LOCAL PATCH: native history transactions and shared grapheme geometry; see PATCHES.md.
+//! LOCAL PATCH: native history transactions, shared grapheme geometry and an
+//! internal-only clipboard; see PATCHES.md.
 //! <div align="center">
 //!
 //! ## `EdTUI`
@@ -71,7 +72,7 @@
 //! - Custom theming.
 //! - Mouse events.
 //! - Vim and Emacs keybindings.
-//! - Copy paste using the systems clipboard.
+//! - Copy paste within the editor, or through a custom clipboard.
 //! - Line wrapping.
 //! - Syntax highlighting.
 //! - Line numbers (absolute and relative).

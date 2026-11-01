@@ -25,13 +25,11 @@
 mod gpu;
 mod host;
 pub(crate) mod landlock;
-mod pty;
 pub(crate) mod seccomp;
 
 use gpu::GpuNodes;
 use host::Builds;
 pub(crate) use host::HostEnvelope;
-use pty::PtyNodes;
 
 use super::Refusal;
 use super::launch::Ownership;
@@ -171,11 +169,6 @@ pub(crate) fn bwrap_command(
     let seccomp = (seccomp_programs()?.into_iter())
         .map(|program| lend_parcel("ral-seccomp", &program))
         .collect::<Result<Vec<_>, _>>()?;
-    let ptys = if !env.host.virtual_dev && matches!(policy.fs, FsProjection::Restricted(_)) {
-        PtyNodes::discover()?
-    } else {
-        PtyNodes::default()
-    };
     let options = bwrap_argv(
         policy,
         chdir,
@@ -183,7 +176,6 @@ pub(crate) fn bwrap_command(
         env.host,
         &binds,
         &GpuNodes::discover(),
-        &ptys,
         &seccomp,
     )?;
     let args = lend_parcel(
@@ -226,8 +218,8 @@ pub(crate) fn bwrap_command(
 /// we stop watching it.  Confinement itself — the mounts, the seccomp
 /// filter — is otherwise identical.
 ///
-/// The render takes `host`, `gpu`, `ptys` and descriptors as data, so a test can assert
-/// options for a host it is not running on.
+/// The render takes `host`, `gpu` and descriptors as data, so a test can
+/// assert options for a host it is not running on.
 #[allow(
     clippy::too_many_arguments,
     reason = "independent inputs to the pure envelope render"
@@ -239,7 +231,6 @@ pub(crate) fn bwrap_argv(
     host: HostEnvelope,
     binds: &Binds,
     gpu: &GpuNodes,
-    ptys: &PtyNodes,
     seccomp: &[Slot],
 ) -> Result<Vec<OsString>, String> {
     let mut c = Options::default();
@@ -276,7 +267,7 @@ pub(crate) fn bwrap_argv(
             binds.render(&mut c, Layer::Shown);
             // After it, or a prefix of `/` or `/proc` re-binds the host's over these.
             c.args(["--proc", "/proc"]);
-            render_dev(&mut c, host, ptys);
+            render_dev(&mut c, host);
             if policy.gpu {
                 gpu.admit(&mut c);
             }
@@ -706,12 +697,10 @@ fn pinned<'a>(pins: [&'a Pinned; 2]) -> Result<Vec<(Bind, BorrowedFd<'a>)>, Stri
 /// The envelope's `/dev`: bwrap's `--dev`, or its shape by hand where the
 /// host refuses a fresh devpts.
 ///
-/// By hand, `/dev/pts` is the host's, so a pty opened inside is not the
-/// envelope's own, and `/dev/ptmx` reaches it only where that devpts's
-/// `ptmxmode` admits: the kernel finds a ptmx node's devpts at the `pts` beside
-/// it in the same mount, which a bind of the host's node lacks.  An absent node
-/// is dropped: binding one costs the launch.
-fn render_dev(c: &mut Options, host: HostEnvelope, ptys: &PtyNodes) {
+/// By hand there is no devpts: the payload keeps the terminals it inherits
+/// and allocates none, as any view of the host's shared devpts leaks host
+/// terminals.  An absent node is dropped: binding one costs the launch.
+fn render_dev(c: &mut Options, host: HostEnvelope) {
     if host.virtual_dev {
         c.args(["--dev", "/dev"]);
         return;
@@ -724,15 +713,10 @@ fn render_dev(c: &mut Options, host: HostEnvelope, ptys: &PtyNodes) {
         "/dev/random",
         "/dev/urandom",
         "/dev/tty",
-        "/dev/pts",
     ] {
         if crate::path::exists(node) {
             c.args(["--dev-bind", node, node]);
         }
-    }
-    c.args(["--symlink", "pts/ptmx", "/dev/ptmx"]);
-    for node in &ptys.0 {
-        c.args(["--ro-bind", "/dev/null", node]);
     }
     c.args(["--symlink", "/proc/self/fd", "/dev/fd"]);
     for (fd, name) in ["/dev/stdin", "/dev/stdout", "/dev/stderr"]

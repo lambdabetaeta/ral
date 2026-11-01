@@ -301,8 +301,7 @@ fn the_by_hand_dev_serves_a_confined_body() {
         &policy,
         "echo x > /dev/null && echo NULL-OK\n\
          head -c 1 /dev/urandom > /dev/null && echo URANDOM-OK\n\
-         : > /dev/shm/probe && echo SHM-OK\n\
-         exec 3<>/dev/ptmx && echo PTMX-OK\n",
+         : > /dev/shm/probe && echo SHM-OK\n",
     )
     .expect("spawn bwrap");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -314,25 +313,13 @@ fn the_by_hand_dev_serves_a_confined_body() {
             "the by-hand /dev is missing {ok}: {stdout} {stderr}"
         );
     }
-    // The pty is the host devpts's, opened at its own `ptmx`, which that
-    // devpts's `ptmxmode` may close: the envelope serves one exactly where
-    // the host's devpts does.
-    let host_serves = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/pts/ptmx")
-        .is_ok();
-    assert_eq!(
-        stdout.contains("PTMX-OK"),
-        host_serves,
-        "the by-hand /dev/ptmx must be the host devpts's own: {stdout} {stderr}"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A host terminal: both ends held open, and the slave's name.
 struct HostPty {
-    _ends: [std::os::fd::OwnedFd; 2],
+    _master: std::os::fd::OwnedFd,
+    slave: std::os::fd::OwnedFd,
     name: String,
 }
 
@@ -359,7 +346,8 @@ impl HostPty {
         // SAFETY: openpty returned two fresh descriptors and a terminated name.
         unsafe {
             Self {
-                _ends: [OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)],
+                _master: OwnedFd::from_raw_fd(master),
+                slave: OwnedFd::from_raw_fd(slave),
                 name: std::ffi::CStr::from_ptr(name.as_ptr())
                     .to_str()
                     .unwrap()
@@ -369,12 +357,12 @@ impl HostPty {
     }
 }
 
-/// A terminal open at render is masked; one the host opens after it, the
-/// declared residual, is reachable, and so is the control.
+/// By hand no host terminal is reachable by name, whether open at render or
+/// opened after it, and none can be allocated; the terminal the payload
+/// inherits, the late one, still works.
 #[test]
-fn the_by_hand_dev_hides_host_terminals_and_allocates_its_own() {
-    use crate::test_helper::confinement::{Output, admitted as accepts, denied, probe};
-    use std::os::unix::fs::PermissionsExt;
+fn the_by_hand_dev_reaches_no_host_terminal() {
+    use crate::test_helper::confinement::{Output, denied, probe};
     let proof = crate::require_confinement!();
     let early = HostPty::open();
     let dir = tempfile::tempdir().unwrap();
@@ -401,25 +389,25 @@ fn the_by_hand_dev_hides_host_terminals_and_allocates_its_own() {
         let args = args(&late.name);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = command
+            .stdin(late.slave.try_clone().unwrap())
             .env("RAL_TEST_PROBE", probe::request(&args))
             .output()
             .unwrap();
         drop(info);
         out.into()
     };
-    let control = invoke(&|late| vec!["pty".into(), late.into()]);
-    let hidden = invoke(&|_| vec!["pty".into(), early.name.clone()]);
-    denied(&proof, &control, &hidden, "ok");
-    assert!(hidden.stderr.contains("Permission denied"), "{hidden:?}");
-    let ptmx = std::fs::metadata("/dev/pts/ptmx").expect("the host devpts has a ptmx node");
-    if ptmx.permissions().mode() & 0o666 == 0 {
-        eprintln!(
-            "skip the_by_hand_dev_hides_host_terminals_and_allocates_its_own, allocation only: \
-             the host devpts has ptmxmode=000, so the by-hand /dev allocates no pty"
+    let control = invoke(&|_| vec!["tty".into()]);
+    for named in [
+        invoke(&|_| vec!["pty".into(), early.name.clone()]),
+        invoke(&|late| vec!["pty".into(), late.into()]),
+    ] {
+        denied(&proof, &control, &named, "ok");
+        assert!(
+            named.stderr.contains("No such file or directory"),
+            "{named:?}"
         );
-        return;
     }
-    accepts(&proof, &invoke(&|_| vec!["pty".into()]), "ok");
+    denied(&proof, &control, &invoke(&|_| vec!["pty".into()]), "ok");
 }
 
 /// What the options cannot show: that a program inside reads its own limits

@@ -1,4 +1,4 @@
-//! The one fold: [`Context::step`] judges a record and applies it. An eviction
+//! The one fold: [`Context::step`](crate::record::Fold::step) judges a record and applies it. An eviction
 //! or a withdrawal is what moves a turn from here to there — the eviction's
 //! rules and its planning live beside it.
 

@@ -231,8 +231,9 @@ commit yields at most one event it narrates.
   math through `tui-math`, and falls back to literal source on refusal.
 - `prompt.rs` and `prompt/editor/` own drafts, history, undo and the fuzzy
   slash-command popup. Completion is one undoable edit; recalling another
-  draft starts a fresh undo baseline. Clipboard routing is native locally,
-  OSC 52 over ssh. `PromptState` holds the draft, guarded recall, searches
+  draft starts a fresh undo baseline. Vi/Emacs yank and put use a private
+  register; only Ctrl-C and `/copy` reach the OS clipboard, through the
+  `clipboard` crate (native locally, OSC 52 over ssh). `PromptState` holds the draft, guarded recall, searches
   and the live popup (`refresh_menu`, `menu_key`), over an injected
   `History`; `prompt/search.rs` traverses matches; `prompt/editor.rs` owns
   the editor wrapper, with

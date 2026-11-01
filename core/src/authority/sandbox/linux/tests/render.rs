@@ -79,7 +79,6 @@ fn render(
         host,
         binds,
         &GpuNodes::default(),
-        &PtyNodes::default(),
         &[],
     )
     .expect("ASCII paths render")
@@ -209,7 +208,6 @@ fn a_cwd_within_a_deny_is_refused_naming_both() {
             WHOLE,
             &binds,
             &GpuNodes::default(),
-            &PtyNodes::default(),
             &[],
         )
     };
@@ -500,7 +498,6 @@ fn a_deny_that_hides_proc_is_refused() {
             WHOLE,
             &binds,
             &GpuNodes::default(),
-            &PtyNodes::default(),
             &[],
         );
         assert_eq!(argv.is_err(), refused, "{denied}: {argv:?}");
@@ -760,35 +757,21 @@ fn cgroup_masks_follow_the_tree_shown_by_the_overlaid_bind() {
     );
 }
 
+/// By hand no devpts is shown: neither the host's terminals nor its ptmx.
 #[test]
-fn the_by_hand_dev_masks_discovered_terminals_but_not_ptmx() {
+fn the_by_hand_dev_has_no_devpts() {
     let dir = tempfile::tempdir().unwrap();
     let policy = deny_within(dir.path(), &[]);
     let host = HostEnvelope {
         virtual_dev: false,
         ..WHOLE
     };
-    let args = bwrap_argv(
-        &policy.rendered().unwrap(),
-        None,
-        None,
-        host,
-        &binds(&policy, host),
-        &GpuNodes::default(),
-        &PtyNodes(vec!["/dev/pts/7".into(), "/dev/pts/19".into()]),
-        &[],
-    )
-    .unwrap()
-    .into_iter()
-    .map(|arg| arg.into_string().unwrap())
-    .collect::<Vec<_>>();
-    let pts = position_of(&args, &["--dev-bind", "/dev/pts", "/dev/pts"]).unwrap();
-    for node in ["/dev/pts/7", "/dev/pts/19"] {
-        let mask = position_of(&args, &["--ro-bind", "/dev/null", node]).unwrap();
-        assert!(pts < mask, "the terminal mask must follow devpts: {args:?}");
-    }
-    assert!(position_of(&args, &["--symlink", "pts/ptmx", "/dev/ptmx"]).is_some());
-    assert!(position_of(&args, &["--ro-bind", "/dev/null", "/dev/pts/ptmx"]).is_none());
+    let args = options_on(host, &policy, Ownership::Kept);
+    let devpts = |arg: &String| arg.starts_with("/dev/pts") || arg == "/dev/ptmx";
+    assert!(
+        !args.iter().any(devpts),
+        "the by-hand /dev shows a devpts: {args:?}"
+    );
 }
 
 /// A grant keeps the real path it froze: a spelling retargeted since
@@ -845,7 +828,6 @@ fn a_host_that_refuses_dev_gets_the_same_shape_by_hand() {
     for piece in [
         ["--dev-bind", "/dev/null", "/dev/null"],
         ["--dev-bind", "/dev/urandom", "/dev/urandom"],
-        ["--symlink", "pts/ptmx", "/dev/ptmx"],
         ["--symlink", "/proc/self/fd/1", "/dev/stdout"],
     ] {
         assert!(
@@ -875,7 +857,6 @@ fn render_gpu(policy: &SandboxProjection) -> Vec<String> {
         WHOLE,
         &binds(policy, WHOLE),
         &gpu(),
-        &PtyNodes::default(),
         &[],
     )
     .expect("ASCII paths render")

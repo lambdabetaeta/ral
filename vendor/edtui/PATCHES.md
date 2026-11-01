@@ -61,10 +61,21 @@ storage and vi operation counts still use Unicode scalar columns. The host
 provides grapheme-aware insert-mode movement, selection and deletion using
 native edit transactions.
 
+## Clipboard
+
+The `arboard` feature, its dependency and `clipboard/arboard.rs` are removed;
+`Clipboard::default()` is always the internal register. As a workspace member,
+edtui's default features were unified back on in `--workspace` builds, so yank
+and put reached the OS clipboard in development and CI builds but not in
+`-p exarch` release builds. Hosts that want the system clipboard supply a
+`ClipboardTrait`; exarch keeps a private kill buffer and copies to the OS only
+on explicit request, through the workspace `clipboard` crate.
+
 ## Production-only manifest
 
 `Cargo.toml` removes targets for omitted examples, retains the ratatui test
-dependency, adds `unicode-segmentation`, and uses the workspace's Rust 2024 edition.
+dependency, adds `unicode-segmentation`, drops `arboard`, and uses the
+workspace's Rust 2024 edition.
 `view/syntax_higlighting.rs` uses syntect's built-in theme set rather than an
 omitted binary theme dump; optional syntax-highlighting callers must use those
 names or supply a custom set. The README and crate example name a built-in theme.

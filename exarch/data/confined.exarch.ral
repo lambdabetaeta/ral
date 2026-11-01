@@ -51,9 +51,8 @@ return [
       # bundled tool is spawned by bare name and never resolved on disk, so
       # no prefix above can reach it and it must be named.  Silence here is
       # not tightness — it is an agent that cannot `ls`.  `cmp`, `diff` and
-      # `rg` bundle only under non-default features, so they are host
-      # binaries here; a build that turns those on fails
-      # `every_grantable_base_settles_the_bundled_tools`, which names them.
+      # `rg` bundle only under the `diffutils`/`ripgrep` features; elsewhere
+      # the name admits the host binary found on PATH.
       #
       # `rm`, `mv` and `truncate` are admitted like any other: what a
       # confined child may destroy is settled by the `fs.write` prefixes
@@ -67,11 +66,13 @@ return [
       `name base64,
       `name basename,
       `name cat,
+      `name cmp,
       `name comm,
       `name cp,
       `name cut,
       `name date,
       `name df,
+      `name diff,
       `name dirname,
       `name du,
       `name env,
@@ -92,6 +93,7 @@ return [
       `name pwd,
       `name readlink,
       `name realpath,
+      `name rg,
       `name rm,
       `name rmdir,
       `name seq,

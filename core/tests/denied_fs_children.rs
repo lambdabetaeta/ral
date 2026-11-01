@@ -71,6 +71,8 @@ fn a_system_reads_file_reads_alike_in_process_and_in_a_child() {
     }
 }
 
+// Linux runs these through the real binary in ral/tests/bundled_confinement.rs.
+#[cfg(target_os = "macos")]
 #[test]
 fn bundled_write_outside_grant_denied() {
     let proof = ral_core::require_confinement!();
@@ -81,6 +83,7 @@ fn bundled_write_outside_grant_denied() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn bundled_pipeline_stage_write_outside_grant_denied() {
     let proof = ral_core::require_confinement!();
@@ -91,6 +94,7 @@ fn bundled_pipeline_stage_write_outside_grant_denied() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn downstream_bundled_pipeline_stage_write_outside_grant_denied() {
     let proof = ral_core::require_confinement!();

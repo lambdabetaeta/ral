@@ -1,7 +1,7 @@
 use super::landlock::{Abi, Landlock, Landlocked};
 use super::{
     Access, Bind, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, InfoFd, Layer, Pinned,
-    PtyNodes, Shown, bwrap_argv, bwrap_command, envelope, open_object, own_cgroup, pin_envelope,
+    Shown, bwrap_argv, bwrap_command, envelope, open_object, own_cgroup, pin_envelope,
 };
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};

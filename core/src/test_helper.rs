@@ -7,6 +7,10 @@ use std::time::{Duration, Instant};
 /// Unix process-control fixtures bypass bundled tools, which musl cannot serve before `main`.
 pub const SLEEP: &str = if cfg!(unix) { "/bin/sleep" } else { "sleep" };
 
+/// A ceiling no prompt wait nears: a hundred poll slices.  A test that only
+/// asks a wait to end bounds it here, so a loaded runner cannot flake it.
+pub const NEVER_RETURNS: Duration = crate::process::POLL_SLICE.saturating_mul(100);
+
 /// The first `Some` that `probe` answers within `within`, polled every 10ms;
 /// `None` if it never came.
 pub fn eventually<T>(within: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {

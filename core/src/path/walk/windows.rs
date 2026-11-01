@@ -1182,8 +1182,9 @@ pub(super) mod owner_only {
         EqualSid, GetAce, GetSecurityDescriptorControl, INHERIT_ONLY_ACE,
         InitializeSecurityDescriptor, IsWellKnownSid, NO_INHERITANCE, OBJECT_INHERIT_ACE,
         OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-        SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY,
-        TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         DELETE, FILE_ALL_ACCESS, FILE_DELETE_CHILD, WRITE_DAC, WRITE_OWNER,
@@ -1249,15 +1250,10 @@ pub(super) mod owner_only {
         Ok(buf)
     }
 
-    /// A single-ACE ACL granting the process owner full control and nobody
-    /// else anything. The caller owns the allocation and frees it once the
-    /// create has copied the descriptor into the new file object.
-    fn owner_only_acl(kind: Kind) -> io::Result<*mut ACL> {
-        let owner_buf = current_process_owner()?;
-        // SAFETY: `owner_buf` holds a populated `TOKEN_USER` in a `u64`
-        // buffer, so aligned for it, and outlives every use of the `PSID`.
-        let owner_sid = unsafe { (*owner_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-
+    /// A single-ACE ACL granting `owner_sid` full control and nobody else
+    /// anything. The caller owns the allocation and frees it once the create
+    /// has copied the descriptor into the new file object.
+    fn owner_only_acl(kind: Kind, owner_sid: PSID) -> io::Result<*mut ACL> {
         let trustee = TRUSTEE_W {
             pMultipleTrustee: std::ptr::null_mut(),
             MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
@@ -1292,11 +1288,8 @@ pub(super) mod owner_only {
     /// Deliberately accept only our exact protected, inheritable directory ACL.
     pub(super) fn validate_directory(file: &File) -> io::Result<()> {
         let expected = OwnerOnly::new(Kind::Dir)?;
-        let user = current_process_owner()?;
-        // SAFETY: `user` is an aligned TOKEN_USER and keeps its SID alive.
-        let user_sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
         with_security(file, |owner, acl, descriptor| {
-            validate_owner_only(owner, acl, descriptor, user_sid, &expected)
+            validate_owner_only(owner, acl, descriptor, &expected)
         })
     }
 
@@ -1333,7 +1326,6 @@ pub(super) mod owner_only {
         owner: PSID,
         acl: *mut ACL,
         descriptor: PSECURITY_DESCRIPTOR,
-        user_sid: PSID,
         expected: &OwnerOnly,
     ) -> io::Result<()> {
         let mut control = 0;
@@ -1345,12 +1337,13 @@ pub(super) mod owner_only {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: non-null owner and ACL point into the live descriptor;
-        // expected.acl is valid and both ACLs contain their AclSize bytes.
+        // expected's SID and ACL are valid and both ACLs contain their
+        // AclSize bytes.
         let matches = unsafe {
             !owner.is_null()
                 && !acl.is_null()
                 && control & SE_DACL_PROTECTED != 0
-                && EqualSid(owner, user_sid) != 0
+                && EqualSid(owner, expected.user_sid()) != 0
                 && (*acl).AclSize == (*expected.acl).AclSize
                 && std::slice::from_raw_parts(acl.cast::<u8>(), usize::from((*acl).AclSize))
                     == std::slice::from_raw_parts(
@@ -1432,21 +1425,30 @@ pub(super) mod owner_only {
         Ok(protected)
     }
 
-    /// The descriptor and the ACL it points at, which this owns and frees.
+    /// The descriptor, the ACL it points at (which this frees) and the owner
+    /// SID's buffer, which it also points into.
     pub(in crate::path::walk) struct OwnerOnly {
         descriptor: SECURITY_DESCRIPTOR,
         acl: *mut ACL,
+        user: Vec<u64>,
     }
 
     impl OwnerOnly {
-        /// Protected owner-only access, inheritable by children of directories.
+        /// Protected owner-only access, inheritable by children of directories,
+        /// owned by the current process user whatever the token's default owner.
         ///
         /// # Errors
         /// The OS's, as a token, an ACL or a descriptor refuses.
         pub(in crate::path::walk) fn new(kind: Kind) -> io::Result<Self> {
+            let user = current_process_owner()?;
+            // SAFETY: `user` holds a populated `TOKEN_USER` in a `u64` buffer,
+            // so aligned for it; the SID points into the heap block `owner`
+            // keeps, which moving the `Vec` leaves in place.
+            let user_sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
             let mut owner = Self {
                 descriptor: SECURITY_DESCRIPTOR::default(),
-                acl: owner_only_acl(kind)?,
+                acl: owner_only_acl(kind, user_sid)?,
+                user,
             };
             let sd: PSECURITY_DESCRIPTOR = (&raw mut owner.descriptor).cast();
             // SAFETY: `sd` is the descriptor `owner` holds, which
@@ -1459,6 +1461,13 @@ pub(super) mod owner_only {
             if unsafe { SetSecurityDescriptorDacl(sd, TRUE, owner.acl, FALSE) } == 0 {
                 return Err(io::Error::last_os_error());
             }
+            // Else an elevated token's default owner is Administrators, which
+            // `validate_owner_only` refuses.
+            // SAFETY: `sd` was just initialised; `user_sid` lives in
+            // `owner.user`, which outlives every use of the descriptor.
+            if unsafe { SetSecurityDescriptorOwner(sd, user_sid, FALSE) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
             // Protecting the DACL is what stops a create merging in the
             // parent directory's inheritable ACEs.
             // SAFETY: `sd` carries the DACL just attached above.
@@ -1468,6 +1477,13 @@ pub(super) mod owner_only {
                 return Err(io::Error::last_os_error());
             }
             Ok(owner)
+        }
+
+        /// The owner SID, valid as long as `self` is.
+        fn user_sid(&self) -> PSID {
+            // SAFETY: `user` holds a populated, `u64`-aligned `TOKEN_USER`
+            // whose SID points into the same heap block.
+            unsafe { (*self.user.as_ptr().cast::<TOKEN_USER>()).User.Sid }
         }
 
         /// The descriptor, as the `SecurityDescriptor` of an object's

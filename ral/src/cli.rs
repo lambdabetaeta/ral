@@ -91,7 +91,6 @@ pub(crate) struct InteractiveOpts {
 }
 
 impl InteractiveOpts {
-    #[cfg(unix)]
     pub(crate) fn adopts_login_env(&self) -> bool {
         self.login && !self.no_rc && !self.reads_stdin_as_script()
     }

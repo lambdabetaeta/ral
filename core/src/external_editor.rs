@@ -50,7 +50,7 @@ impl EditorCommand {
         #[cfg(not(windows))]
         let words = shlex::split(spec).ok_or(Fault::Unbalanced)?;
         #[cfg(windows)]
-        let words = winsplit::split(spec);
+        let words = windows_words(spec);
         let mut words = words.into_iter();
         match words.next() {
             Some(program) if !program.is_empty() => Ok(Self {
@@ -68,6 +68,38 @@ impl EditorCommand {
     /// The arguments before the draft's path, which the caller appends.
     pub fn args(&self) -> &[String] {
         &self.args
+    }
+}
+
+/// `spec` split by `CommandLineToArgvW`, which keeps quoted empty words.
+#[cfg(windows)]
+fn windows_words(spec: &str) -> Vec<String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    // Leading blanks would otherwise make an empty first word; an empty
+    // line would otherwise yield this executable's own path.
+    let spec = spec.trim_start();
+    if spec.is_empty() {
+        return Vec::new();
+    }
+    let wide: Vec<u16> = spec.encode_utf16().chain([0]).collect();
+    let mut count = 0;
+    // SAFETY: `wide` is NUL-terminated and outlives the call; on success the
+    // result is `count` NUL-terminated wide strings in one LocalAlloc block,
+    // all read before that block is freed.
+    unsafe {
+        let argv = CommandLineToArgvW(wide.as_ptr(), &raw mut count);
+        assert!(!argv.is_null(), "CommandLineToArgvW failed: out of memory");
+        let words = (0..usize::try_from(count).unwrap_or_default())
+            .map(|i| {
+                let word = *argv.add(i);
+                let len = (0..usize::MAX).take_while(|&n| *word.add(n) != 0).count();
+                String::from_utf16_lossy(std::slice::from_raw_parts(word, len))
+            })
+            .collect();
+        LocalFree(argv.cast());
+        words
     }
 }
 

@@ -11,7 +11,9 @@
 
 mod common;
 
-use common::{Output, ral_command, repl_output_lines};
+#[cfg(unix)]
+use common::repl_output_lines;
+use common::{Output, ral_command};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;

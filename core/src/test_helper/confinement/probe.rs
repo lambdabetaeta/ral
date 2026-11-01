@@ -76,6 +76,14 @@ fn run(args: &[String]) -> io::Result<()> {
                 unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
             Ok(())
         }
+        [cmd] if cmd == "tty" => {
+            use std::io::IsTerminal;
+            if io::stdin().is_terminal() {
+                Ok(())
+            } else {
+                Err(io::Error::other("stdin is not a terminal"))
+            }
+        }
         #[cfg(unix)]
         [cmd, path] if cmd == "pty" => std::fs::OpenOptions::new()
             .read(true)

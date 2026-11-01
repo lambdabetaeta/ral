@@ -141,7 +141,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | private ipc / uts | `--unshare-*` | never refused |
 | `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | the tree is the host's |
 | no signalling the host; host process table hidden | pid namespace + fresh `/proc` | the table is the container's own |
-| private ptys | `--dev` | host devpts with every terminal present at render masked; the child allocates ptys, and a terminal the host opens during the launch remains reachable for that launch |
+| private ptys | `--dev` | no devpts: the child holds only the terminals it inherits and allocates none |
 
 The first row has one exception on Linux: a `deny` naming a path *absent at
 render* has no mask, since making its mountpoint would touch the host. Even

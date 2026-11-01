@@ -2,7 +2,7 @@ use super::{FsAllow, FsRules, ProjectionKey, profile_name, refuse_deny_meeting_g
 use crate::authority::policy::GrantPath;
 use crate::authority::sandbox::Refusal;
 use crate::authority::sandbox::carve::carve;
-use crate::path::{Excluded, FrozenPath, RealPath, Trace};
+use crate::path::{Dir, Excluded, FrozenPath, RealPath, Trace};
 use crate::test_helper::{place, real as walked};
 use std::path::{Path, PathBuf};
 
@@ -216,11 +216,7 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
     expected.sort();
     assert_eq!(held, expected);
     assert_eq!(
-        carved
-            .entries
-            .iter()
-            .map(|dir| dir.real())
-            .collect::<Vec<_>>(),
+        carved.entries.iter().map(Dir::real).collect::<Vec<_>>(),
         [&allowance]
     );
 }

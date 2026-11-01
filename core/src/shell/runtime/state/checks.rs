@@ -297,7 +297,7 @@ mod tests {
     fn fs_and_flag_refusals_keep_their_diagnostics_and_error_status() {
         use crate::authority::policy::{Capabilities, FsPolicy, ShellVerb};
         use crate::path::Reading;
-        use crate::test_helper::{layer, trace};
+        use crate::test_helper::layer;
 
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("secret");
@@ -318,7 +318,7 @@ mod tests {
                 fs.message,
                 format!(
                     "fs read denied by grant: no allowance for reading {}",
-                    crate::path::shown(trace(&file).real().as_path())
+                    crate::path::shown(&file)
                 )
             );
             assert_eq!(fs.hint.as_deref(), Some("add it to the grant's fs `read` or `write` list"));

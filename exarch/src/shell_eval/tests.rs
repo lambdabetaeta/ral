@@ -1956,13 +1956,7 @@ mod self_layer {
         assert!(to.exists(), "mv moved the file");
     }
 
-    /// The extension admits exarch's own directory, so only the self layer
-    /// refuses it.
-    #[test]
-    fn exarch_is_refused_in_a_reasonable_session() {
-        ral_core::require_landlock!(1);
-        let proof = ral_core::require_confinement!();
-        let f = fixture();
+    fn reasonable(f: &Fixture) -> GrantStack {
         let scratch = f.cwd.join("scratch");
         let crate::policy::Invocation { stack, .. } = crate::policy::for_invocation(
             &ral_core::path::CwdPath::new(f.cwd.clone()).expect("fixture cwd"),
@@ -1973,8 +1967,29 @@ mod self_layer {
             Some(std::path::Path::new(&f.exe)),
         )
         .expect("reasonable composes");
-        refuses_exarch(&proof, &f, &stack);
-        bundled_tool_runs(&proof, &f, &stack);
+        stack
+    }
+
+    /// The extension admits exarch's own directory, so only the self layer
+    /// refuses it.
+    #[test]
+    fn exarch_is_refused_in_a_reasonable_session() {
+        ral_core::require_landlock!(1);
+        let proof = ral_core::require_confinement!();
+        let f = fixture();
+        refuses_exarch(&proof, &f, &reasonable(&f));
+    }
+
+    #[test]
+    #[cfg_attr(
+        ctor_without_argv,
+        ignore = "bundled tools need std's argv, absent in musl constructors"
+    )]
+    fn a_bundled_tool_runs_in_a_reasonable_session() {
+        ral_core::require_landlock!(1);
+        let proof = ral_core::require_confinement!();
+        let f = fixture();
+        bundled_tool_runs(&proof, &f, &reasonable(&f));
     }
 
     /// A spawned child's `Base` or `Restrict` layer is pushed without passing
@@ -1984,16 +1999,8 @@ mod self_layer {
         ral_core::require_landlock!(1);
         let proof = ral_core::require_confinement!();
         let f = fixture();
+        let parent = reasonable(&f);
         let scratch = f.cwd.join("scratch");
-        let crate::policy::Invocation { stack: parent, .. } = crate::policy::for_invocation(
-            &ral_core::path::CwdPath::new(f.cwd.clone()).expect("fixture cwd"),
-            &scratch.to_string_lossy(),
-            "reasonable",
-            Some(&f.extend),
-            &[],
-            Some(std::path::Path::new(&f.exe)),
-        )
-        .expect("reasonable composes");
         let ctx = ral_core::authority::grant::freeze::FreezeCtx::at(
             ral_core::host::EnvVars::new(),
             ral_core::path::CwdPath::new(f.cwd.clone()).expect("the fixture cwd is absolute"),

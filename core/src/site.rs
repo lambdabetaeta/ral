@@ -70,9 +70,6 @@ pub(crate) enum Silent {
     /// model exec image, so it raises no card.
     #[cfg(target_os = "linux")]
     BwrapHostProbe,
-    /// Host pty names, masked during envelope construction.
-    #[cfg(target_os = "linux")]
-    PtyDiscovery,
     /// Ral's own `/proc/self/cgroup`, read to re-root the envelope's cgroup
     /// tree on the namespace's root.  It raises no card: envelope
     /// construction, not a model's data I/O.

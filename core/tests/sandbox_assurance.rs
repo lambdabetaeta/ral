@@ -24,7 +24,6 @@ fn operation(args: &[String]) -> io::Result<()> {
     match args {
         [op, from, to] if op == "rename" => std::fs::rename(from, to),
         [op, path] if op == "rmdir" => std::fs::remove_dir(path),
-        [op, path] if op == "read" => std::fs::read(path).map(drop),
         _ => Err(io::Error::other(format!(
             "unknown assurance probe: {args:?}"
         ))),
@@ -159,7 +158,8 @@ fn an_admitted_loader_runs_an_unadmitted_file() {
     ral_core::require_landlock!(1);
     let tree = tempfile::tempdir().unwrap();
     let target = tree.path().join("unadmitted");
-    std::fs::copy(std::env::current_exe().unwrap(), &target).unwrap();
+    // Dynamic: ld.so re-execs a static program by path, which the grant rightly denies.
+    std::fs::copy("/bin/echo", &target).unwrap();
     let caps = Capabilities {
         exec: Some(ExecGrant::of(
             [
@@ -171,10 +171,9 @@ fn an_admitted_loader_runs_an_unadmitted_file() {
         ..writable(tree.path(), &[])
     };
     let grants = stack([layer(caps)]);
-    let read = ["read", target.to_str().unwrap()];
     let target = target.display();
-    let launch = |command: &str| run(grants.clone(), &within(&read, command));
-    let through_loader = launch(&format!("{LOADER} {target}"));
+    let launch = |command: &str| run(grants.clone(), command);
+    let through_loader = launch(&format!("{LOADER} {target} ok"));
     let by_ral = launch(&target.to_string());
     let by_kernel = launch(&format!("/bin/sh -c 'exec \"$0\"' '{target}'"));
     denied(&proof, &through_loader, &by_ral, MARKER);

@@ -72,8 +72,10 @@ mod tests {
     #[cfg(unix)]
     use ral_core::authority::grant::freeze::Place;
     #[cfg(unix)]
+    use ral_core::authority::policy::FsSummary;
+    #[cfg(unix)]
     use ral_core::authority::policy::{Capabilities, Fragment, Net};
-    use ral_core::authority::policy::{ExecSummary, FsSummary, GrantLayer};
+    use ral_core::authority::policy::{ExecSummary, GrantLayer};
     #[cfg(unix)]
     use ral_core::path::XdgKind;
     use std::path::PathBuf;
@@ -100,6 +102,7 @@ mod tests {
     }
 
     /// The fs rules `layer` shows.
+    #[cfg(unix)]
     fn fs_of(layer: &GrantLayer) -> FsSummary {
         layer
             .summary()

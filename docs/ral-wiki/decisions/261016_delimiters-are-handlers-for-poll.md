@@ -231,7 +231,7 @@ worker's escape is data on its `` `done `` card.
 | 7 | `every_break_has_its_code`, the wire round-trip `stopped_round_trips` |
 | 8 | `a_stage_panic_tears_the_group_down_and_is_reraised_at_fold`, `an_awaited_panic_is_reraised`, `a_polled_panic_is_reraised`, `a_raced_panic_is_reraised`, `a_cancelled_handle_polls_settled` |
 | 9 | `a_join_names_the_outermost_node_attaining_it`, `a_stop_naming_the_stage_is_consumed_whatever_its_cause`, `a_stop_naming_the_workers_node_is_its_own_and_no_other_is`, `a_stage_inside_a_worker_names_the_worker`, `a_stronger_cause_lands_at_the_closing_poll`, `the_closing_poll_keeps_a_located_stop`, `a_lease_that_fires_during_the_last_step_is_still_the_awaiters_error`, `a_claimed_deadline_is_reported`, `a_teardown_is_the_verdict_when_every_stage_survived_it` |
-| 10 | `a_cancel_all_waits_for_a_live_thread_stage_up_to_its_grace`, `an_abort_grants_no_grace`, `a_panic_mid_teardown_escalates_to_abort`, `a_cancelled_scope_is_read_between_slices`, `a_write_blocked_under_a_cause_is_stopped_within_a_slice`, `a_pump_blocked_on_a_full_edge_ends_within_a_slice`, `a_descendant_holding_the_pipe_does_not_hold_the_run`, `a_closed_stdout_is_a_stop` |
+| 10 | `a_cancel_all_waits_for_a_live_thread_stage_up_to_its_grace`, `an_abort_grants_no_grace`, `a_panic_mid_teardown_escalates_to_abort`, `a_cancelled_scope_is_read_between_slices`, `a_write_blocked_under_a_cause_is_stopped`, `a_pump_blocked_on_a_full_edge_ends_once_its_scope_is_cancelled`, `a_descendant_holding_the_pipe_does_not_hold_the_run`, `a_closed_stdout_is_a_stop` |
 
 ## Denotation
 

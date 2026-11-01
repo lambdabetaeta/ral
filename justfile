@@ -14,6 +14,10 @@ default:
 # third-party crates included (measured 2026-08-25: 408 rebuilt).
 deny := '-D warnings'
 
+# The bundled-tool features releases build `ral` with (build-binaries.yml):
+# build and lint carry it identically; test a superset (the test-util features).
+ship := 'ral/coreutils,ral/diffutils,ral/ripgrep'
+
 # `--keep-going`, here and on `lint`: a catch-up session walks into a pile of
 # drift at once — a cross-platform half nothing has compiled in weeks — and
 # stopping at the first crate turns one pass into one fix-and-rebuild cycle per
@@ -22,11 +26,11 @@ deny := '-D warnings'
 # Build all workspace targets; `test` depends on this to refresh the `ral`
 # binary that ral/tests/ shells out to.
 build $RUSTFLAGS=deny:
-    cargo build --workspace --all-targets --keep-going
+    cargo build --workspace --all-targets --features {{ship}} --keep-going
 
 # Run the workspace test suite.
 test $RUSTFLAGS=deny: build
-    cargo test --workspace --features ral-core/test-util,exarch/test-util --no-fail-fast
+    cargo test --workspace --features {{ship}},ral-core/test-util,exarch/test-util --no-fail-fast
 
 # Compiles nothing, so it is the cheapest step CI has and the one worth failing
 # first. `--all` reaches vendor/ too, where vendor/rustfmt.toml turns formatting
@@ -42,7 +46,7 @@ fmt-check:
 
 # Clippy across the workspace, warnings as errors; no em dash in string literals.
 lint $RUSTFLAGS=deny:
-    cargo clippy --workspace --all-targets --keep-going
+    cargo clippy --workspace --all-targets --features {{ship}} --keep-going
     ! rg -n '"[^"]*[^ ] — ' core/src exarch/src ral/src --glob '!**/tests*'
 
 # Never links, so a Unix host can run it. `cargo xwin` (rust-cross/cargo-xwin)
@@ -156,6 +160,12 @@ ui-check:
     cd synod/ui
     deno check --unstable-sloppy-imports js/*.js
     deno test --unstable-sloppy-imports tests/
+
+# Agda is not on the CI images, so neither lint nor CI runs this.
+
+# Typecheck the Agda formalisation of the calculus under agda/.
+agda:
+    just --justfile agda/justfile check
 
 # Both run scripts/ci.sh — the same step list GitHub Actions runs, differing
 # only in where cargo runs.  It calls the recipes above rather than spelling

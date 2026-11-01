@@ -1,9 +1,5 @@
 #![allow(clippy::disallowed_methods, reason = "test code")]
-#![cfg(all(
-    feature = "test-util",
-    feature = "coreutils",
-    any(target_os = "linux", target_os = "macos")
-))]
+#![cfg(all(feature = "test-util", feature = "coreutils", target_os = "macos"))]
 
 //! Loader overrides are set only after the inert parent has started.
 
@@ -13,13 +9,6 @@ use ral_core::test_helper::confinement::{Confining, Output, admitted, run};
 use ral_core::test_helper::stack;
 use std::io::Write;
 
-#[cfg(target_os = "linux")]
-const LOADER_VARS: &[(&str, &str)] = &[
-    ("LD_PRELOAD", "/nonexistent/ral-preload.so"),
-    ("LD_AUDIT", "/nonexistent/ral-audit.so"),
-    ("LD_LIBRARY_PATH", "/nonexistent/ral-libraries"),
-];
-#[cfg(target_os = "macos")]
 const LOADER_VARS: &[(&str, &str)] = &[
     ("DYLD_INSERT_LIBRARIES", "/usr/lib/libSystem.B.dylib"),
     ("DYLD_LIBRARY_PATH", "/nonexistent/ral-libraries"),

@@ -1,52 +1,15 @@
+// LOCAL PATCH: the internal register is the only built-in clipboard.
 //! The editors clipboard
 //!
 //! ## Default clipboard
 //!
-//! `EdTUI` uses the arboard clipboard by default, which enables copy and paste
-//! operations between the system clipboard and the editor. However, if a lighter
-//! clipboard is desired, the "arboard" function flag can be deactivated. In this
-//! case, the internal clipboard is used, which only supports copying and pasting
-//! within the editor.
+//! `EdTUI` uses an internal clipboard by default, which only supports copying
+//! and pasting within the editor.
 //!
-//! ## Example: A custom global clipboard
+//! ## Custom clipboard
 //!
-//! `EdTUI` allows you to set a custom clipboard. This is useful if you want to
-//! define a global clipboard for example:
-//!
-//!```ignore
-//! use once_cell::sync::Lazy;
-//! use std::sync::Mutex;
-//!
-//! static CLIPBOARD: Lazy<GlobalClipboard> = Lazy::new(|| GlobalClipboard::new());
-//!
-//! struct GlobalClipboard(Mutex<Clipboard>);
-//!
-//! impl GlobalClipboard {
-//!     pub fn new() -> Self {
-//!         Self(Mutex::new(arboard::Clipboard::new().unwrap()))
-//!     }
-//! }
-//!
-//! impl ClipboardTrait for &GlobalClipboard {
-//!     fn set_text(&mut self, text: String) {
-//!         if let Ok(mut clipboard) = self.0.lock() {
-//!             let _ = clipboard.set_text(text);
-//!         }
-//!     }
-//!
-//!     fn get_text(&mut self) -> String {
-//!         if let Ok(mut clipboard) = self.0.lock() {
-//!             return clipboard.get_text().unwrap_or_default();
-//!         }
-//!         String::new()
-//!     }
-//! }
-//!
-//! let mut state = EditorState::default();
-//! state.set_clipboard(Lazy::force(&CLIPBOARD));
-//!```
-#[cfg(feature = "arboard")]
-mod arboard;
+//! A host may supply any [`ClipboardTrait`] implementation, for example one
+//! backed by the system clipboard, with `EditorState::set_clipboard`.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -117,7 +80,6 @@ impl ClipboardTrait for InternalClipboard {
     }
 }
 
-#[cfg(not(feature = "arboard"))]
 impl Default for Clipboard {
     /// Creates a new `Clipboard` with `InternalClipboard`.
     /// The internal clipboard does not capture the systems clipboard.

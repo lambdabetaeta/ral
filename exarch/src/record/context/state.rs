@@ -1,5 +1,5 @@
 //! Where the protocol rests and what may follow: the sequencing automaton
-//! [`Context::step`] runs, and the readings of it the agent asks for.
+//! [`Context::step`](crate::record::Fold::step) runs, and the readings of it the agent asks for.
 
 use super::Context;
 use crate::record::{QuiesceReason, Recorded, ToolResult, Transcript};

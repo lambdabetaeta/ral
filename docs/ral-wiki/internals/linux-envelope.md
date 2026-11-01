@@ -2,7 +2,7 @@
 generated_at_commit: bb5bc1a6
 verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 verified_at_date: 2026-10-26
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, PtyNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
 ---
 
 # The Linux envelope
@@ -196,7 +196,9 @@ result by hand, or states what it cannot build.**
 - **A fresh devpts.** A rootless container's mount layer will not give bwrap
   one, so `--dev` fails in setup and no `Restricted` envelope could launch.
   `render_dev` lays out `--dev`'s shape by hand instead: a tmpfs, the device
-  nodes bound in, the `pts/ptmx` symlink, and a fresh `/dev/shm`.
+  nodes bound in, and a fresh `/dev/shm`, but no devpts.  The refusal is
+  the mount layer's: on a Fedora (SELinux) host, `container_t` may not mount
+  devpts (`EACCES`); `--security-opt label=disable` lifts it.
 - **A fresh procfs.** The same runtimes mask `/proc`, and the kernel then
   refuses the procfs a pid namespace needs. `--unshare-pid` is emitted only
   where the table can be hidden.
@@ -204,27 +206,24 @@ result by hand, or states what it cannot build.**
   (`authority/sandbox/linux/host.rs`).
 - **What cannot be rebuilt is stated, not refused.** Neither is a restriction a
   grant names, so the launch runs, and the child sees what it would see
-  unconfined: the container's own process table, the host's devpts allocation
+  unconfined: the container's own process table
   ([[design/two-enforcers|two-enforcers]]). Running the container
   `--privileged` lifts both.
-- **A pty by hand is the host devpts's.** `/dev/ptmx` opens where that
-  devpts's `ptmxmode` admits: a container runtime's own devpts (`0666`), not
-  the kernel's default nor a systemd host's (`000`). The host's `/dev/ptmx`
-  node cannot stand in: the kernel finds a node's devpts at the `pts` beside
-  it in the same mount, and a bind of one file has none.
-- **Host terminals present at render are hidden.** `PtyNodes::discover` lists
-  `/dev/pts/<N>` before rendering; each gets an unopenable `/dev/null` bind
-  after the devpts bind, with `ptmx` left for the child's own allocations.
-  A pty the host opens during the launch remains reachable for that launch,
-  the same snapshot gap as exec exclusions.
-  A terminal that closes between discovery and mount fails that launch.
-- **The render takes the probed host and discovered nodes as data.** The argv
+- **No host terminal is reachable by name, in either arm.** `--dev` gives a
+  private devpts; by hand there is none, no `/dev/pts` and no `/dev/ptmx`,
+  since the host's devpts is shared and any view of it leaks host terminals.
+  The child keeps the terminals it inherits as descriptors and allocates
+  none, so a payload that needs a pty (`tmux`, `script`, `ssh -t`) fails by
+  hand. Allocation there was only ever host-conditional (`ptmxmode`), so no
+  guarantee is lost.
+- **The render takes the probed host as data.** The argv
   tests assert both shapes from literals, not from whichever host runs them.
 - **Open:** such hosts still refuse the read-only rebind of their own locked
   `/etc/hosts` and `/etc/resolv.conf`, by descriptor as by name.
 
-Pinned by `authority::sandbox::linux::tests::render::a_host_that_refuses_dev_gets_the_same_shape_by_hand`
-and `::the_by_hand_dev_serves_a_confined_body`.
+Pinned by `authority::sandbox::linux::tests::render::a_host_that_refuses_dev_gets_the_same_shape_by_hand`,
+`::the_by_hand_dev_has_no_devpts`, `spawn::the_by_hand_dev_serves_a_confined_body`
+and `spawn::the_by_hand_dev_reaches_no_host_terminal`.
 
 ## The GPU is shown or masked by name
 

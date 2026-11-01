@@ -886,7 +886,7 @@ fn a_scoped_directory_rejects_a_public_substitute() {
     });
     let error = walked(&path).create_scoped_dir().err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    assert!(!dacl_of(&path).0, "the rejected substitute is not removed");
+    assert!(!path.exists());
 }
 
 /// `Secret` is a protected DACL naming the owner alone, over a leaf that

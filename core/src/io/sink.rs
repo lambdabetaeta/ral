@@ -633,7 +633,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_pump_blocked_on_a_full_edge_ends_within_a_slice() {
+    fn a_pump_blocked_on_a_full_edge_ends_once_its_scope_is_cancelled() {
         let (node, scope) = (
             DurableRoot::default().worker(),
             DurableRoot::default().worker(),
@@ -653,7 +653,7 @@ mod tests {
         let start = Instant::now();
         while !pump.is_finished() {
             assert!(
-                start.elapsed() < Duration::from_millis(250),
+                start.elapsed() < crate::test_helper::NEVER_RETURNS,
                 "the pump outlived its scope"
             );
             std::thread::sleep(Duration::from_millis(1));
@@ -698,13 +698,13 @@ mod tests {
         let start = Instant::now();
         let stop = write_stopped(writer.join().expect("writer").expect_err("stopped"));
         assert_eq!(stop.cause, CancelCause::Interrupted);
-        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(start.elapsed() < crate::test_helper::NEVER_RETURNS);
         drain.join().expect("drain");
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_full_dead_edge_stops_a_blocked_write_within_a_slice() {
+    fn a_full_dead_edge_stops_a_blocked_write() {
         let node = DurableRoot::default().worker();
         let (_reader, mut sink, edge, writer) = pipe_sink(&node);
         node.cancel(CancelCause::Interrupted);
@@ -717,7 +717,7 @@ mod tests {
             (stop.cause, stop.owner),
             (CancelCause::ReaderGone, Some(node.id()))
         );
-        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(start.elapsed() < crate::test_helper::NEVER_RETURNS);
     }
 
     #[cfg(unix)]

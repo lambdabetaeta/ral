@@ -72,7 +72,7 @@ let event_handler = EditorEventHandler::new(key_handler);
 - Custom theming.
 - Mouse events.
 - Vim and Emacs keybindings.
-- Copy paste using the systems clipboard.
+- Copy paste within the editor, or through a custom clipboard.
 - Line wrapping.
 - Syntax highlighting.
 - Line numbers (absolute and relative).

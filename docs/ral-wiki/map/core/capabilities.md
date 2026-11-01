@@ -733,9 +733,7 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   before `/proc` and `/dev`, `Over` after. `--chdir` carries
   the context's absolute `CwdPath` bytes, while every rendered
   name refuses a position that is not Unicode rather than go lossy into
-  bwrap's argv. `PtyNodes` supplies the by-hand `/dev` renderer with host
-  terminals to mask; terminals opened by the host during a launch remain
-  reachable for that launch. A malformed or unreadable `InfoFd` record makes
+  bwrap's argv. A malformed or unreadable `InfoFd` record makes
   `Launch::spawn` kill and reap the envelope before returning its error;
   an empty record means bwrap died before reporting its payload. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
