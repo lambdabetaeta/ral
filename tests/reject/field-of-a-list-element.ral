@@ -1,6 +1,6 @@
-# codes: T0061
+# codes: T0010
 # status: 1
 # at: 6:14
-# contains: Integer cannot be indexed
+# contains: only records, lists and maps are read with `[…]`
 let xs = [1, 2]
 return $xs[0][a]

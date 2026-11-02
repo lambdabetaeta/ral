@@ -1,7 +1,7 @@
-# codes: T0062
+# codes: T0010
 # status: 1
 # at: 7:10
-# contains: a record takes a literal label
-# contains: (available: a, b)
+# contains: a whole number reads a list element
+# contains: a field whose name is digits is written quoted, as in `$r['0']`
 let m = [a: 1, b: 2]
 return $m[0]

@@ -1,0 +1,2 @@
+let pick = { |env| $env[HOME] }
+return !{pick !{env}}

@@ -1,5 +1,5 @@
-# codes: T0061
+# codes: T0074
 # status: 1
-# at: 5:17
-# contains: Integer cannot be indexed
+# at: 5:22
+# contains: this is a record, but a number (Int or Float) is needed
 let f = { |x| $x[a]; $[$x + 1] }

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 9c8aa5d9
 generated_at_date: 2026-11-01
 covers_paths: [core/src/elaborator.rs, core/src/elaborator/, core/src/syntax/group.rs]
 ---
@@ -84,6 +84,10 @@ bound `App` head, never a bare `Exec`.
 
 A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node of its stages and
 nothing more: every interior edge is a byte pipe allocated from position.
+
+An index lowers `IndexKey::{Label, Position, Data}` directly to the IR's
+`Key` of the same form (`elaborator/expr.rs`); only `Data` lowers an expression
+to a value. Written names never become generic string-valued keys.
 
 A map literal with a spread or computed key assembles from `MapOperand`s
 (`Elaborator::map_operand`): each key, value and spread elaborates isolated,

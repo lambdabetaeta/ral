@@ -1,7 +1,7 @@
 # codes: T0010
 # status: 1
-# at: 7:14
-# contains: shared by every use in its unit
+# at: 6:14
+# contains: couldn't match type Map α with type [
 let pick = { |m k| $m[$k] }
 let a = pick [1, 2] 0
-let b = pick ["y": 2] 'y'
+let b = pick [:, y: 2] 'y'

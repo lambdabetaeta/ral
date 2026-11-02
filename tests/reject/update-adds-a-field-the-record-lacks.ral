@@ -2,6 +2,6 @@
 # status: 1
 # at: 7:12
 # contains: `$cfg` has no field `total` to update
-# contains: nest it (`[cfg: $cfg, total: …]`), or make `$cfg` a map (`[...$cfg, "total": …]`)
+# contains: nest it (`[cfg: $cfg, total: …]`), or make `$cfg` a map (`[:, ...$cfg, total: …]`)
 let cfg = [host: 'h']
 return [...$cfg, total: 3]

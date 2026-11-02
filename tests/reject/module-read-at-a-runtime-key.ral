@@ -1,7 +1,7 @@
-# codes: T0062
+# codes: T0010
 # status: 1
 # at: 7:10
-# contains: a record takes a literal label
+# contains: a computed key reads a map, and this is a record, whose fields have names: write the name, as in `$r[host]`
 let m = use 'lib/versioned.ral'
 let k = 'version'
 return $m[$k]

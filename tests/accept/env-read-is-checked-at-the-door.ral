@@ -1,0 +1,2 @@
+# The numeric use is checked at the env door, not statically.
+let n = $[!{env}[HOME] + 1]

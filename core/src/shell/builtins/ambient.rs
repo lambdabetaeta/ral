@@ -1,7 +1,9 @@
 //! The ambient reads — the dynamic `Context` and the machine — as nullary natives.
 
 use crate::host::EnvVars;
-use crate::shell::runtime::{Error, Shell, Value};
+use crate::shell::runtime::{Error, Mooring, Settled, Shell, Value};
+use crate::ty::Site;
+use std::sync::Arc;
 
 pub(super) fn cwd(shell: &Shell) -> Value {
     Value::string(crate::path::shown(shell.cwd()))
@@ -32,6 +34,15 @@ pub(super) fn env(shell: &Shell) -> Value {
             .map(|(k, v)| (k, Value::string(v)))
             .collect(),
     )
+}
+
+pub(super) fn builtin_env(
+    _args: &[Value],
+    site: &Arc<Site>,
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    site.admitted("env", env(shell), shell)
 }
 
 pub(super) fn args(shell: &Shell) -> Value {

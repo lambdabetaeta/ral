@@ -1,7 +1,0 @@
-# codes: T0062
-# status: 1
-# at: 7:8
-# contains: String cannot be indexed
-# contains: text cannot be indexed; use `slice $s 0 80` or `lines $s`
-let x = 'hello'
-echo $x[0]

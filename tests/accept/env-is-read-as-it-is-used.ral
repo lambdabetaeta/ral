@@ -1,0 +1,13 @@
+let home = !{env}[HOME]
+echo "home: $home"
+let names = keys !{env}
+echo !{length $names}
+let m = [:, a: 1]
+let k = 'a'
+echo $[$m[$k] + 1]
+let key_after = { |m| $m[$k]; keys $m }
+let key_before = { |m| keys $m; $m[$k] }
+let chain_after = { |m| let x = $m[$k][b]; keys $m }
+let chain_before = { |m| keys $m; let x = $m[$k][b]; return $x }
+let sized_before = { |m| length $m; $m[$k] }
+let sized_after = { |m| $m[$k]; length $m }

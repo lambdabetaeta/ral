@@ -1,4 +1,4 @@
-//! Arithmetic, comparison, negation, and subscripting: the leaves
+//! Arithmetic, comparison, negation, and the three reads: the leaves
 //! `machine::eval_rules` dispatches `CompKind::Binary`, `CompKind::Negate`,
 //! `CompKind::Not`, and `CompKind::Index` to.
 
@@ -6,66 +6,82 @@ use super::val::form;
 use crate::data::Finite;
 use crate::ir::Val;
 use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp};
-use crate::shell::runtime::{Break, Env, Error, Settled, Signature, Value};
+use crate::shell::runtime::{Break, Env, Error, Map, Settled, Signature, Value};
+use std::borrow::Cow;
 
-// ── Indexing ─────────────────────────────────────────────────────────────
+// ── Reads ────────────────────────────────────────────────────────────────
 
-/// Index a `List` by non-negative `Int`, or a `Map` by `String` key. Pure:
-/// both operands are already-closed values, so no environment is needed.
-pub(crate) fn index_value(val: &Value, key: &Value) -> Result<Value, Error> {
+/// `$r[ℓ]`: a record's field.
+pub(crate) fn field(val: &Value, label: &str) -> Result<Value, Error> {
     match val {
-        Value::List(items) => {
-            let idx: usize = key
-                .as_int()
-                .and_then(|i| usize::try_from(i).ok())
-                .ok_or_else(|| {
-                    Error::new(format!(
-                        "list index must be a non-negative Int, got {} '{key}'",
-                        key.type_name()
-                    ))
-                    .with_hint("list indices are zero-based integers")
-                })?;
-            items
-                .get(idx)
-                .map(std::borrow::Cow::into_owned)
-                .ok_or_else(|| {
-                    Error::new(format!(
-                        "index {idx} out of bounds for list of length {}",
-                        items.len()
-                    ))
-                    .with_hint(if items.is_empty() {
-                        "the list is empty".to_string()
-                    } else {
-                        format!("valid indices: 0..{}", items.len() - 1)
-                    })
-                })
-        }
-        Value::Map(m) => {
-            let key_str = match key {
-                Value::String(s) => s.as_str(),
-                _ => {
-                    return Err(Error::new(format!(
-                        "map key must be a String, got {} '{key}'",
-                        key.type_name()
-                    ))
-                    .with_hint("use str to convert"));
-                }
-            };
-            m.get(key_str)
-                .map(std::borrow::Cow::into_owned)
-                .ok_or_else(|| {
-                    let ks: Vec<&str> = m.keys().collect();
-                    let hint = if ks.is_empty() {
-                        "the map is empty".to_string()
-                    } else {
-                        format!("available: {}", ks.join(", "))
-                    };
-                    Error::new(format!("key '{key_str}' not found")).with_hint(hint)
-                })
-        }
-        _ => Err(Error::new(format!("cannot index into {}", val.type_name()))
-            .with_hint("indexing requires a List or Map")),
+        Value::Map(fields) => entry(fields, label, "field", "record"),
+        _ => Err(unreadable(
+            val,
+            &format!("the field `{label}`"),
+            "a field is read from a record",
+        )),
     }
+}
+
+/// `$xs[n]`: a list's element, counting from 0.
+pub(crate) fn position(val: &Value, n: usize) -> Result<Value, Error> {
+    let Value::List(items) = val else {
+        return Err(unreadable(
+            val,
+            &format!("the position {n}"),
+            "a position is read from a list",
+        ));
+    };
+    items.get(n).map(Cow::into_owned).ok_or_else(|| {
+        Error::new(format!(
+            "index {n} out of bounds for list of length {}",
+            items.len()
+        ))
+        .with_hint(if items.is_empty() {
+            "the list is empty".to_string()
+        } else {
+            format!("valid indices: 0..{}", items.len() - 1)
+        })
+    })
+}
+
+/// `$m[k]`: a map's value at a computed key.
+pub(crate) fn lookup(val: &Value, key: &Value) -> Result<Value, Error> {
+    let Value::String(key) = key else {
+        return Err(Error::new(format!(
+            "map key must be a String, got {} '{key}'",
+            key.type_name()
+        ))
+        .with_hint("use str to convert"));
+    };
+    match val {
+        Value::Map(m) => entry(m, key, "key", "map"),
+        _ => Err(unreadable(
+            val,
+            &format!("the key '{key}'"),
+            "a computed key reads a map",
+        )),
+    }
+}
+
+fn entry(map: &Map, key: &str, what: &str, whole: &str) -> Result<Value, Error> {
+    map.get(key).map(Cow::into_owned).ok_or_else(|| {
+        let ks: Vec<&str> = map.keys().collect();
+        let hint = if ks.is_empty() {
+            format!("the {whole} is empty")
+        } else {
+            format!("available: {}", ks.join(", "))
+        };
+        Error::new(format!("{what} '{key}' not found")).with_hint(hint)
+    })
+}
+
+fn unreadable(val: &Value, what: &str, rule: &str) -> Error {
+    Error::new(format!(
+        "cannot read {what} of a value of type {}",
+        val.type_name()
+    ))
+    .with_hint(rule)
 }
 
 // ── Primitive ops ────────────────────────────────────────────────────────

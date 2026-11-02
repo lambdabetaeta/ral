@@ -1,6 +1,6 @@
-# codes: T0061
+# codes: T0010
 # status: 1
 # at: 6:11
-# contains: a list takes an Integer, not `hello`
+# contains: a list is read by position: `$xs[0]`, or `nth $i $xs` for a computed one
 let xs = [1, 2, 3]
 return $xs[hello]

@@ -1,7 +1,16 @@
 ---
 status: accepted
-generated_at_commit: 8d868e18
+generated_at_commit: 9c8aa5d9
 ---
+
+> **Amended 2026-11-02** by
+> [[decisions/261102_a-written-key-is-a-name|a written key is a name]]:
+> `env : ∀α. F α` and `from-csv : ∀α. F [α]` are checked boundaries;
+> their text values are admitted as records or maps according to use, never
+> converted. The closed set is `from-json`, `from-jsonl`, `from-json-at`,
+> `from-csv`, `env`, `use`, `exarch-agents`, `exarch-pins`,
+> `exarch-transcript` and `_ed-state`. This replaces the exclusions below;
+> each call is its own door.
 
 > Amended 2026-10-21: `worker <id>` and `Site::admit_handled` are deleted; a
 > worker handle is a capability held only in the bindings that received it from

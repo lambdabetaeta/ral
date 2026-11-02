@@ -1,6 +1,11 @@
 # Test: the `env` builtin reads the shell's own environment
 
-# HOME is the home directory the shell reports
+# A numeric use is refused at the env door.
+let refused = try {
+    let n = $[!{env}[HOME] + 1]
+    return false
+} { |e| return $[!{re-match '^env:.*`/HOME`' $e[message]} && !{re-match 'line 5$' $e[message]}] }
+if $[not $refused] { fail [status: 1, message: 'env must refuse the numeric HOME use at its door, naming /HOME and line 5'] }
 echo $[!{env}[HOME] == !{home}]
 
 # within [env:] is visible to `env`; nested overrides stack; none leaks
@@ -12,5 +17,4 @@ within [env: [A: 1]] {
     let e = env
     echo $e[A]
 }
-let after = env
-echo !{try { let v = $after[A]; return false } { |_| return true }}
+echo !{try { let after = env; let v = $after[A]; return false } { |_| return true }}

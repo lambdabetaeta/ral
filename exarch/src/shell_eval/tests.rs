@@ -1024,7 +1024,7 @@ each {{ |f|
     let rows = view-hash $f 1 $[$lc + 1]
     let mine = filter {{ |h| $[$h[file] == $f] }} $hits
     edit-hash $f !{{map {{ |h|
-        [ hash: $rows[$[$h[line] - 1]][hash], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
+        [ hash: !{{nth $[$h[line] - 1] $rows}}[hash], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
     }} $mine}}
 }} $files
 return !{{length $hits}}"

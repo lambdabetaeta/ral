@@ -18,9 +18,7 @@ impl Site {
     }
 
     pub(crate) fn protect(&self, value: Value, shell: &Shell) -> Settled<Value> {
-        self.admit(&value, shell.fixings())
-            .map_err(|m| m.refusal("imported value", shell))?;
-        Ok(self.wrap(value))
+        Ok(self.wrap(self.admitted("imported value", value, shell)?))
     }
 
     /// Install obligations without inspecting delayed results.

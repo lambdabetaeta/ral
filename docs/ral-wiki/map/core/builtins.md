@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 6dd2407d
 generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -56,10 +56,12 @@ scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
 shell must be built over a `Runtime` that carries them or re-link a native by name.
 `register` clones the baked prelude's bindings into each fresh environment.
-`BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `use`) also sits
+`BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `from-csv`,
+`env`, `use`) also sits
 outside it, for a different reason: each row is a `BuiltinEntry::boundary`, whose
-body takes the `Site` the checker solved at the call and admits the value it
-lets in against it ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
+body takes the `Site` the checker solved at the call and lets the value in
+through `Site::admitted` (`shell/runtime/admit.rs`), which words a mismatch as
+the door's refusal ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
 Three entries sit *outside* the macro, implemented in core but installed by a
 host. The public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
@@ -84,6 +86,20 @@ Filesystem query schemas live below the shell: `fact/fs.rs` declares
 `DirEntry` (`list-dir`) and `FileInfo` (`file-info`) and constructs them purely
 from observed metadata. `shell/builtins/fs.rs` owns the queries; the checker
 reads the same records' `Typed` declarations.
+
+The read and CSV schemes live in `typecheck/builtins.rs`:
+
+- `env : ∀α. F α` admits the effective environment against its site's record
+  or map shape (`ambient.rs`); values remain text.
+- `from-csv : ∀α. F [α]` parses text cells and admits the rows against the
+  site's type (`codecs.rs`). Written field reads use records; computed reads
+  use maps. The row stays a decoder for misuse diagnostics.
+- `to-csv : ∀α:data. [α] → writes` accepts record or map rows, requiring the
+  first row's keys and scalar cells at runtime. Strings, numbers and booleans
+  render as `str` renders them; other cells name their row index and key.
+- `nth : ∀α. Int → [α] → F α` (`collections.rs`) refuses a negative Int and
+  then reads through `evaluator::expr::position`, the read a written position
+  uses; field reads and map lookups are `expr::field` and `expr::lookup`.
 
 Bodies are grouped by concern, one submodule each:
 

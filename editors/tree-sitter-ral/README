@@ -55,9 +55,10 @@ This is an editor parser, not the runtime validator:
   not a second context-sensitive scanner.
 - Numeral nodes recognize complete lexical shapes, including signs, partial
   decimal points and point-bearing exponents, not runtime numeric ranges.
-- Brackets with spreads alone are lists. A keyed entry selects map_literal,
-  which covers both records and maps. Classification-dependent record rules
-  (one spread, first), duplicate keys/binders/arms, and types are not checked.
+- Brackets with spreads alone are lists. A keyed entry or the [: marker
+  selects map_literal, which covers both records and maps. Classification-
+  dependent record rules (one spread, first), a spliced pattern key,
+  duplicate keys/binders/arms, and types are not checked.
 - Reserved control-operator heads other than let/return/if/case use application
   nodes. Highlight queries classify those names; this grammar does not check
   their form-specific option sets or arities.

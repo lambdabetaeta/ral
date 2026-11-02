@@ -5,12 +5,12 @@ let items = [a, b, c]
 echo $items[0]
 echo $items[2]
 
-# Map basics
+# Record basics
 let opts = [host: localhost, port: 8080]
 echo $opts[host]
 echo $opts[port]
 
-# Nested map with chained indexing
+# Nested record with chained indexing
 let config = [db: [host: localhost, port: 5432], app: [workers: 4]]
 echo $config[db][host]
 echo $config[app][workers]
@@ -41,8 +41,8 @@ let trailing = [
 echo !{length $trailing}
 
 # `has` tests for a key
-echo !{has ["a": 1, "b": 2] a}
-echo !{has ["a": 1, "b": 2] c}
+echo !{has [:, a: 1, b: 2] a}
+echo !{has [:, a: 1, b: 2] c}
 
 # A key given twice is an error, not a silent overwrite, whether both are
 # computed or one is written out
@@ -52,8 +52,8 @@ try { let _ = [$k: 1, $j: 2]; return () } { |e| echo $e[message] }
 try { let _ = [a: 1, $k: 2]; return () } { |e| echo $e[message] }
 
 # An explicit entry replaces a spread's, so that is not a repeat
-let replaced = [...["a": 1], $k: 2]
-echo $replaced[a]
+let replaced = [...[:, a: 1], $k: 2]
+echo $replaced[$k]
 
 # Functions are values in lists and maps
 let fns = [{ |x| return $[$x + 1] }, { |x| return $[$x * 2] }]
@@ -67,8 +67,8 @@ echo ...[upper, hello]
 echo !{[label: upper, fn: $upper][label]}
 
 # keys, values, entries
-echo ...!{keys ["a": 1, "b": 2, "c": 3]}
-echo ...!{values ["a": 1, "b": 2]}
+echo ...!{keys [:, a: 1, b: 2, c: 3]}
+echo ...!{values [:, a: 1, b: 2]}
 echo !{length !{keys [:]}}
-let pairs = entries ["x": hello]
+let pairs = entries [:, x: hello]
 echo $pairs[0][0] $pairs[0][1]

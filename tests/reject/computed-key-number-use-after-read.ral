@@ -1,0 +1,10 @@
+# codes: T0074 T0010 T0010
+# status: 1
+# at: 7:11
+# contains: this is text (String), but a number (Int or Float) is needed
+let run = { |i|
+  let h = { |c| $c[$i] }
+  let n = $[$i + 1]
+  h [1]
+  h ['x']
+}

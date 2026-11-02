@@ -40,7 +40,7 @@ echo !{posix-quote 'hello world'}
 echo !{ral-quote hello} !{ral-quote 'hello world'} !{ral-quote '007'} !{ral-quote #'it's'#} !{ral-quote ##'a'#b'##}
 
 # has
-let m = ["a": 1, "b": 2]
+let m = [:, a: 1, b: 2]
 if !{has $m a} { echo 'has a' }
 if $[not !{has $m c}] { echo 'no c' }
 

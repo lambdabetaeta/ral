@@ -12,8 +12,8 @@ use super::env::{InferCtx, Node};
 use crate::ir::Redirects;
 use crate::ir::{
     Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec,
-    GroupNode, HandlerArmV, MapEntryV, MapOperand, Name, OptionsV, Pattern, Phrase, Toplevel, Val,
-    ValListElem, ValRecordEntry,
+    GroupNode, HandlerArmV, Key, MapEntryV, MapOperand, Name, OptionsV, Pattern, Phrase, Toplevel,
+    Val, ValListElem, ValRecordEntry,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -184,7 +184,18 @@ impl Annotate<'_> {
             CompKind::Not(value) => CompKind::Not(self.val(value)),
             CompKind::Index { target, keys } => CompKind::Index {
                 target: self.val(target),
-                keys: keys.iter().map(|k| self.spanned_val(k)).collect(),
+                keys: keys
+                    .iter()
+                    .map(|key| {
+                        Spanned::with_span(
+                            key.span,
+                            match &key.item {
+                                Key::Data(value) => Key::Data(self.val(value)),
+                                key => key.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
             },
             CompKind::Interpolation(parts) => {
                 CompKind::Interpolation(parts.iter().map(|v| self.val(v)).collect())

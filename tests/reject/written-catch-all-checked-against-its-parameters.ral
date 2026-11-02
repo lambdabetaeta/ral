@@ -1,5 +1,5 @@
-# codes: T0010
+# codes: T0010 T0010
 # status: 1
 # at: 5:38
-# contains: couldn't match type [String] with type Integer
+# contains: a computed key reads a map; for a list element at a computed position, write `nth $i $xs`
 within [handler: { |n a| let bad = $a[$a]; return () }] { zzz }

@@ -89,7 +89,7 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
         "return",
         "return [value]  — finish successfully with a value; without one, return `()`.\n\n\
          `return` constructs a successful computation; it does not exit the process and does not escape an enclosing function early. A block's result is the final computation it runs, so `return` is most useful when lifting data explicitly or returning unit from an otherwise empty path.\n\n\
-         In an rc file, plugin manifest, or capability profile whose terminal result a host checks against a fixed keyset, return a record: `return [edit-mode: 'vi']`. A misspelled key is a type error before the file runs. `return [\"edit-mode\": 'vi']` is a map, and `[]` is a list; neither is a configuration record. A file with nothing to set returns `()`.\n\n\
+         In an rc file, plugin manifest, or capability profile whose terminal result a host checks against a fixed keyset, return a record: `return [edit-mode: 'vi']`. A misspelled key is a type error before the file runs. `return [:, edit-mode: 'vi']` is a map, and `[]` is a list; neither is a configuration record. A file with nothing to set returns `()`.\n\n\
          Example:\n  let twice = { |n| return $[$n * 2] }",
     ),
     (
@@ -112,7 +112,7 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
     (
         "within",
         "within [options] { body }  — run a block with temporary shell context.\n\n\
-         Options are `dir: path`, `env: map`, `handlers: [name: handler, ...]`, and `handler: catch-all`. `dir` changes the logical working directory; `env` overlays variables, with `unset removing one. Named handlers receive the command's argument list. The catch-all receives the unresolved command name and then its argument list. Options compose, and the previous context returns when the body finishes.\n\n\
+         Options are `dir: path`, `env: [NAME: value, ...]`, `handlers: [name: handler, ...]`, and `handler: catch-all`. `dir` changes the logical working directory; `env` overlays variables, with `unset removing one. Named handlers receive the command's argument list. The catch-all receives the unresolved command name and then its argument list. Options compose, and the previous context returns when the body finishes.\n\n\
          The outer brackets are syntax: write option names in place, with computed values such as `within [dir: $d] { ... }`. A bound option bundle or spread is a parse error; a misspelled option is a static error. `[]` and `[:]` both name no options.\n\n\
          Write the `handlers:` table in place too: its names are bound in the body, so a bound table or spread is a parse error. Each entry is a one-argument block or a name holding one. The catch-all `handler:` is ordinary data: a two-argument function, written inline or bound, that intercepts every external command reached by a bare name. `^name` bypasses handlers and runs the binary. A handler is a stub, not a sandbox.\n\n\
          Example:\n  within [\n    dir: project,\n    env: [MODE: 'test', TOKEN: `unset],\n    handlers: [notify: { |args| echo ...$args }],\n  ] {\n    notify building\n    make check\n  }",

@@ -1,3 +1,7 @@
+---
+generated_at_commit: 9c8aa5d9
+---
+
 # The type system: Hindley–Milner with rows
 
 ral is typed by Hindley–Milner inference with let-polymorphism, run over the
@@ -109,11 +113,10 @@ M : F^ε̂ A   ⟹  ε̂ := p, then the first case
 ```
 
 The bind rule's third case defaults a grade, and it is local: a `let` demands a
-value. `annotate` wraps the recorded nodes. It is not the only default: a label
-read (`$r[host]`) whose target is still a variable at the generalising `let`
-that owns the variable, or at the end of the unit, is closed as a record
-(`finish_indexes`, [[internals/type-inference|type-inference]]). No *value type*
-is defaulted by the hole it lands in.
+value. `annotate` wraps the recorded nodes. No *value type* is defaulted:
+a written field, a written position and a computed key immediately require a
+record, a list and a map, respectively
+([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
 
 **`capture` is total and exact.** `capture M : F Bytes` for `M : F^w Unit` runs
 `M` with its stdout captured and returns precisely the bytes `M` wrote —
@@ -238,9 +241,9 @@ legs:
   pass through the scheme, bytes are untyped, and a failure carries an error
   of a closed data type. That last is required: a failure raised inside a
   generalised right-hand side escapes the bind, and preservation holds only
-  because its payload mentions no generalised variable. What a program did not decide — data that
-  enters through a decoder, or a container indexed by a computed key — has
-  *weak* type variables, which a `let` never quantifies: one type per unit
+  because its payload mentions no generalised variable. What a program did not
+  decide, data entering through a checked boundary, has *weak* type variables,
+  which a `let` never quantifies: one type per unit
   ([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
 
 A type error aborts with exit status 1 and a positioned expected-vs-inferred

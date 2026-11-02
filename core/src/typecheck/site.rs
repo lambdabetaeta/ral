@@ -143,7 +143,6 @@ impl Site {
         Arc::new(super::generalize::generalize(
             &u,
             &super::env::TyEnv::new(),
-            &super::generalize::FreeVars::new(),
             &ty,
         ))
     }

@@ -289,9 +289,9 @@ mod tests {
     /// enters typed code only through a boundary.  A row whose scheme
     /// quantifies a variable only its result mentions is such a door, so each
     /// must be a boundary or diverge.  The enumeration is not the whole
-    /// perimeter: two casts lived in term rules rather than in Σ — `env`,
-    /// typed `Map String`, and a bound head that is not a block, refused as
-    /// `HeadBoundToValue` — and `tests/reject` pins those.  The exarch and
+    /// perimeter: a bound head that is not a block is refused as
+    /// `HeadBoundToValue`, and `tests/reject` pins that rule. `env` is checked
+    /// through the boundary table. The exarch and
     /// plugin tables are swept by their own crates through the same predicate
     /// (`test_access::has_result_only_var`).
     #[test]
@@ -332,7 +332,17 @@ mod tests {
             .iter()
             .map(|e| e.decl.name.as_ref())
             .collect();
-        assert_eq!(names, ["from-json", "from-jsonl", "from-json-at", "use"]);
+        assert_eq!(
+            names,
+            [
+                "from-json",
+                "from-jsonl",
+                "from-json-at",
+                "from-csv",
+                "env",
+                "use"
+            ]
+        );
         assert!(CORE_BUILTINS.iter().all(|e| !e.decl.is_boundary()));
     }
 }

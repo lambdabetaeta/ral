@@ -1,6 +1,6 @@
 # codes: P0001
 # status: 2
 # at: 6:9
-# contains: `within`'s options are named in writing, so a key that is data (`"…"` or `$var`) cannot be one; write the name out, as in `within [dir: $d]`
+# contains: `within`'s options are named in writing, so a key that is data (`"…$x…"` or `$var`) cannot be one; write the name out, as in `within [dir: $d]`
 let k = "dir"
 within [$k: "/tmp"] { return "ok" }

@@ -5,13 +5,11 @@ use super::builtins::{BuiltinDiagnostic, Decl, LANGUAGE_CONSTANTS, fail_status_i
 use super::contract::catch_all_shape;
 use super::env::{BoundaryValue, HandlerBinding, HandlerOrigin, InferCtx, Node, TyEnv};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
-use super::generalize::{FreeVars, generalize};
+use super::generalize::generalize;
 use super::grade::JoinArm;
-use super::index::{Idx, Lbl, Settled};
-use super::unify::WeakSource;
 use crate::ir::{
     Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec,
-    GroupNode, MapEntryV, MapOperand, Name, Pattern, Phrase, Val, ValListElem, ValRecordEntry,
+    GroupNode, Key, MapEntryV, MapOperand, Name, Pattern, Phrase, Val, ValListElem, ValRecordEntry,
     is_synthetic,
 };
 use crate::ir::{ArithOp, BinaryOp, StdinSource};
@@ -115,11 +113,11 @@ fn written(v: &Val) -> Option<&Name> {
 }
 
 /// An index key as written between the brackets.
-fn spell_key(v: &Val) -> String {
-    match v {
-        Val::String(s) => s.to_string(),
-        Val::Int(n) => n.to_string(),
-        _ => written(v).map_or_else(|| "…".into(), |x| format!("${x}")),
+fn spell_key(key: &Key) -> String {
+    match key {
+        Key::Label(label) => label.to_string(),
+        Key::Position(n) => n.to_string(),
+        Key::Data(v) => written(v).map_or_else(|| "…".into(), |x| format!("${x}")),
     }
 }
 
@@ -230,9 +228,8 @@ impl WithSpan for Inferencer<'_> {
 /// Whether a pattern binds in let position (names generalize) or as a
 /// lambda/handler parameter (names stay monomorphic).
 #[derive(Clone, Copy)]
-enum BindMode<'a> {
-    /// `tied` is what the boundary left unquantified (`settle_pending_labels`).
-    Let(&'a FreeVars),
+enum BindMode {
+    Let,
     Param,
 }
 
@@ -246,12 +243,12 @@ impl Inferencer<'_> {
         out
     }
 
-    fn bind_pattern(&mut self, pat: &Pattern, ty: &Ty, mode: BindMode<'_>) {
+    fn bind_pattern(&mut self, pat: &Pattern, ty: &Ty, mode: BindMode) {
         match pat {
             Pattern::Wildcard => {}
             Pattern::Name(name) => {
                 let scheme = match mode {
-                    BindMode::Let(tied) => generalize(&self.ctx.unifier, self.env, tied, ty),
+                    BindMode::Let => generalize(&self.ctx.unifier, self.env, ty),
                     BindMode::Param => Scheme::mono(ty.clone()),
                 };
                 self.env.bind(name.to_string(), scheme);
@@ -266,9 +263,7 @@ impl Inferencer<'_> {
                 if let Some(rest_name) = rest {
                     let list_ty = Ty::list(elem);
                     let scheme = match mode {
-                        BindMode::Let(tied) => {
-                            generalize(&self.ctx.unifier, self.env, tied, &list_ty)
-                        }
+                        BindMode::Let => generalize(&self.ctx.unifier, self.env, &list_ty),
                         BindMode::Param => Scheme::mono(list_ty),
                     };
                     self.env.bind(rest_name.to_string(), scheme);
@@ -698,8 +693,7 @@ impl Inferencer<'_> {
     /// The scheme a named arm is bound at for what follows it.
     pub(super) fn install_arm(&mut self, block: &Val, name: &str) -> Scheme {
         let thunk_ty = Ty::Thunk(Box::new(self.checked_arm(block, Arm::Named(name))));
-        let tied = self.ctx.settle_pending_labels(Some(self.env));
-        generalize(&self.ctx.unifier, self.env, &tied, &thunk_ty)
+        generalize(&self.ctx.unifier, self.env, &thunk_ty)
     }
 
     /// What the head an arm stands in for is: under a name, the base frame or
@@ -1035,14 +1029,12 @@ impl Inferencer<'_> {
         }
     }
 
-    /// `let pattern = rhs`: the RHS inferred as the holder of the indexes it
-    /// reads, bound by the bind rule, and generalised.
+    /// Infer, bind and generalise a `let` right-hand side.
     fn infer_let(&mut self, pattern: &Pattern, rhs: &Comp) {
-        let cty = self.infer_held(pattern, rhs);
+        let cty = self.infer_comp(rhs);
         let bound_ty = self.rhs_bound_ty(rhs, cty);
-        let tied = self.ctx.settle_pending_labels(Some(self.env));
         let concrete = self.ctx.unifier.apply_ty_keeping_weak(&bound_ty);
-        self.bind_pattern(pattern, &concrete, BindMode::Let(&tied));
+        self.bind_pattern(pattern, &concrete, BindMode::Let);
         self.note_called(pattern, rhs);
     }
 
@@ -1506,10 +1498,12 @@ impl Inferencer<'_> {
         }
     }
 
-    fn infer_index(&mut self, target: &Val, keys: &[crate::source::Spanned<Val>]) -> CompTy {
+    fn infer_index(&mut self, target: &Val, keys: &[Spanned<Key>]) -> CompTy {
         if let (Some(literal), Some(first)) = (spell_literal(target), keys.first()) {
             for key in keys {
-                self.infer_val(&key.item);
+                if let Key::Data(value) = &key.item {
+                    self.infer_val(value);
+                }
             }
             self.ctx.diagnose(TypeErrorKind::IndexOnLiteral {
                 literal,
@@ -1518,66 +1512,40 @@ impl Inferencer<'_> {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
         }
         let mut current_ty = self.infer_val(target);
-        for (step, key) in keys.iter().enumerate() {
-            let names = match (step, written(target), written(&key.item)) {
-                (0, Some(t), Some(k)) => Some((t.to_string(), k.to_string())),
-                _ => None,
-            };
+        for key in keys {
             current_ty = self.with_span(key.span, |this| {
-                this.infer_index_step(&current_ty, &key.item, names)
+                this.infer_index_step(&current_ty, &key.item)
             });
         }
         CompTy::pure(current_ty)
     }
 
-    /// One step of an indexing chain, run under the pos `infer_index` narrowed
-    /// to this key, so a failure underlines the step and not the whole chain.
-    /// The key's form decides the rule before the target's type is read, so an
-    /// inline read and the same read extracted into a block agree: a bare
-    /// label is a [`Lbl`], and any other key an [`Idx`], whose three types are
-    /// weak for the unit unless the key is an integer literal, which is the
-    /// list rule and waits for nothing.
-    fn infer_index_step(
-        &mut self,
-        current_ty: &Ty,
-        key: &Val,
-        names: Option<(String, String)>,
-    ) -> Ty {
-        if let Val::String(label) = key {
-            return self.infer_label_read(current_ty, label);
-        }
-        let idx = Idx {
-            target: current_ty.clone(),
-            key: self.infer_val(key),
-            elem: self.ctx.unifier.fresh_ty(),
-            span: self.ctx.pos,
-            names,
-            holder: self.ctx.holder,
-        };
-        if !matches!(key, Val::Int(_)) {
-            for ty in [&idx.target, &idx.key, &idx.elem] {
-                self.ctx.unifier.mark_weak(ty, &WeakSource::Index);
+    fn infer_index_step(&mut self, current_ty: &Ty, key: &Key) -> Ty {
+        let elem = self.ctx.unifier.fresh_ty();
+        match key {
+            Key::Label(label) => {
+                let tail = self.ctx.unifier.fresh_row();
+                let record = Ty::Record(Row::Extend(
+                    Label::Field(label.to_string()),
+                    Box::new(elem.clone()),
+                    Box::new(tail),
+                ));
+                self.ctx
+                    .unify_ty(current_ty, &record, Reason::RecordFieldRead);
             }
-        }
-        let elem = idx.elem.clone();
-        if matches!(self.ctx.settle_index(&idx), Settled::Pending) {
-            self.ctx.pending_indexes.push(idx);
-        }
-        elem
-    }
-
-    /// `$c[label]` is `c = [label: e | ρ] ∨ c = Map e`, decided by `c`'s head
-    /// now or at the boundary that owns it (`typecheck/index.rs`).
-    fn infer_label_read(&mut self, target: &Ty, label: &str) -> Ty {
-        let lbl = Lbl {
-            target: target.clone(),
-            label: label.to_string(),
-            elem: self.ctx.unifier.fresh_ty(),
-            span: self.ctx.pos,
-        };
-        let elem = lbl.elem.clone();
-        if matches!(self.ctx.settle_label(&lbl), Settled::Pending) {
-            self.ctx.pending_labels.push(lbl);
+            Key::Position(_) => {
+                self.ctx.unify_ty(
+                    current_ty,
+                    &Ty::list(elem.clone()),
+                    Reason::ListPositionRead,
+                );
+            }
+            Key::Data(value) => {
+                let key_ty = self.infer_val(value);
+                self.ctx
+                    .unify_ty(current_ty, &Ty::map(elem.clone()), Reason::MapKeyRead);
+                self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapIndexKey);
+            }
         }
         elem
     }
@@ -1748,17 +1716,6 @@ impl Inferencer<'_> {
             };
             self.ctx.unit_reads.push((pos, call));
         }
-    }
-
-    /// A `let`'s right-hand side, inferred as the holder of the indexes it reads.
-    fn infer_held(&mut self, pattern: &Pattern, rhs: &Comp) -> CompTy {
-        let outer = self.ctx.holder;
-        if pattern.names().into_iter().any(|name| !is_synthetic(name)) {
-            self.ctx.holder = rhs.span.or(outer);
-        }
-        let cty = self.infer_comp(rhs);
-        self.ctx.holder = outer;
-        cty
     }
 
     /// A computation's result held to its contract, as [`Self::infer_protected_val`].
@@ -2012,7 +1969,7 @@ mod tests {
     #[test]
     fn a_map_literal_refuses_a_static_duplicate_key() {
         assert_eq!(error_codes("return [a: 1, a: 2]"), ["T0022"]);
-        assert_eq!(error_codes("return [\"a\": 1, a: 2]"), ["T0022"]);
+        assert_eq!(error_codes("return [:, a: 1, a: 2]"), ["T0022"]);
         assert_eq!(
             error_codes("let k = 'x'\nreturn [$k: 1, a: 1, a: 2]"),
             ["T0022"]

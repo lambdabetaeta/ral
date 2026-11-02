@@ -12,7 +12,8 @@ use std::sync::Arc;
 use crate::io::{self, Sink};
 use crate::ir::Redirects;
 use crate::ir::{
-    Args, Assembly, CaseArm, Comp, CompKind, GroupNode, MapEntryV, MapOperand, Val, ValListElem,
+    Args, Assembly, CaseArm, Comp, CompKind, GroupNode, Key, MapEntryV, MapOperand, Val,
+    ValListElem,
 };
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
@@ -599,8 +600,11 @@ impl Machine {
             CompKind::Index { target, keys } => {
                 let mut v = form(target, &env, &shell.sig)?;
                 for key in keys {
-                    let k = form(&key.item, &env, &shell.sig)?;
-                    v = expr::index_value(&v, &k)?;
+                    v = match &key.item {
+                        Key::Label(label) => expr::field(&v, label),
+                        Key::Position(n) => expr::position(&v, *n),
+                        Key::Data(k) => expr::lookup(&v, &form(k, &env, &shell.sig)?),
+                    }?;
                 }
                 Focus::Return(Terminal::Value(v))
             }

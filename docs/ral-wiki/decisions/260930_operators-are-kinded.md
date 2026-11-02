@@ -1,7 +1,17 @@
 ---
 status: accepted
-generated_at_commit: 8d868e18
+generated_at_commit: 9c8aa5d9
 ---
+
+> **Amended 2026-11-02** by
+> [[decisions/261102_a-written-key-is-a-name|a written key is a name]]:
+> the `Lbl` and `Idx` clauses below, including kind-based read settlement,
+> index-made weakness and T0075, are superseded. Every written label requires
+> a record, every written position a list, and every computed key a map with
+> a `String` key, immediately. `nth` reads computed list positions. The CSV
+> row rejection is also superseded: `from-csv : ∀α. F [α]` is a checked
+> boundary, and `to-csv : ∀α:data. [α] → writes` accepts records or maps
+> with scalar cells. The kind rules remain in force.
 
 # Operators are kinded
 

@@ -91,7 +91,11 @@ fn every_variant() -> Vec<Arc<Comp>> {
     let not = Spanned::synthetic(CompKind::Not(var("r_not")));
     let index = Spanned::synthetic(CompKind::Index {
         target: var("r_index_target"),
-        keys: vec![Spanned::synthetic(var("r_index_key"))],
+        keys: vec![
+            Spanned::synthetic(Key::Label("index_label".into())),
+            Spanned::synthetic(Key::Position(0)),
+            Spanned::synthetic(Key::Data(var("r_index_key"))),
+        ],
     });
     let interpolation = Spanned::synthetic(CompKind::Interpolation(vec![
         var("r_interp_a"),

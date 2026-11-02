@@ -46,7 +46,6 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
     ("from-string", "reads the byte channel"),
     ("from-line", "reads the byte channel"),
     ("from-lines", "reads the byte channel"),
-    ("from-csv", "reads the byte channel"),
     ("await", "needs a live Handle"),
     ("race", "needs live Handles"),
     ("cancel", "needs a live Handle"),

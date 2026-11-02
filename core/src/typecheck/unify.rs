@@ -23,8 +23,6 @@ use std::sync::Arc;
 /// What made a variable weak, so a mismatch on it can say which use shares it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WeakSource {
-    /// A computed index `$c[$k]`.
-    Index,
     /// The result of a boundary, named as the program spells it.
     Boundary(Arc<str>),
     /// A residual an earlier unit stored, whose own source is gone.

@@ -1,5 +1,5 @@
 # codes: P0001
 # status: 2
-# at: 5:10
+# at: 5:11
 # contains: names a variant
-["a": 1, `b: 2]
+[:, a: 1, `b: 2]

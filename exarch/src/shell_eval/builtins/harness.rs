@@ -64,15 +64,6 @@ fn builtin_family<F: Family>(
     ask(&verb, request.request(), mooring, shell)
 }
 
-/// A host's answer let into the program: a family whose answer is not one fixed
-/// shape leaves its type to the script, and the site says what the script made
-/// of it.
-fn admitted(verb: &str, site: &Site, answer: Value, shell: &Shell) -> Settled<Value> {
-    site.admit(&answer, shell.fixings())
-        .map_err(|mismatch| mismatch.refusal(verb, shell))?;
-    Ok(answer)
-}
-
 /// [`builtin_family`] for a family whose answer is the script's to decide.
 fn boundary_family<F: Family>(
     args: &[Value],
@@ -81,7 +72,7 @@ fn boundary_family<F: Family>(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let answer = builtin_family::<F>(args, mooring, shell)?;
-    admitted(&format!("exarch-{}", F::CLASS), site, answer, shell)
+    site.admitted(&format!("exarch-{}", F::CLASS), answer, shell)
 }
 
 /// `exarch-agents <tag>`: `` `start `` forks before it enquires, every other
@@ -93,7 +84,7 @@ fn builtin_agents(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let answer = agents(args, mooring, shell)?;
-    admitted(AGENTS, site, answer, shell)
+    site.admitted(AGENTS, answer, shell)
 }
 
 fn agents(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {

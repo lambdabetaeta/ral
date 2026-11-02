@@ -121,6 +121,26 @@ The cost is real: POSIX habits transfer imperfectly, and scripts are rewritten
 rather than ported. The gain is a surface small enough to hold in one head,
 with no form whose meaning changes behind the reader's back.
 
+## A written key is a name
+
+**How a key is written decides what it reads; quotes do not decide a type.**
+A word or a constant quoted string names a record field, a whole number reads
+a list element, and a computed string reads a map value. `["host": db]` is a
+record; `[:, host: db]` is a map on written keys. A computed list position
+uses `nth $i $xs`.
+
+Each read has one typing rule: record projection, list indexing, or map lookup.
+No read waits for another use to choose its container, defaults a type's shape,
+or makes a helper monomorphic. Naming a helper therefore preserves its
+principal type rather than changing what the same body may read.
+
+External data need not choose between records and maps in advance.
+`from-json`, `from-csv` and `env` admit each result against the type the script
+uses at that call, before the value escapes. CSV and environment cells remain
+text: a numeric use is refused at the door, not silently converted. The cost
+is one explicit word, `nth`, for a computed list position; the gain is one
+meaning for each written read.
+
 ## Lexical data, dynamic authority
 
 **Data is lexically scoped; ambient authority is dynamically scoped.** The two

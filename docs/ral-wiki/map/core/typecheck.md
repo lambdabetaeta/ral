@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 9c8aa5d9
 generated_at_date: 2026-11-01
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -76,7 +76,10 @@ monomorphic to keep generalisation sound.
 
 Internals:
 
-- `infer.rs` — the `Inferencer`; `infer_comp`;
+- `infer.rs` — the `Inferencer`; `infer_comp`; `infer_index_step` matches
+  `Key::{Label, Position, Data}` and immediately requires a record row, a list,
+  or a map with a `String` key, respectively. No read constraint is deferred
+  and no read makes variables weak;
 - `grade.rs` — the grade rules, as one `impl Inferencer`: the bind rule
   (`rhs_bound_ty`), a block meeting a demand of the other producer kind
   (`adapt` to an `Adaptation`, `coerce`), the join of a form's arms
@@ -86,13 +89,6 @@ Internals:
   rebuilds a producer past its parameters for the handler-arm rule, not redirects. `spine` reads a `CompTy` as a `Spine` (`ty.rs`, [[map/core/ty|ty]]:
   parameters and tail; `producer()` the `Producer` past them, `over` the
   same parameters on another tail; `CompTy::arrows` is the constructor);
-- `index.rs` — the deferred reads `Lbl` (a bare label) and `Idx` (a computed key):
-  owns `InferCtx::pending_labels` and `pending_indexes` and their settlement.
-  A pending label is closed as a record at the boundary that owns it; an `Idx`'s
-  variables are weak, nothing settles it at a generalisation, and
-  `InferCtx::finish_indexes` propagates labels and indexes to a fixpoint,
-  defaults unresolved labels to records, then propagates again before refusing
-  remaining indexes (`IndexContainerUnknown`, T0075);
 - `unify.rs` — `Unifier`; binding refuses a cycle that crosses no data (`CyclicType`, T0073)
   and a head its variable's kind does not admit (`KindMismatch`, T0074);
   the weak set (`mark_weak`, inherited through `unite`), which `generalize.rs` subtracts,
@@ -166,8 +162,8 @@ Internals:
   `ascribe` holds a contract file's finished return to its table, after
   inference and in a scratch copy of the unifier (unknown key T0076, not a
   record T0077, and the row errors); a nested table is ascribed by the same
-  recursive function, from the queue `typecheck` drains once, after the
-  pending labels settle and before the contract ascription (a map or `()` where
+  recursive function, from the queue `typecheck` drains once, after inference
+  and before the contract ascription (a map or `()` where
   a nested table belongs is refused as a non-record). The one-shot sessions
   drop their queue unread. A clash at a closed row names the row's tags and the
   nearest one. It is the single registration point, so the runtime decoders that read the same

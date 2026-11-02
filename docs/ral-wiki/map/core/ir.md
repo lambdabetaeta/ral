@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 9c8aa5d9
 generated_at_date: 2026-11-01
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
@@ -89,6 +89,10 @@ representable state.
   the alternatives are a list fixed at parse time and every arm is a node the
   checker can annotate — an `if` with as many branches as the row has labels
   ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
+- `CompKind::Index { target, keys }` carries `Vec<Spanned<Key>>`:
+  `Label(Str)`, `Position(usize)` or `Data(Val)`. The key's form is explicit;
+  no pass infers it from a `Val`. Annotation and `Mentions` traverse only
+  `Data`; the checker requires a record, list or map, respectively.
 - `Exec { head, args, redirects, site }` is an external or builtin call;
   `site` is the type the checker solved at a boundary call, which that door
   admits its value against, and `None` for every other head.

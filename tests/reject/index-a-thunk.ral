@@ -1,6 +1,6 @@
-# codes: T0060
+# codes: T0010
 # status: 1
 # at: 6:10
-# contains: you can't read a field from it directly
+# contains: run the block first, then index its result: `!{!$t}[field]`
 let t = { return 42 }
 return $t[a]

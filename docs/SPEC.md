@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 96e103a5 -->
+<!-- verified_at_commit: 9c8aa5d9 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -681,7 +681,7 @@ Records and maps use the same runtime value: a string-keyed collection. They
 differ in what the checker knows.
 
 - A record has known fields. Its fields may hold different kinds of value.
-- A map has keys computed at runtime. Its values must have compatible types.
+- A map's keys are data, not field names. Its values must have compatible types.
 
 ```ral
 let server = [host: 'db.example', port: 5432]
@@ -690,21 +690,23 @@ let ports = [$key: 5432]
 let empty_map = [:]
 ```
 
-A key is a label or data, and its form says which. A label is a bare name or
-a `'single-quoted'` word. A data key is a string: `"double-quoted"`, whether
-or not it interpolates, or a value such as `$key`. Any computed key that is
-not a `String` is an error. Keys are unique in the resulting value and iterate
+A key is a label or data, and its form says which. A label is a bare name,
+a `'single-quoted'` word, or a `"double-quoted"` string with no splice.
+`true` and `false` are labels too. A computed key, such as `$key`, `"k$i"`,
+`!{f}` or `$[…]`, is data and must have type `String`. Quotes never decide
+a collection's type. Keys are unique in the resulting value and iterate
 in sorted order. A literal's explicit entries, as opposed to those a spread
 brings, never repeat a key: a repeat among labels and strings that do not
 interpolate is a type error, and any other is a runtime error. A tag is not a
 key, in a literal or in a pattern (§4.6).
 
-`[:]` is the empty map, and the only literal that opens with `:`. Otherwise a
-literal's keys decide. A literal every one of whose keys is a label is a
-record; a literal with any data key is a map, because a keyset that is data
-cannot carry a type per key; a literal with no entry at all is a list. So
-`["a": 1, "b": 2]` is a map on keys written out, where `[a: 1, b: 2]` is a
-record.
+`[:]` is the empty map. `[:, a: 1, b: 2]` explicitly builds a map on
+written keys, and permits spreads, as in `[:, ...$m, a: 1]`; every non-spread
+entry must be keyed, and `[:,]` is refused: write `[:]` for the empty map.
+Otherwise a literal's keys decide: all written keys give a record, any
+computed key gives a map, and no keyed entry gives a list. One computed key
+makes every written key in that literal data. `[a: 1, "b c": 2, 'd': 3]`
+is a record.
 
 There is no empty-record literal: `[]` is the empty list, not `[a: 1]` with
 its fields removed. A contract file (an rc file, a plugin manifest, a
@@ -715,7 +717,7 @@ a map or `[]` is refused there, with the spelling to use.
 
 ```ral
 let record = [host: 'db', port: 5432]
-let by_data = ["host": 'db', "port": 'https']
+let by_data = [:, host: 'db', port: 'https']
 let computed = [$key: 5432]
 ```
 
@@ -730,7 +732,7 @@ the base already has, each at whatever type it is written, and the rest of the
 base keeps its place in the result. A spread never adds a field: naming one
 the base lacks is refused, with the three ways to carry a new field: give the
 record the field from the start, nest the record (`[cfg: $cfg, total: 3]`), or
-make `$cfg` a map (`[...$cfg, "total": 3]`). Nothing is appended after an unknown
+make `$cfg` a map (`[:, ...$cfg, total: 3]`). Nothing is appended after an unknown
 remainder, so defaults are not merged over an unknown record; absence over an
 unknown record travels as a variant.
 
@@ -772,19 +774,33 @@ $server[host]
 $config[database][port]
 ```
 
-Lists use zero-based, non-negative `Int` indices. Records and maps use `String`
-keys. A key written out selects a record field, or reads that key when the
-value is a map, and then has the map's element type; which it is follows from
-the value's type, never from statement order, and a block's parameter that
-nothing else fixes is read as a record. An integer literal (`$xs[0]`) indexes
-a list. Any other key (`$m[$k]`) is computed: an `Int` indexes a list and a
-`String` a map, and the container type, the key type and the element type are
-fixed once for the whole program, so a helper that indexes with a computed key
-is accepted at the one container type its program uses and refused when
-nothing fixes which. The prelude's `get $m key default` supplies a fallback.
-`env` returns a map of strings, so `!{env}[HOME]` is a `String`.
-A missing key, an out-of-range list index, a key of the wrong kind, or an
-attempt to index another value kind is an error.
+The written key picks one typing rule, applied immediately:
+
+| Key form | Reads | Type required |
+|---|---|---|
+| `$r[host]`, `$r['user name']`, `$r["user name"]`, `$r[true]` | record field | `[label: α \| ρ]` |
+| `$xs[0]` | list element | `[α]` |
+| `$m[$k]`, `$m["k$i"]`, `$m[!{f}]`, `$m[$[…]]` | map value | `Map α`; key `String` |
+
+A constant double-quoted key is a label; a splice makes it computed. `true`
+and `false` name fields, not boolean keys. List positions are whole numbers
+from zero. Negative and fractional numerals are parse errors, with a hint to
+quote a numeric field name: `$r['1.5']`. Path and tilde words must likewise
+be quoted as field names, as in `$r['a/b']`; tags are not keys.
+
+For a position computed at runtime, use `nth : ∀α. Int → [α] → F α`:
+`nth $i $xs`. It has the same bounds checks as a written list position.
+A helper `{ |m k| $m[$k] }` is polymorphic over map element types; indexing
+neither defers a constraint nor makes a type variable weak. The prelude's
+`get $m key default` supplies a map fallback.
+
+`env : ∀α. F α` is a checked boundary (§7.3). `!{env}[HOME]` uses a record
+field and checks its presence at that call; `keys !{env}` or `has !{env} X`
+uses a map. Each call is checked independently. Environment values are text:
+using `HOME` as a number fails at `env`, rather than converting it.
+A missing field or key, an out-of-range position, or an incompatible target
+is an error. A computed key on a list is refused with advice to use `nth`;
+a written key on a map needs a computed key or `get` instead.
 
 ### 4.8. Equality and ordering
 
@@ -914,10 +930,10 @@ when a binding hides a prelude name.
 A `let` is polymorphic: the type of a bound function generalises over every
 type variable that the rest of the program does not also mention, so `let first
 = { |xs| return $xs[0] }` can be applied to lists of any element type. The
-exception is a *weak* type variable — the type of a value whose shape the
-program did not decide, such as decoded data, or of a computed index. A weak
-variable has one type for the whole program, every use of it must agree, and a
-type that shows one prints as `_α`.
+exception is a *weak* type variable: the type of a value whose shape the
+program did not decide, entering through a checked boundary such as a decoder
+or `env`. A weak variable has one type for the whole program, every use of it
+must agree, and a type that shows one prints as `_α`.
 
 ### 5.2. Patterns
 
@@ -1631,7 +1647,7 @@ Codecs make every conversion between values and bytes visible in the source. A d
 | `from-json` | a ral value, checked | Requires valid UTF-8 and JSON. JSON `null` becomes `Unit`, a whole number an `Int`, a number with a fraction a `Float`. |
 | `from-jsonl` | a list of ral values, checked | Splits by the line rule below and decodes each line as `from-json` does. A blank line, holding only spaces, tabs, and carriage returns, holds no value. An error names its line. |
 | `from-json-at tokens` | a ral value, checked | Decodes as `from-json` does, then reads the value at the RFC 6901 reference tokens `tokens`, a list of `String`: an object member by exact key, an array element by canonical decimal. A token that does not resolve is an error naming the pointer prefix and the object's keys or the array's length. |
-| `from-csv` | a list of maps from header to text | Uses the header row as map keys. Fields are strings. A duplicate header, or a row with more or fewer fields than the header, is an error naming it. |
+| `from-csv` | a list of rows, checked | `∀α. F [α]`: the header names each row's keys. Label reads use records; computed reads use maps. Cells remain strings: a numeric use fails at the decode, naming the column and the line of use. A duplicate header or a ragged row is an error naming it. |
 
 Decoders are command forms. They read the preceding byte pipe, or standard input when there is no preceding stage; only `from-json-at` takes an argument.
 
@@ -1640,12 +1656,16 @@ Decoders are command forms. They read the preceding byte pipe, or standard input
 The shape of a decoded value is the file's, not the program's, so a decoder's result is a *boundary*: the checker gives it one type for the whole unit, `_α`, which every use of the value fixes (§5.1), and the decoder admits the value against that type before the program sees it. `let n = $[$doc[size] + 1]` over `{"size": "12kB"}` fails at the decode, naming where:
 
 ```text
-from-json: the value at `/size` is text (`'12kB'`), but this script uses it as an Int — line 3
+from-json: the value at `/size` is text (`'12kB'`), but this script uses it as an Int; line 3
 ```
 
 A mismatch names an RFC 6901 pointer into the value, what was found, what the script uses it as, and the line of the use. An open record (the fields the script reads) admits extra fields; a closed record literal refuses them. Two decodes the program compares with `<` agree on numbers or on text, and are refused at the second decode otherwise. A JSON number keeps its kind: `3` is an `Int` and `2.5` a `Float`, so a position used as a `Float` refuses `3`, and `float` at the use accepts both. A decoder never converts a value to fit its type.
 
-The same discipline admits what `use` (§10.3) and the exarch host's answers (`exarch-agents`, `exarch-pins`, `exarch-transcript`) let in.
+The closed set of checked boundaries is `from-json`, `from-jsonl`,
+`from-json-at`, `from-csv`, `env`, `use` (§10.3), `exarch-agents`,
+`exarch-pins`, `exarch-transcript`, and `_ed-state`. Each call admits its own
+result. `from-csv : ∀α. F [α]` checks rows against their use; `env : ∀α. F α`
+checks the environment as a record or a map. Neither converts text to numbers.
 
 A decoder is a legal pipeline tail:
 
@@ -1672,9 +1692,20 @@ An encoder takes its value as an ordinary argument and writes bytes:
 | `to-lines` | a list of values | Each element's textual form followed by a newline. |
 | `to-json` | a JSON-representable value | UTF-8 JSON. `Bytes` become an array of integers; variants become tagged objects. |
 | `to-jsonl` | a list of JSON-representable values | Each element as `to-json` encodes it, followed by a newline. |
-| `to-csv` | a list of maps of text, all with the same keys | UTF-8 CSV: the keys in sorted order as the header row, then one row per map. |
+| `to-csv` | a list of records or a list of maps, with scalar cells and the same keys | `∀α:data. [α] → writes`: UTF-8 CSV, keys in sorted order as the header, then one row per record or map. Cells are `String`, `Int`, `Float` or `Bool`, rendered as `str` renders them. |
 
-`to-json` rejects values with no faithful JSON representation, including blocks, lambdas, and handles. `to-jsonl` rejects a list holding one, names its index, and writes nothing. `to-csv` rejects a map whose keys are not the first map's, naming a key one has and the other lacks, and a map with no keys, since CSV can neither leave a field out nor write a row of no columns; it too writes nothing, so `from-csv` reads back exactly the maps `to-csv` wrote. To decode a value already held in memory, encode it into a byte pipe first:
+`to-json` rejects values with no faithful JSON representation, including blocks, lambdas, and handles. `to-jsonl` rejects a list holding one, names its index, and writes nothing.
+`to-csv` requires every row to use the string-keyed record/map carrier with
+exactly the first row's keys. It refuses missing or extra keys and zero-column
+rows. A non-scalar cell names its zero-based row index and key:
+
+```text
+to-csv: the cell `k` of the row at index 2 is a list; a CSV cell is text, a number or a boolean
+```
+
+Every row is validated before any byte is written. Decoding the result with
+`from-csv` returns text cells, including cells encoded from numbers or booleans.
+To decode a value already held in memory, encode it into a byte pipe first:
 
 ```ral
 to-string $json_text | from-json
@@ -2292,7 +2323,7 @@ An empty path, a missing path, a non-directory, or a path denied by the active f
 
 ### 9.3. Environment scope
 
-`env` must be a map. Each value must be a string, integer, float, or Boolean; non-string scalars are converted to strings.
+`env` is a record or a map from variable names to values: `[PATH: …]` and `[$name: …]` both serve. Each value must be a string, integer, float, or Boolean; non-string scalars are converted to strings.
 
 ```ral
 within [env: [PATH: 'tools:/usr/bin', DEBUG: true]] {
@@ -2429,7 +2460,7 @@ The live shell is read by six nullary builtins:
 
 | Name | Type | Value |
 |---|---|---|
-| `env` | `F (Map String)` | Environment variables as a map of `String` to `String`. |
+| `env` | `∀α. F α` | Checked boundary: environment variables as the record or map the script uses; values remain text. |
 | `cwd` | `F String` | The logical working directory, absolute, `/`-separated on Windows (§14.4). |
 | `home` | `F String` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment, `/`-separated on Windows; the directory `~` abbreviates. |
 | `user` | `F String` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
@@ -3555,9 +3586,9 @@ A profile is ascribed `grant`'s table after inference, as at the rc file
 record, so `exec`'s misspelling as `exect` is caught statically, before the
 profile script runs at all; so is a misspelled place tag, a bare string in a
 list of places, or `net: true`, since the nested tables are ascribed too.
-`return ["exec": …]` is a map, whose
-keys are data rather than the table's labels, and is refused statically with
-the spelling to use. A profile whose return the checker cannot type — one
+`return ["exec": …]` also names the record field and is checked against the
+table. `return [:, exec: …]` is a map and is refused statically with the
+record spelling to use. A profile whose return the checker cannot type — one
 decoded from JSON — runs to completion first, and its keys are then checked
 against the same table at the moment the profile is decoded. Either way an
 unknown key or a badly-shaped value refuses the whole profile — the session
@@ -4581,10 +4612,11 @@ return [...$extra, env: [:]]        # refused — 'surfase' is not an RC key
 ```
 
 The table is ascribed to the file once it has been inferred, as ML ascribes a
-signature. The return must be a record, or `()`: `return ["edit_mde": 'vi']`
-is a map, whose keys are data, and `return []` the empty list; each is refused
-before the file runs, with the spelling to use. A file whose return the
-checker cannot type — `return !{from-json < rc.json}` — meets the same keyset,
+signature. The return must be a record, or `()`: `return ["edit-mode": 'vi']`
+is a record checked against the table, while `return ["edit_mde": 'vi']`
+has an unknown field. `return [:, edit-mode: 'vi']` is a map and `return []`
+the empty list; each is refused before the file runs, with the spelling to
+use. A file whose return the checker cannot type — `return !{from-json < rc.json}` — meets the same keyset,
 and the same field types, when the value is applied instead: an unknown key or
 a wrongly-typed value both name the mistake and refuse the whole rc,
 agreeing with the static check above — the shell starts with defaults. An
@@ -4678,9 +4710,10 @@ four are the manifest's whole keyset: an unknown top-level key is an error
 naming the key and the list. A manifest the file returns is ascribed the
 table before the file runs, as at the rc file (§15.3): `return [nam: 'example']`
 is a record, so the misspelled `name` is caught statically and the plugin file
-never runs, and `return ["nam": 'example']` is a map, refused statically with
-the spelling to use. `return ()` lacks `name`, and is refused for that. A factory is held to the
-same table before the file runs: it must be a block of one parameter, the
+never runs. `return ["nam": 'example']` has the same unknown record field;
+`return [:, name: 'example']` is a map, refused with the record spelling to
+use. `return ()` lacks `name`, and is refused for that. A factory is held to
+the same table before the file runs: it must be a block of one parameter, the
 options, and what it makes is ascribed as a returned manifest is, so
 `return { [name: 'example'] }` and `return { |a b| [name: 'example'] }` are
 refused statically. What a factory returns is checked again as it is parsed.
@@ -5119,7 +5152,7 @@ scope-form    ::= "try" atom atom
                 | "gather" atom
 options       ::= "[" "]"
                 | "[" option ("," option)* ","? "]"
-option        ::= identifier ":" atom
+option        ::= static-key ":" atom
 
 command       ::= head (argument | redirect)*
 head          ::= "^" bare-name | atom
@@ -5134,7 +5167,10 @@ word-value    ::= lexical-word
                 | expr-block
                 | force
                 | tag
-index         ::= "[" word-value "]"        /* adjacent to a target other than $(name) */
+index         ::= "[" index-key "]"         /* adjacent to a target other than $(name) */
+index-key     ::= static-key | position | computed-key
+position      ::= nonnegative-integer
+computed-key  ::= variable | spliced-double-quoted-string | expr-block | force
 force         ::= "!" variable index* | "!" primary
 variable      ::= "$" identifier | "$(" identifier ")"
 expr-block    ::= "$[" expression "]"
@@ -5152,9 +5188,10 @@ list-item     ::= atom | "..." atom
 record        ::= "[" record-entry ("," record-entry)* ","? "]"
 record-entry  ::= static-key ":" atom | "..." atom
 map           ::= "[:]"
+                | "[:," map-entry ("," map-entry)* ","? "]"
                 | "[" map-entry ("," map-entry)* ","? "]"
 map-entry     ::= map-key ":" atom | "..." atom
-map-key       ::= identifier | quoted-string | interpolated-string | variable
+map-key       ::= static-key | computed-key
 
 unit-literal  ::= "(" ")"
 
@@ -5165,7 +5202,7 @@ pattern-list  ::= pattern ("," pattern)* ("," "..." identifier)?
 map-pattern   ::= "[" map-pattern-entry
                   ("," map-pattern-entry)* ","? "]"
 map-pattern-entry ::= static-key ":" pattern
-static-key    ::= identifier | quoted-string
+static-key    ::= identifier | quoted-string | constant-double-quoted-string
 
 redirects     ::= redirect*
 redirect      ::= fd? ">" word-value
@@ -5180,10 +5217,15 @@ A redirect list binds each stream at most once (§7.4); the parser refuses a sec
 For `<<`, an explicit descriptor, if present, must be 0. For `>&`, the source
 descriptor must not be 1 when the target is 2: `1>&2` and its short spelling
 `>&2` are rejected in favour of `warn` (§7.4). `[]` is the empty
-list and `[:]` the empty map. Otherwise a collection's entries decide: any
-data key, `"…"` or `$name`, makes it a map, labels alone a record, no entry
-at all a list (§4.5). A pattern's keys are labels only, since it cannot bind
-through data. A tag is no key at all: `tag-key` occurs only in a `case` arm.
+list and `[:]` the empty map; `[:, …]` explicitly opens a map on written
+keys. Otherwise a collection's entries decide: any computed key makes it a
+map, written keys alone a record, and no keyed entry a list (§4.5).
+A constant double-quoted string is a written key; a spliced one contains at
+least one interpolation splice. A pattern's keys are written
+out in the same alphabet: `let ["user name": u] = $r` is a record pattern;
+a spliced key is refused because a pattern cannot bind through data.
+`within` and `grant` likewise admit constant quoted option names but refuse
+computed ones. A tag is no key at all: `tag-key` occurs only in a `case` arm.
 
 A `case`'s arm list is a production of its own, and no expression may stand in
 its place: a spread among the arms and
@@ -5352,7 +5394,7 @@ every use of the name shares one type for it. There is no value restriction. A
 scheme that leaves a weak variable unquantified keeps it weak in later runs, where
 it is re-seeded as a fresh weak variable. A *boundary* — a place where a
 value of a shape the program did not decide enters typed code: the decoders,
-`use`, the exarch host's answers, `_ed-state` — makes the
+`env`, `use`, the exarch host's answers, `_ed-state` — makes the
 variables of its result weak and records the result type on the call. Once the
 unit is solved that type is frozen as a *site* on the call, which the boundary
 admits the value against: each position's head, each free variable's kind, and
@@ -5390,18 +5432,13 @@ structure's head to be admitted, and a deep kind imposes `data` on every
 component: a list or map element, the fields of a record and the payloads of a
 variant, and, through the tail row variable's deep bit, every field later added.
 A kinded variable still free at the end of a unit needs no default, since every
-admissible type supports the operation. A label read `v[l]` on a variable is
-decided by the kind when it admits `Map` and not `Record` (`sized`), or the
-reverse. A computed index `c[k]` is the one deferred relation over a container
-and its key, `c = [e] ∧ k = Int ∨ c = Map e ∧ k = String`: the head of `c` or
-of `k`, or a kind that admits one disjunct and not the other, selects it, and an
-integer literal key is the list case outright. Its three variables are weak, so
-they are shared by every use in the unit, and one still undecided when the unit
-ends is a static error (`T0075`); a key that is neither `Int` nor `String` is
-refused by kind (`T0074`). At the unit boundary, label and computed-index
-constraints propagate together to a fixpoint before unresolved bare-label
-reads default to records. Both propagate again after that default; only then
-are undecided computed indexes refused.
+admissible type supports the operation. Every read instead has one immediate
+unification rule (§4.7): a written label requires `[label: α | ρ]`, a written
+position requires `[α]`, and a computed key requires `Map α` with a `String`
+key. These are the core's `proj`, `index` and `lookup`, respectively.
+There is no deferred read constraint, shape default or index-made weak
+variable. `nth : ∀α. Int → [α] → F α` reads a computed list position without
+sacrificing polymorphism.
 
 A stored scheme is closed over its whole graph: body and recursive equations.
 All variables are quantified, recursive roots, or listed weak residuals.

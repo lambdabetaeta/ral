@@ -35,6 +35,14 @@ impl Word {
     }
 }
 
+/// An index key, classified by how it is written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum IndexKey {
+    Label(String),
+    Position(usize),
+    Data(Box<Ast>),
+}
+
 /// One syntactic form.
 ///
 /// The tree is flat — no statement/expression split here; command position,
@@ -92,7 +100,7 @@ pub enum Ast {
     List(Vec<ListElem>),
     /// `[key: val, key: val]` — every key a static label.
     Record(Vec<RecordEntry>),
-    /// `[:]`, `["key": val]`, `[$k: val]`: the keys are data.
+    /// `[:]`, `[:, key: val]`, `[$k: val]`: the keys are data.
     Map(Vec<MapEntry>),
     /// `"hello $name"`, one segment per literal fragment or `$…` insertion.
     Interpolation(Vec<Spanned<Self>>),
@@ -123,7 +131,7 @@ pub enum Ast {
     /// `target[k1][k2]`; each key's span covers its brackets too.
     Index {
         target: Spanned<Box<Self>>,
-        keys: Vec<Spanned<Self>>,
+        keys: Vec<Spanned<IndexKey>>,
     },
     /// `!atom`; the span covers the `!` along with the operand.
     Force(Spanned<Box<Self>>),
@@ -200,7 +208,7 @@ pub enum ListElem {
 /// Entry of a record literal; no variant can carry a computed key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RecordEntry {
-    /// `key: value` or `'key': value` — a label known statically.
+    /// A written label and its value.
     Field {
         key: Spanned<String>,
         value: Spanned<Ast>,
@@ -212,8 +220,7 @@ pub enum RecordEntry {
 /// Entry of a map literal; a key is data, so no variant can carry a tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MapEntry {
-    /// `key: value` — the key a string: a label written out is a literal,
-    /// `"…"` and `$name` are computed.
+    /// A string key and its value.
     Entry {
         key: Spanned<Ast>,
         value: Spanned<Ast>,

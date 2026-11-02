@@ -1,0 +1,7 @@
+# codes: T0010
+# status: 1
+# at: 7:8
+# contains: couldn't match type String with type [
+# contains: text is not read with `[…]`; use `slice $s 0 80` or `lines $s`
+let x = 'hello'
+echo $x[0]

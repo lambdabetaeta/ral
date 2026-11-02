@@ -1,0 +1,10 @@
+# codes: T0010 T0010 T0010
+# status: 1
+# at: 7:19
+# contains: a computed key reads a map, whose keys are Strings; for a list position, write `nth $i $xs`
+let run = { |i|
+  let n = $[$i + 1]
+  let h = { |c| $c[$i] }
+  h [1]
+  h ['x']
+}

@@ -1,6 +1,6 @@
-# codes: T0062
+# codes: T0010 T0010
 # status: 1
 # at: 5:17
-# contains: Integer cannot be indexed
+# contains: couldn't match type Map α with type Integer
 let f = { |x| $x[$x] }
 map $f [1]

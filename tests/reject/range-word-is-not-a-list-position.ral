@@ -1,0 +1,6 @@
+# codes: T0010
+# status: 1
+# at: 6:11
+# contains: a list is read by position: `$xs[0]`, or `nth $i $xs` for a computed one
+let xs = [1, 2, 3]
+return $xs[0..2]

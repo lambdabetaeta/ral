@@ -1,10 +1,17 @@
 ---
 status: active
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 9c8aa5d9
 verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 verified_at_date: 2026-10-25
 anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Net, EditorVerb, ShellVerb, Holds, ExecGrant, Flag, drain_nested]
 ---
+
+> **Amended 2026-11-02** by
+> [[decisions/261102_a-written-key-is-a-name|a written key is a name]]:
+> constant quoted keys name record fields, so the map refusal below is
+> written `return [:, exec: …]`; `return ["exec": …]` is checked as a
+> record. Reads unify immediately; nested tables are drained after inference,
+> without a pending-label settlement step.
 
 # The grant surface is typed data
 

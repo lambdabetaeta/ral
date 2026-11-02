@@ -1,7 +1,0 @@
-# codes: T0075
-# status: 1
-# at: 7:22
-# contains: is `$m` a list or a map?
-# contains: this binding holds the index
-# contains: Help:
-let pick = { |m k| $m[$k] }

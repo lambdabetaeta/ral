@@ -157,6 +157,9 @@ builtin_registry! {
     Len { names: ["length"], ty: scheme::length,
         doc: "length <val>  — number of elements in a string, bytes, list, or map.",
         call: |args, _mooring, _shell| strings::builtin_len(args), },
+    Nth { names: ["nth"], ty: scheme::nth,
+        doc: "nth <i> <xs>: read a list element at a computed Int position, counting from 0; a negative or out-of-bounds position is refused.",
+        call: |args, _mooring, _shell| collections::builtin_nth(args), },
     Upper { names: ["upper"], ty: scheme::str_to_str,
         doc: "upper <s>  — convert a string to uppercase.",
         call: |args, _mooring, _shell| strings::builtin_upper(args), },
@@ -248,10 +251,6 @@ builtin_registry! {
         doc: "from-lines  — decode the channel to a list of lines, lossy on invalid UTF-8: a line ends at `\\n` or `\\r\\n`, the last need not end, and a lone `\\r` is text.",
         diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_lines(args, shell), },
-    FromCsv { names: ["from-csv"], ty: scheme::from_csv,
-        doc: "from-csv  — decode CSV bytes from the channel to a list of maps keyed by the header row (every field a String); a row with more or fewer fields than the header is refused.",
-        diagnostic: BuiltinDiagnostic::Decoder,
-        call: |args, _mooring, shell| codecs::builtin_from_csv(args, shell), },
     ToBytes { names: ["to-bytes"], ty: scheme::to_bytes,
         doc: "to-bytes <bytes>  — pass a Bytes value through to the byte channel; the inverse of from-bytes.",
         call: |args, _mooring, shell| codecs::builtin_to_bytes(args, shell), },
@@ -274,7 +273,7 @@ builtin_registry! {
         doc: "to-jsonl <list>  — write each element to the byte channel as to-json encodes it, one per line.",
         call: |args, _mooring, shell| codecs::builtin_to_jsonl(args, shell), },
     ToCsv { names: ["to-csv"], ty: scheme::to_csv,
-        doc: "to-csv <rows>  — encode a list of maps of text, all with the same keys, as CSV to the byte channel; the columns are those keys in sorted order.",
+        doc: "to-csv <rows>: encode records or maps with the same keys as CSV to the byte channel, with sorted columns and text, number or boolean cells rendered as `str` renders them; other cells are refused by row index and key.",
         call: |args, _mooring, shell| codecs::builtin_to_csv(args, shell), },
     Ask { names: ["ask"], ty: scheme::ask,
         doc: "ask <prompt>  — prompt for interactive input, return string.",
@@ -282,9 +281,6 @@ builtin_registry! {
     Cwd { names: ["cwd"], ty: scheme::pure_string,
         doc: "cwd  — the shell's working directory, absolute.",
         call: |_args, _mooring, shell| Ok(ambient::cwd(shell)), },
-    Env { names: ["env"], ty: scheme::pure_string_map,
-        doc: "env  — the environment as a Map of String to String: the host process environment under any `within [env: …]` overlay. PWD and OLDPWD are absent; the working directory is `cwd`.",
-        call: |_args, _mooring, shell| Ok(ambient::env(shell)), },
     Args { names: ["args"], ty: scheme::pure_strs,
         doc: "args  — the program's arguments as [String]: those after the script path or the -c source. Empty in the REPL.",
         call: |_args, _mooring, shell| Ok(ambient::args(shell)), },
@@ -414,7 +410,7 @@ pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 /// [`Site`](crate::ty::Site) the checker solved at its call and admits what
 /// it lets in against it; they sit apart from [`CORE_BUILTINS`] because their
 /// bodies take that site.
-static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
+static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("from-json"),
         scheme::from_json,
@@ -436,6 +432,19 @@ static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
         codecs::builtin_from_json_at,
     )
     .with_diagnostic(BuiltinDiagnostic::Decoder),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("from-csv"),
+        scheme::from_jsonl,
+        "from-csv: decode channel CSV with text cells into rows checked as records or maps according to their use; duplicate headers, ragged rows and cells used as non-text are refused at the decode.",
+        codecs::builtin_from_csv,
+    )
+    .with_diagnostic(BuiltinDiagnostic::Decoder),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("env"),
+        scheme::from_json,
+        "env: read the host environment under the `within [env: …]` overlay as a record or map checked against its use at each call; PWD and OLDPWD are absent, and `cwd` reads the working directory.",
+        ambient::builtin_env,
+    ),
     BuiltinEntry::boundary(
         Cow::Borrowed("use"),
         scheme::use_op,

@@ -11,4 +11,5 @@ from-csv: duplicate header column "a"
 to-csv: the row at index 1 has the key "b", but the row at index 0 does not
 to-csv: the row at index 0 has the key "a", but the row at index 1 does not
 to-csv: the row at index 0 has no keys, and CSV cannot write a row of no columns
+to-csv: the cell `a` of the row at index 0 is a map; a CSV cell is text, a number or a boolean
 csv tests done

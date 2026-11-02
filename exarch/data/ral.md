@@ -153,9 +153,11 @@ Every element of a list shares one type; use a record for fields of different ty
 
 Collection literals contain values, so force calls inside them: `[!{length $xs}, 2]`. The same rule applies to record fields: `[count: !{length $xs}]`. A pipeline is one computation, so it is forced whole: `[mode: !{stat -c #'%a'# $f | from-line}]`.
 
-Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`. It reads a list by Int, a record by label and a map by key, nothing else: not text, bytes or a handle, and no slices. Use `take 5 !{drop 2 $xs}`, `slice $s 0 80`, `!{commands $r}[0][stdout]`.
+Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`. It reads a list by a whole-number position, a record by a written label and a map by a computed key, nothing else: not text, bytes or a handle, and no slices. Use `take 5 !{drop 2 $xs}`, `slice $s 0 80`, `!{commands $r}[0][stdout]`.
 
-A map's keys are runtime data and its values all share one type; a record's labels are fixed. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare key or a raw string key (`#'label'#`) is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`).
+The key says what you read: a word or a quoted string reads a record field, a whole number a list element, and a computed key (`$k`, `"k$i"`) a map's value; build a map on written keys as `[:, a: 1]`. Data from `from-json`, `from-csv` and `env` takes the shape your script uses, checked when it is read in.
+
+Written keys alone make a record, including `["user name": #'Ada'#, active: true]`; any computed key makes a map, as in `[$k: 1]`. A map's values share one type; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union` and `entries`. For a list position computed at runtime, use `nth $i $xs`.
 
 A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] ``:
 

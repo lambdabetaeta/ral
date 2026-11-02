@@ -1,7 +1,7 @@
 # Map operands run where written; validation precedes the next operand.
 let mark = { |label value| echo $label; return $value }
 let k = 'a'
-let m = ["!{mark key z}": !{mark value 1}, ...!{mark spread ["a": 2]}, "!{mark last b}": !{mark final 3}]
+let m = ["!{mark key z}": !{mark value 1}, ...!{mark spread [:, a: 2]}, "!{mark last b}": !{mark final 3}]
 to-json $m; echo
 
 # Neither the duplicate's value nor a later spread may run.
@@ -24,35 +24,36 @@ try {
     return ()
 } { |e| echo $e[status] $e[message] }
 try {
-    let _ = [$k: !{fail [status: 9, message: first-value]}, ...!{mark forbidden ["a": 2]}]
+    let _ = [$k: !{fail [status: 9, message: first-value]}, ...!{mark forbidden [:, a: 2]}]
     return ()
 } { |e| echo $e[status] $e[message] }
 
 # Explicit beats every spread; among spreads the first wins. Iteration is sorted.
-let a = ["a": 1, "b": 10, "c": 100]
-let b = ["a": 2, "b": 20, "d": 200]
+let a = [:, a: 1, b: 10, c: 100]
+let b = [:, a: 2, b: 20, d: 200]
 to-json [...$a, ...$b, $k: 3]; echo
 to-json [$k: 3, ...$a, ...$b]; echo
 to-json [...$a, $k: 3, ...$b]; echo
 
 # Capture and function/block values survive the operand boundary.
 let captured = [$k: !{echo hello}]
-echo $captured[a]
+echo $captured[$k]
 let fns = [$k: { |x| return $[$x + 1] }]
-echo !{$fns[a] 4}
+echo !{$fns[$k] 4}
 let blocks = [$k: { echo forced }]
-!$blocks[a]
+!$blocks[$k]
 
 # Computed operands retain their lexical dependencies in a delayed closure.
 let build = !{
     let prefix = 'inner'
     return { |key| return [$key: !{str $prefix}] }
 }
-let delayed = build result
-echo $delayed[result]
+let result-key = 'result'
+let delayed = build $result-key
+echo $delayed[$result-key]
 
 # A decoder's nested admission failure runs inside the cursor, not after it.
 try {
-    let _ = [$k: !{echo '{"nested":"wrong"}' | from-json}, "b": ["nested": 1], ...!{mark forbidden ["c": ["nested": 2]]}]
+    let _ = [$k: !{echo '{"nested":"wrong"}' | from-json}, b: [:, nested: 1], ...!{mark forbidden [:, c: [:, nested: 2]]}]
     return ()
 } { |e| echo admission-failed }

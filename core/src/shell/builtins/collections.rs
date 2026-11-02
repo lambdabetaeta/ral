@@ -1,12 +1,12 @@
 //! List combinators — `each`, `map`, `filter`, `sort-list-by`,
-//! `fold`, `fold-lines` — and the `range` constructor.
+//! `fold`, `fold-lines` — the `range` constructor, and `nth`.
 //!
 //! Neither a combinator nor its per-element applications is an observation:
 //! whatever effects an element's body performs land in the enclosing trail
 //! unwrapped, from the doors that performed them.
 
-use crate::shell::evaluator::apply;
-use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value, sig};
+use crate::shell::evaluator::{apply, expr};
+use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell, Value, sig};
 
 /// Steps `range` runs between cancellation polls: its per-step work is a
 /// single push, which an unconditional poll would dominate.  The combinators
@@ -23,6 +23,22 @@ const RANGE_INITIAL_CAP: usize = 1 << 16;
 fn call(func: &Value, item: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     shell.poll()?;
     apply(func, vec![item], mooring, shell)
+}
+
+/// `nth i xs`: the position read, at a position computed at run time.
+pub(super) fn builtin_nth(args: &[Value]) -> Settled<Value> {
+    let (i, xs) = (&args[0], &args[1]);
+    let n = i
+        .as_int()
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| {
+            Error::new(format!(
+                "list index must be a non-negative Int, got {} '{i}'",
+                i.type_name()
+            ))
+            .with_hint("list indices are zero-based integers")
+        })?;
+    Ok(expr::position(xs, n)?)
 }
 
 /// The prelude spelling (`let for = { |list fn| each $fn $list }`) a loop is

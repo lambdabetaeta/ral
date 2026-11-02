@@ -118,7 +118,15 @@ fn strip_one(n: Ast) -> Ast {
         }
         Ast::Index { target, keys } => Ast::Index {
             target: Spanned::synthetic_boxed(strip_one(*target.item)),
-            keys: strip_spanned_args(keys),
+            keys: keys
+                .into_iter()
+                .map(|key| {
+                    Spanned::synthetic(match key.item {
+                        IndexKey::Data(ast) => IndexKey::Data(Box::new(strip_one(*ast))),
+                        other => other,
+                    })
+                })
+                .collect(),
         },
         Ast::Call { head, args } => {
             let plain_args: Vec<Ast> = args.into_iter().map(|sp| sp.item).collect();
@@ -797,12 +805,27 @@ fn parse_record() {
     );
 }
 
-/// A `"quoted"` key is data, so one makes the literal a map, and a value of
-/// another type under a second key is the map element rule's business, not
-/// the parser's.
 #[test]
-fn parse_quoted_key_makes_a_map() {
-    let ast = unwrap_stmts(parse("[\"a\": 1, 'b': 2]").unwrap());
+fn parse_quoted_key_is_a_label() {
+    let ast = unwrap_stmts(parse("[\"a\": 1, 'b': true]").unwrap());
+    assert_eq!(
+        ast,
+        vec![Ast::Record(vec![
+            RecordEntry::Field {
+                key: Spanned::synthetic("a".into()),
+                value: sp(plain("1")),
+            },
+            RecordEntry::Field {
+                key: Spanned::synthetic("b".into()),
+                value: sp(plain("true")),
+            },
+        ])]
+    );
+}
+
+#[test]
+fn parse_colon_opens_a_map_on_written_keys() {
+    let ast = unwrap_stmts(parse("[:, a: 1, b: 2]").unwrap());
     assert_eq!(
         ast,
         vec![Ast::Map(vec![
@@ -818,24 +841,13 @@ fn parse_quoted_key_makes_a_map() {
     );
 }
 
-/// `[:]` is the one literal that opens with `:`; the old `[:, …]` marker is
-/// refused with the quoted-key spelling.
-#[test]
-fn parse_colon_then_entries_is_refused() {
-    refused_helping(&[(
-        "[:, a: 1, b: 2]",
-        "`[:]` is the empty map",
-        "[\"a\": 1, \"b\": 2]",
-    )]);
-}
-
 /// A tag names a variant, so it keys nothing: not a record, not a map,
 /// not a pattern.
 #[test]
 fn parse_tag_key_errors_everywhere() {
     for src in [
         "[`dev: 8080]",
-        "[\"x\": 1, `dev: 8080]",
+        "[:, x: 1, `dev: 8080]",
         "[$k: 1, `dev: 2]",
         "let [`dev: p] = $x",
     ] {
@@ -1022,13 +1034,13 @@ fn interpolated_force_of_a_variable_is_a_bare_force() {
 fn force_reaches_over_a_dereference_but_not_a_block() {
     let field = Ast::Force(Spanned::synthetic_boxed(Ast::Index {
         target: Spanned::synthetic_boxed(Ast::Variable("p".into())),
-        keys: vec![sp(plain("tail"))],
+        keys: vec![Spanned::synthetic(IndexKey::Label("tail".into()))],
     }));
     let result = Ast::Index {
         target: Spanned::synthetic_boxed(Ast::Force(Spanned::synthetic_boxed(Ast::Block(body(
             vec![plain("cmd")],
         ))))),
-        keys: vec![sp(plain("k"))],
+        keys: vec![Spanned::synthetic(IndexKey::Label("k".into()))],
     };
     assert_eq!(
         unwrap_stmts(parse("!$p[tail]").unwrap()),
@@ -1108,7 +1120,7 @@ fn parse_index() {
             bare_head("echo"),
             vec![Ast::Index {
                 target: Spanned::synthetic_boxed(Ast::Variable("items".into())),
-                keys: vec![Spanned::synthetic(plain("0"))],
+                keys: vec![Spanned::synthetic(IndexKey::Position(0))],
             }],
         )]
     );
@@ -1123,7 +1135,7 @@ fn parse_postfix_index_on_list_literal() {
             target: Spanned::synthetic_boxed(Ast::List(vec![ListElem::Single(sp(Ast::Literal(
                 "a".into()
             ))),])),
-            keys: vec![Spanned::synthetic(plain("0"))],
+            keys: vec![Spanned::synthetic(IndexKey::Position(0))],
         },)))]
     );
 }
@@ -1284,8 +1296,8 @@ fn parse_empty_list() {
 }
 
 #[test]
-fn parse_quoted_key_with_spread() {
-    let ast = unwrap_stmts(parse("[\"k\": 'v', ...$d]").unwrap());
+fn parse_map_on_written_keys_with_spread() {
+    let ast = unwrap_stmts(parse("[:, \"k\": 'v', ...$d]").unwrap());
     assert_eq!(
         ast,
         vec![Ast::Map(vec![
@@ -1313,7 +1325,7 @@ fn parse_interpolated_key_is_computed() {
 
 #[test]
 fn parse_keyed_map_bare_element_errors() {
-    assert!(parse("[\"k\": 1, 5]").is_err());
+    assert!(parse("[:, \"k\": 1, 5]").is_err());
 }
 
 #[test]
@@ -2518,7 +2530,7 @@ fn a_repeated_option_is_refused() {
 fn a_computed_handler_table_is_refused() {
     for src in [
         "within [handlers: $hs] { body }",
-        "within [handlers: [\"foo\": { echo }]] { body }",
+        "within [handlers: [$key: { echo }]] { body }",
         "within [handlers: [...$hs]] { body }",
     ] {
         let err = parse(src).unwrap_err();

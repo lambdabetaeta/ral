@@ -9,7 +9,7 @@
 //! needs no renaming pass.
 
 use super::env::TyEnv;
-use super::generalize::{FreeVars, generalize};
+use super::generalize::generalize;
 use super::unify::Unifier;
 use crate::fact::{DirEntry, FileInfo};
 use crate::fact::{ErrorRecord, Io, Observation, Receipt};
@@ -385,15 +385,16 @@ pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, DirEntry, FileInfo, FreeVars, Grade, GradeVar, Kind, Receipt, Row, Scheme, Ty,
-        TyEnv, TyVar, Unifier, WorkerRow, command, error_record_shape, fun, generalize, graded,
-        mk_plain_scheme, mk_scheme, poll_variant, pure, thunk,
+        CompTy, DirEntry, FileInfo, Grade, GradeVar, Kind, Receipt, Row, Scheme, Ty, TyEnv, TyVar,
+        Unifier, WorkerRow, command, error_record_shape, fun, generalize, graded, mk_plain_scheme,
+        mk_scheme, poll_variant, pure, thunk,
     };
     use crate::ty::Typed as _;
 
     // ── List operations ──────────────────────────────────────────────────
 
     scheme!(length<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Int);
+    scheme!(nth<av: Kind::ANY>: [Ty::Int, Ty::list(Ty::Var(av))] -> Ty::Var(av));
 
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
@@ -606,8 +607,6 @@ pub mod scheme {
 
     scheme!(pure_strs: pure Ty::list(Ty::String));
 
-    scheme!(pure_string_map: pure Ty::map(Ty::String));
-
     scheme!(pure_bool: pure Ty::Bool);
 
     // ── Host-backed queries ───────────────────────────────────────────────
@@ -637,7 +636,7 @@ pub mod scheme {
     scheme!(to_any_bytes<av: Kind::DATA>: [Ty::Var(av)] -> writes);
     scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> writes);
     scheme!(to_lines<av: Kind::DATA>: [Ty::list(Ty::Var(av))] -> writes);
-    scheme!(to_csv: [Ty::list(Ty::Map(Box::new(Ty::String)))] -> writes);
+    scheme!(to_csv<av: Kind::DATA>: [Ty::list(Ty::Var(av))] -> writes);
 
     // ── Decoders ─────────────────────────────────────────────────────────
     //
@@ -646,9 +645,7 @@ pub mod scheme {
     scheme!(from_bytes: pure Ty::Bytes);
     scheme!(from_string: pure Ty::String);
     scheme!(from_lines: pure Ty::list(Ty::String));
-    scheme!(from_csv: pure Ty::list(Ty::Map(Box::new(Ty::String))));
-
-    /// `from-json` :: ∀α. F α — decode whatever the channel holds.
+    /// `from-json`, `env` :: ∀α. F α — whatever the source holds.
     pub fn from_json(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         mk_plain_scheme(&[av], &[], thunk(pure(Ty::Var(av))))
@@ -662,7 +659,7 @@ pub mod scheme {
         mk_plain_scheme(&[av], &[], thunk(fun(tokens, pure(Ty::Var(av)))))
     }
 
-    /// `from-jsonl` :: ∀α. F \[α\] — a list of whatever each line holds.
+    /// `from-jsonl`, `from-csv` :: ∀α. F \[α\] — a list of whatever each line holds.
     pub fn from_jsonl(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let records = Ty::list(Ty::Var(av));
@@ -692,7 +689,7 @@ pub mod scheme {
     pub(crate) fn alias(u: &mut Unifier) -> Scheme {
         let block = u.fresh_comp_ty();
         let body = fun(Ty::String, fun(thunk(block), pure(Ty::Unit)));
-        generalize(u, &TyEnv::new(), &FreeVars::new(), &thunk(body))
+        generalize(u, &TyEnv::new(), &thunk(body))
     }
     scheme!(unalias: [Ty::String] -> Ty::Unit);
 

@@ -116,14 +116,6 @@ fn json_to_value(j: serde_json::Value) -> Result<Value, OutOfRange> {
     json_to_fo(j).map(Value::from)
 }
 
-/// Let a decoded `value` into the program if it is what the program makes of
-/// it: the one door every decoder of undecided shape ends at.
-fn admitted(door: &str, site: &Site, value: Value, shell: &Shell) -> Settled<Value> {
-    site.admit(&value, shell.fixings())
-        .map_err(|mismatch| mismatch.refusal(door, shell))?;
-    Ok(value)
-}
-
 pub(crate) fn builtin_from_json(
     args: &[Value],
     site: &Arc<Site>,
@@ -133,7 +125,7 @@ pub(crate) fn builtin_from_json(
     let text = input_text(args, "from-json", shell)?;
     let json = serde_json::from_str(&text).map_err(|e| sig(format!("from-json: {e}")))?;
     let value = json_to_value(json).map_err(|e| sig(format!("from-json: {e}")))?;
-    admitted("from-json", site, value, shell)
+    site.admitted("from-json", value, shell)
 }
 
 /// The member or element `token` names under `json`, an object member by exact
@@ -225,7 +217,7 @@ pub(crate) fn builtin_from_json_at(
         at.push_str(&pointer_token(token));
     }
     let value = json_to_value(leaf.clone()).map_err(|e| sig(format!("{DOOR}: {e}")))?;
-    admitted(DOOR, site, value, shell)
+    site.admitted(DOOR, value, shell)
 }
 
 /// JSON Lines: a JSON text on each line the one line rule splits, a blank line
@@ -255,7 +247,7 @@ pub(crate) fn builtin_from_jsonl(
         })?;
         records.push(json_to_value(json).map_err(|e| sig(format!("from-jsonl: line {n}: {e}")))?);
     }
-    admitted("from-jsonl", site, Value::list(records), shell)
+    site.admitted("from-jsonl", Value::list(records), shell)
 }
 
 /// serde's message less the position it appends, for a caller stating the
@@ -267,11 +259,13 @@ fn unpositioned(e: &serde_json::Error) -> String {
     message
 }
 
-/// Decode CSV into a list of maps keyed by the header row; fields stay
-/// `String`, since CSV is untyped.  A duplicate header is refused rather than
-/// resolved last-write-wins — a map cannot hold two columns of one name — and
-/// a row with more or fewer fields than the header rather than cut or padded.
-pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> {
+/// CSV cells stay text; the site checks each row's required shape.
+pub(super) fn builtin_from_csv(
+    args: &[Value],
+    site: &Arc<Site>,
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     let bytes = input_bytes(args, "from-csv", shell)?;
     let mut rdr = csv::Reader::from_reader(bytes.as_slice());
     let headers: Vec<String> = rdr
@@ -296,7 +290,7 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> 
             .zip(record.iter().map(Value::string));
         rows.push(Value::map(fields.collect()));
     }
-    Ok(Value::list(rows))
+    site.admitted("from-csv", Value::list(rows), shell)
 }
 
 /// `from-csv`'s refusal, a ragged row named by the line its read began on:
@@ -317,9 +311,7 @@ fn csv_refusal(e: &csv::Error) -> Break {
     }
 }
 
-/// Encode a list of maps as CSV: the first map's keys, sorted (`Map` is
-/// key-ordered), as header, then each map's values.  A map with other keys
-/// is refused rather than cut or padded, so `from-csv` reads back exactly this.
+/// Records and maps share the key-ordered runtime carrier.
 pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let rows = args[0].as_list("to-csv")?;
     let mut wtr = csv::Writer::from_writer(Vec::new());
@@ -351,12 +343,34 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
                     "CSV cannot leave a field out: give every row every key, as `union $blank $row` does where `$blank` maps each column to ''",
                 ));
             }
-            wtr.write_record(map.iter().map(|(_, v)| v.to_string()))
+            let cells = map
+                .iter()
+                .map(|(key, value)| csv_cell(&value, i, key))
+                .collect::<Settled<Vec<_>>>()?;
+            wtr.write_record(cells)
                 .map_err(|e| sig(format!("to-csv: {e}")))?;
         }
     }
     let bytes = wtr.into_inner().map_err(|e| sig(format!("to-csv: {e}")))?;
     write_encoded(&bytes, shell)
+}
+
+fn csv_cell(value: &Value, row: usize, key: &str) -> Settled<String> {
+    let kind = match value {
+        Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
+            return Ok(value.to_string());
+        }
+        Value::Unit => "unit",
+        Value::Bytes(_) => "bytes",
+        Value::List(_) => "a list",
+        Value::Map(_) => "a map",
+        Value::Variant { .. } => "a variant",
+        Value::Thunk(_) | Value::Native { .. } => "a block",
+        Value::Handle(_) => "a handle",
+    };
+    Err(sig(format!(
+        "to-csv: the cell `{key}` of the row at index {row} is {kind}; a CSV cell is text, a number or a boolean"
+    )))
 }
 
 fn write_encoded(bytes: &[u8], shell: &mut Shell) -> Settled<Value> {

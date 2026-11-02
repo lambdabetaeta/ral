@@ -1,9 +1,15 @@
 ---
 status: accepted
-generated_at_commit: f52a58a9
+generated_at_commit: 9c8aa5d9
 verified_at_commit: f52a58a9
 anchors: [ambient, require_home, CompKind::Tilde, variable_val, pure_int, pure_strs, pure_string_map]
 ---
+
+> **Amended 2026-11-02** by
+> [[decisions/261102_a-written-key-is-a-name|a written key is a name]]:
+> `env : ∀α. F α` is a checked boundary, replacing its fixed map scheme
+> below. Each call admits its text values against the record or map the
+> script uses. The names, dynamic context and other ambient schemes stand.
 
 # Ambient reads are builtins
 

@@ -1,0 +1,7 @@
+# codes: P0001
+# status: 2
+# at: 7:12
+# contains: `99999999999999999999` is not a list position: a position is a whole number from 0
+# contains: a field whose name is a number is quoted: `$r['99999999999999999999']`
+let xs = [1, 2, 3]
+return $xs[99999999999999999999]

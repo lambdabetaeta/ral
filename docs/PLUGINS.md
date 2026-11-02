@@ -22,7 +22,10 @@ registering. Four consequences follow.
   form, no magic config binding. A plugin is written in ral and checked
   as ral is checked. The manifest has a declared keyset, ascribed to the
   file before it runs (SPEC §15.5, as for the rc file in §15.3), so a
-  misspelled key is a compile error and the file never executes.
+  misspelled key is a compile error and the file never executes. Quoted
+  constant keys are names too: `["name": 'example']` is a record checked
+  against the manifest table, not a map. `[:, name: 'example']` is a map
+  and cannot stand for a manifest.
 - **Load is atomic.** The manifest is validated whole, and registration
   is all or nothing: a rejected load leaves no hooks, keybindings, or
   aliases behind, and unloading is the exact inverse of loading.

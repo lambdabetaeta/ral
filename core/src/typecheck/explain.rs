@@ -110,24 +110,6 @@ impl TypeErrorKind {
                     describe(ty)
                 )
             }
-            Self::IndexContainerUnknown { names, .. } => {
-                let (target, read, key) = match names {
-                    Some((t, k)) => (
-                        format!("`${t}`"),
-                        format!("`${t}[${k}]`"),
-                        format!("`${k}`"),
-                    ),
-                    None => (
-                        "this".to_string(),
-                        "an index with a computed key".to_string(),
-                        "the key".to_string(),
-                    ),
-                };
-                format!(
-                    "is {target} a list or a map? {read} indexes a list when {key} is an Int \
-                     and a map when it is a String, but nothing in the program fixes which"
-                )
-            }
             Self::BuiltinArity {
                 name,
                 expected,
@@ -175,34 +157,9 @@ impl TypeErrorKind {
             Self::FailStatusZero => "fail requires a nonzero status".into(),
             Self::MalformedAlias { .. } => "malformed alias definition".into(),
             Self::MalformedUnalias { .. } => "malformed unalias".into(),
-            Self::IndexIntoThunk => {
-                "this is a block: you can't read a field from it directly".into()
-            }
-            Self::FieldOnNonRecord { label, ty } => {
-                let ctx = FmtCtx::for_value_types(&[ty]);
-                match ty {
-                    Ty::List(_) => {
-                        format!("{INDEX_RULE}: a list takes an Integer, not `{label}`")
-                    }
-                    _ => format!("{INDEX_RULE}: {} cannot be indexed", fmt_ty_ctx(ty, &ctx)),
-                }
-            }
             Self::IndexOnLiteral { literal, key } => format!(
                 "`[{key}]` reads from {literal} itself: an index attaches to the one word right before it"
             ),
-            Self::DynamicIndexOnScalar {
-                ty: Ty::Record(row),
-            } => {
-                let rule = format!("{INDEX_RULE}: a record takes a literal label");
-                match available_fields(row) {
-                    Some(fields) => format!("{rule} {fields}"),
-                    None => rule,
-                }
-            }
-            Self::DynamicIndexOnScalar { ty } => {
-                let ctx = FmtCtx::for_value_types(&[ty]);
-                format!("{INDEX_RULE}: {} cannot be indexed", fmt_ty_ctx(ty, &ctx))
-            }
             Self::DeadPipeEdge { feed } => format!(
                 "the pipe writes into a stdin this `{}` replaces",
                 feed.spelling()
@@ -273,36 +230,26 @@ impl TypeErrorKind {
             | Self::DecoderTakesNoArgument { .. }
             | Self::FailStatusZero
             | Self::MalformedAlias { .. }
-            | Self::MalformedUnalias { .. }
-            | Self::IndexIntoThunk
-            | Self::FieldOnNonRecord { .. }
-            | Self::DynamicIndexOnScalar { .. } => "here".into(),
+            | Self::MalformedUnalias { .. } => "here".into(),
             Self::UnboundVariable { .. } => "not defined".into(),
             Self::IndexOnLiteral { literal, .. } => {
                 format!("this index belongs to {literal} alone")
             }
-            Self::IndexContainerUnknown { .. } => "a list or a map?".into(),
             Self::HeadBoundToValue { name, ty } => format!("this `{name}` is {}", describe(ty)),
         }
     }
 }
 
 impl TypeErrorKind {
-    /// The other span an error rests on: where a kind was imposed, or the
-    /// binding that holds an index — unless that is where the error itself
-    /// stands.
+    /// Where a kind was imposed, unless the error already stands there.
     pub(crate) fn witness(&self, at: Option<Span>) -> Option<(Span, String)> {
-        let (found, kind, witness) = match self {
-            Self::KindMismatch {
-                found,
-                kind,
-                witness,
-            } => (found, kind, witness),
-            Self::IndexContainerUnknown {
-                holder: Some(holder),
-                ..
-            } => return Some((*holder, "this binding holds the index".to_string())),
-            _ => return None,
+        let Self::KindMismatch {
+            found,
+            kind,
+            witness,
+        } = self
+        else {
+            return None;
         };
         let cited = match found {
             KindFound::Type(_) => vec![(*witness, *kind)],
@@ -346,8 +293,6 @@ fn needs(kind: Kind) -> String {
         Kind::SCALAR => "text, a number or a Bool".into(),
         Kind::SIZED => "text, bytes, a list or a map".into(),
         Kind::DATA => "data (no blocks or handles)".into(),
-        Kind::INDEXED => "a list or a map".into(),
-        Kind::KEY => "an Int key for a list or a String key for a map".into(),
         other => format!("something of kind `{other}`"),
     }
 }
@@ -360,9 +305,6 @@ fn role(kind: Kind) -> String {
         Kind::SCALAR => "something interpolated into a string".into(),
         Kind::SIZED => "something `length` measures".into(),
         Kind::DATA => "data".into(),
-        Kind::LABELLED => "a record or map read by a bare label".into(),
-        Kind::INDEXED => "a list or map read by a computed key".into(),
-        Kind::KEY => "a key: an Int for a list, a String for a map".into(),
         other => format!("something of kind `{other}`"),
     }
 }
@@ -377,12 +319,6 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
                 .to_string(),
         );
     };
-    if required == Kind::KEY {
-        return Some(format!(
-            "a list takes an Int key and a map a String key; this key is {}",
-            describe(ty)
-        ));
-    }
     let lead = match reason {
         Some(Reason::BinaryOperands(BinaryOp::Arith(ArithOp::Mod))) => Some("`%` takes Ints"),
         Some(Reason::BinaryOperands(BinaryOp::Arith(_))) => {
@@ -623,18 +559,13 @@ fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
 fn weak_note(source: &WeakSource) -> String {
     const SHARED: &str = "this type is shared by every use in its unit, and another use fixed it: ";
     match source {
-        WeakSource::Index => format!(
-            "{SHARED}a computed index `$c[$k]` has one container, key and element type for the \
-             whole unit. Write one function per container type"
-        ),
         WeakSource::Boundary(name) => format!(
             "{SHARED}what `{name}` reads has one type for the whole unit, which its door checks \
              every use of. Write one function per shape, or decode once and bind the result"
         ),
         WeakSource::Residual => format!(
-            "{SHARED}a computed index `$c[$k]` has one container, key and element type for the \
-             whole unit, and so does data of a shape the program did not decide. Write one \
-             function per container type, or decode once and bind the result"
+            "{SHARED}data of a shape the program did not decide keeps its type across units. \
+             Write one function per shape, or decode once and bind the result"
         ),
     }
 }
@@ -713,7 +644,9 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         ..
     } = kind
     {
-        return kind_hint(found, *required, reason);
+        return reason
+            .and_then(|reason| read_hint(kind, reason))
+            .or_else(|| kind_hint(found, *required, reason));
     }
     if let Some(Reason::Vocabulary(vocab)) = reason {
         match kind {
@@ -775,11 +708,6 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         TypeErrorKind::HeadBoundToValue { name, .. } => Some(format!(
             "`${name}` is the value; if you meant a command named `{name}`, `^{name}` runs it"
         )),
-        TypeErrorKind::IndexContainerUnknown { .. } => Some(
-            "a function that indexes with a computed key has one container type per program: \
-             call it on a list or on a map, or read a list with a literal key, `$xs[0]`"
-                .to_string(),
-        ),
         TypeErrorKind::BuiltinArity { name, .. } => {
             Some(format!("`explain {name}` gives its command shape"))
         }
@@ -843,17 +771,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         TypeErrorKind::MalformedAlias { detail } | TypeErrorKind::MalformedUnalias { detail } => {
             Some(detail.to_string())
         }
-        TypeErrorKind::IndexIntoThunk => Some(
-            "run the block first, then index its result: `!{!$t}[field]` \
-             (`!$t[field]` reads `field` off `$t` and forces *that*)"
-                .to_string(),
-        ),
-        TypeErrorKind::FieldOnNonRecord { label, ty } => index_hint(ty, Some(label)),
         TypeErrorKind::IndexOnLiteral { literal, key } => Some(format!(
             "did you mean to index what a command returns? Force the command first, \
              then index its result: `!{{… {literal}}}[{key}]`"
         )),
-        TypeErrorKind::DynamicIndexOnScalar { ty } => index_hint(ty, None),
         TypeErrorKind::CaseOnNonVariant { .. } => {
             Some(format!(
                 "construct the value with a tag ({}) before scrutinising it",
@@ -911,9 +832,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             "`not` flips a Bool: its operand has to be a Bool (`true` / `false` or a comparison)"
                 .to_string(),
         ),
-        Reason::MapKey => {
-            Some("map keys must be Strings: quote a bare token or convert with `str`".to_string())
-        }
+        Reason::MapKey => Some("map keys must be Strings: convert with `str`".to_string()),
         Reason::ListSpread => list_spread_shape_hint(kind).or_else(|| {
             Some(
                 "a `...x` spread copies the elements of a \
@@ -922,10 +841,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                     .to_string(),
             )
         }),
-        Reason::ListIndexKey => {
-            Some("indexing into a list takes an Integer (the position)".to_string())
-        }
-        Reason::MapIndexKey => Some("indexing into a map takes a String (the key)".to_string()),
+        r @ (Reason::MapIndexKey
+        | Reason::RecordFieldRead
+        | Reason::MapKeyRead
+        | Reason::ListPositionRead) => read_hint(kind, r),
         Reason::CaseArmHandler => Some(
             "an arm that names its handler runs that handler on the payload, \
              so the name must stand for a function of one argument: to hand \
@@ -1007,8 +926,8 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         ),
         Reason::RecordUpdate { base } => Some(record_update_hint(base.as_deref(), kind)),
         Reason::MapSpread => Some(
-            "a `...x` spread inside a map literal (one with a `\"quoted\"` or `$computed` \
-             key) copies another map's entries into it, so the value after `...` must \
+            "a `...x` spread inside a map literal (one with a computed key or a `[:,` \
+             opener) copies another map's entries into it, so the value after `...` must \
              itself be a map: a record's fields are reached by name, so spread it into \
              a record literal (`[...$r, k: v]`) instead"
                 .to_string(),
@@ -1059,9 +978,6 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         Reason::CaseScrutinee
         | Reason::Negation
         | Reason::Interpolation
-        | Reason::RecordFieldRead
-        | Reason::MapKeyRead
-        | Reason::DynamicIndexTarget
         | Reason::AutoderefHead
         | Reason::ProtectContract
         | Reason::Vocabulary(_)
@@ -1090,7 +1006,7 @@ fn record_update_hint(base: Option<&str>, kind: &TypeErrorKind) -> String {
     let r = base.unwrap_or("r");
     format!(
         "{lead}; to carry a new field, give the record the field from the start, \
-         nest it (`[{r}: ${r}, total: …]`), or make `${r}` a map (`[...${r}, \"total\": …]`)"
+         nest it (`[{r}: ${r}, total: …]`), or make `${r}` a map (`[:, ...${r}, total: …]`)"
     )
 }
 
@@ -1169,21 +1085,13 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let is_record = |t: &Ty| matches!(t, Ty::Record(_));
     let is_map = |t: &Ty| matches!(t, Ty::Map(_));
     if (is_record(expected) && is_map(actual)) || (is_map(expected) && is_record(actual)) {
-        let open_record = [expected, actual]
-            .into_iter()
-            .any(|t| matches!(&**t, Ty::Record(row) if row.is_open()));
-        let block_clause = if open_record {
-            "a bare label on a block's parameter reads a record field; to read a map's key \
-             in a block, index it with a computed key, `$m[$k]`. "
-        } else {
-            ""
-        };
-        return Some(format!(
-            "{block_clause}a record and a map are different types over the same pairs: a \
-             record's fields are reached by name (`$r[a]`), while a map's keys are data. If \
-             these keys are data, write each literal as a map: `[\"a\": 1, \"b\": 2]`, \
-             `[$k: v]`, and `[:]` for the empty one, there being no empty-record literal"
-        ));
+        return Some(
+            "a record and a map are different types over the same pairs: a record's fields \
+             are reached by name (`$r[a]`), while a map's keys are data; if these keys are \
+             data, build a map: `[$k: v]`, `[:, a: 1, b: 2]` for keys written out, and \
+             `[:]` for the empty one"
+                .to_string(),
+        );
     }
     let is_thunk = |t: &Ty| matches!(t, Ty::Thunk(_));
     if is_thunk(expected) != is_thunk(actual) {
@@ -1214,31 +1122,72 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
     byte_writer_hint(expected, actual)
 }
 
-/// The rule every refused `[…]` states.
-const INDEX_RULE: &str = "`[…]` reads a list by Integer, a record by label, or a map by key";
-
-/// A fix for a refused `[…]`, by the head of the value it read; `label` is absent for a computed index.
-fn index_hint(ty: &Ty, label: Option<&str>) -> Option<String> {
-    Some(match ty {
-        Ty::String => "text cannot be indexed; use `slice $s 0 80` or `lines $s`".into(),
-        Ty::Bytes => "decode bytes first: `bytes-to-string $b`".into(),
-        Ty::Handle(..) => "await the handle first: `await $h`".into(),
-        Ty::List(_) => {
-            let (lo, hi) = label?.split_once("..")?;
-            let (lo, hi) = (lo.parse::<u32>().ok()?, hi.parse::<u32>().ok()?);
-            let from = if lo == 0 {
-                "$xs".into()
-            } else {
-                format!("!{{drop {lo} $xs}}")
-            };
-            format!(
-                "lists cannot be sliced; use `take {} {from}`",
-                hi.saturating_sub(lo)
-            )
-        }
-        Ty::Record(_) => "read a record field by name: `$r[fieldname]`".into(),
+/// A read refusal, by its written key and the head found.
+fn read_hint(kind: &TypeErrorKind, reason: &Reason) -> Option<String> {
+    let accepts: fn(&Ty) -> bool = match reason {
+        Reason::RecordFieldRead => |ty| matches!(ty, Ty::Record(_)),
+        Reason::ListPositionRead => |ty| matches!(ty, Ty::List(_)),
+        Reason::MapKeyRead => |ty| matches!(ty, Ty::Map(_)),
+        Reason::MapIndexKey => |ty| matches!(ty, Ty::String),
         _ => return None,
-    })
+    };
+    let found = match kind {
+        TypeErrorKind::TyMismatch { expected, actual } => [&**expected, &**actual]
+            .into_iter()
+            .find(|ty| !accepts(ty))?,
+        TypeErrorKind::KindMismatch {
+            found: KindFound::Type(ty),
+            ..
+        } => ty,
+        _ => return None,
+    };
+    Some(
+        match (reason, found) {
+            (Reason::RecordFieldRead, Ty::Map(_)) => {
+                "a key written out, like `HOME`, names a record field, and this is a map, whose \
+             keys are data: read it with a computed key (`$m[$k]`) or with `get $m HOME default`"
+            }
+            (Reason::RecordFieldRead, Ty::List(_)) => {
+                "a list is read by position: `$xs[0]`, or `nth $i $xs` for a computed one"
+            }
+            (Reason::MapKeyRead, Ty::Record(_)) => {
+                "a computed key reads a map, and this is a record, whose fields have names: \
+             write the name, as in `$r[host]`"
+            }
+            (Reason::MapKeyRead, Ty::List(_)) => {
+                "a computed key reads a map; for a list element at a computed position, \
+             write `nth $i $xs`"
+            }
+            (Reason::ListPositionRead, Ty::Record(_) | Ty::Map(_)) => {
+                "a whole number reads a list element; a field whose name is digits is written \
+             quoted, as in `$r['0']`"
+            }
+            (Reason::MapIndexKey, Ty::Int) => {
+                "a computed key reads a map, whose keys are Strings; for a list position, \
+             write `nth $i $xs`"
+            }
+            (Reason::MapIndexKey, ty) if !matches!(ty, Ty::String) => {
+                "a computed key reads a map, whose keys are Strings; convert it with `str`"
+            }
+            (Reason::RecordFieldRead | Reason::ListPositionRead | Reason::MapKeyRead, ty) => {
+                match ty {
+                    Ty::Thunk(_) => {
+                        "run the block first, then index its result: `!{!$t}[field]` \
+             (`!$t[field]` reads `field` off `$t` and forces *that*)"
+                    }
+                    Ty::Bytes => "decode bytes first: `bytes-to-string $b`",
+                    Ty::Handle(..) => "await the handle first: `await $h`",
+                    Ty::String => "text is not read with `[…]`; use `slice $s 0 80` or `lines $s`",
+                    Ty::Unit | Ty::Bool | Ty::Int | Ty::Float => {
+                        "only records, lists and maps are read with `[…]`"
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 /// Whether a row carries `status: Int`.  An error carries the row as it stood
@@ -1309,7 +1258,7 @@ fn return_not_record_hint(form: &str, found: &Ty, offered: &[&str]) -> String {
     match found {
         Ty::Map(_) => format!(
             "the keys of `{form}` are its labels, so write a record: `[{key}: …]`, \
-             not a map (`[\"{key}\": …]`)"
+             not a map (`[:, {key}: …]`)"
         ),
         Ty::List(_) => format!(
             "`[]` is the empty list, not the empty record; a file with nothing to set \

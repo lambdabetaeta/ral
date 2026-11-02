@@ -1,0 +1,7 @@
+# codes: T0010 T0010
+# status: 1
+# at: 6:21
+# contains: a computed key reads a map; for a list element at a computed position, write `nth $i $xs`
+let xs = [1, 2]
+let pick = { |i| $xs[$i] }
+let a = pick 0

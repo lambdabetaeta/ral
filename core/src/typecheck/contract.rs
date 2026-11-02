@@ -7,7 +7,7 @@
 //! and a plugin manifest are ascribed the table once inference has finished,
 //! as ML ascribes a signature (`ascribe`).  A table may hold another
 //! ([`Holds::Table`]), ascribed the same way from a queue `typecheck` drains
-//! once the labels settle (`drain_nested`).  The runtime doors —
+//! once inference has finished (`drain_nested`).  The runtime doors —
 //! `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` — each keep
 //! their own `match` over the values; a table gives them only the *keyset*
 //! and the unknown-key wording, so that much is written once.  A door's own
@@ -146,7 +146,7 @@ impl Vocab {
     }
 }
 
-/// A nested table's value, waiting for the labels to settle.
+/// A nested table's value, waiting for inference to finish.
 pub(super) struct NestedCheck {
     pub key: &'static str,
     pub table: &'static Table,
@@ -593,7 +593,7 @@ fn ascribe_nested(
 }
 
 /// Ascribe every queued nested table, each at its value's span.  Call once,
-/// after the pending labels settle.
+/// after inference.
 pub(super) fn drain_nested(ctx: &mut InferCtx) {
     let saved = ctx.pos;
     for NestedCheck {

@@ -157,12 +157,6 @@ impl Kind {
         ]),
         true,
     );
-    /// What a bare-label read needs of its target.
-    pub(crate) const LABELLED: Self = Self::new(heads(&[Head::Record, Head::Map]), false);
-    /// What a computed-key read needs of its target.
-    pub(crate) const INDEXED: Self = Self::new(heads(&[Head::List, Head::Map]), false);
-    /// What a computed-key read needs of its key.
-    pub(crate) const KEY: Self = Self::new(heads(&[Head::Int, Head::String]), false);
 
     const NAMED: [(&'static str, Self); 5] = [
         ("number", Self::NUMBER),
@@ -251,7 +245,6 @@ mod tests {
         let text = Kind::SIZED.meet(Kind::COMPARABLE).expect("both admit text");
         assert_eq!(text.pin(), Some(Ty::String));
         assert_eq!(Kind::SIZED.pin(), None);
-        assert_eq!(Kind::LABELLED.meet(Kind::SIZED).and_then(Kind::pin), None);
     }
 
     #[test]
@@ -260,7 +253,6 @@ mod tests {
         assert_eq!(Kind::DATA.to_string(), "data");
         let deep_sized = Kind::DATA.meet(Kind::SIZED).expect("sized data exists");
         assert_eq!(deep_sized.to_string(), "sized^d");
-        assert_eq!(Kind::LABELLED.to_string(), "{Map|Record}");
     }
 
     #[test]

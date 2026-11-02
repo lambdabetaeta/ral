@@ -179,8 +179,7 @@ let par = { |f items jobs|
         }
         ## `running`: the children holding a slot; `pending`: the unstarted
         ## items; `i`: the count started, for the title; `born`: every child so
-        ## far, in input order.  Destructuring, not `$xs[$k]`: an index by a
-        ## computed key would make `par` monomorphic (`typecheck/index.rs`).
+        ## far, in input order.
         let _schedule = { |running pending i born|
             if $[!{length $running} < $limit && !{length $pending} > 0] {
                 let [x, ...later] = $pending
@@ -292,7 +291,7 @@ let median-by = { |key-fn xs|
         fail [status: 1, message: "median-by: empty list has no median"]
     } else {
         let sorted = sort-list-by $key-fn $xs
-        return $sorted[$[(!{length $sorted} - 1) / 2]]
+        nth $[(!{length $sorted} - 1) / 2] $sorted
     }
 }
 
@@ -340,7 +339,7 @@ let option-or = { |default opt|
 ## Zip items with their indices: enumerate $xs → [[index: 0, item: x0], ...].
 let enumerate = { |items|
     let count = !{length $items}
-    map { |i| return [index: $i, item: $items[$i]] } !{range 0 $count}
+    map { |i| return [index: $i, item: !{nth $i $items}] } !{range 0 $count}
 }
 
 ## Flatten a list of lists one level (tail-recursive).

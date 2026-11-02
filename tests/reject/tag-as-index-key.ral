@@ -1,6 +1,6 @@
-# codes: T0062
-# status: 1
-# at: 6:10
-# contains: a record takes a literal label
+# codes: P0001
+# status: 2
+# at: 6:11
+# contains: names a variant, so it cannot be a key
 let r = [a: 1, b: hello]
 return $r[`a]

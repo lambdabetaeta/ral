@@ -1,5 +1,5 @@
 # codes: P0001
 # status: 2
-# at: 5:34
+# at: 5:35
 # contains: `grant` takes its options written in its own bracket
-let m = ["net": `offline]; grant $m { return "ok" }
+let m = [:, net: `offline]; grant $m { return "ok" }

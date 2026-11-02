@@ -1,0 +1,7 @@
+# codes: T0010
+# status: 1
+# at: 7:17
+# contains: couldn't match type Bool with type String
+# contains: a computed key reads a map, whose keys are Strings; convert it with `str`
+let k = $[1 < 2]
+let f = { |m| $m[$k] }

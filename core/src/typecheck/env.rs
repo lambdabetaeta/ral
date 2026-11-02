@@ -2,7 +2,6 @@
 
 use super::contract::NestedCheck;
 use super::error::{Clash, Reason, TypeError, TypeErrorKind, UnitCall};
-use super::index::{Idx, Lbl};
 use super::unify::{Unifier, WeakSource};
 use crate::ir::{Comp, GroupNode, Name, Val, synthetic};
 use crate::source::Span;
@@ -223,15 +222,9 @@ pub struct InferCtx {
     /// Each read of a name bound to what a call returned, which was `()`, at the
     /// span it was read at: an error raised there says why the name is `()`.
     pub(super) unit_reads: Vec<(Span, UnitCall)>,
-    /// Label reads whose target's head is not yet known.
-    pub(super) pending_labels: Vec<Lbl>,
-    /// Computed reads whose target's head is not yet known.
-    pub(super) pending_indexes: Vec<Idx>,
     /// Nested grant tables awaiting ascription, drained once by `typecheck`;
     /// the one-shot sessions re-infer accepted bodies and never read it.
     pub(super) nested: Vec<NestedCheck>,
-    /// The binding whose value is being inferred, narrowed like [`Self::pos`].
-    pub(super) holder: Option<Span>,
     /// A `Rec` group's member types, inferred once per `Arc` within a run
     /// and keyed by its identity — every projection of the same group reads
     /// the same betas rather than re-inferring the group.
@@ -284,10 +277,7 @@ impl InferCtx {
             thunked: HashSet::new(),
             captured_vals: HashMap::new(),
             unit_reads: Vec::new(),
-            pending_labels: Vec::new(),
-            pending_indexes: Vec::new(),
             nested: Vec::new(),
-            holder: None,
             rec_groups: HashMap::new(),
             rec_group_rebuilds: HashMap::new(),
             boundary_results: HashMap::new(),
@@ -508,13 +498,14 @@ mod tests {
     fn a_mismatch_with_what_a_weak_variable_was_fixed_to_carries_the_note() {
         let mut ctx = InferCtx::new();
         let weak = ctx.unifier.fresh_ty();
-        ctx.unifier.mark_weak(&weak, &WeakSource::Index);
+        ctx.unifier
+            .mark_weak(&weak, &WeakSource::Boundary("from-json".into()));
         ctx.unify_ty(&weak, &Ty::Int, Reason::Argument);
         ctx.unify_ty(&weak, &Ty::String, Reason::Argument);
         let [err] = &ctx.errors[..] else {
             panic!("one mismatch expected: {:?}", ctx.errors);
         };
-        assert_eq!(err.weak, Some(WeakSource::Index));
+        assert_eq!(err.weak, Some(WeakSource::Boundary("from-json".into())));
         assert!(
             err.hint()
                 .is_some_and(|h| h.contains("another use fixed it"))

@@ -1,5 +1,5 @@
-# codes: T0062
+# codes: T0010 T0010
 # status: 1
 # at: 5:13
-# contains: Integer cannot be indexed
+# contains: a computed key reads a map, whose keys are Strings; for a list position, write `nth $i $xs`
 map { |x| $x[$x] } [1]

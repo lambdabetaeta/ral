@@ -1,0 +1,6 @@
+# codes: T0010
+# status: 1
+# at: 6:13
+# contains: a key written out, like `HOME`, names a record field, and this is a map
+let m = [:, a: 'x']
+let n = $[$m[a] + 1]

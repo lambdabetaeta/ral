@@ -3,7 +3,7 @@
 # `"Smith, Jane"` — shifts every later field left: that row prints `Boston`
 # under `role`, `lead` under `amount`, and drops the amount, silently, status 0.
 # Here `from-csv` decodes RFC 4180, so the quoted comma stays one field and the
-# columns are picked by name out of the typed records.
+# columns are picked by computed key out of the typed maps.
 
 let [path, ...cols] = args
 
@@ -14,7 +14,7 @@ let widths = map { |c|
 } $cols
 
 let render = { |cells|
-    let padded = map { |i| pad-right $widths[$i] ' ' $cells[$i] } !{range 0 !{length $cols}}
+    let padded = map { |i| pad-right !{nth $i $widths} ' ' !{nth $i $cells} } !{range 0 !{length $cols}}
     echo !{re-replace-all ' +$' '' !{intercalate '  ' $padded}}
 }
 

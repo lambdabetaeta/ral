@@ -19,8 +19,8 @@ use crate::ir::{
 use crate::source::{Span, Spanned};
 use crate::syntax::CONTROL_OPERATORS;
 use crate::syntax::ast::{
-    Ast, CaseArm, HandlerArm, Head, IfBranch, ListElem, MapEntry, Options, RecordEntry, ScopeAst,
-    Stmt, Word, WordLiteral,
+    Ast, CaseArm, HandlerArm, Head, IfBranch, IndexKey, ListElem, MapEntry, Options, RecordEntry,
+    ScopeAst, Stmt, Word, WordLiteral,
 };
 use crate::syntax::lexer::{
     self, LexError, LexErrorKind, Lexeme, Operator, RedirectOp, StringPart, Token,
@@ -189,8 +189,7 @@ pub(crate) fn parse_with(
 
 // ── Parser ───────────────────────────────────────────────────────────────
 
-/// Which keys a `[k: v]` accepts: a literal admits a data key, `"…"` or
-/// `$var`; a pattern cannot bind through one.
+/// A literal admits computed keys; a pattern needs written names.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum KeyAlphabet {
     Label,
@@ -829,7 +828,7 @@ impl Parser {
                         key.span,
                         format!(
                             "`{name}`'s options are named in writing, so a key that is data \
-                             (`\"…\"` or `$var`) cannot be one; write the name out, as in \
+                             (`\"…$x…\"` or `$var`) cannot be one; write the name out, as in \
                              `{name} [{example}]`",
                             name = form.name,
                         ),
@@ -1310,8 +1309,7 @@ impl Parser {
         Ok(Pattern::Map(entries))
     }
 
-    /// pkey = IDENT | 'QUOTED' — the label alphabet.  Literals additionally
-    /// admit data keys, which is [`Self::parse_map_key`]'s job.
+    /// A written field name.
     fn parse_static_key(&mut self) -> Result<String, ParseError> {
         match self.peek().clone() {
             Token::Word(Word::Plain(k)) if lexer::is_ident(&k) => {
@@ -1322,38 +1320,47 @@ impl Parser {
                 self.advance();
                 Ok(k)
             }
-            Token::Tag(label) => Err(self
-                .error(format!(
-                    "`` `{label} `` names a variant, so it cannot be a key: a tag says \
-                     *which of* several alternatives, and a key says *which part of* one \
-                     value"
-                ))
-                .with_hint(format!(
-                    "write the field as `{label}`, or, if these are the arms of a match, \
-                     write them as case $x [`{label}: {{ |p| … }}, …]"
-                ))),
-            _ => Err(self
-                .error("expected a key")
-                .with_hint("a key is a name or a 'quoted string', as in `[name: x]`")),
+            Token::DoubleQuoted(parts) => {
+                let Some(key) = constant_string(&parts) else {
+                    return Err(self.error("a pattern's key is written out; \"…$x…\" is computed"));
+                };
+                self.advance();
+                Ok(key.to_owned())
+            }
+            Token::Tag(label) => Err(self.invalid_tag_key(&label)),
+            _ => Err(self.error("expected a key").with_hint(
+                "a key is a name, a 'quoted string' or a \"string\", as in `[name: x]`",
+            )),
         }
     }
 
-    /// mapkey = IDENT | 'QUOTED' | "STRING" | deref, a literal's key alphabet.
-    /// The form is returned rather than the entry, because which entry to
-    /// build is only settled once the `:` and value are consumed.
+    fn invalid_tag_key(&self, label: &str) -> ParseError {
+        self.error(format!(
+            "`` `{label} `` names a variant, so it cannot be a key: a tag says \
+             *which of* several alternatives, and a key says *which part of* one value"
+        ))
+        .with_hint(format!(
+            "write the field as `{label}`, or, if these are the arms of a match, \
+             write them as case $x [`{label}: {{ |p| … }}, …]"
+        ))
+    }
+
+    /// A literal key: written name or computed string.
     fn parse_map_key(&mut self) -> Result<MapKeyForm, ParseError> {
         match self.peek().clone() {
+            Token::DoubleQuoted(parts) if constant_string(&parts).is_none() => {
+                Ok(MapKeyForm::Data(self.spanned(|p| {
+                    let at = p.span();
+                    p.advance();
+                    Self::parse_interpolation_parts(&parts, at)
+                })?))
+            }
+            Token::SingleQuoted(_) | Token::Tag(_) | Token::DoubleQuoted(_) => {
+                Ok(MapKeyForm::Label(self.spanned(Self::parse_static_key)?))
+            }
             Token::Word(Word::Plain(k)) if lexer::is_ident(&k) => {
                 Ok(MapKeyForm::Label(self.spanned(Self::parse_static_key)?))
             }
-            Token::SingleQuoted(_) | Token::Tag(_) => {
-                Ok(MapKeyForm::Label(self.spanned(Self::parse_static_key)?))
-            }
-            Token::DoubleQuoted(parts) => Ok(MapKeyForm::Data(self.spanned(|p| {
-                let at = p.span();
-                p.advance();
-                Self::parse_interpolation_parts(&parts, at)
-            })?)),
             Token::Variable { name, .. } => Ok(MapKeyForm::Data(self.spanned(|p| {
                 p.advance();
                 Ok(Ast::Variable(name))
@@ -1403,7 +1410,7 @@ impl Parser {
         Ok(atom)
     }
 
-    /// `atom = primary ('[' word ']')*`
+    /// `atom = primary ('[' index-key ']')*`
     ///
     /// A run of postfix keys becomes one flat `Ast::Index`, never a nest of
     /// single-key ones.  `$(name)` marks the end of a name and takes none,
@@ -1414,7 +1421,7 @@ impl Parser {
         if delimited {
             return Ok(node);
         }
-        let mut new_keys: Vec<Spanned<Ast>> = Vec::new();
+        let mut new_keys = Vec::new();
         while self.peek() == &Token::LBracket && self.next_token_is_adjacent() {
             // Brackets included, so the caret underlines what the user wrote.
             let (span, k) = self.capture_span(|p| {
@@ -1422,7 +1429,7 @@ impl Parser {
                 if p.peek() == &Token::RBracket {
                     return Err(p.error("an index needs a key: `$x[name]` or `$x[0]`"));
                 }
-                let k = p.parse_word()?;
+                let k = p.parse_index_key()?;
                 p.expect(&Token::RBracket)?;
                 Ok(k)
             })?;
@@ -1435,6 +1442,54 @@ impl Parser {
             target: Spanned::boxed(node_span, node),
             keys: new_keys,
         })
+    }
+
+    fn parse_index_key(&mut self) -> Result<IndexKey, ParseError> {
+        match self.peek().clone() {
+            _ if let Some(numeral) = self.signed_numeral() => Err(self.invalid_position(&numeral)),
+            Token::Word(Word::Plain(word)) => {
+                let key = match numeral::shape(&word) {
+                    Some(Shape::Int) => IndexKey::Position(
+                        word.parse::<usize>()
+                            .map_err(|_| self.invalid_position(&word))?,
+                    ),
+                    Some(Shape::Float) => return Err(self.invalid_position(&word)),
+                    None => IndexKey::Label(word),
+                };
+                self.advance();
+                Ok(key)
+            }
+            Token::Word(Word::Path(word)) => Err(self
+                .error("a path is not an index key; quote a field name")
+                .with_hint(format!("quote it: `$r['{word}']`"))),
+            Token::Word(Word::Tilde(path)) => Err(self
+                .error("a tilde word is not an index key; quote a field name")
+                .with_hint(format!("quote it: `$r['{}']`", path.to_literal()))),
+            Token::SingleQuoted(label) => {
+                self.advance();
+                Ok(IndexKey::Label(label))
+            }
+            Token::DoubleQuoted(parts) => {
+                let at = self.span();
+                self.advance();
+                Ok(match Self::parse_interpolation_parts(&parts, at)? {
+                    Ast::Literal(label) => IndexKey::Label(label),
+                    ast => IndexKey::Data(Box::new(ast)),
+                })
+            }
+            Token::Tag(label) => Err(self.invalid_tag_key(&label)),
+            _ => self.parse_word().map(|ast| IndexKey::Data(Box::new(ast))),
+        }
+    }
+
+    fn invalid_position(&self, word: &str) -> ParseError {
+        self.error(format!(
+            "`{word}` is not a list position: a position is a whole number from 0, \
+             as in `$xs[0]`"
+        ))
+        .with_hint(format!(
+            "a field whose name is a number is quoted: `$r['{word}']`"
+        ))
     }
 
     /// `$(name)` or `!$(name)` ahead.
@@ -1871,27 +1926,30 @@ impl Parser {
         }
     }
 
-    /// collection = list | record | map — `[]` is the empty list and `[:]` the
-    /// empty map, an entry with both sides erased.  Otherwise the items are read
-    /// in one pass and each lifts the literal to at least its own kind: a label
-    /// makes a record, a data key a map.
+    /// Written keys make a record; a computed key or `[:,` makes a map.
     fn parse_collection(&mut self) -> Result<Ast, ParseError> {
         self.expect(&Token::LBracket)?;
 
         if self.eat(&Token::RBracket) {
             return Ok(Ast::List(vec![]));
         }
-        if self.eat(&Token::Colon) {
+        let initial = if self.eat(&Token::Colon) {
             if self.eat(&Token::RBracket) {
                 return Ok(Ast::Map(vec![]));
             }
-            return Err(self
-                .error("`[:]` is the empty map, and the only literal that opens with `:`")
-                .with_hint(
-                    "a map on written keys quotes them, `[\"a\": 1, \"b\": 2]`: a \"quoted\" \
-                     key is data, where a bare `a:` or `'a':` is a record's label",
+            if !self.eat(&Token::Comma) {
+                return Err(self.error(
+                    "`[:]` is the empty map; a map on keys written out opens with `[:,`, \
+                     as in `[:, a: 1, b: 2]`",
                 ));
-        }
+            }
+            if self.peek() == &Token::RBracket {
+                return Err(self.error("write [:] for the empty map"));
+            }
+            Literal::Map(Vec::new())
+        } else {
+            Literal::List(Vec::new())
+        };
 
         let mut items = Vec::new();
         self.parse_bracket_items(Bracketed::Collection, |p| {
@@ -1900,7 +1958,7 @@ impl Parser {
         })?;
         items
             .into_iter()
-            .try_fold(Literal::List(Vec::new()), Literal::push)?
+            .try_fold(initial, Literal::push)?
             .into_ast()
     }
 
@@ -1981,15 +2039,17 @@ impl Parser {
         last
     }
 
-    /// True when the next token is a map key followed by `:`.  The one shape
-    /// test behind literal and pattern alike, so the two cannot drift on what a
-    /// key is.  A tag is key-*shaped* but is no key: it is admitted only so
-    /// [`Self::parse_static_key`] gets to say why.
+    /// In patterns, tags and spliced strings reach `parse_static_key` for refusal.
     fn key_colon_here(&self, alphabet: KeyAlphabet) -> bool {
         let at = |i: usize| self.tokens.get(self.pos + i).map(|l| &l.token);
         let is_key = match at(0) {
-            Some(Token::Word(Word::Plain(_)) | Token::SingleQuoted(_) | Token::Tag(_)) => true,
-            Some(Token::Variable { .. } | Token::DoubleQuoted(_)) => alphabet == KeyAlphabet::Data,
+            Some(
+                Token::Word(Word::Plain(_))
+                | Token::SingleQuoted(_)
+                | Token::Tag(_)
+                | Token::DoubleQuoted(_),
+            ) => true,
+            Some(Token::Variable { .. }) => alphabet == KeyAlphabet::Data,
             _ => false,
         };
         is_key && matches!(at(1), Some(Token::Colon))
@@ -2002,15 +2062,8 @@ impl Parser {
         parts: &[Spanned<StringPart>],
         at: Span,
     ) -> Result<Ast, ParseError> {
-        match parts {
-            [] => return Ok(Ast::Literal(String::new())),
-            [
-                Spanned {
-                    item: StringPart::Literal(s),
-                    ..
-                },
-            ] => return Ok(Ast::Literal(s.clone())),
-            _ => {}
+        if let Some(s) = constant_string(parts) {
+            return Ok(Ast::Literal(s.to_owned()));
         }
 
         let mut ast_parts = Vec::new();
@@ -2339,6 +2392,19 @@ fn record_literal(entries: Vec<RecordEntry>) -> Result<Ast, ParseError> {
         );
     }
     Ok(Ast::Record(entries))
+}
+
+fn constant_string(parts: &[Spanned<StringPart>]) -> Option<&str> {
+    match parts {
+        [] => Some(""),
+        [
+            Spanned {
+                item: StringPart::Literal(s),
+                ..
+            },
+        ] => Some(s),
+        _ => None,
+    }
 }
 
 fn map_entry(key: MapKeyForm, value: Spanned<Ast>) -> MapEntry {

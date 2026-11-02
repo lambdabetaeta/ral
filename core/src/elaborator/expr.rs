@@ -5,6 +5,9 @@ use super::{
     Val, ValListElem, ValRecordEntry, WithSpan, Word, word_val,
 };
 
+use crate::ir::Key;
+use crate::syntax::ast::IndexKey;
+
 impl Elaborator {
     /// Elaborate `ast` as a computation, pushing every sub-expression that must
     /// run before its parent into `binds` for the caller to `wrap_binds`.
@@ -357,7 +360,11 @@ impl Elaborator {
                         .iter()
                         .map(|k| Spanned::with_span(
                             k.span,
-                            self.with_span(k.span, |this| this.to_val(&k.item, binds)),
+                            self.with_span(k.span, |this| match &k.item {
+                                IndexKey::Label(label) => Key::Label(label.clone().into()),
+                                IndexKey::Position(n) => Key::Position(*n),
+                                IndexKey::Data(ast) => Key::Data(this.to_val(ast, binds)),
+                            }),
                         ))
                         .collect(),
                 }

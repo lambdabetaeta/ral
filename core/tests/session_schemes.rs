@@ -355,16 +355,29 @@ fn a_stored_scheme_keeps_its_kinds() {
     );
 }
 
-/// What a bare-label read needs is decided by the kind the target carries,
-/// not by which statement came first.
 #[test]
-fn a_label_read_is_settled_by_a_kind_in_either_order() {
+fn a_sized_kind_does_not_change_the_key_forms_read_rule() {
     let mut sh = shell();
-    top_level(&mut sh, "let before = { |m| length $m; $m[a] }").unwrap();
-    top_level(&mut sh, "let after = { |m| $m[a]; length $m }").unwrap();
+    for src in [
+        "let before = { |m| length $m; $m[a] }",
+        "let after = { |m| $m[a]; length $m }",
+    ] {
+        let errs = check_errors(&sh, src);
+        assert_eq!(
+            errs.iter().map(|e| e.kind.code()).collect::<Vec<_>>(),
+            ["T0074"],
+            "{src}: {errs:?}"
+        );
+        assert!(
+            errs[0].kind.render_message().contains("a record"),
+            "{src}: {errs:?}"
+        );
+    }
+    top_level(&mut sh, "let before = { |m k| length $m; $m[$k] }").unwrap();
+    top_level(&mut sh, "let after = { |m k| $m[$k]; length $m }").unwrap();
     let shown = |name: &str| scheme_of(&sh, name).expect("a scheme").to_string();
-    assert_eq!(shown("before"), "∀α. Map α → Returns α");
-    assert_eq!(shown("after"), "∀α. Map α → Returns Integer");
+    assert_eq!(shown("before"), "∀α. Map α → String → Returns α");
+    assert_eq!(shown("after"), "∀α. Map α → String → Returns Integer");
 }
 
 // ─── checked boundaries ─────────────────────────────────────────────────────

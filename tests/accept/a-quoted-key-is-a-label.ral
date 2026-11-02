@@ -1,0 +1,3 @@
+let r = ["a": 1, "b": "x"]
+echo $[$r["a"] + 1]
+echo !{upper $r["b"]}

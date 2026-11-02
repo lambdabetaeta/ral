@@ -1,7 +1,8 @@
 ---
-verified_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
-verified_at_date: 2026-10-25
-anchors: [Inferencer, Idx, settle_index, finish_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
+generated_at_commit: 9c8aa5d9
+verified_at_commit: 9c8aa5d9
+verified_at_date: 2026-11-02
+anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
 ---
 
 # Type inference: the algorithm
@@ -47,12 +48,10 @@ the loop, against the `α` the spine has since ground. `check_comp` then pushes
 that expectation inwards: a `Lam` met with a known `Fun` binds the parameter to
 the type the expectation names instead of a fresh variable. Synthesis in source
 order would check the body of `map { |x| … } $xs` while the element type was
-still free, which is a difference the body can *observe* — the computed-key
-index rule once observed it, and no longer does: `map { |x| $x[$x] } [1]` and the
-same lambda extracted into a `let` are both refused, because a computed index
-is decided by the store at the unit's end, not by what was known when its body
-was read. Everything else has nothing to push inwards and is inferred as ever,
-the caller unifying.
+still free. Read rules do not depend on that knowledge: `map { |x| $x[$x] } [1]`
+and the same lambda extracted into a `let` are both refused by immediate
+unification. Everything else has nothing to push inwards and is inferred as
+ever, the caller unifying.
 
 **The Unifier solves types and rows at once** (`unify.rs`):
 
@@ -87,31 +86,23 @@ two types unify only with their own kind
 **update** of one base (`infer_assembly_record`): it demands of the base a slot
 at each written label, at a fresh payload with nothing imposed on it, and
 returns those labels at the types written over the base's own tail. So a field
-may change its type, a spread never adds a label, and the result is flat. Indexing splits the same way,
-on the key rather than the target: a `Val::String` key is
-`infer_label_read`, which emits a deferred `Lbl(c, label, e)`, meaning
-`c = [label: e | ρ] ∨ c = Map e` (`typecheck/index.rs`). `settle_label` fires
-the disjunct the target's head selects, at creation and at every drain; a head
-is a monotone fact of the store, so the verdict does not depend on statement
-order. A label whose target is still a variable is closed as a record where
-the generalising `let` owns that variable — `settle_pending_labels` computes
-which, and hands `generalize` the `tied` variables of the labels it keeps — and
-at the unit's end; nothing pending is refused. Any other key is a computed index,
-`Idx(c, k, e)` — `c = [e] ∧ k = Int ∨ c = Map e ∧ k = String` — beside `Lbl` in
-the same file. `settle_index` fires a disjunct at creation when the target's
-head, the key's head, or either kind refutes the other; an integer literal key
-is the list rule and never waits, which is why `{ |xs| $xs[0] }` stays generic.
-The three operands are made weak when the `Idx` is made, whether or not it
-settles, and settlement never lifts the mark, so which variables a `let`
-quantifies is a fact about the syntax of its body and no verdict depends on the
-order of independent statements. Nothing settles at a generalisation;
-`InferCtx::finish_indexes` runs at the unit's end: it first propagates labels
-and indexes together to a fixpoint without defaulting, then defaults unresolved
-labels to records (the system's one defaulting of a value type's shape, beside
-the bind rule's grade default), then propagates both again. Only then does it refuse an
-index still pending
-(`IndexContainerUnknown`, T0075, with a second caret on the binding that holds
-it, `InferCtx.holder`).
+may change its type, a spread never adds a label, and the result is flat.
+All written keys, including constant double-quoted strings, name record fields;
+any computed key makes a map, as does the explicit `[:, …]` opener.
+
+Indexing matches the IR's `Key`, never the shape of a `Val`:
+
+- `Label(l)` unifies the target with `[l: α | ρ]`, under `RecordFieldRead`.
+- `Position(n)` unifies it with `[α]`, under `ListPositionRead`.
+- `Data(v)` unifies it with `Map α`, under `MapKeyRead`, and `v` with
+  `String`, under `MapIndexKey`.
+
+`infer_index_step` applies each rule immediately. There is no deferred read
+constraint, shape default, special generalisation parameter or index-made weak
+variable. `nth : ∀α. Int → [α] → F α` handles computed list positions, so
+both map and list helpers retain their element polymorphism. The surface is
+one to one with the formal core's `proj`, `index` and `lookup`
+([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
 
 **Capture is decided by the type.** `CompTy::Return(Grade, Ty)` carries a grade
 — `Value`, `Output` or a variable — in a fourth atomic union-find beside the
@@ -230,8 +221,8 @@ to the parameter grade then known and a literal block only once every argument
 has unified (`demand_block`). Where a `let` captures
 is decided by the type at three syntax-directed sites, and every other rule is
 unification, so typing verdicts do not otherwise depend on the order the solver emits
-constraints. The deferred constraints that remain (`Lbl`, `Idx`) are settled by
-monotone facts of the store and drained at the unit's end. Shape verdicts — the
+constraints. Reads impose ordinary equalities immediately; no read constraint
+is drained at the unit's end. Shape verdicts — the
 pipeline stage forcing, the sequence tail — are introduction-rule choices, not joins.**The row algebra is textbook.** A slot is a label and a type, so the Rémy
 rewrite is unitary and principality over rows is the standard Hindley–Milner
 result. The two rules that build a row from a program — the closed literal and
@@ -304,11 +295,10 @@ the image of the weak seeds under the accumulated substitution. A scheme or bind
 (`apply_ty_keeping_weak`) until its unit ends. A weak
 variable is treated as free in the environment, so a `let` over it is
 monomorphic in it, and the scheme lists it in `Scheme.weak` instead of
-quantifying it; its `Display` prints it `_α` after the binders. A pending label
-read whose target is weak is tied in the same way (`settle_pending_labels`).
+quantifying it; its `Display` prints it `_α` after the binders.
 There is no value restriction: a `let` of anything generalises
 ([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
-A computed index marks its three operands, and so does a boundary call its result
+Only a checked boundary call marks its result
 ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]);
 once the unit is solved, `annotate` freezes each recorded result as a `Site` on
 the call. A site's graph preserves type and computation roots, and canonical
@@ -344,9 +334,8 @@ A scheme quantifies `(TyVar, Kind)` and `(RowVar, bool)` and prints `∀α:numbe
 instantiation re-mints each, and a weak residual keeps its kind
 ([[decisions/260930_operators-are-kinded|operators-are-kinded]]).
 
-A bare-label read is settled by a head, or by a kind that admits `Map` and not
-`Record` (`sized`), or `Record` and not `Map`, or neither, which is refused at the
-read naming what else the variable was used as (`settle_by_kind`).
+Kinds do not select read rules. The written key already determines the
+required head; a conflicting kind is refused by ordinary unification.
 
 **The quantifier is the prefix, not a binder.** A `Scheme` is the body's
 ordinary `Ty` under a ∀-prefix of four `Vec`s of variable ids — value

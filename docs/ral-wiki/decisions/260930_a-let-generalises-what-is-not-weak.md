@@ -1,7 +1,14 @@
 ---
 status: accepted
-generated_at_commit: 8d868e18
+generated_at_commit: 9c8aa5d9
 ---
+
+> **Amended 2026-11-02** by
+> [[decisions/261102_a-written-key-is-a-name|a written key is a name]]:
+> the pending-label and index-made weakness clauses below are superseded.
+> Reads unify immediately and do not mark variables weak. Only checked
+> boundaries introduce weak results; the permanent mark, generalisation
+> subtraction and cross-unit rules remain in force.
 
 # A `let` generalises what is not weak
 

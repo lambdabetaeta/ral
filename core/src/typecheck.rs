@@ -11,7 +11,6 @@ mod error;
 mod explain;
 mod generalize;
 mod grade;
-mod index;
 pub(crate) mod infer;
 mod scope;
 #[cfg(test)]
@@ -29,7 +28,7 @@ pub use self::unify::Unifier;
 use self::env::HandlerOrigin;
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use self::generalize::has_result_only_var;
-use self::generalize::{FreeVars, generalize, settle_weak};
+use self::generalize::{generalize, settle_weak};
 pub(crate) use self::generalize::{instantiate, reseed_weak};
 use crate::ir::{Comp, Phrase, Toplevel, Val};
 use crate::source::Spanned;
@@ -158,13 +157,7 @@ fn close_thunk_scheme(
     invariant: &'static str,
 ) -> Scheme {
     let thunk_ty = Ty::Thunk(Box::new(cty));
-    inferencer.ctx.finish_indexes();
-    let scheme = generalize(
-        &inferencer.ctx.unifier,
-        &TyEnv::new(),
-        &FreeVars::new(),
-        &thunk_ty,
-    );
+    let scheme = generalize(&inferencer.ctx.unifier, &TyEnv::new(), &thunk_ty);
     let scheme = Arc::unwrap_or_clone(settle_weak(&inferencer.ctx.unifier, Arc::new(scheme)));
     self::generalize::debug_assert_scheme_closed(&scheme, invariant);
     scheme
@@ -199,7 +192,6 @@ pub fn typecheck(
     let (mut ctx, mut env) = seeded_session(schemes);
 
     let (mut phrase_schemes, tail) = infer::infer_toplevel(&mut ctx, &mut env, phrases);
-    ctx.finish_indexes();
     contract::drain_nested(&mut ctx);
     if ctx.errors.is_empty()
         && let Some(table) = contract

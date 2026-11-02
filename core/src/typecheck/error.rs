@@ -108,13 +108,11 @@ pub enum Reason {
     /// One part of an interpolated string.
     Interpolation,
     BinaryOperands(BinaryOp),
-    ListIndexKey,
     MapIndexKey,
     RecordFieldRead,
-    /// A bare label on a target known to be a map, read as that key.
+    ListPositionRead,
+    /// A computed key reads a map.
     MapKeyRead,
-    /// An indexing target settled to `List` or `Map`, by its key or its kind.
-    DynamicIndexTarget,
     /// A head still a bare variable, pinned to `Thunk` so application can unfold it.
     AutoderefHead,
     LetRecSelf,
@@ -323,29 +321,11 @@ pub enum TypeErrorKind {
     MalformedUnalias {
         detail: &'static str,
     },
-    /// Indexing into a block value instead of its forced result.
-    IndexIntoThunk,
-    /// A field read (`$v[field]`) on a value that is concretely not a record.
-    FieldOnNonRecord {
-        label: String,
-        ty: Ty,
-    },
     /// An index on a literal, `'x'[f]`: it binds to that word alone, so this
     /// is `cmd 'x'[f]` meant as `!{cmd 'x'}[f]`.  Both spelled as written.
     IndexOnLiteral {
         literal: String,
         key: String,
-    },
-    /// A computed index (`$v[$k]`) on a value that accepts no key at all.
-    DynamicIndexOnScalar {
-        ty: Ty,
-    },
-    /// A computed index whose container nothing in the unit decides is a list
-    /// or a map.  `names` is the target and key as written, when both are
-    /// variables; `holder` is the binding whose value holds the index.
-    IndexContainerUnknown {
-        names: Option<(String, String)>,
-        holder: Option<Span>,
     },
     /// A pipe edge into a stage whose own root binds standard input.  The feed
     /// answers every read the stage makes, for the stage's whole run, so the
@@ -384,14 +364,10 @@ impl TypeErrorKind {
             Self::DecoderTakesNoArgument { .. } => "T0054",
             Self::SpreadIntoApplication { .. } => "T0056",
             Self::ExecArgNotText { .. } => "T0057",
-            Self::IndexIntoThunk => "T0060",
-            Self::FieldOnNonRecord { .. } => "T0061",
-            Self::DynamicIndexOnScalar { .. } => "T0062",
             Self::IndexOnLiteral { .. } => "T0063",
             Self::DeadPipeEdge { .. } => "T0070",
             Self::UnboundVariable { .. } => "T0071",
             Self::HeadBoundToValue { .. } => "T0072",
-            Self::IndexContainerUnknown { .. } => "T0075",
             Self::DecoderMidPipeline { .. } => "T0078",
         }
     }

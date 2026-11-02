@@ -323,7 +323,7 @@ fn a_function_typed_rhs_is_bound_as_its_thunk_at_any_depth() {
     );
 }
 
-// ─── Computed indexes: one relation, settled at the unit's end ─────────────
+// ─── Reads: the key form determines the container ─────────────────────────
 
 /// The scheme the `let` at phrase `index` closed with, as `explain` prints it.
 fn scheme_at(top: &Toplevel, index: usize) -> String {
@@ -337,25 +337,28 @@ fn scheme_at(top: &Toplevel, index: usize) -> String {
 }
 
 #[test]
-fn a_label_defaulted_to_a_record_is_what_refuses_a_computed_index() {
+fn a_label_read_requires_a_record_and_refuses_a_computed_key() {
     let src = "let f = { |m k| let a = $m[x]; return $m[$k] }\nreturn ()";
-    assert_eq!(codes_of(&raw_errors(src)), ["T0062"]);
-    has_error(src, "available: x");
+    let errs = raw_errors(src);
+    assert_eq!(codes_of(&errs), ["T0010"]);
+    assert!(errs[0].hint().unwrap().contains("write the name"));
 }
 
 #[test]
-fn a_computed_index_helper_is_accepted_at_the_one_container_type_its_unit_uses() {
+fn a_computed_key_helper_generalises_over_map_element_types() {
     let top = toplevel_ok(
         "let pick = { |m k| $m[$k] }\n\
-         let a = pick [\"x\": 1] 'x'\n\
-         let b = pick [\"y\": 2] 'y'\n\
+         let a = pick [:, x: 1] 'x'\n\
+         let b = pick [:, y: true] 'y'\n\
          return ()",
     );
-    assert_eq!(scheme_at(&top, 0), "Map Integer → String → Returns Integer");
+    assert_eq!(scheme_at(&top, 0), "∀α. Map α → String → Returns α");
+    assert_eq!(scheme_at(&top, 1), "Integer");
+    assert_eq!(scheme_at(&top, 2), "Bool");
 }
 
 #[test]
-fn a_literal_key_is_the_list_rule_and_stays_generic() {
+fn a_written_position_is_the_list_rule_and_stays_generic() {
     let top = toplevel_ok(
         "let first = { |xs| $xs[0] }\n\
          let a = first [1, 2]\n\
@@ -366,45 +369,28 @@ fn a_literal_key_is_the_list_rule_and_stays_generic() {
 }
 
 #[test]
-fn a_computed_key_makes_the_helper_monomorphic_for_the_unit() {
-    let src = "let nth = { |xs i| $xs[$i] }\n\
-               let a = nth [1, 2] 0\n\
-               let b = nth ['x'] 0\n\
-               return ()";
-    assert_eq!(codes_of(&raw_errors(src)), ["T0010"]);
-    let src = "let nth = { |xs i| let j = $[$i + 1]; $xs[$j] }\n\
-               let a = nth [1, 2] 0\n\
-               let b = nth ['x'] 0\n\
-               return ()";
-    assert_eq!(codes_of(&raw_errors(src)), ["T0010"]);
+fn a_computed_list_position_is_refused_with_the_nth_help() {
+    let errs = raw_errors("let xs = [1, 2]\nlet i = 0\nreturn $xs[$i]");
+    assert_eq!(codes_of(&errs), ["T0010", "T0010"]);
+    assert!(
+        errs.iter()
+            .all(|e| e.hint().unwrap().contains("nth $i $xs"))
+    );
 }
 
-/// Whether a helper is generic must not depend on where an independent
-/// `let` stands.
 #[test]
-fn the_verdict_on_an_index_helper_is_independent_of_statement_order() {
-    let body = |n_first: bool, second: &str| {
-        let n = "let n = $[$i + 1]\n";
-        let h = "let h = { |c| $c[$i] }\n";
-        let (first, then) = if n_first { (n, h) } else { (h, n) };
-        format!("let run = {{ |i|\n{first}{then}h [1]\nh {second}\n}}\nreturn ()")
-    };
-    for n_first in [true, false] {
-        let refused = body(n_first, "['x']");
-        assert_eq!(
-            codes_of(&raw_errors(&refused)),
-            ["T0010"],
-            "n first: {n_first}"
-        );
-        assert!(
-            errors(&body(n_first, "[2]")).is_empty(),
-            "n first: {n_first}"
-        );
+fn nth_helpers_generalise_over_list_element_types() {
+    for body in ["nth $i $xs", "let j = $[$i + 1]; nth $j $xs"] {
+        let top = toplevel_ok(&format!(
+            "let pick = {{ |xs i| {body} }}\n\
+             let a = pick [1, 2] 0\n\
+             let b = pick ['x', 'y'] 0\n\
+             return ()"
+        ));
+        assert_eq!(scheme_at(&top, 0), "∀α. [α] → Integer → Returns α");
+        assert_eq!(scheme_at(&top, 1), "Integer");
+        assert_eq!(scheme_at(&top, 2), "String");
     }
-    let schemes: Vec<String> = [true, false]
-        .map(|n_first| scheme_at(&toplevel_ok(&body(n_first, "[2]")), 0))
-        .into();
-    assert_eq!(schemes[0], schemes[1]);
 }
 
 /// Walking a value of unknown shape by computed keys makes it a map of
@@ -423,25 +409,27 @@ fn a_walk_down_a_decoded_value_is_a_map_of_itself() {
 }
 
 #[test]
-fn a_key_of_number_kind_settles_the_index_as_a_list() {
-    let top = toplevel_ok("let f = { |xs k| let j = $[$k + 1]; $xs[$k] }\nreturn ()");
-    assert_eq!(scheme_at(&top, 0), "[_α] → Integer → Returns _α");
+fn a_numeric_computed_key_is_refused_with_the_nth_help() {
+    let errs = raw_errors("let f = { |xs k| let j = $[$k + 1]; $xs[$k] }\nreturn ()");
+    assert_eq!(codes_of(&errs), ["T0010"]);
+    assert!(errs[0].hint().unwrap().contains("nth $i $xs"));
 }
 
 #[test]
 fn a_target_of_comparable_kind_is_refused_with_the_kind_sentence() {
     let src = "let f = { |c d k| let b = $[$c < $d]; $c[$k] }\nreturn ()";
     assert_eq!(codes_of(&raw_errors(src)), ["T0074"]);
-    has_error(src, "nothing is both");
+    has_error(src, "this is a map, but a number or text is needed");
 }
 
 #[test]
-fn a_key_that_is_neither_an_int_nor_a_string_is_refused() {
+fn a_boolean_computed_key_is_refused_as_a_non_string() {
     let src = "let k = $[1 < 2]\nlet f = { |m| $m[$k] }\nreturn ()";
-    assert_eq!(codes_of(&raw_errors(src)), ["T0074"]);
-    has_error(
-        src,
-        "but an Int key for a list or a String key for a map is needed",
+    let errs = raw_errors(src);
+    assert_eq!(codes_of(&errs), ["T0010"]);
+    assert_eq!(
+        errs[0].kind.render_message(),
+        "couldn't match type Bool with type String"
     );
 }
 
@@ -587,7 +575,7 @@ fn return_schema_names_an_unknown_key_in_the_tables_words() {
 #[test]
 fn return_schema_refuses_a_map() {
     for form in [Form::Rc, Form::Grant, Form::Manifest] {
-        let errs = contract_errors(declared(form), "return [\"nn\": 1]");
+        let errs = contract_errors(declared(form), "return [:, nn: 1]");
         assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
         let hint = errs[0].hint().unwrap();
         assert!(hint.contains("not a map"), "{hint}");
@@ -944,7 +932,7 @@ fn grant_refuses_a_place_given_no_payload() {
 /// with the record spelling.
 #[test]
 fn grant_refuses_a_map_or_unit_as_a_nested_table() {
-    for table in ["[:]", "[\"allow\": []]", "()"] {
+    for table in ["[:]", "[:, allow: []]", "()"] {
         let src = format!("grant [exec: {table}] {{ return 1 }}");
         let errs = raw_errors(&src);
         assert_eq!(codes_of(&errs), ["T0079"], "{table}: {errs:?}");

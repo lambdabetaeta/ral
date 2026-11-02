@@ -229,7 +229,7 @@ pub enum Val {
     List(Arc<ListNode>),
     /// `[key: val, …]`: static labels, no spread.
     Record(Arc<FieldsNode>),
-    /// `["key": val, …]`: keys written out, no spread.
+    /// `[:, key: val, …]`: keys written out, no spread.
     Map(Arc<FieldsNode>),
     /// `` `label `` or `` `label payload ``; the label is stored without
     /// its leading backtick.
@@ -237,6 +237,13 @@ pub enum Val {
         label: Name,
         payload: Option<Box<Self>>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Key {
+    Label(Str),
+    Position(usize),
+    Data(Val),
 }
 
 impl Val {
@@ -255,7 +262,7 @@ impl Val {
         Self::Record(Node::new(entries.into()))
     }
 
-    /// `["key": val, …]`, entries already sorted by key.
+    /// `[:, key: val, …]`, entries already sorted by key.
     pub(crate) fn map(entries: impl Into<Box<[(Name, Spanned<Self>)]>>) -> Self {
         Self::Map(Node::new(entries.into()))
     }
@@ -547,7 +554,10 @@ impl Mentions for Comp {
             CompKind::Index { target, keys } => {
                 target.mentions(out);
                 for key in keys {
-                    key.item.mentions(out);
+                    match &key.item {
+                        Key::Data(value) => value.mentions(out),
+                        Key::Label(_) | Key::Position(_) => {}
+                    }
                 }
             }
             CompKind::Interpolation(vals) => {
@@ -742,7 +752,7 @@ pub enum CompKind {
     /// found, out of bounds); target and keys are themselves pure.
     Index {
         target: Val,
-        keys: Vec<Spanned<Val>>,
+        keys: Vec<Spanned<Key>>,
     },
     /// String interpolation, effectful because a lookup can fail.
     Interpolation(Vec<Val>),

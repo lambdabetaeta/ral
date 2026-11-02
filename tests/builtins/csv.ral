@@ -1,7 +1,7 @@
 # Test: from-csv / to-csv codecs
 
 # Encode to the byte channel, decode back: the value survives the round trip.
-let rows = [["b": '2', "a": '1'], ["a": '3', "b": '4']]
+let rows = [[:, b: '2', a: '1'], [:, a: '3', b: '4']]
 let back = !{to-csv $rows | from-csv}
 echo !{length $back}
 echo $back[0][a]
@@ -22,8 +22,13 @@ try { let _dup = !{to-string "a,a\n1,2\n" | from-csv} } { |e| echo $e[message] }
 
 # A row whose keys differ from the first's is refused by name, and nothing is
 # written: no `b` dropped, no `''` standing in for an absent key.
-try { to-csv [["a": '1'], ["a": '2', "b": '3']] } { |e| echo $e[message] }
-try { to-csv [["a": '1', "b": '2'], ["b": '3', "c": '4']] } { |e| echo $e[message] }
+try { to-csv [[:, a: '1'], [:, a: '2', b: '3']] } { |e| echo $e[message] }
+try { to-csv [[:, a: '1', b: '2'], [:, b: '3', c: '4']] } { |e| echo $e[message] }
 try { to-csv [[:]] } { |e| echo $e[message] }
+
+let encoded = !{to-csv [[a: 1]] | from-string}
+if $[$encoded != "a\n1\n"] { fail [status: 1, message: 'to-csv must encode a record with a numeric cell'] }
+
+try { to-csv [[a: [k: 1]]] } { |e| echo $e[message] }
 
 echo 'csv tests done'

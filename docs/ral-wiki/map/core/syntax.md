@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 9c8aa5d9
 generated_at_date: 2026-11-01
 covers_paths: [core/src/syntax/, editors/]
 ---
@@ -47,12 +47,16 @@ sees raw bytes and bare words.
   `NESTING_DEPTH_LIMIT`.
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
   carries a `FileId`. A `||` after a pipe is refused naming `?`. The words rule is checked once
-  per unit by `end_unit`. `[:]` is the
-  empty map and the only literal opening with `:`; otherwise a bracket's keys
-  decide — any data key (`"…"` or `$k`, `MapKeyForm::Data`) makes a map, labels
-  alone an `Ast::Record`, no entry at all a list. `parse_static_key` admits a
-  name or a single-quoted word; a tag is refused there for literal and pattern
-  alike, since a tag keys nothing. The items are read in one pass, each
+  per unit by `end_unit`. `[:]` is the empty map; `[:, …]` opens an explicit
+  map on written keys, permits spreads and refuses `[:,]`. Otherwise keys
+  decide: any computed key (`$k`, `"k$i"`, `MapKeyForm::Data`) makes a map,
+  labels alone an `Ast::Record`, no keyed entry a list. `parse_static_key`
+  admits words and constant single- or double-quoted strings. Patterns and
+  options accept this same alphabet but refuse computed keys; a tag keys
+  nothing. `parse_index_key` emits `IndexKey::{Label, Position, Data}`:
+  written names, whole-number positions from zero, or computed expressions.
+  Negative and fractional numerals, path and tilde words, and tags are refused
+  with guidance about the permitted key form. The items are read in one pass, each
   lifting the literal to at least its own kind, so no token-level lookahead has
   to skip a spread's nested brackets. Every item is one atom
   (`parse_entry_value`): a command written as one — an argument, `|`, `?` or

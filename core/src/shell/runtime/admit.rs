@@ -5,7 +5,7 @@
 //! walk over it.  A door that admits never converts: the value is what its
 //! source says, and admission only says whether the program may have it.
 
-use crate::shell::runtime::{Break, Error, Map, Shell, Value};
+use crate::shell::runtime::{Break, Error, Map, Settled, Shell, Value};
 use crate::source::Span;
 use crate::sync::LockExt as _;
 use crate::ty::{Fields, Fixed, Fixings, Id, Kind, Scheme, Shape, Side, Site, Tail, UnitId};
@@ -215,9 +215,6 @@ fn kind_phrase(kind: Kind) -> String {
         Kind::SCALAR => "a number, text or a Bool".into(),
         Kind::SIZED => "text, bytes, a list or a map".into(),
         Kind::DATA => "data, with no block or handle in it".into(),
-        Kind::LABELLED => "a record or a map".into(),
-        Kind::INDEXED => "a list or a map".into(),
-        Kind::KEY => "a whole number or text".into(),
         other => format!("a value of kind `{other}`"),
     }
 }
@@ -245,6 +242,16 @@ impl Site {
     /// The first place the value and the type disagree.
     pub fn admit(&self, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
         self.walk(self.root, value, fixings)
+    }
+
+    /// `value` let in at `door`, or `door`'s refusal of it.
+    ///
+    /// # Errors
+    /// As [`Self::admit`], as [`Mismatch::refusal`] words it.
+    pub fn admitted(&self, door: &str, value: Value, shell: &Shell) -> Settled<Value> {
+        self.admit(&value, shell.fixings())
+            .map_err(|mismatch| mismatch.refusal(door, shell))?;
+        Ok(value)
     }
 
     /// [`Self::admit`] for a module's export record, whose closures are also

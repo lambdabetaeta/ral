@@ -1,0 +1,7 @@
+# codes: T0010
+# status: 1
+# at: 7:8
+# contains: text is not read with `[…]`; use `slice $s 0 80` or `lines $s`
+let x = 'hello'
+let k = 'name'
+echo $x[$k]

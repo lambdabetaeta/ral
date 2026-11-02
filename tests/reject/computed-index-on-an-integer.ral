@@ -1,6 +1,6 @@
-# codes: T0062
+# codes: T0010
 # status: 1
-# at: 5:22
-# contains: Integer cannot be indexed
+# at: 6:14
+# contains: couldn't match type Map α with type Integer
 let pick = { |m k| $m[$k] }
 let x = pick 5 5

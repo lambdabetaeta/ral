@@ -273,11 +273,17 @@ Lists and records share square brackets:
     "$server[host]:$server[port]"
 
 Entries use commas. `[]` is an empty list; `[:]` is an empty map. A record has
-known fields, possibly of different types. A map has string keys that are data
-and values of one type; a `"quoted"` key is data, as a computed one is:
+known fields, possibly of different types: `["user name": 'Ada', age: 36]`
+is a record too. A map has string keys that are data and values of one type.
+Any computed key makes the literal a map; `[:, …]` builds a map on written keys:
 
     let key   = 'staging'
-    let ports = [$key: 8080, "production": 443]
+    let ports = [$key: 8080, production: 443]
+    let fixed = [:, staging: 8080, production: 443]
+
+The key says what you read: `$server[host]` and `$server["host"]` read a
+record field, `$hosts[0]` a list element, and `$ports[$key]` a map value.
+For a computed list position, write `nth $i $hosts`, not `$hosts[$i]`.
 
 `...` spreads collections and command arguments:
 
@@ -376,7 +382,7 @@ Codecs cross between bytes and values:
 | `from-lines` | a list of strings, one per line |
 | `from-json` | a ral value decoded from JSON |
 | `from-jsonl` | a list of values, one per line of JSON |
-| `from-csv` | a list of header-keyed maps of text |
+| `from-csv` | a list of header-keyed rows, checked as records or maps where used |
 | `from-bytes` | a `Bytes` value |
 
 The encoders are `to-line`, `to-string`, `to-lines`, `to-json`, `to-jsonl`,
@@ -391,6 +397,23 @@ returned value is the pipeline's, and `let` binds it:
     let branch = git branch --show-current | from-line
     let config = curl -fsS $url | from-json
     let rows   = curl -fsS $csv-url | from-csv
+
+`from-csv`, like `from-json`, checks data against the shape your script uses.
+A written key reads a row as a record; a computed key reads it as a map:
+
+    let rows = from-csv < servers.csv
+    map { |row| $row[host] } $rows
+
+Cells are text, even when they contain digits. Use `int $row[port]` to parse a
+number; arithmetic directly on that cell fails at `from-csv`, naming the column
+and the line that needed a number. `to-csv` accepts record rows as well as map
+rows:
+
+    to-csv [[host: db, port: 5432, enabled: true]] > servers.csv
+
+Every row must have the same keys; every cell must be text, a number or a
+boolean. Numbers and booleans are written as `str` writes them, and read back
+as text. An invalid cell names its row index and key before anything is written.
 
 A value already in hand is not on any pipe. Encode it into one first, or read
 the file directly:
@@ -456,8 +479,10 @@ A script begins:
 
 `args` returns only user arguments. Forward them with `...!{args}`. `$SCRIPT`
 is the current file's path. The shell's own state is read by builtins, not
-variables: `env` is a map of environment variables, `nproc` is the CPU count,
-and `cwd`, `home`, and `user` are what they say.
+variables: `env` reads environment variables, `nproc` is the CPU count,
+and `cwd`, `home`, and `user` are what they say. Each `env` call is checked
+against its use: `!{env}[HOME]` checks that field is present, while
+`keys !{env}` uses a map. Environment values remain text.
 
 Use `within` for a scoped directory or environment:
 

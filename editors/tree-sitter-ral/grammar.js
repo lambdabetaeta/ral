@@ -90,8 +90,11 @@ function primary($, name, attached) {
     // Spreads alone make a list; a later keyed entry selects the map parse.
     case 'list_literal': return prec.dynamic(1, seq(start('['), choice(optional(NL),
       separated(choice(value($, 'bracket'), contextual($, 'spread', 'bracket')))), ']'));
-    case 'map_literal': return seq(start('['), choice(ws(':'), separated(choice($.map_entry,
-      contextual($, 'spread', 'bracket')))), ']');
+    // `[:]` is the empty map; `[:, …]` opens a map on written keys.
+    case 'map_literal': {
+      const entries = separated(choice($.map_entry, contextual($, 'spread', 'bracket')));
+      return seq(start('['), choice(seq(ws(':'), optional(seq(',', entries))), entries), ']');
+    }
     case 'arith_expr': return seq(lex('$['), optional(NL), $._arith, ']');
     case 'deref': return lex(seq('$', DEREF_IDENT));
     case 'deref_paren': return seq(lex('$('), token.immediate(IDENT), token.immediate(')'));
@@ -260,9 +263,10 @@ module.exports = grammar({
     lambda_params: $ => seq('|', repeat1($._pattern), '|'),
     _block_body: $ => choice(SEP, seq(optional(SEP), $.statement,
       repeat(seq(SEP, $.statement)), optional(SEP))),
-    map_entry: $ => seq(field('key', choice($._static_key, $.string_double,
-      $.deref, $.deref_paren)), optional(NL), ':', optional(NL), field('value', value($, 'bracket'))),
-    _static_key: $ => choice($._label, $.string_single),
+    map_entry: $ => seq(field('key', choice($._static_key, $.deref, $.deref_paren)),
+      optional(NL), ':', optional(NL), field('value', value($, 'bracket'))),
+    // A spliced double-quoted key is data; the parser refuses it in a pattern.
+    _static_key: $ => choice($._label, $.string_single, $.string_double),
     _label: $ => choice($._value_label, alias('true', $.identifier), alias('false', $.identifier)),
     _value_label: $ => choice($.identifier, ...KEYWORDS.map(word => alias(word, $.identifier))),
     _attached_value_label: $ => choice(node($, 'identifier', true),

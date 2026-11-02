@@ -1,3 +1,7 @@
+---
+generated_at_commit: 9c8aa5d9
+---
+
 # Codecs: the typed crossing between bytes and values
 
 **The `from-X` / `to-X` builtins name the typed crossing between stdin bytes
@@ -7,7 +11,8 @@ takes one value and writes the encoded bytes:
 - every decoder has the computation type `from-X : Returns A`;
 - every encoder has the type `to-X : A → Command`.
 
-The two types are inverse: an encoder writes what the matching decoder reads.
+The two directions share a format, not necessarily a value type: CSV decoding
+always returns text cells, even when encoding writes numbers or booleans.
 
 ## The crossing is a name
 
@@ -29,7 +34,7 @@ misspelled codec fails at command lookup
 A decoder takes no value argument. It reads stdin, whether that comes from a
 `< file` redirect, the left stage of a pipeline, or the terminal. Each decoder
 is declared with arity 0, so a passed value is a type error, raised before the
-call runs (`` `from-json` takes no argument — it reads the byte channel ``).
+call runs (`` `from-json` takes no argument: it reads the byte channel ``).
 The error's hint names the fix: apply the matching encoder, then send its bytes
 through the pipeline so the decoder has a channel to read —
 `to-string $s | from-json` for JSON in a `String`, `to-bytes $b | from-string`
@@ -48,11 +53,12 @@ for a `Bytes` value (for example `$s[stdout]` from a `poll` result). The decoder
   object member by exact key, an array element by decimal), decoded and
   checked like `from-json`; a path given as tokens, never as a pointer string,
   so no key needs escaping;
-- `from-csv` → a list of maps keyed by the header row, `[Map String]` and so not
-  a boundary: its shape is decided; every field is a
-  `String`, because CSV is untyped — coerce with `int` / `float`; the reader
-  handles quoted fields, embedded commas, and embedded newlines, and refuses a
-  row with more or fewer fields than the header, naming its line;
+- `from-csv : ∀α. F [α]` → a list of header-keyed rows, a boundary like
+  `from-jsonl`. Label reads use records and computed reads maps. Every cell
+  is a `String`; use `int` / `float` to parse a number. Numeric use without
+  parsing fails at decode, naming the column and line of use. Quoted fields,
+  embedded commas and embedded newlines are supported; duplicate headers and
+  ragged rows are refused; a ragged row names its input line;
 - `from-lines` → `[String]`, split by the line rule (below), lossy per line.
 
 **A decoder of undecided shape is checked.** `from-json`'s type is `∀α. Returns α`,
@@ -86,13 +92,19 @@ distinguishes the second writer, as in `bytes-to-string`. In a pipeline, the wri
 `let e = to-json $x` binds the encoded text as a `String`, and
 `let e = to-json $x > f` binds `()`, the redirect having discharged the output.
 
-`to-csv` takes a list of maps and writes a header row plus one row for each
-map. The columns are the keys in sorted order, because maps are key-ordered and
-hold no original column order. Every map must have the first one's keys, since
-CSV cannot leave a field out: a map with a key the first lacks, or lacking one
-it has, is refused by name, as is a map with no keys; as with `to-jsonl`,
-every row encodes before a byte is written. With `from-csv`'s refusal of a
-ragged line, `from-csv` reads back exactly the maps `to-csv` wrote.
+`to-csv : ∀α:data. [α] → writes` accepts record or map rows, the same runtime
+carrier. Columns are the keys in sorted order; every row must have the first
+row's keys and at least one column. A missing or extra key is refused by name.
+Cells must be `String`, `Int`, `Float` or `Bool`, rendered as `str` renders
+them. Another cell names the zero-based row index and key:
+
+```text
+to-csv: the cell `k` of the row at index 2 is a list; a CSV cell is text, a number or a boolean
+```
+
+Every row encodes before a byte is written. `from-csv` reads the result as
+text cells; it does not recover encoded numbers or booleans.
+See [[decisions/261102_a-written-key-is-a-name|a written key is a name]].
 
 `to-json` maps a ral value to JSON structurally. A record or a `Map A`
 becomes an object; a list becomes an array; `Unit` becomes `null`. A

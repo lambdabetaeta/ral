@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 6dd2407d
 generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
@@ -177,7 +177,9 @@ Internals:
   builds it eagerly instead so that name is never asked of a `Literal`'s
   Σ-free inspection. `expr.rs` holds the primitive
   operators the elaborator's expression desugaring emits (`Negate` / `Not` /
-  `Binary`) and value indexing (`Index`).
+  `Binary`) and the three reads `Index` dispatches to by its `Key`:
+  `field` (a record by label), `position` (a list by `usize`, shared with
+  `nth`) and `lookup` (a map by `String`).
 - Imported weak occurrences whose contract reaches a thunk or handle carry
   `Val::Protected`: `val::form` calls `Site::wrap` without admitting (a data
   binding is admitted once per unit by `readmit`; `Site::protect`, admit then

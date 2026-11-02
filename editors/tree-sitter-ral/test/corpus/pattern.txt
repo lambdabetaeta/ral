@@ -78,3 +78,25 @@ a lambda parameter may destructure too
                       (application
                         (identifier)
                         (deref)))))))))))))
+
+================================================================================
+a double-quoted pattern key is a label
+================================================================================
+let ["user name": u] = source
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (let_stmt
+            (map_pattern
+              (map_pattern_entry
+                (string_double)
+                (identifier)))
+            (chain
+              (pipeline
+                (cmd
+                  (application
+                    (identifier)))))))))))
