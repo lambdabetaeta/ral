@@ -1,9 +1,9 @@
 #!/bin/sh
-# Install ral (default) or exarch on macOS or Linux, from the newest versioned
-# release or a named one, e.g. the rolling `latest`.
+# Install ral (default) or exarch on macOS or Linux, from the newest release or
+# the one a tag names.
 # Usage: curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh
 #        curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh -s exarch
-#        curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh -s ral latest
+#        curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh -s ral v0.10.0
 #
 # Everything below is one function, called on the last line.  A script read
 # from a pipe is executed as it arrives, so a connection that dies mid-transfer
@@ -18,9 +18,8 @@ die() {
     exit 1
 }
 
-# github.com/$REPO/releases/latest 302s to the newest *versioned* release, not
-# the rolling release tagged `latest`.  Resolved once, so the archive and its
-# checksum come from the same release.
+# github.com/$REPO/releases/latest 302s to the newest release's tag.  Resolved
+# once, so the archive and its checksum come from the same release.
 latest_tag() {
     final="$(curl -fsSL --proto '=https' --tlsv1.2 -o /dev/null -w '%{url_effective}' \
         "https://github.com/${REPO}/releases/latest")" || die "could not reach github.com/${REPO}"

@@ -1,5 +1,5 @@
 name: Build Binaries
-# Rolling `latest` prerelease on manual dispatch; a versioned release on a `v*` tag.
+# A release on a `v*` tag; a manual dispatch builds without publishing.
 on:
   push:
     tags:
@@ -253,6 +253,7 @@ jobs:
           if-no-files-found: error
 
   release:
+    if: github.ref_type == 'tag'
     needs: [build, msi, synod-bundle]
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -270,8 +271,5 @@ jobs:
           for f in *; do sha256sum "$f" | cut -d ' ' -f 1 > "$f.sha256"; done
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
-          name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
-          prerelease: ${{ github.ref_type != 'tag' }}
           fail_on_unmatched_files: true
           files: release/*

@@ -1,15 +1,14 @@
 #!/usr/bin/env ral
 
-# Offline fallback for build-binaries.yml: builds the Unix release matrix and
-# republishes the `latest` prerelease via `gh`.  Push first, so public HEAD
-# matches the binaries.  Windows and synod are built only by Actions.
+# Builds the Unix release matrix locally, as build-binaries.yml does on Actions.
+# Publishing is Actions' alone: push a `v*` tag.  Windows and synod are built
+# only by Actions.
 #
 # Flags:
 #   --linux          include the Linux musl matrix (docker)
 #   --macos          include macOS (host cargo, Darwin only)
 #   --all            shorthand for --linux --macos; the default if no target flag
-#   --local          build for the host only: no docker, no publish
-#   --skip-publish   build artifacts only, no tag move or gh release
+#   --local          build for the host only: no docker
 #   --clean-builds   wipe the cache and artifact dirs (keeps docker images)
 #   --clean-images   remove the cross-compile docker images
 #   --clean          both of the above
@@ -43,7 +42,7 @@ let norm_arch = { |s|
 }
 
 let flags = ['--linux', '--macos', '--all', '--local',
-             '--skip-publish', '--clean-builds', '--clean-images', '--clean',
+             '--clean-builds', '--clean-images', '--clean',
              '--dry-run']
 let known = [...$flags, '-h', '--help']
 
@@ -59,7 +58,6 @@ for !{args} { |a|
 }
 
 let dry_run      = has '--dry-run'      !{args}
-let skip_publish = has '--skip-publish' !{args}
 let want_local   = has '--local'        !{args}
 let want_linux   = has '--linux'        !{args}
 let want_macos   = has '--macos'        !{args}
@@ -210,27 +208,8 @@ let main = {
         }
     }
     ls -1 $artifact_dir
-
-    # Publish.  git and gh both need cwd inside the repo.
-    if $skip_publish {
-        echo ''
-        echo "!{styled dim '  Skipping publish.'}  Artifacts in !{styled yellow $artifact_dir}"
-        exit 0
-    }
-
-    within [dir: $repo_root] {
-        echo ''
-        echo "!{styled cyan '==>'} publishing !{styled bold "'latest'"} on lambdabetaeta/ral"
-        let notes = "Built locally !{date -u +%Y-%m-%dT%H:%M:%SZ} from !{git rev-parse --short HEAD}"
-        let archives = filter { |e| return !{re-match '\.tar\.gz(\.sha256)?$' $e[name]} } !{list-dir $artifact_dir}
-        let files = map { |e| return "$artifact_dir/$e[name]" } $archives
-        # --cleanup-tag, so the new release tags the current HEAD.
-        gh release delete latest --repo lambdabetaeta/ral --yes --cleanup-tag ? {}
-        gh release create latest --repo lambdabetaeta/ral --title 'Latest Build' --prerelease --notes $notes ...$files
-    }
-
     echo ''
-    echo "!{styled green '  Done.'}  https://github.com/lambdabetaeta/ral/releases/tag/latest"
+    echo "!{styled green '  Done.'}  Artifacts in !{styled yellow $artifact_dir}"
 }
 
 if $dry_run {

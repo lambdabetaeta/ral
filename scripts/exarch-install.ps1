@@ -4,9 +4,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "lambdabetaeta/ral"
 
-# github.com/$Repo/releases/latest redirects to .../releases/tag/<Tag> —
-# the newest *versioned* release, distinct from any release whose tag name
-# is literally "latest" (build-binaries.yml's workflow_dispatch channel).
+# github.com/$Repo/releases/latest redirects to the newest release's tag.
 $latestResponse = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest"
 $Tag = ($latestResponse.BaseResponse.ResponseUri.ToString() -split "/tag/")[1]
 if (-not $Tag) {
