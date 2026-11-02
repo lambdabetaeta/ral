@@ -107,7 +107,8 @@ quantifies is a fact about the syntax of its body and no verdict depends on the
 order of independent statements. Nothing settles at a generalisation;
 `InferCtx::finish_indexes` runs at the unit's end: it first propagates labels
 and indexes together to a fixpoint without defaulting, then defaults unresolved
-labels to records, then propagates both again. Only then does it refuse an
+labels to records (the system's one defaulting of a value type's shape, beside
+the bind rule's grade default), then propagates both again. Only then does it refuse an
 index still pending
 (`IndexContainerUnknown`, T0075, with a second caret on the binding that holds
 it, `InferCtx.holder`).
@@ -120,8 +121,14 @@ writes, or a handler arm standing in for one — is `Return(Output, Unit)`,
 printed `Command`; `CompTy::command()` builds it and `CompTy::pure` is
 `Return(Value, _)`. `unify` unifies the grades, then the values; a grade
 disagreement is a `CompTyMismatch` reading `Command` against `Returns A`. The
-invariant `F^w A ⇒ A = Unit` is rule-enforced and asserted in `generalize` and
-the annotate walk ([[decisions/260930_graded-f|graded-f]]).
+invariant `F^w A ⇒ A = Unit` is a property of *inferred* types, not of
+well-formed ones (it fails under instantiation: `∀ν α. U(F^ν α) → F^ν α` at
+`ν := w`, `α := Int`). It holds because a grade variable is only ever unified
+with the one value type it is paired with, every rule introducing `w` does so
+at `Unit`, and the builtin schemes and the error type are paired alike; it is
+asserted in `generalize` and the annotate walk
+([[decisions/260930_graded-f|graded-f]]). `CompKind::Capture` types its body at
+`Return(fresh grade, Unit)`, so it also accepts a value producer, as if upcast.
 
 - `head_class` (`infer.rs`, beside `exec_comp_ty`) resolves a bare head by the
   order checker and runtime share: `Binding`, `Value(entry)`, `Arm`, `External`.
@@ -208,10 +215,19 @@ kind concerns `()` gains a sentence that `deploy` returns `()` and that
 takes everything a stage writes, so the remedy is operationally right. `()` is
 neither a word nor an interpolant: its kind is `scalar`.
 
-**Principality is the textbook result, with its limits stated.** One rule reads the
-order of statements: the join, which resolves its arms as they are met and holds
+**Principality is the textbook result, with its limits stated.** It is principal
+against a declarative system whose generalised kinds are *proper* — neither
+empty nor a single nullary head — which `unite_tys` enforces by refusing an
+empty meet and binding a one-head meet (`{ |x| $[$x + 1]; length $x }` is refused
+at the meet, though it is bound and never used), and which holds of the schemes
+in the environment and the builtins. Failures are data: a failure escaping a
+generalised right-hand side carries a closed error type, so no generalised
+variable escapes with it. Two rules read the order of statements. The join, which resolves its arms as they are met and holds
 no pending constraint, so a grade it could have learned later is not waited for
-(the `t : {Command}` against `{Returns String}` case above). Where a `let` captures
+(the `t : {Command}` against `{Returns String}` case above); and argument
+adaptation in `apply_args_capped`, where a block in hand adapts at its position
+to the parameter grade then known and a literal block only once every argument
+has unified (`demand_block`). Where a `let` captures
 is decided by the type at three syntax-directed sites, and every other rule is
 unification, so typing verdicts do not otherwise depend on the order the solver emits
 constraints. The deferred constraints that remain (`Lbl`, `Idx`) are settled by
@@ -283,7 +299,8 @@ variable of any sort — type, computation or row — is weak once
 `Store::unite` hands it to the survivor, and a variable of any sort
 unified with a weak one, even one already fixed to a structure, becomes weak, so
 a later mismatch is still seen; binding a weak variable to a structure makes
-every variable of the structure weak, with the same source. A scheme or binding keeps a weak variable as itself
+every variable of the structure weak, with the same source — so the weak set is
+the image of the weak seeds under the accumulated substitution. A scheme or binding keeps a weak variable as itself
 (`apply_ty_keeping_weak`) until its unit ends. A weak
 variable is treated as free in the environment, so a `let` over it is
 monomorphic in it, and the scheme lists it in `Scheme.weak` instead of

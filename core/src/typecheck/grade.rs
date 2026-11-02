@@ -132,7 +132,7 @@ impl Inferencer<'_> {
     /// `Fun` RHS is a function, bound unrun as its thunk (Let-fun); a command is
     /// captured, and the binder takes its output; a value producer's value is
     /// bound; a producer of unknown grade is made a value producer — a `let`
-    /// is a demand for a value, the one defaulting in the system.  Shared by
+    /// is a demand for a value, the one grade defaulting.  Shared by
     /// `Bind` and `Phrase::Define`.
     pub(super) fn rhs_bound_ty(&mut self, rhs: &Comp, cty: CompTy) -> Ty {
         match self.ctx.unifier.resolve_comp_ty(&cty) {

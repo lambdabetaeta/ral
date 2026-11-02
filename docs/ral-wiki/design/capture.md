@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6ca71142
+generated_at_commit: cddee133
 ---
 
 # Capture: a command's value is its output
@@ -28,7 +28,7 @@ let answer = !{ echo first ; echo second }
   `let x = M | from-line` for every `M` that is a command — a block, a call, a
   variable holding a block, a pipeline, an `if` with command arms. A right-hand
   side whose grade is still a variable is defaulted to `p`: a `let` is a demand
-  for a value, and this is the only defaulting in the system.
+  for a value, and this is the only defaulting of a grade.
 - *Argument.* In `apply_args_capped`, an argument whose type ends, after its own
   parameters, in `F^w Unit`, passed where the callee's parameter ends in
   `F^p β` at the same arity, sets `β := String` and is coerced: a literal block
@@ -105,12 +105,11 @@ accepted write preserves the body signal; a refused write pre-empts it. Bytes
 delivered before refusal remain visible. Under `!{ … } > f` the file is that
 sink, so the flush lands in `f`.
 
-The finite-behaviour algebra (`dev/agda/Core/Semantics/Behaviour.agda`) defines `capture`: body
-writes go to an accepting buffer and refusal can arise only at the outer flush. Independently,
-the typed machine routes a failed capture's buffer to the enclosing capture or thread output
-before resuming the same break (`Ral/Machine.agda`, `flush`); `Ral/OutputExamples.agda` checks
-byte preservation and nested/worker replay. Its writes cannot fail, bytes are text, and no
-adequacy theorem connects the two models.
+A checked-in mechanised model gives `capture` as a finite-behaviour algebra: body
+writes go to an accepting buffer and refusal can arise only at the outer flush. A second,
+independent typed machine routes a failed capture's buffer to the enclosing capture or thread
+output before resuming the same break, and checks byte preservation and nested/worker replay.
+Its writes cannot fail, bytes are text, and no adequacy theorem connects the two models.
 
 The capture is of the whole computation, so everything the body writes is
 retained, a `guard`'s cleanup included: `let x = !{ guard { cmd } { echo clean } }`

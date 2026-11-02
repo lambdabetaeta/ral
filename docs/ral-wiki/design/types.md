@@ -9,8 +9,10 @@ call-by-push-value [[map/core/ir|IR]] after [[map/core/elaboration|elaboration]]
 - **computation types** `C` describe effectful computations.
 
 The value types are `Unit`, `Bytes`, `Bool`, `Int`, `Float`, `String`,
-homogeneous lists `[A]` and maps `Map A`, closed and open records, the
-thunk `{B}`, the opaque `Handle`, and type/row variables. Records are
+homogeneous lists `[A]` and maps `Map A`, closed and open records, their dual
+the variant (a tagged sum over the same rows), the thunk `{B}`, the graded
+handle `Handle^ε A` (what `spawn` returns; `await` gives back `F^ε A`), and
+type/row variables. Records are
 open-row-polymorphic; that fragment is its own page,
 [[design/row-types|row-types]]. Records and maps share one runtime carrier but
 answer different static questions — [[design/records-and-maps|records-and-maps]].
@@ -68,11 +70,17 @@ and `watch` keep the grade in the handle they return, `Handle^ε α`, and
 for every ε. `map`,
 `filter` and `sort-list-by` demand a value.
 
-**Invariant.** `F^w A ⇒ A = Unit`. Every rule that introduces `w` does so at
-`Unit`, every rule that copies a grade copies the value type with it, and every
-builtin scheme pairs a grade variable with exactly one value variable; a sweep in
+**Invariant, of inferred types.** `F^w A ⇒ A = Unit`. This is a theorem about
+what inference produces, not a well-formedness condition on types: `F^w Int` is
+a formable type, and a scheme can instantiate to it
+(`∀ν α. U(F^ν α) → F^ν α` at `ν := w`, `α := Int`). It holds because every
+rule that introduces `w` does so at `Unit`, every rule that copies a grade
+copies the value type with it, and a grade variable is only ever unified
+together with the one value type it is paired with, so output appears only at
+`Unit` — given that every builtin scheme, and the error type of `fail` and
+`try`, pair their grade variables in the same way. A sweep in
 `core/tests/builtin_registry_property.rs` and a `debug_assert` in `generalize`
-guard it. Grades are atomic — a grade variable binds only to `p` or `w` — so
+guard it; the pairing argument is checked in a mechanised model. Grades are atomic — a grade variable binds only to `p` or `w` — so
 there is no occurs check, no kind, and a grade is never weak.
 
 Every external command is `F^w Unit` (`external_exec_comp_ty` in
@@ -87,7 +95,9 @@ captured.** `cap : F^w Unit ⇝ F^p String` is the one run-time coercion, captur
 then decode; `F^p Unit ⇝ F^w Unit` is a zero-cost upcast (a `()`-producer
 regarded as a command, identity at run time), admitted at joins and handler arms
 only. From `F^p Unit` there is no path to `F^p String`, so `let x = f` with `f`
-returning `()` binds `()`; that keeps the two coherent. `cap` is inserted in
+returning `()` binds `()`; that keeps the two coherent.
+The checker-inserted `capture M` node itself types its body at `F^ν Unit` for a
+fresh ν, so a `()`-producer there is accepted as if upcast. `cap` is inserted in
 checking mode at a demand already resolved to `F^p`: the *bind* rule (the whole
 right-hand side of a `let`), an *argument* to a value-demanding function, and a
 *join* that settles on a value ([[design/capture|capture]]).
@@ -98,8 +108,12 @@ M : F^w Unit ⟹  M to x. N  binds x : String, elaborated  cap M to d. decode d 
 M : F^ε̂ A   ⟹  ε̂ := p, then the first case
 ```
 
-The bind rule's third case is the only defaulting in the system, and it is
-local: a `let` demands a value. `annotate` wraps the recorded nodes.
+The bind rule's third case defaults a grade, and it is local: a `let` demands a
+value. `annotate` wraps the recorded nodes. It is not the only default: a label
+read (`$r[host]`) whose target is still a variable at the generalising `let`
+that owns the variable, or at the end of the unit, is closed as a record
+(`finish_indexes`, [[internals/type-inference|type-inference]]). No *value type*
+is defaulted by the hole it lands in.
 
 **`capture` is total and exact.** `capture M : F Bytes` for `M : F^w Unit` runs
 `M` with its stdout captured and returns precisely the bytes `M` wrote —
@@ -190,13 +204,26 @@ Three properties hold:
 - capture is placed by the type at three syntax-directed sites, and the result is
   principal on that stated rule. Joins are decided in program order with no
   pending constraints, so the verdict is not order-independent in one corner
-  ([[decisions/260930_graded-f|graded-f]]).
+  ([[decisions/260930_graded-f|graded-f]]); argument adaptation shares the
+  corner: a block in hand adapts to its parameter's grade as known at its own
+  position, a literal block only after every argument has unified, so a grade
+  fixed by a later argument reaches the former too late.
+
+**Principality is relative to proper kinds.** Inference is principal against a
+declarative system in which every generalised kind is *proper*: not empty, and
+not a single nullary head. That is what the checker implements: it refuses an
+empty meet, and a meet that is one nullary head binds the variable to that
+head. A declarative system that allowed a variable of empty kind would type what
+the checker rightly refuses: `let f = { |x| $[$x + 1]; length $x }` needs `x`
+both `number` and `sized`, so it is refused though `f` is bound and never
+called. The same properness is assumed of every scheme in the environment and
+every builtin's.
 
 Inference is annotation-free; generalisation happens at the `Bind` boundary. A
 leaf, meanwhile, commits before inference begins: a bare word's value type is
 fixed by the grammar that classifies it, never by the hole it lands in
 ([[invariants/numerals-denote-numbers|numerals-denote-numbers]]), so no
-defaulting rule touches a value type. Soundness then rests on two independent
+defaulting rule touches a leaf's value type. Soundness then rests on two independent
 legs:
 
 - **Recursion** is governed by the strongly-connected-component structure of
@@ -206,7 +233,12 @@ legs:
 - **No value restriction is needed.** Bindings are immutable, so there are no
   polymorphic references; and CBPV's `Bind` sequences a computation's effect
   *before* binding its result, so the thing generalised is always a value whose
-  effect has already happened. What a program did not decide — data that
+  effect has already happened. What an effectful right-hand side can still
+  emit is typed independently of the variables the bind generalises: values
+  pass through the scheme, bytes are untyped, and a failure carries an error
+  of a closed data type. That last is required: a failure raised inside a
+  generalised right-hand side escapes the bind, and preservation holds only
+  because its payload mentions no generalised variable. What a program did not decide — data that
   enters through a decoder, or a container indexed by a computed key — has
   *weak* type variables, which a `let` never quantifies: one type per unit
   ([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
