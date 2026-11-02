@@ -75,6 +75,10 @@ let repo_root    = resolve-path "!{dirname $SCRIPT}/.."
 let artifact_dir = "$repo_root/target/release-artifacts"
 let cache_dir    = "$repo_root/target/release-cache"
 
+# Read here, not in `main`: a dry run's handler would intercept `uname`.
+let host_os   = norm_os !{uname -s}
+let host_arch = norm_arch !{uname -m}
+
 # The cross images ship amd64 only (run under Rosetta on Apple Silicon).
 let musl_x86     = 'messense/rust-musl-cross:x86_64-musl'
 let musl_arm     = 'messense/rust-musl-cross:aarch64-musl'
@@ -132,8 +136,8 @@ let main = {
     mkdir -p "$cache_dir/binaries"
 
     if $want_local {
-        host_variants_ral    "$cache_dir/target-host" !{norm_os !{uname -s}} !{norm_arch !{uname -m}} false
-        host_variants_exarch "$cache_dir/target-host" !{norm_os !{uname -s}} !{norm_arch !{uname -m}} false
+        host_variants_ral    "$cache_dir/target-host" $host_os $host_arch false
+        host_variants_exarch "$cache_dir/target-host" $host_os $host_arch false
         echo ''
         echo "!{styled green '  Local build done.'}  Artifacts in !{styled yellow $artifact_dir}"
         exit 0
@@ -180,34 +184,36 @@ let main = {
     }
 
     if $build_macos {
-        let kernel = uname -s
-        if $[$kernel == 'Darwin'] {
-            host_variants_ral    "$cache_dir/target-macos" 'macos' !{norm_arch !{uname -m}} true
-            host_variants_exarch "$cache_dir/target-macos" 'macos' !{norm_arch !{uname -m}} true
+        if $[$host_os == 'macos'] {
+            host_variants_ral    "$cache_dir/target-macos" 'macos' $host_arch true
+            host_variants_exarch "$cache_dir/target-macos" 'macos' $host_arch true
         } else {
             # Silent under --all or the default; warn only when asked for.
             if $want_macos {
-                warn "!{styled red "  --macos requested but host is $kernel; skipping"}"
+                warn "!{styled red "  --macos requested but host is $host_os; skipping"}"
             }
         }
     }
 
-    echo ''
-    echo "!{styled cyan '==>'} sha256 checksums"
-    for !{list-dir $artifact_dir} { |e|
-        if !{re-match '\.tar\.gz$' $e[name]} {
-            let path = "$artifact_dir/$e[name]"
-            let line =
-              try {
-                return !{sha256sum $path | from-string}
-              } { |_|
-                return !{shasum -a 256 $path | from-string}
-              }
-            let hash = !{words $line}[0]
-            to-string "$hash\n" > "$path.sha256"
+    # Reads what the build wrote; a dry run wrote nothing.
+    if $[not $dry_run] {
+        echo ''
+        echo "!{styled cyan '==>'} sha256 checksums"
+        for !{list-dir $artifact_dir} { |e|
+            if !{re-match '\.tar\.gz$' $e[name]} {
+                let path = "$artifact_dir/$e[name]"
+                let line =
+                  try {
+                    return !{sha256sum $path | from-string}
+                  } { |_|
+                    return !{shasum -a 256 $path | from-string}
+                  }
+                let hash = !{words $line}[0]
+                to-string "$hash\n" > "$path.sha256"
+            }
         }
+        ls -1 $artifact_dir
     }
-    ls -1 $artifact_dir
     echo ''
     echo "!{styled green '  Done.'}  Artifacts in !{styled yellow $artifact_dir}"
 }
