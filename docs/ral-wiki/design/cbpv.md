@@ -30,24 +30,33 @@ aliases, `eval`, subshells, and trap handlers: a block can be bound, passed,
 returned, or installed as an effect handler. Currying desugars to nested
 lambdas, so partial and under-application are uniform.
 
-**The Agda core proves properties of an intrinsically typed model, not a refinement of Rust.**
-The model supplies graded syntax (`p`/`w`, `Returns` and `Command`) and one CEK machine per thread:
+**A mechanised core calculus models ral; it is not a refinement of Rust.**
+It is Agda (`--safe --without-K`, no postulates): extrinsically typed call-by-push-value over
+well-scoped terms, with grades (`F^ε A`, value/output), kinds as head sets, scoped rows up to
+permutation, and Hindley–Milner let-polymorphism generalising at `bind` with no value restriction
+(proper kinds only). Its CK machine, with an output sink, `capture` and failure, is deterministic
+and type-safe (preservation and progress). Unification terminates and is most general; inference
+is sound, complete and principal relative to proper kinds, and refuses only untypable terms.
+Inferred types pair `output` only with `Unit`, the grade invariant, as a theorem
+([[design/types|types]], [[internals/type-inference|type-inference]]).
 
-- preservation is by indexing; handle-ranking preservation and pool progress rule out waiting
-  cycles;
-- round-robin gives an enabled thread an eventual turn, or main-thread finality, not an explicit
-  numerical waiting bound;
+The core does not yet cover coercion placement (`capture`/`decode`/`upcast` insertion and argument
+adaptation), equi-recursive types through data, concurrency, or authority.
+
+An older, monomorphic, intrinsically typed model still covers threads and authority:
+
+- preservation is by indexing; handle-ranking and pool progress rule out waiting cycles;
+- round-robin gives an enabled thread an eventual turn, or main-thread finality, not a numerical
+  waiting bound;
 - workers inherit ambient grants; external requests carry admission evidence;
 - cancellation ancestry is separate from handle visibility and result claiming; await/join poll,
-  cleanup shields, and both successful and failing gathers drain all accepted children;
+  cleanup shields, and gathers drain all accepted children;
 - failed captures flush their output before resuming the break; worker output replays on await/join.
 
-Cleanup grace is unbounded, stop causes are collapsed, and bytes are text. The stack-free big-step
-semantics and checked capture executions have no general adequacy
-proof. A separate development independently gives finite behaviours, capture and least fixed
-points of continuous process operators; no machine interpretation connects the two developments.
-Contextual equivalence and the βη laws are not mechanised. The remaining assumptions
-include the intentionally omitted `i32` exit-status check.
+Cleanup grace is unbounded, stop causes are collapsed, and bytes are text. Its big-step semantics
+has no general adequacy proof. A separate trace semantics gives finite behaviours, capture and
+least fixed points of continuous process operators; no adequacy result connects it to either
+machine yet. Contextual equivalence and the βη laws are not mechanised.
 
 Bindings are immutable. Re-`let` introduces a fresh binding that shadows the
 outer one within its lexical scope; closures capture at definition time. This
