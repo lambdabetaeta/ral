@@ -1,4 +1,5 @@
-<!-- verified_at_commit: 9c8aa5d9 -->
+<!-- generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0 -->
+<!-- verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -492,7 +493,7 @@ ral has these kinds of value:
 | `Bytes` | An arbitrary finite sequence of bytes |
 | `List` | An ordered sequence of values |
 | record or map | Values stored under string keys |
-| variant | A tag with an optional payload |
+| variant | A tag carrying one value; a bare tag carries `()` |
 | block or function | A suspended command |
 | handle | A reference to concurrent work |
 
@@ -742,7 +743,8 @@ failing spread fails where it is written.
 
 ### 4.6. Variants
 
-A variant records one named outcome. It can carry no payload or one value:
+A variant records one named outcome. A bare tag carries `()`: `` `t `` and
+`` `t () `` are one value.
 
 ```ral
 let absent = `none
@@ -753,8 +755,7 @@ let problem = `error [message: 'not found']
 The tag takes the next value atom as its payload. So two tags in a row nest:
 `` `a `b `` is one value, `` `a `` carrying `` `b ``. To pass two tags as two
 arguments, bind the first: `` let a = `a `` and then `` f $a `b ``. A statement
-boundary, comma, closing bracket, pipe, `?`, or redirect leaves it without a
-payload.
+boundary, comma, closing bracket, pipe, `?`, or redirect leaves it bare.
 Section 8 defines `case`, which chooses one arm by tag.
 
 A tag says *which of* several alternatives, and a key says *which part of* one
@@ -959,7 +960,7 @@ One pattern cannot bind the same name twice. ral reports this as a parse
 error, including when the repeated name is nested or used as a list tail.
 
 A list pattern without `...rest` must match the complete list. It is an error
-if the list has too few or too many items. A map pattern requires every
+if the list has too few or too many items. A record pattern requires every
 field it names. Extra map fields are allowed.
 
 A pattern either binds every name or binds none of them. If any nested part
@@ -5195,13 +5196,13 @@ map-key       ::= static-key | computed-key
 
 unit-literal  ::= "(" ")"
 
-pattern       ::= "_" | identifier | list-pattern | map-pattern
+pattern       ::= "_" | identifier | list-pattern | record-pattern
 list-pattern  ::= "[" pattern-list? "]"
 pattern-list  ::= pattern ("," pattern)* ("," "..." identifier)?
                 | "..." identifier
-map-pattern   ::= "[" map-pattern-entry
-                  ("," map-pattern-entry)* ","? "]"
-map-pattern-entry ::= static-key ":" pattern
+record-pattern ::= "[" record-pattern-entry
+                   ("," record-pattern-entry)* ","? "]"
+record-pattern-entry ::= static-key ":" pattern
 static-key    ::= identifier | quoted-string | constant-double-quoted-string
 
 redirects     ::= redirect*
@@ -5298,11 +5299,11 @@ and computation forms are:
 ```text
 v ::= unit | true | false | n | f | s | bytes
     | [v1, ..., vn] | {l1 = v1, ..., ln = vn}
-    | `l | `l v | thunk M | handle A
+    | `l v | thunk M | handle A
 
 M ::= return v
     | force v
-    | lambda p . M
+    | lambda x . M
     | M v
     | M to p . N
     | exec h [v1, ..., vn]
@@ -5314,7 +5315,8 @@ M ::= return v
     | letrec {xi = vi}
     | scope op
     | capture M
-    | decode v
+    | upcast M
+    | prim o [v1, ..., vn]
 
 op ::= try v1 v2 | guard v1 v2 | within v1 v2 | grant v1 v2 | audit v
      | spawn [v1] v2 | gather v
@@ -5328,9 +5330,13 @@ is what can be held unrun. `redirect`
 takes the computation itself: its body is an application or a nested scope,
 neither of which can fuse its own redirects the way `exec` does.
 
-`capture` and `decode` are the two forms no program can name: the checker
-writes them and nothing else does (§17.5). They are core terms all the same,
-because they survive elaboration and the evaluator matches on them.
+`capture` and `upcast` are checker-written control forms (§17.5).
+`decode v` abbreviates `prim decode [v]`, a primitive on a byte value.
+Other primitives include arithmetic, rendering, concatenation, indexing,
+record update, and list/map assembly; all operands are values. Operand
+computations elaborate to surrounding binds. A bare tag supplies `unit` as
+its payload. A lambda binds one name; destructuring parameters elaborate
+to binds after the whole lambda chain.
 
 Command calls elaborate either to `exec`, which enters command dispatch, or to
 application when the head resolves to a bound value. A trailing redirect on an
@@ -5865,21 +5871,23 @@ X / κ, Σ                          (climbs to the first frame whose rule catche
 - The focus is either a **closure** ⟨M, Γ⟩ — a computation paired with the
   environment its free variables read — a **terminal** `R` meeting the frame
   atop `κ`, or a **break** `X` climbing past it.
-- `κ` is a stack of **frames**, one per enclosing `to`, application, or scope
-  form still open; a frame carries the environment it resumes under, `Γ`, so a
-  binder's extent is exactly the frame pushed for it and nothing wider.
-  Applying a thunk puts its closure in focus directly, in place, and pushes no
-  frame — `force(thunk M) = M` — so a tail call costs no stack: depth is
-  `|κ|`, and a call in tail position leaves it unchanged.
+- `κ` is a stack of **frames** for pending binds, sequences, arguments and
+  scopes. Bind and sequence frames carry the environment they resume under,
+  so a binder's extent is structural. Application pushes one `Arg` per
+  argument, right to left, before evaluating its computation head. Forcing a
+  thunk puts its closure in focus and pushes nothing: `force(thunk M) = M`.
+  A lambda consumes one argument frame and enters its body in tail position.
+  Depth is `|κ|`; a call with n arguments needs n free frames at entry.
 - `Σ` is everything not lexical: current directory, environment overrides,
   handlers, capabilities, status, and audit state. Lexical bindings live in
   `Γ`, never in `Σ`.
 - `R` has two shapes, `value v` or `lambda ⟨M, Γ⟩` — a λ-closure standing for
-  an unapplied function, since `lambda p.M` is never a value (§17.2). Only an
-  `Apply` frame consumes a `lambda` by β; every other frame's hole wants a
-  value, and meeting a `lambda` there is a case the checker excludes: the one
-  function-typed computation a value hole could otherwise receive is a `let`'s
-  right-hand side, which Let-fun binds unrun (§17.5).
+  an unapplied function, since `lambda x.M` is never a value (§17.2). Only an
+  `Arg` frame consumes a `lambda` by β, binding its one name. Scope frames
+  whose holes admit functions pass it through; value-demanding frames reject
+  it. Let-fun binds a function-typed right-hand side unrun (§17.5). No rule
+  applies a returned value or forces implicitly; the checker writes an
+  application through a returned thunk as `M to h. force h v`.
 - `X` has two shapes, `error e` and `escape q` (`q ::= exit n`).
   A break climbs `κ` past every frame whose rule does not catch it, each
   frame's own rule running once on the way up to close what it opened — a
@@ -5899,12 +5907,14 @@ error e / (to p.N, Γ) :: κ, Σ  ⟶  error e / κ, Σ             Propagate
 
 `M to p.N` pushes its frame *before* `M` runs, carrying the environment `N`
 resumes under; `p ↦ v` is built from that frame's own `Γ` when `M` returns, so
-`p` scopes over `N` alone. A sequence `M;N` is `M to _.N`: it evaluates left
-to right, stops on the first error or escape, and its value is its last
-statement's. `if` evaluates its Boolean condition and forces only the chosen
+`p` scopes over `N` alone. A sequence `M;N` pushes its own frame, discards
+`M`'s returned value and continues with `N` under the saved environment.
+It evaluates left to right, stops on the first error or escape, and its value
+is its last statement's. A written `let _` is a pattern bind.
+`if` evaluates its Boolean condition and forces only the chosen
 arm, in place and over the same `Γ`: a literal thunk runs with the current
 environment and closes nothing. `case` evaluates the scrutinee, selects the arm
-carrying its tag, pushes an `Apply` frame holding the payload, `()` for a
+carrying its tag, pushes an `Arg` frame holding the payload, `()` for a
 nullary tag, and forces the arm. The arm is a branch and not an ordinary
 function call: it runs in the ambient shell context, so the arm's own effects
 on the shell outlive the `case`.

@@ -76,7 +76,7 @@ impl<'a> Tag<'a> {
         }
     }
 
-    /// A nullary tag takes no payload, not even `()`.
+    /// A nullary tag takes no payload.
     fn nullary(&self, vocab: &Vocab) -> Result<(), PolicyError> {
         match self.payload {
             None => Ok(()),
@@ -836,9 +836,9 @@ mod tests {
     }
 
     #[test]
-    fn nullary_tags_refuse_a_payload_even_unit() {
+    fn nullary_tags_refuse_a_non_unit_payload() {
         let e = exec_refusal(exec(
-            vec![dir(Value::variant("system", Some(Value::Unit)))],
+            vec![dir(Value::variant("system", Some(Value::Bool(true))))],
             vec![],
         ));
         assert!(e.message.contains("takes no payload"), "{}", e.message);
@@ -1195,7 +1195,7 @@ mod tests {
         assert!(m.contains("`` `online `` is not a net mode"), "{m}");
         let m = refusal(&rec(&[(
             "net",
-            Value::variant("offline", Some(Value::Unit)),
+            Value::variant("offline", Some(Value::Bool(true))),
         )]))
         .message;
         assert!(m.contains("takes no payload"), "{m}");
@@ -1219,7 +1219,7 @@ mod tests {
         assert!(m.contains("`` `on `` is not a GPU mode"), "{m}");
         let m = refusal(&rec(&[(
             "gpu",
-            Value::variant("withheld", Some(Value::Unit)),
+            Value::variant("withheld", Some(Value::Bool(true))),
         )]))
         .message;
         assert!(m.contains("takes no payload"), "{m}");
@@ -1267,7 +1267,7 @@ mod tests {
         assert!(e.hint.unwrap().contains("`shell` takes the list of verbs"));
         let m = refusal(&rec(&[(
             "editor",
-            list(vec![Value::variant("read", Some(Value::Unit))]),
+            list(vec![Value::variant("read", Some(Value::Bool(true)))]),
         )]))
         .message;
         assert!(m.contains("takes no payload"), "{m}");

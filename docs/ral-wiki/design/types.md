@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 9c8aa5d9
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 ---
 
 # The type system: Hindley–Milner with rows
@@ -126,13 +126,13 @@ in `core/src/shell/evaluator/machine.rs`). Its one further clause is handler
 semantics rather than decoding: bytes `M` wrote before failing are flushed to
 the sink the capture replaced rather than lost.
 
-**`decode : F Bytes → F String` owns everything lossy.** One trailing
+**`decode : Bytes → F String` owns everything lossy.** One trailing
 terminator goes, and the rest must decode as strict UTF-8 or the step fails,
 naming `| from-bytes` as the way to keep output that is not text. It is its own
-node (`CompKind::Decode`), so every partial or lossy step from bytes to
+primitive (`Prim::Decode`), so every partial or lossy step from bytes to
 `String` is syntax the operational semantics reads.
 
-Both nodes are checker-inserted and have no surface syntax: a translation whose
+Both terms are checker-inserted and have no surface syntax: a translation whose
 meaning a session could redefine is not a translation
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]). The composite
 is close to the decoder tail `M | from-string`, which a user can write — and

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9c8aa5d9
-generated_at_date: 2026-11-01
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_date: 2026-11-02
 covers_paths: [core/src/elaborator.rs, core/src/elaborator/, core/src/syntax/group.rs]
 ---
 
@@ -53,9 +53,11 @@ and `$SCRIPT` bakes to it, shown, as a `Val::String` rather than a
 `Val::Variable` lookup (`Elaborator::variable_val`), so self-location is
 lexical by construction. A virtual source (the REPL, `-c`, a hook, an embedded
 `<…>` source) has no file and therefore nothing to bake, and a `$SCRIPT`
-reference there is a static error. That is the only way elaboration can fail: the error is parked in one
-`Option<ParseError>` slot and checked once at the end, rather than threading
-`Result` through every traversal.
+reference there is a static error. A spread into a written value head or
+lexically bound head is refused here too, through `Elaborator::refuse`, with
+the checker's `spread_into_application` message and hint, as an elaboration
+error (P0001, exit 2). Errors are parked in one `Option<ParseError>` slot and checked once
+at the end, rather than threading `Result` through every traversal.
 
 `group::parts` (`core/src/syntax/group.rs`) partitions each statement list
 into statements and *stretches* of block definitions (SPEC §5.7): any
@@ -87,12 +89,32 @@ nothing more: every interior edge is a byte pipe allocated from position.
 
 An index lowers `IndexKey::{Label, Position, Data}` directly to the IR's
 `Key` of the same form (`elaborator/expr.rs`); only `Data` lowers an expression
-to a value. Written names never become generic string-valued keys.
+to a value. Every key operand lowers before the first read; each read is one
+`Prim::Index`, joined to the next by a synthetic bind. Written names never
+become generic string-valued keys.
 
-A map literal with a spread or computed key assembles from `MapOperand`s
-(`Elaborator::map_operand`): each key, value and spread elaborates isolated,
-to a plain `Value` or a `Compute`d computation the machine sequences in source
-order, so no operand's effect is hoisted past another.
+**Operands hoist; primitives only compute on values.**
+
+- A map literal hoists each key, then its value, and each spread in place.
+  `Prim::Map` assembles the resulting values; a repeated computed key fails
+  only after every operand ran. `Prim::List` handles list spreads and
+  `Prim::Update` a record's single base and replacement fields.
+- Interpolation first lowers every part through `to_val`, then hoists a
+  `Prim::Render` for each nonliteral part in written order, followed by one
+  n-ary `Prim::Concat`. All part computations precede the first rendering.
+- A value head lowers through `to_val` before its arguments, then becomes
+  `App { head: Force(v), args }`. `Exec` alone carries spreading `Argv`.
+- A parameter chain becomes name-binding `Lam`s followed by `Bind(Return(g),
+  pattern, rest)` for each destructuring parameter, at that parameter's span.
+  A later plain name also uses a synthetic binder and a body bind if an
+  earlier destructuring parameter binds it, preserving shadowing. Wildcards
+  use synthetic names; display recovers the written patterns.
+- A written sequence becomes `Seq`; a written `let _` remains `Bind` on
+  `Wildcard`. Hoists use synthetic name patterns, distinguishing them from
+  written continuations for failure hints.
+- A bare tag gets `Val::Unit` as its payload. A form's options lower as a
+  spread-free record node, hoisted, spanned and sorted; handler labels stay
+  separate syntax.
 
 An arm of `if` and `case` elaborates to a thunk the form forces
 (`Elaborator::elab_arm`): a literal `{ … }` or `{ |p| … }`, or a name holding

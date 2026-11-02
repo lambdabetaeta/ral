@@ -25,7 +25,7 @@ use crate::authority::sandbox::FsProjection;
 use crate::authority::sandbox::{ExecProjection, SandboxProjection};
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
 use crate::data::FOValue;
-use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
+use crate::ir::{CaseArm, Comp, CompKind, Exec, Val};
 #[cfg(unix)]
 use crate::path::Walked;
 use crate::protocol::Frame;
@@ -42,13 +42,12 @@ pub fn case_arm_val(arm: &CaseArm) -> &Val {
 
 /// The arguments of a call — an `Exec`'s argv or an `App`'s — in order,
 /// spread and single alike; empty for any other node.
-pub fn call_args(comp: &Comp) -> impl Iterator<Item = &Val> {
-    let args: &[ValListElem] = match &comp.item {
-        CompKind::Exec(exec) => &exec.args,
-        CompKind::App { args, .. } => args,
-        _ => &[],
-    };
-    args.iter().map(|elem| &elem.slot().item)
+pub fn call_args(comp: &Comp) -> Box<dyn Iterator<Item = &Val> + '_> {
+    match &comp.item {
+        CompKind::Exec(exec) => Box::new(exec.argv.iter().map(|arg| &arg.slot().item)),
+        CompKind::App { args, .. } => Box::new(args.iter().map(|arg| &arg.item)),
+        _ => Box::new(std::iter::empty()),
+    }
 }
 
 /// Whether an `Exec` carries redirects, which a fuzz invariant asserts it

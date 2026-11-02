@@ -126,11 +126,7 @@ impl Elaborator {
         })
     }
 
-    /// Elaborate `stmts` at depth > 0 — every block or lambda body — right-
-    /// nesting each statement into a `Bind` chain over what follows it, so
-    /// `{ a; b }` is `a to _. b`.  The tail of the block is its last
-    /// statement's own comp, not a `Bind` on it; a block ending in a `let`
-    /// has tail `Return(Unit)`.
+    /// Right-nest statements into `Bind` and `Seq`; a trailing `let` returns `Unit`.
     pub(super) fn stmts_nested(&mut self, stmts: &[Stmt]) -> Comp {
         let mut units: Vec<(Option<Span>, NestedUnit)> = Vec::new();
         let parts = group::parts(stmts);
@@ -152,31 +148,24 @@ impl Elaborator {
         };
         let mut rest = nested_tail(span, last);
         for (span, unit) in rev {
-            rest = unit.into_bind(span, rest);
+            rest = unit.into_comp(span, rest);
         }
         rest
     }
 
-    /// One statement at depth > 0: a `let` binds a fresh `Name` (never
-    /// `Wildcard` — a surface `_` gets the hygienic gensym `$[…]` temporaries
-    /// already use), and anything else is a discard, marked `Wildcard`,
-    /// which no surface pattern ever produces.
+    /// One nested statement, before its continuation is known.
     fn nested_single(&mut self, stmt: &Stmt) -> (Option<Span>, NestedUnit) {
         let Spanned { item: kind, span } = stmt;
         let span = *span;
         self.with_span(span, |this| {
             if let Ast::Let { pattern, value } = kind {
                 let rhs = this.elab_let_rhs(value);
-                let pattern_ir = match &pattern.item {
-                    Pattern::Wildcard => Pattern::Name(this.gensym()),
-                    named => named.clone(),
-                };
                 this.bind_pattern(pattern);
                 return (
                     span,
                     NestedUnit::Bind {
                         rhs,
-                        pattern: pattern_ir,
+                        pattern: pattern.item.clone(),
                     },
                 );
             }
@@ -192,18 +181,21 @@ enum NestedUnit {
     /// A `let` or a recursive group's member: `rest` is the elaboration of
     /// what follows.
     Bind { rhs: Comp, pattern: Pattern },
-    /// Any other statement, discarded on a `Wildcard` bind.
+    /// Any other statement.
     Other { comp: Comp },
 }
 
 impl NestedUnit {
     /// Nest over `rest`: a `let` binds its pattern, anything else is discarded.
-    fn into_bind(self, span: Option<Span>, rest: Comp) -> Comp {
-        let (pattern, comp) = match self {
-            Self::Bind { rhs, pattern } => (pattern, rhs),
-            Self::Other { comp } => (Pattern::Wildcard, comp),
+    fn into_comp(self, span: Option<Span>, rest: Comp) -> Comp {
+        let item = match self {
+            Self::Bind { rhs, pattern } => CompKind::bind(pattern, rhs, rest),
+            Self::Other { comp } => CompKind::Seq {
+                first: Arc::new(comp),
+                rest: Arc::new(rest),
+            },
         };
-        Spanned::with_span(span, CompKind::bind(pattern, comp, rest))
+        Spanned::with_span(span, item)
     }
 }
 
@@ -213,7 +205,7 @@ fn nested_tail(span: Option<Span>, unit: NestedUnit) -> Comp {
     match unit {
         NestedUnit::Other { comp } => comp,
         bind @ NestedUnit::Bind { .. } => {
-            bind.into_bind(span, Spanned::with_span(span, CompKind::Return(Val::Unit)))
+            bind.into_comp(span, Spanned::with_span(span, CompKind::Return(Val::Unit)))
         }
     }
 }

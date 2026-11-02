@@ -213,10 +213,13 @@ impl EngineSeed {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::ir::{CompKind, ThunkNode, Val};
     use crate::shell::boot::BakedPrelude;
     use crate::shell::runtime::{
-        DefaultPolicy, Env, HookName, HookSig, Shell, Value, block_over, captured, idle_handle,
+        Binding, Closure, DefaultPolicy, Env, HookName, HookSig, Shell, Value, block_over,
+        captured, idle_handle,
     };
+    use crate::source::Spanned;
     use crate::sync::LockExt as _;
     use std::collections::BTreeSet;
 
@@ -261,7 +264,7 @@ mod tests {
     }
 
     /// A booted parent with a binding of every shape the scrub and the codec
-    /// must treat: kept, handle-carrying, block, partly applied native, a
+    /// must treat: kept, handle-carrying, block, partial application, a
     /// frame with a catch-all, a per-name and an alias entry, a hook, an extra source, a fixed unit, and a spent
     /// birth.
     fn parent() -> Shell {
@@ -275,19 +278,7 @@ mod tests {
         parent.set_var("live".to_string(), idle_handle());
         let blk = block_over(&parent.env);
         parent.set_var("blk".to_string(), blk.clone());
-        let has = parent
-            .session
-            .runtime
-            .builtins
-            .value("has")
-            .expect("`has` is a builtin");
-        parent.set_var(
-            "nat".to_string(),
-            Value::Native {
-                entry: Arc::new(has),
-                applied: Box::new([idle_handle()]),
-            },
-        );
+        parent.set_var("nat".to_string(), partial_over(idle_handle()));
         let catch_all = block_over(&parent.env);
         let mut alias = HandlerEntry::ral_per_name("alias".into(), blk.clone());
         alias.scheme = Some(Arc::new(crate::ty::Scheme::mono(crate::ty::Ty::Unit)));
@@ -319,6 +310,26 @@ mod tests {
         parent
     }
 
+    /// `has` applied to `held` alone, held as a value: a thunk of the call.
+    fn partial_over(held: Value) -> Value {
+        let mut env = Env::new();
+        env.bind(
+            "held".into(),
+            Binding {
+                value: held,
+                scheme: None,
+            },
+        );
+        let call = Arc::new(Spanned::synthetic(CompKind::App {
+            head: Arc::new(Spanned::synthetic(CompKind::Force(Val::Variable(
+                "has".into(),
+            )))),
+            args: Box::new([Spanned::synthetic(Val::Variable("held".into()))]),
+        }));
+        let node = ThunkNode::new(Arc::clone(&call));
+        Value::Thunk(Closure::new(call, node.occ(), &env))
+    }
+
     /// `bequest` through bytes, and decoded against `runtime`.
     fn through_the_wire(bequest: &Bequest, runtime: &Runtime) -> Bequest {
         let seed = seal(bequest).expect("seal").unseal().expect("unseal");
@@ -334,23 +345,13 @@ mod tests {
     }
 
     /// Values agree across the wire: data by `==`, a closure by its body and
-    /// its captured scope, a native by its name and what it was applied to.
+    /// its captured scope, a native by its name.
     fn agree(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Thunk(x), Value::Thunk(y)) => {
                 x.comp() == y.comp() && scopes_agree(x.env(), y.env())
             }
-            (
-                Value::Native { entry, applied },
-                Value::Native {
-                    entry: theirs,
-                    applied: args,
-                },
-            ) => {
-                entry.decl.name == theirs.decl.name
-                    && applied.len() == args.len()
-                    && applied.iter().zip(args).all(|(a, b)| agree(a, b))
-            }
+            (Value::Native(x), Value::Native(y)) => x.decl.name == y.decl.name,
             _ => a == b,
         }
     }
@@ -397,12 +398,9 @@ mod tests {
                 opaque(captured(catch_all).get("live")),
                 "{arm} must scrub a handler frame's captured handle"
             );
-            let Some(Value::Native { applied, .. }) = env.get("nat") else {
-                panic!("{arm} must keep a partially applied native");
-            };
             assert!(
-                opaque(applied.first()),
-                "{arm} must scrub a native's handle"
+                opaque(captured(env.get("nat")).get("held")),
+                "{arm} must scrub a partial application's captured handle"
             );
         }
 

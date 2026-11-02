@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 generated_at_date: 2026-11-01
 covers_paths: [plugins/, ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
@@ -159,7 +159,8 @@ so plugin code never handles UTF-8.
 `state-set`) and answers `EditorSnapshot` or data; `` `repl-plugin `` carries
 a `PluginNote` — `loaded` with the manifest's first-order part, `unloaded`
 with a name; `` `repl-clipboard `` carries a `ClipboardReq` and answers
-whether the whole text landed. `EditorOp` and `ClipboardReq` are `Gated`. An
+whether the whole text landed. A bare `` `state-set `` sets `()` as
+`` `state-set () `` does. `EditorOp` and `ClipboardReq` are `Gated`. An
 unknown class or tag is refused by name.
 
 ## Runtime, manifests, loading

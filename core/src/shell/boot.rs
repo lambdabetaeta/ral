@@ -182,6 +182,7 @@ fn describe_comp(kind: &CompKind) -> &'static str {
         CompKind::App { .. } => "a call",
         CompKind::Exec(_) => "a command",
         CompKind::Bind { .. } => "`to`",
+        CompKind::Seq { .. } => "a sequence",
         CompKind::Force(_) => "`force`",
         _ => "a computation",
     }

@@ -194,12 +194,10 @@ pub(super) fn inspect<'a>(val: &'a Val, env: &'a Env) -> Cow<'a, Value> {
             Arc::clone(node),
             env.clone(),
         ))),
-        Val::Variant { label, payload } => Cow::Owned(Value::Variant {
-            label: label.clone(),
-            payload: payload
-                .as_deref()
-                .map(|p| Box::new(inspect(p, env).into_owned())),
-        }),
+        Val::Variant { label, payload } => Cow::Owned(Value::variant(
+            label.clone(),
+            Some(inspect(payload, env).into_owned()),
+        )),
     }
 }
 

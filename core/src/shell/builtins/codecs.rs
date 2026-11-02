@@ -5,7 +5,7 @@
 //! policy.
 //!
 //! The checker's own byte-to-text step is not here and is not a command: it is
-//! [`crate::ir::CompKind::Decode`], syntax whose meaning no session can
+//! [`crate::ir::Prim::Decode`], an operation whose meaning no session can
 //! redefine.
 
 use crate::shell::runtime::{
@@ -32,7 +32,7 @@ fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
 
 /// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
 /// argument outright, so this guard is for spread calls, whose arity it
-/// cannot see ([`crate::ir::Args::positional`] gives up on them).
+/// cannot see ([`crate::ir::Argv::positional`] gives up on them).
 fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
     if args.is_empty() {
         return Ok(());
@@ -365,7 +365,7 @@ fn csv_cell(value: &Value, row: usize, key: &str) -> Settled<String> {
         Value::List(_) => "a list",
         Value::Map(_) => "a map",
         Value::Variant { .. } => "a variant",
-        Value::Thunk(_) | Value::Native { .. } => "a block",
+        Value::Thunk(_) | Value::Native(_) => "a block",
         Value::Handle(_) => "a handle",
     };
     Err(sig(format!(

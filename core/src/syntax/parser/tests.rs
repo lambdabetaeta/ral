@@ -1598,7 +1598,7 @@ fn parse_case_arm_binder_may_destructure() {
     };
     assert_eq!(
         param.item,
-        Pattern::Map(vec![MapPatternEntry {
+        Pattern::Record(vec![FieldPattern {
             key: "head".into(),
             pattern: Pattern::Name("h".into()),
         }])

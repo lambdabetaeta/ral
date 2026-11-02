@@ -1,9 +1,16 @@
 ---
 status: accepted
-generated_at_commit: 9c8aa5d9
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 ---
 
 # A written key is a name
+
+> **Amended 2026-11-02:**
+> [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+> expresses the three reads as primitive `index (fld ℓ)`, `index (pos k)`
+> and `index key`, not separate computation constructors. Their typing
+> rules and surface key forms stand.
 
 **How a key is written decides what it reads. Quotes never decide a type.**
 A written name reads a record field, a whole number a list element, and a

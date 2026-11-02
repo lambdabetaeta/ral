@@ -215,7 +215,7 @@ impl Family for Agents {
             Self::Message(message) => tag("message", Some(message.encode())),
             Self::Stop(name) => tag("stop", Some(name.encode())),
             Self::Dismiss(name) => tag("dismiss", Some(name.encode())),
-            Self::Reply(value) => tag("reply", Some(value)),
+            Self::Reply(value) => tag("reply", (value != FOValue::Unit).then_some(value)),
             Self::Read(name) => tag("read", Some(name.encode())),
         }
     }
@@ -227,7 +227,7 @@ impl Family for Agents {
             "message" => datum(payload).map(Self::Message),
             "stop" => datum(payload).map(Self::Stop),
             "dismiss" => datum(payload).map(Self::Dismiss),
-            "reply" => carried(payload).cloned().map(Self::Reply),
+            "reply" => Ok(Self::Reply(payload.cloned().unwrap_or(FOValue::Unit))),
             "read" => datum(payload).map(Self::Read),
             _ => return None,
         })
@@ -1360,9 +1360,32 @@ mod tests {
             })),
             Request::Agents(Agents::Stop("scout".into())),
             Request::Agents(Agents::Dismiss("scout".into())),
+            Request::Agents(Agents::Reply(FOValue::Unit)),
             Request::Agents(Agents::Reply(restriction())),
             Request::Agents(Agents::Read("scout".into())),
         ]);
+    }
+
+    #[test]
+    fn an_absent_or_unit_reply_payload_is_unit() {
+        for payload in [None, Some(FOValue::Unit)] {
+            let word = tag("reply", payload);
+            assert!(matches!(
+                Word::decode(&word),
+                Ok(Word::Ask(Agents::Reply(FOValue::Unit)))
+            ));
+            let reply = family::<Agents>(&word).unwrap_or_else(|why| panic!("{why}"));
+            assert_eq!(reply.encode(), tag("reply", None));
+        }
+    }
+
+    #[test]
+    fn non_unit_agent_requests_still_require_their_payloads() {
+        for label in ["start", "message", "stop", "dismiss", "read"] {
+            for payload in [None, Some(FOValue::Unit)] {
+                assert!(family::<Agents>(&tag(label, payload)).is_err(), "{label}");
+            }
+        }
     }
 
     #[test]
@@ -1849,9 +1872,9 @@ mod tests {
     /// A tag that reads nothing refuses a payload rather than dropping it.
     #[test]
     fn a_payload_on_a_bare_tag_is_refused() {
-        let Err(why) = family::<Pins>(&tag("list", Some(FOValue::Unit))) else {
+        let Err(why) = family::<Pins>(&tag("list", Some(FOValue::Int { value: 1 }))) else {
             panic!("`list takes nothing");
         };
-        assert_eq!(why, "`` exarch-pins `list ``: takes no payload, got ()");
+        assert_eq!(why, "`` exarch-pins `list ``: takes no payload, got an Int");
     }
 }

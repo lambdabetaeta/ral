@@ -15,17 +15,15 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode,
-    HandlerArmV, MapEntryV, MapOperand, Name, OptionsV, Pattern, Phrase, Redirects, Unchecked, Val,
-    ValListElem, ValRecordEntry, synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode, HandlerArmV,
+    MapEntryV, Name, Pattern, Phrase, Redirects, Unchecked, Val, ValListElem, synthetic,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{
-    self, Ast, Head, IfBranch, ListElem, MapEntry, Options, RecordEntry, ScopeAst, Stmt, Word,
-    WordLiteral,
+    self, Ast, Head, IfBranch, ListElem, MapEntry, RecordEntry, ScopeAst, Stmt, Word, WordLiteral,
 };
 use crate::syntax::group::{self, Def};
 use crate::syntax::parser::ParseError;
@@ -113,10 +111,10 @@ impl Elaborator {
         if let Some(s) = &self.script {
             return Val::String(s.clone().into());
         }
-        self.refuse(
+        self.refuse(ParseError::new(
             self.current_span,
             "$SCRIPT: no script name here (the REPL, `-c`, and preloaded sources have none)",
-        );
+        ));
         Val::Unit
     }
 
@@ -127,9 +125,8 @@ impl Elaborator {
     }
 
     /// Elaboration's one failure: the first refusal stands.
-    fn refuse(&mut self, span: Option<Span>, message: &str) {
-        self.error
-            .get_or_insert_with(|| ParseError::new(span, message));
+    fn refuse(&mut self, error: ParseError) {
+        self.error.get_or_insert(error);
     }
 
     /// The one door into scope, hence the one place `SCRIPT` is refused as
@@ -137,11 +134,11 @@ impl Elaborator {
     fn bind(&mut self, span: Option<Span>, names: impl IntoIterator<Item = Name>) {
         for name in names {
             if &*name == "SCRIPT" {
-                self.refuse(
+                self.refuse(ParseError::new(
                     span,
                     "$SCRIPT names the file being compiled, not a name you can bind; choose \
                      another name",
-                );
+                ));
             }
             self.lexical_scopes
                 .last_mut()
@@ -152,19 +149,6 @@ impl Elaborator {
 
     fn bind_pattern(&mut self, pat: &Spanned<Pattern>) {
         self.bind(pat.span, pat.item.names().into_iter().cloned());
-    }
-
-    /// A `{ |param| body }` binder together with the statements it scopes:
-    /// the body elaborates inside the frame the param's names open.  Both
-    /// readings of that spelling — the lambda it denotes and the `case` arm
-    /// that is a branch rather than a function — get their scope from here,
-    /// so it is stated once.
-    fn elab_binder_scope(&mut self, param: &Spanned<Pattern>, body: &[Stmt]) -> (Pattern, Comp) {
-        let body = self.with_new_scope(|this| {
-            this.bind_pattern(param);
-            this.stmts_nested(body)
-        });
-        (param.item.clone(), body)
     }
 
     /// A fresh frame, so the body's `let`s shadow rather than leak outward.
@@ -196,14 +180,14 @@ impl Elaborator {
             .iter()
             .any(|s| s.later.contains(name) && frame.is_none_or(|f| f < s.frame))
         {
-            self.refuse(
+            self.refuse(ParseError::new(
                 self.current_span,
-                &format!(
+                format!(
                     "a block further down defines `{name}`, but a statement between them \
                      hides it from this block; move that definition up, so that only block \
                      definitions stand between them, or rename it"
                 ),
-            );
+            ));
         }
         let Some(frame) = frame else {
             return;

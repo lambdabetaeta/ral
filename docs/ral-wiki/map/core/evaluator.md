@@ -1,226 +1,114 @@
 ---
-generated_at_commit: 6dd2407d
-generated_at_date: 2026-11-01
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_date: 2026-11-02
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
 
 # Map: core / shell / evaluator
 
-`core/src/shell/evaluator/` runs the CBPV [[map/core/ir|IR]] as one CEK machine
-(`machine.rs`) — the full narrative is
-[[internals/evaluator-machine|the evaluator machine]]. **Evaluation is
-entered only through the framed run (`Shell::run`); the machine's own verbs are
-crate-private.** Three reach outside the module — `evaluate`, `apply`, and its
-argument-free twin `force`:
+**`core/src/shell/evaluator/` is the CEK machine for the checked CBPV IR.**
+The [[internals/evaluator-machine|machine narrative]] describes its rules;
+[[invariants/ir-pure-cbpv|the IR invariant]] partitions control, primitives
+and shell. Hosts enter only through the framed run in `shell/run.rs`.
 
-- `machine::evaluate(comp, env, mooring, shell)` (`pub(crate)`) — inject the
-  computation closure ⟨M, ρ⟩ over the empty stack and step until it is empty.
-  `run_phrases` (`shell/evaluator.rs`) is the phrase-level verb a tool call, a
-  REPL run, or a script line settles through: it threads a `Toplevel`'s
-  `Phrase::{Define, Run}` sequence over a local `E` starting from
-  `env`, running each phrase as its own closed machine, and — under
-  `Mode::Session` alone — writing each landed `Define` straight into
-  `shell.env` as it lands, not as a post-run install
-  ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
-  [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]).
-  Hosts call none of the four directly: they enter through the framed
-  `Shell::run` and the run spine behind it, both in `core/src/shell/run.rs`,
-  the sole way into evaluation — its `Run` (`core/src/protocol.rs`) carries
-  a `Program` of source text or a registered hook. `Shell::run_under` checkpoints
-  and rolls back `(env, context)` around every run, so a
-  panicking run reports as a failed run instead of corrupting the store.
-- `machine::apply(f, args, mooring, shell)` (`pub(crate)`) — the same, from a
-  closed value meeting arguments (`Machine::applying` sets the first state);
-  `machine::force(v, mooring, shell)` is its argument-free twin, the entry for a
-  hook's arity-0 call and for a worker's body (`worker_body`).
-  A host reaches it only through the `Program::Hook` arm of `Shell::run` or the
-  in-frame builtin wrapper (a native applying a user function — collection
-  combinators, hook dispatch — runs a *nested* machine on the host stack,
-  capped by `NESTED_MACHINE_LIMIT`), so an unframed reduction is
-  unconstructable.
+## Entry
 
-The result surface is `Settled<Value>`, whose `Break` is a catchable `Error`
-or an uncatchable `Escape`.
-A tail call binds its argument into the closure's environment and puts the body
-straight in focus,
-so it costs no frame and depth is simply `stack.len()`; `reserve` — checked
-before any pushing rule's effect — is the cap (`session.stack_limit`, the
-`--recursion-limit` knob). The escape-propagation guarantees (try does not
-swallow exit, grant does not bypass tail calls) are regression-tested
-([[decisions/260514_escape-propagation-bugs|escape-propagation-bugs]]).
+- `machine::evaluate(comp, env, mooring, shell)` injects ⟨M, ρ⟩ over an
+  empty stack. `machine::apply(f, args, …)` pushes the arguments, if any,
+  then forces the value. Both are crate-private and return `Settled<Value>`.
+- `run_phrases` (`shell/evaluator.rs`) runs `Phrase::{Define, Run}` in
+  order. A landed `Define` immediately extends the environment; under
+  `Mode::Session` it also updates `shell.env` and the lease ledger.
+  Earlier definitions survive a later failure.
+- Higher-order natives re-enter through `machine::apply`; session hooks
+  through `evaluator::apply`. `NESTED_MACHINE_LIMIT` bounds host-stack
+  nesting independently of the machine's frame cap.
 
-A **same-thread β-step** — forcing a block or applying a lambda — evaluates
-in place on the caller's `Shell`, no snapshot or restore: `force` puts a
-thunk's computation and environment in focus and `beta` a λ's body, directly,
-so `io`, `session`, and
-`local` state are simply the one `Shell`'s and the caller's `&Mooring` is
-passed along. Block and lambda entry are uniform: an unbracketed store write
-in either body (`cd`, `alias`, a hook registration) persists to the caller,
-no snapshot standing between the body and the store
-([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]).
-The `Value`-level force/block split stays intact
-([[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]); only
-their shared store-threading is made literal. The `Shell` lifetime regions
-this shares belong to [[map/core/shell-state|shell-state]].
+## Machine: `machine.rs`
 
-Internals:
+- `Focus::{Eval, Return, Halt}` holds a computation closure, a terminal,
+  or a `Break`. `Terminal::{Value, Lambda}` distinguishes a returned value
+  from a lambda computation awaiting its argument.
+- `eval_rules` has one arm per `CompKind`; `step_return` and `step_halt`
+  have one per `Frame`. Rules return `Settled<Focus>`; raising points use
+  `stamp`, and `step` folds failure into `Halt`.
+- `App` pushes one `Frame::Arg` per argument, right to left, then evaluates
+  the head. Only `Lambda` consumes `Arg`, binding its one name and entering
+  the body. Returned-thunk splits follow the [[invariants/ir-pure-cbpv|IR
+  invariant]]. A call with n arguments needs n free frames.
+- `force_val` enters a literal thunk in the current environment without
+  closing it. `force` enters a stored thunk's closure. `native_code` builds
+  the lambda chain ending in `CompKind::Native` when a native is forced;
+  received arguments live in the partial closure's environment. Full-arity
+  resolved `Exec` calls run the builtin directly.
+- `Bind` pushes `Frame::To`; `Seq` pushes `Frame::Seq`. These alone carry
+  saved environments for their continuations. A lambda binds a name;
+  parameter destructuring runs through body binds at parameter spans.
+- `If` forces its selected arm; `step_case` first pushes one `Arg` holding
+  the variant payload. Bare tags carry `Unit`. `Try` passes an error record
+  to its handler by the same push-then-force rule.
+- `Capture` swaps stdout for a buffer. Success restores the sink and returns
+  exact `Bytes`; overflow refuses a prefix. Failure flushes to the displaced
+  sink before propagating. `Upcast` enters its body in tail position without
+  a frame.
+- `Rec` unfolds the selected member of a shared `GroupNode`. Every sibling
+  closes over one environment restricted to the group's occurrence set;
+  recursive references re-enter through force without rewriting bodies.
+- Every frame is pushed through a `Slot` that `reserve`/`reserve_n` checked
+  against `session.stack_limit` before any effect. `push_args` reserves all n
+  `Arg` frames at once. Consuming `Arg` enters the body in tail position;
+  no consumed call frame remains.
+- `Frame::abandon` supplies undo to the rules and panic walk. Only `Seq`
+  and a written `let` add the abandoned-steps hint; compiler-written binds
+  do not add it merely for abandoning an operand or split call.
+- Shell rules dispatch `Exec`, launch and join a `PipeNode` for `Pipeline`,
+  and birth workers for `Spawn`. `Frame::Gather` owns a `ScopeOwner` and
+  restores its displaced cradle before the shared brood-exit machinery
+  joins or stops children. See [[internals/pipeline-execution|pipelines]]
+  and [[invariants/a-worker-ends-with-its-children|worker scope]].
 
-- `machine.rs` — the whole machine: `Machine { focus: Focus, stack:
-  Vec<Frame> }`, `step_eval` and its rule table `eval_rules` (one arm per
-  `CompKind` — the ξ-rules, each raising with `?` so `step_eval`'s
-  `stamp` is their single exit), `step_return` and `step_halt` (one arm
-  per `Frame` each — the two frame-table columns). Every rule, `beta`,
-  `apply_rule` and `force` included, returns `Settled<Focus>`, and `step`
-  folds the `Err` into `Focus::Halt` once. `reserve` is the stack cap and
-  hands back the `Slot` that is the only way to push, so "infallible after
-  reserve" is a type; `Frame::abandon` is the one undo for `Unmask`, `Within`,
-  `Grant`, `Audit` and `Gather`, shared by the rules and the panic walk. `Focus::Eval` and
-  `Terminal::Lambda` hold a computation closure `{ comp, env }`, a type apart
-  from the thunk value's `Closure`; `Frame::To` and `Frame::Map` alone carry an
-  `Env`, and `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` pushes
-  `Frame::Capture`, which holds the sink it replaced, and swaps a fresh buffer
-  in as `shell.io.stdout`; on return it restores the sink and yields the buffer
-  exactly, as `Value::Bytes`, ignoring the body's own value (`cap : F^w Unit → F
-  Bytes`), and a buffer that overflowed `SINK_BUFFER_CAP` is
-  `capture_overflowed`; on a halt it flushes what the body wrote to the sink it
-  replaced (`Shell::write_sink`) and propagates the halt. The checker binds that
-  value to a fresh name and composes a `Decode` node over it, which — since
-  the kernel's `decode` takes a value, not a computation — has no frame of
-  its own: `step_eval` closes the bound variable, drops the bind's scope so
-  the buffer is unshared and moves into the string uncopied, and reads it as
-  text after dropping one trailing terminator, strictly, or fails with
-  "captured output is not valid UTF-8 text"
-  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
-  [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
-  [[design/types|types]]). `CompKind::Bind` pushes `Frame::To` and evaluates
-  its right-hand side; a discarded statement writes to whatever `shell.io.stdout`
-  is, a capture's buffer inside a capture.
-  `CompKind::If` and `step_case` force the arm they choose in place
-  (`Machine::force_val`: a literal thunk runs in the current environment,
-  closing nothing; any other value is forced as a value); `step_case` first
-  pushes a `Frame::Apply` carrying the payload (`Unit` for a nullary tag), so
-  the arm, a thunk of a function of the payload, receives it, and its store
-  effects outlive the `case` as an `if` body's do
-  ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
-  The unmatched-tag error is unreachable from source — the checker has proved
-  coverage — and remains for a variant that arrives untyped.
-  `CompKind::Rec { group: Arc<GroupNode>, index }` unfolds the
-  n-ary recursive group: `group.occ()` — the union of every member's
-  mentions, computed once when the elaborator built the node — restricts ρ
-  once, and every sibling's thunk shares that restricted ρ; the member in
-  focus binds to `comp` itself, `Arc::clone`d rather
-  than rebuilt, and the rest bind to a fresh `Rec` node over the same
-  `group`. A recursive reference forces its name, re-entering `Rec` over the
-  forced closure's own already-restricted environment, so `restrict` answers
-  the identity again and every later unfold shares that one root; a group of
-  one is Levy's `rec f. M` and binds its own member to the node already in
-  focus, allocating nothing.
-  `CompKind::Assemble` is the one rule that does O(data) work over what looks
-  like value syntax — a list/record/map literal with a spread or a computed
-  key; a plain literal stays a `Return` and closes for free. A list or record
-  assembles atomically in `assemble.rs`; a map pushes `Frame::Map`, whose
-  `MapCursor` walks the entries' `MapOperand`s one at a time (key, value or
-  spread, each a plain value or a computation), so an operand's effect, a
-  cancellation poll and the stack cap all land between operands.
-  `CompKind::Exec` classifies the head through the lexical environment and
-  dispatches into [[map/core/runtime|shell/exec]]'s `dispatch`.
-  `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
-  ([[map/core/runtime|runtime]]).
-- `scope.rs` — dynamic-frame installation implementing [[design/scoping|scoping]]
-  and the frame-installing [[design/control-operators|control operators]] (`WithinScope`; a failed `try`/`guard`/`audit`
-  body becomes an `ErrorRecord` through `Error::record`). `spawn` installs no
-  frame: `machine.rs` forms its operands and hands them to
-  `concurrency::spawn_form` ([[map/core/builtins|builtins]]). `gather` is
-  `Frame::Gather` in `machine.rs`: it swaps the shell's cradle for one owning a
-  fresh `ScopeOwner` (`Cradle::owning`), and on exit restores it and settles the
-  scope by `concurrency::exit_brood` (`ScopeOwner::end`) on return, `ScopeOwner::stop` on a halt. The
-  `within` form installs command handlers: a per-name handler and every alias
-  takes one parameter, the argv, and the catch-all two, the name and the argv;
-  the calling convention is fixed by the surface position, and the arm's type
-  is checked against it at the install boundary (`HandlerEntry::vet`,
-  `parse_catch_all`), never sniffed from the runtime value's shape
-  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
-  The handler-stack mechanics live in [[internals/handler-dispatch|handler-dispatch]].
-  `WithinUndo` holds the whole cwd cell a `dir:` displaced, so a `cd` in the
-  body is undone on every exit
-  ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
-- `pattern.rs` — matching, pure: `destructure(pattern, value)` returns the
-  `(name, value)` pairs a compiled `Pattern` (wildcard, name, list with
-  optional `...rest`, map by key) binds in a `Value`, and `bind` folds them
-  into an `Env`. Without a `...rest` tail a list pattern must cover the value
-  exactly — a longer list errors rather than silently dropping its extra
-  elements. A mismatch is a located runtime error with an `expected … got …`
-  message and a shape hint, propagating like any other failure and so
-  catchable by `try`. All-or-nothing: `destructure` collects every binding
-  first, so a pattern that fails partway binds nothing. `Define` is the one
-  consumer that attaches schemes and observes: `Ran::define` in `shell/evaluator.rs`
-  reaches [[map/core/shell-state|`Shell::note_define`]] beside each name's
-  install, under `Mode::Session` alone, so only a session-scope write stamps
-  the binding-lease ledger; a block, lambda, or `Rec` group's fixpoint
-  pre-install binds unobserved
-  ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
-- Output capture (`with_capture`, the audit tee, one `SinkScope`) and the
-  redirect-frame open/route/restore lifecycle (`RedirectState`, the one
-  interpreter of a `Redirects` list) live in [[map/core/runtime|runtime]]
-  (`shell/exec/capture.rs`, `shell/exec/redirect/scope.rs`); the machine enters the
-  latter from `Frame::Redirect`, and `with_redirects` serves a base-frame
-  native's synchronous call and a fused external, whose child then reads the
-  installed sinks in `shell/exec/command/stdio.rs`. Targets open stdin, stdout, stderr;
-  every write is observed at settle, carrying its target before and after.
-- `val.rs` holds the side-effect-free `Val` layer: `form(val, env, sig)` is
-  CBPV's one-step rule — a constant is itself, a name is `lookup`, a variant
-  forms its payload, `thunk M` builds `⟨M, ρ|occ(M)⟩` through `Closure::new`
-  (reading `occ` off the `ThunkNode` rather than walking `M`), and a plain
-  list/record/map literal — no spread, no computed key — is `List::literal`
-  or `Map::literal`, the value closure `⟨V, ρ|occ(V)⟩`, unless one of the
-  names it directly mentions is answered only by Σ, in which case `form`
-  builds it eagerly instead so that name is never asked of a `Literal`'s
-  Σ-free inspection. `expr.rs` holds the primitive
-  operators the elaborator's expression desugaring emits (`Negate` / `Not` /
-  `Binary`) and the three reads `Index` dispatches to by its `Key`:
-  `field` (a record by label), `position` (a list by `usize`, shared with
-  `nth`) and `lookup` (a map by `String`).
-- Imported weak occurrences whose contract reaches a thunk or handle carry
-  `Val::Protected`: `val::form` calls `Site::wrap` without admitting (a data
-  binding is admitted once per unit by `readmit`; `Site::protect`, admit then
-  wrap, runs at `Frame::Protect` returns and handle exposure), and
-  `shell/runtime/protect.rs` recursively wraps thunks, containers and handles without
-  forcing delayed results. Thunk wrappers guard each argument and result;
-  `CompKind::Protect` pushes `Frame::Protect`, whose return checks and wraps the
-  value and whose halt propagates unchanged.
-  Handle views retain payload guards, applied by `shell/builtins/concurrency/eliminate.rs`
-  at `await`, ready `poll`, and `race`, not by consuming a handle at import.
-  Wrapper captures carry schemes rebuilt from the site's authoritative contract,
-  preserving weak identities and the raw computation's grade on re-inference
-  ([[map/core/typecheck|typecheck]], [[map/core/ty|ty]]).
-- `assemble.rs` is the atomic half of `CompKind::Assemble`: `eval_list` splices
-  `...spread` elements (cons/snoc-shaped fast paths reuse the spread's
-  persistent spine; explicit beats spread, first spread wins), `eval_record`
-  does the same for record entries (explicit fields win over spreads). A map
-  literal's computed keys are the cursor's (`machine.rs`, `return_map`): a
-  computed key must close to a `String`, and a duplicate discovered only
-  there is an error ("key 'k' given twice; which did you mean?", SPEC §4.5), as
-  a *static* duplicate is refused at check time.
-- The command/pipeline machinery — external-command dispatch,
-  pipeline planning and execution, and the in-process-vs-sandboxed-child
-  dispatch choice — lives in [[map/core/runtime|runtime]], which the machine
-  reaches by dispatching an `Exec` node through `shell::exec::dispatch::classify_command`
-  → `run_base_frame` / `run_external`, and at
-  `PipeNode::run`; runtime re-enters the machine only through
-  `machine::STAGE_EVAL` (`evaluate` and `close_args`, passed to `PipeNode::run`; a stage's `(comp, env)`, run from `shell/exec/pipeline/thread.rs` —
-  a stage never rides a re-exec) — the boundary itself always evaluates its
-  body in process, OS confinement being per-child in `build_launch`
-  ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
-- `call.rs` — `run_native`, the one call site for every native: it runs the
-  body in `BuiltinEntry::framed`'s frame, the only minter of the `Frame` proof
-  `call_body` demands. A builtin application is no observation; the fan-out
-  is `shell::runtime::audit::fan_out`.
-- A `~`-path (`CompKind::Tilde`, [[map/core/ir|ir]]) is read in `machine.rs`
-  through `Context::require_home` and shown by `TildePath::shown`
-  (the one spelling `~`, `home` and a `~/…` command head share). The six ambient reads (`cwd`, `env`,
-  `args`, `user`, `home`, `nproc`) are natives in `shell/builtins/ambient.rs`
-  ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).
-  `$SCRIPT` is neither — the elaborator bakes it to a literal.
+## Values and primitives
 
-Hot loops poll a cancellation flag cooperatively
-([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]).
+- `val.rs`: `form(val, env, sig)` is side-effect-free. Variables use
+  `lookup`; thunks use `Closure::new`; variants use `Value::variant`,
+  normalising unit payloads. Plain list/record/map literals close over
+  precomputed occurrence sets, unless a directly mentioned name requires
+  Σ lookup and therefore eager formation.
+- `expr.rs`: `eval_prim` interprets every `Prim` on values. `field`,
+  `position` and `lookup` implement `Key::{Label, Position, Data}` reads;
+  `position` is shared with `nth`. `Render` checks scalars; `Concat` joins
+  strings. `Decode` drops its environment before taking over the bytes,
+  removes one trailing terminator and checks UTF-8 strictly.
+- `assemble.rs`: `eval_list` splices list values, `eval_update` replaces
+  fields over one record base, and `eval_map` assembles map values. All
+  operands have already run in surrounding binds. Explicit map entries
+  beat spreads, first spread wins, and a repeated computed key fails here
+  after every operand ran; known duplicates are refused statically.
+- `pattern.rs`: `destructure` matches `Pattern::{Wildcard, Name, List,
+  Record}`, collecting all bindings before installing any. A list without
+  rest requires exact length. Mismatches are catchable errors; lambda
+  parameter failures point at the parameter's span.
+
+## Shell interpretation
+
+- `scope.rs` installs dynamic frames. `WithinScope` forms the option record
+  and handlers; `WithinUndo` restores cwd, env overrides and handlers.
+  Grants attenuate authority; cleanup restores the body's outcome unless
+  cleanup itself fails. Handler dispatch is
+  [[internals/handler-dispatch|deep and self-masking]].
+- `call.rs`: `run_native` runs each native body inside `BuiltinEntry::framed`.
+  The builtin may re-enter the machine; it is not a value-only primitive.
+- Redirect installation and capture helpers live in
+  [[map/core/runtime|shell/exec]] (`RedirectState`, `with_redirects`,
+  `with_capture`). `STAGE_EVAL` supplies `evaluate` and `close_argv` to
+  pipeline execution; a ral stage starts a fresh machine on its thread.
+- `Val::Protected` wraps delayed obligations through `Site::wrap` without
+  admitting data at import. `CompKind::Protect` pushes `Frame::Protect`;
+  its return admits and wraps. Handle guards apply at exposure, never by
+  consuming a handle at import ([[map/core/typecheck|typecheck]]).
+- `Tilde` reads live `HOME` through `Context::require_home`. Ambient reads
+  are natives; `$SCRIPT` is a literal baked by elaboration.
+
+The loop catches panics and abandons frames; the framed run restores its
+checkpoint. Hot paths poll cancellation cooperatively. See
+[[map/core/shell-state|shell state]], [[map/core/runtime|runtime]].

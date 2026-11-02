@@ -12,7 +12,7 @@ mod sentinel;
 mod stage;
 mod thread;
 
-use crate::ir::{Args, Comp};
+use crate::ir::{Argv, Comp};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -26,11 +26,11 @@ use route::open_stage_routes;
 
 /// What a stage needs of the machine, handed in by the evaluator so the
 /// runtime never names it: `run` evaluates a ral stage under the node's
-/// environment, `close_args` closes a direct external's arguments.
+/// environment, `close_argv` closes a direct external's argv.
 #[derive(Clone, Copy)]
 pub(crate) struct StageEval {
     pub(crate) run: fn(Arc<Comp>, Env, &Mooring, &mut Shell) -> Settled<Value>,
-    pub(crate) close_args: fn(&Args, &Env, &Signature) -> Result<Vec<Value>, Error>,
+    pub(crate) close_argv: fn(&Argv, &Env, &Signature) -> Result<Vec<Value>, Error>,
 }
 
 /// A multi-stage pipeline from its launch to its join, its stages running in

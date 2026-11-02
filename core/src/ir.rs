@@ -12,7 +12,7 @@ mod pattern;
 mod redirect;
 
 pub use op::{ArithOp, BinaryOp, CompareOp, EqOp};
-pub use pattern::{MapPatternEntry, Pattern};
+pub use pattern::{FieldPattern, Pattern};
 pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
 
 use crate::data::Finite;
@@ -135,8 +135,6 @@ pub type GroupNode = Node<Box<[(Name, Arc<Comp>)]>>;
 pub type ListNode = Node<Box<[Spanned<Val>]>>;
 /// Entries sorted by key, stably; equal keys are the checker's to refuse.
 pub type FieldsNode = Node<Box<[(Name, Spanned<Val>)]>>;
-/// A form's written options, in source order: labels are syntax.
-pub type OptionsV = Box<[(Name, Spanned<Val>)]>;
 
 impl Mentions for Arc<Comp> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
@@ -217,11 +215,6 @@ pub enum Val {
     Float(Finite),
     Bool(bool),
     Variable(Name),
-    /// Checker-inserted protection at an instantiation site.
-    Protected {
-        value: Box<Self>,
-        site: Arc<crate::ty::Site>,
-    },
     /// A suspended computation, eliminated by [`CompKind::Force`]: `⟨M,
     /// ρ|occ(M)⟩`.
     Thunk(Arc<ThunkNode>),
@@ -231,11 +224,15 @@ pub enum Val {
     Record(Arc<FieldsNode>),
     /// `[:, key: val, …]`: keys written out, no spread.
     Map(Arc<FieldsNode>),
-    /// `` `label `` or `` `label payload ``; the label is stored without
-    /// its leading backtick.
+    /// The label has no leading backtick; a bare tag carries `Unit`.
     Variant {
         label: Name,
-        payload: Option<Box<Self>>,
+        payload: Box<Self>,
+    },
+    /// Checker-inserted protection at an instantiation site.
+    Protected {
+        value: Box<Self>,
+        site: Arc<crate::ty::Site>,
     },
 }
 
@@ -285,57 +282,25 @@ impl ValListElem {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ValRecordEntry {
-    /// `label: value`; the label is the row's, tags included.
-    Field(String, Spanned<Val>),
-    /// `...x`, merged into the surrounding record.
+pub enum MapEntryV {
+    Entry(Spanned<Val>, Spanned<Val>),
     Spread(Spanned<Val>),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum MapOperand {
-    Value(Spanned<Val>),
-    Compute(Arc<Comp>),
-}
-
-impl MapOperand {
-    pub(crate) fn span(&self) -> Option<Span> {
-        match self {
-            Self::Value(value) => value.span,
-            Self::Compute(comp) => comp.span,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum MapEntryV {
-    Entry(MapOperand, MapOperand),
-    Spread(MapOperand),
-}
-
-/// A collection literal that a spread or a computed key keeps out of value
-/// syntax: building it costs O(data) and can fail, so it is
-/// [`CompKind::Assemble`], a primitive computation rather than a `Val`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Assembly {
-    List(Vec<ValListElem>),
-    Record(Vec<ValRecordEntry>),
-    Map(Vec<MapEntryV>),
-}
-
-/// Positional arguments to a call — the same slots a list literal has.
+/// A command's argv — the same slots a list literal has, a `...` splicing a
+/// list in place.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Args(Vec<ValListElem>);
+pub struct Argv(Vec<ValListElem>);
 
-impl Args {
-    /// The args as a literal positional list, or `None` if any element is a
+impl Argv {
+    /// The slots as a literal positional list, or `None` if any is a
     /// `Spread` — dynamic arity, so callers fall back to weaker checks.
-    pub(crate) fn positional(&self) -> Option<Vec<&Val>> {
+    pub(crate) fn positional(&self) -> Option<Vec<&Spanned<Val>>> {
         self.0
             .iter()
             .map(|e| match e {
-                ValListElem::Single(v) => Some(&v.item),
+                ValListElem::Single(v) => Some(v),
                 ValListElem::Spread(_) => None,
             })
             .collect()
@@ -347,32 +312,32 @@ impl Args {
     }
 }
 
-impl std::ops::Deref for Args {
+impl std::ops::Deref for Argv {
     type Target = [ValListElem];
     fn deref(&self) -> &[ValListElem] {
         &self.0
     }
 }
 
-impl From<Vec<ValListElem>> for Args {
+impl From<Vec<ValListElem>> for Argv {
     fn from(elems: Vec<ValListElem>) -> Self {
         Self(elems)
     }
 }
 
-impl FromIterator<ValListElem> for Args {
+impl FromIterator<ValListElem> for Argv {
     fn from_iter<I: IntoIterator<Item = ValListElem>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl Extend<ValListElem> for Args {
+impl Extend<ValListElem> for Argv {
     fn extend<I: IntoIterator<Item = ValListElem>>(&mut self, iter: I) {
         self.0.extend(iter);
     }
 }
 
-impl IntoIterator for Args {
+impl IntoIterator for Argv {
     type Item = ValListElem;
     type IntoIter = std::vec::IntoIter<ValListElem>;
     fn into_iter(self) -> Self::IntoIter {
@@ -380,7 +345,7 @@ impl IntoIterator for Args {
     }
 }
 
-impl<'a> IntoIterator for &'a Args {
+impl<'a> IntoIterator for &'a Argv {
     type Item = &'a ValListElem;
     type IntoIter = std::slice::Iter<'a, ValListElem>;
     fn into_iter(self) -> Self::IntoIter {
@@ -493,7 +458,7 @@ impl Comp {
     /// The λ this code opens with, through a `Rec` projection.  Syntax, not
     /// type: a block of function type need not open with one, so only a
     /// description of a value reads it.
-    pub(crate) fn lam(&self) -> Option<(&Pattern, &Arc<Self>)> {
+    pub(crate) fn lam(&self) -> Option<(&Name, &Arc<Self>)> {
         match &self.item {
             CompKind::Lam { param, body } => Some((param, body)),
             CompKind::Rec { group, index } => group.shape()[*index].1.lam(),
@@ -507,7 +472,9 @@ impl Comp {
         match &self.item {
             CompKind::Exec(exec) => Some(exec),
             CompKind::Capture(body) => body.command(),
-            CompKind::Bind { comp, rest, .. } if matches!(rest.item, CompKind::Decode(_)) => {
+            CompKind::Bind { comp, rest, .. }
+                if matches!(rest.item, CompKind::Prim(Prim::Decode(_))) =>
+            {
                 comp.command()
             }
             _ => None,
@@ -520,12 +487,14 @@ impl Mentions for Comp {
         match &self.item {
             CompKind::Lam { param: _, body }
             | CompKind::Capture(body)
+            | CompKind::Upcast(body)
             | CompKind::Protect { body, .. } => body.mentions(out),
             CompKind::Bind {
                 comp,
                 pattern: _,
                 rest,
-            } => {
+            }
+            | CompKind::Seq { first: comp, rest } => {
                 comp.mentions(out);
                 rest.mentions(out);
             }
@@ -535,35 +504,26 @@ impl Mentions for Comp {
             }
             CompKind::Exec(exec) => {
                 exec.head.mentions(out);
-                exec.args.mentions(out);
+                exec.argv.mentions(out);
                 exec.redirects.mentions(out);
+            }
+            CompKind::Native { entry: _, args } => {
+                for arg in args {
+                    arg.mentions(out);
+                }
             }
             CompKind::Pipeline { stages } => {
                 for stage in stages {
                     stage.mentions(out);
                 }
             }
-            CompKind::Binary(_op, a, b) => {
-                a.mentions(out);
-                b.mentions(out);
+            CompKind::Prim(prim) => {
+                for value in prim.operands() {
+                    value.mentions(out);
+                }
             }
-            CompKind::Force(v) | CompKind::Return(v) | CompKind::Negate(v) | CompKind::Not(v) => {
+            CompKind::Force(v) | CompKind::Return(v) => {
                 v.mentions(out);
-            }
-            CompKind::Assemble(assembly) => assembly.mentions(out),
-            CompKind::Index { target, keys } => {
-                target.mentions(out);
-                for key in keys {
-                    match &key.item {
-                        Key::Data(value) => value.mentions(out),
-                        Key::Label(_) | Key::Position(_) => {}
-                    }
-                }
-            }
-            CompKind::Interpolation(vals) => {
-                for v in vals {
-                    v.mentions(out);
-                }
             }
             // The group is a nested node: its own occ, not a walk.
             CompKind::Rec { group, index: _ } => out.extend(group.occ().names()),
@@ -592,14 +552,14 @@ impl Mentions for Comp {
                 handlers,
                 body,
             } => {
-                opts.mentions(out);
+                out.extend(opts.occ().names());
                 for arm in handlers.iter().flatten() {
                     arm.value.item.mentions(out);
                 }
                 body.mentions(out);
             }
             CompKind::Grant { caps, body } => {
-                caps.mentions(out);
+                out.extend(caps.occ().names());
                 body.mentions(out);
             }
             CompKind::Audit { body } | CompKind::Gather { body } => body.mentions(out),
@@ -613,7 +573,6 @@ impl Mentions for Comp {
                 body.mentions(out);
                 redirects.mentions(out);
             }
-            CompKind::Decode(val) => val.mentions(out),
         }
     }
 }
@@ -627,48 +586,7 @@ impl Mentions for Val {
             Self::Thunk(node) => out.extend(node.occ().names()),
             Self::List(node) => out.extend(node.occ().names()),
             Self::Record(node) | Self::Map(node) => out.extend(node.occ().names()),
-            Self::Variant { label: _, payload } => {
-                if let Some(p) = payload {
-                    p.mentions(out);
-                }
-            }
-        }
-    }
-}
-
-impl Mentions for MapOperand {
-    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
-        match self {
-            Self::Value(value) => value.item.mentions(out),
-            Self::Compute(comp) => comp.mentions(out),
-        }
-    }
-}
-
-impl Mentions for Assembly {
-    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
-        match self {
-            Self::List(elems) => elems.mentions(out),
-            Self::Record(entries) => {
-                for entry in entries {
-                    match entry {
-                        ValRecordEntry::Field(_, value) | ValRecordEntry::Spread(value) => {
-                            value.item.mentions(out);
-                        }
-                    }
-                }
-            }
-            Self::Map(entries) => {
-                for entry in entries {
-                    match entry {
-                        MapEntryV::Entry(key, value) => {
-                            key.mentions(out);
-                            value.mentions(out);
-                        }
-                        MapEntryV::Spread(value) => value.mentions(out),
-                    }
-                }
-            }
+            Self::Variant { payload, .. } => payload.mentions(out),
         }
     }
 }
@@ -704,64 +622,42 @@ impl Mentions for Redirects<Val> {
 /// matching on this.  Variant docs use Levy's CBPV notation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CompKind {
-    /// Checker-inserted protection at an instantiation site.
-    Protect {
-        body: Arc<Comp>,
-        site: Arc<crate::ty::Site>,
-    },
+    // CBPV core.
+    /// return V — produce a value.
+    Return(Val),
     /// force V — run a thunk.
     Force(Val),
     /// λ — evaluates to a closure.
-    Lam { param: Pattern, body: Arc<Comp> },
-    /// return V — produce a value.
-    Return(Val),
-    /// Build a list, record, or map some of whose parts are spread or keyed
-    /// at run time — the one rule that does O(data) work over value syntax.
-    Assemble(Assembly),
-    /// M to x. N — run `comp`, bind its result, continue with `rest`.  `a; b`
-    /// is `a to _. b`, on `Wildcard`.
+    Lam {
+        param: Name,
+        body: Arc<Comp>,
+    },
+    /// `M V₁ … Vₙ`, `n ≥ 1`: the arguments are pushed, then `head` runs —
+    /// taken when the head is a value (`$f x`, `{ |x| body } x`, a bound
+    /// name).  It carries no redirects, those being a shell effect and not a
+    /// property of application; trailing ones become a
+    /// [`CompKind::Redirect`] around it.
+    App {
+        head: Arc<Comp>,
+        args: Box<[Spanned<Val>]>,
+    },
+    /// M to p. N: run `comp`, bind its result, continue with `rest`.
     Bind {
         comp: Arc<Comp>,
         pattern: Arc<Pattern>,
         rest: Arc<Comp>,
     },
-    /// `M : A → B, V : A ⊢ M V : B` — the elimination form taken when the
-    /// head resolves to a bound value (`$f x`, `(|x| body) x`).  It carries
-    /// no redirects, those being a shell effect and not a property of
-    /// application; trailing ones become a [`CompKind::Redirect`] around it.
-    App { head: Arc<Comp>, args: Args },
-    /// Shell command invocation, and the effect boundary — nothing outside
-    /// this variant reaches the dispatch chain or an external program.
-    /// Redirects live on the call, not around it: they are installed once the
-    /// head is admitted, and the capture wrap goes around them.
-    Exec(Exec),
-    /// Concurrent stages joined by Unix pipes: stdout of stage N feeds
-    /// stdin of stage N+1.
-    Pipeline { stages: Vec<Arc<Comp>> },
-    /// Binary primitive on already-evaluated values (`$[a + b]`, `$[a == b]`).
-    Binary(BinaryOp, Val, Val),
-    /// `-v` on a number.  Its own variant rather than a subtraction from a
-    /// literal zero, which would have to pick that zero's type and so force
-    /// the operand to match it — negating a `Float` would not typecheck.
-    Negate(Val),
-    /// `not v` on a `Bool`.  Its own variant so the IR cannot spell a
-    /// two-operand `not` or a one-operand `Add`; evaluator and typechecker
-    /// dispatch on the tag rather than a runtime arity guard.
-    Not(Val),
-    /// `V[k1][k2]` — computation-typed only because it can fail (key not
-    /// found, out of bounds); target and keys are themselves pure.
-    Index {
-        target: Val,
-        keys: Vec<Spanned<Key>>,
+    /// M ⨟ N: run `first`, discard its result, continue with `rest`.
+    Seq {
+        first: Arc<Comp>,
+        rest: Arc<Comp>,
     },
-    /// String interpolation, effectful because a lookup can fail.
-    Interpolation(Vec<Val>),
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
     /// node has type `C_index`. A group of one is Levy's `rec x. M`.
-    Rec { group: Arc<GroupNode>, index: usize },
-    /// A `~` or `~/x` in value position: the home directory with the suffix
-    /// appended. Never a value, since reading the store is an effect.
-    Tilde(TildePath),
+    Rec {
+        group: Arc<GroupNode>,
+        index: usize,
+    },
     /// `if V T E` with `V : Bool` and `T, E : U C`; the chosen arm is forced.
     /// Every form that suspends a command takes a thunk, so an arm is a literal
     /// block or a thunk in hand.
@@ -779,24 +675,54 @@ pub enum CompKind {
     },
     /// `try BODY HANDLER` — catch an error out of `body` and pass it to
     /// `handler`, a thunk of one argument.
-    Try { body: Val, handler: Val },
+    Try {
+        body: Val,
+        handler: Val,
+    },
     /// `guard BODY CLEANUP` — `cleanup` runs unconditionally; a failure in
     /// it replaces the body's outcome.
-    Guard { body: Val, cleanup: Val },
-    /// `audit BODY` — record an audit subtree over `body` and reify it as a
-    /// `[outcome: `ok v | `err e, trail]` record.
-    Audit { body: Val },
+    Guard {
+        body: Val,
+        cleanup: Val,
+    },
+    /// Checker-inserted value boundary: run `body` with its byte channel
+    /// captured and hand those bytes over exactly, as `Bytes`. Total, and
+    /// lossless. No surface syntax.
+    Capture(Arc<Comp>),
+    /// Checker-inserted command boundary for a `()` producer.
+    Upcast(Arc<Comp>),
+    Prim(Prim),
+    // Shell layer.
+    /// Shell command invocation, and the effect boundary — nothing outside
+    /// this variant reaches the dispatch chain or an external program.
+    /// Redirects live on the call, not around it: they are installed once the
+    /// head is admitted, and the capture wrap goes around them.
+    Exec(Exec),
+    /// Two or more concurrent stages: stdout of stage N feeds stdin of stage N+1.
+    Pipeline {
+        stages: Vec<Arc<Comp>>,
+    },
+    /// Redirect frame for a body that cannot fuse its own redirects — a
+    /// CBPV `App`, or a nested effect frame.  `body` is an `Arc<Comp>` and
+    /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
+    Redirect {
+        body: Arc<Comp>,
+        redirects: Redirects<Val>,
+    },
     /// `within OPTS BODY` — install the option overrides in `opts`, written
     /// out pair by pair, for the duration of `body`.  `handlers` is not
     /// among them: its labels are the names it binds in `body`, so the arms
     /// are syntax and `None` is a `within` that wrote none.
     Within {
-        opts: OptionsV,
+        opts: Arc<FieldsNode>,
         handlers: Option<Vec<HandlerArmV>>,
         body: Val,
     },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
-    Grant { caps: OptionsV, body: Val },
+    Grant {
+        caps: Arc<FieldsNode>,
+        body: Val,
+    },
     /// `spawn [TITLE] BODY` — run `body` on a worker of its own and return its
     /// handle; the title names it to people.
     Spawn {
@@ -805,29 +731,139 @@ pub enum CompKind {
     },
     /// `gather BODY` — run `body`, owning the workers spawned inside it:
     /// they are joined at its return and ended at its halt.
-    Gather { body: Val },
-    /// Redirect frame for a body that cannot fuse its own redirects — a
-    /// CBPV `App`, or a nested effect frame.  `body` is an `Arc<Comp>` and
-    /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
-    Redirect {
-        body: Arc<Comp>,
-        redirects: Redirects<Val>,
+    Gather {
+        body: Val,
     },
-    /// Checker-inserted value boundary: run `body` with its byte channel
-    /// captured and hand those bytes over exactly, as `Bytes`. Total, and
-    /// lossless. No surface syntax.
-    Capture(Arc<Comp>),
-    /// Checker-inserted coercion: read the `Bytes` value as text — one
-    /// trailing line terminator dropped, then a strict UTF-8 decode. The
-    /// partial, lossy half of the value boundary, kept its own node so that
-    /// [`CompKind::Capture`] stays exact. The kernel's `decode` takes a
-    /// value, so the checker reaches it through a bind: `Bind(Capture(M), x,
-    /// Decode(x))`.
-    ///
-    /// It is syntax and not a command because its meaning is fixed where the
-    /// checker writes it: no name is looked up, and no frame the user can
-    /// install stands between the bytes and their reading. No surface syntax.
+    /// `audit BODY` — record an audit subtree over `body` and reify it as a
+    /// `[outcome: `ok v | `err e, trail]` record.
+    Audit {
+        body: Val,
+    },
+    /// A `~` or `~/x` in value position: the home directory with the suffix
+    /// appended. Never a value, since reading the store is an effect.
+    Tilde(TildePath),
+    /// Checker-inserted protection at an instantiation site.
+    Protect {
+        body: Arc<Comp>,
+        site: Arc<crate::ty::Site>,
+    },
+    /// A builtin run on the values `args` name: the body of a native's code,
+    /// which forcing the native builds.  Never elaborated, so never serialised;
+    /// last, since a skipped variant shifts the wire index of every one after.
+    #[serde(skip)]
+    Native {
+        entry: NativeEntry,
+        args: Box<[Val]>,
+    },
+}
+
+/// A fixed operation on values: no name is looked up and nothing runs inside it;
+/// it may fail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Prim {
+    /// Arithmetic, comparison, or equality.
+    Binary(BinaryOp, Val, Val),
+    /// Numeric negation, without choosing a zero's type.
+    Negate(Val),
+    Not(Val),
+    /// Scalar rendering for interpolation.
+    Render(Val),
+    Concat(Box<[Val]>),
+    /// Drop one trailing line terminator, then decode strict UTF-8.
     Decode(Val),
+    Index {
+        target: Val,
+        key: Spanned<Key>,
+    },
+    Update {
+        base: Spanned<Val>,
+        fields: Box<[(Name, Spanned<Val>)]>,
+    },
+    List(Box<[ValListElem]>),
+    Map(Box<[MapEntryV]>),
+}
+
+impl Prim {
+    pub fn operands(&self) -> impl Iterator<Item = &Val> {
+        let mut operands = Vec::new();
+        match self {
+            Self::Binary(_, lhs, rhs) => operands.extend([lhs, rhs]),
+            Self::Negate(value) | Self::Not(value) | Self::Render(value) | Self::Decode(value) => {
+                operands.push(value);
+            }
+            Self::Concat(parts) => operands.extend(parts.iter()),
+            Self::Index { target, key } => {
+                operands.push(target);
+                if let Key::Data(value) = &key.item {
+                    operands.push(value);
+                }
+            }
+            Self::Update { base, fields } => {
+                operands.push(&base.item);
+                operands.extend(fields.iter().map(|(_, value)| &value.item));
+            }
+            Self::List(elems) => operands.extend(elems.iter().map(|elem| &elem.slot().item)),
+            Self::Map(entries) => {
+                for entry in entries {
+                    match entry {
+                        MapEntryV::Entry(key, value) => operands.extend([&key.item, &value.item]),
+                        MapEntryV::Spread(value) => operands.push(&value.item),
+                    }
+                }
+            }
+        }
+        operands.into_iter()
+    }
+
+    pub(crate) fn map_operands(&self, mut f: impl FnMut(&Val, Option<Span>) -> Val) -> Self {
+        let mut spanned =
+            |value: &Spanned<Val>| Spanned::with_span(value.span, f(&value.item, value.span));
+        match self {
+            Self::Binary(op, lhs, rhs) => Self::Binary(*op, f(lhs, None), f(rhs, None)),
+            Self::Negate(value) => Self::Negate(f(value, None)),
+            Self::Not(value) => Self::Not(f(value, None)),
+            Self::Render(value) => Self::Render(f(value, None)),
+            Self::Concat(parts) => Self::Concat(parts.iter().map(|value| f(value, None)).collect()),
+            Self::Decode(value) => Self::Decode(f(value, None)),
+            Self::Index { target, key } => Self::Index {
+                target: f(target, None),
+                key: Spanned::with_span(
+                    key.span,
+                    match &key.item {
+                        Key::Data(value) => Key::Data(f(value, None)),
+                        key => key.clone(),
+                    },
+                ),
+            },
+            Self::Update { base, fields } => Self::Update {
+                base: spanned(base),
+                fields: fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), spanned(value)))
+                    .collect(),
+            },
+            Self::List(elems) => Self::List(
+                elems
+                    .iter()
+                    .map(|elem| match elem {
+                        ValListElem::Single(value) => ValListElem::Single(spanned(value)),
+                        ValListElem::Spread(value) => ValListElem::Spread(spanned(value)),
+                    })
+                    .collect(),
+            ),
+            Self::Map(entries) => Self::Map(
+                entries
+                    .iter()
+                    .map(|entry| match entry {
+                        MapEntryV::Entry(key, value) => {
+                            MapEntryV::Entry(spanned(key), spanned(value))
+                        }
+                        MapEntryV::Spread(value) => MapEntryV::Spread(spanned(value)),
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// One arm of a `within [handlers: …]`: the command name it stands in for,
@@ -849,13 +885,24 @@ pub struct CaseArm {
     pub(crate) body: Spanned<Val>,
 }
 
+/// A builtin as [`CompKind::Native`] holds it, equal by name:
+/// [`BuiltinEntry`](crate::shell::runtime::BuiltinEntry) has no `PartialEq`.
+#[derive(Debug, Clone)]
+pub struct NativeEntry(pub(crate) Arc<crate::shell::runtime::BuiltinEntry>);
+
+impl PartialEq for NativeEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.decl.name == other.0.decl.name
+    }
+}
+
 /// Body of a [`CompKind::Exec`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Exec {
     pub(crate) head: CommandWord,
-    /// An argv: each element crosses rendered, whichever boundary it reaches —
-    /// a handler arm, a base frame, or the syscall itself.
-    pub(crate) args: Args,
+    /// Each element crosses rendered, whichever boundary it reaches — a
+    /// handler arm, a base frame, or the syscall itself.
+    pub(crate) argv: Argv,
     pub(crate) redirects: Redirects<Val>,
     /// The type the checker solved at a boundary call, which its door admits
     /// the value it lets in against.  Unchecked, `None` everywhere; checked,

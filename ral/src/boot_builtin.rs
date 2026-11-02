@@ -59,10 +59,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
     shell
         .register_hook(
             hook(),
-            Value::Native {
-                entry: entry.into(),
-                applied: Box::new([]),
-            },
+            Value::Native(entry.into()),
             HookSig::Hook {
                 kind: "boot".into(),
             },

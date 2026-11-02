@@ -127,9 +127,9 @@ pub struct SessionState {
     /// backgrounded, tty-less, or off Unix.  Lent — never moved or cloned — to
     /// the handoff, and only when the run's [`TerminalAccess`] permits.
     pub(crate) terminal_lease: Option<crate::process::TerminalLease>,
-    /// The machine's stack cap: `Machine::reserve` refuses a push at
-    /// `stack.len() >= stack_limit`.  Counts machine frames, not host stack
-    /// frames; `--recursion-limit`/rc's `recursion-limit:` key set it.
+    /// The machine's stack cap: no push takes `stack.len()` past
+    /// `stack_limit`.  Counts machine frames, not host stack frames;
+    /// `--recursion-limit`/rc's `recursion-limit:` key set it.
     pub(crate) stack_limit: usize,
     /// Soft resource ceilings for children; ral keeps its own limits.
     pub(crate) child_limits: crate::process::ChildLimits,

@@ -1,8 +1,10 @@
-//! Atomic list and record assembly. Computed map operands use the CEK cursor.
+//! Pure collection assembly.
 
-use crate::ir::{ValListElem, ValRecordEntry};
-use crate::shell::runtime::{Env, Error, List, Signature, Value};
+use crate::ir::{MapEntryV, Name, Val, ValListElem};
+use crate::shell::runtime::{Env, Error, List, Map, Settled, Signature, Value};
+use crate::source::Spanned;
 
+use super::machine::stamp;
 use super::val::{form, spread_type_err};
 
 /// Evaluates a list literal, splicing `...spread` elements inline. The
@@ -44,44 +46,81 @@ pub(super) fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Re
     Ok(Value::List(items))
 }
 
-/// Explicit record fields override the spread's fields.
-pub(super) fn eval_record(
-    entries: &[ValRecordEntry],
+pub(super) fn eval_update(
+    base: &Spanned<Val>,
+    fields: &[(Name, Spanned<Val>)],
     env: &Env,
     sig: &Signature,
 ) -> Result<Value, Error> {
-    let mut pairs: Vec<(String, Value)> = Vec::new();
-    let mut seen = std::collections::HashSet::<String>::new();
-    for entry in entries {
-        let ValRecordEntry::Field(key, value) = entry else {
-            continue;
-        };
-        if !seen.insert(key.clone()) {
-            return Err(Error::new(format!(
-                "map literal: key '{key}' given twice; which did you mean?"
-            )));
+    let mut pairs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in fields {
+        if !seen.insert(key.to_string()) {
+            return Err(duplicate_key(key));
         }
-        pairs.push((key.clone(), form(&value.item, env, sig)?));
+        pairs.push((key.to_string(), form(&value.item, env, sig)?));
     }
+    for (key, value) in &form_map(base, env, sig)? {
+        if seen.insert(key.to_string()) {
+            pairs.push((key.to_string(), value.into_owned()));
+        }
+    }
+    Ok(Value::map(pairs))
+}
+
+pub(super) fn eval_map(entries: &[MapEntryV], env: &Env, sig: &Signature) -> Settled<Value> {
+    let mut explicit = std::collections::HashSet::new();
+    let mut result = Map::new();
     for entry in entries {
-        if let ValRecordEntry::Spread(v) = entry {
-            match form(&v.item, env, sig)? {
-                Value::Map(inner) => {
-                    for (k, v) in &inner {
-                        if seen.insert(k.to_string()) {
-                            pairs.push((k.to_string(), v.into_owned()));
-                        }
-                    }
+        match entry {
+            MapEntryV::Entry(key, value) => {
+                let formed =
+                    form(&key.item, env, sig).map_err(|error| stamp(error.into(), key.span))?;
+                let Value::String(label) = formed else {
+                    return Err(stamp(
+                        Error::new(format!(
+                            "map key must be a String, got {} '{formed}'",
+                            formed.type_name()
+                        ))
+                        .with_hint("use str to convert")
+                        .into(),
+                        key.span,
+                    ));
+                };
+                let label = label.into_string();
+                if !explicit.insert(label.clone()) {
+                    return Err(stamp(duplicate_key(&label).into(), key.span));
                 }
-                val => {
-                    return Err(Error::new(format!(
-                        "spread requires a Map, got {}",
-                        val.type_name()
-                    ))
-                    .with_hint("spread (...) in a map expands key-value pairs"));
+                let value =
+                    form(&value.item, env, sig).map_err(|error| stamp(error.into(), value.span))?;
+                result.insert(label, value);
+            }
+            MapEntryV::Spread(value) => {
+                for (key, value) in
+                    &form_map(value, env, sig).map_err(|error| stamp(error.into(), value.span))?
+                {
+                    if !result.contains_key(key) {
+                        result.insert(key.to_string(), value.into_owned());
+                    }
                 }
             }
         }
     }
-    Ok(Value::map(pairs))
+    Ok(Value::Map(result))
+}
+
+fn form_map(value: &Spanned<Val>, env: &Env, sig: &Signature) -> Result<Map, Error> {
+    match form(&value.item, env, sig)? {
+        Value::Map(map) => Ok(map),
+        value => Err(
+            Error::new(format!("spread requires a Map, got {}", value.type_name()))
+                .with_hint("spread (...) in a map expands key-value pairs"),
+        ),
+    }
+}
+
+fn duplicate_key(key: &str) -> Error {
+    Error::new(format!(
+        "map literal: key '{key}' given twice; which did you mean?"
+    ))
 }

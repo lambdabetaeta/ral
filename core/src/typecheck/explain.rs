@@ -981,7 +981,8 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         | Reason::AutoderefHead
         | Reason::ProtectContract
         | Reason::Vocabulary(_)
-        | Reason::Capture => None,
+        | Reason::Capture
+        | Reason::Upcast => None,
     }
 }
 
@@ -1216,6 +1217,16 @@ fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
 pub(crate) const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
     error record that carries its own status: catch it with `try` and read \
     `$err[status]` from the handler's argument";
+
+/// The message and hint refusing `...` in a value's application, which the
+/// elaborator raises for a head it knows to be a value: the checker's words.
+pub(crate) fn spread_into_application() -> (String, String) {
+    let kind = TypeErrorKind::SpreadIntoApplication {
+        head: SpreadHead::Applied,
+    };
+    let hint = guidance(&kind, None).expect("a refused spread names its rewrite");
+    (kind.render_message(), hint)
+}
 
 /// The longest prefix of `name` that ends just before a `-` and is bound:
 /// `-` continues a name, so `$os-$arch` reads `$os-`.

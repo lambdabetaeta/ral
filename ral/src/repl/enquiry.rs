@@ -168,7 +168,9 @@ impl Datum for EditorOp {
             Self::Highlight(spans) => tag("highlight", Some(spans.encode())),
             Self::History => tag("history", None),
             Self::StateGet => tag("state-get", None),
-            Self::StateSet(v) => tag("state-set", Some(v.encode())),
+            Self::StateSet(Data(value)) => {
+                tag("state-set", (value != FOValue::Unit).then_some(value))
+            }
         }
     }
 
@@ -191,7 +193,9 @@ impl Datum for EditorOp {
             Some(("highlight", Some(p))) => Self::Highlight(Datum::decode(p)?),
             Some(("history", None)) => Self::History,
             Some(("state-get", None)) => Self::StateGet,
-            Some(("state-set", Some(p))) => Self::StateSet(Datum::decode(p)?),
+            Some(("state-set", payload)) => {
+                Self::StateSet(Data(payload.cloned().unwrap_or(FOValue::Unit)))
+            }
             _ => return Err(format!("no `{EDITOR} request is shaped like {}", v.shape())),
         })
     }
@@ -253,6 +257,7 @@ mod tests {
                 end: 2,
                 style: "command".into(),
             }]),
+            EditorOp::StateSet(Data(FOValue::Unit)),
             EditorOp::StateSet(Data(FOValue::Int { value: 3 })),
         ] {
             let req = Enquiry::Editor(op);
@@ -265,6 +270,24 @@ mod tests {
             osc52: true,
         });
         assert_eq!(Enquiry::decode(&copy.clone().encode()), Ok(copy));
+    }
+
+    #[test]
+    fn an_absent_or_unit_state_payload_is_unit() {
+        for payload in [None, Some(FOValue::Unit)] {
+            let op = EditorOp::decode(&tag("state-set", payload)).expect("unit is valid state");
+            assert_eq!(op, EditorOp::StateSet(Data(FOValue::Unit)));
+            assert_eq!(op.encode(), tag("state-set", None));
+        }
+    }
+
+    #[test]
+    fn non_unit_editor_requests_still_require_their_payloads() {
+        for label in ["set", "set-lbuffer", "insert", "ghost", "highlight"] {
+            for payload in [None, Some(FOValue::Unit)] {
+                assert!(EditorOp::decode(&tag(label, payload)).is_err(), "{label}");
+            }
+        }
     }
 
     /// An unknown class names itself, never passes silently.

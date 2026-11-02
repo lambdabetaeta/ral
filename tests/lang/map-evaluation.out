@@ -4,8 +4,14 @@ spread
 last
 final
 {"a":2,"b":3,"z":1}
+duplicate-value
+later-spread
 1 map literal: key 'a' given twice; which did you mean?
+duplicate-value
 1 map literal: key 'a' given twice; which did you mean?
+duplicate-value
+7 later-spread
+8 duplicate-value
 7 first-spread
 8 first-key
 9 first-value

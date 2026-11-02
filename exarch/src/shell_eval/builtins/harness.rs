@@ -439,6 +439,7 @@ Reply to your caller
 
 Available to spawned and headless agents; interactive roots converse with the
 user instead. Return first-order data: no blocks, handles, or environments.
+A bare `reply replies with (), as `reply () does.
 Write reply last: the value is deposited after the enclosing ral batch drains.
 Final prose alone does not deliver a reply. A child keeps its helpers and
 rests once its pending work settles; a headless root finishes. Human dealings

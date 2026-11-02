@@ -1,8 +1,18 @@
 ---
 status: accepted
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 ---
 
 # The evaluator steps closures
+
+> **Amended 2026-11-02:**
+> [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+> makes application push one `Arg` per argument before force; only a lambda
+> terminal consumes an argument. Written sequences use `Seq`, and both
+> `To` and `Seq` carry continuation environments. Natives force to ordinary
+> lambda chains. The CEK architecture stands; the sequencing and application
+> mechanisms below are historical.
 
 **The evaluator is a CEK machine.** What is in focus is a computation closure
 ⟨M, E⟩; the continuation is a stack of frames, each carrying the environment

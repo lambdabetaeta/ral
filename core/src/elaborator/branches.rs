@@ -1,6 +1,6 @@
 use super::{
-    Arc, Ast, CaseArm, Comp, CompKind, Elaborator, IfBranch, Pattern, Spanned, Val, WithSpan, ast,
-    wrap_binds,
+    Arc, Ast, CaseArm, Comp, CompKind, Elaborator, IfBranch, ParseError, Pattern, Spanned, Val,
+    WithSpan, ast, wrap_binds,
 };
 
 impl Elaborator {
@@ -67,11 +67,11 @@ impl Elaborator {
         let val = match comp.item {
             CompKind::Return(val) if hoisted.is_empty() => val,
             _ => {
-                self.refuse(
+                self.refuse(ParseError::new(
                     arm.span.or(self.current_span),
                     "an arm is a block, or a name holding one; to compute the block first, \
                      bind it: `let arm = $arms[a]`",
-                );
+                ));
                 Val::Unit
             }
         };
@@ -91,11 +91,10 @@ impl Elaborator {
         };
         Self::thunk_of(comp!(
             self,
-            CompKind::bind(
-                Pattern::Wildcard,
-                body,
-                comp!(self, CompKind::Return(Val::Unit))
-            )
+            CompKind::Seq {
+                first: body,
+                rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
+            }
         ))
     }
 

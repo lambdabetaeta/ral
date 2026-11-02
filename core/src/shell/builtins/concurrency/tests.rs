@@ -3373,10 +3373,7 @@ fn par_surfaces_outside_claim_with_par_prefix() {
     );
     Arc::make_mut(&mut shell.sig).install_natives([(
         "first-settled".to_string(),
-        Value::Native {
-            entry: Arc::new(override_entry),
-            applied: Vec::new().into(),
-        },
+        Value::Native(Arc::new(override_entry)),
     )]);
 
     let (ended, _) = run_captured(&mut shell, "par { |x| return $x } [1] 1", None);

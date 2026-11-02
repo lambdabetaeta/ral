@@ -14,7 +14,7 @@
 //! operands are the ordinary atoms of the value grammar.
 
 use crate::ir::{
-    ArithOp, BinaryOp, MapPatternEntry, Pattern, Redirect, Redirects, StdinSource, WriteMode,
+    ArithOp, BinaryOp, FieldPattern, Pattern, Redirect, Redirects, StdinSource, WriteMode,
 };
 use crate::source::{Span, Spanned};
 use crate::syntax::CONTROL_OPERATORS;
@@ -211,13 +211,13 @@ enum Bracketed {
     Options,
     CaseArms,
     ListPattern,
-    MapPattern,
+    RecordPattern,
 }
 
 impl Bracketed {
     fn item(self) -> &'static str {
         match self {
-            Self::Collection | Self::MapPattern => "entry",
+            Self::Collection | Self::RecordPattern => "entry",
             Self::Options => "option",
             Self::CaseArms => "`case` arm",
             Self::ListPattern => "element",
@@ -230,7 +230,7 @@ impl Bracketed {
             Self::Options => "`[a: 1, b: 2]`",
             Self::CaseArms => "[`ok: { |v| … }, `err: { |e| … }]",
             Self::ListPattern => "`[x, y]`",
-            Self::MapPattern => "`[a: x, b: y]`",
+            Self::RecordPattern => "`[a: x, b: y]`",
         }
     }
 }
@@ -1179,7 +1179,7 @@ impl Parser {
     }
 
     /// A binding LHS or lambda parameter, and the pattern grammar's sole entry:
-    /// list and map patterns recurse back here per element, so the one
+    /// list and record patterns recurse back here per element, so the one
     /// `nested()` guard bounds the whole recursion.
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         self.nested(|p| match p.peek() {
@@ -1229,10 +1229,10 @@ impl Parser {
 
         // Same key alphabet as a map literal minus the data keys, which a
         // pattern cannot bind through.
-        let is_map = self.key_colon_here(KeyAlphabet::Label);
+        let is_record = self.key_colon_here(KeyAlphabet::Label);
 
-        if is_map {
-            self.parse_map_pattern()
+        if is_record {
+            self.parse_record_pattern()
         } else {
             self.parse_list_pattern()
         }
@@ -1282,16 +1282,16 @@ impl Parser {
         Ok(Pattern::List { elems, rest })
     }
 
-    fn parse_map_pattern(&mut self) -> Result<Pattern, ParseError> {
+    fn parse_record_pattern(&mut self) -> Result<Pattern, ParseError> {
         let mut entries = Vec::new();
 
-        self.parse_bracket_items(Bracketed::MapPattern, |p| {
+        self.parse_bracket_items(Bracketed::RecordPattern, |p| {
             let (key_span, key) = p.capture_span(Self::parse_static_key)?;
             // Parsed keys, not token spellings: `[a: x, 'a': y]` repeats and
             // `[a: [a: x]]` does not.  A record has one value per field, so a
             // repeated label is a mistake about the pattern, not about the
             // value it is matched against — and it needs no types to see.
-            if entries.iter().any(|e: &MapPatternEntry| e.key == key) {
+            if entries.iter().any(|e: &FieldPattern| e.key == key) {
                 return Err(ParseError::new(
                     Some(key_span),
                     format!("this pattern binds '{key}' twice"),
@@ -1302,11 +1302,11 @@ impl Parser {
             }
             p.expect(&Token::Colon)?;
             let pattern = p.parse_pattern()?;
-            entries.push(MapPatternEntry { key, pattern });
+            entries.push(FieldPattern { key, pattern });
             Ok(SepFlow::Cont)
         })?;
 
-        Ok(Pattern::Map(entries))
+        Ok(Pattern::Record(entries))
     }
 
     /// A written field name.

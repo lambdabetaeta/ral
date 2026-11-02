@@ -1,3 +1,7 @@
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
+
 # Term depth
 
 **A term's depth is not bounded by its syntax, and the language puts no limit
@@ -13,8 +17,8 @@ door, or it is a stack overflow waiting for a long enough program.**
   chain and a block's statement list each nest one level per element in the
   AST or the IR: the Pratt loop builds a left spine, `parse_block` curries,
   `Chain` lowers to right-nested `try`, `elsif` folds, and a block body folds
-  into a `Bind` chain.
-- **Why not a measure.** A block *is* a `Bind` chain, walked by the checker,
+  into a `Bind`/`Seq` chain.
+- **Why not a measure.** A block *is* a `Bind`/`Seq` chain, walked by the checker,
   the annotator and the drop glue alike, so no depth measure rejects a deep
   term without rejecting a long block; and a limit safe on Windows' 1 MB main
   stack would reject a few hundred statements.

@@ -171,18 +171,6 @@ impl Scrub {
                     payload: Some(Box::new(payload)),
                 })
             }
-            Value::Native { entry, applied } => patched(
-                applied,
-                applied
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, arg)| self.rebuild(arg).map(|new| (i, new))),
-                |args: &mut Box<[Value]>, i, new| args[i] = new,
-            )
-            .map(|applied| Value::Native {
-                entry: Arc::clone(entry),
-                applied,
-            }),
             Value::Thunk(closure) => {
                 let env = self.replacement(closure.env())?;
                 Some(Value::Thunk(Closure::captured(
@@ -195,7 +183,8 @@ impl Scrub {
             | Value::Int(_)
             | Value::Float(_)
             | Value::String(_)
-            | Value::Bytes(_) => None,
+            | Value::Bytes(_)
+            | Value::Native(_) => None,
         }
     }
 }
@@ -223,8 +212,8 @@ fn patched<C: Clone, K, V>(
     Some(copy)
 }
 
-/// Push the environment of every closure `v` holds, through data and a
-/// native's applied arguments, never entering a closure.
+/// Push the environment of every closure `v` holds, through data, never
+/// entering a closure.
 fn captured_scopes(v: &Value, out: &mut Vec<Env>) {
     let capture = match v {
         Value::Thunk(closure) => Some(closure.env()),

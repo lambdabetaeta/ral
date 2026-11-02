@@ -83,9 +83,7 @@ fn span_cases() -> Vec<SpanCase> {
             "99",
             "non-bool-cond",
         ),
-        // Field on Int via index chain: `$r[a][b]` — the second `[b]`
-        // is on an Int.  `key_spans` on `CompKind::Index` narrows the
-        // caret onto exactly that step in the chain.
+        // Each `Prim::Index` keeps its key's span.
         c("let r = [a: 1]\nreturn $r[a][b]", "[b]", "field-on-int"),
         // String as command head: the whole call carries a Call span.
         c("'foo' bar baz", "'foo' bar baz", "string-as-head"),
@@ -150,6 +148,18 @@ fn span_cases() -> Vec<SpanCase> {
             "pipeline-stage-shape-early-stage",
         ),
     ]
+}
+
+#[test]
+fn scope_option_errors_follow_written_order_not_key_order() {
+    for form in ["within", "grant"] {
+        let src = format!("{form} [zzz: 17, aaa: 23] {{ return () }}");
+        let errs = raw_errors(&src);
+        let spans: Vec<_> = errs.iter().map(|err| slice_span(&src, err)).collect();
+        assert_eq!(spans, [Some("17".into()), Some("23".into())], "{src}");
+        assert!(errs[0].message().contains("zzz"));
+        assert!(errs[1].message().contains("aaa"));
+    }
 }
 
 /// Pin each case's first error span to the expected substring.

@@ -181,9 +181,7 @@ impl Hook {
                 }
                 scheme.arity()
             }
-            Value::Native { entry, applied } => {
-                entry.decl.fixed_arity().saturating_sub(applied.len())
-            }
+            Value::Native(entry) => entry.decl.fixed_arity(),
             other => {
                 return Err(RegisterError::NotFunction {
                     name: name.clone(),

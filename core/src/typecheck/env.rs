@@ -2,6 +2,7 @@
 
 use super::contract::NestedCheck;
 use super::error::{Clash, Reason, TypeError, TypeErrorKind, UnitCall};
+use super::grade::Adaptation;
 use super::unify::{Unifier, WeakSource};
 use crate::ir::{Comp, GroupNode, Name, Val, synthetic};
 use crate::source::Span;
@@ -209,16 +210,13 @@ pub struct InferCtx {
     pub(crate) errors: Vec<TypeError>,
     /// Source position for newly emitted [`TypeError`]s, narrowed by `with_span`.
     pub pos: Option<Span>,
-    /// The computations a value demand captures, keyed by node address:
-    /// `annotate` wraps each in `cap … to d. decode d`.
-    pub(super) captured: HashSet<Node>,
+    /// Grade adaptations; a node's producer grade fixes the direction.
+    pub(super) adapted: HashMap<Node, Adaptation>,
     /// The right-hand sides the bind rule found of function type, keyed by
     /// node address: `annotate` binds each unrun, as `return (thunk M)`.
     pub(super) thunked: HashSet<Node>,
-    /// The values in hand a value demand captures — a command block passed
-    /// where a value producer was wanted — keyed by address, with the arity
-    /// `annotate` η-wraps them at.
-    pub(super) captured_vals: HashMap<Node, usize>,
+    /// Values in hand η-wrapped at this arity with this adaptation.
+    pub(super) adapted_vals: HashMap<Node, (usize, Adaptation)>,
     /// Each read of a name bound to what a call returned, which was `()`, at the
     /// span it was read at: an error raised there says why the name is `()`.
     pub(super) unit_reads: Vec<(Span, UnitCall)>,
@@ -243,6 +241,10 @@ pub struct InferCtx {
     /// How many arguments an under-applied boundary call lacks, keyed by its
     /// `Exec`: `annotate` η-expands it to a saturated call, where the site is.
     pub(super) boundary_missing: HashMap<Node, usize>,
+    /// Before which argument each call forced a returned thunk, once per
+    /// thunk, in order (0: the head's own result), keyed by its `App` or
+    /// `Exec`: `annotate` splits the call there, as `to h. force h`.
+    pub(super) splits: HashMap<Node, Vec<usize>>,
     /// The sites [`Self::snapshot_sites`] froze, under the same keys.
     pub(super) sites: HashMap<Node, Arc<Site>>,
     /// Stored session bindings that entered this unit with weak residuals, as
@@ -273,9 +275,9 @@ impl InferCtx {
             unifier: Unifier::new(),
             errors: Vec::new(),
             pos: None,
-            captured: HashSet::new(),
+            adapted: HashMap::new(),
             thunked: HashSet::new(),
-            captured_vals: HashMap::new(),
+            adapted_vals: HashMap::new(),
             unit_reads: Vec::new(),
             nested: Vec::new(),
             rec_groups: HashMap::new(),
@@ -283,6 +285,7 @@ impl InferCtx {
             boundary_results: HashMap::new(),
             boundary_values: HashMap::new(),
             boundary_missing: HashMap::new(),
+            splits: HashMap::new(),
             sites: HashMap::new(),
             residuals: Vec::new(),
             residual_uses: Vec::new(),

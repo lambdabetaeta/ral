@@ -1,8 +1,18 @@
 ---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 status: 'active; who places the coercion is superseded by [[decisions/260930_capture-is-decided-by-syntax]] — the coercion is unchanged, but `⟦·⟧` on a `let` places it, not a demand walk.'
 ---
 
 # A coercion is syntax, or it is not a coercion
+
+> **Amended 2026-11-02:**
+> [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+> represents the coercion as `Capture(M) to d. Prim::Decode(d)`.
+> Decode is a primitive on a byte value, not a computation constructor;
+> failure is a machine register. The historical constructor names and code
+> locations below describe earlier implementations; the decision that a
+> coercion is syntax stands.
 
 **The byte-to-value coercion the checker inserts is two kernel nodes,
 `Decode(Capture(M))`, and no part of it is a name.** A translation whose meaning

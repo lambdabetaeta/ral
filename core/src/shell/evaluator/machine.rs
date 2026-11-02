@@ -1,19 +1,19 @@
-//! The machine: closures in focus, frames on a stack, one `step`.
+//! The machine: a CEK machine for CBPV — closures in focus, frames on a
+//! stack, one `step`.
 //!
 //! [`Machine::eval_rules`] has one match arm per `CompKind`;
 //! [`Machine::step_return`] and [`Machine::step_halt`] are each frame's two
 //! rules, one match arm per [`Frame`]. `step` itself only
 //! dispatches on the shape of [`Focus`]. No arm calls another arm; no arm
-//! loops.
+//! loops. Every call pushes one `Arg` frame per argument, then forces.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::io::{self, Sink};
 use crate::ir::Redirects;
 use crate::ir::{
-    Args, Assembly, CaseArm, Comp, CompKind, GroupNode, Key, MapEntryV, MapOperand, Val,
-    ValListElem,
+    Argv, CaseArm, Comp, CompKind, GroupNode, NativeEntry, Pattern, Val, ValListElem, is_synthetic,
+    synthetic,
 };
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
@@ -22,18 +22,17 @@ use crate::shell::exec::pipeline;
 use crate::shell::exec::redirect::scope::{RedirectState, WriteFate};
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
-    Binding, Break, BroodOwner, CapturePolicy, Closure, Cradle, Env, Error, Escape, FrameHandle,
-    HandlerArity, HandlerFrame, Map, Mooring, ScopeOwner, Settled, Shell, Signature, TrailScope,
-    Value, report_value, sig, sig_hint,
+    Binding, Break, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle, Env, Error, Escape,
+    FrameHandle, HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell, Signature,
+    TrailScope, Value, report_value, sig, sig_hint,
 };
-use crate::source::Span;
+use crate::source::{Span, Spanned};
 use crate::ty::Site;
 
-use super::assemble;
 use super::expr;
 use super::pattern;
 use super::scope::{WithinScope, WithinUndo};
-use super::val::{form, form_options, interpolate_piece, spread_type_err};
+use super::val::{form, spread_type_err};
 
 // ── The stack ─────────────────────────────────────────────────────────
 
@@ -41,7 +40,7 @@ use super::val::{form, form_options, interpolate_piece, spread_type_err};
 /// means: a value, or a λ awaiting its arguments.
 pub(crate) enum Terminal {
     Value(Value),
-    /// `λp. M` awaiting an argument, over the environment it was reached in.
+    /// `λx. M` awaiting an argument, over the environment it was reached in.
     Lambda {
         comp: Arc<Comp>,
         env: Env,
@@ -60,7 +59,7 @@ pub(crate) enum Focus {
 
 /// One elimination form with a pending sub-computation. Frames hold `Arc`s
 /// into the IR, never cloned IR, never a `Context` clone, and an `Env` only
-/// with syntax to close over it: `To` and `Map`. Large states are boxed.
+/// with syntax to close over it: `To` and `Seq`. Large states are boxed.
 enum Frame {
     /// `M to x. N`: `bind` is the `Bind` node itself, read for its pattern,
     /// rest and span.
@@ -68,9 +67,13 @@ enum Frame {
         bind: Arc<Comp>,
         env: Env,
     },
-    Map(Box<MapCursor>),
-    Apply {
-        args: Vec<Value>,
+    Seq {
+        rest: Arc<Comp>,
+        env: Env,
+    },
+    /// `□ V`: an argument awaiting the λ it binds; `span` is its call's.
+    Arg {
+        value: Value,
         span: Option<Span>,
     },
     Capture {
@@ -110,39 +113,6 @@ enum Frame {
 
 /// Large frame states are boxed: any alone would exceed the cap.
 const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
-
-enum MapPhase {
-    Key,
-    Value(String),
-    Spread,
-}
-
-struct MapCursor {
-    node: Arc<Comp>,
-    env: Env,
-    index: usize,
-    phase: MapPhase,
-    explicit: HashSet<String>,
-    result: Map,
-}
-
-impl MapCursor {
-    fn entries(&self) -> &[MapEntryV] {
-        let CompKind::Assemble(Assembly::Map(entries)) = &self.node.item else {
-            unreachable!("a map cursor holds map assembly")
-        };
-        entries
-    }
-
-    fn operand(&self) -> &MapOperand {
-        match (&self.entries()[self.index], &self.phase) {
-            (MapEntryV::Entry(key, _), MapPhase::Key) => key,
-            (MapEntryV::Entry(_, value), MapPhase::Value(_))
-            | (MapEntryV::Spread(value), MapPhase::Spread) => value,
-            _ => unreachable!("map phase matches its entry"),
-        }
-    }
-}
 
 /// The state: a focus and a stack. Private — nothing outside this module
 /// constructs one or sees the stack.
@@ -242,38 +212,84 @@ fn capture_overflowed() -> Error {
     .with_hint("did you mean to write this to a file? `cmd > out.txt` keeps every byte")
 }
 
+/// `V` meeting an argument: unreachable for a checked program, which applies
+/// only what it has forced; kept a clean error, not a panic.
+fn not_a_function(v: &Value) -> Break {
+    sig_hint(
+        format!("{} is not a function", v.type_name()),
+        "the type checker forces every function before it is applied, so this is a fault \
+         in ral rather than in your program: please report the source that produced it",
+    )
+}
+
 fn rec_node(group: &Arc<GroupNode>, index: usize) -> Arc<Comp> {
-    Arc::new(crate::source::Spanned::synthetic(CompKind::Rec {
+    Arc::new(Spanned::synthetic(CompKind::Rec {
         group: Arc::clone(group),
         index,
     }))
 }
 
+/// A native's code, built afresh at each force: `λx₁…λxₙ. Native(b,
+/// x₁…xₙ)`, located where it is forced. Its bodies have no span, so each is
+/// located at the application that enters it.
+fn native_code(entry: Arc<BuiltinEntry>, span: Option<Span>) -> Arc<Comp> {
+    let params: Vec<_> = (0..entry.decl.fixed_arity())
+        .map(|i| synthetic("native", i))
+        .collect();
+    let call = CompKind::Native {
+        args: params.iter().cloned().map(Val::Variable).collect(),
+        entry: NativeEntry(entry),
+    };
+    let code = params
+        .into_iter()
+        .rev()
+        .fold(call, |body, param| CompKind::Lam {
+            param,
+            body: Arc::new(Spanned::synthetic(body)),
+        });
+    Arc::new(Spanned::with_span(span, code))
+}
+
+/// `body`, at `span` when it has no span of its own: such code, a native's
+/// above all, runs where it was called.
+fn located(body: &Arc<Comp>, span: Option<Span>) -> Arc<Comp> {
+    match (body.span, span) {
+        (None, Some(_)) => Arc::new(Spanned::with_span(span, body.item.clone())),
+        _ => Arc::clone(body),
+    }
+}
+
 /// A boundary runs saturated: `annotate` η-expands an under-applied call, so
 /// a call that is not is one the checker never saw.
 fn run_boundary(
-    entry: &crate::shell::runtime::BuiltinEntry,
-    applied: Box<[Value]>,
-    argv: Vec<Value>,
+    entry: &BuiltinEntry,
+    argv: &[Value],
     site: Option<&Arc<Site>>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let args: Vec<Value> = applied.into_vec().into_iter().chain(argv).collect();
     let arity = entry.decl.fixed_arity();
-    if args.len() != arity {
+    if argv.len() != arity {
         let name = &entry.decl.name;
-        return Err(crate::shell::runtime::sig(format!(
+        return Err(sig(format!(
             "{name}: takes {arity} argument(s) in one call, got {}",
-            args.len()
+            argv.len()
         )));
     }
-    super::call::run_native(entry, &args, site, mooring, shell)
+    super::call::run_native(entry, argv, site, mooring, shell)
 }
 
-pub(crate) fn close_args(args: &Args, env: &Env, sig: &Signature) -> Result<Vec<Value>, Error> {
-    let mut out = Vec::with_capacity(args.len());
-    for elem in args {
+fn form_args<'a>(
+    args: impl IntoIterator<Item = &'a Val>,
+    env: &Env,
+    sig: &Signature,
+) -> Result<Vec<Value>, Error> {
+    args.into_iter().map(|arg| form(arg, env, sig)).collect()
+}
+
+pub(crate) fn close_argv(argv: &Argv, env: &Env, sig: &Signature) -> Result<Vec<Value>, Error> {
+    let mut out = Vec::with_capacity(argv.len());
+    for elem in argv {
         match elem {
             ValListElem::Single(v) => out.push(form(&v.item, env, sig)?),
             ValListElem::Spread(v) => match form(&v.item, env, sig)? {
@@ -306,30 +322,28 @@ fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<V
     }
 }
 
-/// The only way a frame gets on the stack, and only [`Machine::reserve`]
-/// hands one out, so a push is infallible and never precedes the cap check.
-struct Slot<'a>(&'a mut Vec<Frame>);
+/// Room for frames, handed out only after the stack cap check.
+struct Slot<'a> {
+    stack: &'a mut Vec<Frame>,
+    count: usize,
+}
 
 impl Slot<'_> {
     fn push(self, frame: Frame) {
-        self.0.push(frame);
+        self.extend(std::iter::once(frame));
+    }
+
+    fn extend(self, frames: impl ExactSizeIterator<Item = Frame>) {
+        assert_eq!(frames.len(), self.count, "push must match its reservation");
+        self.stack.extend(frames);
     }
 }
 
 impl Machine {
-    /// The initial state for `apply`: an empty stack, focus set by `apply_rule`.
-    fn applying(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut Shell) -> Self {
-        let mut m = Self::default();
-        m.focus = m
-            .apply_rule(f, args, None, mooring, shell)
-            .unwrap_or_else(Focus::Halt);
-        m
-    }
-
-    /// The stack cap: refuse a push at `stack.len() >= shell.session.stack_limit`,
+    /// The stack cap: refuse `n` more frames past `shell.session.stack_limit`,
     /// before any effect — every pushing rule calls this first.
-    fn reserve(&mut self, shell: &Shell) -> Settled<Slot<'_>> {
-        if self.stack.len() >= shell.session.stack_limit {
+    fn room(&self, n: usize, shell: &Shell) -> Settled<()> {
+        if self.stack.len() + n > shell.session.stack_limit {
             return Err(sig_hint(
                 format!(
                     "recursion limit exceeded ({} frames)",
@@ -339,7 +353,30 @@ impl Machine {
                      raise via rc recursion-limit: or --recursion-limit",
             ));
         }
-        Ok(Slot(&mut self.stack))
+        Ok(())
+    }
+
+    fn reserve(&mut self, shell: &Shell) -> Settled<Slot<'_>> {
+        self.reserve_n(1, shell)
+    }
+
+    fn reserve_n(&mut self, count: usize, shell: &Shell) -> Settled<Slot<'_>> {
+        self.room(count, shell)?;
+        Ok(Slot {
+            stack: &mut self.stack,
+            count,
+        })
+    }
+
+    /// One `Arg` frame per argument, the first on top, where the head's
+    /// first λ meets it.
+    fn push_args(&mut self, args: Vec<Value>, span: Option<Span>, shell: &Shell) -> Settled<()> {
+        self.reserve_n(args.len(), shell)?.extend(
+            args.into_iter()
+                .rev()
+                .map(|value| Frame::Arg { value, span }),
+        );
+        Ok(())
     }
 
     /// One transition: `step_eval` on `Eval`, `step_return`/`step_halt` otherwise.
@@ -363,92 +400,32 @@ impl Machine {
         .unwrap_or_else(Focus::Halt);
     }
 
-    // ── force, beta, apply ─────────────────────────────────────────────
+    // ── call, force ────────────────────────────────────────────────────
 
-    /// `beta(⟨λp. M, E⟩, args)`: a λ meeting its arguments. `args` non-empty.
-    fn beta(
+    /// The one way anything is called: `args` pushed, then `f` forced.
+    fn call(
         &mut self,
-        comp: &Comp,
-        env: Env,
-        mut args: Vec<Value>,
+        f: Value,
+        args: Vec<Value>,
         span: Option<Span>,
         shell: &Shell,
     ) -> Settled<Focus> {
-        let CompKind::Lam { param, body } = &comp.item else {
-            unreachable!("a Terminal::Lambda is built only from a Lam node")
-        };
-        let arg = args.remove(0);
-        let env = pattern::bind(param, &arg, env)?;
-        shell.poll()?;
-        if !args.is_empty() {
-            self.reserve(shell)?.push(Frame::Apply { args, span });
-        }
-        Ok(Focus::Eval {
-            comp: Arc::clone(body),
-            env,
-        })
+        self.push_args(args, span, shell)?;
+        Self::force(f, span)
     }
 
-    /// `apply(f, args)`: a closed value meeting arguments. `args` non-empty.
-    fn apply_rule(
-        &mut self,
-        f: Value,
-        mut args: Vec<Value>,
-        span: Option<Span>,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
-        debug_assert!(!args.is_empty(), "apply called with empty args");
-        match f {
-            Value::Thunk(c) => {
-                self.reserve(shell)?.push(Frame::Apply { args, span });
-                let (comp, env) = c.into_parts();
-                Ok(Focus::Eval { comp, env })
-            }
-            Value::Native { entry, applied } => {
-                let needed = entry.decl.fixed_arity();
-                let take = needed.saturating_sub(applied.len()).min(args.len());
-                let mut collected = applied.into_vec();
-                let rest = args.split_off(take);
-                collected.extend(args);
-                if collected.len() < needed {
-                    return Ok(Focus::Return(Terminal::Value(Value::Native {
-                        entry,
-                        applied: collected.into(),
-                    })));
-                }
-                let v = super::call::run_native(&entry, &collected, None, mooring, shell)?;
-                if !rest.is_empty() {
-                    self.reserve(shell)?.push(Frame::Apply { args: rest, span });
-                }
-                Ok(Focus::Return(Terminal::Value(v)))
-            }
-            other => {
-                let hint = if matches!(other, Value::Unit) {
-                    "too many arguments: the function returned before consuming all of them"
-                } else {
-                    "only Lambdas, Blocks, and natives are functions"
-                };
-                Err(sig_hint(
-                    format!("{} is not a function", other.type_name()),
-                    hint,
-                ))
-            }
-        }
-    }
-
-    /// `force V` on a closed value: `force(thunk M) = M`, nothing pushed.
-    fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<Focus> {
+    /// `force V` on a closed value: `force(thunk M) = M`, and a native's code
+    /// built at `span`; nothing pushed.
+    fn force(v: Value, span: Option<Span>) -> Settled<Focus> {
         match v {
             Value::Thunk(c) => {
                 let (comp, env) = c.into_parts();
                 Ok(Focus::Eval { comp, env })
             }
-            Value::Native { entry, applied } if entry.decl.fixed_arity() == 0 => {
-                let v = super::call::run_native(&entry, &applied, None, mooring, shell)?;
-                Ok(Focus::Return(Terminal::Value(v)))
-            }
-            native @ Value::Native { .. } => Ok(Focus::Return(Terminal::Value(native))),
+            Value::Native(entry) => Ok(Focus::Eval {
+                comp: native_code(entry, span),
+                env: Env::new(),
+            }),
             other => Err(sig_hint(
                 format!("cannot force {}: ! requires a Block", other.type_name()),
                 "wrap in a block: !{ expr }",
@@ -458,13 +435,13 @@ impl Machine {
 
     /// `force V` on a value still syntax: `force(thunk M) = M`, a literal block
     /// running in place and closing nothing.
-    fn force_val(val: &Val, env: Env, mooring: &Mooring, shell: &mut Shell) -> Settled<Focus> {
+    fn force_val(val: &Val, env: Env, span: Option<Span>, shell: &Shell) -> Settled<Focus> {
         match val {
             Val::Thunk(node) => Ok(Focus::Eval {
                 comp: Arc::clone(node.shape()),
                 env,
             }),
-            other => Self::force(form(other, &env, &shell.sig)?, mooring, shell),
+            other => Self::force(form(other, &env, &shell.sig)?, span),
         }
     }
 
@@ -519,28 +496,8 @@ impl Machine {
             }
             CompKind::Return(val) => Focus::Return(Terminal::Value(form(val, &env, &shell.sig)?)),
 
-            CompKind::Assemble(assembly) => match assembly {
-                Assembly::List(elems) => Focus::Return(Terminal::Value(assemble::eval_list(
-                    elems, &env, &shell.sig,
-                )?)),
-                Assembly::Record(entries) => Focus::Return(Terminal::Value(assemble::eval_record(
-                    entries, &env, &shell.sig,
-                )?)),
-                Assembly::Map(_) => {
-                    let cursor = Box::new(MapCursor {
-                        node: Arc::clone(comp),
-                        env,
-                        index: 0,
-                        phase: MapPhase::Key,
-                        explicit: HashSet::new(),
-                        result: Map::new(),
-                    });
-                    self.next_map_part(cursor, shell)?
-                }
-            },
-
             // Canonical at A → C, never a value: the frame on top decides.
-            // Unreachable except under Apply/a C-holed frame for a checked
+            // Unreachable except under `Arg`/a C-holed frame for a checked
             // program.
             CompKind::Lam { .. } => Focus::Return(Terminal::Lambda {
                 comp: Arc::clone(comp),
@@ -577,36 +534,10 @@ impl Machine {
                 path.shown(&shell.context.require_home()?),
             ))),
 
-            CompKind::Force(val) => Self::force_val(val, env, mooring, shell)?,
+            CompKind::Force(val) => Self::force_val(val, env, comp.span, shell)?,
 
-            CompKind::Interpolation(parts) => {
-                let mut s = String::new();
-                for p in parts {
-                    s.push_str(&interpolate_piece(&form(p, &env, &shell.sig)?)?);
-                }
-                Focus::Return(Terminal::Value(Value::string(s)))
-            }
-
-            CompKind::Binary(op, lhs, rhs) => Focus::Return(Terminal::Value(expr::eval_binary(
-                *op, lhs, rhs, &env, &shell.sig,
-            )?)),
-            CompKind::Negate(v) => {
-                Focus::Return(Terminal::Value(expr::eval_negate(v, &env, &shell.sig)?))
-            }
-            CompKind::Not(v) => {
-                Focus::Return(Terminal::Value(expr::eval_not(v, &env, &shell.sig)?))
-            }
-
-            CompKind::Index { target, keys } => {
-                let mut v = form(target, &env, &shell.sig)?;
-                for key in keys {
-                    v = match &key.item {
-                        Key::Label(label) => expr::field(&v, label),
-                        Key::Position(n) => expr::position(&v, *n),
-                        Key::Data(k) => expr::lookup(&v, &form(k, &env, &shell.sig)?),
-                    }?;
-                }
-                Focus::Return(Terminal::Value(v))
+            CompKind::Prim(prim) => {
+                Focus::Return(Terminal::Value(expr::eval_prim(prim, env, &shell.sig)?))
             }
 
             CompKind::Bind {
@@ -625,9 +556,21 @@ impl Machine {
                 }
             }
 
+            CompKind::Seq { first, rest } => {
+                shell.poll()?;
+                self.reserve(shell)?.push(Frame::Seq {
+                    rest: Arc::clone(rest),
+                    env: env.clone(),
+                });
+                Focus::Eval {
+                    comp: Arc::clone(first),
+                    env,
+                }
+            }
+
             CompKind::If { cond, then, else_ } => match form(&cond.item, &env, &shell.sig)? {
                 Value::Bool(b) => {
-                    Self::force_val(&if b { then } else { else_ }.item, env, mooring, shell)?
+                    Self::force_val(&if b { then } else { else_ }.item, env, comp.span, shell)?
                 }
                 other => {
                     return Err(sig(format!(
@@ -639,17 +582,14 @@ impl Machine {
             },
 
             CompKind::Case { scrutinee, arms } => {
-                self.step_case(scrutinee, arms, comp.span, env, mooring, shell)?
+                self.step_case(scrutinee, arms, comp.span, env, shell)?
             }
 
             CompKind::App { head, args } => {
                 shell.poll()?;
                 shell.stamp_call_site(comp.span);
-                let argv = close_args(args, &env, &shell.sig)?;
-                self.reserve(shell)?.push(Frame::Apply {
-                    args: argv,
-                    span: comp.span,
-                });
+                let args = form_args(args.iter().map(|arg| &arg.item), &env, &shell.sig)?;
+                self.push_args(args, comp.span, shell)?;
                 Focus::Eval {
                     comp: Arc::clone(head),
                     env,
@@ -658,17 +598,20 @@ impl Machine {
 
             CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, mooring, shell)?,
 
-            CompKind::Pipeline { stages } => {
-                if stages.len() == 1 {
-                    return Ok(Focus::Eval {
-                        comp: Arc::clone(&stages[0]),
-                        env,
-                    });
-                }
-                Focus::Return(Terminal::Value(pipeline::PipeNode::run(
-                    stages, &env, STAGE_EVAL, mooring, shell,
-                )?))
+            CompKind::Native { entry, args } => {
+                let args = form_args(args, &env, &shell.sig)?;
+                let v = super::call::run_native(&entry.0, &args, None, mooring, shell)?;
+                Focus::Return(Terminal::Value(v))
             }
+
+            CompKind::Pipeline { stages } => Focus::Return(Terminal::Value(
+                pipeline::PipeNode::run(stages, &env, STAGE_EVAL, mooring, shell)?,
+            )),
+
+            CompKind::Upcast(body) => Focus::Eval {
+                comp: Arc::clone(body),
+                env,
+            },
 
             CompKind::Capture(body) => {
                 let slot = self.reserve(shell)?;
@@ -685,32 +628,6 @@ impl Machine {
                 }
             }
 
-            CompKind::Decode(val) => {
-                let v = form(val, &env, &shell.sig)?;
-                // The bind's scope dies before the decode, not after it, so the
-                // capture's buffer is unshared and taken over, not copied.
-                drop(env);
-                let Value::Bytes(bytes) = v else {
-                    return Err(sig_hint(
-                        format!(
-                            "the value boundary was handed {} where a captured byte payload belongs",
-                            v.type_name()
-                        ),
-                        "only the type checker writes this step, so this is a fault in ral \
-                             rather than in your program: please report the source that produced it",
-                    ));
-                };
-                let mut bytes = bytes.into_vec();
-                bytes.truncate(io::without_terminator(&bytes).len());
-                Focus::Return(Terminal::Value(Value::string(
-                    crate::shell::runtime::decode_utf8_strict(
-                        bytes,
-                        "captured output is not valid UTF-8 text",
-                        "to keep it as bytes, pipe it: `… | from-bytes`",
-                    )?,
-                )))
-            }
-
             CompKind::Redirect { body, redirects } => {
                 let redirs = close_redirects(redirects, &env, &shell.sig)?;
                 self.push_redirect(&redirs, comp.span, mooring, shell)?;
@@ -725,7 +642,7 @@ impl Machine {
                 handlers,
                 body,
             } => {
-                let opts = form_options(opts, &env, &shell.sig)?;
+                let opts = form(&Val::Record(Arc::clone(opts)), &env, &shell.sig)?;
                 let arms = handlers
                     .as_ref()
                     .map(|arms| {
@@ -740,11 +657,11 @@ impl Machine {
                 let body = form(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 slot.push(Frame::Within(scope.enter(shell)));
-                Self::force(body, mooring, shell)?
+                Self::force(body, comp.span)?
             }
 
             CompKind::Grant { caps, body } => {
-                let c = form_options(caps, &env, &shell.sig)?;
+                let c = form(&Val::Record(Arc::clone(caps)), &env, &shell.sig)?;
                 let caps = decode_capability_map(&c, "grant", &shell.freeze_ctx())?;
                 let body = form(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
@@ -752,28 +669,28 @@ impl Machine {
                 shell.context.grants.push(caps);
                 shell.audit_deputy_prefixes();
                 slot.push(Frame::Grant(at));
-                Self::force(body, mooring, shell)?
+                Self::force(body, comp.span)?
             }
 
             CompKind::Try { body, handler } => {
                 let body = form(body, &env, &shell.sig)?;
                 let handler = form(handler, &env, &shell.sig)?;
                 self.reserve(shell)?.push(Frame::Try { handler });
-                Self::force(body, mooring, shell)?
+                Self::force(body, comp.span)?
             }
 
             CompKind::Guard { body, cleanup } => {
                 let body = form(body, &env, &shell.sig)?;
                 let cleanup = form(cleanup, &env, &shell.sig)?;
                 self.reserve(shell)?.push(Frame::Guard { cleanup });
-                Self::force(body, mooring, shell)?
+                Self::force(body, comp.span)?
             }
 
             CompKind::Audit { body } => {
                 let body = form(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 slot.push(Frame::Audit(shell.local.audit.open(CapturePolicy::Bytes)));
-                Self::force(body, mooring, shell)?
+                Self::force(body, comp.span)?
             }
 
             CompKind::Spawn { title, body } => {
@@ -797,20 +714,19 @@ impl Machine {
                     Cradle::owning(shell.scope.clone(), owner.brood()),
                 );
                 slot.push(Frame::Gather { owner, prev });
-                Self::force(body, mooring, shell)?
+                Self::force(body, comp.span)?
             }
         })
     }
 
-    /// `case`: the chosen arm is forced and applied to the payload.
+    /// `case`: the payload is pushed, and the chosen arm forced.
     fn step_case(
         &mut self,
-        scrutinee: &crate::source::Spanned<Val>,
+        scrutinee: &Spanned<Val>,
         arms: &[CaseArm],
         span: Option<Span>,
         env: Env,
-        mooring: &Mooring,
-        shell: &mut Shell,
+        shell: &Shell,
     ) -> Settled<Focus> {
         let (label, payload) = match form(&scrutinee.item, &env, &shell.sig)? {
             Value::Variant { label, payload } => (label, payload),
@@ -833,11 +749,8 @@ impl Machine {
             )));
         };
         let payload = payload.map_or(Value::Unit, |p| *p);
-        self.reserve(shell)?.push(Frame::Apply {
-            args: vec![payload],
-            span,
-        });
-        Self::force_val(&arm.body.item, env, mooring, shell)
+        self.push_args(vec![payload], span, shell)?;
+        Self::force_val(&arm.body.item, env, span, shell)
     }
 
     fn step_exec(
@@ -849,31 +762,32 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         shell.poll()?;
-        let argv = close_args(&exec.args, env, &shell.sig)?;
+        let argv = close_argv(&exec.argv, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
         shell.stamp_call_site(span);
         match dispatch::classify_command(&exec.head, env, mooring, shell)? {
-            Resolution::Env(Value::Native { entry, applied }) if entry.decl.is_boundary() => {
+            Resolution::Env(Value::Native(entry)) if entry.decl.is_boundary() => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
-                let site = exec.site.as_ref();
-                let v = run_boundary(&entry, applied, argv, site, mooring, shell)?;
+                let v = run_boundary(&entry, &argv, exec.site.as_ref(), mooring, shell)?;
+                Ok(Focus::Return(Terminal::Value(v)))
+            }
+            // Agda's `prim` rule: a builtin given its arity runs on its argv.
+            Resolution::Env(Value::Native(entry)) if argv.len() == entry.decl.fixed_arity() => {
+                self.push_redirect(&redirs, span, mooring, shell)?;
+                let v = super::call::run_native(&entry, &argv, None, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::Env(v) => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
-                if argv.is_empty() {
-                    Self::force(v, mooring, shell)
-                } else {
-                    self.apply_rule(v, argv, span, mooring, shell)
-                }
+                self.call(v, argv, span, shell)
             }
             Resolution::Handler { entry, depth } => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
                 let slot = self.reserve(shell)?;
                 let frame = Box::new(shell.context.handlers.strip_matched(depth));
                 slot.push(Frame::Unmask { frame });
-                let call_args = render_handler_args(&entry.name, entry.arity, &argv);
-                self.apply_rule(entry.thunk.clone(), call_args, span, mooring, shell)
+                let args = render_handler_args(&entry.name, entry.arity, &argv);
+                self.call(entry.thunk.clone(), args, span, shell)
             }
             Resolution::Base(entry) => {
                 let v = dispatch::run_base_frame(&entry, &argv, &redirs, span, mooring, shell)?;
@@ -886,87 +800,6 @@ impl Machine {
         }
     }
 
-    fn next_map_part(&mut self, mut cursor: Box<MapCursor>, shell: &Shell) -> Settled<Focus> {
-        let Some(entry) = cursor.entries().get(cursor.index) else {
-            return Ok(Focus::Return(Terminal::Value(Value::Map(cursor.result))));
-        };
-        cursor.phase = match entry {
-            MapEntryV::Entry(..) => MapPhase::Key,
-            MapEntryV::Spread(_) => MapPhase::Spread,
-        };
-        self.map_operand(cursor, shell)
-    }
-
-    fn map_operand(&mut self, cursor: Box<MapCursor>, shell: &Shell) -> Settled<Focus> {
-        let span = cursor.operand().span();
-        let run = || {
-            shell.poll()?;
-            let slot = self.reserve(shell)?;
-            let focus = match cursor.operand() {
-                MapOperand::Value(value) => {
-                    Focus::Return(Terminal::Value(form(&value.item, &cursor.env, &shell.sig)?))
-                }
-                MapOperand::Compute(comp) => Focus::Eval {
-                    comp: Arc::clone(comp),
-                    env: cursor.env.clone(),
-                },
-            };
-            slot.push(Frame::Map(cursor));
-            Ok(focus)
-        };
-        run().map_err(|b| stamp(b, span))
-    }
-
-    fn return_map(
-        &mut self,
-        mut cursor: Box<MapCursor>,
-        terminal: Terminal,
-        shell: &Shell,
-    ) -> Settled<Focus> {
-        let span = cursor.operand().span();
-        let accept = || {
-            let value = as_value(terminal)?;
-            match std::mem::replace(&mut cursor.phase, MapPhase::Key) {
-                MapPhase::Key => {
-                    let Value::String(key) = value else {
-                        return Err(sig_hint(
-                            format!(
-                                "map key must be a String, got {} '{value}'",
-                                value.type_name()
-                            ),
-                            "use str to convert",
-                        ));
-                    };
-                    let key = key.into_string();
-                    if !cursor.explicit.insert(key.clone()) {
-                        return Err(sig(format!(
-                            "map literal: key '{key}' given twice; which did you mean?"
-                        )));
-                    }
-                    cursor.phase = MapPhase::Value(key);
-                    return self.map_operand(cursor, shell);
-                }
-                MapPhase::Value(key) => cursor.result.insert(key, value),
-                MapPhase::Spread => {
-                    let Value::Map(inner) = value else {
-                        return Err(sig_hint(
-                            format!("spread requires a Map, got {}", value.type_name()),
-                            "spread (...) in a map expands key-value pairs",
-                        ));
-                    };
-                    for (key, value) in &inner {
-                        if !cursor.result.contains_key(key) {
-                            cursor.result.insert(key.to_string(), value.into_owned());
-                        }
-                    }
-                }
-            }
-            cursor.index += 1;
-            self.next_map_part(cursor, shell)
-        };
-        accept().map_err(|b| stamp(b, span))
-    }
-
     // ── Frames, and their two rules each ───────────────────────────────
 
     fn step_return(
@@ -977,7 +810,6 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         match frame {
-            Frame::Map(cursor) => self.return_map(cursor, t, shell),
             Frame::Protect(site) => Ok(Focus::Return(Terminal::Value(
                 site.protect(as_value(t)?, shell)?,
             ))),
@@ -993,11 +825,32 @@ impl Machine {
                 })
             }
 
-            Frame::Apply { args, span } => match t {
-                Terminal::Lambda { comp, env } => self.beta(&comp, env, args, span, shell),
-                Terminal::Value(v) => self.apply_rule(v, args, span, mooring, shell),
+            Frame::Seq { rest, env } => {
+                as_value(t)?;
+                Ok(Focus::Eval { comp: rest, env })
             }
-            .map_err(|b| stamp(b, span)),
+
+            // β: `⟨λx. M, ρ⟩` meeting `Arg(V)` is `⟨M, ρ[x ↦ V]⟩`.
+            Frame::Arg { value, span } => match t {
+                Terminal::Lambda { comp, mut env } => {
+                    let CompKind::Lam { param, body } = &comp.item else {
+                        unreachable!("a Terminal::Lambda is built only from a Lam node")
+                    };
+                    shell.poll().map_err(|b| stamp(b, span))?;
+                    env.bind(
+                        param.clone(),
+                        Binding {
+                            value,
+                            scheme: None,
+                        },
+                    );
+                    Ok(Focus::Eval {
+                        comp: located(body, span),
+                        env,
+                    })
+                }
+                Terminal::Value(v) => Err(stamp(not_a_function(&v), span)),
+            },
 
             Frame::Capture {
                 mut prev,
@@ -1036,7 +889,7 @@ impl Machine {
                     outcome: Ok(v),
                     prev,
                 });
-                Self::force(cleanup, mooring, shell)
+                Self::force(cleanup, None)
             }
 
             Frame::Cleanup { outcome, prev } => {
@@ -1071,7 +924,19 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         match frame {
-            Frame::To { .. } => Err(match s {
+            Frame::To { bind, .. } => {
+                let CompKind::Bind { pattern, .. } = &bind.item else {
+                    unreachable!("a To frame's `bind` is always a Bind comp")
+                };
+                Err(match s {
+                    Break::Error(e) if !matches!(pattern.as_ref(), Pattern::Name(name) if is_synthetic(name)) => {
+                        Break::Error(e.abandoning_tail())
+                    }
+                    s => s,
+                })
+            }
+
+            Frame::Seq { .. } => Err(match s {
                 Break::Error(e) => Break::Error(e.abandoning_tail()),
                 s @ Break::Escape(_) => s,
             }),
@@ -1087,7 +952,7 @@ impl Machine {
                 Err(flushed.err().unwrap_or(s))
             }
 
-            Frame::Apply { .. } | Frame::Protect(_) | Frame::Map(_) => Err(s),
+            Frame::Arg { .. } | Frame::Protect(_) => Err(s),
 
             Frame::Cleanup { prev, .. } => {
                 shell.scope = prev;
@@ -1108,7 +973,7 @@ impl Machine {
             Frame::Try { handler } => match s {
                 Break::Error(e) => {
                     let record = Value::from_datum(e.record(shell));
-                    self.apply_rule(handler, vec![record], None, mooring, shell)
+                    self.call(handler, vec![record], None, shell)
                 }
                 escape @ Break::Escape(_) => Err(escape),
             },
@@ -1120,7 +985,7 @@ impl Machine {
                     outcome: Err(s),
                     prev,
                 });
-                Self::force(cleanup, mooring, shell)
+                Self::force(cleanup, None)
             }
 
             Frame::Audit(scope) => match s {
@@ -1166,11 +1031,11 @@ impl Frame {
             Self::Cleanup { prev, .. } => shell.scope = prev,
             Self::Gather { prev, .. } => shell.local.cradle = prev,
             Self::To { .. }
-            | Self::Apply { .. }
+            | Self::Seq { .. }
+            | Self::Arg { .. }
             | Self::Try { .. }
             | Self::Guard { .. }
-            | Self::Protect(_)
-            | Self::Map(_) => {}
+            | Self::Protect(_) => {}
         }
     }
 }
@@ -1230,7 +1095,7 @@ fn run(
 /// What the runtime's pipeline stages call back into: the one recursion.
 pub(crate) const STAGE_EVAL: pipeline::StageEval = pipeline::StageEval {
     run: evaluate,
-    close_args,
+    close_argv,
 };
 
 /// The initial state ⟨M, E⟩ over the empty stack, then step until the stack
@@ -1248,8 +1113,8 @@ pub(crate) fn evaluate(
     )
 }
 
-/// The same, from a closed value meeting arguments — `Machine::applying`
-/// sets the first state.
+/// The same, from a closed value meeting arguments: [`Machine::call`] sets
+/// the first state, so a value meeting none is forced.
 pub(crate) fn apply(
     f: Value,
     args: Vec<Value>,
@@ -1257,20 +1122,7 @@ pub(crate) fn apply(
     shell: &mut Shell,
 ) -> Settled<Value> {
     run(
-        |m, mooring, shell| *m = Machine::applying(f, args, mooring, shell),
-        mooring,
-        shell,
-    )
-}
-
-/// `force v` on a value already in hand (a door — the hook table's arity-0
-/// entries, a worker's body — rather than a `CompKind::Force` node):
-/// `Machine::force`'s rule, run as its own machine.
-pub(crate) fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    run(
-        |m, mooring, shell| {
-            m.focus = Machine::force(v, mooring, shell).unwrap_or_else(Focus::Halt);
-        },
+        |m, _, shell| m.focus = m.call(f, args, None, shell).unwrap_or_else(Focus::Halt),
         mooring,
         shell,
     )
@@ -1284,7 +1136,7 @@ mod tests {
     use crate::ir::{Name, Phrase};
     use crate::shell::evaluator::{run_source, with_capture};
     use crate::shell::runtime::{Break, captured};
-    use crate::source::{FileId, Spanned};
+    use crate::source::FileId;
 
     /// Run every phrase of `source` through the machine: a `Define` binds
     /// into the running `Env` with `pattern::bind`, a `Run` phrase's
@@ -1394,14 +1246,9 @@ mod tests {
         }
     }
 
-    /// Over-application raises the "not a function" text, stamped with the
-    /// call's own span. Built by hand rather than parsed: `App`ing a value
-    /// twice is rejected statically by the checker (its type never unifies
-    /// with a further arrow), so the runtime rule is unreachable from real
-    /// source text — this is exactly why it is a rule at all (unreachable
-    /// for a *checked* program), and the machine must still have it.
+    /// A value meeting an argument is unreachable for checked code.
     #[test]
-    fn over_application_is_stamped_with_the_calls_span() {
+    fn a_value_meeting_an_argument_is_stamped_with_the_calls_span() {
         let mut shell = new_shell();
         let file = FileId::DUMMY;
         let span = crate::source::Span::new(file, 10, 20);
@@ -1409,11 +1256,7 @@ mod tests {
             Some(span),
             CompKind::Return(Val::Int(5)),
         ));
-        let args: Args = vec![ValListElem::Single(Spanned::with_span(
-            Some(span),
-            Val::Int(1),
-        ))]
-        .into();
+        let args = Box::new([Spanned::with_span(Some(span), Val::Int(1))]);
         let app = Spanned::with_span(Some(span), CompKind::App { head, args });
         let out = evaluate(
             Arc::new(app),
@@ -1431,7 +1274,7 @@ mod tests {
                 assert_eq!(
                     e.span,
                     Some(span),
-                    "the over-application error must carry the call's span"
+                    "the value application error must carry the call's span"
                 );
             }
             other => panic!("expected a not-a-function error, got {other:?}"),
@@ -1704,30 +1547,29 @@ mod tests {
     }
 
     #[test]
-    fn map_cursor_reserves_before_forming_an_operand() {
+    fn map_assembly_needs_no_stack_frame() {
         let mut shell = new_shell();
         shell.session.stack_limit = 0;
-        let node = Arc::new(Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
-            MapEntryV::Entry(
-                MapOperand::Value(Spanned::synthetic(Val::Variable("unbound".into()))),
-                MapOperand::Value(Spanned::synthetic(Val::Int(1))),
-            ),
-        ]))));
+        let node = Arc::new(Spanned::synthetic(CompKind::Prim(crate::ir::Prim::Map(
+            Box::new([crate::ir::MapEntryV::Entry(
+                Spanned::synthetic(Val::String("a".into())),
+                Spanned::synthetic(Val::Int(1)),
+            )]),
+        ))));
         let out = evaluate(node, shell.env.clone(), &Mooring::adrift(), &mut shell);
-        assert!(
-            matches!(out, Err(Break::Error(e)) if e.message.contains("recursion limit exceeded"))
-        );
+        assert!(matches!(out, Ok(Value::Map(_))));
     }
 
     #[test]
-    fn map_cursor_validation_errors_name_the_operand_span() {
+    fn map_validation_errors_name_the_operand_span() {
+        use crate::ir::{MapEntryV, Prim};
         let span = Span::new(FileId::DUMMY, 10, 20);
-        let bad = || MapOperand::Value(Spanned::with_span(Some(span), Val::Int(1)));
+        let bad = || Spanned::with_span(Some(span), Val::Int(1));
         for entry in [MapEntryV::Entry(bad(), bad()), MapEntryV::Spread(bad())] {
             let mut shell = new_shell();
-            let node = Arc::new(Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
+            let node = Arc::new(Spanned::synthetic(CompKind::Prim(Prim::Map(Box::new([
                 entry,
-            ]))));
+            ])))));
             match evaluate(node, shell.env.clone(), &Mooring::adrift(), &mut shell) {
                 Err(Break::Error(e)) => assert_eq!(e.span, Some(span)),
                 other => panic!("expected located map validation failure, got {other:?}"),
@@ -1736,39 +1578,30 @@ mod tests {
     }
 
     #[test]
-    fn map_cursor_polls_between_key_and_value() {
+    fn a_bind_polls_before_its_rhs() {
         let mut shell = new_shell();
         let mooring = Mooring::adrift();
         shell.scope = Scope::clone(&mooring.home);
         let span = Span::new(FileId::DUMMY, 10, 20);
-        let node = Arc::new(Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
-            MapEntryV::Entry(
-                MapOperand::Value(Spanned::synthetic(Val::String("a".into()))),
-                MapOperand::Value(Spanned::with_span(
-                    Some(span),
-                    Val::Variable("unbound".into()),
-                )),
+        let node = Arc::new(Spanned::with_span(
+            Some(span),
+            CompKind::bind(
+                Pattern::Name(crate::ir::synthetic("map", 0)),
+                Spanned::synthetic(CompKind::Return(Val::Variable("unbound".into()))),
+                Spanned::synthetic(CompKind::Prim(crate::ir::Prim::Map(Box::new([])))),
             ),
-        ]))));
-        let mut machine = Machine::default();
-        machine.focus = machine
-            .eval_rules(&node, shell.env.clone(), &mooring, &mut shell)
-            .expect("request key");
+        ));
         mooring
             .home
             .cancel(crate::process::cancel::CancelCause::Cancelled);
-        machine.step(&mooring, &mut shell);
+        let out = evaluate(node, shell.env.clone(), &mooring, &mut shell);
         assert!(
-            matches!(machine.focus, Focus::Halt(Break::Escape(Escape::Stopped { at: Some(at), .. })) if at == span)
-        );
-        assert!(
-            machine.stack.is_empty(),
-            "the cursor is dropped on cancellation"
+            matches!(out, Err(Break::Escape(Escape::Stopped { at: Some(at), .. })) if at == span)
         );
     }
 
     #[test]
-    fn map_cursor_propagates_exit_without_running_later_operands() {
+    fn map_operand_hoists_propagate_exit_without_running_later_operands() {
         let mut shell = new_shell();
         let out = run_source(
             "let k = 'a'; try { let _ = [$k: !{exit 5}, ...!{fail [status: 7, message: later]}]; return () } { |e| return () }",

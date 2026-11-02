@@ -18,6 +18,10 @@ let n1 = `none
 echo $[$a1 == $a2] $[$a1 == $e1] $[$s1 == $s2] $[$s1 == $s3] $[$s1 == $n1]
 # Expected: true false true false false
 
+let n2 = `none ()
+echo $[$n1 == $n2] $[[`none] == [`none ()]]
+# Expected: true true
+
 # lt and gt order numbers numerically, not by spelling
 echo !{lt 2 10} !{gt 2 10} !{lt 10 2}
 # Expected: true false false

@@ -716,8 +716,7 @@ mod chokepoint_tests {
         );
     }
 
-    /// A name mentioned only inside a double-quoted string renews — the
-    /// walker's `CompKind::Interpolation` arm, through a real run.
+    /// A reference inside interpolation renews through the prim's operands.
     #[test]
     fn interpolated_reference_renews() {
         let mut shell = armed_shell(64);

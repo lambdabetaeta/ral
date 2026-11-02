@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_date: 2026-11-02
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -435,7 +435,8 @@ datum (the host builtin table among them) can be silently severed by a call site
 copying only the fields it happened to remember. There are two regimes.
 
 A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
-`force`/`beta` in `shell::evaluator::machine` put the body in focus *in* the
+`force` and the lambda-meets-`Arg` rule in `shell::evaluator::machine`
+put the body in focus *in* the
 caller's `Shell`, no snapshot or restore around the call ([[map/core/evaluator|evaluator]]).
 The `io`, `session`, and `local` state are simply the one `Shell`'s, and the
 caller's `&Mooring` is passed along, so the body observes the caller's audit
@@ -505,9 +506,10 @@ fixings:
     `ptr_eq` root identity, dependencies first, on an explicit stack — so a
     chain of closures costs no host stack, and a scope many closures share
     is visited once.
-  - Within a scope it recurses through data only — lists, maps, variant
-    payloads, a native's `applied` arguments. A closure is never entered: it
-    is re-seated over its captured scope's scrubbed replacement.
+  - Within a scope it recurses through data only: lists, maps and variant
+    payloads. A closure is re-seated over its captured scope's scrubbed
+    replacement; a partial native application's received arguments live
+    in that scope, not in the native entry.
   - A rebuilt scope or container is its original with only the changed
     entries overwritten, and one that reaches no handle is kept whole: a
     shell reaching no handle forks as itself, its session map `ptr_eq` to

@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 9c8aa5d9
-verified_at_commit: 9c8aa5d9
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 verified_at_date: 2026-11-02
-anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
+anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_update, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
 ---
 
 # Type inference: the algorithm
@@ -33,8 +33,9 @@ error. The same rule holds at a head: a binding met as a bare head is applied at
 its thunk's computation type, a binding of still-unknown type is taken to be a
 thunk, and a binding of anything else is `HeadBoundToValue` (T0072) —
 `instantiate_comp` never mints a computation variable for it. A bound bare
-head is elaborated as `Force` of the variable, so the `Force` rule asks the
-same question through the same `thunk_body`, and a variable head in `App`
+head is elaborated as `Force` of the variable; the `App` rule reads its type
+under `Reason::AutoderefHead`, including when it is still an unsolved variable,
+so it does not suggest a `!` operator the user never wrote. A variable head in `App`
 (`$date +%s`) is named the same way: a user's own `let ls = …` then `ls /tmp`
 is told of the binding and of `^ls`, not of a `!` it never wrote; the hint
 offers `^ls` conditionally, since the checker never reads `PATH`. T0072 stands on the
@@ -83,7 +84,7 @@ constructor — `infer_record_val` and `infer_map_val`: a record's fields each
 keep their own slot in a row, a map's values share one element type, and the
 two types unify only with their own kind
 ([[design/records-and-maps|records-and-maps]]). A record literal with a spread is an
-**update** of one base (`infer_assembly_record`): it demands of the base a slot
+**update** of one base (`infer_update`): it demands of the base a slot
 at each written label, at a fresh payload with nothing imposed on it, and
 returns those labels at the types written over the base's own tail. So a field
 may change its type, a spread never adds a label, and the result is flat.
@@ -101,7 +102,8 @@ Indexing matches the IR's `Key`, never the shape of a `Val`:
 constraint, shape default, special generalisation parameter or index-made weak
 variable. `nth : ∀α. Int → [α] → F α` handles computed list positions, so
 both map and list helpers retain their element polymorphism. The surface is
-one to one with the formal core's `proj`, `index` and `lookup`
+one to one with the formal core's primitive `index (fld ℓ)`, `index (pos k)`
+and `index key`
 ([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
 
 **Capture is decided by the type.** `CompTy::Return(Grade, Ty)` carries a grade
@@ -119,22 +121,24 @@ with the one value type it is paired with, every rule introducing `w` does so
 at `Unit`, and the builtin schemes and the error type are paired alike; it is
 asserted in `generalize` and the annotate walk
 ([[decisions/260930_graded-f|graded-f]]). `CompKind::Capture` types its body at
-`Return(fresh grade, Unit)`, so it also accepts a value producer, as if upcast.
+`Return(Output, Unit)`; `CompKind::Upcast` checks a body at
+`Return(Value, Unit)` and produces `Return(Output, Unit)`.
 
 - `head_class` (`infer.rs`, beside `exec_comp_ty`) resolves a bare head by the
   order checker and runtime share: `Binding`, `Value(entry)`, `Arm`, `External`.
 - `rhs_bound_ty`, shared by `Bind` and `Define`, is the bind rule: a `Fun` right-hand
   side binds a thunk; `Return(Output, _)` inserts the node's address in
-  `InferCtx.captured` and binds `String`; `Return(Value, a)` binds `a`;
+  `InferCtx.adapted` as `Adaptation::Capture` and binds `String`; `Return(Value, a)` binds `a`;
   `Return(Var(g), a)` binds `g := Value` and `a`; a computation variable opens
   into `Return(Value, fresh)`. `force_return_shape` opens a variable into a fresh
   *grade*, never `Value`: only the bind rule decides `p`.
 - `apply_args_capped` coerces an argument ending in `Return(Output, Unit)` where
   the callee's parameter ends in `Return(Value, β)` at the same arity (`spine`
   reads the parameters and the `Producer` past them), recording a literal
-  block's body address in `captured` when the block writes every lambda of
-  that arity, else the block itself in `InferCtx.captured_vals` with its
-  arity, as a value in hand.
+  block's body address through `adapt_block` in `adapted` as
+  `Adaptation::Capture` when the block writes every lambda of that arity,
+  else the block itself in `InferCtx.adapted_vals` with its arity and
+  adaptation, as a value in hand.
 - Both `Exec` and `Redirect` check redirect operands. Every nonempty redirect
   list calls `redirected`, which forces the **outer** computation to `Return`
   under `Reason::RedirectShape`; a partial application is refused with advice
@@ -143,10 +147,34 @@ asserted in `generalize` and the annotate walk
   grade; stdin, stderr and `2>&1` preserve it. `map_producer` still rebuilds
   producers past parameters for handler arms, never for redirects.
 - `annotate` is a structural rebuild (the methods of `Annotate { ctx }`) that
-  wraps each recorded node in `cap M to d. decode d` (`CompKind::Capture` and
-  `CompKind::Decode`, both checker-inserted); a value in hand becomes a lambda
+  wraps each capture-recorded node in `cap M to d. decode d` (`CompKind::Capture` and
+  `Prim::Decode`, both checker-inserted); a value in hand becomes a lambda
   whose body captures the forced call; a right-hand side of function type is
   written `return (thunk M)`, bound unrun (Let-fun).
+
+**Returned-thunk application is explicit in the checked tree.**
+`autoderef_thunk_return` records every argument position before which a
+returned thunk must be forced. Positions may repeat when several thunks are
+unwrapped before one argument. `InferCtx.splits` records them for `App` and
+binding-resolved `Exec`; `Annotate::split` writes
+`App(head, prefix) to h. App(Force h, suffix)`, repeated as needed. Redirects
+wrap the whole split call; other node adaptations also wrap the whole. A
+re-inferred checked tree records no further split
+([[invariants/ir-pure-cbpv|the IR invariant]]).
+
+**Adaptations and binding rules are explicit.**
+
+- `coerce` records `Adaptation::Upcast` in `adapted` or `adapted_vals`, the
+  tables a capture uses. `annotate` places `Upcast` under a literal's lambda
+  chain or η-wraps a value in hand. A unit producer standing in for a command
+  receives the same explicit boundary.
+- `Seq` uses statement inference without generalisation; `Bind` always uses
+  the let rule.
+- Lambdas bind monomorphic names, with destructuring binds after the whole
+  chain, so their binders cannot generalise parameter types. A destructuring
+  mismatch points at the parameter, both during checking and at runtime.
+- Options are record nodes; `check_options` reads their entries in written
+  span order before consulting the declared table.
 
 So `let x = f` with `f = { hostname }`, `let x = !$t`, `let x = g 5` and
 `let x = map { |f| echo $f } xs` all capture: β and η preserve meaning.
@@ -253,7 +281,11 @@ the inferencer takes the type's free variables minus those still free in the
 environment and closes over the difference into a `Scheme`, each quantifier
 list sorted by variable id so a scheme — and the letters its `Display` prints it
 under — is a function of the type alone; `instantiate` refreshes a scheme's
-bound variables at each use. Generalisation walks the
+bound variables at each use. A pattern's binders generalise together: the
+pattern's shape is solved first, then each binder's type is closed over the
+environment, so acceptance does not depend on sibling order
+(`let [a, [b]] = []` and `let [[b], a] = []` are both refused when `a` is later
+used as a number); the Agda `to⟨ p ⟩` does the same. Generalisation walks the
 type structurally and unbudgeted, where unification charges a depth ceiling:
 the walks are linear in a type the source built one constructor per statement,
 and only unification descends past what the parser saw

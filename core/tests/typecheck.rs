@@ -277,6 +277,30 @@ fn independent_dependencies_are_checked_in_source_order() {
     }
 }
 
+#[test]
+fn pattern_siblings_constrain_each_other_before_generalisation() {
+    for pattern in ["[a, [b]]", "[[b], a]"] {
+        let src = format!("let {pattern} = []\nlet c = $[$a + 1]");
+        assert_eq!(codes_of(&raw_errors(&src)), ["T0074"], "{src}");
+    }
+}
+
+#[test]
+fn both_names_in_a_list_pattern_remain_polymorphic() {
+    let top = toplevel_ok(
+        "let id = { |x| return $x }\n\
+         let [f, g] = [$id, $id]\n\
+         let fi = f 1\n\
+         let fs = f 's'\n\
+         let gi = g 2\n\
+         let gs = g 't'\n\
+         return ()",
+    );
+    for (index, expected) in [(2, "Integer"), (3, "String"), (4, "Integer"), (5, "String")] {
+        assert_eq!(scheme_at(&top, index), expected);
+    }
+}
+
 /// A right-hand side of function type is bound unrun, as its thunk (Let-fun),
 /// at any depth: `let g = f 1` is `Return(Thunk(App))`, generalised, and so is
 /// a `let` inside a lambda's body.
@@ -1018,6 +1042,51 @@ fn a_let_captures_the_command_that_produces_its_value() {
     assert_eq!(captures("let f = { echo hi }; let x = f"), 1);
     assert_eq!(captures("let t = { echo hi }; let x = !$t"), 1);
     assert_eq!(captures("let g = { |n| echo $n }; let x = g 5"), 1);
+}
+
+#[test]
+fn unit_producers_have_explicit_upcasts_that_survive_reinference() {
+    for src in [
+        "let x = if true { return () } else { echo hi }",
+        "case `a () [`a: { |_| return () }, `b: { |_| echo hi }]",
+        "within [handlers: [foo: { |args| return () }]] { foo }",
+        "let f = { |args| return () }; within [handlers: [foo: $f]] { foo }",
+        "let f = { |args| return () }; within [handlers: [foo: { !$f }]] { foo }",
+    ] {
+        let top = toplevel_ok(src);
+        let count = |top: &Toplevel| {
+            let mut found = 0;
+            walk_toplevel(top, &mut |comp| {
+                if matches!(comp.item, CompKind::Upcast(_)) {
+                    found += 1;
+                }
+            });
+            found
+        };
+        assert_eq!(count(&top), 1, "{src}");
+        let unchecked: Unchecked = top
+            .phrases
+            .iter()
+            .map(|phrase| ral_core::source::Spanned {
+                span: phrase.span,
+                item: match phrase.item.clone() {
+                    Phrase::Define { pattern, comp, .. } => Phrase::Define {
+                        pattern,
+                        comp,
+                        schemes: (),
+                    },
+                    Phrase::Run(comp) => Phrase::Run(comp),
+                },
+            })
+            .collect();
+        let checked = typecheck(
+            &unchecked,
+            common::schemes_for(&ral_core::HostSurface::default()),
+            None,
+        )
+        .unwrap_or_else(|errors| panic!("re-inference of {src}: {errors:?}"));
+        assert_eq!(count(&checked), 1, "{src}");
+    }
 }
 
 #[test]

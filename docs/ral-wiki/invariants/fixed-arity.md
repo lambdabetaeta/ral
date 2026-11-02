@@ -1,3 +1,7 @@
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
+
 # Fixed arity
 
 **Fixed arity binds *application*: every invocable with a first-class `$name`
@@ -68,9 +72,11 @@ manifest holds it.
 **A spread is the notation of an argv.** `...$xs` splices a list into an argv,
 so it may be written only where an argv exists: a command, an external, a base
 frame, or a handler or alias arm. A value takes its arguments by application at
-a declared arity, so it has no argv and `...` has nothing to spread into — a
-spread in a value's argument position is **T0056**
-(`SpreadIntoApplication`). A list literal's spread (`[1, ...$xs, 2]`) and a
+a declared arity, so it has no argv and `...` has nothing to spread into. A
+spread in a value's argument position is refused before the run: at
+elaboration (P0001) when the head is written as a value or names a lexically
+bound one, and as **T0056** (`SpreadIntoApplication`) when a bare head resolves
+at check time to a builtin or a session binding (`infer.rs` `exec_comp_ty`). A list literal's spread (`[1, ...$xs, 2]`) and a
 rest-pattern (`[first, ...rest]`) are a different construct, building and
 taking apart a list rather than an argument sequence, and this rule leaves them
 alone.

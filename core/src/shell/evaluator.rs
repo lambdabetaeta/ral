@@ -82,7 +82,7 @@ pub(crate) fn run_phrases(
         match result {
             Ok(v) => ran.outcome = Ok(v),
             // A non-final phrase's error says what it abandoned, as
-            // `Frame::To`'s halt does for a chain step.
+            // `Frame::Seq`'s halt does for a chain step.
             Err(Break::Error(e)) if i != last => {
                 ran.outcome = Err(Break::Error(e.abandoning_tail()));
                 break;
@@ -152,15 +152,14 @@ fn as_let_text(e: Error, pattern: &Pattern, comp: &Comp) -> Error {
     };
     match failure
         .text_hint(cmd, Some(binder))
-        .filter(|_| exec.args.is_empty())
+        .filter(|_| exec.argv.is_empty())
     {
         Some(hint) => e.with_hint(hint),
         None => e,
     }
 }
 
-/// Apply a function value (`Block`, `Lambda`, or `Native`) to `args`, with a
-/// run frame already installed.
+/// Push `args` and force a `Thunk` or `Native`, with a run frame installed.
 ///
 /// Builtins that take function arguments call this, as does the run
 /// door's hook arm ([`crate::Shell::run`]), which establishes that frame first.
@@ -174,13 +173,7 @@ pub fn apply(
     shell: &mut Shell,
 ) -> Settled<Value> {
     match val {
-        // Zero arguments is a force, not an application (the machine's
-        // `apply` boundary demands at least one): the hook door's arity-0
-        // entries (`HookSig::Block` and the like) take this path.
-        Value::Thunk(_) | Value::Native { .. } if args.is_empty() => {
-            machine::force(val.clone(), mooring, shell)
-        }
-        Value::Thunk(_) | Value::Native { .. } => machine::apply(val.clone(), args, mooring, shell),
+        Value::Thunk(_) | Value::Native(_) => machine::apply(val.clone(), args, mooring, shell),
         _ => Err(crate::shell::runtime::sig_hint(
             format!("cannot call {} '{}'", val.type_name(), val),
             "only Blocks, Lambdas, and natives can be called",

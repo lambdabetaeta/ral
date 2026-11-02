@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9c8aa5d9
-generated_at_date: 2026-11-01
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_date: 2026-11-02
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -16,11 +16,13 @@ Entry points (`typecheck.rs`):
   — this function checks a program: infer each phrase in order, extending
   `TyEnv` at each `Define`, then `annotate::annotate_toplevel` writes the
   verdict back, on success returning an *annotated* `Toplevel`. `annotate`
-  writes two things onto the rebuilt IR: a generalised `Scheme` per name a
+  writes explicit verdicts onto the rebuilt IR: a generalised `Scheme` per name a
   `Phrase::Define` binds — landed on its own phrase, not a shared spine —
   resolved against the final unifier and closed by quantifying its
   residuals, that is, generalised against the empty environment; and a
-  `Capture`/`Decode` pair around each computation a value demand captured
+  `Capture`/`Prim::Decode` pair around each computation a value demand captured,
+  `Upcast` at command boundaries for unit producers, and explicit
+  bind/force segments for returned-thunk application
   ([[map/core/ir|ir]]). A pipeline's value is its final stage's, so
   there is nothing per-pipeline to annotate
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
@@ -76,7 +78,9 @@ monomorphic to keep generalisation sound.
 
 Internals:
 
-- `infer.rs` — the `Inferencer`; `infer_comp`; `infer_index_step` matches
+- `infer.rs`: the `Inferencer`; `infer_comp`; `infer_prim` types every
+  value-only primitive; `infer_update` is the record-update rule;
+  `infer_index_step` matches
   `Key::{Label, Position, Data}` and immediately requires a record row, a list,
   or a map with a `String` key, respectively. No read constraint is deferred
   and no read makes variables weak;
@@ -116,9 +120,10 @@ Internals:
   reason prose or deliberately lists it as hintless: the constraint's other
   side is fresh, or the error kind is already its own diagnosis;
 - `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
-  IR with schemes, boundary sites, stage types, `Capture`/`Decode` nodes,
-  and `Val::Protected` membranes for imported weak values, attached per
-  occurrence only where its contract reaches a thunk or handle;
+  IR with schemes, boundary sites, stage types, `Capture`/`Prim::Decode`,
+  `Upcast`, returned-thunk application splits, and `Val::Protected` membranes
+  for imported weak values, attached per occurrence only where the contract
+  reaches a thunk or handle;
   its side tables in `InferCtx` are keyed by `Node`, a node address tagged
   `Comp`, `Val` or `Group`;
 - `generalize.rs` — quantification, capture-avoiding instantiation and weak
@@ -147,8 +152,9 @@ Internals:
   ordinary row typing rather than a `Map` lookup [[design/audit|audit]];
 - `scope.rs` — the five structural scope nodes, and `check_options`: the rule
   that holds each written option of `within` and `grant` to a declared table,
-  key by key — unknown key T0076, refused key T0026, a clash at the key's own
-  sentence. `Holds::CatchAll` (`within`'s `handler`) alone takes contextual
+  key by key, in written span order even though the `FieldsNode` is sorted:
+  unknown key T0076, refused key T0026, a clash at the key's own sentence.
+  `Holds::CatchAll` (`within`'s `handler`) alone takes contextual
   handler inference at the written form; `Holds::Shaped` infers an ordinary
   value and unifies it with the minted type, and `Holds::Table` queues the
   value's nested check with its span (the value is inferred normally and never
@@ -237,21 +243,24 @@ a bare head the class the runtime's lookup order gives it: `Binding`,
 a head), or `External`. No separate pass decides capture.
 
 `grade.rs` holds the grade rules. `rhs_bound_ty` (the `Bind` and
-`Phrase::Define` right-hand side, and a map literal's `MapOperand::Compute` key or
-value, via `infer_map_operand`) is the bind rule: `Return(Output, _)` records
-the right-hand side's address in `InferCtx::captured` and binds `String`,
+`Phrase::Define` right-hand side, including hoisted operands) is the bind rule:
+`Return(Output, _)` records
+the right-hand side's address in `InferCtx::adapted` as `Adaptation::Capture`
+and binds `String`,
 `Return(Value, a)` binds `a`, and `Return(Var(g), a)` binds `g := Value` and
 `a`. `adapt` says how a block meets a demand of the other producer kind — a
 command where a value is wanted is `Adaptation::Capture`, a `()` producer
-where a command is wanted is `Adaptation::Upcast` — and `coerce` records a
-captured block and unifies the type it is read at with the demand, reporting
+where a command is wanted is `Adaptation::Upcast`; `coerce` records either
+boundary and unifies the type it is read at with the demand, reporting
 a failure between what the two produce past their parameters
-(`InferCtx::unify_comp_ty_as`). `capture_block` records a literal block by
-its body under *exactly* its arity of written lambdas in `captured`; anything
-else — a value in hand, or a literal whose arrows are not all written, `map {
-!$f } $xs` — goes in `InferCtx::captured_vals` with its arity and is η-wrapped
-whole, since a `Capture` frame between a lambda and its pending argument would
-drop the lambda. `apply_args_capped` applies the two to a block argument, and
+(`InferCtx::unify_comp_ty_as`). `adapt_block` records a literal block by
+its body under *exactly* its arity of written lambdas in `adapted`; anything
+else, a value in hand or a literal whose arrows are not all written, `map {
+!$f } $xs`, goes in `InferCtx::adapted_vals` with its arity and adaptation and
+is η-wrapped whole, since a `Capture` frame between a lambda and its pending
+argument would drop the lambda. Both adaptations share these tables; a node's
+producer grade fixes which it gets.
+`apply_args_capped` applies the two to a block argument, and
 `join_arms` to each arm against the join. Both fused `Exec` redirects and
 `CompKind::Redirect` check their operands. For every nonempty list, `redirected`
 uses `force_return_shape` under `Reason::RedirectShape`: a partial application
@@ -260,16 +269,38 @@ computation opens to a fresh input grade; stdout returns `Value` at the same
 payload type without binding that grade, while other redirects preserve it.
 
 `annotate.rs` is a plain structural rebuild, the methods of `Annotate { ctx }`.
-It wraps each recorded node through the one constructor `captured_string`,
-which builds `Capture(body) to x. Decode(x)` — `x` a fresh name from
+It wraps each node recorded as `Adaptation::Capture` through `captured_string`,
+which builds `Capture(body) to x. Prim::Decode(x)` — `x` a fresh name from
 `InferCtx::fresh_name` — with the captured node's span on both the bind and
 the decode; a recorded value in hand becomes a lambda whose body captures the
 forced call. `CompKind::Capture(body)` types as `F Bytes` with `body` unified
-to `F^w Unit`; `CompKind::Decode(val)` types as `F String` with `val` unified to
-`Bytes`. Both rules fire only when re-inferring a tree that already carries
-`annotate`-inserted nodes — a stored handler or thunk re-checked at a later
-install. A right-hand side the bind rule recorded in `InferCtx::thunked`, one
+to `F^w Unit`; `Prim::Decode(val)` types as `F String` with `val` unified to
+`Bytes`. `CompKind::Upcast(body)` checks `F^p Unit` and yields `F^w Unit`.
+These rules retain the boundaries when re-inferring a stored handler or thunk.
+A right-hand side the bind rule recorded in `InferCtx::thunked`, one
 of function type, is rebuilt as `return (thunk M)`: bound unrun (Let-fun).
+
+## Application and binders
+
+`autoderef_thunk_return` records each argument index before which a returned
+thunk must be forced, once per unwrapped thunk, in `InferCtx.splits`.
+`Annotate::split` writes the `App` or binding-resolved `Exec` as explicit
+bind/force segments; repeated indices give repeated forces before one argument.
+Redirects and other adaptations wrap the whole split call. Re-inference is
+idempotent ([[invariants/ir-pure-cbpv|the IR invariant]]).
+
+An `App` head shaped as `Force(v)` is checked directly under
+`Reason::AutoderefHead`, including an unsolved bare-name head, preserving
+head diagnostics without suggesting an unwritten `!`. Arguments are a fixed
+slice of values. Elaboration refuses a spread into a written value head or
+lexically bound head; `exec_comp_ty` refuses one when a bare head resolves to
+a builtin or session binding. Argv spreading remains separately checked.
+
+`Lam` binds one monomorphic name. Destructuring parameters are binds after
+the lambda chain, at the parameter spans, so a mismatch points there during
+type checking as at runtime. Their types remain free in the environment and
+cannot generalise. `Bind` always uses let inference; `Seq` uses statement
+inference without generalisation.
 
 ## Arms and joins
 

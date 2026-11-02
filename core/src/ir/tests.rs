@@ -27,7 +27,7 @@ fn ret(name: &str) -> Arc<Comp> {
 /// One synthetic `Comp` per `CompKind` and `Val` variant: `r_*` labels
 /// what it references, `*_bound` what it merely binds.
 fn every_variant() -> Vec<Arc<Comp>> {
-    let lam_param = Pattern::Name("lam_param_bound".into());
+    let lam_param = "lam_param_bound".into();
     let lam = Spanned::synthetic(CompKind::Lam {
         param: lam_param,
         body: ret("r_lam_body"),
@@ -43,18 +43,23 @@ fn every_variant() -> Vec<Arc<Comp>> {
         rest: ret("r_bind_rest"),
     });
 
+    let seq = Spanned::synthetic(CompKind::Seq {
+        first: ret("r_seq_first"),
+        rest: ret("r_seq_rest"),
+    });
+
     let app = Spanned::synthetic(CompKind::App {
         head: Arc::new(Spanned::synthetic(CompKind::Force(var("r_app_head")))),
-        args: vec![
-            ValListElem::Single(svar("r_app_arg_single")),
-            ValListElem::Spread(svar("r_app_arg_spread")),
-        ]
-        .into(),
+        args: Box::new([svar("r_app_arg_first"), svar("r_app_arg_second")]),
     });
 
     let exec_name = Spanned::synthetic(CompKind::Exec(Exec {
         head: CommandWord::Name(CommandName::Bare("r_exec_name_head".into())),
-        args: vec![ValListElem::Single(svar("r_exec_arg"))].into(),
+        argv: vec![
+            ValListElem::Single(svar("r_exec_arg")),
+            ValListElem::Spread(svar("r_exec_arg_spread")),
+        ]
+        .into(),
         redirects: Redirects {
             stdout: Some((WriteMode::Write, var("r_exec_redirect_target"))),
             ..Redirects::default()
@@ -63,7 +68,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
     }));
     let exec_external = Spanned::synthetic(CompKind::Exec(Exec {
         head: CommandWord::External(CommandName::Bare("r_exec_external_head".into())),
-        args: Args::default(),
+        argv: Argv::default(),
         // A dup has no operand, so contributes no reference to over-collect.
         redirects: Redirects {
             stderr: Some(StderrTarget::Stdout),
@@ -83,24 +88,29 @@ fn every_variant() -> Vec<Arc<Comp>> {
         ],
     });
 
-    let binary = Spanned::synthetic(CompKind::Binary(
+    let binary = Spanned::synthetic(CompKind::Prim(Prim::Binary(
         BinaryOp::Arith(ArithOp::Add),
         var("r_binary_a"),
         var("r_binary_b"),
-    ));
-    let not = Spanned::synthetic(CompKind::Not(var("r_not")));
-    let index = Spanned::synthetic(CompKind::Index {
+    )));
+    let negate = Spanned::synthetic(CompKind::Prim(Prim::Negate(var("r_negate"))));
+    let not = Spanned::synthetic(CompKind::Prim(Prim::Not(var("r_not"))));
+    let render = Spanned::synthetic(CompKind::Prim(Prim::Render(var("r_render"))));
+    let index = Spanned::synthetic(CompKind::Prim(Prim::Index {
         target: var("r_index_target"),
-        keys: vec![
-            Spanned::synthetic(Key::Label("index_label".into())),
-            Spanned::synthetic(Key::Position(0)),
-            Spanned::synthetic(Key::Data(var("r_index_key"))),
-        ],
-    });
-    let interpolation = Spanned::synthetic(CompKind::Interpolation(vec![
-        var("r_interp_a"),
-        var("r_interp_b"),
-    ]));
+        key: Spanned::synthetic(Key::Data(var("r_index_key"))),
+    }));
+    let index_label = Spanned::synthetic(CompKind::Prim(Prim::Index {
+        target: var("r_index_target"),
+        key: Spanned::synthetic(Key::Label("index_label".into())),
+    }));
+    let index_position = Spanned::synthetic(CompKind::Prim(Prim::Index {
+        target: var("r_index_target"),
+        key: Spanned::synthetic(Key::Position(0)),
+    }));
+    let concat = Spanned::synthetic(CompKind::Prim(Prim::Concat(
+        vec![var("r_concat_a"), var("r_concat_b")].into(),
+    )));
     let rec_group: Arc<GroupNode> =
         Node::new(vec![("rec_name_bound".into(), ret("r_rec_member"))].into());
     let rec = Spanned::synthetic(CompKind::Rec {
@@ -130,7 +140,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
         cleanup: var("r_guard_cleanup"),
     });
     let scope_within = Spanned::synthetic(CompKind::Within {
-        opts: vec![("dir".into(), svar("r_within_opts"))].into(),
+        opts: Node::new(vec![("dir".into(), svar("r_within_opts"))].into()),
         handlers: Some(vec![HandlerArmV {
             name: "deploy".into(),
             value: Spanned::synthetic(var("r_within_arm")),
@@ -138,7 +148,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
         body: var("r_within_body"),
     });
     let scope_grant = Spanned::synthetic(CompKind::Grant {
-        caps: vec![("net".into(), svar("r_grant_caps"))].into(),
+        caps: Node::new(vec![("net".into(), svar("r_grant_caps"))].into()),
         body: var("r_grant_body"),
     });
     let scope_audit = Spanned::synthetic(CompKind::Audit {
@@ -177,34 +187,32 @@ fn every_variant() -> Vec<Arc<Comp>> {
         "lbl".into(),
         svar("r_map_value"),
     )])));
-    let assemble_list = Spanned::synthetic(CompKind::Assemble(Assembly::List(vec![
+    let assemble_list = Spanned::synthetic(CompKind::Prim(Prim::List(Box::new([
         ValListElem::Single(svar("r_assemble_list_single")),
         ValListElem::Spread(svar("r_assemble_list_spread")),
-    ])));
-    let assemble_record = Spanned::synthetic(CompKind::Assemble(Assembly::Record(vec![
-        ValRecordEntry::Field("lbl".into(), svar("r_assemble_record_value")),
-        ValRecordEntry::Spread(svar("r_assemble_record_spread")),
-    ])));
-    let assemble_map = Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
-        MapEntryV::Entry(
-            MapOperand::Value(svar("r_assemble_map_key")),
-            MapOperand::Compute(ret("r_assemble_map_value")),
-        ),
-        MapEntryV::Spread(MapOperand::Compute(ret("r_assemble_map_spread"))),
-    ])));
+    ]))));
+    let update = Spanned::synthetic(CompKind::Prim(Prim::Update {
+        base: svar("r_update_base"),
+        fields: Box::new([("lbl".into(), svar("r_update_field"))]),
+    }));
+    let assemble_map = Spanned::synthetic(CompKind::Prim(Prim::Map(Box::new([
+        MapEntryV::Entry(svar("r_assemble_map_key"), svar("r_assemble_map_value")),
+        MapEntryV::Spread(svar("r_assemble_map_spread")),
+    ]))));
     let val_variant = Spanned::synthetic(CompKind::Return(Val::Variant {
         label: "lbl".into(),
-        payload: Some(Box::new(var("r_variant_payload"))),
+        payload: Box::new(var("r_variant_payload")),
     }));
     let val_variant_empty = Spanned::synthetic(CompKind::Return(Val::Variant {
         label: "lbl_empty".into(),
-        payload: None,
+        payload: Box::new(Val::Unit),
     }));
     let val_thunk = Spanned::synthetic(CompKind::Return(Val::thunk(Arc::new(Spanned::synthetic(
         CompKind::Return(var("r_thunk_body")),
     )))));
     let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
-    let decode = Spanned::synthetic(CompKind::Decode(var("r_decode_body")));
+    let upcast = Spanned::synthetic(CompKind::Upcast(ret("r_upcast_body")));
+    let decode = Spanned::synthetic(CompKind::Prim(Prim::Decode(var("r_decode_body"))));
 
     // No single `CompKind` holds an arbitrary list of sub-`Comp`s to
     // wrap all of the above in one tree, so each is walked on its own
@@ -214,14 +222,19 @@ fn every_variant() -> Vec<Arc<Comp>> {
         Arc::new(Spanned::synthetic(CompKind::Return(var("r_return")))),
         Arc::new(lam),
         Arc::new(bind),
+        Arc::new(seq),
         Arc::new(app),
         Arc::new(exec_name),
         Arc::new(exec_external),
         Arc::new(pipeline),
         Arc::new(binary),
+        Arc::new(negate),
         Arc::new(not),
+        Arc::new(render),
         Arc::new(index),
-        Arc::new(interpolation),
+        Arc::new(index_label),
+        Arc::new(index_position),
+        Arc::new(concat),
         Arc::new(rec),
         Arc::new(tilde),
         Arc::new(if_),
@@ -238,12 +251,13 @@ fn every_variant() -> Vec<Arc<Comp>> {
         Arc::new(val_record),
         Arc::new(val_map),
         Arc::new(assemble_list),
-        Arc::new(assemble_record),
+        Arc::new(update),
         Arc::new(assemble_map),
         Arc::new(val_variant),
         Arc::new(val_variant_empty),
         Arc::new(val_thunk),
         Arc::new(capture),
+        Arc::new(upcast),
         Arc::new(decode),
     ]
 }
@@ -277,22 +291,27 @@ fn referenced_names_walks_every_variant() {
         "r_lam_body",
         "r_bind_comp",
         "r_bind_rest",
+        "r_seq_first",
+        "r_seq_rest",
         "r_app_head",
-        "r_app_arg_single",
-        "r_app_arg_spread",
+        "r_app_arg_first",
+        "r_app_arg_second",
         "r_exec_name_head",
         "r_exec_arg",
+        "r_exec_arg_spread",
         "r_exec_redirect_target",
         "r_exec_external_head",
         "r_pipeline_stage1",
         "r_pipeline_stage2",
         "r_binary_a",
         "r_binary_b",
+        "r_negate",
         "r_not",
+        "r_render",
         "r_index_target",
         "r_index_key",
-        "r_interp_a",
-        "r_interp_b",
+        "r_concat_a",
+        "r_concat_b",
         "r_rec_member",
         "r_if_cond",
         "r_if_then",
@@ -319,14 +338,15 @@ fn referenced_names_walks_every_variant() {
         "r_map_value",
         "r_assemble_list_single",
         "r_assemble_list_spread",
-        "r_assemble_record_value",
-        "r_assemble_record_spread",
+        "r_update_field",
+        "r_update_base",
         "r_assemble_map_key",
         "r_assemble_map_value",
         "r_assemble_map_spread",
         "r_variant_payload",
         "r_thunk_body",
         "r_capture_body",
+        "r_upcast_body",
         "r_decode_body",
     ];
 
@@ -345,17 +365,14 @@ fn referenced_names_walks_every_variant() {
 /// occ `[a, b, c]`: sorted, distinct, the nested node's names included.
 #[test]
 fn occ_is_sorted_distinct_and_includes_nested_nodes() {
-    let inner = Val::thunk(Arc::new(Spanned::synthetic(CompKind::Binary(
+    let inner = Val::thunk(Arc::new(Spanned::synthetic(CompKind::Prim(Prim::Binary(
         BinaryOp::Arith(ArithOp::Add),
         var("c"),
         var("a"),
-    ))));
-    let outer = ThunkNode::new(Arc::new(Spanned::synthetic(CompKind::Interpolation(vec![
-        var("b"),
-        var("a"),
-        var("b"),
-        inner,
-    ]))));
+    )))));
+    let outer = ThunkNode::new(Arc::new(Spanned::synthetic(CompKind::Prim(Prim::Concat(
+        vec![var("b"), var("a"), var("b"), inner].into(),
+    )))));
     let occ: Vec<&str> = outer.occ().names().map(|n| &**n).collect();
     assert_eq!(occ, ["a", "b", "c"]);
 }
@@ -373,7 +390,7 @@ fn a_node_crosses_the_wire_as_its_shape() {
     assert_eq!(decoded.occ(), node.occ());
 }
 
-// ── Args, Toplevel, Pattern, Redirects ───────────────────────────────
+// ── Argv, Toplevel, Pattern, Redirects ───────────────────────────────
 
 fn single(name: &str) -> ValListElem {
     ValListElem::Single(svar(name))
@@ -381,12 +398,12 @@ fn single(name: &str) -> ValListElem {
 
 #[test]
 fn positional_and_arity_are_none_once_a_spread_makes_arity_dynamic() {
-    let literal: Args = vec![single("a"), single("b")].into();
-    assert_eq!(literal.positional(), Some(vec![&var("a"), &var("b")]));
+    let literal: Argv = vec![single("a"), single("b")].into();
+    assert_eq!(literal.positional(), Some(vec![&svar("a"), &svar("b")]));
     assert_eq!(literal.arity(), Some(2));
-    assert_eq!(Args::default().arity(), Some(0));
+    assert_eq!(Argv::default().arity(), Some(0));
 
-    let spread: Args = vec![single("a"), ValListElem::Spread(svar("b"))].into();
+    let spread: Argv = vec![single("a"), ValListElem::Spread(svar("b"))].into();
     assert_eq!(spread.positional(), None);
     assert_eq!(spread.arity(), None);
 }
@@ -394,7 +411,7 @@ fn positional_and_arity_are_none_once_a_spread_makes_arity_dynamic() {
 fn exec() -> Arc<Comp> {
     Arc::new(Spanned::synthetic(CompKind::Exec(Exec {
         head: CommandWord::Name(CommandName::Bare("ls".into())),
-        args: Args::default(),
+        argv: Argv::default(),
         redirects: Redirects::default(),
         site: None,
     })))
@@ -456,7 +473,7 @@ fn the_last_let_of_a_name_wins_the_exported_scheme() {
 #[test]
 fn a_pattern_displays_as_written() {
     let name = |n: &str| Pattern::Name(n.into());
-    let entry = |key: &str, pattern| MapPatternEntry {
+    let entry = |key: &str, pattern| FieldPattern {
         key: key.into(),
         pattern,
     };
@@ -471,7 +488,7 @@ fn a_pattern_displays_as_written() {
             "[a _ ...rest]",
         ),
         (
-            Pattern::Map(vec![entry("host", name("host")), entry("port", name("p"))]),
+            Pattern::Record(vec![entry("host", name("host")), entry("port", name("p"))]),
             "[host port: p]",
         ),
     ] {

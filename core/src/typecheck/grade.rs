@@ -142,7 +142,9 @@ impl Inferencer<'_> {
             }
             CompTy::Return(Grade::Output, unit) => {
                 debug_assert!(self.is_unit(&unit));
-                self.ctx.captured.insert(Node::comp(rhs));
+                self.ctx
+                    .adapted
+                    .insert(Node::comp(rhs), Adaptation::Capture);
                 Ty::String
             }
             CompTy::Return(Grade::Value, ty) => *ty,
@@ -175,8 +177,8 @@ impl Inferencer<'_> {
         }
     }
 
-    /// `block`, of type `given`, read as `how` says: a captured block is
-    /// marked at its arity, and the type it is read at is unified with the
+    /// `block`, of type `given`, read as `how` says: the block is marked
+    /// at its arity, and the type it is read at is unified with the
     /// demand `wanted`.  A failure is reported between what the two produce
     /// past the parameters they agree on — the block as written, and the
     /// demand.
@@ -189,26 +191,21 @@ impl Inferencer<'_> {
         why: &Reason,
     ) {
         let given = self.spine(given);
-        if how == Adaptation::Capture {
-            self.capture_block(block, given.arity());
-        }
+        self.adapt_block(block, given.arity(), how);
         let shown = (self.spine(wanted).tail, given.tail.clone());
         let read_at = given.over(how.produces());
         self.ctx
             .unify_comp_ty_as(&read_at, wanted, shown, why.clone());
     }
 
-    /// Mark a block for capture: a literal one by its body under exactly
-    /// `arity` lambdas; any other by itself, η-wrapped at that arity — a
-    /// value in hand, or a literal whose arrows are not all written, `{ !$f }`,
-    /// whose body the capture frame would otherwise part from its argument.
-    fn capture_block(&mut self, block: &Val, arity: usize) {
+    /// Adapt under written lambdas; otherwise η-wrap at the same arity.
+    pub(super) fn adapt_block(&mut self, block: &Val, arity: usize, how: Adaptation) {
         if let Val::Thunk(comp) = block
             && let Some(body) = Self::body_under(comp.shape(), arity)
         {
-            self.ctx.captured.insert(Node::comp(body));
+            self.ctx.adapted.insert(Node::comp(body), how);
         } else {
-            self.ctx.captured_vals.insert(Node::val(block), arity);
+            self.ctx.adapted_vals.insert(Node::val(block), (arity, how));
         }
     }
 

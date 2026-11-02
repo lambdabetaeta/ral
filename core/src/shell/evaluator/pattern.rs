@@ -96,7 +96,7 @@ fn stage(pattern: &Pattern, value: &Value, staged: &mut Vec<(Name, Value)>) -> S
             }
             Ok(())
         }
-        Pattern::Map(entries) => {
+        Pattern::Record(entries) => {
             let Value::Map(m) = value else {
                 return Err(
                     Error::new(format!("expected Map, got {}", value.type_name()))

@@ -194,7 +194,7 @@ fn found(value: &Value) -> String {
         Value::List(_) => "a list".into(),
         Value::Map(_) => "a map".into(),
         Value::Variant { label, .. } => format!("a variant (tag `{label}`)"),
-        Value::Thunk(_) | Value::Native { .. } => "a block".into(),
+        Value::Thunk(_) | Value::Native(_) => "a block".into(),
         Value::Handle(_) => "a handle".into(),
     }
 }
@@ -276,7 +276,7 @@ impl Site {
         for (name, scheme) in schemes {
             let is_block = matches!(
                 fields.get(name).as_deref(),
-                Some(Value::Thunk(_) | Value::Native { .. })
+                Some(Value::Thunk(_) | Value::Native(_))
             );
             if !is_block {
                 continue;
@@ -359,7 +359,7 @@ impl Walk<'_> {
             | (Shape::String, Value::String(_))
             | (Shape::Bytes, Value::Bytes(_))
             | (Shape::Handle(..), Value::Handle(_))
-            | (Shape::Thunk(_), Value::Thunk(_) | Value::Native { .. }) => Ok(()),
+            | (Shape::Thunk(_), Value::Thunk(_) | Value::Native(_)) => Ok(()),
             (Shape::List(elem), Value::List(items)) => {
                 for (index, item) in items.iter().enumerate() {
                     self.below(Step::At(index), |w| w.run(*elem, &item, at))?;
@@ -485,7 +485,7 @@ impl Walk<'_> {
     /// No block or handle anywhere in `value`.
     fn data(&mut self, value: &Value, at: Option<Span>) -> Result<(), Mismatch> {
         match value {
-            Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
+            Value::Thunk(_) | Value::Native(_) | Value::Handle(_) => {
                 Err(self.uses(value, kind_phrase(Kind::DATA), at, None))
             }
             Value::List(items) => {

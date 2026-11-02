@@ -1,8 +1,16 @@
 ---
 status: proposed
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 ---
 
 # `!` eliminates a block, not a function
+
+> **Implementation note, 2026-11-02:** this remains a surface-language
+> proposal, not the machine's force rule.
+> [[261102_the-checked-ir-is-the-calculus|The checked IR is the calculus]]
+> uses one thunk value; force enters its computation and may reach a lambda
+> terminal. Arguments are then consumed by lambda-meets-`Arg`. The separate
+> runtime function values and trampoline described below are historical.
 
 The surface force operator should eliminate a value-producing thunk; forcing a function is a category error the checker should reject where the function is supplied.
 

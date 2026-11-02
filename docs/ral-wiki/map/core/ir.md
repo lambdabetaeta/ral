@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9c8aa5d9
-generated_at_date: 2026-11-01
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_date: 2026-11-02
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -19,7 +19,7 @@ session environment the next phrase sees. `Toplevel::referenced_names` is
 the phrase-level analogue of the `Comp`-level walk below, for the same lease
 ledger.
 
-The two categories:
+Values, computations and shared nodes:
 
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
   maps, variants, thunks, variables. A value can never diverge or perform I/O,
@@ -47,24 +47,41 @@ The two categories:
   `Pattern`), a `Rec` group's members,
   `CommandName::Bare`, and `Env`'s keys. A bind, a capture and a label clone a
   pointer.
-- `CompKind::Assemble(Assembly)` is the one rule that builds a collection some
-  of whose parts are spread or keyed at run time: a primitive computation, not
-  a value, since it costs O(data) and can fail. `Assembly::List(Vec<ValListElem>)`,
-  `::Record(Vec<ValRecordEntry>)`, and `::Map(Vec<MapEntryV>)` are the spread-
-  and computed-key-bearing element enums — `ValRecordEntry::Field(String, …)`
-  against `MapEntryV::Entry(MapOperand, MapOperand)`, so a record cannot hold a
-  key computed at run time and the [[design/records-and-maps|record/map]]
-  classification is settled by the parser rather than re-derived. A
-  `MapOperand` — key, value or spread — is a plain `Value(Spanned<Val>)` or a
-  `Compute(Arc<Comp>)` the machine sequences in source order. The list and
-  record enums live only in `Assembly` and in `Args` (positional call arguments,
-  which always admit a spread), each entry carrying its value's span.
-  The elaborator's literal arms (`elaborator.rs`) emit `Return(Val::…)` for a
-  plain literal and `Assemble(…)` otherwise; `hoist` names a non-`Return` comp
-  reached in value position, so `[1, ...$xs]` becomes `Assemble(…) to t. …
-  t …` with no new plumbing.
+- `Val::Variant { label, payload: Box<Val> }` always carries a payload;
+  elaboration supplies `Unit` for a bare tag. Runtime `Value::variant`
+  normalises unit payloads to its compact bare-tag representation.
+- `CompKind::Prim(Prim)` computes on value operands only. `Prim::List`
+  holds `ValListElem` entries or spreads; `Prim::Map` holds
+  `MapEntryV::{Entry(Spanned<Val>, Spanned<Val>), Spread(Spanned<Val>)}`;
+  `Prim::Update` holds one record base and named replacement fields.
+  Operand computations hoist into surrounding binds in written order.
+  Assembly may cost O(data) and fail, but runs no operand computation.
+  Plain literals remain values.
 - `Comp` — effectful, sequenced computation. `Comp` wraps a `CompKind` plus an
   optional `Span` for error reporting (synthetic nodes carry `span: None`).
+
+**Computations partition into control, primitives and shell.** The core
+constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
+`Seq`, `Rec`, `If`, `Case`, `Try`, `Guard`, `Capture`, `Upcast`, each an
+`Extrinsic/Syntax/Term` constructor, and `Prim`, each of whose variants is an
+`Extrinsic.Prims.Op`.
+`Prim::operands` and `map_operands` are the common operand traversals.
+
+- `Lam` binds one `Name`; destructuring parameters use `Bind` after the
+  lambda chain. `Pattern::{Wildcard, Name, List, Record}` and `FieldPattern`
+  are defined in `ir/pattern.rs`.
+- `App { head, args: Box<[Spanned<Val>]> }` applies a computation to values,
+  with no spread. `Bind` takes a pattern; `Seq` discards a computation's
+  result without generalisation.
+- `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`, `Gather`,
+  `Audit`, `Tilde`, `Protect` and `Native` form the shell layer.
+  `Native { entry: NativeEntry, args: Box<[Val]> }` is runtime-only and
+  skipped by serde; `NativeEntry` compares entries by name.
+- `Within.opts` and `Grant.caps` are `Arc<FieldsNode>`, the same nodes as
+  record literals. `Within.handlers` stays separate syntax; `None` and an
+  explicitly empty handler list install different scopes.
+
+See [[invariants/ir-pure-cbpv|the IR invariant]] for the correspondence rule.
 
 The checker's verdict rides on the IR too, as **ground** annotations written by
 `annotate`. Because the inference pass is unconditional — every evaluated IR is
@@ -89,27 +106,30 @@ representable state.
   the alternatives are a list fixed at parse time and every arm is a node the
   checker can annotate — an `if` with as many branches as the row has labels
   ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
-- `CompKind::Index { target, keys }` carries `Vec<Spanned<Key>>`:
+- `Prim::Index { target, key }` carries one `Spanned<Key>`:
   `Label(Str)`, `Position(usize)` or `Data(Val)`. The key's form is explicit;
   no pass infers it from a `Val`. Annotation and `Mentions` traverse only
   `Data`; the checker requires a record, list or map, respectively.
-- `Exec { head, args, redirects, site }` is an external or builtin call;
+  An index chain is a sequence of these primitives joined by binds.
+- `Exec { head, argv, redirects, site }` is an external or builtin call;
   `site` is the type the checker solved at a boundary call, which that door
   admits its value against, and `None` for every other head.
 - `CompKind::Capture(Arc<Comp>)` is the kernel half of the checker's one
   coercion: run the body, which is `F^w Unit`, collect what it writes, and return
-  those bytes exactly — total and lossless. `CompKind::Decode(Val)` is the
+  those bytes exactly — total and lossless. `Prim::Decode(Val)` is the
   other half: read that `Bytes` value as text, one trailing terminator dropped
   and a strict UTF-8 decode, which is the partial step — the kernel's `decode`
   takes a value, so it reads a bound variable rather than nesting a `Comp`.
-  Neither has surface syntax; [[map/core/typecheck|typecheck]]'s `annotate`
-  composes them as `Capture(body) to x. Decode(x)` around each computation
+  [[map/core/typecheck|typecheck]]'s `annotate` composes capture and decode
+  as `Capture(body) to x. Prim::Decode(x)` around each computation
   a value demand recorded, and `Mentions`' walk descends into the `Capture`
   and the `Bind`. The reading is a node and not a command so that its meaning
   is fixed where the checker writes it
   ([[decisions/260930_graded-f|graded-f]],
   [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
-  [[design/types|types]]).
+  [[design/types|types]]). Neither has surface syntax.
+- `CompKind::Upcast(M)` explicitly marks a unit producer standing as a
+  command, stepped in tail position. It has no surface syntax.
 
 - `Val::Protected { value, site }` marks an imported weak value occurrence whose
   solved contract reaches a thunk or handle (`Site::has_delayed`). Forming it
@@ -129,7 +149,8 @@ representable state.
   memoizing its rebuild per source `Arc`'s identity.
 
 Every verdict
-the evaluator needs from the checker is explicit syntax: a `Capture`/`Decode` pair, a protection node, a site, a scheme.
+the evaluator needs from the checker is explicit: capture/decode, upcasts,
+returned-thunk splits, protection nodes, sites and schemes.
 
 `CommandName` is the structured head for external dispatch (`Bare` / `Path` /
 `TildePath`); `written()` gives it back as the source spelled it, `~`
@@ -144,8 +165,9 @@ a computation, so there is no parser syntax for elaboration to strip out
 ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<S>` is indexed by its
 schemes: elaboration yields `Unchecked` (`Phrase<()>`), and only the checker
 makes a `Toplevel` of checked phrases, so the evaluator cannot be handed
-unchecked IR. A call's arguments are `Args`, a newtype over the list slots
-(`positional()`, `arity()`).
+unchecked IR. `Exec::argv` is `Argv`, a newtype over list slots admitting
+spreads (`positional()`, `arity()`). Value application instead has a fixed
+slice of arguments.
 
 `Mentions` (`pub(crate)`) is the trait a `Comp`, a `Val`, and each of the four
 node shapes implement: `fn mentions(&self, out: &mut Vec<&Name>)`, one

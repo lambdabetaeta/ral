@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9c8aa5d9
-generated_at_date: 2026-11-01
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_date: 2026-11-02
 covers_paths: [core/src/syntax/, editors/]
 ---
 
@@ -65,7 +65,7 @@ sees raw bytes and bare words.
   bracket's shape is a P0001 whose help shows what to write
   (`ParseErrorKind::Plain { hint }`, set by `ParseError::with_hint`):
   `parse_bracket_items` reads the items of every `[…]` — literal, options,
-  `case` arms, list and map pattern — and names them (`Bracketed`) when a `,`
+  `case` arms, list and record pattern — and names them (`Bracketed`) when a `,`
   is missing or extra; `stray_colon` catches a `key: value` written outside
   `[ ]`. The `$[…]`
   body is a Pratt parser whose operands are
@@ -159,7 +159,7 @@ governs both stages.
   shared `depth`: values through `parse_primary`, expressions through
   `parse_expr_operand` (the unary prefixes `-` / `not` and parenthesised
   sub-expressions bottom out here), patterns through `parse_pattern` (list and
-  map patterns recurse back through it per element).
+  record patterns recurse back through it per element).
 
 The seven reserved [[design/control-operators|control operators]] are recognised
 at this layer, `spawn`'s arity elastic (one operand, or a title and the body)

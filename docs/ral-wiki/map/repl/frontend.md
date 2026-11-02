@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 generated_at_date: 2026-11-01
 covers_paths: [ral/src/repl/external_editor.rs, core/src/external_editor.rs, ral/src/startup.rs, ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/cursor.rs, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, core/src/text.rs]
 ---

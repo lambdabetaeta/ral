@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 generated_at_date: 2026-11-01
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -372,8 +372,9 @@ and ends itself after its idle interval (five hours by default)
   (the `` exarch-pins `read `` precedent), not a roster
   ([[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]).
 
-  `` `reply `` is the sole return path of a returning agent — first-orderness
-  checked at the door,
+  `` `reply `` is the sole return path of a returning agent, with
+  first-orderness checked at the door. A bare `` `reply `` returns `()`,
+  as `` `reply () `` does. It is
   refused on every non-returning agent with the desk's own didactic text, last
   write wins within a run, deposited once the enclosing `ral` batch drains. The
   outer row is open so an unknown tag reaches a door that enumerates the tags; each known

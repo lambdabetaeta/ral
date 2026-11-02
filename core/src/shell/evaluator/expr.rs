@@ -1,12 +1,11 @@
-//! Arithmetic, comparison, negation, and the three reads: the leaves
-//! `machine::eval_rules` dispatches `CompKind::Binary`, `CompKind::Negate`,
-//! `CompKind::Not`, and `CompKind::Index` to.
+//! Fixed operations on values, and the three reads.
 
-use super::val::form;
+use super::{assemble, val::form};
 use crate::data::Finite;
-use crate::ir::Val;
+use crate::io;
 use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp};
-use crate::shell::runtime::{Break, Env, Error, Map, Settled, Signature, Value};
+use crate::ir::{Key, Prim, Val};
+use crate::shell::runtime::{Break, Env, Error, Map, Settled, Signature, Value, sig_hint};
 use std::borrow::Cow;
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -86,8 +85,74 @@ fn unreadable(val: &Value, what: &str, rule: &str) -> Error {
 
 // ── Primitive ops ────────────────────────────────────────────────────────
 
+pub(crate) fn eval_prim(prim: &Prim, env: Env, sig: &Signature) -> Settled<Value> {
+    Ok(match prim {
+        Prim::Binary(op, lhs, rhs) => eval_binary(*op, lhs, rhs, &env, sig)?,
+        Prim::Negate(value) => eval_negate(value, &env, sig)?,
+        Prim::Not(value) => eval_not(value, &env, sig)?,
+        Prim::Index { target, key } => {
+            let value = form(target, &env, sig)?;
+            match &key.item {
+                Key::Label(label) => field(&value, label),
+                Key::Position(n) => position(&value, *n),
+                Key::Data(key) => lookup(&value, &form(key, &env, sig)?),
+            }?
+        }
+        Prim::Update { base, fields } => assemble::eval_update(base, fields, &env, sig)?,
+        Prim::List(elems) => assemble::eval_list(elems, &env, sig)?,
+        Prim::Map(entries) => assemble::eval_map(entries, &env, sig)?,
+        Prim::Render(value) => Value::string(render(&form(value, &env, sig)?)?),
+        Prim::Concat(parts) => {
+            let mut text = String::new();
+            for value in parts {
+                text.push_str(form(value, &env, sig)?.as_str("concat")?);
+            }
+            Value::string(text)
+        }
+        Prim::Decode(value) => {
+            let value = form(value, &env, sig)?;
+            // Release the capture's scope before taking over its buffer.
+            drop(env);
+            let Value::Bytes(bytes) = value else {
+                return Err(sig_hint(
+                    format!(
+                        "the value boundary was handed {} where a captured byte payload belongs",
+                        value.type_name()
+                    ),
+                    "only the type checker writes this step, so this is a fault in ral \
+                     rather than in your program: please report the source that produced it",
+                ));
+            };
+            let mut bytes = bytes.into_vec();
+            bytes.truncate(io::without_terminator(&bytes).len());
+            Value::string(crate::shell::runtime::decode_utf8_strict(
+                bytes,
+                "captured output is not valid UTF-8 text",
+                "to keep it as bytes, pipe it: `… | from-bytes`",
+            )?)
+        }
+    })
+}
+
+fn render(value: &Value) -> Result<String, Error> {
+    if let Some(text) = value.scalar_text() {
+        return Ok(text);
+    }
+    match value {
+        Value::Unit => Err(Error::new("cannot interpolate Unit in string")
+            .with_hint("`()` is nothing to print; to print the text, write '()'")),
+        Value::Bytes(_) => Err(Error::new("cannot interpolate Bytes in string")
+            .with_hint("render with str (lossy UTF-8), or decode with from-string")),
+        _ => Err(Error::new(format!(
+            "cannot interpolate {} in string",
+            value.type_name()
+        ))
+        .with_hint("use str to convert, or index into the value")),
+    }
+}
+
 /// Negation of a `Bool`, and only a `Bool`: nothing else is truthy here.
-pub(crate) fn eval_not(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
+fn eval_not(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
     match form(val, env, sig)? {
         Value::Bool(b) => Ok(Value::Bool(!b)),
         other => Err(Error::new(format!(
@@ -100,7 +165,7 @@ pub(crate) fn eval_not(val: &Val, env: &Env, sig: &Signature) -> Result<Value, E
 }
 
 /// `-v` on a number, `Int` overflow-checked as [`arithmetic`] is.
-pub(crate) fn eval_negate(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
+fn eval_negate(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
     match form(val, env, sig)? {
         Value::Int(n) => n
             .checked_neg()
@@ -112,13 +177,7 @@ pub(crate) fn eval_negate(val: &Val, env: &Env, sig: &Signature) -> Result<Value
 }
 
 /// Arithmetic, comparison, or equality; both operands evaluate, left first.
-pub(crate) fn eval_binary(
-    op: BinaryOp,
-    lhs: &Val,
-    rhs: &Val,
-    env: &Env,
-    sig: &Signature,
-) -> Settled<Value> {
+fn eval_binary(op: BinaryOp, lhs: &Val, rhs: &Val, env: &Env, sig: &Signature) -> Settled<Value> {
     let l = form(lhs, env, sig).map_err(Break::from)?;
     let r = form(rhs, env, sig).map_err(Break::from)?;
     binop(&l, op, &r)

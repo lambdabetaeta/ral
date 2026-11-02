@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_date: 2026-11-02
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -48,8 +48,9 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 - `SerialValue = FOValue<SerialClosure>` (`seed/table.rs`) fills the slot with what this wire
   adds: `SerialClosure::Thunk(SerialThunk)` — the closure's `comp` and a
   `SerialEnvSnapshot` naming its scope's row — and `SerialClosure::Native`,
-  a builtin's name and applied arguments, re-linked against the receiver's own
-  table.
+  a builtin's name, re-linked against the receiver's own table. A partial
+  application used as a value crosses as a Let-fun thunk capturing the
+  variables the application mentions.
 - `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
   keeps each binding's type
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
@@ -91,8 +92,8 @@ classifies it — a block, a function, a handle:
   [[map/core/shell-state|shell-state]]) replaces only `Handle`s, with the same
   placeholder, and keeps closures live, since this wire interns them. It
   reaches every handle the fork holds — in a binding's data, in every scope a
-  closure captured, in a native's applied arguments, in a handler frame's
-  arms — and empties the fork's hooks.
+  closure captured, including a partial native application's environment,
+  and in a handler frame's arms; it empties the fork's hooks.
 
 ## Scopes — `InternCtx` and `WireDecoder`
 

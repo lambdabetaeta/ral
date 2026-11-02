@@ -1,35 +1,58 @@
-# The IR is pure call-by-push-value
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
 
-The intermediate representation is structurally pure
-[[design/cbpv|call-by-push-value]]: values, computations, force and thunk, and
-the dedicated nodes for the seven [[design/control-operators|control operators]].
-**A surface convenience whose unfolding is purely syntactic does not survive
-into the IR** — it unfolds at elaboration into the existing primitives:
+# The checked IR is pure CBPV
 
-- currying sugar `{ |x y| M }` lowers to nested lambdas;
-- a control operator lowers to its structural IR node, not a name-keyed builtin;
-- the byte/value pipeline forms lower to one pipeline node, the byte-vs-value
-  distinction recovered by mode inference.
+**The checked IR has three layers: control, primitives on values, and shell.**
+The core corresponds constructor for constructor to `dev/agda/Extrinsic/`;
+the evaluator is a CEK machine for [[design/cbpv|call-by-push-value]], and the
+Agda machine its substitution-based CK counterpart.
 
-Two conveniences are resolved by *runtime values* and therefore stay in the IR
-as their own constructors, not as unfoldings:
+- **Control:** `Return`, `Force`, `Lam`, `App`, `Bind`, `Seq`, `Rec`, `If`,
+  `Case`, `Try`, `Guard`, `Capture`, `Upcast`. A lambda binds one name;
+  `Bind` takes a pattern, generalising its binders over one shared set of
+  variables. Failure is a machine register, not a computation constructor.
+- **Primitives:** `CompKind::Prim` contains `Binary`, `Negate`, `Not`,
+  `Render`, `Concat`, `Decode`, `Index`, `Update`, `List`, `Map`. Every
+  operand is a value. A primitive computes on those values and may fail;
+  it neither resolves a shell name nor runs another computation.
+- **Shell:** `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`,
+  `Gather`, `Audit`, `Tilde`, `Protect`/`Val::Protected`, and runtime-only
+  `Native`. Resolved full-arity sample builtins correspond to Agda's
+  `prim (builtin b)`; the shell forms themselves are outside the core.
 
-- collection assembly is a computation (`CompKind::Assemble`): spreads and
-  computed keys need runtime validation. List/record parts carry values;
-  map parts (`MapEntryV`) carry `MapOperand::Value` or `::Compute`, keeping
-  each operand computation inside the assembly's sequencing boundary. A key
-  is validated before its value runs; no surface AST survives. Spread `Args`
-  and `ValListElem::Spread` likewise expand runtime values;
-- string interpolation is a computation node (`CompKind::Interpolation`)
-  whose part-computations evaluate and concatenate.
+**Surface conveniences unfold before evaluation.**
 
-The elaborator is the one place that knows about surface forms; everything
-downstream — typechecker, evaluator — sees only the IR's fixed constructor set.
+- A parameter chain becomes nested name-binding lambdas, followed by binds
+  for destructuring parameters. A later plain parameter also gets a bind if
+  an earlier destructuring parameter binds its name, preserving shadowing.
+- A written sequence is `Seq`; a written `let`, including `let _`, is `Bind`.
+  Only these written continuations add the abandoned-steps hint on failure.
+- Map operands are hoisted into binds in written order: key, then value,
+  with each spread in place. `Prim::Map` validates and assembles after all
+  operands have run; a repeated computed key fails then. Explicit entries
+  beat spreads, and the first spread wins.
+- Interpolation hoists every part's computations first, then renders the
+  nonliteral parts in written order and concatenates all parts once.
+- A value head is hoisted before its arguments, then forced; a head of
+  function type is bound unrun, so its own effects follow the arguments'.
+  Application has one `Arg` frame per argument; only a lambda terminal
+  consumes an argument. A spread belongs to argv, not value application:
+  elaboration refuses it for written value heads and lexically bound heads;
+  checking refuses it when a bare head resolves to a builtin or session binding.
+- The checker writes returned-thunk application as `M to h. force h · V`;
+  capture as `Capture(M) to d. Prim::Decode(d)`; and a command boundary for
+  a unit producer as `Upcast(M)`. No runtime rule forces implicitly.
+- A variant always has a payload: a bare tag carries `()`.
+- A form's options are spread-free record nodes; handler labels remain syntax.
 
-This keeps the core small and the semantics regular. When adding a surface
-convenience, lower it during elaboration into what the IR already has; the IR
-grows a constructor only when the convenience's meaning depends on runtime
-values.
+**A new IR form must be classified as control, primitive, or shell.** A core
+form is mirrored in Agda, including its typing and machine rule or primitive
+signature and interpretation. The correspondence and its standing gaps are
+recorded in [[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+and `dev/agda/README.md`.
 
-See also [[invariants/fixed-arity|fixed-arity]]. Cite: `docs/SPEC.md` §3, §17.1 (grammar /
-scope-stage), §IR.
+See [[map/core/ir|IR]], [[internals/compilation-ladder|the compilation ladder]],
+[[internals/evaluator-machine|the evaluator machine]],
+[[invariants/fixed-arity|fixed arity]].

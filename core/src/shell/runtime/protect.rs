@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::ir::{Args, CompKind, Pattern, Val, ValListElem};
+use crate::ir::{CompKind, Pattern, Val};
 use crate::source::Spanned;
 use crate::ty::{Id, Shape, Site};
 
@@ -24,7 +24,7 @@ impl Site {
     /// Install obligations without inspecting delayed results.
     pub(crate) fn wrap(&self, value: Value) -> Value {
         match (&self.nodes[self.root].shape, value) {
-            (Shape::Thunk(body), raw @ (Value::Thunk(_) | Value::Native { .. })) => {
+            (Shape::Thunk(body), raw @ (Value::Thunk(_) | Value::Native(_))) => {
                 self.wrap_thunk(*body, raw)
             }
             // Internal projections suspend the remaining computation contract.
@@ -95,13 +95,9 @@ impl Site {
             Shape::Fun(arg, rest) => {
                 let param = crate::ir::synthetic("membrane", 1);
                 let checked = crate::ir::synthetic("membrane", 2);
-                let args: Args = vec![ValListElem::Single(Spanned::synthetic(Val::Variable(
-                    checked.clone(),
-                )))]
-                .into();
                 let call = Val::thunk(Arc::new(Spanned::synthetic(CompKind::App {
                     head: Arc::new(force),
-                    args,
+                    args: Box::new([Spanned::synthetic(Val::Variable(checked.clone()))]),
                 })));
                 // Form the next wrapper only after beta: even an arrow cycle is guarded.
                 let tail = Spanned::synthetic(CompKind::Force(Val::Protected {
@@ -119,7 +115,7 @@ impl Site {
                     tail,
                 );
                 CompKind::Lam {
-                    param: Pattern::Name(param),
+                    param,
                     body: Arc::new(Spanned::synthetic(body)),
                 }
             }

@@ -1,12 +1,16 @@
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
+
 # Call-by-push-value: values and commands
 
 **ral's organising principle is the call-by-push-value separation of *values*
-from *commands*:**
+from *computations*:**
 
 - *values* are inert data: strings, integers, lists, records, thunks;
-- *commands* are computations that read, write, fail, or return;
-- a thunk `{M}` suspends a command as a value; `!` forces it back into a
-  command, exactly — `force(thunk M) = M`, one thunk value and no bracket
+- *computations* read, write, fail, return a value, or await an argument;
+- a thunk `{M}` suspends a computation as a value; `!` forces it back into a
+  computation: `force(thunk M) = M`, one thunk value and no bracket
   around the body ([[design/scoping|scoping]]).
 
 The typed calculus is ordinary call-by-push-value ([[design/types|types]]). A
@@ -28,7 +32,21 @@ The parameterised block `{ |x| M }` is the language's single abstraction
 mechanism. It subsumes what conventional shells splinter across functions,
 aliases, `eval`, subshells, and trap handlers: a block can be bound, passed,
 returned, or installed as an effect handler. Currying desugars to nested
-lambdas, so partial and under-application are uniform.
+name-binding lambdas, followed by pattern binds for destructuring parameters,
+so partial and under-application are uniform. Later parameters shadow earlier
+ones, including names introduced by destructuring.
+
+**The checked core is control syntax plus primitives on values.** Each core
+constructor corresponds to `Extrinsic/` in Agda; shell forms are a separate
+layer ([[invariants/ir-pure-cbpv|the IR invariant]]). Application pushes one
+argument frame per argument, then forces the head. Only a lambda terminal
+consumes an argument. Returned-thunk application follows the
+[[invariants/ir-pure-cbpv|IR invariant]]. A value head is hoisted before its
+arguments, as a `let` right-hand side is. A head that returns a function runs
+first, so `!{ echo a; return $f } !{ echo b; return 1 }` prints `a` before `b`,
+and a failing head runs no argument. A head that is itself a function
+computation is bound unrun (Let-fun) and runs when applied, after the
+arguments' computations.
 
 **A mechanised core calculus models ral; it is not a refinement of Rust.**
 It is Agda (`--safe --without-K`, no postulates): extrinsically typed call-by-push-value over
@@ -40,8 +58,11 @@ is sound, complete and principal relative to proper kinds, and refuses only unty
 Inferred types pair `output` only with `Unit`, the grade invariant, as a theorem
 ([[design/types|types]], [[internals/type-inference|type-inference]]).
 
-The core does not yet cover coercion placement (`capture`/`decode`/`upcast` insertion and argument
-adaptation), equi-recursive types through data, concurrency, or authority.
+The calculus contains the checked coercions and returned-thunk splits; their
+insertion algorithm is not mechanised. Equi-recursive types through data,
+concurrency and authority are not covered by this core. The correspondence's
+standing gaps are listed in
+[[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
 
 An older, monomorphic, intrinsically typed model still covers threads and authority:
 

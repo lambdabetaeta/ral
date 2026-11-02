@@ -1,12 +1,22 @@
-# Map operands run where written; validation precedes the next operand.
+# Map operands run in written order; assembly follows all operands.
 let mark = { |label value| echo $label; return $value }
 let k = 'a'
 let m = ["!{mark key z}": !{mark value 1}, ...!{mark spread [:, a: 2]}, "!{mark last b}": !{mark final 3}]
 to-json $m; echo
 
-# Neither the duplicate's value nor a later spread may run.
+# The duplicate's value and later spread run before the duplicate is refused.
 try {
-    let _ = [$k: 1, $k: !{mark forbidden 2}, ...!{fail [status: 7, message: later-spread]}]
+    let _ = [$k: 1, $k: !{mark duplicate-value 2}, ...!{mark later-spread [:, b: 3]}]
+    return ()
+} { |e| echo $e[status] $e[message] }
+try {
+    let _ = [$k: 1, $k: !{mark duplicate-value 2}]
+    return ()
+} { |e| echo $e[status] $e[message] }
+
+# An operand failure prevents assembly, even with a repeated computed key.
+try {
+    let _ = [$k: 1, $k: !{mark duplicate-value 2}, ...!{fail [status: 7, message: later-spread]}]
     return ()
 } { |e| echo $e[status] $e[message] }
 try {
@@ -52,7 +62,7 @@ let result-key = 'result'
 let delayed = build $result-key
 echo $delayed[$result-key]
 
-# A decoder's nested admission failure runs inside the cursor, not after it.
+# A nested admission failure stops the later operand before assembly.
 try {
     let _ = [$k: !{echo '{"nested":"wrong"}' | from-json}, b: [:, nested: 1], ...!{mark forbidden [:, c: [:, nested: 2]]}]
     return ()

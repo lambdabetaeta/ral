@@ -86,7 +86,8 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         CompKind::Lam { body, .. } => sub(body),
         CompKind::Bind {
             comp: rhs, rest, ..
-        } => {
+        }
+        | CompKind::Seq { first: rhs, rest } => {
             sub(rhs);
             sub(rest);
         }
@@ -95,6 +96,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             walk_args(comp, visit);
         }
         CompKind::Exec(_) => walk_args(comp, visit),
+        CompKind::Prim(prim) => prim.operands().for_each(|value| walk_val(value, visit)),
         CompKind::If { then, else_, .. } => {
             walk_val(&then.item, visit);
             walk_val(&else_.item, visit);
@@ -106,7 +108,9 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         CompKind::Force(Val::Thunk(node)) | CompKind::Return(Val::Thunk(node)) => {
             walk_comp(node.shape(), visit);
         }
-        CompKind::Capture(c) | CompKind::Redirect { body: c, .. } => walk_comp(c, visit),
+        CompKind::Capture(c) | CompKind::Upcast(c) | CompKind::Redirect { body: c, .. } => {
+            walk_comp(c, visit);
+        }
         CompKind::Try {
             body: a,
             handler: b,
@@ -120,7 +124,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             }
         }
         CompKind::Grant { caps, body } => {
-            for (_, v) in caps {
+            for (_, v) in caps.shape() {
                 walk_val(&v.item, visit);
             }
             walk_val(body, visit);
@@ -130,7 +134,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             handlers,
             body,
         } => {
-            for (_, v) in opts {
+            for (_, v) in opts.shape() {
                 walk_val(&v.item, visit);
             }
             for arm in handlers.iter().flatten() {

@@ -9,26 +9,8 @@
 
 use std::sync::Arc;
 
-use crate::ir::{OptionsV, Val};
+use crate::ir::Val;
 use crate::shell::runtime::{Closure, Env, Error, List, Map, Signature, Value};
-
-/// Renders one interpolation piece for `machine::eval_rules`'s
-/// `CompKind::Interpolation` rule.
-pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
-    if let Some(text) = v.scalar_text() {
-        return Ok(text);
-    }
-    match v {
-        Value::Unit => Err(Error::new("cannot interpolate Unit in string")
-            .with_hint("`()` is nothing to print; to print the text, write '()'")),
-        Value::Bytes(_) => Err(Error::new("cannot interpolate Bytes in string")
-            .with_hint("render with str (lossy UTF-8), or decode with from-string")),
-        _ => Err(
-            Error::new(format!("cannot interpolate {} in string", v.type_name()))
-                .with_hint("use str to convert, or index into the value"),
-        ),
-    }
-}
 
 /// Forms a value term, one step: a constant is its value; `Variable`
 /// resolves through ρ, then Σ ([`crate::shell::runtime::lookup`]), so a miss is an
@@ -100,20 +82,11 @@ pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error
                 Ok(Value::map(pairs))
             }
         }
-        Val::Variant { label, payload } => {
-            let payload = payload.as_ref().map(|p| form(p, env, sig)).transpose()?;
-            Ok(Value::variant(label.clone(), payload))
-        }
+        Val::Variant { label, payload } => Ok(Value::variant(
+            label.clone(),
+            Some(form(payload, env, sig)?),
+        )),
     }
-}
-
-/// A form's written options, each value formed, as the map the form's door reads.
-pub(crate) fn form_options(opts: &OptionsV, env: &Env, sig: &Signature) -> Result<Value, Error> {
-    let pairs = opts
-        .iter()
-        .map(|(key, value)| Ok((key.to_string(), form(&value.item, env, sig)?)))
-        .collect::<Result<Vec<_>, Error>>()?;
-    Ok(Value::map(pairs))
 }
 
 /// Whether every direct name `val` mentions — a `Variable`, through variant
@@ -132,9 +105,7 @@ fn literal_names_bound(val: &Val, env: &Env) -> bool {
             true
         }
         Val::Variable(name) => env.get(name).is_some(),
-        Val::Variant { payload, .. } => payload
-            .as_deref()
-            .is_none_or(|p| literal_names_bound(p, env)),
+        Val::Variant { payload, .. } => literal_names_bound(payload, env),
         Val::List(node) => node
             .shape()
             .iter()
@@ -146,7 +117,7 @@ fn literal_names_bound(val: &Val, env: &Env) -> bool {
     }
 }
 
-/// Shared with argument-spread checking in `machine::close_args`, and with
+/// Shared with argv-spread checking in `machine::close_argv`, and with
 /// [`super::assemble`]'s list rule.
 pub(crate) fn spread_type_err(val: &Value) -> Error {
     Error::new(format!("spread requires a List, got {}", val.type_name()))

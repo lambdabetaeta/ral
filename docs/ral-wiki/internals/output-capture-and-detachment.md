@@ -1,6 +1,7 @@
 ---
-verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
-verified_at_date: 2026-10-27
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+verified_at_date: 2026-11-02
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
@@ -32,7 +33,7 @@ frame inspects no produced value: `capture : F^w Unit → F Bytes`.
   sink it replaced.
 - On success, `Frame::Capture`'s return rule restores that sink and takes the
   buffer exactly, as `Value::Bytes`; the operand's own value is ignored. The
-  text a value boundary reads comes from the `Decode` node the checker binds
+  text a value boundary reads comes from the `Prim::Decode` node the checker binds
   over it — no frame of its own, since the kernel's `decode` takes a value and
   `step_eval` reads it inline: one trailing terminator stripped, then
   `decode_utf8_strict`, the bind's scope dropped first so the buffer moves into
@@ -46,7 +47,7 @@ frame inspects no produced value: `capture : F^w Unit → F Bytes`.
   `Capture` buffer rather than in the terminal.
 
 **A discarded statement writes to `stdout`, wherever that is.** A block is a
-right-nested `Bind`, `a; b` being `a to _. b`
+nesting of `Bind` and `Seq`, `a; b` being `Seq(a, b)`
 ([[internals/evaluator-machine|evaluator-machine]]), and stepping it touches no
 sink. Inside a capture `stdout` is the buffer, and the capture wraps the whole
 right-hand side, so everything the block writes is the value unless an inner

@@ -1,8 +1,18 @@
 ---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the arity partition (native vs. base frame), no-install-time-admission, and every consequence for natives and base frames stand. What resolves otherwise: `^name` no longer reaches an installed base-frame arm at all — it joins the path-head class, skipping the handler stack entirely, so `^echo` is `/bin/echo` and `^detach` is not found.'
 ---
 
 # A name is a value or it is handled
+
+> **Amended 2026-11-02:**
+> [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+> replaces the native representation below. `Value::Native(entry)` crosses
+> by name; forcing builds its lambda chain. Runtime suspensions have no
+> structural equality.
+> A partial application is a closure with arguments in its environment,
+> not a native with an argument list. The value/base-frame partition stands.
 
 **The builtin is not a kind of name. A manifest entry with *fixed arity* has a
 function type, so it is a first-class *native* value seeded into the base env

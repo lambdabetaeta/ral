@@ -1,19 +1,20 @@
 //! Write-back pass: rebuild a checked comp with the inferencer's verdicts —
-//! generalised schemes, boundary sites, and `capture` coercions — over the
+//! generalised schemes, boundary sites, and grade coercions — over the
 //! tree that was inferred, using [`InferCtx`]'s node-address-keyed side maps.
 //!
 //! The walk is a plain structural rebuild: the commands inference recorded
 //! as captured are wrapped in [`captured_string`] where they stand, and a
 //! captured value in hand is η-wrapped into a block that captures its call.
-//! A right-hand side of function type is bound unrun, as its thunk. Its state
-//! is [`Annotate`], the context.
+//! A right-hand side of function type is bound unrun, as its thunk, and a
+//! call whose head returned a thunk is split to force it ([`Annotate::split`]).
+//! Its state is [`Annotate`], the context.
 
 use super::env::{InferCtx, Node};
+use super::grade::Adaptation;
 use crate::ir::Redirects;
 use crate::ir::{
-    Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec,
-    GroupNode, HandlerArmV, Key, MapEntryV, MapOperand, Name, OptionsV, Pattern, Phrase, Toplevel,
-    Val, ValListElem, ValRecordEntry,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, FieldsNode,
+    GroupNode, HandlerArmV, Name, Pattern, Phrase, Prim, Toplevel, Val, ValListElem,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -39,34 +40,62 @@ fn captured_string(body: Comp, ctx: &mut InferCtx) -> CompKind {
     CompKind::bind(
         Pattern::Name(name.clone()),
         Spanned::with_span(span, CompKind::Capture(Arc::new(body))),
-        Spanned::with_span(span, CompKind::Decode(Val::Variable(name))),
+        Spanned::with_span(span, CompKind::Prim(Prim::Decode(Val::Variable(name)))),
     )
 }
 
 /// `n` fresh parameters and the arguments that pass them on.
-fn eta(ctx: &mut InferCtx, n: usize) -> (Vec<Name>, Args) {
+fn eta(ctx: &mut InferCtx, n: usize) -> (Vec<Name>, Vec<Spanned<Val>>) {
     let params: Vec<Name> = (0..n).map(|_| ctx.fresh_name("eta")).collect();
     let args = params
         .iter()
-        .map(|p| ValListElem::Single(Spanned::synthetic(Val::Variable(p.clone()))))
+        .map(|p| Spanned::synthetic(Val::Variable(p.clone())))
         .collect();
     (params, args)
 }
 
-/// `{ |x₁…xₙ| cap (!v x₁ … xₙ) to d. decode d }`: a captured value in hand,
-/// its call wrapped where a literal block's body would be.
-fn captured_block(value: Val, arity: usize, span: Option<Span>, ctx: &mut InferCtx) -> Val {
+/// `head` applied to `args`; with none, the head alone.
+fn applied(span: Option<Span>, head: Comp, args: Vec<Spanned<Val>>) -> Comp {
+    if args.is_empty() {
+        head
+    } else {
+        Spanned::with_span(
+            span,
+            CompKind::App {
+                head: Arc::new(head),
+                args: args.into(),
+            },
+        )
+    }
+}
+
+/// `body` under `redirects`, when there are any.
+fn redirected(body: Comp, redirects: Redirects<Val>) -> CompKind {
+    if redirects.is_empty() {
+        body.item
+    } else {
+        CompKind::Redirect {
+            body: Arc::new(body),
+            redirects,
+        }
+    }
+}
+
+/// Adapt a value in hand under exactly `arity` fresh lambdas.
+fn adapted_block(
+    value: Val,
+    arity: usize,
+    how: Adaptation,
+    span: Option<Span>,
+    ctx: &mut InferCtx,
+) -> Val {
     let (params, args) = eta(ctx, arity);
     let forced = Spanned::with_span(span, CompKind::Force(value));
-    let call = if params.is_empty() {
-        forced.item
-    } else {
-        CompKind::App {
-            head: Arc::new(forced),
-            args,
-        }
+    let call = applied(span, forced, args);
+    let body = match how {
+        Adaptation::Capture => captured_string(call, ctx),
+        Adaptation::Upcast => CompKind::Upcast(Arc::new(call)),
     };
-    let body = captured_string(Spanned::with_span(span, call), ctx);
     lambda(span, params, body)
 }
 
@@ -84,7 +113,7 @@ fn lambda_comp(span: Option<Span>, params: Vec<Name>, body: CompKind) -> Comp {
             Spanned::with_span(
                 span,
                 CompKind::Lam {
-                    param: Pattern::Name(param),
+                    param,
                     body: Arc::new(body),
                 },
             )
@@ -103,7 +132,7 @@ fn boundary_block(
     let (params, args) = eta(ctx, arity);
     let call = CompKind::Exec(Exec {
         head: CommandWord::Name(CommandName::Bare(name.into())),
-        args,
+        argv: args.into_iter().map(ValListElem::Single).collect(),
         redirects: Redirects::default(),
         site: Some(site),
     });
@@ -157,6 +186,10 @@ impl Annotate<'_> {
                 pattern: Arc::clone(pattern),
                 rest: Arc::new(self.comp(rest)),
             },
+            CompKind::Seq { first, rest } => CompKind::Seq {
+                first: Arc::new(self.comp(first)),
+                rest: Arc::new(self.comp(rest)),
+            },
             CompKind::Pipeline { stages } => CompKind::Pipeline {
                 stages: stages
                     .iter()
@@ -167,38 +200,23 @@ impl Annotate<'_> {
                 param: param.clone(),
                 body: Arc::new(self.comp(body)),
             },
-            CompKind::App { head, args } => CompKind::App {
-                head: Arc::new(self.comp(head)),
-                args: self.args(args),
-            },
+            CompKind::App { head, args } => {
+                let head = self.comp(head);
+                let args = self.args(args);
+                self.app(comp, head, args)
+            }
             CompKind::Protect { body, site } => CompKind::Protect {
                 body: Arc::new(self.comp(body)),
                 site: Arc::clone(site),
             },
             CompKind::Force(value) => CompKind::Force(self.val(value)),
             CompKind::Return(value) => CompKind::Return(self.val(value)),
-            CompKind::Assemble(assembly) => CompKind::Assemble(self.assembly(assembly)),
             CompKind::Exec(e) => self.exec(comp, e),
-            CompKind::Binary(op, lhs, rhs) => CompKind::Binary(*op, self.val(lhs), self.val(rhs)),
-            CompKind::Negate(value) => CompKind::Negate(self.val(value)),
-            CompKind::Not(value) => CompKind::Not(self.val(value)),
-            CompKind::Index { target, keys } => CompKind::Index {
-                target: self.val(target),
-                keys: keys
-                    .iter()
-                    .map(|key| {
-                        Spanned::with_span(
-                            key.span,
-                            match &key.item {
-                                Key::Data(value) => Key::Data(self.val(value)),
-                                key => key.clone(),
-                            },
-                        )
-                    })
-                    .collect(),
-            },
-            CompKind::Interpolation(parts) => {
-                CompKind::Interpolation(parts.iter().map(|v| self.val(v)).collect())
+            CompKind::Native { .. } => {
+                unreachable!("a native's code is built by forcing it, never checked")
+            }
+            CompKind::Prim(prim) => {
+                CompKind::Prim(prim.map_operands(|value, span| self.val_at(value, span)))
             }
             CompKind::Rec { group, index } => CompKind::Rec {
                 group: self.rec_group(group),
@@ -233,7 +251,7 @@ impl Annotate<'_> {
                 handlers,
                 body,
             } => CompKind::Within {
-                opts: self.options(opts),
+                opts: self.fields(opts),
                 handlers: handlers.as_ref().map(|arms| {
                     arms.iter()
                         .map(|arm| HandlerArmV {
@@ -245,7 +263,7 @@ impl Annotate<'_> {
                 body: self.val(body),
             },
             CompKind::Grant { caps, body } => CompKind::Grant {
-                caps: self.options(caps),
+                caps: self.fields(caps),
                 body: self.val(body),
             },
             CompKind::Audit { body } => CompKind::Audit {
@@ -263,19 +281,66 @@ impl Annotate<'_> {
                 redirects: redirects.map(|v| self.val(v)),
             },
             CompKind::Capture(body) => CompKind::Capture(Arc::new(self.comp(body))),
-            CompKind::Decode(value) => CompKind::Decode(self.val(value)),
+            CompKind::Upcast(body) => CompKind::Upcast(Arc::new(self.comp(body))),
         };
-        let item = if self.ctx.captured.contains(&Node::comp(comp)) {
-            captured_string(Spanned::with_span(comp.span, item), self.ctx)
-        } else {
-            item
+        let item = match self.ctx.adapted.get(&Node::comp(comp)) {
+            Some(Adaptation::Capture) => {
+                captured_string(Spanned::with_span(comp.span, item), self.ctx)
+            }
+            Some(Adaptation::Upcast) => {
+                CompKind::Upcast(Arc::new(Spanned::with_span(comp.span, item)))
+            }
+            None => item,
         };
         Spanned::with_span(comp.span, item)
     }
 
+    /// `head` applied to `args`, the call at `node`, split where the checker
+    /// forced a returned thunk.
+    fn app(&mut self, node: &Comp, head: Comp, args: Vec<Spanned<Val>>) -> CompKind {
+        match self.ctx.splits.get(&Node::comp(node)).cloned() {
+            Some(splits) => self.split(node.span, &splits, args, |args| {
+                applied(node.span, head, args)
+            }),
+            None => applied(node.span, head, args).item,
+        }
+    }
+
+    /// A call whose head returned thunks the checker forced before the
+    /// arguments at `splits`: `first` takes the arguments before the
+    /// first position, and each later segment applies the thunk the one
+    /// before returned, `first to h₁. force h₁ a[k₁..k₂] to h₂. … force hₘ
+    /// a[kₘ..]`.
+    fn split(
+        &mut self,
+        span: Option<Span>,
+        splits: &[usize],
+        mut args: Vec<Spanned<Val>>,
+        first: impl FnOnce(Vec<Spanned<Val>>) -> Comp,
+    ) -> CompKind {
+        let mut later: Vec<_> = splits.iter().rev().map(|&k| args.split_off(k)).collect();
+        later.reverse();
+        let mut call = first(args);
+        let mut binds = Vec::with_capacity(later.len());
+        for segment in later {
+            let thunk = self.ctx.fresh_name("split");
+            let head = Spanned::with_span(span, CompKind::Force(Val::Variable(thunk.clone())));
+            binds.push((thunk, call));
+            call = applied(span, head, segment);
+        }
+        binds
+            .into_iter()
+            .rev()
+            .fold(call, |rest, (thunk, rhs)| {
+                Spanned::with_span(span, CompKind::bind(Pattern::Name(thunk), rhs, rest))
+            })
+            .item
+    }
+
     /// An `Exec`: its site from the checker, η-expanded when it is an
-    /// under-applied boundary.
+    /// under-applied boundary, split when its binding returned a thunk.
     fn exec(&mut self, comp: &Comp, e: &Exec) -> CompKind {
+        let redirects = e.redirects.map(|v| self.val(v));
         if let Some(site) = self.ctx.imported_sites.get(&Node::comp(comp)).cloned() {
             let CommandWord::Name(CommandName::Bare(name)) = &e.head else {
                 unreachable!("a stored binding has a bare name")
@@ -287,40 +352,46 @@ impl Annotate<'_> {
                     site,
                 }),
             );
-            let args = self.args(&e.args);
-            let call = if args.is_empty() {
-                force.item
-            } else {
-                CompKind::App {
-                    head: Arc::new(force),
-                    args,
-                }
-            };
-            return if e.redirects.is_empty() {
-                call
-            } else {
-                CompKind::Redirect {
-                    body: Arc::new(Spanned::with_span(comp.span, call)),
-                    redirects: e.redirects.map(|v| self.val(v)),
-                }
-            };
+            let args = self.bound_args(&e.argv);
+            let call = self.app(comp, force, args);
+            return redirected(Spanned::with_span(comp.span, call), redirects);
         }
-        let mut exec = Exec {
-            head: e.head.clone(),
-            args: self.args(&e.args),
-            redirects: e.redirects.map(|v| self.val(v)),
-            site: self.ctx.sites.get(&Node::comp(comp)).cloned(),
-        };
+        let site = self.ctx.sites.get(&Node::comp(comp)).cloned();
         // An under-applied boundary is a boundary held as a value: a block of the
         // saturated call, wherever it stands.
-        match self.ctx.boundary_missing.get(&Node::comp(comp)).copied() {
-            Some(missing) => {
-                let (params, args) = eta(self.ctx, missing);
-                exec.args.extend(args);
-                lambda_comp(comp.span, params, CompKind::Exec(exec)).item
-            }
-            None => CompKind::Exec(exec),
+        if let Some(missing) = self.ctx.boundary_missing.get(&Node::comp(comp)).copied() {
+            let (params, args) = eta(self.ctx, missing);
+            let mut argv = self.argv(&e.argv);
+            argv.extend(args.into_iter().map(ValListElem::Single));
+            let exec = CompKind::Exec(Exec {
+                head: e.head.clone(),
+                argv,
+                redirects,
+                site,
+            });
+            return lambda_comp(comp.span, params, exec).item;
         }
+        let Some(splits) = self.ctx.splits.get(&Node::comp(comp)).cloned() else {
+            return CompKind::Exec(Exec {
+                head: e.head.clone(),
+                argv: self.argv(&e.argv),
+                redirects,
+                site,
+            });
+        };
+        let args = self.bound_args(&e.argv);
+        let call = self.split(comp.span, &splits, args, |args| {
+            Spanned::with_span(
+                comp.span,
+                CompKind::Exec(Exec {
+                    head: e.head.clone(),
+                    argv: args.into_iter().map(ValListElem::Single).collect(),
+                    redirects: Redirects::default(),
+                    site,
+                }),
+            )
+        });
+        redirected(Spanned::with_span(comp.span, call), redirects)
     }
 
     fn val(&mut self, val: &Val) -> Val {
@@ -328,7 +399,7 @@ impl Annotate<'_> {
     }
 
     /// [`Self::val`] for a value written at `span`, which the block a boundary
-    /// reference or a captured value becomes is given, so its errors point where
+    /// reference or an adapted value becomes is given, so its errors point where
     /// the value is.
     fn val_at(&mut self, val: &Val, span: Option<Span>) -> Val {
         if let Some(value) = self.ctx.boundary_values.get(&Node::val(val))
@@ -346,8 +417,8 @@ impl Annotate<'_> {
             },
             _ => rebuilt,
         };
-        match self.ctx.captured_vals.get(&Node::val(val)).copied() {
-            Some(arity) => captured_block(rebuilt, arity, span, self.ctx),
+        match self.ctx.adapted_vals.get(&Node::val(val)) {
+            Some(&(arity, how)) => adapted_block(rebuilt, arity, how, span, self.ctx),
             None => rebuilt,
         }
     }
@@ -367,23 +438,11 @@ impl Annotate<'_> {
                     .map(|v| self.spanned_val(v))
                     .collect::<Vec<_>>(),
             ),
-            Val::Record(entries) => Val::record(
-                entries
-                    .shape()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), self.spanned_val(v)))
-                    .collect::<Vec<_>>(),
-            ),
-            Val::Map(entries) => Val::map(
-                entries
-                    .shape()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), self.spanned_val(v)))
-                    .collect::<Vec<_>>(),
-            ),
+            Val::Record(entries) => Val::Record(self.fields(entries)),
+            Val::Map(entries) => Val::Map(self.fields(entries)),
             Val::Variant { label, payload } => Val::Variant {
                 label: label.clone(),
-                payload: payload.as_ref().map(|p| Box::new(self.val(p))),
+                payload: Box::new(self.val(payload)),
             },
             Val::Unit
             | Val::String(_)
@@ -405,57 +464,31 @@ impl Annotate<'_> {
         }
     }
 
-    fn elems(&mut self, elems: &[ValListElem]) -> Vec<ValListElem> {
-        elems.iter().map(|e| self.list_elem(e)).collect()
+    fn argv(&mut self, argv: &Argv) -> Argv {
+        argv.iter().map(|e| self.list_elem(e)).collect()
     }
 
-    fn args(&mut self, args: &Args) -> Args {
-        self.elems(args).into()
+    fn args<'v>(&mut self, args: impl IntoIterator<Item = &'v Spanned<Val>>) -> Vec<Spanned<Val>> {
+        args.into_iter().map(|arg| self.spanned_val(arg)).collect()
     }
 
-    fn map_operand(&mut self, operand: &MapOperand) -> MapOperand {
-        match operand {
-            MapOperand::Value(value) => MapOperand::Value(self.spanned_val(value)),
-            MapOperand::Compute(comp) => MapOperand::Compute(self.rhs(comp)),
-        }
+    /// A binding's argv, as the arguments it is applied to: the checker
+    /// refuses a spread into a binding.
+    fn bound_args(&mut self, argv: &Argv) -> Vec<Spanned<Val>> {
+        let args = argv
+            .positional()
+            .expect("the checker refuses a spread into a binding");
+        self.args(args)
     }
 
-    fn assembly(&mut self, assembly: &Assembly) -> Assembly {
-        match assembly {
-            Assembly::List(elems) => Assembly::List(self.elems(elems)),
-            Assembly::Record(entries) => Assembly::Record(
-                entries
-                    .iter()
-                    .map(|e| match e {
-                        ValRecordEntry::Field(label, v) => {
-                            ValRecordEntry::Field(label.clone(), self.spanned_val(v))
-                        }
-                        ValRecordEntry::Spread(v) => ValRecordEntry::Spread(self.spanned_val(v)),
-                    })
-                    .collect(),
-            ),
-            Assembly::Map(entries) => Assembly::Map(
-                entries
-                    .iter()
-                    .map(|e| match e {
-                        MapEntryV::Entry(k, v) => {
-                            MapEntryV::Entry(self.map_operand(k), self.map_operand(v))
-                        }
-                        MapEntryV::Spread(v) => MapEntryV::Spread(self.map_operand(v)),
-                    })
-                    .collect(),
-            ),
-        }
-    }
-
-    /// A form's written options, each value annotated where it stands.
-    fn options(&mut self, opts: &OptionsV) -> OptionsV {
-        opts.iter()
-            .map(|(name, value)| {
-                let value = Spanned::with_span(value.span, self.val(&value.item));
-                (name.clone(), value)
-            })
-            .collect()
+    fn fields(&mut self, fields: &FieldsNode) -> Arc<FieldsNode> {
+        FieldsNode::new(
+            fields
+                .shape()
+                .iter()
+                .map(|(name, value)| (name.clone(), self.spanned_val(value)))
+                .collect(),
+        )
     }
 }
 
@@ -497,8 +530,38 @@ mod tests {
     use super::*;
     use crate::source::FileId;
 
-    /// Every node a capture coercion adds carries the span of the body it
-    /// wraps, so a decode failure names what the user wrote.
+    #[test]
+    fn upcast_nodes_take_the_bodys_span_under_the_lambda_chain() {
+        let span = Span::new(FileId::DUMMY, 3, 9);
+        let mut ctx = InferCtx::new();
+        let Val::Thunk(block) = adapted_block(
+            Val::Variable("f".into()),
+            2,
+            Adaptation::Upcast,
+            Some(span),
+            &mut ctx,
+        ) else {
+            panic!("an adapted value is a block");
+        };
+        let mut body = block.shape();
+        for _ in 0..2 {
+            assert_eq!(body.span, Some(span));
+            let CompKind::Lam { body: inner, .. } = &body.item else {
+                panic!("the adaptation belongs under both lambdas");
+            };
+            body = inner;
+        }
+        let CompKind::Upcast(call) = &body.item else {
+            panic!("the call is upcast");
+        };
+        let CompKind::App { head, args } = &call.item else {
+            panic!("the value receives both arguments");
+        };
+        assert_eq!(args.len(), 2);
+        assert!(matches!(head.item, CompKind::Force(_)));
+        assert_eq!([body.span, call.span, head.span], [Some(span); 3]);
+    }
+
     #[test]
     fn capture_nodes_take_the_bodys_span() {
         let span = Span::new(FileId::DUMMY, 3, 9);
@@ -509,10 +572,12 @@ mod tests {
             panic!("a capture is bound to its decode");
         };
         assert!(matches!(comp.item, CompKind::Capture(_)));
-        assert!(matches!(rest.item, CompKind::Decode(_)));
+        assert!(matches!(rest.item, CompKind::Prim(Prim::Decode(_))));
         assert_eq!([comp.span, rest.span], [Some(span); 2]);
 
-        let Val::Thunk(block) = captured_block(Val::Unit, 1, Some(span), &mut ctx) else {
+        let Val::Thunk(block) =
+            adapted_block(Val::Unit, 1, Adaptation::Capture, Some(span), &mut ctx)
+        else {
             panic!("a captured value is wrapped in a block");
         };
         let lam = block.shape();

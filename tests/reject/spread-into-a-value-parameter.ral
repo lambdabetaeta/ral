@@ -1,4 +1,6 @@
-# codes: T0056
-# status: 1
-# at: 4:26
+# codes: P0001
+# status: 2
+# at: 6:26
+# contains: this head takes its arguments by application
+# contains: index the list at the call, as in `$f $xs[0]`, or spread into a command
 let appl = { |f args| $f ...$args }; appl $to-json [1]

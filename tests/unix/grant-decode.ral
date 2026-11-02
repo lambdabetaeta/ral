@@ -15,8 +15,4 @@ try { exec-of [alow: []]; return () } { |e| echo "$e[message]" }
 try { exec-of [git: [status, log]]; return () } { |e| echo "$e[message]" }
 try { exec-of [only: [status]]; return () } { |e| echo "$e[message]" }
 
-# A nullary tag carries no payload, not even an explicit unit
-let net-of = { |mode| grant [net: $mode] { echo BODYRAN } }
-try { net-of `offline (); return () } { |e| echo "$e[message]" }
-
 echo 'grant decode tests done'

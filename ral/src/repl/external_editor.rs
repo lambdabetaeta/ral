@@ -34,10 +34,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
     shell
         .register_hook(
             HookName::session("external-editor"),
-            Value::Native {
-                entry: entry.into(),
-                applied: Box::new([]),
-            },
+            Value::Native(entry.into()),
             HookSig::Hook {
                 kind: "external editor".into(),
             },

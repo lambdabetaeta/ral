@@ -1,15 +1,16 @@
 use super::*;
 use crate::data::Finite;
+use crate::ir::Prim;
 use crate::path::tilde::TildePath;
 use crate::syntax::parser::parse;
 
-/// Head name, args, and whether the head was written `^name`.
-fn expect_exec_name(comp: &Comp) -> (&CommandName, &Args, bool) {
+/// Head name, argv, and whether the head was written `^name`.
+fn expect_exec_name(comp: &Comp) -> (&CommandName, &Argv, bool) {
     let CompKind::Exec(e) = &comp.item else {
         panic!("expected exec, got {:?}", comp.item);
     };
     let caret = matches!(e.head, CommandWord::External(_));
-    (e.head.name(), &e.args, caret)
+    (e.head.name(), &e.argv, caret)
 }
 
 /// Strip spans so assertions match on shape alone.  Only lists and maps
@@ -49,8 +50,8 @@ fn strip_val(val: &Val) -> Val {
     }
 }
 
-fn arg_items(args: &Args) -> Vec<ValListElem> {
-    args.iter().map(strip_slot).collect()
+fn arg_items(argv: &Argv) -> Vec<ValListElem> {
+    argv.iter().map(strip_slot).collect()
 }
 
 /// Elaborate one statement, unwrapped from its sole `Run` phrase — for
@@ -68,6 +69,89 @@ fn elaborate_one(
         panic!("expected a Run phrase, got {:?}", phrase.item);
     };
     comp.clone()
+}
+
+#[test]
+fn lambda_parameter_binds_preserve_written_shadowing() {
+    fn check(written: &str, expected_names: &[&str], expected_binds: &[(usize, &str)]) {
+        let src = format!("{{ |{written}| return $x }}");
+        let ast = parse(&src).expect("parse");
+        let comp = elaborate_one(&ast, [], None);
+        let CompKind::Return(Val::Thunk(node)) = &comp.item else {
+            panic!("expected a lambda thunk: {comp:?}");
+        };
+        let mut body = node.shape().as_ref();
+        let mut names = Vec::new();
+        while let CompKind::Lam { param, body: rest } = &body.item {
+            names.push(param);
+            body = rest;
+        }
+        let shown: Vec<_> = names
+            .iter()
+            .map(|name| {
+                if crate::ir::is_synthetic(name) {
+                    "_"
+                } else {
+                    name
+                }
+            })
+            .collect();
+        assert_eq!(shown, expected_names, "{written}");
+        for (index, expected_pattern) in expected_binds {
+            let CompKind::Bind {
+                comp: rhs,
+                pattern,
+                rest,
+            } = &body.item
+            else {
+                panic!("expected a parameter bind: {body:?}");
+            };
+            assert_eq!(pattern.to_string(), *expected_pattern, "{written}");
+            assert_eq!(
+                rhs.item,
+                CompKind::Return(Val::Variable(names[*index].clone()))
+            );
+            assert_eq!(rhs.span, body.span);
+            let span = body.span.expect("parameter span");
+            assert_eq!(
+                &src[span.start as usize..span.end as usize],
+                *expected_pattern
+            );
+            body = rest;
+        }
+        assert_eq!(body.item, CompKind::Return(Val::Variable("x".into())));
+    }
+
+    check("x x", &["x", "x"], &[]);
+    check("x [x]", &["x", "_"], &[(1, "[x]")]);
+    check("[x] x", &["_", "_"], &[(0, "[x]"), (1, "x")]);
+    check("[...x] x", &["_", "_"], &[(0, "[...x]"), (1, "x")]);
+    check("[a: x] x", &["_", "_"], &[(0, "[a: x]"), (1, "x")]);
+    check("[x] y", &["_", "y"], &[(0, "[x]")]);
+    check(
+        "[x] x x",
+        &["_", "_", "_"],
+        &[(0, "[x]"), (1, "x"), (2, "x")],
+    );
+    check("_ x", &["_", "x"], &[]);
+}
+
+#[test]
+fn explicitly_returned_lambda_keeps_the_existing_lambda_chain() {
+    let ast = parse("{ |x| return { |y| return $y } }").expect("parse");
+    let comp = elaborate_one(&ast, [], None);
+    let CompKind::Return(Val::Thunk(node)) = &comp.item else {
+        panic!("expected a lambda thunk: {comp:?}");
+    };
+    let CompKind::Lam { param: x, body } = &node.shape().item else {
+        panic!("expected the outer lambda: {node:?}");
+    };
+    let CompKind::Lam { param: y, body } = &body.item else {
+        panic!("expected the inner lambda: {body:?}");
+    };
+    assert_eq!(x.as_ref(), "x");
+    assert_eq!(y.as_ref(), "y");
+    assert_eq!(body.item, CompKind::Return(Val::Variable("y".into())));
 }
 
 #[test]
@@ -129,25 +213,23 @@ fn external_name_head_elaborates_to_external_exec() {
 
 #[test]
 fn explicit_value_head_elaborates_to_app() {
-    // A value head takes no wrapping `Force`: `apply` forces a thunk in
-    // head position at runtime, which leaves a `<file` redirect on the
-    // `App` free to bracket the body.
+    // A value head is forced, as a bound name is: nothing forces implicitly.
     let ast = parse("$map $upper ['a']").expect("parse");
     let comp = elaborate_one(&ast, [], None);
     let CompKind::App { head, args } = &comp.item else {
         panic!("expected app, got {:?}", comp.item);
     };
-    let CompKind::Return(Val::Variable(name)) = &head.item else {
-        panic!("expected returned-variable head, got {:?}", head.item);
+    let CompKind::Force(Val::Variable(name)) = &head.item else {
+        panic!("expected a forced variable head, got {:?}", head.item);
     };
     assert_eq!(name.as_ref(), "map");
     assert_eq!(
-        arg_items(args),
+        args.iter()
+            .map(|arg| strip_val(&arg.item))
+            .collect::<Vec<_>>(),
         vec![
-            ValListElem::Single(Spanned::synthetic(Val::Variable("upper".into()))),
-            ValListElem::Single(Spanned::synthetic(Val::list(vec![Spanned::synthetic(
-                Val::String("a".into())
-            )]))),
+            Val::Variable("upper".into()),
+            Val::list(vec![Spanned::synthetic(Val::String("a".into()))]),
         ]
     );
 }
@@ -296,21 +378,14 @@ fn script_with_no_identity_is_an_elaboration_error() {
 // ── phrases and right-nested binders ─────────────────────────────────
 
 #[test]
-fn nested_sequence_is_wildcard_bind() {
+fn nested_sequence_is_seq() {
     let stmts = parse("date\necho hi").expect("parse");
     let mut elaborator = Elaborator::new_with_bindings([], None);
     let seq = elaborator.stmts_nested(&stmts);
-    let CompKind::Bind {
-        pattern,
-        comp,
-        rest,
-        ..
-    } = &seq.item
-    else {
-        panic!("expected a Bind, got {:?}", seq.item);
+    let CompKind::Seq { first, rest } = &seq.item else {
+        panic!("expected a Seq, got {:?}", seq.item);
     };
-    assert!(matches!(pattern.as_ref(), Pattern::Wildcard));
-    let (name, _, _) = expect_exec_name(comp);
+    let (name, _, _) = expect_exec_name(first);
     assert_eq!(name, &CommandName::Bare("date".into()));
     let (name, _, _) = expect_exec_name(rest);
     assert_eq!(name, &CommandName::Bare("echo".into()));
@@ -353,17 +428,14 @@ fn word_val_classifies_canonical_numbers() {
 }
 
 #[test]
-fn nested_let_wildcard_binds_a_fresh_name() {
+fn nested_let_wildcard_keeps_its_pattern() {
     let stmts = parse("let _ = date\necho hi").expect("parse");
     let mut elaborator = Elaborator::new_with_bindings([], None);
     let seq = elaborator.stmts_nested(&stmts);
     let CompKind::Bind { pattern, .. } = &seq.item else {
         panic!("expected a Bind, got {:?}", seq.item);
     };
-    match pattern.as_ref() {
-        Pattern::Name(n) => assert!(crate::ir::is_synthetic(n), "not synthetic: {n}"),
-        other => panic!("expected a fresh Name, never Wildcard, got {other:?}"),
-    }
+    assert!(matches!(pattern.as_ref(), Pattern::Wildcard));
 }
 
 #[test]
@@ -375,10 +447,8 @@ fn nested_let_right_nests_over_following_statements() {
         panic!("expected a Bind, got {:?}", seq.item);
     };
     assert!(matches!(pattern.as_ref(), Pattern::Name(n) if n.as_ref() == "x"));
-    let CompKind::Bind {
-        pattern: inner_pattern,
-        rest: inner_rest,
-        ..
+    let CompKind::Seq {
+        rest: inner_rest, ..
     } = &rest.item
     else {
         panic!(
@@ -386,7 +456,6 @@ fn nested_let_right_nests_over_following_statements() {
             rest.item
         );
     };
-    assert!(matches!(inner_pattern.as_ref(), Pattern::Wildcard));
     let (name, _, _) = expect_exec_name(inner_rest);
     assert_eq!(name, &CommandName::Bare("echo".into()));
 }
@@ -657,6 +726,66 @@ fn hoisted(comp: &Comp) -> (&Comp, &Pattern, &Comp) {
 }
 
 #[test]
+fn scope_options_are_record_fields_with_written_order_hoists() {
+    for form in ["within", "grant"] {
+        let src = format!("{form} [z: !$first, a: !$second] {{ return () }}");
+        let ast = parse(&src).expect("parse");
+        let comp = elaborate_one(&ast, [], None);
+        let mut rest = comp.as_ref();
+        let mut values = Vec::new();
+        for name in ["first", "second"] {
+            let (rhs, pattern, next) = hoisted(rest);
+            assert_eq!(rhs.item, CompKind::Force(Val::Variable(name.into())));
+            let Pattern::Name(tmp) = pattern else {
+                panic!("expected a named temporary, got {pattern:?}");
+            };
+            values.push(Val::Variable(tmp.clone()));
+            rest = next;
+        }
+        let fields = match &rest.item {
+            CompKind::Within { opts, handlers, .. } => {
+                assert!(handlers.is_none());
+                opts
+            }
+            CompKind::Grant { caps, .. } => caps,
+            other => panic!("expected a scope form, got {other:?}"),
+        };
+        let fields = fields.shape();
+        assert_eq!(fields.len(), 2);
+        for ((key, value), (label, operand, expected)) in fields
+            .iter()
+            .zip([("a", "!$second", &values[1]), ("z", "!$first", &values[0])])
+        {
+            assert_eq!(key.as_ref(), label);
+            assert_eq!(&value.item, expected);
+            assert_eq!(&src[value.span.expect("value span").range()], operand);
+        }
+    }
+}
+
+#[test]
+fn empty_scope_options_preserve_the_handler_frame_distinction() {
+    for (src, named_handlers) in [
+        ("within [] { return () }", None),
+        ("within [handlers: []] { return () }", Some(0)),
+    ] {
+        let ast = parse(src).expect("parse");
+        let comp = elaborate_one(&ast, [], None);
+        let CompKind::Within { opts, handlers, .. } = &comp.item else {
+            panic!("expected Within, got {:?}", comp.item);
+        };
+        assert!(opts.shape().is_empty());
+        assert_eq!(handlers.as_ref().map(Vec::len), named_handlers);
+    }
+    let ast = parse("grant [] { return () }").expect("parse");
+    let comp = elaborate_one(&ast, [], None);
+    let CompKind::Grant { caps, .. } = &comp.item else {
+        panic!("expected Grant, got {:?}", comp.item);
+    };
+    assert!(caps.shape().is_empty());
+}
+
+#[test]
 fn tilde_path_hoists_one_tilde() {
     let ast = parse("echo ~/x").expect("parse");
     let comp = elaborate_one(&ast, [], None);
@@ -679,13 +808,77 @@ fn leading_tilde_in_a_string_interpolates_the_home_tilde() {
     let Pattern::Name(tmp) = pattern else {
         panic!("expected a named temporary, got {pattern:?}");
     };
-    let CompKind::Interpolation(parts) = &rest.item else {
-        panic!("expected an Interpolation, got {:?}", rest.item);
+    let (render, pattern, rest) = hoisted(rest);
+    assert_eq!(
+        render.item,
+        CompKind::Prim(crate::ir::Prim::Render(Val::Variable(tmp.clone())))
+    );
+    assert_eq!(render.span, comp.span);
+    let Pattern::Name(rendered) = pattern else {
+        panic!("expected a named temporary, got {pattern:?}");
+    };
+    let CompKind::Prim(crate::ir::Prim::Concat(parts)) = &rest.item else {
+        panic!("expected Prim(Concat(_)), got {:?}", rest.item);
+    };
+    assert_eq!(rest.span, comp.span);
+    assert_eq!(
+        parts.as_ref(),
+        [Val::Variable(rendered.clone()), Val::String("/x".into())]
+    );
+}
+
+#[test]
+fn interpolation_hoists_all_parts_before_rendering() {
+    let ast = parse(r#""!$a!$b""#).expect("parse");
+    let comp = elaborate_one(&ast, [], None);
+    let mut rest = comp.as_ref();
+    let mut operands = Vec::new();
+    for name in ["a", "b"] {
+        let (rhs, pattern, next) = hoisted(rest);
+        assert_eq!(rhs.item, CompKind::Force(Val::Variable(name.into())));
+        let Pattern::Name(tmp) = pattern else {
+            panic!("expected a named temporary, got {pattern:?}");
+        };
+        operands.push(Val::Variable(tmp.clone()));
+        rest = next;
+    }
+    let mut rendered = Vec::new();
+    for operand in operands {
+        let (rhs, pattern, next) = hoisted(rest);
+        assert_eq!(rhs.item, CompKind::Prim(crate::ir::Prim::Render(operand)));
+        assert_eq!(rhs.span, comp.span);
+        let Pattern::Name(tmp) = pattern else {
+            panic!("expected a named temporary, got {pattern:?}");
+        };
+        rendered.push(Val::Variable(tmp.clone()));
+        rest = next;
+    }
+    assert_eq!(
+        rest.item,
+        CompKind::Prim(crate::ir::Prim::Concat(rendered.into()))
+    );
+    assert_eq!(rest.span, comp.span);
+}
+
+#[test]
+fn a_single_interpolation_part_still_concatenates() {
+    let ast = parse(r#""$x""#).expect("parse");
+    let comp = elaborate_one(&ast, [], None);
+    let (rhs, pattern, rest) = hoisted(&comp);
+    assert_eq!(
+        rhs.item,
+        CompKind::Prim(crate::ir::Prim::Render(Val::Variable("x".into())))
+    );
+    let Pattern::Name(tmp) = pattern else {
+        panic!("expected a named temporary, got {pattern:?}");
     };
     assert_eq!(
-        parts.as_slice(),
-        [Val::Variable(tmp.clone()), Val::String("/x".into())]
+        rest.item,
+        CompKind::Prim(crate::ir::Prim::Concat(
+            vec![Val::Variable(tmp.clone())].into()
+        ))
     );
+    assert_eq!([rhs.span, rest.span], [comp.span; 2]);
 }
 
 #[test]
@@ -703,7 +896,7 @@ fn let_of_lone_tilde_reads_rather_than_runs() {
 /// A literal with no spread stays value syntax; one with a spread is a
 /// computation, hoisted like any other under `to_val`.
 #[test]
-fn a_spread_literal_is_an_assembly_and_a_plain_one_a_value() {
+fn a_spread_literal_is_a_prim_and_a_plain_one_a_value() {
     let ast = parse("return [1, $x]").expect("parse");
     let comp = elaborate_one(&ast, [], None);
     assert!(
@@ -724,8 +917,8 @@ fn a_spread_literal_is_an_assembly_and_a_plain_one_a_value() {
         );
     };
     assert!(
-        matches!(rhs.item, CompKind::Assemble(Assembly::List(_))),
-        "expected Assemble(List(_)), got {:?}",
+        matches!(rhs.item, CompKind::Prim(Prim::List(_))),
+        "expected Prim(List(_)), got {:?}",
         rhs.item
     );
     assert!(
@@ -774,7 +967,7 @@ fn arms_are_thunks_and_a_lone_arm_returns_unit() {
         unreachable!()
     };
     assert!(
-        matches!(&node.shape().item, CompKind::Bind { pattern, .. } if matches!(**pattern, Pattern::Wildcard)),
+        matches!(&node.shape().item, CompKind::Seq { .. }),
         "the lone arm is wrapped to discard its result, got {:?}",
         node.shape().item
     );

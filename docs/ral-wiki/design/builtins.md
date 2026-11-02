@@ -1,3 +1,7 @@
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
+
 # Builtins: the structured primitive set
 
 **A builtin is a Rust atom the language keeps in-process precisely because the
@@ -36,9 +40,9 @@ spelling would be a second thing to keep capability-checked
 
 ## The families
 
-The Agda core gives checked `i64` and finite `f64` arithmetic, comparison and scalar rendering a
-value-or-error semantics; it does
-not cover the builtin library.
+`Extrinsic.Prims` gives the core operations a value-or-error semantics and
+models resolved `fail`, `echo` and `nth` calls. It does not cover the builtin
+library; see the [[decisions/261102_the-checked-ir-is-the-calculus|correspondence and gaps]].
 
 The core entries group by what they compute:
 
@@ -145,12 +149,16 @@ for each of ral's two existing mechanisms**
 - **A table entry → a *native* value.** It declares its arguments, so it has a
   curried function type (arity 0: a thunk type) and is a first-class value bound
   in the base scope. `$upper` *is* the entry, not a lambda around a
-  name-dispatched command: it curries by collecting arguments until the entry's
-  arity is reached, prints as `<native NAME>`, is equal by name plus collected
-  arguments, and crosses the scope envelope by name, re-linked against the
-  receiving shell's manifest. Its type is the η-equivalent lambda's, uncurried
-  all the way, so partial application in a typed position goes through a `let`
-  rethunk rather than a provenance-sensitive rule.
+  name-dispatched command. `Value::Native(entry)` prints as `<native NAME>`
+  and crosses the scope envelope by name, re-linked against the receiving
+  shell's manifest. Its type is the η-equivalent lambda's, uncurried all
+  the way. Forcing the native builds
+  `λx₁…λxₙ. Native(entry, x₁…xₙ)` in the empty environment, with no stored
+  code or self-reference. Application consumes ordinary argument frames;
+  partial application is a lambda closure whose environment holds the
+  received arguments, rethunked by `let` when used as a value. A resolved
+  full-arity `Exec` runs the entry directly. Neither natives nor thunks have
+  language-level equality.
 - **A base-frame row → a *base frame*.** It is variadic over a list of strings,
   so there is no arity, nothing to curry, and no meaning for partial
   application: it is only interpretable as command syntax and lives at the

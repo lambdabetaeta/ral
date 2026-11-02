@@ -102,6 +102,7 @@ pub enum Reason {
     /// The coercion the checker itself inserted, `cap` and `decode`: no user
     /// sentence ever needs it.
     Capture,
+    Upcast,
     NotOperand,
     /// Unary `-`'s operand, which must be a number.
     Negation,
@@ -113,7 +114,8 @@ pub enum Reason {
     ListPositionRead,
     /// A computed key reads a map.
     MapKeyRead,
-    /// A head still a bare variable, pinned to `Thunk` so application can unfold it.
+    /// A call's head, or a thunk its head returned, pinned to `Thunk` so the
+    /// call can force it.
     AutoderefHead,
     LetRecSelf,
 }

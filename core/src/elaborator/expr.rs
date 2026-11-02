@@ -1,14 +1,89 @@
 use super::branches::Junction;
 use super::{
-    Arc, Assembly, Ast, Comp, CompKind, Elaborator, HandlerArmV, ListElem, MapEntry, MapEntryV,
-    MapOperand, Name, Options, OptionsV, Pattern, RecordEntry, Redirects, ScopeAst, Span, Spanned,
-    Val, ValListElem, ValRecordEntry, WithSpan, Word, word_val,
+    Arc, Ast, Comp, CompKind, Elaborator, HandlerArmV, ListElem, MapEntry, MapEntryV, Name,
+    Pattern, RecordEntry, Redirects, ScopeAst, Span, Spanned, Val, ValListElem, WithSpan, Word,
+    word_val,
 };
 
-use crate::ir::Key;
-use crate::syntax::ast::IndexKey;
+use crate::ir::{FieldsNode, Key, Prim};
+use crate::syntax::ast::{IndexKey, Options, Stmt};
+use std::collections::HashSet;
 
 impl Elaborator {
+    fn lambda_param(
+        &mut self,
+        pattern: &Pattern,
+        destructured: &mut HashSet<Name>,
+    ) -> (Name, Option<Pattern>) {
+        match pattern {
+            Pattern::Name(name) if !destructured.contains(name) => (name.clone(), None),
+            Pattern::Wildcard => (self.gensym(), None),
+            _ => {
+                destructured.extend(pattern.names().into_iter().cloned());
+                (self.gensym(), Some(pattern.clone()))
+            }
+        }
+    }
+
+    fn elab_lambda(&mut self, param: &Spanned<Pattern>, body: &[Stmt]) -> Comp {
+        let mut params = vec![(self.current_span, param)];
+        let mut body = body;
+        let mut body_span = self.current_span;
+        while let [stmt] = body {
+            let (span, ast) = match &stmt.item {
+                Ast::Return(Some(value)) => (value.span, value.item.as_ref()),
+                ast => (stmt.span, ast),
+            };
+            let Ast::Lambda { param, body: inner } = ast else {
+                break;
+            };
+            params.push((span, param));
+            body = inner;
+            body_span = span;
+        }
+        let body = self.with_new_scope(|this| {
+            for (_, param) in &params {
+                this.bind_pattern(param);
+            }
+            this.with_span(body_span, |this| this.stmts_nested(body))
+        });
+        let mut destructured = HashSet::new();
+        let params: Vec<_> = params
+            .into_iter()
+            .map(|(span, param)| {
+                let (name, pattern) = self.lambda_param(&param.item, &mut destructured);
+                (span, param.span, name, pattern)
+            })
+            .collect();
+        let body = params
+            .iter()
+            .rev()
+            .fold(body, |rest, (_, span, name, pattern)| match pattern {
+                Some(pattern) => Spanned::with_span(
+                    *span,
+                    CompKind::bind(
+                        pattern.clone(),
+                        Spanned::with_span(*span, CompKind::Return(Val::Variable(name.clone()))),
+                        rest,
+                    ),
+                ),
+                None => rest,
+            });
+        let lambda = params
+            .into_iter()
+            .rev()
+            .fold(body, |body, (span, _, param, _)| {
+                Spanned::with_span(
+                    span,
+                    CompKind::Lam {
+                        param,
+                        body: Arc::new(body),
+                    },
+                )
+            });
+        comp!(self, CompKind::Return(Val::thunk(Arc::new(lambda))))
+    }
+
     /// Elaborate `ast` as a computation, pushing every sub-expression that must
     /// run before its parent into `binds` for the caller to `wrap_binds`.
     pub(super) fn elab_expr(&mut self, ast: &Ast, binds: &mut Vec<(Pattern, Comp)>) -> Comp {
@@ -31,29 +106,7 @@ impl Elaborator {
                 comp!(self, CompKind::Return(Val::thunk(Arc::new(body_comp))))
             }
 
-            Ast::Lambda { param, body } => {
-                let (param_ir, body_comp) = self.elab_binder_scope(param, body);
-                // A body that is itself a single lambda already carries its own
-                // thunk; reuse it rather than wrapping a thunk in a thunk.
-                let body_arc: Arc<Comp> = match &body_comp.item {
-                    CompKind::Return(Val::Thunk(inner))
-                        if matches!(inner.shape().item, CompKind::Lam { .. }) =>
-                    {
-                        Arc::clone(inner.shape())
-                    }
-                    _ => Arc::new(body_comp),
-                };
-                comp!(
-                    self,
-                    CompKind::Return(Val::thunk(Arc::new(comp!(
-                        self,
-                        CompKind::Lam {
-                            param: param_ir,
-                            body: body_arc,
-                        }
-                    ))))
-                )
-            }
+            Ast::Lambda { param, body } => self.elab_lambda(param, body),
 
             Ast::Force(value) => self.with_span(value.span, |this| {
                 comp!(this, CompKind::Force(this.to_val(&value.item, binds)))
@@ -93,7 +146,7 @@ impl Elaborator {
                     handlers,
                     body,
                 } => {
-                    let opts = self.lower_options(opts, binds);
+                    let opts = self.options(opts, binds);
                     let handlers = handlers.as_ref().map(|arms| {
                         arms.iter()
                             .map(|arm| HandlerArmV {
@@ -117,7 +170,7 @@ impl Elaborator {
                 ScopeAst::Grant { caps, body } => comp!(
                     self,
                     CompKind::Grant {
-                        caps: self.lower_options(caps, binds),
+                        caps: self.options(caps, binds),
                         body: self.to_val(body, binds),
                     }
                 ),
@@ -187,7 +240,7 @@ impl Elaborator {
                                     let handler = Val::thunk(Arc::new(comp!(
                                         this,
                                         CompKind::Lam {
-                                            param: Pattern::Wildcard,
+                                            param: this.gensym(),
                                             body: Arc::new(handler_body),
                                         }
                                     )));
@@ -224,7 +277,7 @@ impl Elaborator {
                     ),
                     None => comp!(
                         self,
-                        CompKind::Assemble(Assembly::List(
+                        CompKind::Prim(Prim::List(
                             elems
                                 .iter()
                                 .map(|e| match e {
@@ -249,28 +302,24 @@ impl Elaborator {
                         RecordEntry::Spread(_) => None,
                     })
                     .collect();
-                match plain {
-                    Some(items) => {
-                        let fields = self.sorted_fields(items, binds);
-                        comp!(self, CompKind::Return(Val::record(fields)))
-                    }
-                    None => comp!(
-                        self,
-                        CompKind::Assemble(Assembly::Record(
-                            entries
-                                .iter()
-                                .map(|e| match e {
-                                    RecordEntry::Field { key, value } => ValRecordEntry::Field(
-                                        key.item.clone(),
-                                        self.spanned_val(value, binds),
-                                    ),
-                                    RecordEntry::Spread(a) => {
-                                        ValRecordEntry::Spread(self.spanned_val(a, binds))
-                                    }
-                                })
-                                .collect(),
-                        ))
-                    ),
+                if let Some(items) = plain {
+                    let fields = self.sorted_fields(items, binds);
+                    comp!(self, CompKind::Return(Val::record(fields)))
+                } else {
+                    let Some((RecordEntry::Spread(base), fields)) = entries.split_first() else {
+                        unreachable!("a record update starts with its base")
+                    };
+                    let base = self.spanned_val(base, binds);
+                    let fields = fields
+                        .iter()
+                        .map(|entry| {
+                            let RecordEntry::Field { key, value } = entry else {
+                                unreachable!("a record update has one base")
+                            };
+                            (key.item.clone().into(), self.spanned_val(value, binds))
+                        })
+                        .collect();
+                    comp!(self, CompKind::Prim(Prim::Update { base, fields }))
                 }
             }
 
@@ -292,16 +341,16 @@ impl Elaborator {
                     }
                     None => comp!(
                         self,
-                        CompKind::Assemble(Assembly::Map(
+                        CompKind::Prim(Prim::Map(
                             entries
                                 .iter()
                                 .map(|e| match e {
                                     MapEntry::Entry { key, value } => MapEntryV::Entry(
-                                        self.map_operand(key),
-                                        self.map_operand(value),
+                                        self.spanned_val(key, binds),
+                                        self.spanned_val(value, binds),
                                     ),
                                     MapEntry::Spread(a) => {
-                                        MapEntryV::Spread(self.map_operand(a))
+                                        MapEntryV::Spread(self.spanned_val(a, binds))
                                     }
                                 })
                                 .collect(),
@@ -311,64 +360,78 @@ impl Elaborator {
             }
 
             Ast::Tag { label, payload } => {
-                let payload_val = payload
-                    .as_ref()
-                    .map(|p| self.with_span(p.span, |this| Box::new(this.to_val(&p.item, binds))));
+                let payload_val = payload.as_ref().map_or(Val::Unit, |p| {
+                    self.with_span(p.span, |this| this.to_val(&p.item, binds))
+                });
                 comp!(
                     self,
                     CompKind::Return(Val::Variant {
                         label: label.as_str().into(),
-                        payload: payload_val,
+                        payload: Box::new(payload_val),
                     })
                 )
             }
 
             Ast::Interpolation(parts) => {
-                comp!(
-                    self,
-                    CompKind::Interpolation(
-                        parts
-                            .iter()
-                            .map(|a| self.with_span(a.span, |this| this.to_val(&a.item, binds)))
-                            .collect()
-                    )
-                )
+                let values: Vec<_> = parts
+                    .iter()
+                    .map(|part| self.with_span(part.span, |this| this.to_val(&part.item, binds)))
+                    .collect();
+                let parts = parts
+                    .iter()
+                    .zip(values)
+                    .map(|(part, value)| {
+                        if matches!(part.item, Ast::Literal(_)) {
+                            value
+                        } else {
+                            let render = comp!(self, CompKind::Prim(Prim::Render(value)));
+                            self.hoist(render, binds)
+                        }
+                    })
+                    .collect();
+                comp!(self, CompKind::Prim(Prim::Concat(parts)))
             }
 
             Ast::Binary(l, op, r) => {
                 let lv = self.with_span(l.span, |this| this.to_val(&l.item, binds));
                 let rv = self.with_span(r.span, |this| this.to_val(&r.item, binds));
-                comp!(self, CompKind::Binary(*op, lv, rv))
+                comp!(self, CompKind::Prim(Prim::Binary(*op, lv, rv)))
             }
             Ast::Negate(inner) => {
                 let v = self.with_span(inner.span, |this| this.to_val(&inner.item, binds));
-                comp!(self, CompKind::Negate(v))
+                comp!(self, CompKind::Prim(Prim::Negate(v)))
             }
             Ast::Not(inner) => {
                 let v = self.with_span(inner.span, |this| this.to_val(&inner.item, binds));
-                comp!(self, CompKind::Not(v))
+                comp!(self, CompKind::Prim(Prim::Not(v)))
             }
             Ast::And(l, r) => self.lower_short_circuit(l, r, binds, Junction::And),
             Ast::Or(l, r) => self.lower_short_circuit(l, r, binds, Junction::Or),
 
-            Ast::Index { target, keys } => comp!(
-                self,
-                CompKind::Index {
-                    target: self
-                        .with_span(target.span, |this| { this.to_val(&target.item, binds) }),
-                    keys: keys
-                        .iter()
-                        .map(|k| Spanned::with_span(
-                            k.span,
-                            self.with_span(k.span, |this| match &k.item {
+            Ast::Index { target, keys } => {
+                let mut target =
+                    self.with_span(target.span, |this| this.to_val(&target.item, binds));
+                let keys: Vec<_> = keys
+                    .iter()
+                    .map(|key| {
+                        Spanned::with_span(
+                            key.span,
+                            self.with_span(key.span, |this| match &key.item {
                                 IndexKey::Label(label) => Key::Label(label.clone().into()),
                                 IndexKey::Position(n) => Key::Position(*n),
                                 IndexKey::Data(ast) => Key::Data(this.to_val(ast, binds)),
                             }),
-                        ))
-                        .collect(),
+                        )
+                    })
+                    .collect();
+                let mut keys = keys.into_iter();
+                let last = keys.next_back().expect("an index has at least one key");
+                for key in keys {
+                    let index = comp!(self, CompKind::Prim(Prim::Index { target, key }));
+                    target = self.hoist(index, binds);
                 }
-            ),
+                comp!(self, CompKind::Prim(Prim::Index { target, key: last }))
+            }
 
             Ast::If { branches, else_ } => self.elab_if(branches, else_.as_ref(), binds),
 
@@ -396,14 +459,6 @@ impl Elaborator {
         }
     }
 
-    fn map_operand(&mut self, ast: &Spanned<Ast>) -> MapOperand {
-        let comp = self.with_span(ast.span, |this| this.elab_isolated(&ast.item));
-        match comp.item {
-            CompKind::Return(value) => MapOperand::Value(Spanned::with_span(ast.span, value)),
-            _ => MapOperand::Compute(Arc::new(comp)),
-        }
-    }
-
     /// [`Self::to_val`], spanned at `ast`'s own range — every literal
     /// element and entry value.
     fn spanned_val(
@@ -417,11 +472,18 @@ impl Elaborator {
         )
     }
 
+    fn options(&mut self, opts: &Options, binds: &mut Vec<(Pattern, Comp)>) -> Arc<FieldsNode> {
+        FieldsNode::new(
+            self.sorted_fields(opts.iter().map(|(key, value)| (key, value)), binds)
+                .into(),
+        )
+    }
+
     /// A plain record or map literal's entries, elaborated in written order and
     /// then sorted by key, stably.
-    fn sorted_fields(
+    fn sorted_fields<'a>(
         &mut self,
-        items: Vec<(&String, &Spanned<Ast>)>,
+        items: impl IntoIterator<Item = (&'a String, &'a Spanned<Ast>)>,
         binds: &mut Vec<(Pattern, Comp)>,
     ) -> Vec<(Name, Spanned<Val>)> {
         let mut fields: Vec<(Name, _)> = items
@@ -430,12 +492,5 @@ impl Elaborator {
             .collect();
         fields.sort_by(|(a, _), (b, _)| a.cmp(b));
         fields
-    }
-
-    /// A form's written options, each value hoisted like any other value.
-    fn lower_options(&mut self, opts: &Options, binds: &mut Vec<(Pattern, Comp)>) -> OptionsV {
-        opts.iter()
-            .map(|(name, value)| (Name::from(name.as_str()), self.spanned_val(value, binds)))
-            .collect()
     }
 }

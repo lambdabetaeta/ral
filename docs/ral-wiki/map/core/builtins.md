@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6dd2407d
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -275,7 +275,7 @@ Bodies are grouped by concern, one submodule each:
   runs its thunk on a fresh `std::thread` via `Shell::spawn_thread`
   ([[map/core/shell-state|shell-state]]), seeded from the parent's session;
   `worker_body` hands the thunk, its capture riding in its closure, straight
-  to `machine::force` ([[map/core/evaluator|evaluator]]), deliberately
+  to `machine::apply` with no arguments ([[map/core/evaluator|evaluator]]), deliberately
   bypassing the `Toplevel`/`Phrase` boundary, because the worker's own `Shell`
   is the only one its bindings touch and they die with the thread. The worker
   carries the parent's grant stack, so a forced block *inside* the worker

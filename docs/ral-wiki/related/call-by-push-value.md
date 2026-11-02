@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 verified_at_commit: 8d868e18
 verified_at_date: 2026-09-30
 against: [design/cbpv, design/types, design/pipelines, internals/evaluator-machine]
@@ -35,11 +36,12 @@ touches the world ([[design/cbpv|cbpv]],
 - **The machine is the CK reading, now literally a CEK machine.** ral's
   evaluator steps a focus ⟨M, E⟩ against a stack of frames, each frame
   carrying the environment it resumes under
-  ([[internals/evaluator-machine|evaluator-machine]]). A tail call pushes no
-  frame — β binds the argument into the closure's own environment and puts
-  the body in focus, so depth is exactly `stack.len()`. That is Levy's
-  jumping intuition — *calling a procedure is a jump, and returning is also a
-  jump* — with the stack discipline enforced by the module's two doors,
+  ([[internals/evaluator-machine|evaluator-machine]]). A call pushes one
+  `Arg` frame per argument; β consumes each on entry, binding its name in
+  the closure's environment. The body runs in tail position, so depth is
+  exactly `stack.len()`. That is Levy's jumping intuition, *calling a
+  procedure is a jump, and returning is also a jump*, with the stack
+  discipline enforced by the module's two doors,
   `evaluate` and `apply`, rather than by a calculus of stacks.
 
 ## Divergences (extensions, mostly)

@@ -1,5 +1,6 @@
-# codes: T0056
-# status: 1
-# at: 5:44
-# contains: $f $xs[0]
+# codes: P0001
+# status: 2
+# at: 6:44
+# contains: this head takes its arguments by application
+# contains: index the list at the call, as in `$f $xs[0]`, or spread into a command
 let g = { |x| return $x }; let ys = [1]; g ...$ys

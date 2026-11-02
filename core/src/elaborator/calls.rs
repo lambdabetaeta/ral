@@ -1,17 +1,17 @@
 use super::{
-    Arc, Args, Ast, CommandName, CommandWord, Comp, CompKind, Elaborator, Exec, Head, Pattern,
-    Redirects, Spanned, Val, ValListElem, WithSpan,
+    Arc, Argv, Ast, CommandName, CommandWord, Comp, CompKind, Elaborator, Exec, Head, ParseError,
+    Pattern, Redirects, Spanned, Val, ValListElem, WithSpan,
 };
 
 impl Elaborator {
     /// Every name-dispatched head (`bare`, `^name`, `./path`, `~/path`) funnels
     /// through here.
-    fn exec(&self, head: CommandWord, args: Args, redirects: Redirects<Val>) -> Comp {
+    fn exec(&self, head: CommandWord, argv: Argv, redirects: Redirects<Val>) -> Comp {
         comp!(
             self,
             CompKind::Exec(Exec {
                 head,
-                args,
+                argv,
                 redirects,
                 site: None,
             })
@@ -26,18 +26,20 @@ impl Elaborator {
         redirects: &Redirects<Ast>,
         binds: &mut Vec<(Pattern, Comp)>,
     ) -> Comp {
-        // A value head can hoist binds of its own, and its effects
-        // precede the arguments' in source order — so it is elaborated
-        // before the args below, or its binds land after theirs.
-        let value_head_comp = if let Head::Value(value) = &head.item {
-            Some(self.with_span(head.span, |this| this.elab_expr(value, binds)))
+        // A head returning a function runs before argument hoists;
+        // a function-typed head is thunked and runs at App, after them.
+        let value_head = if let Head::Value(value) = &head.item {
+            Some(self.with_span(head.span, |this| {
+                let value = this.to_val(value, binds);
+                comp!(this, CompKind::Force(value))
+            }))
         } else {
             None
         };
 
         // Only an argument-position spread splices here: a list-literal
         // argument `f [...$xs]` stays one arg carrying its own spread.
-        let arg_vals: Args = args
+        let argv: Argv = args
             .iter()
             .map(|a| match &a.item {
                 Ast::Spread(inner) => ValListElem::Spread(Spanned::with_span(
@@ -55,7 +57,7 @@ impl Elaborator {
         match &head.item {
             Head::ExternalName(s) => self.exec(
                 CommandWord::External(CommandName::Bare(s.clone().into())),
-                arg_vals,
+                argv,
                 redirect_vals,
             ),
             Head::Bare(s) if self.is_bound(s) => {
@@ -66,45 +68,58 @@ impl Elaborator {
                     this.refer(s);
                     comp!(this, CompKind::Force(Val::Variable(s.clone().into())))
                 });
-                self.apply_head(head_comp, arg_vals, redirect_vals)
+                self.apply_head(head_comp, argv, redirect_vals)
             }
             Head::Bare(s) => {
                 self.with_span(head.span, |this| this.refer(s));
                 self.exec(
                     CommandWord::Name(CommandName::Bare(s.clone().into())),
-                    desugar_zero_arg_exit(s, arg_vals),
+                    desugar_zero_arg_exit(s, argv),
                     redirect_vals,
                 )
             }
             Head::Path(path) => self.exec(
                 CommandWord::Name(CommandName::Path(path.clone())),
-                arg_vals,
+                argv,
                 redirect_vals,
             ),
             Head::TildePath(path) => self.exec(
                 CommandWord::Name(CommandName::TildePath(path.clone())),
-                arg_vals,
+                argv,
                 redirect_vals,
             ),
             Head::Value(_) => {
-                let head_comp = value_head_comp.expect("computed above for Head::Value");
-                self.apply_head(head_comp, arg_vals, redirect_vals)
+                let head_comp = value_head.expect("lowered above for Head::Value");
+                self.apply_head(head_comp, argv, redirect_vals)
             }
         }
     }
 
     /// Shared by the two value-application heads, a bound bare name (`f x`) and
-    /// an explicit value head (`$f x`, `{…} x`).  A zero-arg call is the head
-    /// computation alone: `App` with an empty argument list is not a CBPV form.
-    fn apply_head(&self, head_comp: Comp, arg_vals: Args, redirects: Redirects<Val>) -> Comp {
-        let app = if arg_vals.is_empty() {
+    /// an explicit value head (`$f x`, `{…} x`), each forced.  A zero-arg call
+    /// is the head computation alone: `App` with an empty argument list is not
+    /// a CBPV form.  A value takes its arguments by application, so it has no
+    /// argv for `...` to spread into.
+    fn apply_head(&mut self, head_comp: Comp, argv: Argv, redirects: Redirects<Val>) -> Comp {
+        let args: Box<[Spanned<Val>]> = argv
+            .into_iter()
+            .map(|elem| match elem {
+                ValListElem::Single(arg) => arg,
+                ValListElem::Spread(arg) => {
+                    let (message, hint) = crate::typecheck::spread_into_application();
+                    self.refuse(ParseError::new(arg.span, message).with_hint(hint));
+                    arg
+                }
+            })
+            .collect();
+        let app = if args.is_empty() {
             head_comp
         } else {
             comp!(
                 self,
                 CompKind::App {
                     head: Arc::new(head_comp),
-                    args: arg_vals,
+                    args,
                 }
             )
         };
@@ -112,8 +127,7 @@ impl Elaborator {
     }
 
     /// Attach trailing `redirects` to `body` as a [`CompKind::Redirect`] frame.
-    /// `Exec` carries its own redirects instead, and pipelines and chains take
-    /// X
+    /// `Exec` carries its own redirects instead.
     pub(super) fn wrap_redirect(&self, body: Comp, redirects: Redirects<Val>) -> Comp {
         if redirects.is_empty() {
             return body;
@@ -141,10 +155,10 @@ impl Elaborator {
 /// Sugar bare `exit` / `quit` into `exit 0` / `quit 0`.  The builtin tolerates
 /// zero args, but ral's fixed-arity rule gives it one `Int` slot; supplying the
 /// status here spares the typechecker a zero-arg special case.
-fn desugar_zero_arg_exit(name: &str, args: Args) -> Args {
-    if args.is_empty() && (name == "exit" || name == "quit") {
-        Args::from(vec![ValListElem::Single(Spanned::synthetic(Val::Int(0)))])
+fn desugar_zero_arg_exit(name: &str, argv: Argv) -> Argv {
+    if argv.is_empty() && (name == "exit" || name == "quit") {
+        Argv::from(vec![ValListElem::Single(Spanned::synthetic(Val::Int(0)))])
     } else {
-        args
+        argv
     }
 }

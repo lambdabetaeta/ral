@@ -4,5 +4,4 @@ grant exec: `` `absolute /usr/bin `` is a directory, so as an exec target it nam
 grant exec: unknown key 'alow': `grant exec` takes allow, deny (did you mean 'allow'?)
 grant exec: unknown key 'git': `grant exec` takes allow, deny
 grant exec: unknown key 'only': `grant exec` takes allow, deny
-grant net: `` `offline `` takes no payload; write it bare, `` `offline ``
 grant decode tests done

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 9c8aa5d9
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 ---
 
 # Records and maps
@@ -67,7 +67,8 @@ No pass recovers the form from a value's shape. Only `Data` is traversed by
 annotation and name collection. Each read unifies at once: no disjunction,
 shape default, deferred read constraint or index-made weak variable.
 `let lookup = { |m k| $m[$k] }` therefore generalises over map element types.
-These reads are exactly the formal core's `proj`, `index` and `lookup`.
+These reads are the formal core's `prim` operations `index (fld ℓ)`,
+`index (pos k)` and `index key`.
 
 ## Data is checked at the door
 
@@ -119,11 +120,15 @@ also run backwards and invent record fields.
 
 ## Evaluation order
 
-Keys are checked before their values. The machine's `MapCursor` sequences
-key, validation, value and spread operands in written order; no later operand
-runs after a refusal. A repeated computed key is rejected before its value
-runs. The Agda data model checks value-only entries in a strictly key-sorted
-association list; it does not model computation-bearing operand transitions.
+**All operands run before assembly validates the keys.** Elaboration hoists
+map operands into binds in written order: each key, then its value, with a
+spread in place. An operand failure stops the remaining operands; a repeated
+computed key is refused by `Prim::Map` only after every operand has run.
+Explicit entries beat spreads, and the first spread wins.
+
+Assembly is a primitive on values in Rust and in `Extrinsic.Prims`; operand
+effects are represented by the surrounding binds, not by assembly transitions.
+See [[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
 
 See [[internals/type-inference|type inference]], [[design/row-types|row types]],
 [[invariants/fields-are-reached-by-name|fields are reached by name]].

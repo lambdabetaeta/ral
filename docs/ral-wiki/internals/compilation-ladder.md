@@ -1,6 +1,7 @@
 ---
-verified_at_commit: 30a5e059
-verified_at_date: 2026-10-24
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+verified_at_date: 2026-11-02
 anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, annotate, Capture, captured_string, thunked]
 ---
 
@@ -25,13 +26,20 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   splits each stretch of block definitions (SPEC §5.7) into its mutually
   recursive groups along the references that resolution itself finds; each
   lowers to an n-ary `Rec` with a projection per member. A statement sequence
-  `a; b` is itself a binder — `a to _. b` — so a block is a right-nested chain
-  of `Bind`s and the top level is a list of `Phrase`s (`Define` / `Run`). What
-  it emits carries no parser syntax
+  `a; b` is `Seq(a, b)`; a written `let`, including `let _`, is `Bind`.
+  A block nests those continuations and the top level is a list of `Phrase`s
+  (`Define` / `Run`). Lambdas bind names; destructuring becomes binds after
+  the whole lambda chain, located at the parameters. Collection operands
+  hoist in written order before their assembly primitive; interpolation
+  hoists all parts, then renders and concatenates. A value head hoists before
+  its arguments; a function-typed head is bound unrun and runs when applied.
+  Elaboration refuses a spread into a written value head or lexically bound
+  head; checking refuses one into a builtin or session binding.
+  What it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
 - **IR → typed IR.** Hindley–Milner inference annotates the `Val` / `Comp`
   tree ([[design/types|types]]). The checker is a transformation, `annotate`: a
-  plain structural rebuild of the inferred tree carrying four verdicts.
+  structural rebuild of the inferred tree carrying explicit verdicts.
 
   - Each top-level name-bind carries the generalised `Scheme` it inferred,
     closed against the empty environment so the scheme outlives the per-run
@@ -42,11 +50,16 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   - Each boundary call carries the `Site` inference recorded for it.
   - A command the checker recorded as captured is wrapped as
-    `cap M to d. decode d` (`CompKind::Capture`, `CompKind::Decode`, built by
+    `cap M to d. decode d` (`CompKind::Capture`, `Prim::Decode`, built by
     `captured_string`)
     ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
+  - A unit producer standing as a command is wrapped in `Upcast`, under its
+    lambdas or in an η-wrapper for a value in hand.
+  - An application through a returned thunk is split into explicit
+    `M to h. force h · V` segments, once per unwrapped thunk
+    ([[invariants/ir-pure-cbpv|the IR invariant]]).
 
-  Generalisation happens at each `Bind`, along the SCC structure the
+  Generalisation happens at each `Bind`, not `Seq`, along the SCC structure the
   elaborator already found. A non-recursive group generalises at its own
   binding point. A mutually recursive group stays monomorphic until its fixed
   point.
@@ -62,11 +75,9 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   [[decisions/260930_graded-f|graded-f]]).
   The rebuild places a `Capture` by looking a node up in that record.
 
-  This rung is the *only* source of `Capture` nodes, and it runs on every
-  evaluated path: nothing reaches the evaluator that asks whether to capture,
-  and a capture is never re-derived at runtime. A node inference never visited
-  keeps the elaborator's placeholder — `Unit` for a stage type. The verdict
-  rides inside the comp; `CompileError` is unchanged in shape.
+  This rung is the *only* source of `Capture` and `Upcast` nodes, and it runs
+  on every evaluated path: nothing reaches the evaluator that asks whether
+  to capture or upcast. The verdict rides inside the comp.
   ([[map/core/typecheck|typecheck]])
 
 A loading form may also hand this rung a `ReturnContract` — one of the

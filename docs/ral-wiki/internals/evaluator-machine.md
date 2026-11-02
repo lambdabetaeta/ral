@@ -1,234 +1,142 @@
 ---
-verified_at_commit: 61c288f
-verified_at_date: 2026-10-21
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, EngineSeed, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble, Frame::Gather, ScopeOwner, exit_brood]
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+verified_at_date: 2026-11-02
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, ScopeOwner, exit_brood]
 ---
 
-# The evaluator: a CEK machine over computation closures
+# The evaluator: a CEK machine for CBPV
 
-The evaluator is one abstract machine, `core/src/shell/evaluator/machine.rs`. Its
-state is a **focus** and a **stack**: `Machine { focus: Focus, stack:
-Vec<Frame> }`, stepped against the store `&mut Shell` and the run's
-`&Mooring`. Nothing else in the crate constructs a state or sees the stack;
-the module's doors are `evaluate(comp, env, …)` — inject ⟨M, E⟩ over the
-empty stack and step until it is empty — `apply(f, args, …)`, the same
-from a closed value meeting arguments, and its argument-free twin
-`force(v, …)`. All return `Settled<Value>`.
+**The machine steps a computation closure against a continuation.**
+`Machine { focus, stack }` is private to `core/src/shell/evaluator/machine.rs`;
+it steps against `&mut Shell` and the run's `&Mooring`.
 
-**What is in focus is a computation closure.** `Focus::Eval { comp, env }`
-pairs a [[map/core/ir|computation]] with the whole environment it was reached
-in: transient — never stored, sent, or kept alive by a binding — and so a type
-apart from `Closure`, the thunk value's. `Focus::Return(t)` is a
-terminal meeting the frame above; `Focus::Halt(Break)` is a signal climbing
-the stack. A terminal has two shapes, `Terminal::Value(v)` and
-`Terminal::Lambda { comp, env }` — a λ is canonical at `A → C` and is never a
-value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
-`Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
-`Within`, `Grant`, `Try`) passes it through, a value-holed frame
-(`To`, `Capture`, `Guard`, `Cleanup`, `Audit`, `Gather`) halts with the
-bare-lambda error — unreachable for a checked program, since the one
-function-typed computation such a hole could receive, a `let`'s right-hand
-side, is bound unrun as its thunk (SPEC §17.5, §17.8).
-`Decode` has no frame: the kernel's `decode` takes a value, so it closes and
-reads it inline in `step_eval`, and the checker reaches it through a bind
-over `Capture` rather than nesting the two.
+- `Focus::Eval { comp, env }` is ⟨M, ρ⟩, a computation under the whole
+  environment in which it was reached.
+- `Focus::Return(Terminal::Value(v))` is a returned value.
+- `Focus::Return(Terminal::Lambda { comp, env })` is a lambda closure,
+  canonical at `A → C`, not a value.
+- `Focus::Halt(Break)` is failure or escape climbing the continuation.
+  Failure is a register, not an IR term.
 
-**One thunk value.** `Value::Thunk(Closure)` is `⟨M, ρ|occ(M)⟩`, built only
-by `Closure::new`, which `restrict`s the environment to `occ`, read off the
-`ThunkNode` that owns `M` (`Val::Thunk(Arc<ThunkNode>)`) — occ(M) is
-computed once, by `Node::new`, where the node is built, not walked at every
-capture
-([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
-`force` of it puts its computation and environment in focus and pushes
-nothing, so `force(thunk M) = M` and a forced block's `cd` persists exactly
-as a lambda's does ([[design/scoping|scoping]]). A literal `!{ … }` takes
-that equation as a rule (U-β): `Force(Val::Thunk(node))` puts `node.shape()`
-in focus under the current environment, closing nothing (`Machine::force_val`).
-Every form that suspends a command — `if`, `case`, `try`, `?`, `guard`,
-`within`, `grant` — holds its arms as thunks and forces the one it chooses the
-same way: `if true $aaah else $baaah` runs `$aaah`, and `case` pushes an
-`Apply` with the variant's payload before forcing the arm. Whether a thunk
-takes parameters is its type's business: the machine never asks, and only a
-description of a value reads the body's shape (`Comp::lam`).
+The core corresponds to the substitution-based CK machine in
+`dev/agda/Extrinsic/Semantics/Machine.agda`. The
+[[invariants/ir-pure-cbpv|IR invariant]] partitions control, primitives and
+shell; the [[decisions/261102_the-checked-ir-is-the-calculus|correspondence ADR]]
+states the standing gaps.
 
-**A list, record or map literal is a value closure too.** `form(val, env,
-sig)` (`core/src/shell/evaluator/val.rs`) is CBPV's one-step rule for every value:
-a constant is itself, a name is `lookup(name, env, sig)`, a variant forms its
-payload, `thunk M` is `Closure::new`, and a plain literal is `List::literal`
-or `Map::literal` — `⟨V, ρ|occ(V)⟩` — unless one of the names it *directly*
-mentions (through variant payloads and nested literals, never inside a
-thunk) is answered only by Σ: a `Literal`'s inspection reads ρ alone, with no
-Σ fallback, so that name could never be read back out, and `form` builds the
-literal eagerly instead, forming each element with `sig`. Inspecting a
-`Literal`'s element is the distributive law, one layer: a name is lent from
-ρ, a constant is built, and a nested literal or thunk closes over the *same*
-ρ — two refcount bumps, not a second restriction.
+## Application and force
 
-**`step` is the tables.** `Machine::step` dispatches on the focus:
-`eval_rules` has one match arm per `CompKind` (the ξ-rules: `Return` closes
-its value, `Bind` pushes `To`, `App`
-closes its arguments then pushes `Apply` and evaluates the head, `Rec`
-unfolds the n-ary group, `Exec` classifies the head through the lexical
-environment, `Pipeline` launches and joins its node, the seven handler forms
-close their operands, install, push their frame and force the body …);
-`Assemble` is the one rule that does O(data) work over what looks like value
-syntax: a list, record, or map literal with a spread or a computed key
-elaborates to it rather than to `Return`, and `shell/evaluator/assemble.rs` builds
-the collection ([[map/core/evaluator|evaluator]]) — a plain literal, with
-none of those, stays a `Return` and closes for free;
-`step_return` and `step_halt` have one arm per `Frame` — the two columns of
-the frame table. No arm calls another arm; no arm loops.
+**Only a lambda terminal consumes an argument.** `App` forms its value
+arguments, pushes one `Frame::Arg { value, span }` per argument right to left,
+then evaluates its computation head. A lambda meeting `Arg` binds its one name
+in the closure's environment and puts its body in focus. A returned value
+meeting `Arg` is a fault in ral, unreachable for a checked program.
 
-**A rule cannot leave unlocated.** Every rule returns `Settled<Focus>`
-(`eval_rules`, and `step_return`, `step_halt`, `beta`, `apply_rule` and
-`force` alike), so each raises with `?` rather than by building a
-`Focus::Halt` of its own; `step` folds the `Err` into `Focus::Halt` once, and
-`step_eval` first stamps it with `comp.span`. There is exactly one exit, so a
-raising rule is stamped with the span of the node it is the rule for, and no
-arm can be written that skips the stamp. `step_case` and `step_exec` are rules
-under the same discipline. (Before this shape, a bare `return` in the `Rec`
-arm bypassed the stamp and cancelling a recursive definition rendered without
-a caret.)
+- Calling a value means pushing arguments, then forcing it. This is shared
+  by bound heads, handlers, recovery handlers and the host's `apply` entry.
+- Forcing `Value::Thunk(Closure)` puts its computation and environment in
+  focus, pushing nothing. A literal `Force(Val::Thunk(node))` enters the
+  body in the current environment without first closing it (`force_val`).
+- Forcing `Value::Native(entry)` builds `native_code`:
+  `λx₁…λxₙ. Native(entry, x₁…xₙ)` in the empty environment. At arity zero
+  it runs immediately; partial application is an ordinary lambda closure.
+  A resolved full-arity `Exec` runs the builtin directly.
+- `Case` pushes one argument, the payload, before forcing its selected arm.
+  A bare tag carries `()`. `Try` similarly passes the error record to its
+  handler on a catchable failure.
+- Application through a returned thunk is already explicit in checked IR:
+  `M to h. force h · V`, as the [[invariants/ir-pure-cbpv|IR invariant]] requires.
+- Elaboration hoists a value head before its arguments; a function-typed
+  head is bound unrun and runs when applied.
 
-**Pushing is a type.** `Machine::reserve` is the stack cap, checked before
-any effect, and returns the `Slot` that holds the stack's only `push`; a rule
-cannot push without having asked. `Frame::abandon` is the one undo for the
-frames whose effect is only undone (`Unmask`, `Within`, `Grant`, and `Audit`
-on an escape), used by the rules and by the panic walk alike; on `Gather` it
-restores the cradle and closes and stops the `ScopeOwner` without waiting
-(`ScopeOwner::stop`), and `Frame::Gather`'s `Drop` does the same if the frame
-is dropped before `exit_brood` or `ScopeOwner::end` takes the owner.
+**Tail entry retains no consumed argument frame.** A call with n arguments
+needs n free frames before its head runs; after a lambda consumes its frame,
+its body runs in tail position. Every frame is pushed through a `Slot` that
+`reserve`/`reserve_n` checked against `session.stack_limit` (default 100 000,
+set by `--recursion-limit`) before any effect. `push_args` reserves all n
+argument frames at once.
 
-**`To` holds its environment, which is what makes extent structural.** `M to
-x. N` pushes `To { bind, env: E }` *before* M runs; when M
-returns a value, `E[x ↦ v]` is built from the frame's own `E`, so `x`
-scopes over `N` and nothing else whatever M did. It is the only frame with
-syntax to close over, so the only one carrying an `Env`. `Cleanup` is
-the kernel's `to _` with a settled rest: it drops the cleanup's value and
-resumes the outcome it holds (`βguard-val`). It also holds the cancel scope
-`Guard` displaced when it shielded the cleanup (`Shell::shield`), restored on
-pop and on abandon, so the finaliser *and* the re-halt run under the shield
-([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]). Frames hold
-`Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
-clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
-the one interpreter of a redirect list (stdin, stdout, stderr open in that order; a
-write is observed when the body settles, carrying its target before and after),
-`Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
-the capability stack, `Unmask` restores the masked handler, `Audit`
-closes its trail scope and restores the capture policy; `Try` holds only its
-handler. `Gather` holds the `ScopeOwner` its body's births enrol in and the
-cradle it displaced: on return it takes the owner, restores the cradle, and
-settles the brood by `exit_brood` — the exit rule a worker's base shares,
-closing membership, joining unclaimed children, and draining all accepted
-children to a terminal state within the grace — and on a halt it takes the
-owner, restores the cradle, and runs `ScopeOwner::end` within the cleanup grace
-([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). `Frame` is at most 128 bytes (asserted at compile
-time; `Redirect` and `Unmask` are boxed).
+## Continuations
 
-**`Capture` holds the sink it replaced.** `cap M` pushes a fresh buffer as
-`shell.io.stdout` and keeps the previous sink in the frame. A discarded statement
-writes to `stdout`, which is wherever the run's stdout is, so inside a capture
-it is the buffer. On return the frame
-restores the sink and yields the buffer as `Bytes`, ignoring the body's value
-(`cap : F^w Unit → F Bytes`); a buffer past `SINK_BUFFER_CAP` halts
-(`capture_overflowed`). On a halt it flushes what the body wrote to the sink it
-replaced (`Shell::write_sink`) and propagates the halt. Which computations a value
-demand wraps in it is decided by the checker, not here
-([[decisions/260930_graded-f|graded-f]]).
+**Syntax that resumes later carries its own environment.** Only `To` and
+`Seq` carry an `Env`; frames hold shared IR and undo tokens, not `Context`
+snapshots.
 
-`a ? b ? c` has no frame of its own: it elaborates to nested `try`,
-right-associated so the last arm stays in tail
-position.
+- `Bind` pushes `To { bind, env }`; on return it matches the pattern and
+  extends that saved environment for the rest. `Seq` pushes `{ rest, env }`
+  and discards the first computation's returned value. A written `let _`
+  still uses `Bind`, so it has the ordinary capture rule.
+- Only a written sequence or `let` adds “later steps in this block did not
+  run” when its continuation is abandoned. Synthetic hoists, returned-thunk
+  splits, rendering and capture decoding add none.
+- `Redirect`, `Unmask`, `Within`, `Grant` and `Try` pass lambda terminals
+  through. Value-demanding frames reject a bare lambda; `let` avoids that
+  case by binding a function-typed right-hand side unrun as its thunk.
+- `Guard` runs cleanup under a shield; `Cleanup` holds the body's outcome
+  and restores it unless cleanup fails. The shield is restored on pop and
+  abandonment.
+- `Capture` swaps stdout for a fresh buffer and holds the replaced sink.
+  Success yields exact `Bytes`; failure flushes the bytes to that sink
+  before propagating. Buffer overflow refuses a prefix. The surrounding
+  bind feeds `Prim::Decode`, which drops one trailing terminator and checks
+  UTF-8, with the environment dropped before taking over the byte buffer.
+- `Upcast(M)` enters `M` in tail position with no frame.
+- Shell frames restore their own dynamic state: redirects settle writes,
+  `Within` restores env overrides, cwd and handlers, `Grant` pops its layer,
+  `Unmask` restores a handler, and `Audit` closes its trail scope.
+- `Gather` holds a `ScopeOwner` and the displaced cradle. Its body runs on
+  this machine; its exit restores the cradle and joins or stops the brood
+  through the shared worker exit machinery
+  ([[invariants/a-worker-ends-with-its-children|a worker ends with its children]]).
 
-**Tail calls push nothing.** β binds the parameter into the closure's
-environment and puts the body in focus; an `Apply` frame is pushed only when
-arguments remain (currying). So a call in tail position costs no frame, and
-depth is simply `stack.len()`. `reserve` is the cap — `session.stack_limit`,
-default 100 000 frames, the `--recursion-limit` knob — and every pushing rule
-calls it *before* any effect (sink swap, redirect entry, grant push), so a
-refused push leaks nothing; `push` itself cannot fail.
+`eval_rules` has one arm per `CompKind`; `step_return` and `step_halt` have
+one arm per frame. Rules return `Settled<Focus>`; raising points stamp errors
+with their node or frame span, and `step` folds the error into `Halt`.
+`Frame::abandon` supplies the undo shared by failure and the panic walk.
+Destructuring parameters are binds at their own spans, so a mismatch points
+at the parameter, at runtime as at type-check time.
 
-**Recursion is `rec`, n-ary.** `Rec { group: Arc<GroupNode>, index }` reads
-occ(g) off `group` — computed once, at the node's build, over every member's
-body — and restricts ρ to it: one `restrict` call, whose result every sibling's
-thunk shares in this unfold. The member in focus binds to `comp` itself,
-`Arc::clone`d, not rebuilt; every other member's thunk is a fresh `Rec` node
-over the same `group` (`rec_node`). The n bindings go into ρ|occ(g) with one
-`Env::extend`. A recursive reference forces its name, which re-enters `Rec`
-over the forced closure's own environment — already ρ|occ(g), so `restrict`
-answers the identity and every later unfold shares that one root. Bodies are
-never rewritten; a group of one is Levy's `rec f. M`, and binds its own
-member to the node already in focus, allocating nothing. Cancellation is
-polled here and at `Bind`, `App`, `Exec` advance and β, so `let f = { !f };
-!f` is interruptible.
+## Values and environments
 
-**The environment is a map, and it is not the store.** `Env`
-(`core/src/shell/runtime/env.rs`) is ρ alone: a sorted array of at most `SMALL` (8) bindings,
-a persistent hash map past it, chosen by size and invisible to its readers.
-`bind`/`extend` produce a fresh environment that disturbs none a closure
-captured; `clone` is O(1); `restrict` narrows it to a closure's names,
-identity when nothing is dropped. Σ — the language natives and the frozen
-prelude — is `Signature` (`core/src/shell/runtime/signature.rs`), one per shell,
-never part of any environment; `crate::shell::runtime::lookup(name, env, sig)` reads
-ρ, then Σ's prelude, then Σ's natives, and every rule that resolves a name
-(`Val::Variable` in `form`, `Exec`'s bare-head lookup in
-`shell::exec::dispatch::resolve`) goes through it. The **store** is everything else
-on `Shell`: `sig`, sinks, the dynamic `Context` (grants, handlers, env
-overrides, cwd, args, modules, hooks), the trail, workers, leases. `Context`
-is read in O(1) by capability checks and command dispatch and changed only
-by frames holding their own undo; neither it nor Σ is ever part of a closure
-([[map/core/shell-state|shell-state]]).
+**Stored closures retain only what they mention.** `Node::new` computes
+`Occ` once. `Closure::new` restricts ρ to a thunk node's occurrence set;
+forcing restores that environment without bracketing shell state. A `cd`
+in a forced body persists exactly as one in a lambda body does
+([[design/scoping|scoping]]).
 
-**The top level is a sequence of phrases** (`core/src/shell/evaluator.rs`,
-`run_phrases`). A `Toplevel` is `Phrase::{Define, Run}`; each phrase
-is a closed computation over the session environment `shell.env`, and a
-`Define` extends that environment *for every phrase after it, in this run
-and every later one* — installed as it lands, so a `use` in the next phrase
-sees it, and a run that halts has installed exactly the `Define`s that ran.
-A block is a right-nested `Bind` chain, `a; b` being `a to _. b`, so a `let`
-inside a block scopes over the rest of the block by structure. `run_phrases`
-takes a `Mode` — `Session`, `Local`, `Module`, `Prelude` — which alone
-decides leases.
+- `form(val, env, sig)` is side-effect-free. Constants form themselves,
+  variables use `lookup`, variants form their payloads, and thunks close.
+- Plain list, record and map literals are value closures too. Inspection
+  distributes the saved environment one layer at a time. A name answered
+  only by Σ requires eager formation, since literal inspection reads ρ alone.
+- `Prim` computes on formed values. Collection assembly may cost O(data)
+  and fail, but its operands have already run in surrounding binds.
+- `Env` is an immutable finite map. Σ (`Signature`, natives and frozen
+  prelude) is separate; `lookup` reads ρ, then Σ. Sinks, dynamic context,
+  workers and leases belong to `Shell`, never to a closure.
+- `Rec { group, index }` restricts ρ once to the group's shared occurrence
+  set, binds each sibling to a thunk over the same group and environment,
+  and enters the selected body. Recursive references re-enter through force;
+  bodies are never substituted or rebuilt.
 
-**Boundaries.** Three things start a fresh machine over the empty stack: a
-run-door phrase, a worker thread (a `spawn` or `watch`), and a pipeline stage
-thread (`shell/exec/pipeline/thread.rs`). The `spawn` form pushes no frame: its
-rule forms the operands and births the worker in one step (`spawn_form`). A
-`gather` is a frame like any handler's, not a boundary: its body runs on the
-same machine, and only the births inside it start machines of their own. A native that applies a user function — the
-collection combinators, hook dispatch — runs a *nested*
-machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
-(calibrated by `nested_machines_fit_a_worker_stack` on a 2 MiB thread, a
-quarter of the 8 MiB `Shell::spawn_thread` gives a worker) caps
-that nesting with a clean error. No native reads a lexical environment:
-`help` and `explain` reflect on the session.
+## Run boundaries
 
-**Pipes are nodes between machines** ([[internals/pipeline-execution|pipeline
-execution]]). A multi-stage pipeline is a configuration: an external stage is
-a process in the pipeline's group, and a ral-written stage is a thread
-(`launch_thread_stage` via `Shell::spawn_thread`) whose shell starts from the
-parent's session and runs `machine::evaluate(comp, env, …)` — the stage's
-subterm under the node's own environment — over the empty stack. The parent's
-`Pipeline` rule holds a `PipeNode` — the process group and the running stages,
-which it `launch`es and `join`s (collect, then finish) in one
-step: no frame, because nothing runs beneath the node; the outcome climbs the
-parent's frames like any other rule's terminal. **No frame ever crosses**: not
-to a stage, whose stack is empty by construction, nor to a sealed child engine,
-which receives the engine seed's `env`, `context` and `terms`
-(`core/src/seed.rs`) — one environment, ρ alone, interned by its
-allocation's identity; Σ never crosses, so the receiver answers a decoded
-closure's Σ names from its own.
+**The top level is a sequence of closed machines.** `run_phrases` runs
+`Phrase::{Define, Run}` against the session environment. Each landed `Define`
+is installed immediately; a later failure keeps earlier definitions.
+A block instead nests `Bind` and `Seq`, whose lexical bindings do not escape.
 
-**Panics and cancellation.** `evaluate`/`apply` wrap the step loop in
-`catch_unwind`; on a panic every frame is `abandon`ed top-down — sinks
-restored, redirects torn down, trail scopes closed, undo applied — and the
-run door restores its checkpoint `(env, context)`, so a panic
-commits nothing. The depth counter is lowered on both paths.
+- `evaluate` injects ⟨M, ρ⟩ over an empty stack; `apply` pushes arguments
+  if any, and forces a closed value. Both return `Settled<Value>`.
+- Higher-order natives enter nested machines on the host stack, bounded by
+  `NESTED_MACHINE_LIMIT`. No native reads a caller's lexical environment.
+- `Spawn` births a worker; `Pipeline` launches and joins a `PipeNode` in
+  one shell rule. Ral stages run in threads over fresh stacks; external
+  stages are processes. No frame crosses a thread or sealed-engine boundary
+  ([[internals/pipeline-execution|pipeline execution]]).
+- The step loop catches panics and abandons frames top-down. The framed run
+  entry restores its checkpoint; cancellation is polled cooperatively.
 
-See also [[design/cbpv|cbpv]], [[design/scoping|scoping]],
-[[design/control-operators|control-operators]],
-[[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]];
-code maps [[map/core/evaluator|evaluator]],
-[[map/core/shell-state|shell-state]], [[map/core/runtime|runtime]]. The
-formal account is `docs/SPEC.md` §17.8. The Agda core
-is the same machine, intrinsically typed, one per thread.
+See [[map/core/evaluator|evaluator]], [[map/core/ir|IR]],
+[[map/core/shell-state|shell state]], [[design/cbpv|CBPV]].

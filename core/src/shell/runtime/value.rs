@@ -48,14 +48,9 @@ pub enum Value {
         payload: Option<Box<Self>>,
     },
     Thunk(Closure),
-    /// A builtin, curried through `applied`: applying appends arguments until
-    /// `entry.fixed_arity()` is reached, then the host body runs with the
-    /// full slice. Under-application yields the partial `Native` back;
-    /// over-application is an arity error, mirroring a `Lambda`.
-    Native {
-        entry: Arc<BuiltinEntry>,
-        applied: Box<[Self]>,
-    },
+    /// A builtin, `thunk (λx₁…λxₙ. Native(b, x₁…xₙ))`: forcing it builds that
+    /// code, so a partial application is a λ closure like any other.
+    Native(Arc<BuiltinEntry>),
     /// A computation spawned onto a worker thread, not a subprocess.
     /// Boxed: `HandleInner`'s eight `Arc` fields would otherwise be the
     /// largest variant, inflating every `Value` move (`Focus`'s hot path
@@ -97,11 +92,11 @@ impl Value {
         Self::List(items.into())
     }
 
-    /// A tagged value; the label is stored without its backtick.
+    /// A tagged value; `Unit` is represented by an absent payload.
     pub fn variant(label: impl Into<crate::ir::Name>, payload: Option<Self>) -> Self {
         Self::Variant {
             label: label.into(),
-            payload: payload.map(Box::new),
+            payload: payload.filter(|p| !matches!(p, Self::Unit)).map(Box::new),
         }
     }
 
@@ -130,7 +125,7 @@ impl Value {
             Self::List(_) => &[Head::List],
             Self::Map(_) => &[Head::Map, Head::Record],
             Self::Variant { .. } => &[Head::Variant],
-            Self::Thunk(_) | Self::Native { .. } => &[Head::Thunk],
+            Self::Thunk(_) | Self::Native(_) => &[Head::Thunk],
             Self::Handle(_) => &[Head::Handle],
         }
     }
@@ -166,8 +161,8 @@ impl Value {
     }
 
     /// Visit each direct component of data: a list's elements, a record's
-    /// values, a variant's payload, a native's collected arguments.  A closure
-    /// has none: its capture is never entered.
+    /// values, a variant's payload.  A closure has none: its capture is never
+    /// entered.
     pub(crate) fn try_for_each_child<B>(
         &self,
         f: &mut impl FnMut(&Self) -> ControlFlow<B>,
@@ -176,7 +171,6 @@ impl Value {
             Self::List(items) => items.iter().try_for_each(|v| f(&v)),
             Self::Map(pairs) => pairs.iter().try_for_each(|(_, v)| f(&v)),
             Self::Variant { payload, .. } => payload.iter().try_for_each(|p| f(p)),
-            Self::Native { applied, .. } => applied.iter().try_for_each(f),
             Self::Unit
             | Self::Bool(_)
             | Self::Int(_)
@@ -184,6 +178,7 @@ impl Value {
             | Self::String(_)
             | Self::Bytes(_)
             | Self::Thunk(_)
+            | Self::Native(_)
             | Self::Handle(_) => ControlFlow::Continue(()),
         }
     }
@@ -202,7 +197,7 @@ impl Value {
             Self::Variant { .. } => "Variant",
             Self::Thunk(c) if c.comp().lam().is_some() => "Lambda",
             Self::Thunk(_) => "Block",
-            Self::Native { .. } => "Native",
+            Self::Native(_) => "Native",
             Self::Handle(_) => "Handle",
         }
     }
@@ -212,9 +207,9 @@ impl Value {
     /// installed, so a heavy binding earns a residency nudge. Exact for
     /// `String`/`Bytes`, and recursive through the *elements* of
     /// `List`/`Map`/`Variant`, so a large collection of small values is
-    /// counted honestly. `Lambda`, `Block`, and `Handle` are never descended:
-    /// chasing a closure's captured `Env` or a handle's buffers is the retained-size
-    /// walk this design refuses throughout, `pins_live_work` in
+    /// counted honestly. `Lambda`, `Block`, `Native` and `Handle` are never
+    /// descended: chasing a closure's captured `Env` or a handle's buffers is
+    /// the retained-size walk this design refuses throughout, `pins_live_work` in
     /// `shell/runtime/handle.rs` refusing it identically. A nudge, then, not an
     /// account — structure shared under `Arc` counts twice, captures not at all.
     pub(crate) fn shallow_size(&self) -> usize {
@@ -232,12 +227,7 @@ impl Value {
             Self::Variant { label, payload } => {
                 label.len() + payload.as_deref().map_or(0, Self::shallow_size)
             }
-            // `entry` is opaque like a closure's capture; `applied` counts
-            // like a list's elements.
-            Self::Native { applied, .. } => {
-                OPAQUE_CONSTANT + applied.iter().map(Self::shallow_size).sum::<usize>()
-            }
-            Self::Thunk(_) | Self::Handle(_) => OPAQUE_CONSTANT,
+            Self::Thunk(_) | Self::Native(_) | Self::Handle(_) => OPAQUE_CONSTANT,
         }
     }
 }
@@ -313,31 +303,38 @@ impl fmt::Display for Value {
                 Some((param, body)) => write!(f, "{}", fmt_lambda(param, body)),
                 None => write!(f, "<block>"),
             },
-            Self::Native { entry, applied } => {
-                write!(f, "{}", fmt_native(&entry.decl.name, applied))
-            }
+            Self::Native(entry) => write!(f, "<native {}>", entry.decl.name),
             Self::Handle(h) => write!(f, "<handle:{}>", h.title),
         }
     }
 }
 
-/// Format as `<native NAME>`, or `<native NAME +N>` for a partial with `N`
-/// collected arguments.
-fn fmt_native(name: &str, applied: &[Value]) -> String {
-    if applied.is_empty() {
-        format!("<native {name}>")
-    } else {
-        format!("<native {name} +{}>", applied.len())
-    }
-}
-
 /// Format as `<|a b ...| block>`, flattening the curried `Lam` chain.
-fn fmt_lambda(param: &crate::ir::Pattern, body: &crate::ir::Comp) -> String {
-    let mut params = vec![param.to_string()];
+fn fmt_lambda(param: &crate::ir::Name, body: &crate::ir::Comp) -> String {
+    use crate::ir::{CompKind, Val, is_synthetic};
+
+    let mut names = vec![param];
     let mut comp = body;
-    while let crate::ir::CompKind::Lam { param, body } = &comp.item {
-        params.push(param.to_string());
+    while let CompKind::Lam { param, body } = &comp.item {
+        names.push(param);
         comp = body;
+    }
+    let mut params: Vec<_> = names
+        .iter()
+        .map(|name| if is_synthetic(name) { "_" } else { name }.to_string())
+        .collect();
+    while let CompKind::Bind {
+        comp: rhs,
+        pattern,
+        rest,
+    } = &comp.item
+        && let CompKind::Return(Val::Variable(name)) = &rhs.item
+        && is_synthetic(name)
+    {
+        if let Some(index) = names.iter().position(|param| *param == name) {
+            params[index] = pattern.to_string();
+        }
+        comp = rest;
     }
     format!("<|{}| block>", params.join(" "))
 }
@@ -456,6 +453,51 @@ pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unit_variant_payload_is_absent() {
+        assert!(matches!(
+            Value::variant("none", Some(Value::Unit)),
+            Value::Variant { payload: None, .. }
+        ));
+    }
+
+    #[test]
+    fn lambda_display_recovers_patterns_and_hides_synthetic_names() {
+        use crate::ir::{CompKind, Phrase, Val};
+
+        for (src, expected, partial) in [
+            (
+                "{ |[a, b] [c] x| () }",
+                "<|[a b] [c] x| block>",
+                Some("<|[c] x| block>"),
+            ),
+            ("{ |[x] x| () }", "<|[x] x| block>", Some("<|x| block>")),
+            ("{ |_| () }", "<|_| block>", None),
+        ] {
+            let ast = crate::syntax::parser::parse(src).expect("parse");
+            let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
+            let Phrase::Run(comp) = &top[0].item else {
+                panic!("expected a run phrase: {top:?}");
+            };
+            let CompKind::Return(Val::Thunk(node)) = &comp.item else {
+                panic!("expected a lambda thunk: {comp:?}");
+            };
+            let (param, body) = node.shape().lam().expect("outer lambda");
+            assert_eq!(fmt_lambda(param, body), expected);
+            if let Some(expected) = partial {
+                let (param, body) = body.lam().expect("inner lambda");
+                assert_eq!(fmt_lambda(param, body), expected);
+            }
+        }
+        assert_eq!(
+            fmt_lambda(
+                &crate::ir::synthetic("param", 0),
+                &crate::source::Spanned::synthetic(CompKind::Return(Val::Unit)),
+            ),
+            "<|_| block>",
+        );
+    }
 
     #[test]
     fn shallow_size_counts_nested_lists_and_maps() {

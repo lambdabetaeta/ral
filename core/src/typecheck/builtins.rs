@@ -754,12 +754,12 @@ pub fn builtin_type_hint(manifest: &Manifest, name: &str) -> Option<String> {
 /// typecheck time.
 ///
 /// Computed statuses and spreads still defer to the runtime.
-pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
-    let Some(positional) = args.positional() else {
+pub(crate) fn fail_status_is_zero_literal(argv: &crate::ir::Argv) -> bool {
+    let Some(positional) = argv.positional() else {
         return false;
     };
     matches!(
-        positional.first(),
+        positional.first().map(|slot| &slot.item),
         Some(crate::ir::Val::Record(entries)) if entries.shape().iter().any(|(k, v)| {
             k.as_ref() == "status" && matches!(v.item, crate::ir::Val::Int(0))
         })

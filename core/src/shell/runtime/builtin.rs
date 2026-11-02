@@ -268,13 +268,10 @@ pub(crate) fn language_constants() -> impl Iterator<Item = (String, Value)> {
         .map(|(name, b)| (name.to_string(), Value::Bool(b)))
 }
 
-/// A value row's `Value::Native`, unapplied.  Shared by boot and wire
-/// hydration, so the two never build one differently.
+/// A value row's `Value::Native`.  Shared by boot and wire hydration, so the
+/// two never build one differently.
 pub(crate) fn native_value(entry: &BuiltinEntry) -> Value {
-    Value::Native {
-        entry: Arc::new(entry.clone()),
-        applied: Box::new([]),
-    }
+    Value::Native(Arc::new(entry.clone()))
 }
 
 #[cfg(test)]

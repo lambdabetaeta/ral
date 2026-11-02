@@ -1,6 +1,7 @@
 ---
 status: active
-generated_at_commit: 9c8aa5d9
+amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 verified_at_date: 2026-10-25
 anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Net, EditorVerb, ShellVerb, Holds, ExecGrant, Flag, drain_nested]
@@ -12,6 +13,11 @@ anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, 
 > written `return [:, exec: …]`; `return ["exec": …]` is checked as a
 > record. Reads unify immediately; nested tables are drained after inference,
 > without a pending-label settlement step.
+
+> **Amended 2026-11-02:**
+> [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+> makes a bare tag carry `()`, so `` `offline () `` is `` `offline `` and the
+> runtime decoder accepts it; a nullary tag still refuses any other payload.
 
 # The grant surface is typed data
 

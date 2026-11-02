@@ -12,7 +12,7 @@ use std::convert::Infallible;
 /// A `Value` that is not data.
 pub(crate) enum Leaf<'a> {
     Thunk(&'a Closure),
-    Native(&'a BuiltinEntry, &'a [Value]),
+    Native(&'a BuiltinEntry),
     Handle,
 }
 
@@ -20,7 +20,7 @@ impl Leaf<'_> {
     pub(crate) fn kind(&self) -> Opaque {
         match self {
             Self::Thunk(c) if c.comp().lam().is_none() => Opaque::Block,
-            Self::Thunk(_) | Self::Native(..) => Opaque::Function,
+            Self::Thunk(_) | Self::Native(_) => Opaque::Function,
             Self::Handle => Opaque::Handle,
         }
     }
@@ -30,7 +30,7 @@ impl Value {
     fn leaf(&self) -> Option<Leaf<'_>> {
         match self {
             Self::Thunk(c) => Some(Leaf::Thunk(c)),
-            Self::Native { entry, applied } => Some(Leaf::Native(entry, applied)),
+            Self::Native(entry) => Some(Leaf::Native(entry)),
             Self::Handle(_) => Some(Leaf::Handle),
             _ => None,
         }
@@ -78,7 +78,7 @@ impl<X> FOValue<X> {
                     .transpose()?,
             },
             Value::Thunk(c) => leaf(Leaf::Thunk(c))?,
-            Value::Native { entry, applied } => leaf(Leaf::Native(entry, applied))?,
+            Value::Native(entry) => leaf(Leaf::Native(entry))?,
             Value::Handle(_) => leaf(Leaf::Handle)?,
         })
     }
@@ -104,10 +104,9 @@ impl<X> FOValue<X> {
                     .map(|(k, v)| Ok((k, v.unwalk(ext)?)))
                     .collect::<Result<_, E>>()?,
             ),
-            Self::Variant { label, payload } => Value::Variant {
-                label: label.into(),
-                payload: payload.map(|p| p.unwalk(ext).map(Box::new)).transpose()?,
-            },
+            Self::Variant { label, payload } => {
+                Value::variant(label, payload.map(|p| p.unwalk(ext)).transpose()?)
+            }
             Self::Ext(x) => ext(x)?,
         })
     }

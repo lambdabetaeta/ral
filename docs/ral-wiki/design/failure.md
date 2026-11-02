@@ -1,3 +1,7 @@
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
+
 # Failure: status, not truth
 
 ral keeps strictly apart two notions a shell conflates. *Failure* is a runtime
@@ -46,16 +50,15 @@ The cleanup forms differ only in what they do with the original failure:
 - the prelude's `attempt` discards both result and failure.
 
 The Agda core models both as frames on a stack a halt walks:
-`try` pops and runs its handler on the error (`halt-to`), and `guard` runs its cleanup in front of
-the body's outcome (`cleanup`), so a cleanup that halts replaces that outcome, as above. It has no
+`try` pops and forces its handler on the error (`err-try`); `guard` runs
+its cleanup in front of the body's outcome (`guard` / `restore` frames), so a cleanup that halts replaces that outcome, as above. It has no
 `exit`.
 
 Failure propagates predictably through the rest of the grammar:
 
-- a sequence `a; b; c` halts at the first failure, and the error says how many
-  later parts it abandoned — otherwise the truncation is legible only as a short
-  `trail` in an enclosing `audit`, which reads the same as a sequence that had
-  fewer parts;
+- a written sequence or `let` halts at the first failure and adds the hint
+  about later steps only when it abandoned written steps. Compiler-generated
+  operand hoists, returned-thunk splits and capture decoding add no such hint;
 - a [[design/pipelines|pipeline]] fails whole on any stage failure, bar a stage
   ral itself ended because its reader was gone;
 - `for` / `map` stop iterating on a failing body;

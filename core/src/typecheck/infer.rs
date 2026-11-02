@@ -6,11 +6,10 @@ use super::contract::catch_all_shape;
 use super::env::{BoundaryValue, HandlerBinding, HandlerOrigin, InferCtx, Node, TyEnv};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::generalize;
-use super::grade::JoinArm;
+use super::grade::{Adaptation, JoinArm};
 use crate::ir::{
-    Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec,
-    GroupNode, Key, MapEntryV, MapOperand, Name, Pattern, Phrase, Val, ValListElem, ValRecordEntry,
-    is_synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, GroupNode, Key,
+    MapEntryV, Name, Pattern, Phrase, Prim, Val, ValListElem, is_synthetic,
 };
 use crate::ir::{ArithOp, BinaryOp, StdinSource};
 use crate::source::Span;
@@ -125,14 +124,14 @@ fn spell_key(key: &Key) -> String {
 ///
 /// The root is where a feed answers the stage's reads for its whole run: an
 /// [`Exec`](CompKind::Exec) carries its redirects, anything else
-/// wears them as a [`CompKind::Redirect`] frame, and the `Bind` arm walks past
+/// wears them as a [`CompKind::Redirect`] frame; the spine walk skips
 /// the binders elaboration hoists out of a redirect's own target
 /// (`b < $[locate f]`), whose innermost continuation is the stage as written.
 /// A read redirected deeper answers one command's reads and no others, which
 /// is that command's business alone, so this walk never sees it.
 fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
     let mut stage = stage;
-    while let CompKind::Bind { rest, .. } = &stage.item {
+    while let CompKind::Bind { rest, .. } | CompKind::Seq { rest, .. } = &stage.item {
         stage = rest;
     }
     let redirects = match &stage.item {
@@ -182,9 +181,10 @@ impl<'a> HandlerStatement<'a> {
         if !exec.redirects.is_empty() {
             return Err(malformed("redirects are not allowed here"));
         }
-        let Some(positional) = exec.args.positional() else {
+        let Some(positional) = exec.argv.positional() else {
             return Err(malformed("spread arguments are not allowed here"));
         };
+        let positional: Vec<&Val> = positional.into_iter().map(|slot| &slot.item).collect();
         match (head, &positional[..]) {
             ("alias", [Val::String(name), thunk]) if matches!(thunk, Val::Thunk(_)) => {
                 Ok(Some(Self::Alias(name.as_str(), thunk)))
@@ -198,9 +198,8 @@ impl<'a> HandlerStatement<'a> {
 
 /// Type-check whole phrases: infer each phrase in order, extending
 /// `TyEnv` at each `Define`, and binding/unbinding an `alias`/`unalias` `Run`
-/// phrase's handler scheme for the phrases after it, as `Bind` on `Wildcard`
-/// does for a nested discarded
-/// statement.  Returns each `Define` phrase's generalised per-name
+/// phrase's handler scheme for the phrases after it, as `Seq` does for a
+/// nested discarded statement. Returns each `Define` phrase's generalised per-name
 /// schemes, parallel to `top.phrases` and empty for every other phrase —
 /// `annotate::annotate_toplevel` writes it straight onto the rebuilt
 /// `Phrase::Define`, and the last phrase's computation type, which a contract
@@ -225,14 +224,6 @@ impl WithSpan for Inferencer<'_> {
     }
 }
 
-/// Whether a pattern binds in let position (names generalize) or as a
-/// lambda/handler parameter (names stay monomorphic).
-#[derive(Clone, Copy)]
-enum BindMode {
-    Let,
-    Param,
-}
-
 impl Inferencer<'_> {
     pub(super) fn with_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved_pos = self.ctx.pos;
@@ -243,33 +234,39 @@ impl Inferencer<'_> {
         out
     }
 
-    fn bind_pattern(&mut self, pat: &Pattern, ty: &Ty, mode: BindMode) {
+    fn bind_pattern(&mut self, pat: &Pattern, ty: &Ty) {
+        let mut bindings = Vec::new();
+        self.collect_pattern(pat, ty, &mut bindings);
+        let schemes: Vec<_> = bindings
+            .into_iter()
+            .map(|(name, ty)| (name, generalize(&self.ctx.unifier, self.env, &ty)))
+            .collect();
+        for (name, scheme) in schemes {
+            self.env.bind(name.to_string(), scheme);
+        }
+    }
+
+    fn collect_pattern<'p>(
+        &mut self,
+        pat: &'p Pattern,
+        ty: &Ty,
+        bindings: &mut Vec<(&'p Name, Ty)>,
+    ) {
         match pat {
             Pattern::Wildcard => {}
-            Pattern::Name(name) => {
-                let scheme = match mode {
-                    BindMode::Let => generalize(&self.ctx.unifier, self.env, ty),
-                    BindMode::Param => Scheme::mono(ty.clone()),
-                };
-                self.env.bind(name.to_string(), scheme);
-            }
+            Pattern::Name(name) => bindings.push((name, ty.clone())),
             Pattern::List { elems, rest } => {
                 let elem = self.ctx.unifier.fresh_ty();
                 self.ctx
                     .unify_ty(ty, &Ty::list(elem.clone()), Reason::ListPattern);
                 for elem_pat in elems {
-                    self.bind_pattern(elem_pat, &elem, mode);
+                    self.collect_pattern(elem_pat, &elem, bindings);
                 }
                 if let Some(rest_name) = rest {
-                    let list_ty = Ty::list(elem);
-                    let scheme = match mode {
-                        BindMode::Let => generalize(&self.ctx.unifier, self.env, &list_ty),
-                        BindMode::Param => Scheme::mono(list_ty),
-                    };
-                    self.env.bind(rest_name.to_string(), scheme);
+                    bindings.push((rest_name, Ty::list(elem)));
                 }
             }
-            Pattern::Map(entries) => {
+            Pattern::Record(entries) => {
                 let tail = Row::Var(self.ctx.unifier.fresh_row_var());
                 let field_tys: Vec<Ty> = entries
                     .iter()
@@ -291,7 +288,7 @@ impl Inferencer<'_> {
                 self.ctx
                     .unify_ty(ty, &Ty::Record(row), Reason::RecordPattern);
                 for (entry, field_ty) in entries.iter().zip(&field_tys) {
-                    self.bind_pattern(&entry.pattern, field_ty, mode);
+                    self.collect_pattern(&entry.pattern, field_ty, bindings);
                 }
             }
         }
@@ -355,12 +352,10 @@ impl Inferencer<'_> {
         let _ = self.force_ready_shape(comp, cty, Reason::DiscardedValueShape);
     }
 
-    /// The statement whose type `comp`'s own type actually is: a `Bind`'s
-    /// type is its `rest`'s, all the way down, so `let a = 1; let b = 2;
-    /// cd`'s discarded value is `cd`'s, not the outermost node's.
+    /// The tail whose type is the whole `Bind`/`Seq` chain's type.
     fn discard_tail(comp: &Comp) -> &Comp {
         let mut comp = comp;
-        while let CompKind::Bind { rest, .. } = &comp.item {
+        while let CompKind::Bind { rest, .. } | CompKind::Seq { rest, .. } = &comp.item {
             comp = rest;
         }
         comp
@@ -376,15 +371,15 @@ impl Inferencer<'_> {
         let HeadClass::Value(entry) = self.head_class(name) else {
             return None;
         };
-        let got = exec.args.arity().unwrap_or(0);
+        let got = exec.argv.arity().unwrap_or(0);
         Some((name.to_string(), entry.fixed_arity(), got))
     }
 
     /// The span of the expression a computation's result comes from: its tail,
-    /// through lambda bodies and the rest of each bind.
+    /// through lambda bodies and each `Bind`/`Seq` continuation.
     pub(super) fn result_span(comp: &Comp) -> Option<Span> {
         let mut comp = comp;
-        while let CompKind::Bind { rest, .. } = &comp.item {
+        while let CompKind::Bind { rest, .. } | CompKind::Seq { rest, .. } = &comp.item {
             comp = rest;
         }
         match &comp.item {
@@ -393,16 +388,21 @@ impl Inferencer<'_> {
         }
     }
 
-    fn autoderef_thunk_return(&mut self, mut cty: CompTy) -> CompTy {
+    /// Unwrap each thunk `cty` returns, noting `at`, the argument about to be
+    /// applied, in `splits` once per thunk: `annotate` forces each there, as
+    /// `to h. force h`.
+    fn autoderef_thunk_return(
+        &mut self,
+        mut cty: CompTy,
+        at: usize,
+        splits: &mut Vec<usize>,
+    ) -> CompTy {
         loop {
-            match self.ctx.unifier.resolve_comp_ty(&cty) {
+            cty = match self.ctx.unifier.resolve_comp_ty(&cty) {
                 CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
-                    Ty::Thunk(inner) => cty = *inner,
-                    // A still-free head must become a thunk: the machine's
-                    // `apply` rule forces a block-shaped `Value::Thunk` callee
-                    // before applying args, so a parameter `$f` of unknown
-                    // type has to unfold
-                    // the same way rather than fail to unify.
+                    Ty::Thunk(inner) => *inner,
+                    // A still-free result that meets an argument must be a
+                    // thunk, which the split forces.
                     Ty::Var(_) => {
                         let inner = self.ctx.unifier.fresh_comp_ty();
                         self.ctx.unify_ty(
@@ -410,20 +410,21 @@ impl Inferencer<'_> {
                             &Ty::Thunk(Box::new(inner.clone())),
                             Reason::AutoderefHead,
                         );
-                        cty = inner;
+                        inner
                     }
                     _ => return cty,
                 },
                 _ => return cty,
-            }
+            };
+            splits.push(at);
         }
     }
 
     /// Refuse a spread that reached an application, blaming the spread itself
     /// rather than the whole call.  Only the first is named: the rest are the
     /// same mistake, and one fix answers them all.
-    pub(super) fn refuse_spread(&mut self, args: &Args, head: super::error::SpreadHead) {
-        let Some(span) = args.iter().find_map(|e| match e {
+    pub(super) fn refuse_spread(&mut self, argv: &Argv, head: super::error::SpreadHead) {
+        let Some(span) = argv.iter().find_map(|e| match e {
             ValListElem::Spread(v) => Some(v.span),
             ValListElem::Single(_) => None,
         }) else {
@@ -435,56 +436,59 @@ impl Inferencer<'_> {
         });
     }
 
-    pub(super) fn apply_args(&mut self, cty: CompTy, args: &Args) -> CompTy {
-        self.apply_args_capped(cty, args, usize::MAX)
+    /// The call at `node`, of type `cty`, applied to `args`: the residual
+    /// computation.
+    pub(super) fn apply_args<'v>(
+        &mut self,
+        node: Node,
+        cty: CompTy,
+        args: impl IntoIterator<Item = &'v Spanned<Val>>,
+    ) -> CompTy {
+        self.apply_args_capped(node, cty, args, usize::MAX)
     }
 
-    /// [`Self::apply_args`], applying no more than `cap` positionals: the
+    /// [`Self::apply_args`], applying no more than `cap` arguments: the
     /// surplus is still inferred, for the errors inside it, but unified
     /// against nothing — the same zip an over-applied builtin needs so its
     /// one arity diagnostic is not followed by an anonymous mismatch on the
-    /// surplus.
-    fn apply_args_capped(&mut self, mut cty: CompTy, args: &Args, cap: usize) -> CompTy {
-        // A value takes its arguments by application, at an arity its own type
-        // declares, so it has no argv and `...` has nothing to spread into.
-        // Both callers are value-side, so the refusal needs no test on the head:
-        // there is no such thing as an open-argv value for it to discriminate.
-        // The subexpressions are still inferred, so errors inside them surface.
-        let Some(positional) = args.positional() else {
-            for slot in args.iter().map(ValListElem::slot) {
-                self.with_span(slot.span, |this| {
-                    let _ = this.infer_val(&slot.item);
-                });
-            }
-            self.refuse_spread(args, super::error::SpreadHead::Applied);
-            return self.peel_curry_spine(&cty);
-        };
+    /// surplus.  Where a returned thunk was forced on the way, `node` is noted
+    /// for `annotate` to split.
+    fn apply_args_capped<'v>(
+        &mut self,
+        node: Node,
+        mut cty: CompTy,
+        args: impl IntoIterator<Item = &'v Spanned<Val>>,
+        cap: usize,
+    ) -> CompTy {
         // A block argument, its body held back until the whole spine is
         // unified, so a parameter a *later* argument determines — the element
         // type in `map { |x| … } $xs` — is known by the time the body reads it.
         let mut deferred = Vec::new();
-        for (i, arg) in positional.into_iter().enumerate() {
+        let mut splits = Vec::new();
+        for (i, arg) in args.into_iter().enumerate() {
             if i >= cap {
-                let _ = self.infer_val(arg);
+                let _ = self.infer_val(&arg.item);
                 continue;
             }
-            cty = self.autoderef_thunk_return(cty);
-            let slot = args[i].slot();
+            cty = self.autoderef_thunk_return(cty, i, &mut splits);
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
-            cty = self.with_span(slot.span, |this| {
-                if let Val::Thunk(_) = arg {
+            cty = self.with_span(arg.span, |this| {
+                if let Val::Thunk(_) = arg.item {
                     let wanted = this.ctx.unifier.fresh_comp_ty();
-                    deferred.push((slot, wanted.clone()));
+                    deferred.push((arg, wanted.clone()));
                     this.apply_to(&cty, Ty::Thunk(Box::new(wanted)))
                 } else {
-                    let ty = this.infer_val(arg);
-                    this.apply_in_hand(&cty, arg, ty)
+                    let ty = this.infer_val(&arg.item);
+                    this.apply_in_hand(&cty, &arg.item, ty)
                 }
             });
         }
-        for (slot, wanted) in deferred {
-            self.demand_block(slot, wanted);
+        for (arg, wanted) in deferred {
+            self.demand_block(arg, wanted);
+        }
+        if !splits.is_empty() {
+            self.ctx.splits.insert(node, splits);
         }
         cty
     }
@@ -557,16 +561,22 @@ impl Inferencer<'_> {
     /// [`Self::apply_alias_arm`] instead — which matters, because a base
     /// frame's argv scheme has curry depth 1 while an argv has no arity at
     /// all ([[invariants/fixed-arity]]).
-    pub(super) fn apply_builtin(&mut self, entry: &Decl, name: &str, args: &Args) -> CompTy {
+    pub(super) fn apply_builtin(
+        &mut self,
+        node: Node,
+        entry: &Decl,
+        name: &str,
+        argv: &Argv,
+    ) -> CompTy {
         let fixed_arity = entry.fixed_arity();
 
         // There is no positional reading exactly when the call writes a
         // `...`, and a builtin takes its arguments by application, which has
         // no argv to spread into.
-        let Some(positional) = args.positional() else {
-            self.infer_refused_args(args);
+        let Some(positional) = argv.positional() else {
+            self.infer_refused_args(argv.iter().map(ValListElem::slot));
             self.refuse_spread(
-                args,
+                argv,
                 super::error::SpreadHead::Builtin {
                     name: name.into(),
                     arity: fixed_arity,
@@ -591,14 +601,14 @@ impl Inferencer<'_> {
         }
 
         if entry.diagnostic == BuiltinDiagnostic::FailStatusNonzero
-            && fail_status_is_zero_literal(args)
+            && fail_status_is_zero_literal(argv)
         {
             self.ctx.diagnose(TypeErrorKind::FailStatusZero);
         }
 
         let scheme = (entry.type_rule)(&mut self.ctx.unifier);
         let head_cty = self.instantiate_comp(name, &scheme);
-        self.apply_args_capped(head_cty, args, fixed_arity)
+        self.apply_args_capped(node, head_cty, positional, fixed_arity)
     }
 
     /// Peel `cty`'s whole curry spine, stopping at the first non-`Fun`: what a
@@ -618,17 +628,26 @@ impl Inferencer<'_> {
         self.peel_curry_spine(&cty)
     }
 
-    /// The head's value type when it is concretely not a function — neither a
+    /// A forced head's value type when it is concretely no thunk — neither a
     /// `Thunk` nor a variable that could still become one.  Lets the `App` rule
     /// name `'foo' bar baz` before the general unifier mismatch fires.
-    fn command_non_function_ty(&self, head_ty: &CompTy) -> Option<Ty> {
-        match self.ctx.unifier.resolve_comp_ty(head_ty) {
-            CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
-                Ty::Thunk(_) | Ty::Var(_) => None,
-                concrete => Some(concrete),
-            },
-            CompTy::Fun(_, _) | CompTy::Var(_) => None,
+    fn non_thunk_ty(&self, ty: &Ty) -> Option<Ty> {
+        match self.ctx.unifier.resolve_ty(ty) {
+            Ty::Thunk(_) | Ty::Var(_) => None,
+            concrete => Some(concrete),
         }
+    }
+
+    /// The `Force` rule on `value`, of type `ty`: the computation it
+    /// suspends, a thunk demanded under `why`.
+    fn forced(&mut self, value: &Val, ty: &Ty, why: Reason) -> CompTy {
+        if let Some(name) = written(value) {
+            return self.thunk_body(name, ty, why);
+        }
+        let cty = self.ctx.unifier.fresh_comp_ty();
+        self.ctx
+            .unify_ty(ty, &Ty::Thunk(Box::new(cty.clone())), why);
+        cty
     }
 
     /// `(arm)`: `block`, written or in hand, takes the parameters its slot
@@ -671,7 +690,7 @@ impl Inferencer<'_> {
             }
         };
         let (head, standing) = self.stands_for(arm);
-        let stands = self.arm_stands_in(&wanted, &head, standing);
+        let stands = self.arm_stands_in(block, &wanted, &head, standing);
         match met {
             Ok(()) => stands,
             Err((kind, why)) => {
@@ -715,7 +734,13 @@ impl Inferencer<'_> {
 
     /// Unify what `arm` and `head` produce, each past its parameters.  A `()`
     /// producer stands in for a command: its output is whatever it wrote.
-    fn arm_stands_in(&mut self, arm: &CompTy, head: &CompTy, standing: Standing) -> ArmVerdict {
+    fn arm_stands_in(
+        &mut self,
+        block: &Val,
+        arm: &CompTy,
+        head: &CompTy,
+        standing: Standing,
+    ) -> ArmVerdict {
         let wanted = self.producer_of(head);
         let found = self.producer_of(arm);
         let upcast = matches!(
@@ -724,6 +749,7 @@ impl Inferencer<'_> {
                 if self.is_unit(unit)
         );
         let verdict = if upcast {
+            self.adapt_block(block, self.spine(arm).arity(), Adaptation::Upcast);
             Ok(())
         } else {
             self.ctx.try_unify_comp_ty(&wanted, &found)
@@ -789,9 +815,9 @@ impl Inferencer<'_> {
     /// site's argv, which every arm takes as its one parameter
     /// ([`Self::arm`]).  The argv rule's contribution is its walk and its
     /// refusals: its type is always [`Ty::argv`].
-    fn apply_alias_arm(&mut self, name: &str, scheme: &Scheme, args: &Args) -> CompTy {
+    fn apply_alias_arm(&mut self, name: &str, scheme: &Scheme, argv: &Argv) -> CompTy {
         let cty = self.instantiate_comp(name, scheme);
-        let _argv = self.argv_ty(args, ArgvBoundary::InShell(name));
+        let _argv = self.argv_ty(argv, ArgvBoundary::InShell(name));
         let CompTy::Fun(_, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
             unreachable!(
                 "every arm takes the argv: `Inferencer::arm` installs it so, as every base frame is"
@@ -808,7 +834,8 @@ impl Inferencer<'_> {
         match (&comp.item, self.ctx.unifier.resolve_comp_ty(expected)) {
             (CompKind::Lam { param, body }, CompTy::Fun(param_ty, result)) => {
                 let body_ty = self.with_scope(|this| {
-                    this.bind_pattern(param, &param_ty, BindMode::Param);
+                    this.env
+                        .bind(param.to_string(), Scheme::mono(*param_ty.clone()));
                     this.check_comp(body, &result)
                 });
                 CompTy::Fun(param_ty, Box::new(body_ty))
@@ -854,24 +881,30 @@ impl Inferencer<'_> {
     /// calculus: arguments by application, at an arity the head's own type
     /// declares, so `...` has no argv to spread into and is refused.  The last
     /// two take an argv, and `...` is exactly its notation.
-    fn exec_comp_ty(&mut self, comp: &Comp, name: &str, args: &Args) -> CompTy {
+    fn exec_comp_ty(&mut self, comp: &Comp, name: &str, argv: &Argv) -> CompTy {
+        let node = Node::comp(comp);
         match self.head_class(name) {
             HeadClass::Binding(scheme) => {
                 let ty = self.ctx.instantiate(&scheme);
-                self.ctx
-                    .note_residual_use(Node::comp(comp), name, &scheme, &ty);
+                self.ctx.note_residual_use(node, name, &scheme, &ty);
                 let body = self.thunk_body(name, &ty, Reason::AutoderefHead);
-                self.apply_args(body, args)
+                if let Some(args) = argv.positional() {
+                    self.apply_args(node, body, args)
+                } else {
+                    self.infer_refused_args(argv.iter().map(ValListElem::slot));
+                    self.refuse_spread(argv, super::error::SpreadHead::Applied);
+                    self.peel_curry_spine(&body)
+                }
             }
             HeadClass::Value(entry) => {
-                let cty = self.apply_builtin(&entry, name, args);
-                self.note_boundary_call(comp, &entry, args, &cty);
+                let cty = self.apply_builtin(node, &entry, name, argv);
+                self.note_boundary_call(comp, &entry, argv, &cty);
                 cty
             }
-            HeadClass::Arm(handler) => self.apply_alias_arm(name, &handler.scheme, args),
+            HeadClass::Arm(handler) => self.apply_alias_arm(name, &handler.scheme, argv),
             // Prelude functions arrive as an `App` on a bound variable, never
             // as a bare `Exec` head.
-            HeadClass::External => self.external_exec_comp_ty(name, args),
+            HeadClass::External => self.external_exec_comp_ty(name, argv),
         }
     }
 
@@ -889,7 +922,7 @@ impl Inferencer<'_> {
     }
 
     /// A call of a boundary row: its result is weak, and the node gets a site.
-    fn note_boundary_call(&mut self, comp: &Comp, entry: &Decl, args: &Args, cty: &CompTy) {
+    fn note_boundary_call(&mut self, comp: &Comp, entry: &Decl, argv: &Argv, cty: &CompTy) {
         if !entry.is_boundary() {
             return;
         }
@@ -899,7 +932,7 @@ impl Inferencer<'_> {
         let key = Node::comp(comp);
         self.ctx.record_boundary(key, &entry.name, producer.ty);
         let arity = entry.fixed_arity();
-        let given = args.arity().unwrap_or(arity);
+        let given = argv.arity().unwrap_or(arity);
         if given < arity {
             self.ctx.boundary_missing.insert(key, arity - given);
         }
@@ -909,8 +942,8 @@ impl Inferencer<'_> {
     ///
     /// Nothing here declares a parameter for that argv to meet, so the rule's
     /// contribution is its walk and its refusals rather than its type.
-    fn external_exec_comp_ty(&mut self, shown: &str, args: &Args) -> CompTy {
-        let _argv = self.argv_ty(args, ArgvBoundary::Exec(shown));
+    fn external_exec_comp_ty(&mut self, shown: &str, argv: &Argv) -> CompTy {
+        let _argv = self.argv_ty(argv, ArgvBoundary::Exec(shown));
         CompTy::command()
     }
 
@@ -925,8 +958,8 @@ impl Inferencer<'_> {
     /// whether `boundary` gates what crosses.  Each element is still inferred,
     /// under its own span, for the errors inside it, and a `...` must still
     /// spread a list: what its elements are is free, what it is is not.
-    fn argv_ty(&mut self, args: &Args, boundary: ArgvBoundary<'_>) -> Ty {
-        for entry in args {
+    fn argv_ty(&mut self, argv: &Argv, boundary: ArgvBoundary<'_>) -> Ty {
+        for entry in argv {
             self.with_span(entry.slot().span, |this| match entry {
                 ValListElem::Single(arg) => {
                     let ty = this.infer_val(&arg.item);
@@ -975,8 +1008,11 @@ impl Inferencer<'_> {
 
     /// Infer every argument for the errors inside it, constraining nothing —
     /// what a refused call still owes its subexpressions.
-    pub(super) fn infer_refused_args(&mut self, args: &Args) {
-        for slot in args.iter().map(ValListElem::slot) {
+    pub(super) fn infer_refused_args<'v>(
+        &mut self,
+        args: impl IntoIterator<Item = &'v Spanned<Val>>,
+    ) {
+        for slot in args {
             self.with_span(slot.span, |this| {
                 let _ = this.infer_val(&slot.item);
             });
@@ -1034,7 +1070,7 @@ impl Inferencer<'_> {
         let cty = self.infer_comp(rhs);
         let bound_ty = self.rhs_bound_ty(rhs, cty);
         let concrete = self.ctx.unifier.apply_ty_keeping_weak(&bound_ty);
-        self.bind_pattern(pattern, &concrete, BindMode::Let);
+        self.bind_pattern(pattern, &concrete);
         self.note_called(pattern, rhs);
     }
 
@@ -1097,7 +1133,7 @@ impl Inferencer<'_> {
 
     /// One record field, folded into `fields` unless its label repeats
     /// (diagnosed there and then dropped: one label, one slot).  Shared by a plain
-    /// record and one with a spread ([`Assembly::Record`]).
+    /// record and an update ([`Prim::Update`]).
     fn infer_record_field(
         &mut self,
         key: &str,
@@ -1123,38 +1159,24 @@ impl Inferencer<'_> {
         Ty::Record(Self::fields_row(fields, Row::Empty))
     }
 
-    /// A record literal with a spread ([`Assembly::Record`]): the update rule.
-    /// The base is demanded to have a slot at each written label, at a type of
-    /// its own that nothing imposes; the result keeps the base's tail and gives
-    /// each written label the type written.  The parser admits one spread, first,
-    /// so the literal shares one tail.
-    fn infer_assembly_record(&mut self, entries: &[ValRecordEntry]) -> Ty {
-        let mut fields: Vec<(String, Ty)> = Vec::new();
-        let mut base = None;
-        for entry in entries {
-            match entry {
-                ValRecordEntry::Field(key, value) => {
-                    self.infer_record_field(key, value, &mut fields);
-                }
-                ValRecordEntry::Spread(value) => {
-                    let ty = self.with_span(value.span, |this| this.infer_val(&value.item));
-                    base = Some((value, ty));
-                }
-            }
+    /// Update existing slots, preserving the base's row tail.
+    fn infer_update(&mut self, base: &Spanned<Val>, entries: &[(Name, Spanned<Val>)]) -> Ty {
+        let base_ty = self.with_span(base.span, |this| this.infer_val(&base.item));
+        let mut fields = Vec::new();
+        for (key, value) in entries {
+            self.infer_record_field(key, value, &mut fields);
         }
         let tail = self.ctx.unifier.fresh_row();
-        if let Some((value, base_ty)) = base {
-            let probe = fields.iter().rev().fold(tail.clone(), |rest, (key, _)| {
-                let old = self.ctx.unifier.fresh_ty();
-                Row::Extend(Label::Field(key.clone()), Box::new(old), Box::new(rest))
-            });
-            let reason = Reason::RecordUpdate {
-                base: written(&value.item).map(ToString::to_string),
-            };
-            self.with_span(value.span, |this| {
-                this.ctx.unify_ty(&base_ty, &Ty::Record(probe), reason);
-            });
-        }
+        let probe = fields.iter().rev().fold(tail.clone(), |rest, (key, _)| {
+            let old = self.ctx.unifier.fresh_ty();
+            Row::Extend(Label::Field(key.clone()), Box::new(old), Box::new(rest))
+        });
+        let reason = Reason::RecordUpdate {
+            base: written(&base.item).map(ToString::to_string),
+        };
+        self.with_span(base.span, |this| {
+            this.ctx.unify_ty(&base_ty, &Ty::Record(probe), reason);
+        });
         Ty::Record(Self::fields_row(fields, tail))
     }
 
@@ -1177,24 +1199,17 @@ impl Inferencer<'_> {
         Ty::map(elem)
     }
 
-    /// A map literal with a computed key or a spread ([`Assembly::Map`]):
-    /// `Map<elem>`, one `elem` shared by every value and spread. A key written
-    /// out is checked for a duplicate as [`Self::infer_map_val`]'s are; a
-    /// computed duplicate is the map cursor's to refuse (SPEC §4.5).
-    fn infer_assembly_map(&mut self, entries: &[MapEntryV]) -> Ty {
+    /// One element type; repeated computed keys are refused at run time.
+    fn infer_map(&mut self, entries: &[MapEntryV]) -> Ty {
         let elem = self.ctx.unifier.fresh_ty();
         let mut seen: Vec<String> = Vec::new();
         for entry in entries {
             match entry {
                 MapEntryV::Entry(key, value) => {
-                    let key_ty = self.infer_map_operand(key);
-                    self.with_span(key.span(), |this| {
+                    let key_ty = self.with_span(key.span, |this| this.infer_val(&key.item));
+                    self.with_span(key.span, |this| {
                         this.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
-                        if let MapOperand::Value(Spanned {
-                            item: Val::String(label),
-                            ..
-                        }) = key
-                        {
+                        if let Val::String(label) = &key.item {
                             this.diagnose_if_duplicate(
                                 label.as_str(),
                                 seen.iter().map(String::as_str),
@@ -1202,14 +1217,14 @@ impl Inferencer<'_> {
                             seen.push(label.as_str().to_string());
                         }
                     });
-                    let value_ty = self.infer_map_operand(value);
-                    self.with_span(value.span(), |this| {
+                    let value_ty = self.with_span(value.span, |this| this.infer_val(&value.item));
+                    self.with_span(value.span, |this| {
                         this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                     });
                 }
                 MapEntryV::Spread(value) => {
-                    let spread_ty = self.infer_map_operand(value);
-                    self.with_span(value.span(), |this| {
+                    let spread_ty = self.with_span(value.span, |this| this.infer_val(&value.item));
+                    self.with_span(value.span, |this| {
                         this.ctx
                             .unify_ty(&spread_ty, &Ty::map(elem.clone()), Reason::MapSpread);
                     });
@@ -1219,30 +1234,9 @@ impl Inferencer<'_> {
         Ty::map(elem)
     }
 
-    fn infer_map_operand(&mut self, operand: &MapOperand) -> Ty {
-        self.with_span(operand.span(), |this| match operand {
-            MapOperand::Value(value) => this.infer_val(&value.item),
-            MapOperand::Compute(comp) => {
-                let cty = this.infer_comp(comp);
-                this.rhs_bound_ty(comp, cty)
-            }
-        })
-    }
-
-    /// [`Assembly`], typed by its arm — the moved literal code, over a
-    /// computed key or a spread.
-    fn infer_assembly(&mut self, assembly: &Assembly) -> Ty {
-        match assembly {
-            Assembly::List(elems) => self.infer_assembly_list(elems),
-            Assembly::Record(entries) => self.infer_assembly_record(entries),
-            Assembly::Map(entries) => self.infer_assembly_map(entries),
-        }
-    }
-
     /// One list element's contribution to `elem`, the list's shared element
     /// type: a plain value unifies directly, a spread's own element type
-    /// does. Shared by a plain list and one with a spread
-    /// ([`Assembly::List`]).
+    /// does. Shared by a plain list and [`Prim::List`].
     fn infer_list_entry(&mut self, value: &Spanned<Val>, spread: bool, elem: &Ty) {
         self.with_span(value.span, |this| {
             let entry_ty = if spread {
@@ -1258,8 +1252,8 @@ impl Inferencer<'_> {
         });
     }
 
-    /// A list literal with a spread ([`Assembly::List`]).
-    fn infer_assembly_list(&mut self, elems: &[ValListElem]) -> Ty {
+    /// A list literal with a spread.
+    fn infer_list(&mut self, elems: &[ValListElem]) -> Ty {
         let elem = self.ctx.unifier.fresh_ty();
         for entry in elems {
             match entry {
@@ -1394,10 +1388,7 @@ impl Inferencer<'_> {
             Val::Map(entries) => self.infer_map_val(entries.shape()),
             Val::Variant { label, payload } => {
                 // Construction is open: `` `ok 5 `` gets a fresh row tail.
-                let payload_ty = match payload {
-                    Some(p) => self.infer_val(p),
-                    None => Ty::Unit,
-                };
+                let payload_ty = self.infer_val(payload);
                 let rest = self.ctx.unifier.fresh_row();
                 Ty::Variant(Row::Extend(
                     Label::Case(label.to_string()),
@@ -1498,26 +1489,21 @@ impl Inferencer<'_> {
         }
     }
 
-    fn infer_index(&mut self, target: &Val, keys: &[Spanned<Key>]) -> CompTy {
-        if let (Some(literal), Some(first)) = (spell_literal(target), keys.first()) {
-            for key in keys {
-                if let Key::Data(value) = &key.item {
-                    self.infer_val(value);
-                }
+    fn infer_index(&mut self, target: &Val, key: &Spanned<Key>) -> Ty {
+        if let Some(literal) = spell_literal(target) {
+            if let Key::Data(value) = &key.item {
+                self.infer_val(value);
             }
             self.ctx.diagnose(TypeErrorKind::IndexOnLiteral {
                 literal,
-                key: spell_key(&first.item),
+                key: spell_key(&key.item),
             });
-            return CompTy::pure(self.ctx.unifier.fresh_ty());
+            return self.ctx.unifier.fresh_ty();
         }
-        let mut current_ty = self.infer_val(target);
-        for key in keys {
-            current_ty = self.with_span(key.span, |this| {
-                this.infer_index_step(&current_ty, &key.item)
-            });
-        }
-        CompTy::pure(current_ty)
+        let target_ty = self.infer_val(target);
+        self.with_span(key.span, |this| {
+            this.infer_index_step(&target_ty, &key.item)
+        })
     }
 
     fn infer_index_step(&mut self, current_ty: &Ty, key: &Key) -> Ty {
@@ -1692,7 +1678,7 @@ impl Inferencer<'_> {
     /// `Force`, or a pipeline ending in one.
     fn called_head(rhs: &Comp) -> Option<String> {
         let mut rhs = rhs;
-        while let CompKind::Bind { rest, .. } = &rhs.item {
+        while let CompKind::Bind { rest, .. } | CompKind::Seq { rest, .. } = &rhs.item {
             rhs = rest;
         }
         match &rhs.item {
@@ -1727,6 +1713,41 @@ impl Inferencer<'_> {
         have
     }
 
+    fn infer_prim(&mut self, prim: &Prim) -> Ty {
+        match prim {
+            Prim::Binary(op, lhs, rhs) => self.infer_binary(*op, lhs, rhs),
+            Prim::Negate(value) => {
+                let ty = self.infer_val(value);
+                let number = self.ctx.fresh_kinded(Kind::NUMBER);
+                self.ctx.unify_ty(&ty, &number, Reason::Negation);
+                number
+            }
+            Prim::Not(value) => self.infer_not(value),
+            Prim::Index { target, key } => self.infer_index(target, key),
+            Prim::Update { base, fields } => self.infer_update(base, fields),
+            Prim::List(elems) => self.infer_list(elems),
+            Prim::Map(entries) => self.infer_map(entries),
+            Prim::Render(value) => {
+                let ty = self.infer_val(value);
+                let scalar = self.ctx.fresh_kinded(Kind::SCALAR);
+                self.ctx.unify_ty(&ty, &scalar, Reason::Interpolation);
+                Ty::String
+            }
+            Prim::Concat(parts) => {
+                for value in parts {
+                    let ty = self.infer_val(value);
+                    self.ctx.unify_ty(&ty, &Ty::String, Reason::Interpolation);
+                }
+                Ty::String
+            }
+            Prim::Decode(value) => {
+                let ty = self.infer_val(value);
+                self.ctx.unify_ty(&ty, &Ty::Bytes, Reason::Capture);
+                Ty::String
+            }
+        }
+    }
+
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
         if let Some(span) = comp.span {
             self.ctx.pos = Some(span);
@@ -1735,73 +1756,61 @@ impl Inferencer<'_> {
         match &comp.item {
             CompKind::Protect { body, site } => self.infer_protected_comp(body, site),
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
-            CompKind::Assemble(assembly) => CompTy::pure(self.infer_assembly(assembly)),
             CompKind::Lam { param, body } => {
                 let param_ty = self.ctx.unifier.fresh_ty();
                 let body_ty = self.with_scope(|this| {
-                    this.bind_pattern(param, &param_ty, BindMode::Param);
+                    this.env
+                        .bind(param.to_string(), Scheme::mono(param_ty.clone()));
                     this.infer_comp(body)
                 });
                 CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
             }
             CompKind::Force(value) => {
                 let val_ty = self.infer_val(value);
-                if let Some(name) = written(value) {
-                    return self.thunk_body(name, &val_ty, Reason::ForceOperand);
-                }
-                let cty = self.ctx.unifier.fresh_comp_ty();
-                self.ctx.unify_ty(
-                    &val_ty,
-                    &Ty::Thunk(Box::new(cty.clone())),
-                    Reason::ForceOperand,
-                );
-                cty
+                self.forced(value, &val_ty, Reason::ForceOperand)
             }
-            // `Bind` on `Wildcard` is a discarded statement — never
-            // generalised, and `rest` inherits whatever handler scope an
-            // `alias`/`unalias` opened.
             CompKind::Bind {
                 comp: inner,
                 pattern,
                 rest,
             } => {
-                match pattern.as_ref() {
-                    Pattern::Wildcard => {
-                        self.infer_statement(inner);
-                    }
-                    pattern => self.infer_let(pattern, inner),
-                }
+                self.infer_let(pattern, inner);
+                self.infer_comp(rest)
+            }
+            CompKind::Seq { first, rest } => {
+                self.infer_statement(first);
                 self.infer_comp(rest)
             }
             CompKind::App { head, args } => {
-                let head_ty = self.with_span(head.span, |this| this.infer_comp(head));
-                // Name a literal used as a command head before the general
-                // `Cmd a vs a → b` mismatch says it in jargon.  Needs a
-                // positional arg; a spread-only call wants the cascading check.
-                let positional = args.positional().unwrap_or_default();
-                if !positional.is_empty()
-                    && let Some(ty) = self.command_non_function_ty(&head_ty)
-                {
-                    match &head.item {
-                        CompKind::Return(v) if let Some(name) = written(v) => {
-                            let kind = TypeErrorKind::HeadBoundToValue {
-                                name: name.to_string(),
-                                ty,
-                            };
-                            self.with_span(head.span, |this| this.ctx.diagnose(kind));
+                let head_ty = match &head.item {
+                    // The forced value's type is read here, not through the
+                    // `Force` rule, so a value used as a command head is named
+                    // as such before the general mismatch says it in jargon.
+                    CompKind::Force(value) => {
+                        let ty = self.with_span(head.span, |this| this.infer_val(value));
+                        if let Some(ty) = self.non_thunk_ty(&ty) {
+                            match written(value) {
+                                Some(name) => {
+                                    let kind = TypeErrorKind::HeadBoundToValue {
+                                        name: name.to_string(),
+                                        ty,
+                                    };
+                                    self.with_span(head.span, |this| this.ctx.diagnose(kind));
+                                }
+                                None => self.ctx.diagnose(TypeErrorKind::CommandNotFunction { ty }),
+                            }
+                            // Check the args anyway, then hand the enclosing
+                            // pipeline or chain a coherent fresh result.
+                            self.infer_refused_args(args);
+                            return self.ctx.unifier.fresh_comp_ty();
                         }
-                        _ => self.ctx.diagnose(TypeErrorKind::CommandNotFunction { ty }),
+                        self.with_span(head.span, |this| {
+                            this.forced(value, &ty, Reason::AutoderefHead)
+                        })
                     }
-                    // Check the args anyway, then hand the enclosing pipeline
-                    // or chain a coherent fresh result.
-                    for slot in args.iter().map(ValListElem::slot) {
-                        self.with_span(slot.span, |this| {
-                            let _ = this.infer_val(&slot.item);
-                        });
-                    }
-                    return self.ctx.unifier.fresh_comp_ty();
-                }
-                self.apply_args(head_ty, args)
+                    _ => self.with_span(head.span, |this| this.infer_comp(head)),
+                };
+                self.apply_args(Node::comp(comp), head_ty, args)
             }
             CompKind::Exec(e) => {
                 // Runtime renders any value; inference still checks embedded blocks.
@@ -1810,12 +1819,12 @@ impl Inferencer<'_> {
                 }
                 let cty = match &e.head {
                     CommandWord::Name(CommandName::Bare(name)) => {
-                        self.exec_comp_ty(comp, name, &e.args)
+                        self.exec_comp_ty(comp, name, &e.argv)
                     }
                     CommandWord::External(name)
                     | CommandWord::Name(
                         name @ (CommandName::Path(_) | CommandName::TildePath(_)),
-                    ) => self.external_exec_comp_ty(&name.written(), &e.args),
+                    ) => self.external_exec_comp_ty(&name.written(), &e.argv),
                 };
                 if e.redirects.is_empty() {
                     cty
@@ -1823,24 +1832,11 @@ impl Inferencer<'_> {
                     self.redirected(&cty, e.redirects.stdout.is_some())
                 }
             }
+            CompKind::Native { .. } => {
+                unreachable!("a native's code is built by forcing it, never checked")
+            }
             CompKind::Pipeline { stages } => self.infer_pipeline(stages),
-            CompKind::Binary(op, lhs, rhs) => CompTy::pure(self.infer_binary(*op, lhs, rhs)),
-            CompKind::Negate(val) => {
-                let ty = self.infer_val(val);
-                let number = self.ctx.fresh_kinded(Kind::NUMBER);
-                self.ctx.unify_ty(&ty, &number, Reason::Negation);
-                CompTy::pure(number)
-            }
-            CompKind::Not(val) => CompTy::pure(self.infer_not(val)),
-            CompKind::Interpolation(parts) => {
-                for value in parts {
-                    let ty = self.infer_val(value);
-                    let part = self.ctx.fresh_kinded(Kind::SCALAR);
-                    self.ctx.unify_ty(&ty, &part, Reason::Interpolation);
-                }
-                CompTy::pure(Ty::String)
-            }
-            CompKind::Index { target, keys } => self.infer_index(target, keys),
+            CompKind::Prim(prim) => CompTy::pure(self.infer_prim(prim)),
             CompKind::Rec { group, index } => self.infer_rec(group, *index),
             CompKind::Tilde(_) => CompTy::pure(Ty::String),
             CompKind::If { cond, then, else_ } => {
@@ -1881,18 +1877,15 @@ impl Inferencer<'_> {
             // lambda's body.  `cap M` runs a command and returns what it wrote.
             CompKind::Capture(body) => {
                 let body_ty = self.infer_comp(body);
-                let shape = CompTy::Return(self.ctx.unifier.fresh_grade(), Box::new(Ty::Unit));
-                self.ctx.unify_comp_ty(&body_ty, &shape, Reason::Capture);
+                self.ctx
+                    .unify_comp_ty(&body_ty, &CompTy::command(), Reason::Capture);
                 CompTy::pure(Ty::Bytes)
             }
-            // The reading half of the same boundary: bytes in, text out.  The
-            // kernel's `decode` takes a value, so `annotate` reaches it through
-            // a bind over `Capture` rather than nesting the two; the operand
-            // here is just the bound variable.
-            CompKind::Decode(val) => {
-                let ty = self.infer_val(val);
-                self.ctx.unify_ty(&ty, &Ty::Bytes, Reason::Capture);
-                CompTy::pure(Ty::String)
+            CompKind::Upcast(body) => {
+                let body_ty = self.infer_comp(body);
+                self.ctx
+                    .unify_comp_ty(&body_ty, &CompTy::pure(Ty::Unit), Reason::Upcast);
+                CompTy::command()
             }
         }
     }
@@ -1965,7 +1958,7 @@ mod tests {
     }
 
     /// A static duplicate key is T0022 in a record, a plain map, and a map
-    /// with a spread (`Assembly::Map`) alike.
+    /// with a spread (`Prim::Map`) alike.
     #[test]
     fn a_map_literal_refuses_a_static_duplicate_key() {
         assert_eq!(error_codes("return [a: 1, a: 2]"), ["T0022"]);

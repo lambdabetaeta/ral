@@ -41,7 +41,6 @@ pub(crate) struct SerialThunk {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SerialNative {
     pub name: std::string::String,
-    pub(crate) applied: Vec<SerialValue>,
 }
 
 /// An [`Env`] in wire form: the [`ScopeTable`] row holding its session
@@ -244,7 +243,7 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
         SerialClosure::Thunk(t) => {
             out.insert(t.env.bindings);
         }
-        SerialClosure::Native(n) => n.applied.iter().for_each(|v| collect_scope_deps(v, out)),
+        SerialClosure::Native(_) => {}
     });
 }
 
@@ -262,12 +261,8 @@ impl FOValue<SerialClosure> {
                 comp: Arc::clone(closure.comp()),
                 env: SerialEnvSnapshot::from_runtime(closure.env(), ctx),
             }))),
-            Leaf::Native(entry, applied) => Ok(Self::Ext(SerialClosure::Native(SerialNative {
+            Leaf::Native(entry) => Ok(Self::Ext(SerialClosure::Native(SerialNative {
                 name: entry.decl.name.as_ref().to_string(),
-                applied: applied
-                    .iter()
-                    .map(|v| Self::from_runtime(v, ctx))
-                    .collect::<Result<_, _>>()?,
             }))),
             Leaf::Handle => Err(Error::new(
                 "a handle reached the seed wire, though `Shell::bequeath` should have \
@@ -300,14 +295,7 @@ impl FOValue<SerialClosure> {
                         n.name
                     ))
                 })?;
-                Ok(Value::Native {
-                    entry: Arc::new(entry),
-                    applied: n
-                        .applied
-                        .into_iter()
-                        .map(|v| v.into_runtime(dec))
-                        .collect::<Result<_, _>>()?,
-                })
+                Ok(Value::Native(Arc::new(entry)))
             }
         })
     }
@@ -371,8 +359,15 @@ mod tests {
             CompKind::Pipeline { stages } => stages.iter().find_map(find_lam_node),
             CompKind::Bind {
                 comp: rhs, rest, ..
-            } => find_lam_node(rhs).or_else(|| find_lam_node(rest)),
+            }
+            | CompKind::Seq { first: rhs, rest } => {
+                find_lam_node(rhs).or_else(|| find_lam_node(rest))
+            }
             CompKind::App { head, .. } => find_lam_node(head),
+            CompKind::Prim(prim) => prim.operands().find_map(|value| match value {
+                crate::ir::Val::Thunk(node) => find_lam_node(node.shape()),
+                _ => None,
+            }),
             CompKind::If { then, else_, .. } => {
                 [then, else_].into_iter().find_map(|arm| match &arm.item {
                     crate::ir::Val::Thunk(node) => find_lam_node(node.shape()),
@@ -381,7 +376,7 @@ mod tests {
             }
             CompKind::Force(crate::ir::Val::Thunk(node))
             | CompKind::Return(crate::ir::Val::Thunk(node)) => find_lam_node(node.shape()),
-            CompKind::Capture(c) => find_lam_node(c),
+            CompKind::Capture(c) | CompKind::Upcast(c) => find_lam_node(c),
             _ => None,
         }
     }
@@ -396,11 +391,19 @@ mod tests {
             CompKind::Lam { body, .. } => sub(body),
             CompKind::Bind {
                 comp: rhs, rest, ..
-            } => {
+            }
+            | CompKind::Seq { first: rhs, rest } => {
                 sub(rhs);
                 sub(rest);
             }
             CompKind::App { head, .. } => sub(head),
+            CompKind::Prim(prim) => {
+                for value in prim.operands() {
+                    if let crate::ir::Val::Thunk(node) = value {
+                        walk_comp(node.shape(), visit);
+                    }
+                }
+            }
             CompKind::If { then, else_, .. } => {
                 for arm in [then, else_] {
                     if let crate::ir::Val::Thunk(node) = &arm.item {
@@ -410,7 +413,7 @@ mod tests {
             }
             CompKind::Force(crate::ir::Val::Thunk(node))
             | CompKind::Return(crate::ir::Val::Thunk(node)) => walk_comp(node.shape(), visit),
-            CompKind::Capture(c) => walk_comp(c, visit),
+            CompKind::Capture(c) | CompKind::Upcast(c) => walk_comp(c, visit),
             _ => {}
         }
     }

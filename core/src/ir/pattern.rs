@@ -18,13 +18,12 @@ pub enum Pattern {
         rest: Option<Name>,
     },
     /// `[key: pat, …]`
-    Map(Vec<MapPatternEntry>),
+    Record(Vec<FieldPattern>),
 }
 
-/// One entry of a [`Pattern::Map`]: a static key and the sub-pattern bound to
-/// that field.
+/// A record field and the sub-pattern it binds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MapPatternEntry {
+pub struct FieldPattern {
     pub(crate) key: String,
     pub(crate) pattern: Pattern,
 }
@@ -42,7 +41,7 @@ impl Pattern {
                     }
                     out.extend(rest);
                 }
-                Pattern::Map(entries) => {
+                Pattern::Record(entries) => {
                     for e in entries {
                         walk(&e.pattern, out);
                     }
@@ -76,7 +75,7 @@ impl fmt::Display for Pattern {
                     .chain(rest.iter().map(|r| format!("...{r}")));
                 write!(f, "[{}]", parts.collect::<Vec<_>>().join(" "))
             }
-            Self::Map(entries) => {
+            Self::Record(entries) => {
                 let parts = entries.iter().map(|e| match &e.pattern {
                     Self::Name(n) if **n == *e.key => e.key.clone(),
                     p => format!("{}: {p}", e.key),

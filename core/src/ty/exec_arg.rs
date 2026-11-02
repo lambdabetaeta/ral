@@ -24,8 +24,7 @@ pub(crate) enum RefusedArg {
     List,
     /// A map or a record: fields, rather than a word.
     Map,
-    /// A block, a lambda, or a partly applied native — a computation that has
-    /// not run.
+    /// A block, a lambda, or a native — a computation that has not run.
     Block,
     /// A concurrent block, possibly still running.
     Handle,

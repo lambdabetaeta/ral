@@ -1,3 +1,7 @@
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
+
 # Agents: one thread, one life, one conversation
 
 **An agent owns its conversation and shell on one joined thread.** Its
@@ -214,8 +218,10 @@ or itself when its parent is the human.
 
 - `Shell::bequeath` snapshots the **serialisable fragment** of lexical scope,
   dynamic context and builtin table. Every handle becomes an opaque
-  placeholder, including in captured closures, native applied arguments and
-  handler arms. Hooks do not cross. No terminal authority crosses.
+  placeholder, including in captured closures and handler arms. A partial
+  native application used as a value is a Let-fun thunk capturing the
+  variables the application mentions; their values are scrubbed there.
+  Hooks do not cross. No terminal authority crosses.
 - The child receives a fresh mailbox, life/exchange scopes, provider handle and
   engine. Its `cd`, environment and new bindings never flow back; reply is
   the sole return path. The fork carries session policy, including inherited

@@ -58,7 +58,7 @@ fn resolve_launch(stage: &Comp, env: &Env, eval: StageEval, shell: &Shell) -> Se
     }
     Ok(StageLaunch::Direct {
         head,
-        args: (eval.close_args)(&e.args, env, &shell.sig)?,
+        args: (eval.close_argv)(&e.argv, env, &shell.sig)?,
     })
 }
 

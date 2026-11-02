@@ -1,5 +1,5 @@
 ---
-generated_at_commit: cddee133
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 ---
 
 # Capture: a command's value is its output
@@ -77,15 +77,16 @@ placement: it is decided in checking mode, in program order
 
 **The node returns bytes; the text is composed.** On success, `capture M : F Bytes`
 returns precisely the bytes `M` wrote, nothing stripped and nothing decoded. Reading them as a `String` is a second step the checker composes over
-it, `decode (capture M)`, and that step owns both things that can go wrong: one
+it, `capture M to d. decode d`, and that step owns the text conversion: one
 trailing terminator is dropped, and output that is not valid UTF-8 fails there,
 naming `| from-bytes` as the way to keep it. Each is its own term in the IR
-(`CompKind::Capture`, `CompKind::Decode`), inserted by `annotate` and with no
+(`CompKind::Capture`, `Prim::Decode`), inserted by `annotate` and with no
 surface syntax, so a step the checker writes into a program cannot be a name the
 program's session resolves
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
-`InferCtx.captured` holds the computations a value demand captures, keyed by node
-address, and `captured_vals` the values coerced in hand; `annotate` reads both.
+`InferCtx.adapted` holds the computations a demand adapts, keyed by node
+address with their `Adaptation`, and `adapted_vals` the values adapted in
+hand with their arity; `annotate` reads both.
 
 **Exactness is kept by refusal.** The buffer behind a capture is capped at
 16 MiB (`SINK_BUFFER_CAP`), and a bounded buffer is what keeps a

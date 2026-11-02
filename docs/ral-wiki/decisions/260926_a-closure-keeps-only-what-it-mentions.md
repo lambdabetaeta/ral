@@ -1,9 +1,17 @@
 ---
 status: accepted
-generated_at_commit: 2ded530f
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 ---
 
 # A closure keeps only what it mentions
+
+> **Amended 2026-11-02:**
+> [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+> adds `Seq` beside `To` as a frame carrying a continuation environment;
+> argument frames are `Arg`, one per argument. The occurrence-set invariant
+> stands. Occurrence sets are cached by `Node::new` and read by
+> `Closure::new`, not recomputed on each capture.
 
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `service`
 > is deleted, so the workers that start from their creator's session are `spawn`,

@@ -26,7 +26,7 @@ use super::error::{Reason, TypeErrorKind};
 use super::grade::JoinArm;
 use super::infer::{Arm, Inferencer};
 use crate::fact::ErrorRecord;
-use crate::ir::{HandlerArmV, OptionsV, Val};
+use crate::ir::{FieldsNode, HandlerArmV, Val};
 use crate::source::{Spanned, WithSpan};
 use crate::ty::Typed as _;
 use crate::ty::{CompTy, Producer, Scheme, Ty};
@@ -35,15 +35,17 @@ impl Inferencer<'_> {
     /// Hold each written option to what `table` says of its label, each
     /// caret on the option's own value.  A catch-all is held to the arm rule
     /// at its slot ([`Inferencer::arm`]).
-    fn check_options(&mut self, opts: &OptionsV, table: &'static Table) {
-        for (label, value) in opts {
+    fn check_options(&mut self, opts: &FieldsNode, table: &'static Table) {
+        let mut written: Vec<_> = opts.shape().iter().collect();
+        written.sort_by_key(|(_, value)| value.span.map(|span| span.start));
+        for (label, value) in written {
             self.with_span(value.span, |this| {
                 this.check_option(label, &value.item, table);
             });
         }
         for key in table.keys {
             if matches!(key.holds, Holds::Required(_))
-                && !opts.iter().any(|(l, _)| l.as_ref() == key.label)
+                && !opts.shape().iter().any(|(l, _)| l.as_ref() == key.label)
             {
                 self.ctx.diagnose(TypeErrorKind::RowMissingField {
                     label: key.label.to_string(),
@@ -109,7 +111,7 @@ impl Inferencer<'_> {
 
     pub(super) fn infer_within(
         &mut self,
-        opts: &OptionsV,
+        opts: &FieldsNode,
         handlers: Option<&[HandlerArmV]>,
         body: &Val,
     ) -> CompTy {
@@ -124,7 +126,7 @@ impl Inferencer<'_> {
         })
     }
 
-    pub(super) fn infer_grant(&mut self, caps: &OptionsV, body: &Val) -> CompTy {
+    pub(super) fn infer_grant(&mut self, caps: &FieldsNode, body: &Val) -> CompTy {
         self.check_options(caps, declared(Form::Grant));
         self.scope_body(body)
     }

@@ -163,10 +163,7 @@ fn bundled_uutils_capture_completes_with_buffer_sink() {
 fn return_deref_name_is_bound_value() {
     let v = must_succeed("return $upper");
     match v {
-        Value::Native { entry, applied } => {
-            assert_eq!(entry.decl.name, "upper");
-            assert!(applied.is_empty());
-        }
+        Value::Native(entry) => assert_eq!(entry.decl.name, "upper"),
         other => panic!("expected the native itself, got {other:?}"),
     }
 }
@@ -275,7 +272,7 @@ fn elaborator_never_wraps_exec_in_redirect() {
                 *saw_exec_with_redirects = true;
             }
             CompKind::Lam { body, .. } => walk(body, saw_exec_with_redirects),
-            CompKind::Bind { comp, rest, .. } => {
+            CompKind::Bind { comp, rest, .. } | CompKind::Seq { first: comp, rest } => {
                 walk(comp, saw_exec_with_redirects);
                 walk(rest, saw_exec_with_redirects);
             }

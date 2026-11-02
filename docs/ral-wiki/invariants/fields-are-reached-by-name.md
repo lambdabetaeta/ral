@@ -1,7 +1,11 @@
+---
+generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+---
+
 # Fields are reached by name
 
 **A record field is reached only by naming it in a row.** Selection names it,
-a map pattern names it, and a builtin taking a record names its fields in the
+a record pattern names it, and a builtin taking a record names its fields in the
 builtin's own row ([[design/row-types|row-types]]). No operation reads a field
 the type does not mention.
 

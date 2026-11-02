@@ -34,7 +34,7 @@ pub(super) use eliminate::{
 fn worker_body(
     closure: Closure,
 ) -> impl FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static {
-    move |mooring, child| machine::force(Value::Thunk(closure), mooring, child)
+    move |mooring, child| machine::apply(Value::Thunk(closure), Vec::new(), mooring, child)
 }
 
 /// `spawn [TITLE] BODY` -- run `body` on a worker of its own and return its
