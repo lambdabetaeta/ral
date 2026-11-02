@@ -41,7 +41,7 @@ netgate/fuzz/target/
 scratch/
 .scratch/
 
-# The window's seam types, written from the Rust by `just ui-check`.  Generated
+# The window's seam types, written from the Rust by `just ui`.  Generated
 # on demand so there is one copy of the fact and no stale checked-in twin.
 synod/ui/js/bindings/
 

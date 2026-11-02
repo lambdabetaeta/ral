@@ -249,7 +249,7 @@ maintainer is not left thinking the group is the only route.
   machine broker*, `LocalSystem`, automatic, started at install so the first
   grant does not wait for a reboot, stopped on upgrade as well as removal, and
   removed on uninstall — so an uninstalled synod leaves no `SYSTEM` service
-  pointing at a deleted binary. `just broker-install` / `broker-uninstall`
+  pointing at a deleted binary. `just synod::broker-install` / `synod::broker-uninstall`
   register the same service from a checkout with `sc.exe`.
 - **Two halves can now differ in age, so they check.** The MSI installs both,
   but a developer runs one from `target\release` against the other from

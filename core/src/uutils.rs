@@ -220,7 +220,7 @@ fn invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     if global == 0 { code } else { global }
 }
 
-/// `rg` shim.  `ral_ripgrep_core::run_cli` wants argv without argv[0], so
+/// `rg` shim.  `ral_ripgrep_core::run_cli` wants argv without `argv[0]`, so
 /// drop the tool-name slot [`invoke`] puts there.
 #[cfg(feature = "ripgrep")]
 fn rg_main<I: Iterator<Item = std::ffi::OsString>>(mut args: I) -> i32 {

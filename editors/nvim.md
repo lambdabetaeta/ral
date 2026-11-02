@@ -15,12 +15,12 @@ and both are installed outside the repo — the library at
 
 ## Install, and re-install after a change
 
-`scripts/install-treesitter.ral` is the whole procedure: it runs
+`editors/install-nvim.ral` is the whole procedure: it runs
 `tree-sitter generate` over `grammar.js`, compiles the resulting
 `src/parser.c` into `ral.so`, and copies `highlights.scm` into place.
 
 ```sh
-scripts/install-treesitter.ral
+editors/install-nvim.ral
 ```
 
 Run it again after editing either `grammar.js` or `queries/highlights.scm`.

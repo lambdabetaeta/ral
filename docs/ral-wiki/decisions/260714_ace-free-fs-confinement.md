@@ -467,7 +467,7 @@ hazard (same container id ⇒ one run's revoke wipes the other's live grants).
 exercise DACL/SID/profile primitives only, while macOS has real
 confined-spawn denial tests (`sandbox/launch.rs`, `core/tests/denied_fs_children.rs`,
 `core/tests/confined_write_in_every_context.rs`). Add, under `#[cfg(windows)]` on
-`windows-latest` CI (`.github/workflows/windows.yml` already builds+tests
+`windows-latest` CI (the windows-x86_64 leg of `.github/workflows/ci.yml` already builds+tests
 ral-core/ral/exarch): a BFS configure/enforce/clear round trip, a tier-detector
 probe test, Phase-G threshold tests, and a first real confined-spawn
 enforcement test (positive control + denial). Keep them non-elevated (GitHub

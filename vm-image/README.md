@@ -12,9 +12,66 @@ on Windows. It is one of the three disks in SYNOD.md §7's stack:
 
 ```
 session.img  (RW, per-session)   overlayfs upper: /work + guest scratch
-rootfs.img   (RO, pinned)   <--   build.sh BUILDS THIS ONE
+rootfs.img   (RO, pinned)   <--   build-rootfs.sh BUILDS THIS ONE
 boot.img     (ships w/ app)      kernel + ral-guest + ral engine (build-boot.sh)
 ```
+
+## Building
+
+```sh
+just vm::rootfs           # out/rootfs/ only
+just vm::boot [--clean]   # out/boot/ only; --clean drops the build cache first
+```
+
+On Windows the same recipes run through `wsl.exe`, inside WSL2. The release
+workflow runs `just vm::rootfs vm::boot` on one native runner per architecture. The
+recipes wrap `build-rootfs.sh` and `build-boot.sh`, which are plain `bash`.
+
+**The architecture is the host's, with no override.** `common.sh` maps
+`uname -m` to `arm64` (Apple silicon) or `amd64` (x86_64 Linux, WSL2) and
+rejects anything else. Nothing here cross-builds: the build executes the
+guest's own binaries, and apt resolves the kernel package for the container's
+architecture. `common.sh` also checks that podman itself runs containers of
+that architecture, and refuses a podman machine that emulates another.
+
+`common.sh` is sourced by both builders and owns what they share: the
+architecture and mirror, `SUITE`, `BASE_IMAGE`, the git hash, the podman and
+architecture check (`preflight`), the private staging directory (`stage`), the
+container invocation and transcript (`run_container`), and the lock-then-swap
+publication of `out/<name>/` once the build has stamped itself done
+(`publish`). Each builder owns only its container script.
+
+`build-boot.sh` keeps a persistent build cache, mounted at `/build`, holding
+cargo's target directory and home. It lives in
+`${XDG_CACHE_HOME:-$HOME/.cache}/ral-guest-build/<arch>`; `RAL_BUILD_CACHE`
+moves it (to a new or empty directory: a marker file confines `--clean` to
+caches this build made) and `--clean` drops it. Nothing shipped comes from the cache: the
+media is rebuilt from the checkout every time, so a stale cache costs only
+disk.
+
+Under WSL, `build-boot.sh` differs in two ways. A checkout on `/mnt/...`
+(drvfs) is rsynced to an ext4 copy at `<cache>/src`, which is mounted as
+`/ral`, because `cargo build` makes a great many source reads that would
+otherwise cross to Windows; the media still lands in the real `out/boot/`.
+`CARGO_BUILD_JOBS` defaults to half the cores, because the other half is
+Windows and a full-width release build makes the VM swap the desktop. Nothing on the Windows side may hold the build's stdout: killing
+the `wsl.exe` that started it closes the pipe and leaves orphaned `rustc`
+processes. To run unattended, detach inside the VM with
+`setsid nohup just vm::boot > ~/guest-boot.log 2>&1 &` and read the log.
+
+| Variable | Read by | Meaning |
+|---|---|---|
+| `SUITE` | both | Ubuntu suite (`resolute`) |
+| `MIRROR` | both | overrides the per-arch mirror, e.g. a `snapshot.ubuntu.com` timestamp |
+| `BASE_IMAGE` | both | the build container (`docker.io/library/ubuntu:24.04`) |
+| `ZSTD_LEVEL` | rootfs | download compression |
+| `RAL_BUILD_CACHE` | boot | build cache directory; must be new, empty, or one this build made |
+| `CARGO_BUILD_JOBS` | boot | cargo jobs; under WSL, default half the cores |
+
+Outputs: `out/rootfs/` (`rootfs.img`, `rootfs.img.zst`, checksums,
+`packages-manifest.txt`, `verify.txt`, `build.log`) and `out/boot/` (`kernel`,
+`initramfs.img`, checksums, `boot-manifest.txt`, `kernel-config-check.txt`,
+`verify.txt`, `build.log`), each described below.
 
 ## Why the image is what an agent may rely on
 
@@ -40,10 +97,10 @@ versioned with the app so the `Attach` handshake can enforce the pairing (§7).
 
 §2 fixes the platform matrix: macOS runs Virtualization.framework on arm64,
 Windows runs Hyper-V on x86_64. The *userland* does not care — an office
-userland is an office userland — so both scripts here take a single `ARCH`
-knob (`arm64`, the default, or `amd64`) and derive everything else from it:
+userland is an office userland — so both scripts derive everything from the
+host's architecture (see *Building*):
 
-| | `ARCH=arm64` | `ARCH=amd64` |
+| | arm64 | amd64 |
 |---|---|---|
 | Host that builds it | Apple-silicon Mac | x86_64 Linux, or WSL2 on the Windows box |
 | Mirror | `ports.ubuntu.com/ubuntu-ports` | `archive.ubuntu.com/ubuntu` |
@@ -55,14 +112,16 @@ Two consequences worth stating before they surprise anyone:
 
 - **The mirrors are not interchangeable.** arm64 packages live only on
   `ports.ubuntu.com`, amd64 packages only on `archive.ubuntu.com`. Both
-  scripts derive the mirror from `ARCH`, so the pair cannot disagree, and an
-  explicit `MIRROR` still wins (for a `snapshot.ubuntu.com` pin).
+  scripts take the mirror from `common.sh`, so the pair cannot disagree, and an
+  explicit `MIRROR` still wins (for a `snapshot.ubuntu.com` pin). It is `https`:
+  `mmdebstrap` bakes it into the guest's `sources.list`, and the guest's only
+  door out is a `CONNECT`-only proxy on port 443.
 - **You build the media for the host that will boot it.** The container is the
-  image's own architecture, and each script refuses a mismatch on its first
-  step rather than fail obscurely later: apt resolves the kernel package for
-  the container's native architecture, and the `fc-cache` pass and every
-  spot-check *execute* guest binaries. Nothing here is cross-architecture, and
-  no qemu is involved on either host.
+  image's own architecture, and `common.sh` refuses a podman machine of another
+  architecture before any build work: apt resolves the kernel package for the
+  container's native architecture, and the `fc-cache` pass and every spot-check
+  *execute* guest binaries. Nothing here is cross-architecture, and no qemu is
+  involved on either host.
 
 Because a developer builds one guest at a time, `out/` deliberately does **not**
 encode the architecture in any path — `vm_manager::media::locate` and the bundle's
@@ -83,7 +142,8 @@ a missing, malformed or mismatched version.
 | File | What it is |
 |------|-----------|
 | `packages.txt` | The pinned package set, one per line, grouped to mirror §7's rationale. Comments and blanks are stripped by the build. |
-| `build.sh` | The rootfs pipeline: one strict-mode script that runs a container and emits the image, checksum, manifest, and verification. |
+| `common.sh` | The skeleton both builders share (see *Building*). |
+| `build-rootfs.sh` | The rootfs pipeline: one strict-mode script that runs a container and emits the image, checksum, manifest, and verification. |
 | `build-boot.sh` | The boot-media pipeline: Ubuntu's kernel plus this repo's initramfs, with `ral-guest` and the engine inside it (see the last section). |
 | `out/` | Build products (git-ignored), for whichever architecture was built last. |
 
@@ -127,17 +187,8 @@ verifies 26.04's archive signature. Inside it:
 The container is `--privileged` only because `mmdebstrap`'s root mode and the
 chroot checks bind-mount `/proc,/sys,/dev` — not for the image creation itself.
 
-Run it:
-
-```sh
-./build.sh                 # arm64, the macOS guest
-ARCH=amd64 ./build.sh      # x86_64, the Windows guest
-just guest-rootfs          # the same two, from the repo root
-just guest-rootfs amd64
-```
-
-Everything is env-overridable (`SUITE`, `MIRROR`, `ARCH`, `ZSTD_LEVEL`,
-`FS_UUID`, `BASE_IMAGE`). The multi-GB tree and apt cache live only in the
+Run it with `just vm::rootfs` (see *Building*, which also lists the env
+knobs). The multi-GB tree and apt cache live only in the
 container's ephemeral layer (`--rm`) and are reclaimed on exit; only the final
 artifacts are written to `out/rootfs/`, via a staging dir that is published only once
 the build has stamped itself done (podman's exit status is not trusted).
@@ -181,7 +232,7 @@ the live mirror; the manifest then documents which snapshot. (The live mirror
 depends on the architecture and the two do not overlap: arm64 packages are
 served from `ports.ubuntu.com/ubuntu-ports` and amd64 packages from
 `archive.ubuntu.com/ubuntu` — a common trap, which is why both scripts derive
-the mirror from `ARCH` rather than let a caller pair them wrongly.)
+the mirror from the host's architecture rather than let a caller pair them wrongly.)
 
 ## Corrections to §7's package names
 
@@ -319,7 +370,7 @@ archive for reliability and records versions in the manifest.
 still **built by a different script** (`build-boot.sh`, this directory) since
 it ships with the synod app rather than being downloaded like `rootfs.img`
 (§7), but resolved here because the two pipelines share one pinned suite, one
-`ARCH` knob, and one container of the guest's own architecture.
+architecture, and one container of the guest's own architecture.
 
 **The kernel is Ubuntu's stock `linux-generic` build for the guest's
 architecture, unmodified — not a custom kernel.** It is already built, signed,
@@ -373,7 +424,7 @@ engines, and console lines carry the `ral-guest:` prefix.
 Both `ral-guest` and `exarch` are cross-built for the guest's musl target
 (`aarch64-unknown-linux-musl` or `x86_64-unknown-linux-musl`) *inside* the same
 container (rustup + `musl-tools`, the recipe `build-binaries.yml`'s
-`build-exarch-linux-arm64` job already uses — no `cross-rs` container needed,
+musl jobs use — no `cross-rs` container needed,
 since neither binary pulls `jemalloc-sys` or a C dependency), and the build
 refuses either binary that is not a static binary of the guest's own
 architecture. `mke2fs` is the one non-Rust piece the initramfs carries: it is
@@ -446,14 +497,8 @@ The amd64 column earns its differences one at a time:
   writes the kernel command line, so `boot.img` is neutral about whether it is
   handed `console=hvc0` or `console=ttyS0`.
 
-Run it; outputs land in `vm-image/out/boot/` (swapped in whole, only on success):
-
-```sh
-./build-boot.sh                 # arm64, for Virtualization.framework
-ARCH=amd64 ./build-boot.sh      # x86_64, for Hyper-V
-just guest-boot                 # the same two, from the repo root
-just guest-boot amd64
-```
+Run it with `just vm::boot` (see *Building*); outputs land in
+`vm-image/out/boot/`, swapped in whole and only on success.
 
 The products are `kernel`, `initramfs.img`, a `.sha256` for each,
 `boot-manifest.txt` (the architecture, on its own leading line, plus the kernel
@@ -473,7 +518,7 @@ real artifacts, and confirm on stdout `ral-guest`'s own `eprintln` lines
 (`guest filesystems up`, `engine running as pid`), that `announce_root()`
 reports the session overlay rather than a fallback, and that the guest dials
 the host's vsock control port within `lifecycle::BOOT_TIMEOUT` (60 s). On Windows
-the same smoke-boot needs a machine with Hyper-V enabled (Pro, Education, or
+the same smoke boot (`just vm::smoke`) needs a machine with Hyper-V enabled (Pro, Education, or
 Enterprise — §2) and an elevated shell, since creating a machine through the
 Host Compute System API is an administrative act; the media itself is verified
 without booting either way (`verify.txt`).

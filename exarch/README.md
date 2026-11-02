@@ -20,7 +20,7 @@ Here the sovereign is the LLM and the province is the `grant`.
 On macOS or Linux:
 
 ```sh
-curl -fsSL https://lambdabetaeta.github.io/ral/scripts/exarch-install.sh | sh
+curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh -s exarch
 ```
 
 On Windows, in PowerShell:

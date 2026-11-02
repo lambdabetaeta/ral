@@ -391,6 +391,50 @@ mod tests {
             .map(|located| located.real().as_path().to_path_buf());
         assert!(absent.unwrap_err().to_string().contains("not found"));
     }
+
+    /// Every shipped plugin loads, alone, on the REPL's surface: `ral --check`
+    /// lacks the `_ed-*` builtins they call.
+    #[test]
+    fn every_shipped_plugin_loads() {
+        use crate::repl::host::ReplHost;
+        use ral_core::protocol::{Ending, Report};
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins");
+        let mut plugins: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "ral"))
+            .collect();
+        plugins.sort();
+        assert!(!plugins.is_empty(), "no plugins under {}", dir.display());
+
+        let failures: Vec<String> = plugins
+            .iter()
+            .filter_map(|plugin| {
+                let mut runtime = crate::repl::prelude_runtime();
+                runtime.install_builtins(crate::repl::ED_BUILTINS);
+                runtime.install_builtins(crate::repl::PLUGIN_LOAD_BUILTINS);
+                let t = crate::repl::in_temp::engine(runtime, |_| {});
+                let line = format!("load-plugin '{}'", ral_core::path::shown(plugin));
+                let run = crate::repl::exec::line_run(&line);
+                match ReplHost::new(std::sync::Arc::default())
+                    .dispatch(&t, run, None)
+                    .0
+                {
+                    Ok(Report::Ran {
+                        ending: Ending::Settled { .. },
+                        ..
+                    }) => None,
+                    Ok(Report::Ran {
+                        ending: Ending::Raised { rendered, .. },
+                        ..
+                    }) => Some(rendered),
+                    other => Some(format!("{}: {other:?}", plugin.display())),
+                }
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 }
 
 /// A plugin bench: an engine with a `record` sink and plugins whose hooks

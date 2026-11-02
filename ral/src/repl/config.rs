@@ -80,7 +80,7 @@ impl Datum for Surface {
 // ── Default RC skeleton ──────────────────────────────────────────────────
 
 const DEFAULT_RC: &str = "\
-# ~/.config/ral/rc — ral shell configuration
+# ~/.config/ral/rc: ral shell configuration
 #
 # This file must return a record, or `()` to leave everything at its default;
 # all keys are optional.  To customise, uncomment the `return [` … `]` block
@@ -110,7 +110,7 @@ const DEFAULT_RC: &str = "\
 
     # plugins: [
     #     zoxide:         [key: 'alt-z'],  # plugin name (or path) => its options
-    #     autosuggestion: [:],             # [:] — no options, the plugin's own defaults
+    #     autosuggestion: [:],             # [:]: no options, the plugin's own defaults
     # ],
 
     # startup: {

@@ -62,7 +62,7 @@ Two things that failure is not:
   — at the path `tauri.conf.json`'s resource map stages from, walked component by
   component so the refusal quotes something a person can paste — and hands it to
   `boot::check_media`. A mismatch is `exit(1)` with one sentence naming both
-  numbers, the manifest, and `just guest-boot`; a panic would bury that sentence
+  numbers, the manifest, and `just vm::boot`; a panic would bury that sentence
   under a location pointing at the wrong file. `ral-daemon` is therefore a
   **build** dependency of synod rather than an ordinary one: the comparison is
   the build's business and synod's own code never asks.

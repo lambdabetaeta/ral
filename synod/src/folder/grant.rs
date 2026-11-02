@@ -130,7 +130,7 @@ impl Grant {
     fn refuse_too_much(root: &RealPath, territory: &Territory) -> Result<(), String> {
         if root.is_root() {
             return Err(format!(
-                "{root} is the whole disk — every file on this computer. \
+                "{root} is the whole disk: every file on this computer. \
                  Choose the one folder that holds the documents for this job."
             ));
         }
@@ -141,7 +141,7 @@ impl Grant {
         if root.contains_folded(home) {
             return Err(if home.contains_folded(root) {
                 format!(
-                    "{} is your whole home folder — your entire computer's worth of files. \
+                    "{} is your whole home folder: your entire computer's worth of files. \
                      Choose the one folder that holds the documents for this job, \
                      such as {}.",
                     root,

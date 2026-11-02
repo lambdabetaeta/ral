@@ -1,6 +1,9 @@
 #!/bin/sh
-# Install ral on macOS or Linux.
+# Install ral (default) or exarch on macOS or Linux, from the newest versioned
+# release or a named one, e.g. the rolling `latest`.
 # Usage: curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh
+#        curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh -s exarch
+#        curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh -s ral latest
 #
 # Everything below is one function, called on the last line.  A script read
 # from a pipe is executed as it arrives, so a connection that dies mid-transfer
@@ -9,11 +12,22 @@
 set -eu
 
 REPO="lambdabetaeta/ral"
-TAG="latest"
 
 die() {
     echo "install.sh: $*" >&2
     exit 1
+}
+
+# github.com/$REPO/releases/latest 302s to the newest *versioned* release, not
+# the rolling release tagged `latest`.  Resolved once, so the archive and its
+# checksum come from the same release.
+latest_tag() {
+    final="$(curl -fsSL --proto '=https' --tlsv1.2 -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest")" || die "could not reach github.com/${REPO}"
+    case "$final" in
+        */tag/?*) echo "${final##*/tag/}" ;;
+        *) die "could not resolve the latest release tag for ${REPO}" ;;
+    esac
 }
 
 # The checksum published beside a release asset comes from the same origin as
@@ -38,40 +52,54 @@ verify() {
 }
 
 main() {
+    product="${1:-ral}"
+    case "$product" in
+        ral)    licenses="LICENSE-APACHE LICENSE-MIT NOTICE" ;;
+        exarch) licenses="LICENSE-APACHE LICENSE-MIT NOTICE LICENSE-EDTUI" ;;
+        *) die "unknown product: $product (expected ral or exarch)" ;;
+    esac
+
     command -v curl > /dev/null 2>&1 || die "curl is required"
     command -v tar > /dev/null 2>&1 || die "tar is required"
 
     os="$(uname -s)"
     arch="$(uname -m)"
     case "$os/$arch" in
-        Darwin/arm64)   artifact="ral-macos-arm64"   ;;
+        Darwin/arm64)   target="macos-arm64"   ;;
         Darwin/x86_64)
             echo "No native x86_64 macOS build; installing arm64 (needs Rosetta 2)."
-            artifact="ral-macos-arm64"
+            target="macos-arm64"
             ;;
-        Linux/x86_64)   artifact="ral-linux-x86_64"  ;;
-        Linux/aarch64)  artifact="ral-linux-arm64"   ;;
-        Linux/arm64)    artifact="ral-linux-arm64"   ;;
-        *) die "unsupported platform: $os $arch" ;;
+        Linux/x86_64)   target="linux-x86_64"  ;;
+        Linux/aarch64)  target="linux-arm64"   ;;
+        Linux/arm64)    target="linux-arm64"   ;;
+        *)
+            hint=""
+            if [ "$product" = exarch ]; then hint="; on Windows, use exarch-install.ps1"; fi
+            die "unsupported platform: $os $arch$hint"
+            ;;
     esac
 
+    tag="${2:-$(latest_tag)}"
+    artifact="${product}-${target}"
     archive="${artifact}.tar.gz"
-    url="https://github.com/${REPO}/releases/download/${TAG}/${archive}"
+    url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
 
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT INT TERM
 
-    echo "Downloading ${archive} from ${REPO} (${TAG})"
+    echo "Downloading ${archive} from ${REPO} (${tag})"
     curl -fL --proto '=https' --tlsv1.2 --progress-bar "$url" -o "$tmp/$archive"
     curl -fL --proto '=https' --tlsv1.2 --silent "$url.sha256" -o "$tmp/$archive.sha256"
 
     verify "$tmp/$archive" "$(cut -d ' ' -f 1 < "$tmp/$archive.sha256")"
     echo "Checksum OK."
-    tar -xzf "$tmp/$archive" -C "$tmp" "$artifact" LICENSE-APACHE LICENSE-MIT NOTICE
+    # shellcheck disable=SC2086 # $licenses is a word list
+    tar -xzf "$tmp/$archive" -C "$tmp" "$artifact" $licenses
 
-    data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/ral"
+    data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/${product}"
     mkdir -p "$data_dir"
-    for file in LICENSE-APACHE LICENSE-MIT NOTICE; do
+    for file in $licenses; do
         install -m 644 "$tmp/$file" "$data_dir/$file"
     done
 
@@ -84,17 +112,21 @@ main() {
 
     # In through the neighbouring name, then a rename within one directory —
     # which is atomic, and which, unlike writing through the path, does not
-    # fail with ETXTBSY when the ral being replaced is currently running: that
-    # process keeps the old inode and the next one gets the new.  The staging
-    # move may well cross a filesystem and copy; the move that matters cannot.
+    # fail with ETXTBSY when the binary being replaced is currently running:
+    # that process keeps the old inode and the next one gets the new.  The
+    # staging move may well cross a filesystem and copy; the move that matters
+    # cannot.
     chmod 755 "$tmp/$artifact"
-    staged="$dir/.ral.$$"
+    staged="$dir/.${product}.$$"
     mv "$tmp/$artifact" "$staged" || die "could not write to $dir"
-    mv "$staged" "$dir/ral" || { rm -f "$staged"; die "could not install into $dir"; }
-    echo "Installed $dir/ral"
-    # ral-sh is ral by another name: the POSIX bridge for chsh (SPEC §16.7).
-    ln -sfn ral "$dir/ral-sh"
-    echo "Linked $dir/ral-sh"
+    if [ "$os" = Darwin ]; then codesign -s - "$staged" 2> /dev/null || true; fi
+    mv "$staged" "$dir/$product" || { rm -f "$staged"; die "could not install into $dir"; }
+    echo "Installed $dir/$product"
+    if [ "$product" = ral ]; then
+        # ral-sh is ral by another name: the POSIX bridge for chsh (SPEC §16.7).
+        ln -sfn ral "$dir/ral-sh"
+        echo "Linked $dir/ral-sh"
+    fi
 
     case ":$PATH:" in
         *":$dir:"*) ;;
@@ -109,11 +141,20 @@ main() {
     esac
 
     echo
-    echo "ral is ready.  Run: ral"
-    echo "To make it your login shell, register the bridge and switch:"
-    echo
-    echo "  sudo sh -c 'echo $dir/ral-sh >> /etc/shells'"
-    echo "  chsh -s $dir/ral-sh"
+    case "$product" in
+        ral)
+            echo "ral is ready.  Run: ral"
+            echo "To make it your login shell, register the bridge and switch:"
+            echo
+            echo "  sudo sh -c 'echo $dir/ral-sh >> /etc/shells'"
+            echo "  chsh -s $dir/ral-sh"
+            ;;
+        exarch)
+            echo "exarch is ready.  The ral shell it runs on is built in; no separate install."
+            echo "Set a provider key in your environment, then run exarch from a project:"
+            echo "  ANTHROPIC_API_KEY=… exarch"
+            ;;
+    esac
 }
 
 main "$@"

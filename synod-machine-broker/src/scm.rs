@@ -55,7 +55,7 @@ pub(crate) fn start() {
     if unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) } == 0 {
         eprintln!(
             "synod machine broker: this program is a Windows service. Windows starts it; to run \
-             it by hand — which is how you watch a guest boot — pass --console."
+             it by hand, which is how you watch a guest boot, pass --console."
         );
         site!(Silent::DispatcherRefused, std::process::exit(1));
     }

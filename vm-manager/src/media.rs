@@ -11,7 +11,7 @@ use crate::error::{Act, Error, HostFile};
 use crate::site::{Silent, site};
 use crate::spec::BootArtifact;
 
-/// Matches vm-image/build.sh's --long=27; the default decoder limit is too small.
+/// Matches vm-image/build-rootfs.sh's --long=27; the default decoder limit is too small.
 pub const ROOTFS_WINDOW: u64 = 1 << 27;
 
 /// Inflate into an unpublished file, optionally verifying its SHA-256.

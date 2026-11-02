@@ -16,6 +16,8 @@ path = "src/main.rs"
 coreutils  = ["ral-core/coreutils"]
 diffutils  = ["ral-core/diffutils"]
 ripgrep    = ["ral-core/ripgrep", "dep:tikv-jemallocator"]
+# What every `-allutils` release and the Windows installer carry.
+allutils   = ["coreutils", "diffutils", "ripgrep"]
 
 [dependencies]
 ral-core  = { path = "../core" }

@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 5b17290a
+generated_at_commit: 1dc7c6e7
 ---
 
 # `ral-core` is `pub(crate)` by default, so `dead_code` can see
@@ -129,8 +129,7 @@ rather than being relabelled.
   clearly". The workspace had already decided in this change's favour.
 - **A narrowed item is dead per platform, so the cross-checks are load-bearing.**
   An item alive only on one platform reads as dead on the others, and the
-  workspace denies warnings, so `check-windows` / `check-macos` /
-  `check-linux` each named a set the host build cannot see. Thirty items
+  workspace denies warnings, so each cross-check (now `just check`) named a set the host build cannot see. Thirty items
   now carry `#[cfg_attr(not(<where it lives>), allow(dead_code))]`, the
   annotation this repo already used — one truthful sentence per item about
   where its callers are, in place of a blanket allow.

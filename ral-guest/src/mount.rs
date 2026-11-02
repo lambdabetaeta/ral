@@ -54,7 +54,7 @@ impl Mount {
         let socket = vsock::dial_host(port).map_err(|err| {
             format!(
                 "could not reach the host's 9p server for the granted folder on vsock port \
-                 {port}: {err}. The host serves the share `{name}` there — is `ral.plan9` the \
+                 {port}: {err}. The host serves the share `{name}` there; is `ral.plan9` the \
                  port the session manager published? (`ral.port` is the control plane, a \
                  different one.)"
             )

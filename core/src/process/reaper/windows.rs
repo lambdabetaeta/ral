@@ -7,7 +7,7 @@
 //! stays signalled, so by the time either calls `UnregisterWaitEx` the
 //! thread-pool callback has already fired (or is finishing) and freed its
 //! context — never cancelled unfired, which would leak it. Compile-checked
-//! only (`just check-windows`); the four real-child tests in `reaper::unix`
+//! only (`just check`); the four real-child tests in `reaper::unix`
 //! are this plan's whole cross-platform question, and Windows has no stop
 //! to test.
 

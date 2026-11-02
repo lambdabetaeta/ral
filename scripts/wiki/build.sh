@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build the ral/exarch wiki (docs/ral-wiki) into site/wiki/ with Quartz v5.
 #
-# Mirrors the "Build wiki" step in .github/workflows/pages.yml so you can preview
-# the published wiki locally.  Quartz is its own Node project, so we clone it
-# (pinned), drop in our config, and point its build at the wiki.
+# Run by .github/workflows/pages.yml, and locally to preview the published wiki.
+# Quartz is its own Node project, so we clone it (pinned), drop in our config,
+# and point its build at the wiki.
 #
 # Requires Node >= 22 and npm >= 10.9.2 (Quartz v5).  Pass --serve to live-preview
 # instead of writing into site/wiki/.

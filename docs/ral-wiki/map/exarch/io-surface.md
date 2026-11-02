@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 1dc7c6e7
 generated_at_date: 2026-11-01
 covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/stream.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
@@ -357,8 +357,7 @@ for what clippy cannot state.**
   `[workspace.lints.clippy] disallowed_methods = "deny"` table, which all ten
   crates opt into via `[lints] workspace = true`, which a test checks of every
   member; plain `cargo clippy
-  --workspace --all-targets` checks it (`scripts/ci.sh`'s `lint` step runs it on
-  the Unix hosts, `windows.yml`'s clippy step on Windows). A call is then a
+  --workspace --all-targets` checks it (`just lint`, which every platform leg of `ci.yml` runs). A call is then a
   typed site or a lint failure *in the crates that do not switch the lint off
   again at their own root*: `ral-guest/src/main.rs` carries a crate-level
   `#![allow(clippy::disallowed_methods, …)]` on the grounds of being a guest's

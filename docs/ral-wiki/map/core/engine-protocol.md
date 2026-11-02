@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 1dc7c6e7
 generated_at_date: 2026-11-01
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -67,7 +67,7 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 
 - `PROTOCOL_VERSION` (currently 34): checked at `Attach`; a mismatch refuses.
   `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
-  sequences; guest media must be rebuilt with `just guest-boot`.
+  sequences; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
   against the `proto_version=` line `media-manifest` compiles into the guest
   media; `check-media`, tauri's `beforeBuildCommand`, refuses to package media

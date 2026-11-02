@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 96e103a5
+generated_at_commit: 1dc7c6e7
 generated_at_date: 2026-11-01
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
@@ -205,7 +205,7 @@ folder and read-only flag
 - `scm.rs` owns service startup and `--console`, reporting RUNNING before
   serving. `synod/wix/broker-service.wxs` installs the LocalSystem service
   beside the application and boot media. Checkout helpers are
-  `just broker-install` and `just broker-uninstall`.
+  `just synod::broker-install` and `just synod::broker-uninstall`.
   Cargo declares the binary on every platform; off Windows it refuses to run.
 
 ## synod/src/ — five layers
@@ -224,7 +224,7 @@ and composes the desktop application.
 
 - Tauri, its plugins, `url`, L4 and the desktop `main` compile only for
   macOS or Windows. L0–L3 compile on Linux; its `main` prints a refusal.
-  `just lint-cross` is the dead-code authority for the lower layers.
+  `just check` is the dead-code authority for the lower layers.
 - `build.rs` calls `tauri_build::build` only for a desktop target;
   `tauri-build` is an unconditional build dependency. Generated permission
   schemas in `synod/gen/` are ignored build products.
@@ -543,7 +543,7 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   are vendored verbatim under `vendor/`, with
   versions and hashes there; hand-written `.d.ts` files type the three.js slice
   in use, since `deno check` cannot read the minified build.
-- `just ui-check` exports Rust bindings into ignored `ui/js/bindings/` and
+- `just ui` exports Rust bindings into ignored `ui/js/bindings/` and
   runs `deno check` on every platform where the recipe runs, including Linux.
   Exhaustive `never` switches catch unhandled Rust variants.
   Test workshops use canonical target paths: symlinked temp paths confuse grant
@@ -553,13 +553,18 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
 
 Boot compatibility is checked by the image tools before bundling.
 
-- `build.sh` constructs the office rootfs in a native arm64 or amd64
+- `common.sh` is the skeleton both builders source: host-derived architecture
+  (no override, no cross-building), mirror, podman and emulation check,
+  staging, and lock-then-swap publication.
+- `build-rootfs.sh` constructs the office rootfs in a native arm64 or amd64
   container: Ubuntu userland, document tools, ext4 and bounded-window zstd,
   with a checksum and package manifest. `vm-image/README.md` records the
   pipeline and remaining image questions.
 - `build-boot.sh` builds static musl `ral-guest` and exarch, packages PID 1
   as `/init`, and writes kernel, initramfs and `boot-manifest.txt`.
   It refuses kernels without `CONFIG_SECCOMP_FILTER` or `CONFIG_NET_NS`.
+  It keeps a persistent cargo cache and, under WSL, builds from an ext4 copy of
+  a drvfs checkout.
 - `build-tools/src/manifest.rs` owns `read`, `check` and `lines`.
   `media-manifest` compiles `boot_contract` and `proto_version` from their
   defining constants; `check-media` compares them. Present media without

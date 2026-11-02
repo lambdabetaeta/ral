@@ -5610,6 +5610,7 @@ dependencies = [
  "nucleo-matcher",
  "os_pipe",
  "postcard",
+ "proc-macro2",
  "ral-core",
  "ral-ripgrep-core",
  "regex",

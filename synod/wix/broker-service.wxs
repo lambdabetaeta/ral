@@ -79,7 +79,7 @@
                   service, whose image path is recorded in the registry at
                   install time and must be the name we shipped.  So the
                   fragment names the file cargo has already produced, which is
-                  why `just synod-msi` builds it on the line before it calls
+                  why `just synod::bundle` builds it on the line before it calls
                   Tauri at all.
 
                   The path is relative to neither this file nor the project.

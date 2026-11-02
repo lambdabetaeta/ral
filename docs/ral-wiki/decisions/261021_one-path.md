@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 6281520c
+generated_at_commit: 1dc7c6e7
 verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 verified_at_date: 2026-10-25
 anchors: [Trace, RealPath, Hold, Excluded, Dir, Located, walk, walk_excluded, GrantLayer, GrantPath, Extent, GrantStack::judge, rehold, Walk, AdmittedWalk, Shell::admitted_walk]
@@ -121,8 +121,7 @@ its authored form beside its resolution, and the two could disagree.
 
 The macOS and Windows code of this commit — the `macos` and `windows` host
 modules of `path/walk.rs` (step 1) and their tests — was cross-compiled only,
-on a Linux host: `just check-macos`, and `just check-windows` at full
-workspace scope. Neither has run on its host. The host-assertion tests that
+on a Linux host: `just check`, at full workspace scope. Neither has run on its host. The host-assertion tests that
 have not, by name:
 
 - macOS (`path/walk/tests/macos.rs`):
@@ -247,5 +246,5 @@ Two names of the deleted list remain at lexical boundaries:
 - `RealPath::rendered` (Linux only): the bwrap renderer walks a `Rendered` envelope name back to a position.
 - `FrozenPath::{lexical, of_real}`: a grant's written spelling enters the walk, and a launch's support files are shown as grant paths.
 
-The first green macOS `ci.yml` and `windows.yml` run on the landing commit
+The first green macOS and Windows legs of `ci.yml` on the landing commit
 discharges them; it is recorded here when it comes.

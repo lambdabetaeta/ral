@@ -56,7 +56,7 @@ pub(crate) fn select_account(
     let available = store.available();
     if available.is_empty() {
         return Err(
-            "no assistant account is set up on this computer — sign in with ChatGPT on the \
+            "no assistant account is set up on this computer: sign in with ChatGPT on the \
              opening screen, or ask whoever administers this computer to set a \
              provider API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
                 .into(),

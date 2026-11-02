@@ -1,0 +1,14 @@
+name: Site tools
+description: What `just site` needs beyond cargo; render-site.py has no highlighting fallback.
+runs:
+  using: composite
+  steps:
+    - name: Install tree-sitter CLI
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/bin"
+        curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.27.1/tree-sitter-linux-x64.gz \
+          | gunzip > "$RUNNER_TEMP/bin/tree-sitter"
+        chmod +x "$RUNNER_TEMP/bin/tree-sitter"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+    - uses: astral-sh/setup-uv@v10.0.1

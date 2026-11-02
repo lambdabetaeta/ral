@@ -169,7 +169,7 @@ fn entered(root: &WalkEntry, named: &Path) -> Result<(), String> {
             why: Unentered::Refused(e),
             ..
         } if e.kind() == io::ErrorKind::NotFound => Err(format!(
-            "Synod could not find {} any more — has the folder been moved, renamed, \
+            "Synod could not find {} any more; has the folder been moved, renamed, \
              or unplugged?",
             shown(named)
         )),
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(
             seen,
             vec![1, 2],
-            "one progress call per file — never per folder, never per byte"
+            "one progress call per file; never per folder, never per byte"
         );
     }
 

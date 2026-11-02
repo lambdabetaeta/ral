@@ -72,7 +72,7 @@ pub(crate) fn control_plane(port: u32) -> Result<OwnedFd, String> {
                     return Err(format!(
                         "could not reach the host's control plane on vsock port {port} after \
                          {}s: {err}. The host must be listening on that port before the guest \
-                         boots — is `ral.port` the port the session manager published?",
+                         boots; is `ral.port` the port the session manager published?",
                         PATIENCE.as_secs()
                     ));
                 }

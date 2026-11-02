@@ -3,11 +3,11 @@
 # The guest reaches the network only through the host's allowlist (§6), and
 # nothing it installs survives the reboot — so this list is what an agent may
 # *rely* on, and everything else is a fetch it has to justify and redo. One
-# package per line; comments and blank lines are stripped by build.sh. Groups
+# package per line; comments and blank lines are stripped by build-rootfs.sh. Groups
 # mirror §7's rationale.
 #
 # Universe components are required (csvkit, ripgrep, tesseract language data,
-# the metric-compatible fonts, some python3-* bindings); build.sh enables
+# the metric-compatible fonts, some python3-* bindings); build-rootfs.sh enables
 # main,universe. Nothing here pulls a compiler — verified against the manifest.
 
 # --- LibreOffice, headless (docx/xlsx/pptx read + write + convert) ---

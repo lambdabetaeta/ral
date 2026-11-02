@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e82dee76
+generated_at_commit: 1dc7c6e7
 generated_at_date: 2026-10-29
 ---
 
@@ -208,7 +208,7 @@ the packaging check and the attach handshake and fails decoding the first
 dispatch. **`PROTOCOL_VERSION` is 34.** `Capabilities` carries an authored
 `ExecGrant` as `every`, `allow` and `deny`: the two sets encode as sequences,
 omitted sets default to empty, and unknown fields are refused. A key may occur
-in both sets. Rebuild guest media with `just guest-boot`. A `Fragment` never
+in both sets. Rebuild guest media with `just vm::boot`. A `Fragment` never
 crosses: it lives only between loading and `extend`.
 
 ## The laws of an enquiry

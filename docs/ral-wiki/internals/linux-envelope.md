@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bb5bc1a6
+generated_at_commit: 1dc7c6e7
 verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 verified_at_date: 2026-10-26
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
@@ -316,7 +316,7 @@ Pinned by `authority::sandbox::linux::tests::render::the_launcher_is_the_pinned_
 
 ## Exercising the envelope
 
-CI runs both Linux architectures in `ral-linux-box`, built with the runner's
-UID and GID so its non-root user can write fixtures in the mounted checkout.
-`scripts/ci.sh` supplies the same privileged envelope and tmpfs `/tmp` locally;
-the policy fixtures outside admitted roots remain outside `/tmp`.
+CI runs both Linux architectures on bare runners, musl target, with
+`RAL_REQUIRE_SANDBOX` set. Locally `just box lint test` runs the same recipes in
+`ral-linux-box` under a privileged envelope and a tmpfs `/tmp`; the policy
+fixtures outside admitted roots remain outside `/tmp`.

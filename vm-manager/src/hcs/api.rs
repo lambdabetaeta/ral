@@ -67,7 +67,7 @@ impl Api {
             Error::backend(
                 HYPERVISOR,
                 "this computer has no computecore.dll, the Windows component that creates \
-                 virtual machines — the Virtual Machine Platform feature is not installed",
+                 virtual machines; the Virtual Machine Platform feature is not installed",
             )
         })?;
         // Windows 11 exports these in computecore; documentation names computestorage, so probe both.
@@ -334,7 +334,7 @@ fn bind<T>(module: HMODULE, name: &std::ffi::CStr) -> Result<T, Error> {
         Error::backend(
             HYPERVISOR,
             format!(
-                "this computer's Host Compute System library has no {} — its Virtual Machine \
+                "this computer's Host Compute System library has no {}; its Virtual Machine \
              Platform is too old for synod",
                 name.to_string_lossy()
             ),

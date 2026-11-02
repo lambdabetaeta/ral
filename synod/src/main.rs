@@ -10,7 +10,7 @@
         dead_code,
         unused_imports,
         clippy::unused_self,
-        reason = "only the macOS/Windows window calls L0–L3; `just lint-cross` is the dead-code authority"
+        reason = "only the macOS/Windows window calls L0–L3; `just check` is the dead-code authority"
     )
 )]
 

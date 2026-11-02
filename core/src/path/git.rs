@@ -312,23 +312,23 @@ mod tests {
 
     #[test]
     fn common_dir_reads_the_named_directory_against_the_git_dir() {
-        let git_dir = Path::new("/r/.git/worktrees/w");
+        let root = std::env::temp_dir();
+        let repo = root.join("r").join(".git");
+        let git_dir = repo.join("worktrees").join("w");
+        let common = root.join("common");
+        let abs = format!("{}\n", common.display());
         for (commondir, expect) in [
-            (Some("../..\n"), "/r/.git"),
-            (Some("/abs/common\n"), "/abs/common"),
-            (Some("\n"), "/r/.git/worktrees/w"),
-            (None, "/r/.git/worktrees/w"),
+            (Some("../..\n"), &repo),
+            (Some(abs.as_str()), &common),
+            (Some("\n"), &git_dir),
+            (None, &git_dir),
         ] {
             let read = |_: &LexicalPath| -> io::Result<String> {
                 commondir
                     .map(str::to_string)
                     .ok_or_else(|| io::ErrorKind::NotFound.into())
             };
-            assert_eq!(
-                common_dir(git_dir, read),
-                Path::new(expect),
-                "{commondir:?}"
-            );
+            assert_eq!(common_dir(&git_dir, read), *expect, "{commondir:?}");
         }
     }
 }

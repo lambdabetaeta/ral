@@ -1,14 +1,12 @@
 #!/usr/bin/env ral
 
-# install-treesitter.ral — generate, compile, and install the ral tree-sitter
+# install-nvim.ral — generate, compile, and install the ral tree-sitter
 # parser and highlight queries for nvim.
 #
 # Prerequisites: tree-sitter CLI, cc, nvim-treesitter configured for ral.
 # Run after any change to grammar.js or highlights.scm.
 
-let here        = dir $SCRIPT
-let repo_root   = resolve-path "$here/.."
-let ts_dir      = "$repo_root/editors/tree-sitter-ral"
+let ts_dir      = resolve-path "!{dirname $SCRIPT}/tree-sitter-ral"
 let parser_dir  = "~/.local/share/nvim/site/parser"
 let queries_dir = "~/.config/nvim/queries/ral"
 

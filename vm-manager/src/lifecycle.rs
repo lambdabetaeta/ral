@@ -171,7 +171,7 @@ impl Drop for SessionDisk {
         if let Err(why) = outcome {
             if disk_removed {
                 eprintln!(
-                    "synod: the session directory {} could not be deleted — {why}. The session \
+                    "synod: the session directory {} could not be deleted: {why}. The session \
                      disk is gone; you may delete the directory yourself",
                     aside_spelling(&self.dir),
                 );
@@ -180,7 +180,7 @@ impl Drop for SessionDisk {
             let bytes = site!(Silent::SessionDiskMeasure, fs::metadata(&self.disk))
                 .map_or(0, |file| file.len());
             eprintln!(
-                "synod: the session disk {} could not be deleted after {}s — {why}. It is {} MiB that \
+                "synod: the session disk {} could not be deleted after {}s: {why}. It is {} MiB that \
                  nothing will ever read again; the next backend to start sweeps up disks \
                  like it once they are an hour old, or you may delete it yourself",
                 aside_spelling(&self.disk),
@@ -236,7 +236,7 @@ pub(crate) fn sweep(parent: &Path) {
     }
     if swept > 0 {
         eprintln!(
-            "synod: {swept} session disk(s) from earlier runs were still in {} — deleted, {} MiB back",
+            "synod: {swept} session disk(s) from earlier runs were still in {}; deleted, {} MiB back",
             aside_spelling(parent),
             reclaimed / (1024 * 1024),
         );

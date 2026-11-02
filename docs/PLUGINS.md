@@ -394,7 +394,7 @@ return [env: [EDITOR: 'nvim']]
 ## 9 Examples
 
 The plugins shipped in `plugins/` are the working examples, and each is
-loaded in CI (`just plugins-check`).
+loaded in CI (`just test`).
 
 - `autosuggestion.ral`: fish-style ghost text from history, one
   `buffer-change` hook over `_ed-get`, `_ed-history`, and `_ed-ghost`.

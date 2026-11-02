@@ -296,15 +296,15 @@ impl fmt::Display for Worded<'_> {
         let spell = self.spell;
         match self.error {
             Error::NoBackend => f.write_str(
-                "this computer cannot run synod's virtual machine — it starts on an Apple Silicon \
+                "this computer cannot run synod's virtual machine: it starts on an Apple Silicon \
                  Mac, or on Windows with the Virtual Machine Platform",
             ),
             Error::Unentitled => f.write_str(
                 "this copy of synod is not signed with the entitlement it needs to start a virtual \
-                 machine — ask whoever installed synod for a properly signed build",
+                 machine; ask whoever installed synod for a properly signed build",
             ),
             Error::NotPermitted => f.write_str(
-                "synod is not allowed to create virtual machines on this computer — ask whoever \
+                "synod is not allowed to create virtual machines on this computer; ask whoever \
                  administers this computer to add this account to the computer's 'Hyper-V \
                  Administrators' group, or to install synod with its own installer, which \
                  registers a service that holds that one privilege so the application does not \
@@ -339,7 +339,7 @@ impl fmt::Display for Worded<'_> {
             Error::NoGuestImage { looked_in } => write!(
                 f,
                 "no guest image in {}; an installation puts it there; a checkout builds it \
-                 with `just guest-boot` and `just guest-rootfs`.",
+                 with `just vm::boot` and `just vm::rootfs`.",
                 looked_in
                     .iter()
                     .map(|path| spell(path))
@@ -348,7 +348,7 @@ impl fmt::Display for Worded<'_> {
             ),
             Error::CorruptGuestImage { archive } => write!(
                 f,
-                "the guest image unpacked from {} did not match its checksum — the download is corrupt",
+                "the guest image unpacked from {} did not match its checksum; the download is corrupt",
                 spell(archive)
             ),
             Error::HostFile {
@@ -415,7 +415,7 @@ impl fmt::Display for Worded<'_> {
             Error::VersionSkew { client, service } => write!(
                 f,
                 "synod and its machine service are different versions (synod speaks {client}, the \
-                 service speaks {service}) — ask whoever administers this computer to install \
+                 service speaks {service}); ask whoever administers this computer to install \
                  them together"
             ),
             Error::NotConstructed {
@@ -453,7 +453,7 @@ impl fmt::Display for Worded<'_> {
             } => write!(
                 f,
                 "the guest did not shut down within {grace_secs}s, so {hypervisor} stopped the \
-                 machine for it — anything it had not finished writing to the folder may be \
+                 machine for it; anything it had not finished writing to the folder may be \
                  missing"
             ),
             Error::Backend { hypervisor, why } => write!(f, "{hypervisor}: {why}"),
@@ -480,12 +480,12 @@ fn console_says(
         write!(
             f,
             "The guest said nothing at all on its console, so it never got as far as a first \
-             message — {kept}"
+             message: {kept}"
         )
     } else {
         write!(
             f,
-            "The guest's last words on its console were {} — {kept}",
+            "The guest's last words on its console were {}: {kept}",
             quoted(tail)
         )
     }

@@ -27,7 +27,7 @@ pub(crate) fn assemble(workspace: &Path, folder_name: &str) -> Result<String, St
     sections.push((
         Some("The folder"),
         format!(
-            "{}\nThe folder granted for this session is mounted at `{}`; outside it there is only the scratch space named under Host. To the user this folder is `{folder_name}` — speak of it by that name, never by its mounted path.\n",
+            "{}\nThe folder granted for this session is mounted at `{}`; outside it there is only the scratch space named under Host. To the user this folder is `{folder_name}`; speak of it by that name, never by its mounted path.\n",
             include_str!("../../data/folder.md"),
             shown(workspace)
         ),
@@ -61,7 +61,7 @@ fn host_section(workspace: &Path) -> String {
     }
     let _ = writeln!(s, "- cwd: {}", shown(workspace));
     format!(
-        "{s}\n{}- scratch: `${}` = {} — this machine's own temporary space, gone when the conversation ends\n",
+        "{s}\n{}- scratch: `${}` = {}; this machine's own temporary space, gone when the conversation ends\n",
         exarch::prompt::GRANT_PLACEHOLDER,
         exarch::app::SCRATCH_VAR,
         exarch::prompt::SCRATCH_PLACEHOLDER

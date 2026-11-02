@@ -1,17 +1,6 @@
 name: CI
-# The step list is scripts/ci.sh, the same one `just ci` and `just linux-ci`
-# run, and its steps are justfile recipes.  This file only provisions each
-# runner: what the cargo steps run in, the site toolchain render-site.py
-# needs, and `just` itself.
-#
-# Three legs.  Both Linux ones run `linux-box`, musl as every Linux artefact
-# ships, so each architecture's seccomp filter executes rather than merely
-# compiles.  synod's library builds on every leg; macOS runs `native` to
-# exercise Seatbelt and build synod's window.  Windows is windows.yml's.
-#
-# Runs on push to main, on pull requests, on a `v*` tag and on manual dispatch.
-# Cross-target release builds live in build-binaries.yml (same tags); the
-# Windows job in windows.yml, which runs on the same events bar tags.
+# Every platform runs the same `just lint test`; one more job runs the
+# platform-independent `just docs ui` once.
 on:
   push:
     branches: [main]
@@ -20,95 +9,68 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A newer push to the same ref supersedes the run in flight.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  RAL_REQUIRE_SANDBOX: '1'
 
 jobs:
-  check:
+  platform:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    # One platform's red must not hide another's.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux-x86_64
             os: ubuntu-latest
-            mode: linux-box
-            tree_sitter: linux-x64
           - name: linux-arm64
             os: ubuntu-24.04-arm
-            mode: linux-box
-            tree_sitter: linux-arm64
           - name: macos-arm64
             os: macos-latest
-            mode: native
-            tree_sitter: macos-arm64
+          - name: windows-x86_64
+            os: windows-latest
     steps:
       - uses: actions/checkout@v7
+      - run: rustup toolchain install
 
-      # A bare runner's unprivileged bwrap path is unreliable (AppArmor userns
-      # denial, then a mount-layer /dev fault no policy fixes), so every cargo
-      # step runs privileged inside this image — exactly what `just linux-ci`
-      # does locally.
-      # Ubuntu 24.04 runners deny unprivileged user namespaces by default, and
-      # that denial is the host kernel's, so `--privileged` does not lift it:
-      # bwrap, run as the image's non-root user, dies at "setting up uid map".
-      - name: Allow unprivileged user namespaces
-        if: matrix.mode == 'linux-box'
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Musl, as every Linux release ships.  Ubuntu denies unprivileged user
+      # namespaces by default, and bwrap needs one.
+      - name: Prepare Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap musl-tools
+          rustup target add "$(uname -m)-unknown-linux-musl"
+          echo "CARGO_BUILD_TARGET=$(uname -m)-unknown-linux-musl" >> "$GITHUB_ENV"
+          # jemalloc on arm64 musl: see scripts/linux-box.Dockerfile.
+          echo "CFLAGS_aarch64_unknown_linux_musl=-mno-outline-atomics" >> "$GITHUB_ENV"
 
-      # `just` on the runner itself: it builds the image, and scripts/ci.sh
-      # then runs every step as a recipe (the cargo ones through that image).
+      - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v4
 
-      - name: Build the Linux sandbox image
-        if: matrix.mode == 'linux-box'
-        run: just linux-box "$(id -u)" "$(id -g)"
+      - run: just lint
+      - run: just test
 
-      # `native` runs cargo on the runner itself.  An explicit step, so
-      # installing rust-toolchain.toml's channel, components and targets is not
-      # the first cargo call's.
-      - name: Install toolchain
-        if: matrix.mode == 'native'
-        run: rustup toolchain install
-
-      # `just check-windows`: cargo-xwin wants clang and lld on PATH, both
-      # keg-only (the recipe's comment gives the same host setup).
-      - name: Install the Windows cross-check's tools
-        if: matrix.mode == 'native'
-        run: |
-          brew install llvm lld
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
-
-      - uses: taiki-e/install-action@v2
-        if: matrix.mode == 'native'
-        with:
-          tool: cargo-xwin
-
-      # `just ui-check` type-checks synod's renderer with deno.
+  common:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
       - uses: denoland/setup-deno@v2
-        if: matrix.mode == 'native'
         with:
           deno-version: v2.x
+      - uses: ./.github/actions/site-tools
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
 
-      # tree-sitter CLI (prebuilt binary): render-site.py has no highlighting
-      # fallback, so this is load-bearing, not optional.  Mirrors pages.yml.
-      - name: Install tree-sitter CLI
-        run: |
-          mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.27.1/tree-sitter-${{ matrix.tree_sitter }}.gz \
-            | gunzip > "$RUNNER_TEMP/bin/tree-sitter"
-          chmod +x "$RUNNER_TEMP/bin/tree-sitter"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-
-      - uses: astral-sh/setup-uv@v10.0.1
-
-      - name: Lint, build, test, site, examples
-        run: scripts/ci.sh ${{ matrix.mode }}
+      - run: just docs ui

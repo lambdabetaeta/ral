@@ -13,8 +13,8 @@ pub const BOOT_CONSEQUENCE: &str = "The `ral.` settings the two ends agree on ar
 pub const PROTO_CONSEQUENCE: &str = "That engine would refuse this host's attach and close the connection, and the \
     conversation would fail to start with nothing but a closed socket to show for it.";
 
-const REMEDY: &str = "Rebuild the media from this checkout: `just guest-boot amd64` for the \
-                      Windows guest, `just guest-boot` for the Mac's; then package again.";
+const REMEDY: &str = "Rebuild the media from this checkout on the machine that will boot it: \
+                      `just vm::boot`; then package again.";
 
 pub fn lines() -> String {
     format!(

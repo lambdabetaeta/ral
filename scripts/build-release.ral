@@ -1,56 +1,32 @@
 #!/usr/bin/env ral
 
-# build-release.ral — build the release matrix inside docker images
-# and publish to lambdabetaeta/ral's `latest` prerelease via `gh`.
-# Used when GitHub Actions minutes are exhausted.  Commit and push
-# to ral's main branch first so public HEAD matches the binaries
-# this script is about to attach.
-#
-# Windows artifacts are not built here: they are produced exclusively by
-# GitHub Actions on windows-latest (see .github/workflows/build-binaries.yml),
-# the one MSVC ABI that ships — a Linux docker host cannot link MSVC binaries
-# (no Windows SDK/CRT import libraries), and the MinGW cross target this
-# script used to build was dropped along with x86_64-pc-windows-gnu.
+# Offline fallback for build-binaries.yml: builds the Unix release matrix and
+# republishes the `latest` prerelease via `gh`.  Push first, so public HEAD
+# matches the binaries.  Windows and synod are built only by Actions.
 #
 # Flags:
-#   --linux          include the Linux musl matrix
-#   --macos          include macOS artifacts (host cargo, Darwin only)
-#   --all            shorthand for --linux --macos
-#                    if no target flag is given, behaves as --all
-#   --local          dev-loop: build just for the host, no docker, no publish
+#   --linux          include the Linux musl matrix (docker)
+#   --macos          include macOS (host cargo, Darwin only)
+#   --all            shorthand for --linux --macos; the default if no target flag
+#   --local          build for the host only: no docker, no publish
 #   --skip-publish   build artifacts only, no tag move or gh release
 #   --clean-builds   wipe the cache and artifact dirs (keeps docker images)
 #   --clean-images   remove the cross-compile docker images
 #   --clean          both of the above
 #   --dry-run        print what would happen, do not run
 #
-# Build strategy:
-#   Linux    — docker, messense/rust-musl-cross, static musl binaries
-#   macOS    — host cargo (Linux images lack osxcross); only runs on Darwin,
-#              produces the native slice only.  Ad-hoc codesigned.
+# Linux builds in messense/rust-musl-cross images.  macOS has no cross image,
+# so host cargo builds the host's own architecture only, ad-hoc codesigned.
 #
-# Artifacts land in  target/release-artifacts/:
-#   ral-linux-x86_64[-allutils]      ral-linux-arm64[-allutils]
-#   ral-macos-{arm64,x86_64}[-allutils]
-#   exarch-linux-{x86_64,arm64}      exarch-macos-{arm64,x86_64}
-#   Each name above ships as <name>.tar.gz with legal files.
-#   <name>.tar.gz.sha256 accompanies each archive.
+# target/release-artifacts/, each name as <name>.tar.gz plus <name>.tar.gz.sha256:
+#   ral-linux-{x86_64,arm64}[-allutils]   exarch-linux-{x86_64,arm64}
+#   ral-macos-<host arch>[-allutils]      exarch-macos-<host arch>
 #
-# exarch is built without the `coreutils,diffutils,ripgrep` features
-# (those belong to ral).  This script only builds the Unix matrix (Linux +
-# macOS, the two ABIs a Linux docker host / a Darwin host can produce);
-# GHA's windows-latest runner builds and publishes the Windows exarch
-# artifact separately (see .github/workflows/build-binaries.yml).
-#
-# Build caches in   target/release-cache/:
-#   registry/        shared cargo registry (mounted into every docker run)
-#   rustup/          shared rustup state — so the pinned toolchain does
-#                    not re-download on every container start
-#   <triple>/        per-triple cargo target dir
-#   target-host/     host cargo target for --local
-#   target-macos/    host cargo target for --macos
-#
-# Both dirs are removed by --clean.
+# target/release-cache/:
+#   registry/, rustup/   shared by every docker run
+#   <triple>/            per-triple cargo target dir
+#   target-host/         host cargo target for --local
+#   target-macos/        host cargo target for --macos
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -58,9 +34,7 @@ let has = { |x list|
     fold { |acc y| if $acc { return true } else { return $[$y == $x] } } false $list
 }
 
-# Normalize `uname -s` / `uname -m` into the names used by the artifact
-# matrix.  Keeps `--local` and `--macos` aligned with the matrix so a
-# local build produces the same filename a published one would.
+# `uname` spellings to artifact-name spellings.
 let norm_os = { |s|
     if $[$s == 'Darwin'] { return 'macos' } else { return !{lower $s} }
 }
@@ -73,7 +47,7 @@ let flags = ['--linux', '--macos', '--all', '--local',
              '--dry-run']
 let known = [...$flags, '-h', '--help']
 
-# Help first, so `--help --whatever` still prints help instead of erroring.
+# Before the unknown-argument check, so `--help --whatever` still prints help.
 if $[!{has '-h' !{args}} || !{has '--help' !{args}}] {
     let usage = map { |f| return "[$f]" } $flags
     echo 'build-release.ral' ...$usage
@@ -94,9 +68,6 @@ let want_clean_builds = $[!{has '--clean-builds' !{args}} || !{has '--clean' !{a
 let want_clean_images = $[!{has '--clean-images' !{args}} || !{has '--clean' !{args}}]
 let want_clean        = $[$want_clean_builds || $want_clean_images]
 
-# Inclusion semantics: a target is built if it was named, or if --all was
-# passed, or if no target flag was given at all (bare invocation defaults
-# to everything).  macOS is further gated on a Darwin host below.
 let any_target  = $[$want_linux || $want_macos]
 let default_all = if $any_target { return $want_all } else { return true }
 let build_linux   = $[$want_linux   || $default_all]
@@ -106,24 +77,16 @@ let repo_root    = resolve-path "!{dirname $SCRIPT}/.."
 let artifact_dir = "$repo_root/target/release-artifacts"
 let cache_dir    = "$repo_root/target/release-cache"
 
-# Cross-compile docker images.  Platform pinned to linux/amd64 because the
-# cross images ship amd64 only; Rosetta emulates on Apple Silicon.
-#
-# musl images are pulled as-is — messense bundles the rust toolchain.
+# The cross images ship amd64 only (run under Rosetta on Apple Silicon).
 let musl_x86     = 'messense/rust-musl-cross:x86_64-musl'
 let musl_arm     = 'messense/rust-musl-cross:aarch64-musl'
 let pull_images  = [$musl_x86, $musl_arm]
 
-# Feature sets spread into `cargo build` via `...$feats`.  `plain` is an
-# empty list (passes no extra flags); `allutils` adds the bundled utilities.
 let plain    = []
-let allutils = ['--features', 'coreutils,diffutils,ripgrep']
+let allutils = ['--features', 'allutils']
 
-# Host-cargo build: shared between --local and --macos.  Identifiers in
-# ral contain dashes, so "$os-$arch" would parse as looking up $os-;
-# assemble names with `join` instead.  `sign` toggles the ad-hoc codesign
-# that macOS needs and Linux has no analogue for.  `pkg` is the cargo
-# package name (`-p`); the binary in `target/release/` shares the name.
+# Shared by --local and --macos.  Names are built with `intercalate`: "$os-$arch"
+# would parse as looking up `$os-`.  `sign` ad-hoc codesigns, as macOS requires.
 let host_build = { |target pkg name feats sign|
     echo ''
     echo "!{styled cyan '==>'} !{styled yellow $name} !{styled dim '(host cargo)'}"
@@ -139,19 +102,15 @@ let host_variants_ral = { |target os arch sign|
     host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch]}             $plain $sign
     host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch, 'allutils']} $allutils $sign
 }
-# exarch has no allutils variant — `coreutils,diffutils,ripgrep` are ral
-# features.  Single binary per (os, arch).
+# exarch has no allutils variant: `allutils` is a ral feature.
 let host_variants_exarch = { |target os arch sign|
     host_build $target 'exarch' !{intercalate '-' ['exarch', $os, $arch]} $plain $sign
 }
 
-# The script body as a thunk.  Written without dry-run awareness; the
-# handler installed below intercepts every command when --dry-run is set.
+# A thunk, so --dry-run can run it under a handler that prints every command.
 let main = {
 
-    # --clean-builds wipes on-disk caches; --clean-images removes the
-    # cross-compile docker images; --clean does both.  Must come before
-    # mkdir so we don't recreate what we're about to remove.
+    # Before the mkdirs, which would recreate what is being removed.
     if $want_clean_builds {
         for [$artifact_dir, $cache_dir] { |d|
             if !{exists $d} {
@@ -174,10 +133,6 @@ let main = {
     mkdir -p "$cache_dir/rustup"
     mkdir -p "$cache_dir/binaries"
 
-    # --local short-circuits: build for the host with host cargo and exit.
-    # No docker, no cross-compilation, no publish — the dev-loop answer to
-    # "give me a binary I can run right now".  Uses the same sanctioned
-    # host-cargo concession as --macos.
     if $want_local {
         host_variants_ral    "$cache_dir/target-host" !{norm_os !{uname -s}} !{norm_arch !{uname -m}} false
         host_variants_exarch "$cache_dir/target-host" !{norm_os !{uname -s}} !{norm_arch !{uname -m}} false
@@ -186,8 +141,6 @@ let main = {
         exit 0
     }
 
-    # Build matrix.  Cargo target dir is per-triple so sysroots do not thrash
-    # each other; the registry is shared.
     let matrix = [
         [include: $build_linux,   pkg: 'ral',    img: $musl_x86, triple: 'x86_64-unknown-linux-musl',  bin: 'ral',     out: 'ral-linux-x86_64',           feats: $plain],
         [include: $build_linux,   pkg: 'ral',    img: $musl_x86, triple: 'x86_64-unknown-linux-musl',  bin: 'ral',     out: 'ral-linux-x86_64-allutils',  feats: $allutils],
@@ -197,18 +150,7 @@ let main = {
         [include: $build_linux,   pkg: 'exarch', img: $musl_arm, triple: 'aarch64-unknown-linux-musl', bin: 'exarch',  out: 'exarch-linux-arm64',         feats: $plain],
     ]
 
-    # Prewarm the cross-compile images in parallel.  `docker run` would pull
-    # serially per-invocation otherwise; on a cold cache the two pulls
-    # overlap and finish in roughly the time of the largest.  `docker pull`
-    # on an already-present image is effectively a HEAD, so it's cheap to
-    # always do this even when one triple is --skip'd.
-    #
-    # `watch LABEL { ... }` spawns the block and streams its stdout/stderr
-    # line-by-line with `[LABEL] ` / `[LABEL:err] ` prefixes, so the
-    # concurrent jobs stay legible when their output interleaves.
-    #
-    # Skipped entirely when only macOS is being built, since no cross image
-    # is involved.
+    # Pull both images concurrently rather than serially inside `docker run`.
     if $build_linux {
         echo ''
         echo "!{styled cyan '==>'} preparing cross-compile images"
@@ -239,23 +181,19 @@ let main = {
         }
     }
 
-    # macOS — the sanctioned host-cargo exception.  Linux docker has no
-    # osxcross, so cross-compilation needs the host toolchain.
     if $build_macos {
         let kernel = uname -s
         if $[$kernel == 'Darwin'] {
             host_variants_ral    "$cache_dir/target-macos" 'macos' !{norm_arch !{uname -m}} true
             host_variants_exarch "$cache_dir/target-macos" 'macos' !{norm_arch !{uname -m}} true
         } else {
-            # Only warn when the user explicitly asked for macOS; otherwise
-            # (--all / bare default on a non-Darwin host) silently skip.
+            # Silent under --all or the default; warn only when asked for.
             if $want_macos {
                 warn "!{styled red "  --macos requested but host is $kernel; skipping"}"
             }
         }
     }
 
-    # Checksums.
     echo ''
     echo "!{styled cyan '==>'} sha256 checksums"
     for !{list-dir $artifact_dir} { |e|
@@ -286,11 +224,7 @@ let main = {
         let notes = "Built locally !{date -u +%Y-%m-%dT%H:%M:%SZ} from !{git rev-parse --short HEAD}"
         let archives = filter { |e| return !{re-match '\.tar\.gz(\.sha256)?$' $e[name]} } !{list-dir $artifact_dir}
         let files = map { |e| return "$artifact_dir/$e[name]" } $archives
-        # Wipe and recreate.  --cleanup-tag drops the latest tag too,
-        # so the new `gh release create` picks up the current HEAD
-        # rather than pinning to a stale tag.  This is the offline
-        # fallback for when GHA can't run; push your commit first so
-        # the published HEAD matches these binaries.
+        # --cleanup-tag, so the new release tags the current HEAD.
         gh release delete latest --repo lambdabetaeta/ral --yes --cleanup-tag ? {}
         gh release create latest --repo lambdabetaeta/ral --title 'Latest Build' --prerelease --notes $notes ...$files
     }
@@ -299,8 +233,6 @@ let main = {
     echo "!{styled green '  Done.'}  https://github.com/lambdabetaeta/ral/releases/tag/latest"
 }
 
-# --dry-run: install a catch-all handler that prints every command instead
-# of executing it.  Otherwise just run the script.
 if $dry_run {
     within [handler: { |name argv| echo "!{styled dim "+ $name"}" ...$argv }] $main
 } else { !$main }

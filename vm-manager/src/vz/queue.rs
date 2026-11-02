@@ -87,7 +87,7 @@ pub(super) fn dial(
             Err(IoError::new(
                 ErrorKind::TimedOut,
                 format!(
-                    "nothing in the guest answered a dial to port {port} within {}s — a guest \
+                    "nothing in the guest answered a dial to port {port} within {}s; a guest \
                      with nothing bound there refuses within milliseconds, so a silence this \
                      long means the machine never delivered the dial at all",
                     GUEST_DIAL_PATIENCE.as_secs()

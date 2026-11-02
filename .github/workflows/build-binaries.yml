@@ -1,22 +1,5 @@
 name: Build Binaries
-# Builds the release matrix and publishes it to this repo.
-# Lives on the public lambdabetaeta/ral repo.
-#
-#   * workflow_dispatch (manual button) → rolling `latest` prerelease
-#   * push of a `v*` tag                → versioned, non-prerelease
-#
-# What a release carries: a licensed archive for every Linux and macOS target,
-# and on Windows an installer instead — `packaging/wix/ral.wxs` argues why a
-# copied .exe is the wrong shape there.  The Windows build still happens, but
-# it is the MSI's payload rather than an asset of its own.
-#
-# Synod is a third shape again: not an executable at all but an application
-# carrying a guest operating system, so it ships only as an installer, and the
-# installer cannot be built where the executables are.  The guest image must be
-# built on a host of the guest's OWN architecture (vm-image/README.md: the
-# build executes guest binaries under chroot), while the bundle must be built
-# on the platform it installs onto.  Hence a Linux job per architecture that
-# builds the image, and a bundle job per platform that consumes it.
+# Rolling `latest` prerelease on manual dispatch; a versioned release on a `v*` tag.
 on:
   push:
     tags:
@@ -24,31 +7,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  # One job per artifact, from one description of it.  Every entry names its
-  # own output file, so a build renames what cargo produced *before* uploading
-  # and nothing downstream has to know how a target's binary was spelled.
-  #
-  # `artifact:` decides where the output goes: `release-*` is collected by the
-  # release job below and published, and anything else is an intermediate that
-  # some other job consumes.  The Windows ral build is the only intermediate —
-  # it exists to be wrapped.
-  #
-  # Every entry cross-compiles explicitly, including to its own host, so the
-  # binary always lands at target/<triple>/release/ and the musl targets are
-  # not a special case in the path.
+  # `artifact: release-*` is published by the `release` job; anything else is an
+  # intermediate for another job.  Every entry cross-compiles, even to its own
+  # host, so the binary is always at target/<triple>/release/.
   build:
     name: ${{ matrix.out }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
-    # Empty for every entry but one, which is the same as not being here.
     container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ral.  The `-allutils` builds fold in a curated coreutils,
-          # diffutils, grep and ripgrep; Linux and macOS ship both, since
-          # those platforms have a system coreutils to fall back on.
+          # `-allutils` bundles coreutils, diffutils, grep and ripgrep.
           - out: ral-linux-x86_64
             artifact: release-ral-linux-x86_64
             os: ubuntu-latest
@@ -61,26 +32,15 @@ jobs:
             pkg: ral
             bin: ral
             target: x86_64-unknown-linux-musl
-            features: coreutils,diffutils,ripgrep
+            features: allutils
           - out: ral-linux-arm64
             artifact: release-ral-linux-arm64
             os: ubuntu-24.04-arm
             pkg: ral
             bin: ral
             target: aarch64-unknown-linux-musl
-          # The one entry that is not like the others.  `allutils` pulls in
-          # `tikv-jemalloc-sys` (`ral`'s allocator under `ripgrep` on 64-bit
-          # musl), and on a plain arm runner with `musl-tools` jemalloc's C
-          # build failed on aarch64-musl with
-          #   include/jemalloc/internal/atomic.h:48:24: error:
-          #     'atomic_memory_order_relaxed' undeclared
-          # a configure/atomics mismatch in that toolchain, seen on jemalloc
-          # 5.3.0; the lock has since moved to 5.3.1 (upstream's fix), untried
-          # on a plain runner.  The supported answer, and the one ripgrep and
-          # yazi use, is the official cross-rs container: it ships a known-good
-          # `aarch64-linux-musl-gcc` and points build scripts at it.  No other
-          # entry needs it — without the `ripgrep` feature no jemalloc-sys is
-          # built at all.
+          # Container because jemalloc-sys (via ripgrep) fails to build on a
+          # plain arm runner's aarch64-musl toolchain; cross-rs ships a working one.
           - out: ral-linux-arm64-allutils
             artifact: release-ral-linux-arm64-allutils
             os: ubuntu-latest
@@ -88,7 +48,7 @@ jobs:
             pkg: ral
             bin: ral
             target: aarch64-unknown-linux-musl
-            features: coreutils,diffutils,ripgrep
+            features: allutils
           - out: ral-macos-arm64
             artifact: release-ral-macos-arm64
             os: macos-latest
@@ -101,23 +61,18 @@ jobs:
             pkg: ral
             bin: ral
             target: aarch64-apple-darwin
-            features: coreutils,diffutils,ripgrep
+            features: allutils
 
-          # The MSI's payload, and the only Windows ral build there is:
-          # Windows has no system coreutils to fall back on, so the bundled
-          # subset is the product rather than an add-on and a plain Windows
-          # build would only be the crippled one.
+          # Only the MSI's payload; Windows has no system coreutils to fall back on.
           - out: ral.exe
             artifact: payload-windows
             os: windows-latest
             pkg: ral
             bin: ral.exe
             target: x86_64-pc-windows-msvc
-            features: coreutils,diffutils,ripgrep
+            features: allutils
 
-          # exarch, which ships in a licensed archive everywhere including
-          # Windows.  No `-allutils` variant: those utilities are ral's, and
-          # exarch runs its work through ral.
+          # No `-allutils`: exarch runs its work through ral.
           - out: exarch-linux-x86_64
             artifact: release-exarch-linux-x86_64
             os: ubuntu-latest
@@ -147,13 +102,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # The C half of a musl build — jemalloc needs a compiler.  The
-      # containerised entry brings its own and has no sudo to do this with.
+      # The containerised entry brings its own compiler and has no sudo.
       - name: Install musl toolchain
         if: endsWith(matrix.target, '-musl') && !matrix.container
         run: sudo apt-get install -y musl-tools
-      # bash on every runner, Windows included, so the build reads the same
-      # way everywhere rather than once per host shell.
       - name: Build
         shell: bash
         run: |
@@ -172,38 +124,20 @@ jobs:
           path: ${{ !startsWith(matrix.artifact, 'release-') && matrix.out || matrix.out == 'exarch-windows.exe' && 'exarch-windows.zip' || format('{0}.tar.gz', matrix.out) }}
           if-no-files-found: error
 
-  # The Windows installer: ral.exe into Program Files\ral, on PATH, with an
-  # Add/Remove Programs entry and an upgrade path — the three things a copied
-  # executable cannot arrange for itself.  It wraps the build above rather
-  # than repeating it.
+  # Wraps the Windows ral build in an installer: PATH, Add/Remove Programs and
+  # upgrades, which a copied .exe cannot arrange.
   #
-  # WiX is a dotnet global tool, pinned rather than floating: an installer
-  # rebuilt by a different toolset than the one that produced the last release
-  # is not something to discover from a user's upgrade.  The UI extension is a
-  # separate package and has to be added to the same toolset before `wix
-  # build` will resolve `ui:WixUI`.
-  #
-  # v7 refuses to run until the Open Source Maintenance Fee EULA is accepted
-  # (`error WIX7015`), which `wix eula accept` below does.  That fee is not
-  # owed here: the EULA applies "only to Users that use the Software as part of
-  # revenue-generating activities *and* have an annual gross revenue greater
-  # than or equal to US$10,000", and ral is neither.  Should that ever change —
-  # donations, sponsorship, anything that makes this revenue-generating — the
-  # fee becomes payable at https://github.com/sponsors/wixtoolset and this
-  # comment is where to find that out.  Acceptance itself is local and free:
-  # no key, no account, no request to anyone.  Nothing in the EULA reaches the
-  # MSI we build with it.
+  # WiX v7 refuses to run until its Open Source Maintenance Fee EULA is accepted
+  # (`wix eula accept`).  The fee applies only to revenue-generating use above
+  # US$10,000 a year, which ral is not; if that changes, see
+  # https://github.com/sponsors/wixtoolset.
   msi:
     name: ral-windows.msi
     needs: build
     runs-on: windows-latest
     timeout-minutes: 120
-    # wix is a framework-dependent app, and one of those does not cross a
-    # major .NET version on its own: the day the runner image stops carrying
-    # the runtime this build of wix was compiled against, it installs happily
-    # and then refuses to start ("You must install .NET to run this
-    # application").  Rolling forward costs nothing now and turns that from a
-    # broken release into a newer runtime.
+    # wix does not cross a .NET major version on its own; roll forward rather
+    # than fail if the runner image drops the runtime it was built against.
     env:
       DOTNET_ROLL_FORWARD: LatestMajor
     steps:
@@ -215,18 +149,13 @@ jobs:
       - name: Install WiX
         run: |
           dotnet tool install --global wix --version 7.0.0
-          # Before `extension add`, which is gated too, not only `build`.
-          # Acceptance is a file under the runner's home directory, so a fresh
-          # runner needs it once and every wix command after it is free.
+          # Also gates `extension add`.
           wix eula accept wix7
           wix extension add -g WixToolset.UI.wixext/7.0.0
       - name: Build MSI
         shell: pwsh
         run: |
-          # `cargo metadata --no-deps` reads the workspace and no registry, so
-          # the version reaches the MSI from [workspace.package] in Cargo.toml
-          # — the same single number the tag and every other channel carry —
-          # without this job parsing TOML by hand.
+          # The version comes from [workspace.package] in Cargo.toml.
           $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($meta.packages | Where-Object { $_.name -eq 'ral' }).version
           wix build packaging/wix/ral.wxs `
@@ -242,20 +171,9 @@ jobs:
           path: ral-windows.msi
           if-no-files-found: error
 
-  # Synod's guest: the office userland and the boot media it runs.  An
-  # intermediate, like the Windows ral build — it exists to be bundled.
-  #
-  # Native, never cross-built, and that is not a preference: build.sh runs
-  # `fc-cache` and its chroot spot-checks by EXECUTING guest binaries, and
-  # build-boot.sh's first check refuses a container that is not $ARCH rather
-  # than let qemu-user emulation appear halfway through.  So amd64 is built on
-  # the x86_64 runner and arm64 on the arm64 one, and podman — which both
-  # scripts drive, and which the Ubuntu runner images carry — pulls the base
-  # image for the host it is on.
-  #
-  # Only the four files `synod/tauri.bundle.conf.json` lists as resources are kept.
-  # The uncompressed rootfs.img is gigabytes and no bundle reads it: what ships
-  # is the zstd-compressed image and the checksum of what it decompresses to.
+  # Synod's guest image, bundled by `synod-bundle`.  Built natively per
+  # architecture: the scripts execute guest binaries under chroot.  Only the
+  # files `synod/tauri.bundle.conf.json` lists as resources are kept.
   guest-image:
     name: synod-guest-${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
@@ -270,13 +188,8 @@ jobs:
             os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
-      - name: Build the office rootfs and the boot media
-        shell: bash
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          bash vm-image/build.sh
-          bash vm-image/build-boot.sh
+      - uses: extractions/setup-just@v4
+      - run: just vm::rootfs vm::boot
       - uses: actions/upload-artifact@v7
         with:
           name: guest-image-${{ matrix.arch }}
@@ -288,21 +201,11 @@ jobs:
             vm-image/out/rootfs/rootfs.img.sha256
           if-no-files-found: error
 
-  # The synod installers, one per platform, each wrapping the guest image built
-  # for the architecture that platform runs.
+  # Installers renamed to a version-free name, so download links stay stable.
   #
-  # Renamed before upload for the reason the `build` matrix renames: tauri
-  # spells a bundle with the version and a locale in it
-  # (`Synod_0.6.0_x64_en-US.msi`), and a download link that has to be edited
-  # every release is a link that will one day not be.  The version is inside
-  # the installer, where an upgrade path reads it, and in the release tag.
-  #
-  # macOS is signed ad hoc (`signingIdentity: "-"` in tauri.conf.json), which
-  # is what carries the virtualization entitlement — a bare `cargo build`
-  # product cannot boot a machine at all.  It is NOT notarized: Gatekeeper
-  # will hold the first launch until the user opens it from the context menu.
-  # Notarizing needs an Apple Developer ID in secrets, which this repo has not
-  # got, so that is a deliberate gap rather than an oversight.
+  # macOS is ad-hoc signed (carries the virtualization entitlement) but not
+  # notarized: the first launch needs the context menu.  No Developer ID is
+  # available in secrets.
   synod-bundle:
     name: ${{ matrix.out }}
     needs: guest-image
@@ -327,27 +230,15 @@ jobs:
         with:
           name: guest-image-${{ matrix.arch }}
           path: vm-image/out
-      # Pinned to the CLI major the app is built against.  `--locked` so a
-      # fresh transitive release cannot change what bundles a release.
       - name: Install the Tauri CLI
         shell: bash
         run: cargo install tauri-cli --version "^2" --locked
-      # Windows only: the broker is a separate binary the installer registers
-      # as a service, and it has to exist before the bundle is assembled.
-      - name: Build the machine broker
-        if: matrix.os == 'windows-latest'
-        shell: bash
-        run: cargo build --release -p synod-machine-broker
-      - name: Bundle
-        shell: bash
-        working-directory: synod
-        run: cargo tauri build --config tauri.bundle.conf.json
+      - uses: extractions/setup-just@v4
+      - run: just synod::bundle
       - name: Name the artifact
         shell: bash
         run: |
-          # One file, whatever tauri called it; `mv` of a glob that matched
-          # more than one would silently pick a winner, so the count is
-          # checked before anything is moved.
+          # Exactly one match, or `mv` of a glob would silently pick a winner.
           shopt -s nullglob
           built=(target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.bundle }})
           if [ ${#built[@]} -ne 1 ]; then
@@ -361,10 +252,6 @@ jobs:
           path: ${{ matrix.out }}
           if-no-files-found: error
 
-  # One publish job for both triggers: they differ only in the tag they write
-  # and whether it is a prerelease.  Collecting `release-*` into one directory
-  # is what lets this job name no individual file — an artifact is published
-  # because it was built to be, not because it was also listed here.
   release:
     needs: [build, msi, synod-bundle]
     runs-on: ubuntu-latest

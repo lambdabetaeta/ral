@@ -83,6 +83,6 @@ finally {
 }
 
 Write-Host ""
-Write-Host "exarch is ready.  The ral shell it runs on is built in — no separate install."
+Write-Host "exarch is ready.  The ral shell it runs on is built in; no separate install."
 Write-Host "Set a provider key in your environment, then run exarch from a project:"
 Write-Host "  `$env:ANTHROPIC_API_KEY = '...'; exarch"

@@ -1,193 +1,91 @@
-# justfile — a registry of dev commands for ral, not a place for logic:
-# every recipe delegates to `cargo`, to scripts/ci.sh, or to a `.ral` script
-# under scripts/.  Run `just` with no arguments to list recipes.
+# A registry of commands, not a place for logic: each recipe delegates to cargo
+# or to scripts/.
 
-# Windows has no `sh`; PowerShell is the shell it always has.
 set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
 
-# Show the recipe list.
+mod vm 'vm-image/mod.just'
+mod synod 'synod/mod.just'
+
+# One value for every cargo call: a differing RUSTFLAGS rebuilds the whole graph.
+export RUSTFLAGS := env('RUSTFLAGS', '-D warnings')
+
+# What releases ship, so CI compiles what ships.
+features := 'ral/allutils'
+
+[private]
 default:
-    @just --list
+    @just --list --list-submodules
 
-# Warnings are errors in every recipe scripts/ci.sh runs, and all of them carry
-# this one value: a step differing re-fingerprints every unit in the graph,
-# third-party crates included (measured 2026-08-25: 408 rebuilt).
-deny := '-D warnings'
+# Build all workspace targets.
+build:
+    cargo build --workspace --all-targets --features {{features}} --keep-going
 
-# The bundled-tool features releases build `ral` with (build-binaries.yml):
-# build and lint carry it identically; test a superset (the test-util features).
-ship := 'ral/coreutils,ral/diffutils,ral/ripgrep'
+# Run the workspace test suite; ral/tests/ runs the `ral` binary `build` refreshes.
+test: build
+    cargo test --workspace --features {{features}},ral-core/test-util,exarch/test-util --no-fail-fast
 
-# `--keep-going`, here and on `lint`: a catch-up session walks into a pile of
-# drift at once — a cross-platform half nothing has compiled in weeks — and
-# stopping at the first crate turns one pass into one fix-and-rebuild cycle per
-# failure. Exit status is unchanged; only how much of the pile one run reports.
-
-# Build all workspace targets; `test` depends on this to refresh the `ral`
-# binary that ral/tests/ shells out to.
-build $RUSTFLAGS=deny:
-    cargo build --workspace --all-targets --features {{ship}} --keep-going
-
-# Run the workspace test suite.
-test $RUSTFLAGS=deny: build
-    cargo test --workspace --features {{ship}},ral-core/test-util,exarch/test-util --no-fail-fast
-
-# Compiles nothing, so it is the cheapest step CI has and the one worth failing
-# first. `--all` reaches vendor/ too, where vendor/rustfmt.toml turns formatting
-# off: vendored code stays upstream's bytes.
-
-# Check the whole workspace is rustfmt-clean.
-fmt-check:
+# Rustfmt, clippy and rustdoc's link checks, for this host's platform.
+lint:
     cargo fmt --all --check
+    cargo clippy --workspace --all-targets --features {{features}} --keep-going
+    cargo doc --workspace --no-deps --document-private-items --features {{features}}
 
-# No `-- -D warnings`: it'd override vendored ral-ripgrep-core's `all = "allow"`
-# opt-out. Pedantry (pedantic + nursery, the clippy.toml I/O bans) lives in
-# RUSTFLAGS and `[workspace.lints.clippy]` instead.
+# Both Linux arches: the seccomp filter is arch-conditional.
 
-# Clippy across the workspace, warnings as errors; no em dash in string literals.
-lint $RUSTFLAGS=deny:
-    cargo clippy --workspace --all-targets --features {{ship}} --keep-going
-    ! rg -n '"[^"]*[^ ] — ' core/src exarch/src ral/src --glob '!**/tests*'
+# Clippy, from this host, the platforms it does not build (needs clang, lld, cargo-xwin).
+check $CC_aarch64_unknown_linux_musl='clang' $CC_x86_64_unknown_linux_musl='clang' $CC_aarch64_apple_darwin='clang':
+    rustup -q target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl aarch64-apple-darwin x86_64-pc-windows-msvc
+    cargo clippy -p ral-core --all-targets --target aarch64-unknown-linux-musl
+    cargo clippy -p ral-core --all-targets --target x86_64-unknown-linux-musl
+    cargo clippy -p ral-core -p vm-manager --all-targets --target aarch64-apple-darwin
+    cargo xwin clippy --workspace --all-targets --target x86_64-pc-windows-msvc --keep-going
 
-# Never links, so a Unix host can run it. `cargo xwin` (rust-cross/cargo-xwin)
-# splats the real MSVC CRT and Windows SDK headers exarch's `rustls ->
-# aws-lc-sys` needs to actually compile C — no workspace member is excluded.
-# One-time host setup:
-#   brew install llvm lld && cargo install cargo-xwin
-# then put both kegs' bin/ on PATH (they're keg-only). Real Windows *test
-# execution* still needs .github/workflows/windows.yml.
+# Build the site and the wiki into site/.
+docs: site wiki
 
-# Cross-check the workspace against the shipping Windows ABI.
-check-windows $RUSTFLAGS=deny:
-    cargo xwin check --workspace --all-targets --target x86_64-pc-windows-msvc
+# ts-rs emits extensionless imports, hence sloppy imports.
 
-# Cross-check the Linux sandbox, which a macOS `lint` never compiles.
-#
-# Both arches because the seccomp filter is arch-conditional, and its x32 guard
-# is x86-64 only: one arch proves half of it. Both are rust-toolchain.toml's,
-# so no host needs a target it was not already going to install. Scoped to
-# ral-core, where the sandbox lives.
-#
-# Even ral-core has C to assemble: psm, under serde_stacker, builds its
-# stack-switching routines in a build script that `cargo check` runs too, and
-# cc-rs would ask for a `<arch>-linux-musl-gcc` that no host has for its cross
-# arch. clang assembles for any target with no sysroot, so it is the one
-# compiler for both arches, on whichever host runs this.
-check-linux $RUSTFLAGS=deny $CC_aarch64_unknown_linux_musl='clang' $CC_x86_64_unknown_linux_musl='clang':
-    cargo check -p ral-core --all-targets --target aarch64-unknown-linux-musl
-    cargo check -p ral-core --all-targets --target x86_64-unknown-linux-musl
-
-# Cross-check the macOS half, which a Linux `lint` never compiles — check-linux
-# read the other way round, and the gap a `cfg(unix)` helper falls through when
-# its only caller is `cfg(target_os = "linux")`: live on a Linux host, dead code
-# on a Mac, and a build break there alone.
-#
-# One arch, Seatbelt being no more arch-conditional than the rest of it. Never
-# links, so a Linux host can run it. Unlike check-linux's, this target is one
-# rust-toolchain.toml installs for this recipe's sake alone.
-#
-# A C toolchain is needed at all because psm, under serde_stacker, assembles
-# its stack-switching routines in a build script that `cargo check` runs too.
-# clang assembles for any target with no SDK or sysroot, so a Linux host runs
-# this as readily as a Mac, where clang is the system compiler.
-check-macos $RUSTFLAGS=deny $CC_aarch64_apple_darwin='clang':
-    cargo check -p ral-core --all-targets --target aarch64-apple-darwin
-
-# Clippy what a Linux `lint` never compiles: the machine layer's macOS half, and every Windows half.
-lint-cross $RUSTFLAGS=deny $CC_aarch64_apple_darwin='clang':
-    cargo clippy -p vm-manager --all-targets --target aarch64-apple-darwin
-    cargo xwin clippy -p vm-manager -p netgate -p synod -p synod-machine-broker --all-targets --target x86_64-pc-windows-msvc
-
-# Rustdoc's link checks, which clippy never runs.
-doc-check $RUSTFLAGS=deny $CC_aarch64_apple_darwin='clang':
-    cargo doc --workspace --no-deps --document-private-items
-    cargo doc -p vm-manager --no-deps --document-private-items --target aarch64-apple-darwin
-    cargo doc -p vm-manager --no-deps --document-private-items --target x86_64-pc-windows-msvc
-
-# plugins/*.ral are left out: the `_ed-*` builtins they call live only on the
-# interactive shell's table, so a batch --check cannot type them — the REPL
-# checks each plugin as rc loads it. One shell for all hundred files: under
-# `just linux-ci` the container then starts once, not once per file.
-
-# Type-check every example under examples/.
-[unix]
-examples-check:
-    #!/bin/sh
-    set -eu
-    for f in examples/*/*.ral; do cargo run -p ral --quiet -- --check "$f"; done
-
-# Drives the REPL load path examples-check can't reach: an rc naming exactly
-# one plugin, a fresh XDG_CONFIG_HOME per plugin so none can mask another's
-# failure, RAL_PATH pointed at this checkout's plugins/. A failing plugin
-# reports `plugin 'NAME': ...` on stderr and the REPL carries on regardless
-# (exit 0), so that line — not the exit status — is the failure signal.
-[unix]
-plugins-check:
-    #!/bin/sh
-    set -eu
-    fail=0
-    for f in plugins/*.ral; do
-        name=$(basename "$f" .ral)
-        dir=$(mktemp -d)
-        mkdir -p "$dir/ral"
-        printf "return [plugins: ['%s': [:]]]" "$name" > "$dir/ral/rc"
-        out=$(echo 'echo ok' | XDG_CONFIG_HOME="$dir" RAL_PATH="{{justfile_directory()}}/plugins" cargo run -p ral --quiet -- -i 2>&1)
-        if echo "$out" | grep -q "plugin '$name':"; then
-            echo "plugins-check: $name failed to load"
-            echo "$out" | grep "plugin '$name':"
-            fail=1
-        fi
-    done
-    exit $fail
-
-# The one check that reads both of the window's languages at once: `ts-rs`
-# writes the TypeScript for every type crossing the Tauri seam, and `deno
-# check` reads synod/ui/js against it — so a `case` the Rust has no variant
-# for is a build failure rather than a renderer nothing ever reaches.
-#
-# Where the types land is each type's own `export_to`, not this recipe's: a
-# bare `cargo test` runs the same export, and a destination that depended on
-# the invocation would strew a second, stale copy through the tree. They are
-# generated and never committed — one copy of the fact, no staleness to police.
-#
-# --unstable-sloppy-imports because ts-rs emits extensionless relative imports
-# between the types it generates, which Deno otherwise refuses.
-[unix]
-ui-check:
-    #!/bin/sh
-    set -eu
-    cargo test -p synod --quiet export_bindings
-    cd synod/ui
+# Type-check synod's renderer against the TypeScript its Rust types export.
+[working-directory('synod/ui')]
+ui: _bindings
     deno check --unstable-sloppy-imports js/*.js
     deno test --unstable-sloppy-imports tests/
 
-# Both run scripts/ci.sh — the same step list GitHub Actions runs, differing
-# only in where cargo runs.  It calls the recipes above rather than spelling
-# out their cargo lines, so `just test` is CI's test and cannot drift from it;
-# it stays POSIX sh so CI still runs when ral does not build.
-
-# Run CI on this host's toolchain: lint, build, test, the Windows cross-check, the site, the examples.
-[unix]
-ci:
-    scripts/ci.sh native
-
-# Run that same CI inside the Linux container — the only place a macOS host compiles the bwrap sandbox.
-[unix]
-linux-ci:
-    scripts/ci.sh linux-box
-
-# `uid` and `gid` are the image's `dev` user's, who owns what a run writes
-# through the bind mount.  CI passes the runner's; the defaults are the
-# Dockerfile's, since a Mac's own gid 20 is Debian's `dialout`.
-
-# Build the container `linux-ci` runs in.
-linux-box uid='1000' gid='1000':
-    engine=$(command -v docker || command -v podman) || { echo 'linux-box: needs docker or podman on PATH' >&2; exit 1; }; \
-    "$engine" build -t ral-linux-box -f scripts/linux-box.Dockerfile --build-arg UID={{uid}} --build-arg GID={{gid}} scripts
+_bindings:
+    cargo test -p synod --quiet export_bindings
 
 # Render the static site into site/.
+[private]
 site:
     uv run scripts/render-site.py
+
+# Build the wiki into site/wiki/ with Quartz; `just wiki --serve` previews it.
+[private]
+wiki *args:
+    bash scripts/wiki/build.sh {{args}}
+
+# Everything GitHub CI runs that this host can.
+ci: lint test docs ui
+
+# Run recipes in the Linux container, e.g. `just box lint test`.
+[unix]
+box +recipes:
+    #!/bin/sh
+    set -eu
+    engine=$(command -v docker || command -v podman) || { echo 'box: needs docker or podman on PATH' >&2; exit 1; }
+    "$engine" build -q -t ral-linux-box -f scripts/linux-box.Dockerfile scripts >/dev/null
+    # A fresh named volume is root-owned.
+    "$engine" run --rm --user root -v ral-linux-target:/workspace/.target-linux ral-linux-box chown dev:dev /workspace/.target-linux
+    # --privileged: bwrap needs an unmasked /proc and a fresh devpts.  --init
+    # reaps orphaned sandbox trees.  A tmpfs /tmp: fuse-overlayfs answers
+    # ENOENT for ENAMETOOLONG.
+    exec "$engine" run --rm --privileged --init -e RAL_REQUIRE_SANDBOX=1 -e CARGO_BUILD_JOBS \
+        --tmpfs /tmp:rw,exec,mode=1777 \
+        -v "$PWD:/workspace" \
+        -v ral-linux-cargo:/home/dev/.cargo \
+        -v ral-linux-rustup:/usr/local/rustup \
+        -v ral-linux-target:/workspace/.target-linux \
+        ral-linux-box sh -c 'rustup -q target add "$(uname -m)-unknown-linux-musl" && exec just "$@"' box {{recipes}}
 
 # Build and install ral and exarch from source.
 install:
@@ -200,58 +98,3 @@ release *args:
 # Build release and time the bench/*.ral benchmarks with hyperfine.
 bench:
     cargo run -p ral --quiet -- scripts/bench.ral
-
-# Run the current source as `ral`, forwarding arguments, e.g. `just run examples/hello.ral`.
-run *args:
-    cargo run -p ral --quiet -- {{args}}
-
-# Boot media for one guest: no argument for the Mac's, `amd64` for Windows'.
-guest-boot $ARCH='arm64':
-    bash vm-image/build-boot.sh
-
-# The same media from Windows, built on WSL's ext4 rather than across drvfs.
-# Keeps the container's build tree between runs; `--clean` drops it.
-[windows]
-guest-boot-wsl ARCH='amd64' DISTRO='Ubuntu' *args:
-    wsl.exe -d {{DISTRO}} -- bash -lc 'cd "$(wslpath "{{justfile_directory()}}")" && ARCH={{ARCH}} bash vm-image/build-boot-wsl.sh {{args}}'
-
-# Office userland for one guest: no argument for the Mac's, `amd64` for Windows'.
-guest-rootfs $ARCH='arm64':
-    bash vm-image/build.sh
-
-# Boot the Windows machine layer and hold it open (needs an elevated shell / Hyper-V Administrators).
-[windows]
-smoke-boot KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs/rootfs.img' FOLDER='.':
-    cargo run -p vm-manager --example boot-smoke -- {{KERNEL}} {{INITRAMFS}} {{ROOTFS}} {{FOLDER}}
-
-[private]
-_broker-release:
-    cargo build --release -p synod-machine-broker
-
-# Install the machine broker as a LocalSystem Windows service (needs an elevated shell).
-[windows]
-broker-install: _broker-release
-    sc.exe create SynodMachineBroker binPath= "{{justfile_directory()}}\target\release\synod-machine-broker.exe" DisplayName= "Synod machine broker" type= own start= auto obj= LocalSystem
-    sc.exe description SynodMachineBroker "Creates and stops the virtual machines Synod runs its work in. Synod itself runs without privileges; this service holds the one privilege the platform requires for a virtual machine, and nothing else."
-    sc.exe start SynodMachineBroker
-
-# Stop that service and take it off this computer again: elevated shell too.
-[windows]
-broker-uninstall:
-    -sc.exe stop SynodMachineBroker
-    sc.exe delete SynodMachineBroker
-
-# The guest media and the check that they match this host are the bundle's
-# business alone, so both live in tauri.bundle.conf.json, which only a bundle
-# names: tauri-build copies a config's resources while *compiling* synod, and a
-# checkout with no built guest image could then not even `cargo check` it.
-# `--config` merges that file over tauri.conf.json and the platform's own, and
-# the merged result is what the cargo build underneath reads.
-
-# Bundle synod into a macOS .app (+ .dmg); needs the Tauri CLI and a built arm64 guest image.
-[working-directory('synod')]
-synod-app:
-    cargo tauri build --config tauri.bundle.conf.json
-
-# Bundle synod into a Windows .msi installer; needs the Tauri CLI and an x86_64 guest image (built from a Unix host).
-synod-msi: _broker-release synod-app

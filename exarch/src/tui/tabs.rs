@@ -475,7 +475,8 @@ impl Tabs {
         }
     }
 
-    /// Every tab's agent id.
+    /// Every tab's agent id, for `dbg_trace!`.
+    #[cfg(debug_assertions)]
     pub(super) fn ids(&self) -> Vec<AgentId> {
         self.tabs.iter().map(|t| t.id).collect()
     }

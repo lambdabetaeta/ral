@@ -22,6 +22,7 @@
 //!   `# contains: Help:` asks for a diagnostic that carries guidance.
 //! - `tests/accept/*.ral` must pass `--check`: programs that cannot or should
 //!   not run, yet must be well typed.
+//! - `examples/*/*.ral` are accepted likewise.
 //!
 //! Helper modules sit in a `lib/` directory beside the programs, which
 //! discovery does not enter.  Each program runs with its own directory as
@@ -194,9 +195,10 @@ fn acceptance_faults(path: &Path) -> Vec<String> {
     )]
 }
 
+/// Run `faults` over every program under `corpus`, a directory of the workspace.
 fn run_corpus(corpus: &str, faults: fn(&Path) -> Vec<String>) {
     let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tests")
+        .join("..")
         .join(corpus);
     let programs = common::discover(&base, &["lib"]);
     assert!(
@@ -229,10 +231,15 @@ fn run_corpus(corpus: &str, faults: fn(&Path) -> Vec<String>) {
 
 #[test]
 fn reject() {
-    run_corpus("reject", rejection_faults);
+    run_corpus("tests/reject", rejection_faults);
 }
 
 #[test]
 fn accept() {
-    run_corpus("accept", acceptance_faults);
+    run_corpus("tests/accept", acceptance_faults);
+}
+
+#[test]
+fn examples() {
+    run_corpus("examples", acceptance_faults);
 }

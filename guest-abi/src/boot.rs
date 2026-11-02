@@ -186,8 +186,8 @@ impl Boot {
         let name = workspace.ok_or_else(|| {
             format!(
                 "the boot is missing `{PREFIX}workspace=<name>`, the name the host published the \
-                 granted folder under — a virtiofs tag, or a 9p share's name when \
-                 `{PREFIX}plan9` gives the port its server answers on. Without it the guest \
+                 granted folder under (a virtiofs tag, or a 9p share's name when \
+                 `{PREFIX}plan9` gives the port its server answers on). Without it the guest \
                  cannot find the one directory it is allowed to work in."
             )
         })?;
@@ -200,7 +200,7 @@ impl Boot {
             port: port.ok_or_else(|| {
                 format!(
                     "the boot is missing `{PREFIX}port=<port>`, the host's vsock port for the \
-                     control plane — not `{PREFIX}plan9`, which is the workspace's transport. \
+                     control plane; not `{PREFIX}plan9`, which is the workspace's transport. \
                      There is no safe default: a guessed port would leave the engine waiting on \
                      a connection nobody is listening for."
                 )
@@ -257,7 +257,7 @@ fn validate_name(value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err(format!(
             "`{PREFIX}workspace=` is empty; it must name the export the host published the \
-             granted folder as — a virtiofs tag, or a 9p share's name."
+             granted folder as (a virtiofs tag, or a 9p share's name)."
         ));
     }
     if value.len() > MAX_TAG {
@@ -269,8 +269,8 @@ fn validate_name(value: &str) -> Result<String, String> {
     }
     if value.contains('/') {
         return Err(format!(
-            "`{PREFIX}workspace={value}` looks like a path. It is the export's *name* — a word \
-             the host and guest agree on, a virtiofs tag or a 9p share's `aname` — not a \
+            "`{PREFIX}workspace={value}` looks like a path. It is the export's *name*, a word \
+             the host and guest agree on (a virtiofs tag or a 9p share's `aname`), not a \
              directory."
         ));
     }
@@ -290,7 +290,7 @@ fn parse_vsock_port(key: &str, value: &str) -> Result<u32, String> {
 fn parse_net(value: &str) -> Result<Net, String> {
     let bad = || {
         format!(
-            "`{PREFIX}net={value}` is not `<port>,<address>/<prefix>,<gateway>` — the host's \
+            "`{PREFIX}net={value}` is not `<port>,<address>/<prefix>,<gateway>`: the host's \
              vsock port for the net wire, the guest's address in CIDR notation, and the \
              gateway, joined by commas, e.g. `1730,10.0.2.15/24,10.0.2.2`."
         )

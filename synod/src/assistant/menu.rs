@@ -38,7 +38,7 @@ where
 
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "the guard is deliberately held from the fold-in loop through menu_from's read of the same catalog — one lock for both, not one per use"
+    reason = "the guard is deliberately held from the fold-in loop through menu_from's read of the same catalog; one lock for both, not one per use"
 )]
 fn refresh_menu_for<S>(available: &[Account], catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
 where
