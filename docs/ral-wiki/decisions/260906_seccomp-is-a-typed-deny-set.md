@@ -5,7 +5,7 @@ generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
 
 # The seccomp filter is a typed deny-set
 
-Prompted by reading gVisor (`.scratch/gvisor`, Apache-2.0; see
+Prompted by reading gVisor (Apache-2.0; see
 [[related/gvisor|gvisor]]) against `core/src/sandbox/`. Nothing of gVisor's is
 copied; what it shows is that our one un-typed enforcer was the seccomp
 program: eight `libc::SYS_*` numbers hand-packed into `sock_filter` bytes

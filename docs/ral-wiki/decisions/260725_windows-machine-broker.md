@@ -309,5 +309,5 @@ this is how it is obtained without widening authority elsewhere),
 discipline inside the guest's host),
 [[invariants/single-binary|single-binary]] (the runtime rule this service stands
 outside of),
-`dev/docs/VM/SYNOD.md` §2 (the platform table), `synod/wix/broker-service.wxs`
+the Synod design's §2 (the platform table), `synod/wix/broker-service.wxs`
 (the installer's own account of the same argument).

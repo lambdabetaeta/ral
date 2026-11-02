@@ -201,7 +201,7 @@ and its backoff arithmetic, and the pipeline arm of `RunningChild::wait`'s
 own poll loop are all deleted; the thread/process shape, the anchor's
 existence, `GroupRole`, `StopPolicy`, and `ParkedPipeline` are unchanged.
 
-Leaves phase 4 of `dev/docs/plans/260902_event-driven-pipeline-collector.md`
+Leaves phase 4 of its plan
 open, each small and independently addressable: standalone (non-pipeline)
 `RunningChild::wait` still polls for its own cancel scope, since a blocking
 wait there could not otherwise be preempted by a deadline or an upstream

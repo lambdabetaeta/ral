@@ -14,8 +14,7 @@ never authority: it is a way to find an object, resolved once, by
 `path/walk.rs`, through directory handles and never by the kernel's following.
 What the grant judges is the transcript of that walk; what is then read or
 written is the object it acquired. How a judgment runs is
-[[internals/path-judgment|path-judgment]]; the plan is
-`dev/docs/plans/261021_one-path.md`. Amends
+[[internals/path-judgment|path-judgment]]. Amends
 [[decisions/261021_access-is-physical|access-is-physical]] (the walk is now the
 only resolver, and policy is resolved by it) and
 [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]

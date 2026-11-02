@@ -132,5 +132,3 @@ while the same block with the `let` first types `t : {Returns String}`.
 who places the capture changes, from a syntactic walk to the type. Its
 statements that pipes stay positional, that an arm stands in for what it
 replaces, and that `{ … }` is a thunk in every position stand.
-
-The plan is `dev/docs/plans/260930_graded-f.md`.

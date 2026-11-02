@@ -231,4 +231,4 @@ See also [[design/cbpv|cbpv]], [[design/scoping|scoping]],
 code maps [[map/core/evaluator|evaluator]],
 [[map/core/shell-state|shell-state]], [[map/core/runtime|runtime]]. The
 formal account is `docs/SPEC.md` §17.8. The Agda core
-(`dev/agda/Ral/Machine.agda`) is the same machine, intrinsically typed, one per thread.
+is the same machine, intrinsically typed, one per thread.

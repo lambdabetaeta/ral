@@ -6,7 +6,7 @@ against: [design/two-enforcers, design/syscalls-are-effects, decisions/260715_vm
 
 # gVisor
 
-Google's `runsc`, Apache-2.0 (`.scratch/gvisor` in this checkout, not vendored,
+Google's `runsc`, Apache-2.0 (not vendored,
 not linked). **gVisor is a userspace reimplementation of the Linux syscall
 ABI, in Go: the Sentry intercepts every syscall a container makes and answers
 most of them itself**, with a second process — the Gofer — proxying the

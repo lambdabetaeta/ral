@@ -45,7 +45,7 @@ folds still step them individually. This is the unit of a write-ahead log
   and never re-parses. A test round-trips a 5000-deep `Control::Status`
   carrying a reply on a 2 MiB thread.
 - Several records on one line are groundwork for the durable-agent plan
-  (`dev/docs/plans/261028_durable-agent.md`, L3 "one transition, one commit");
+  (L3 "one transition, one commit");
   `Emitter::emit` writes single-record commits; control transactions
   use multi-record lines.
 

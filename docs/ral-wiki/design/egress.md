@@ -13,7 +13,7 @@ that read-only or say it prevents exfiltration. synod's guest network exists
 to make even that narrow judgment somewhere it can actually be made: one
 explicit proxy the guest cannot see around, terminating the `CONNECT`
 handshake in user mode before deciding whether a tunnel opens at all
-([[map/synod|synod]], `dev/docs/VM/SYNOD.md` §6).
+([[map/synod|synod]]).
 
 The policy the door is checked against is
 [[decisions/260727_one-connect-door-not-four-gates|one-connect-door-not-four-gates]]'s

@@ -75,7 +75,7 @@ literature in [[related/rows-and-handlers|rows-and-handlers]].
 
 **Realised in** [[internals/type-inference|type-inference]] (row unification by the Rémy rewrite).
 
-The Agda core (`dev/agda/Ral/Type.agda`, `Syntax.agda`) has closed, label-sorted rows: selection,
+The Agda core has closed, label-sorted rows: selection,
 injection, type-changing update and exhaustive `case` are typed against them. Open rows are not
 mechanised.
 

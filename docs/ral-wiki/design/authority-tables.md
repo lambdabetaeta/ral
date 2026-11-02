@@ -137,12 +137,12 @@ positive scope that does not nest needs an explicit intersection first.
   so `b` supports `j̃`; `a` supports `j̃` since `j` holds it (1). So `j`
   survives in the meet and holds `s`. ∎
 
-The generic law is mechanised in `dev/agda/Core/Authority/Table.agda`
-(`denote-meet`), using the separate Belnap algebra in `Core.Belnap`.
-`Core.Authority.Prefix` discharges the three obligations for resolved component
+The generic law is mechanised
+(`denote-meet`), using a separate Belnap algebra.
+A prefix module discharges the three obligations for resolved component
 prefixes, with negative matching independent of the positive relation. The
-exec and fs scope constructors are modelled in `Core.Authority.Exec` and
-`Core.Authority.Fs`, which discharge the scope laws from a common resolved-path
+exec and fs scope constructors are modelled in two further modules,
+which discharge the scope laws from a common resolved-path
 geometry and enforce polarity restrictions in their types. The
 proof uses lists of legal positive and negative scopes and establishes
 denotational equality; correspondence with Rust's concrete path operations,

@@ -33,8 +33,7 @@ was the same story seven days old.
 The measurement is a script, not a survey: rewrite every `pub` in `core/src`
 to `pub(crate)`, compile all five consumers (`ral`, `exarch`, `synod`,
 `vm-manager`, `guest-net`) with `--all-targets --keep-going`, widen back
-exactly what the compiler names, repeat to a fixed point. `dev/` carries the
-full measurement.
+exactly what the compiler names, repeat to a fixed point.
 
 ## Decision
 

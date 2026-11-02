@@ -12,8 +12,7 @@ status: active
 
 # Authorise the object, not the name; compose by stacking, not flattening
 
-Prompted by an external review of the sandbox (`dev/docs/260906_sandbox_astra.md`,
-six findings, all confirmed against `2cfeb108`). Four of the six were two
+Prompted by an external review of the sandbox (six findings, all confirmed against `2cfeb108`). Four of the six were two
 architectural faults; the other two were projection invariants. Nothing here
 is a guard added on top — each fault is removed.
 

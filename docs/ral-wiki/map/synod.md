@@ -581,9 +581,7 @@ machine boot.
   boot and whether the host's 9p server can read the folder unaided still
   require runtime verification. Windows helper dials remain unsupported.
   `vm-manager/examples/{boot-smoke,broker-smoke}.rs` are the boot probes.
-- `dev/docs/VM/SYNOD.md` is the design record; `dev/docs/VM/SYNOD-v1.md`
-  records verification status and open runtime questions. The image README holds
-  build instructions.
+- The image README holds build instructions.
 - [[map/exarch/agent|exarch / agent]], [[map/exarch/frontend|exarch / frontend]]
   and [[design/engine-protocol|engine-protocol]] locate the reusable guest
   engine, conversation bus and wire semantics.

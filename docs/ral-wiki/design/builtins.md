@@ -37,7 +37,7 @@ spelling would be a second thing to keep capability-checked
 ## The families
 
 The Agda core gives checked `i64` and finite `f64` arithmetic, comparison and scalar rendering a
-value-or-error semantics (`dev/agda/Ral/Arithmetic.agda`, `Equality.agda`, `Data.agda`); it does
+value-or-error semantics; it does
 not cover the builtin library.
 
 The core entries group by what they compute:

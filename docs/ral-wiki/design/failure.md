@@ -45,7 +45,7 @@ The cleanup forms differ only in what they do with the original failure:
   ([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]);
 - the prelude's `attempt` discards both result and failure.
 
-The Agda core (`dev/agda/Ral/Machine.agda`) models both as frames on a stack a halt walks:
+The Agda core models both as frames on a stack a halt walks:
 `try` pops and runs its handler on the error (`halt-to`), and `guard` runs its cleanup in front of
 the body's outcome (`cleanup`), so a cleanup that halts replaces that outcome, as above. It has no
 `exit`.

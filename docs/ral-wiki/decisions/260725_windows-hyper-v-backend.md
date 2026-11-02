@@ -27,7 +27,7 @@ status: active
 
 **Synod boots its own virtual machine on Windows by handing one JSON document to
 the Host Compute System API, and every part of that document is chosen so the
-guest cannot tell which hypervisor booted it.** `dev/docs/VM/SYNOD.md` §2 named
+guest cannot tell which hypervisor booted it.** The Synod design's §2 named
 the route; what this decides is the shape of the machine at the far end of it,
 which is where the design record turned out to have promised more ceremony than
 the platform needs. Two of its rows are amended by what landed — direct kernel
@@ -280,4 +280,4 @@ own gate and per-spawn jail stand inside it),
 [[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]] (the same
 "make the Windows boundary as explicit as the Unix one" discipline, one layer
 down),
-`dev/docs/VM/SYNOD.md` §2 (the platform table this amends).
+the Synod design's §2 (the platform table this amends).

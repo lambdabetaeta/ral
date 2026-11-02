@@ -77,6 +77,6 @@ Refines [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-clos
 its O(1) capture is a scrub, and what is in focus is a computation closure, a
 type apart from the thunk value.
 
-Plan: `dev/docs/plans/260926_free_variable_capture.md`. Narrative:
+Narrative:
 [[internals/evaluator-machine|evaluator-machine]]; residency:
 [[internals/binding-leases|binding-leases]].

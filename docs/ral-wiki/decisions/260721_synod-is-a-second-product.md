@@ -82,8 +82,7 @@ price, and it is small; it is not free.
   sandbox child exactly as they do.
 - What v1 actually contains — the work-in-place safety net and desktop shell
   running under `Boundary::None`, and a VM stack built but not yet joined by the
-  design's frame protocol — is recorded in `dev/docs/VM/SYNOD-v1.md` and
-  summarised on [[map/synod|synod]]. This ADR decides the *shape of the reuse*,
+  design's frame protocol — is summarised on [[map/synod|synod]]. This ADR decides the *shape of the reuse*,
   and takes no position on those.
 
 ## See also

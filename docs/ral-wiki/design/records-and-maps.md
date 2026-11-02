@@ -182,8 +182,7 @@ is why neither view can carry a sequence. Data that must keep an order is a
 list; data needing an order *and* a type per key is neither, and ral has no
 third carrier for it.
 
-The Agda core keeps a runtime map as an association list strictly sorted by key
-(`dev/agda/Ral/Map.agda`). Key checking is separate from insertion: the evaluator must reject a
+The Agda core keeps a runtime map as an association list strictly sorted by key. Key checking is separate from insertion: the evaluator must reject a
 repeated computed key before evaluating its value. Rust's `MapCursor`
 (`core/src/shell/evaluator/machine.rs`) sequences key, validation, value, and
 spread operands in written order; no later operand runs after a failure.

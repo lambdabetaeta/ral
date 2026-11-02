@@ -93,7 +93,7 @@ place. Both are recorded, with the profile, in the plan's §8–§9; the second 
 the representation trade-off — O(1) capture against an allocating bind — and
 stays open.
 
-Plan: `dev/docs/plans/260825_cek_machine.md`. Narrative:
+Narrative:
 [[internals/evaluator-machine|evaluator-machine]]. Supersedes the trampoline
 account in
 [[decisions/260514_completion-escape-refactor|completion-escape-refactor]]

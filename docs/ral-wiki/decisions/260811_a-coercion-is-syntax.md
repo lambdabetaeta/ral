@@ -79,16 +79,16 @@ former, and it is where the Agda model carries the failure clause.
 > **Superseded in its facts, not its decision (2026-08-19).** The decision above
 > stands: the coercion is syntax, and `Decode(Capture(M))` is what the checker
 > writes. What has moved is everything this page says about the *model* below.
-> `dev/agda` has since gained the failure layer and the encoder, so the former
+> The Agda model has since gained the failure layer and the encoder, so the former
 > list also carries `halt`, `try`, `guard` and `encode`; the decoder answers
 > `Str ⊎ Err` rather than `Maybe Str`, because a decoder says *why* a word does
 > not read; and failure is no longer stuckness. `decode-stuck` is deleted, the
 > kernel has handlers, and a decode that cannot read raises a signal that climbs
 > the stack until a `try` catches it or the run ends at the `abort` leaf. The
 > paragraph below records what was true on 2026-08-12 and is kept for the
-> record. (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.)
+> record. (The CK development cited here was retired on 2026-10-23.)
 
-The model carries it as of 2026-08-12. `dev/agda` gained a `String` base type
+The model carries it as of 2026-08-12. It gained a `String` base type
 with `str` as its introduction form, a `decode` former over a *computation* —
 the shape of `CompKind::Decode`, so the decomposition is a theorem rather than
 a convention — and a decoder `dec : 𝔹* → Maybe Str` as a parameter of the

@@ -236,7 +236,7 @@ worker's escape is data on its `` `done `` card.
 ## Denotation
 
 A sketch, to be stated over the Agda's existing semantics, not a replacement
-for it. (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.) The signature is the kernel's extended by `fail e`, `exit n`, `stop ν
+for it. (The CK development cited here was retired on 2026-10-23.) The signature is the kernel's extended by `fail e`, `exit n`, `stop ν
 c` and `poll : 1 → L⊥`: `poll`, `write` and `exec` are input operations whose
 response the world chooses, and `poll` has *no equations of its own*. It is
 not a reader: `poll; poll ≠ poll`, the world advancing between two readings.
@@ -254,7 +254,7 @@ forwarding handler), an owner interprets `stop ν c` selectively (a `catch`
 with a predicate), and `guard` is a handler whose two clauses run under the
 shield. The laws above are observational equivalences, `M ≃ N` iff `⟦M⟧W =
 ⟦N⟧W` for every admissible world, to be proved from the machine's reductions
-as `Equivalence.agda` proves today's. Checkpoints are explicit: `ξpoll`, the
+as the model proves today's. Checkpoints are explicit: `ξpoll`, the
 non-focal step that performs `poll` and halts on a nonzero response, fires
 only at the machine's step boundaries (β, bind, apply, exec, the iterating
 builtins, and once per slice inside a blocking operation); a handler clause's
@@ -355,8 +355,7 @@ lands, when a mask ends, and for a process which write is first dead.
   `` `done `` card.
 - The Agda's obligations: `Esc` instantiated with `exit n | stop ν? c`, the
   world extended with the node store and a clock, a non-focal `ξpoll`, `βstop`
-  consuming by name, and `_⊕_` refined to the cause order
-  (`dev/agda/CK/RUST.md`). (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.)
+  consuming by name, and `_⊕_` refined to the cause order. (The CK development cited here was retired on 2026-10-23.)
 - Windows has no sliced pipe wait: a thread stage's blocked I/O is
   interrupted (`CancelSynchronousIo`) when the collector writes its node and
   each pass while its chain carries a cause, and a pump each slice of
@@ -380,13 +379,13 @@ lands, when a mask ends, and for a process which write is first dead.
   Yang et al. 2022) whose inheritance rules differ: a stage runs under
   `extend(ρ, fresh)` and the collector's boundary, a worker under
   `extend(root, fresh)` and its own, inheriting nothing of ρ; an observation
-  relation tying `Equivalence.agda`'s stack-indexed equivalence to the
+  relation tying the stack-indexed equivalence to the
   world-indexed one; (3) `βstop`: a boundary consumes `escaped ⟨ν, c⟩` iff ν
   is its own layer's name, and the pipe's `β∣R` family carrying the stage's
   name and running its cleanup before `report`, so law 6 is a theorem; (4)
   `shield!⟨since, grace⟩` as a `mask-layer` instance over a monotone clock,
   `CleanupPreempts` the base law 3 extends; (5) `fail`'s faithfulness as a
-  lemma about the record projection. See `dev/agda/CK/RUST.md`. (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.)
+  lemma about the record projection. (The CK development cited here was retired on 2026-10-23.)
 - **A nursery**: a scoped `spawn` whose node is the call's, so a stop, an
   `exit` or a failure leaving the scope reaches its workers through the chain
   and the scope frame joins them; Trio's nursery is the precedent. Until then

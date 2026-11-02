@@ -15,7 +15,7 @@ departs — its agent works in the granted folder directly (a live mount under a
 hardware boundary), with a baseline checkpoint before the work and
 conflict-checked undo after it in place of any accept gate. Its workload is
 the user's own documents, and its threat model is *wrong*, not *hostile*; the
-design record `dev/docs/VM/SYNOD.md` carries synod's side of this line.
+Synod design record carries synod's side of this line.
 
 ## Decision
 
