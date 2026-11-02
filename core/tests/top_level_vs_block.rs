@@ -15,15 +15,13 @@
 
 mod common;
 
-use common::fresh_shell;
+use common::{fresh_shell, top_level};
 
 use ral_core::authority::policy::Capabilities;
 #[cfg(unix)]
 use ral_core::authority::policy::FsPolicy;
 use ral_core::path::shown;
-use ral_core::protocol::Run;
-use ral_core::shell::runtime::{Settled, Shell};
-use ral_core::source::SourceOrigin;
+use ral_core::shell::runtime::Shell;
 use ral_core::test_helper::layer;
 use ral_core::{Break, Value};
 use std::path::{Path, PathBuf};
@@ -34,13 +32,6 @@ fn shell_under(caps: Capabilities) -> Shell {
     let mut shell = fresh_shell();
     shell.push_session_capabilities(layer(caps));
     shell
-}
-
-fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    shell
-        .run(Run::foreground(source, SourceOrigin::named("<test>")))
-        .expect_ran()
-        .into_result()
 }
 
 /// Capability frame that actually triggers `sandbox_projection()` to
@@ -96,21 +87,17 @@ fn top_level_let_persists_across_calls() {
 
 // ── (2) Top-level partial effects ───────────────────────────────────────
 
-/// A top-level run that fails partway through still installs the
-/// mobile mutations made before the failure.  This locks in the run's
-/// install-on-Error rule: bindings made before a fatal command survive
-/// into the next run; bindings *after* the failure do not exist because
-/// that line never ran.
+/// A top-level run that fails partway still installs the mobile mutations
+/// made before the failure.  This locks in the run's install-on-Error rule:
+/// bindings made before a fatal command survive into the next run; bindings
+/// *after* the failure do not exist because that line never ran.
 #[test]
 fn top_level_partial_effects_persist_on_error() {
     for caps in parity_caps() {
         let mut shell = shell_under(caps);
-        // `cat /nonexistent` fails between the two `let` lines.  The whole
-        // run returns Err, but the pre-failure binding is in the mobile,
-        // which the top-level run installs unconditionally.
         let _ = top_level(
             &mut shell,
-            "let pre_fail_x = 1\ncat /nonexistent\nlet post_fail_y = 2",
+            "let pre_fail_x = 1\nfail [status: 1, message: x]\nlet post_fail_y = 2",
         );
         assert!(
             shell.scope_lookup("pre_fail_x").is_some(),
@@ -154,22 +141,10 @@ fn top_level_partial_destructure_binds_nothing() {
 fn top_level_cd_persists_across_calls() {
     for caps in parity_caps() {
         let mut shell = shell_under(caps);
-        let tmp = std::env::temp_dir();
-        let tmp_disp = shown_dir(&tmp);
-        top_level(&mut shell, &format!("cd '{tmp_disp}'")).expect("cd should succeed");
+        let tmp = shown_dir(ral_core::test_helper::real(std::env::temp_dir()).as_path());
+        top_level(&mut shell, &format!("cd '{tmp}'")).expect("cd should succeed");
         let result = top_level(&mut shell, "cwd").expect("cwd should succeed");
-        // `cwd` returns the canonicalised path, shown; comparing shown forms
-        // tolerates the macOS `/var` ↔ `/private/var` firmlink and the
-        // Windows 8.3 short name `temp_dir()` may carry.
-        let canon = shown_dir(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
-        let got = match result {
-            Value::String(s) => s.into_string(),
-            other => panic!("cwd must return a String, got {other:?}"),
-        };
-        assert!(
-            got == tmp_disp || got == canon,
-            "cwd after cd: expected {tmp_disp:?} or {canon:?}, got {got:?}"
-        );
+        assert_eq!(result, Value::string(tmp), "cwd after cd");
     }
 }
 

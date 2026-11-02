@@ -1,6 +1,5 @@
 # Test: the one line rule.  A line ends at `\n` or `\r\n` (one `\r` belongs
 # to the terminator), the last line need not end, and a lone `\r` is text.
-# Every check is an assertion: the golden comparison ignores `\r`.
 
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {

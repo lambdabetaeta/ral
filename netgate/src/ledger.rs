@@ -96,6 +96,23 @@ impl AuditLog {
         Self::over(ledger)
     }
 
+    /// A ledger whose every `record` fails, as after a panic mid-write.
+    ///
+    /// # Panics
+    /// If the scratch ledger cannot be created.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn poisoned() -> Self {
+        let log = Self::in_scratch();
+        let held = log.clone();
+        let _ = std::thread::spawn(move || {
+            let _lock = held.0.lock_ignore_poison();
+            panic!("poison the ledger lock on purpose");
+        })
+        .join();
+        log
+    }
+
     /// # Errors
     /// Poison, rotation or append failure must close the gate.
     pub fn record(&self, r: Record<'_>) -> io::Result<()> {
@@ -275,15 +292,7 @@ mod tests {
 
     #[test]
     fn a_record_that_cannot_be_written_reports_err() {
-        let state = tmp("audit-poisoned");
-        let log = AuditLog::for_test(&state);
-        let guard = log.clone();
-        let _ = std::thread::spawn(move || {
-            let _lock = guard.0.lock().unwrap();
-            panic!("poison the ledger lock on purpose");
-        })
-        .join();
-        let err = log.record(Record::Tunnel {
+        let err = AuditLog::poisoned().record(Record::Tunnel {
             host: "a.example",
             addr: None,
             allowed: true,

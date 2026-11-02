@@ -89,3 +89,46 @@ pub fn status(cmd: &mut std::process::Command) -> std::io::Result<std::process::
     let mut child = spawn(cmd)?;
     site!(Silent::StatusWait, &mut child => wait())
 }
+
+#[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use rustix::io::{FdFlags, fcntl_getfd};
+    use std::process::{Command, Stdio};
+
+    fn cloexec(fd: impl std::os::fd::AsFd) -> bool {
+        fcntl_getfd(fd).expect("fcntl").contains(FdFlags::CLOEXEC)
+    }
+
+    #[test]
+    fn pipe_ends_are_cloexec() {
+        let (r, w) = cloexec_pipe().expect("pipe");
+        assert!(cloexec(&r) && cloexec(&w));
+    }
+
+    #[test]
+    fn socketpair_ends_are_cloexec() {
+        let (a, b) = cloexec_socketpair().expect("socketpair");
+        assert!(cloexec(&a) && cloexec(&b));
+    }
+
+    /// Streams preset to something else are overridden; `-ef` tells fd 0 is
+    /// `/dev/null`, not the piped stdin it was given.
+    #[test]
+    fn output_nulls_stdin_and_captures_both_streams() {
+        let out = output(
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "[ /dev/stdin -ef /dev/null ] && echo out; echo err >&2",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit()),
+        )
+        .expect("output");
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+    }
+}

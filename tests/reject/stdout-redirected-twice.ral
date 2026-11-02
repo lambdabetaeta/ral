@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:13
 # contains: standard output is redirected twice
 echo hi > a > b

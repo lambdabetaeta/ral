@@ -97,22 +97,6 @@ fn assert_admissible(session: &Agent) {
     }
 }
 
-#[test]
-fn plain_text_reaches_quiescence() {
-    let mut session = Agent::for_test("system").unwrap();
-    let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
-    set_provider(&mut session, provider);
-
-    let Drive { outcome, .. } = drive_deliberate(&mut session, Some("hi"));
-
-    match outcome {
-        Ok(Outcome::Complete) => {}
-        other => panic!("expected Complete, got {other:?}"),
-    }
-    assert!(session.is_ready());
-    assert_admissible(&session);
-}
-
 /// A turn's reasoning commits ahead of *every* paragraph of the answer it
 /// deliberated into, not merely ahead of the tail.  The chopper commits
 /// prose paragraph by paragraph, so a `∴` authored at the turn's end lands
@@ -337,7 +321,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
 /// taken, and rewrites the context to the head eviction plus the recent
 /// exchange, verbatim, with no provider round-trip of its own.  `test-model`
 /// has no pricing-catalog entry, so the context window is unknown and the
-/// byte fallback (`digest::EVICT_THRESHOLD`, 500 KiB) is the live trigger:
+/// byte fallback (`gauge::EVICT_THRESHOLD`, 500 KiB) is the live trigger:
 /// the older exchange is the larger, so half the history holds the newer one
 /// whole.
 #[test]
@@ -440,8 +424,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
 
 /// X2: a tool call whose `fn_arguments` is not a JSON object is repaired to
 /// `{}` at the commit boundary, so the re-serialised transcript is one a
-/// strict backend accepts.  The repaired-to-`{}` call still reaches the
-/// tool (which reports the missing fields), and it reaches quiescence.
+/// strict backend accepts, and the turn still reaches quiescence.
 #[test]
 fn malformed_tool_arguments_are_normalised_to_object() {
     let mut session = Agent::for_test("system").unwrap();

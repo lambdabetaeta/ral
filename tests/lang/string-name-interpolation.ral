@@ -1,0 +1,39 @@
+# Test: `$(name)` in a double-quoted string ends the name where `$name` would
+# run on
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+let today = '2026-01-02'
+let first-name = 'ann'
+let n = 5
+let t = true
+let f = 1.5
+
+# Adjacent text that would continue a name
+assert_eq 'dash' '2026-01-02-checkout' "$(today)-checkout"
+assert_eq 'digit' '50' "$(n)0"
+assert_eq 'letters' 'x5y anns' "x$(n)y $(first-name)s"
+assert_eq 'path' '2026-01-02/5' "$(today)/$(n)"
+
+# Without parentheses a name continues through `-`
+assert_eq 'plain form' 'ann-ann' "$(first-name)-$first-name"
+
+# Names may follow one another, and mix with the other interpolations
+assert_eq 'twice' '2026-01-022026-01-02' "$(today)$(today)"
+assert_eq 'mixed' 'a562' "a$(n)$[$n + 1]!{length [a, b]}"
+
+# Any scalar interpolates
+assert_eq 'bool' 'truex' "$(t)x"
+assert_eq 'float' '1.5f' "$(f)f"
+assert_eq 'alone' '5' "$(n)"
+
+# An escaped dollar is text, and a spaced one is no name
+assert_eq 'escaped' '$(today) 2026-01-02' "\$(today) $(today)"
+assert_eq 'spaced' '$ (today)' "$ (today)"
+
+echo 'name interpolation tests done'

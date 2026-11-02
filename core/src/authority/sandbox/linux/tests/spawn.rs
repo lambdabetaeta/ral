@@ -486,9 +486,11 @@ fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
 
     let dir = workdir("receipt-grace");
     let flag = dir.join("grace");
+    let ready = dir.join("ready");
     let script = format!(
-        "trap 'echo GRACE > {} ; exit 0' TERM\nsleep 30\n",
-        flag.display()
+        "trap 'echo GRACE > {} ; exit 0' TERM\n: > {}\nsleep 30\n",
+        flag.display(),
+        ready.display()
     );
 
     let scope = DurableRoot::default().worker();
@@ -496,7 +498,11 @@ fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
 
     let striker = scope.clone();
     let canceller = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The marker follows the trap's installation; a miss fails the asserts.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         striker.cancel(CancelCause::Cancelled);
     });
 

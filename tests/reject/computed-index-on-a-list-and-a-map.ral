@@ -1,4 +1,6 @@
 # codes: T0010
+# status: 1
+# at: 7:14
 # contains: shared by every use in its unit
 let pick = { |m k| $m[$k] }
 let a = pick [1, 2] 0

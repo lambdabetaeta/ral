@@ -1,2 +1,5 @@
+# codes: T0074
+# status: 1
+# at: 5:69
 # contains: this is text (String), but a number (Int or Float) is needed
 let f = { |t| if true { echo hi } else { !$t }; let x = !$t; return $[$x + 1] }

@@ -248,8 +248,28 @@ pub enum Trigger {
         expr: String,
     },
     After(Duration),
-    /// One-shot at a wall-clock instant: armed by the harness, never parsed.
+    /// One-shot at a wall-clock instant: armed by the harness, never asked for.
     At(Timestamp),
+}
+
+/// A trigger the model may ask for over `exarch-schedules`: [`Trigger`]
+/// without the harness's `At`, which therefore has no wire spelling.
+#[derive(Debug, Clone)]
+pub enum Asked {
+    Cron {
+        schedule: CronSchedule,
+        expr: String,
+    },
+    After(Duration),
+}
+
+impl From<Asked> for Trigger {
+    fn from(asked: Asked) -> Self {
+        match asked {
+            Asked::Cron { schedule, expr } => Self::Cron { schedule, expr },
+            Asked::After(delay) => Self::After(delay),
+        }
+    }
 }
 
 impl Trigger {
@@ -631,41 +651,77 @@ mod tests {
         assert!(bit(s.minute, 0) && !bit(s.minute, 59));
     }
 
-    #[test]
-    fn next_after_finds_the_following_daily_occurrence() {
-        let from = date(2026, 6, 20)
-            .at(10, 0, 0, 0)
+    fn utc(y: i16, mo: i8, d: i8, h: i8, mi: i8) -> Zoned {
+        date(y, mo, d)
+            .at(h, mi, 0, 0)
             .to_zoned(jiff::tz::TimeZone::UTC)
-            .unwrap();
-        let next = sched("0 3 * * *").next_after(&from).unwrap();
-        assert_eq!(next.year(), 2026);
-        assert_eq!(next.month(), 6);
-        assert_eq!(next.day(), 21);
-        assert_eq!(next.hour(), 3);
-        assert_eq!(next.minute(), 0);
+            .unwrap()
     }
 
+    /// `(expr, from, next)`: each next is strictly after its `from`.
     #[test]
-    fn next_after_respects_weekday_restriction() {
-        // 2026-06-20 is a Saturday, so weekdays-at-09:00 waits for Monday.
-        let from = date(2026, 6, 20)
-            .at(10, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .unwrap();
-        let next = sched("0 9 * * 1-5").next_after(&from).unwrap();
-        assert_eq!(next.day(), 22, "Monday 2026-06-22");
-        assert_eq!(next.hour(), 9);
+    fn next_after_finds_the_first_occurrence_strictly_after() {
+        let table = [
+            // Daily; Saturday 2026-06-20 skips to Monday; within the hour.
+            ("0 3 * * *", utc(2026, 6, 20, 10, 0), utc(2026, 6, 21, 3, 0)),
+            (
+                "0 9 * * 1-5",
+                utc(2026, 6, 20, 10, 0),
+                utc(2026, 6, 22, 9, 0),
+            ),
+            (
+                "*/30 * * * *",
+                utc(2026, 6, 20, 10, 5),
+                utc(2026, 6, 20, 10, 30),
+            ),
+            // Strictly after: a `from` on a matching minute does not match itself.
+            ("0 3 * * *", utc(2026, 6, 20, 3, 0), utc(2026, 6, 21, 3, 0)),
+            ("0 3 * * *", utc(2026, 6, 20, 2, 59), utc(2026, 6, 20, 3, 0)),
+            // Month, year and leap-day rollover.
+            ("0 0 1 * *", utc(2026, 6, 20, 0, 0), utc(2026, 7, 1, 0, 0)),
+            (
+                "0 0 1 1 *",
+                utc(2026, 12, 31, 23, 59),
+                utc(2027, 1, 1, 0, 0),
+            ),
+            ("0 0 29 2 *", utc(2026, 3, 1, 0, 0), utc(2028, 2, 29, 0, 0)),
+            // `N/step` and `a-b/step` over names: Jan, May, Sep; Mon, Wed, Fri.
+            (
+                "0 0 1 jan/4 *",
+                utc(2026, 2, 1, 0, 0),
+                utc(2026, 5, 1, 0, 0),
+            ),
+            (
+                "0 0 * * mon-fri/2",
+                utc(2026, 6, 22, 0, 0),
+                utc(2026, 6, 24, 0, 0),
+            ),
+        ];
+        for (expr, from, want) in table {
+            let got = sched(expr).next_after(&from).unwrap();
+            assert_eq!(got.datetime(), want.datetime(), "`{expr}` after {from}");
+        }
     }
 
+    /// With both day fields restricted a day matches on either; the 13th
+    /// and every Friday.
     #[test]
-    fn next_after_steps_within_the_hour() {
-        let from = date(2026, 6, 20)
-            .at(10, 5, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .unwrap();
-        let next = sched("*/30 * * * *").next_after(&from).unwrap();
-        assert_eq!(next.hour(), 10);
-        assert_eq!(next.minute(), 30);
+    fn restricted_day_fields_fire_on_either() {
+        let mut at = utc(2026, 6, 1, 0, 0);
+        let mut days = Vec::new();
+        for _ in 0..4 {
+            at = sched("0 0 13 * fri").next_after(&at).unwrap();
+            days.push(at.day());
+        }
+        assert_eq!(days, [5, 12, 13, 19]);
+    }
+
+    /// A lone restricted day field is not widened by the starred one.
+    #[test]
+    fn a_starred_day_field_defers_to_the_restricted_one() {
+        let at = utc(2026, 6, 14, 0, 0);
+        assert_eq!(sched("0 0 13 * *").next_after(&at).unwrap().month(), 7);
+        assert_eq!(sched("0 0 * * fri").next_after(&at).unwrap().day(), 19);
     }
 
     #[test]
@@ -689,8 +745,17 @@ mod tests {
         assert!(parse_duration("h").is_err());
     }
 
+    /// `fmt_duration` inverts `parse_duration`.
     #[test]
-    fn describe_round_trips_after() {
+    fn durations_round_trip_through_their_text() {
+        for text in ["45s", "90s", "30m", "90m", "2h", "26h", "1d", "3d"] {
+            let d = parse_duration(text).unwrap();
+            assert_eq!(parse_duration(&fmt_duration(d)).unwrap(), d, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_after_trigger_describes_its_delay_and_is_one_shot() {
         let t = Trigger::After(parse_duration("2h").unwrap());
         assert_eq!(t.describe(), "after 2h");
         assert!(!t.is_recurring());

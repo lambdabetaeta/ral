@@ -143,7 +143,7 @@ fn a_ponging_peer_keeps_the_session_alive_past_the_deadline() {
         }
     });
 
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(brisk().deadline * 3);
     assert!(
         transport.severed().is_none(),
         "a ponging peer must keep the session alive well past the deadline"
@@ -347,4 +347,22 @@ fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
         }
         other => panic!("expected the dispatch's Report, got {other:?}"),
     }
+}
+
+#[test]
+fn a_refusal_from_the_engine_is_the_attach_verdict() {
+    let (front, back) = UnixStream::pair().unwrap();
+    let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut ch = WireChannel::from_stream(back);
+        assert!(matches!(ch.read_frame().unwrap(), Some(Frame::Attach(_))));
+        ch.write_frame(&Frame::Session(SessionEvent::Refused("no".into())))
+            .unwrap();
+    });
+    attach(&transport);
+    assert_eq!(
+        transport.await_attached(),
+        Err(Severed::Refused("no".into()))
+    );
+    peer.join().unwrap();
 }

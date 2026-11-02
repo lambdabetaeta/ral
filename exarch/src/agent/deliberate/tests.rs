@@ -1,6 +1,7 @@
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod scripted;
+mod unoffered;
 
 use super::*;
 use crate::agent::gauge::{EVICT_THRESHOLD, Measure};
@@ -996,47 +997,15 @@ fn ending_a_sub_agent_then_dropping_its_engine_cancels_its_workers() {
     assert!(entries[0].handle.cancel.is_cancelled());
 }
 
-static DELIBERATE_STOP_ENTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static DELIBERATE_STOP_RELEASE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-struct DeliberateReleaseGuard(&'static std::sync::atomic::AtomicBool);
-impl Drop for DeliberateReleaseGuard {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
-fn builtin_deliberate_hold_until_released(
-    _args: &[Value],
-    _mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    DELIBERATE_STOP_ENTERED.store(true, std::sync::atomic::Ordering::Release);
-    while !DELIBERATE_STOP_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    shell.poll()?;
-    Ok(Value::Unit)
-}
-
-static DELIBERATE_HOLD_BUILTINS: [BuiltinEntry; 1] = [BuiltinEntry::new(
-    Cow::Borrowed("test-deliberate-hold"),
-    scheme_t2_cancel_now,
-    "test-only: hold until released, then poll.",
-    BuiltinBody::Static(builtin_deliberate_hold_until_released),
-)];
-
 #[test]
 fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
     use crate::card::testkit::card_value;
     use ral_core::protocol::probe::WorkerState;
     use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
-    DELIBERATE_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
-    DELIBERATE_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
-    let mut session = dressed_trunk(|runtime| runtime.install_builtins(&DELIBERATE_HOLD_BUILTINS));
-    // Declared after the session, so the hold ends before its teardown.
-    let _release = DeliberateReleaseGuard(&DELIBERATE_STOP_RELEASE);
+    let held = HeldWorker::new("test-deliberate-hold");
+    let builtins = held.builtins();
+    let mut session = dressed_trunk(move |runtime| runtime.install_captured_builtins(&builtins));
+    let _release = held.release_on_drop();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     session.ral(
@@ -1045,9 +1014,7 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
         10,
         &emit,
     );
-    while !DELIBERATE_STOP_ENTERED.load(std::sync::atomic::Ordering::Acquire) {
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    held.wait_entered();
     session.ral(
         &DurableRoot::default().child(),
         "cancel $h_stop\nlet h_claimed = spawn \"claimed\" { 7 }\nawait $h_claimed",
@@ -1604,14 +1571,7 @@ fn a_ring_pending_through_a_shell_call_is_answered_once_after_its_results() {
     })
     .unwrap();
     let address = session.mailbox.address();
-    let recorder = session.recorder();
     T2_CANCEL.set(Some(Box::new(move || {
-        let before = recorder.reader().since(None).unwrap().1.count();
-        assert_eq!(
-            recorder.reader().since(None).unwrap().1.count(),
-            before,
-            "a ring must not commit"
-        );
         assert!(address.queued_posts().is_empty(), "a ring must not post");
     })));
     let provider = scripted(

@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:5
 # contains: names the stream it already is
 cmd 1>&1

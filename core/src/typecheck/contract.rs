@@ -463,22 +463,21 @@ pub(super) fn ascribe(
     cty: Option<CompTy>,
     table: &'static Table,
 ) {
-    let (Some(phrase), Some(cty)) = (tail, cty) else {
-        return;
+    // No returning phrase (an empty file, or one ending in a `let`) evaluates
+    // to `()`, and is judged as `return ()` is.
+    let resolved = match cty.map(|cty| ctx.unifier.resolve_comp_ty(&cty)) {
+        Some(CompTy::Return(_, value)) => ctx.unifier.resolve_ty(&value),
+        Some(_) => return,
+        None => Ty::Unit,
     };
-    let Phrase::Run(comp) = &phrase.item else {
-        return;
-    };
-    let CompTy::Return(_, value) = ctx.unifier.resolve_comp_ty(&cty) else {
-        return;
-    };
-    let written = match &comp.item {
-        CompKind::Return(record @ Val::Record(_)) => Some(record),
+    let written = match tail.map(|phrase| &phrase.item) {
+        Some(Phrase::Run(comp)) if let CompKind::Return(record @ Val::Record(_)) = &comp.item => {
+            Some(record)
+        }
         _ => None,
     };
     let saved = ctx.pos;
-    ctx.pos = phrase.span;
-    let resolved = ctx.unifier.resolve_ty(&value);
+    ctx.pos = tail.and_then(|phrase| phrase.span);
     ascribe_value(ctx, resolved, table, written, table.factory);
     ctx.pos = saved;
 }
@@ -608,4 +607,65 @@ pub(super) fn drain_nested(ctx: &mut InferCtx) {
         ascribe_nested(ctx, key, &ty, table, None);
     }
     ctx.pos = saved;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Form, Holds, declared};
+    use crate::syntax::parser::parse;
+    use crate::{TypeError, elaborator::elaborate, typecheck};
+
+    fn contract_errors(form: Form, src: &str) -> Vec<TypeError> {
+        let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
+        let top = elaborate(&ast, [], None)
+            .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+        typecheck(
+            &top,
+            crate::test_helper::core_schemes(),
+            Some(declared(form)),
+        )
+        .err()
+        .unwrap_or_default()
+    }
+
+    /// A diagnosis sits at the key's written value; one about the file as a
+    /// whole at the returning phrase, not at the file's start.
+    #[test]
+    fn contract_diagnostics_sit_at_what_was_written() {
+        let cases = [
+            (Form::Rc, "let a = 1\nreturn [bell: 7]", "7"),
+            (Form::Rc, "let a = 1\nreturn [nope: 7]", "7"),
+            (Form::Grant, "let a = 1\nreturn [detach: true]", "true"),
+            (Form::Grant, "let a = 1\nreturn [fs: [nope: 7]]", "7"),
+            (Form::Manifest, "let a = 1\nreturn [aliases: 1]", "return"),
+        ];
+        for (form, src, at) in cases {
+            let [err] = &contract_errors(form, src)[..] else {
+                panic!("{form:?} {src:?}: one diagnosis expected");
+            };
+            let pos = err.pos.expect("a located diagnosis");
+            let want = src.rfind(at).unwrap();
+            assert_eq!(pos.start as usize, want, "{form:?} {src:?}");
+        }
+    }
+
+    /// A table offers every key but the refused ones, which it knows and
+    /// declines.
+    #[test]
+    fn a_table_offers_every_key_but_the_refused() {
+        for form in [Form::Within, Form::Grant, Form::Rc, Form::Manifest] {
+            let table = declared(form);
+            let offered = table.offered();
+            for key in table.keys {
+                assert_eq!(
+                    offered.contains(&key.label),
+                    !matches!(key.holds, Holds::Refused(_)),
+                    "{form:?}: {}",
+                    key.label
+                );
+            }
+        }
+        let manifest = declared(Form::Manifest);
+        assert!(manifest.offered().len() < manifest.keys.len());
+    }
 }

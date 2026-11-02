@@ -1,4 +1,6 @@
 # codes: P0003
+# status: 2
+# at: 7:7
 # contains: an entry is one value, and `,` separates entries
 # contains: write `!{str $x[type]}`, or, if these are separate entries, put `,` between them
 let x = [type: file, size: 3]

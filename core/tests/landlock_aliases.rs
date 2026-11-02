@@ -162,5 +162,10 @@ fn encountered_bind_aliases_preserve_exec_exclusions() {
         out.status,
         String::from_utf8_lossy(&out.stdout),
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 passed"),
+        "the nested run must run exactly {TEST}: rename it in step with TEST; stdout:\n{stdout}"
+    );
     eprint!("{stderr}");
 }

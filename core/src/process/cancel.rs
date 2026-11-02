@@ -709,14 +709,22 @@ mod tests {
         assert_eq!(s.cause(), Some(CancelCause::Aborted));
     }
 
+    /// The cause once the shield has lapsed: polled, so only expiry is timed.
+    fn cause_once_lapsed(node: &Scope) -> Option<CancelCause> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while node.cause().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        node.cause()
+    }
+
     #[test]
     fn a_spent_shield_masks_nothing() {
         let (parent, node) = pair();
         let s = node.shielded(Duration::from_millis(200));
         parent.cancel(CancelCause::Interrupted);
         assert_eq!(s.cause(), None);
-        std::thread::sleep(Duration::from_millis(400));
-        assert_eq!(s.cause(), Some(CancelCause::Interrupted));
+        assert_eq!(cause_once_lapsed(&s), Some(CancelCause::Interrupted));
     }
 
     #[test]
@@ -724,45 +732,45 @@ mod tests {
         // Sleeps only overshoot, so only the unexpired check needs slack.
         let (parent, node) = pair();
         parent.cancel(CancelCause::Interrupted);
-        std::thread::sleep(Duration::from_millis(100));
-        let s = node.shielded(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(20));
+        let s = node.shielded(Duration::from_millis(1));
         assert_eq!(s.cause(), Some(CancelCause::Interrupted));
-        let t = node.shielded(Duration::from_secs(2));
+        let t = node.shielded(Duration::from_secs(1));
         assert_eq!(t.cause(), None);
-        std::thread::sleep(Duration::from_secs(2));
-        assert_eq!(t.cause(), Some(CancelCause::Interrupted));
+        assert_eq!(cause_once_lapsed(&t), Some(CancelCause::Interrupted));
     }
 
     #[test]
     fn successive_shields_share_the_strike() {
+        // Sleeps only overshoot, which lapses the grace the sooner.
         let (parent, node) = pair();
         parent.cancel(CancelCause::Interrupted);
-        let s1 = node.shielded(Duration::from_millis(400));
-        std::thread::sleep(Duration::from_millis(300));
+        let s1 = node.shielded(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(75));
         drop(s1);
-        let s2 = node.shielded(Duration::from_millis(400));
-        std::thread::sleep(Duration::from_millis(150));
+        let s2 = node.shielded(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(40));
         assert_eq!(s2.cause(), Some(CancelCause::Interrupted));
     }
 
     #[test]
     fn a_nested_shield_ends_with_its_enclosing_one() {
         let (parent, node) = pair();
-        let outer = node.shielded(Duration::from_millis(200));
+        let outer = node.shielded(Duration::from_millis(50));
         let inner = outer.shielded(Duration::from_secs(10));
         parent.cancel(CancelCause::Interrupted);
-        std::thread::sleep(Duration::from_millis(400));
-        assert_eq!(inner.cause(), Some(CancelCause::Interrupted));
+        assert_eq!(cause_once_lapsed(&inner), Some(CancelCause::Interrupted));
     }
 
     #[test]
     fn a_stronger_cause_keeps_the_first_strike() {
+        // Sleeps only overshoot, which lapses the grace the sooner.
         let (parent, node) = pair();
         parent.cancel(CancelCause::Interrupted);
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(75));
         parent.cancel(CancelCause::Cancelled);
-        let s = node.shielded(Duration::from_millis(400));
-        std::thread::sleep(Duration::from_millis(150));
+        let s = node.shielded(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(40));
         assert_eq!(s.cause(), Some(CancelCause::Cancelled));
     }
 

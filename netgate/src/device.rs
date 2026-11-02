@@ -157,77 +157,86 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    /// Loss is allowed; corruption, reordering and reader-induced blocking are not.
+    fn wait_failed(device: &mut TunDevice) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !device.failed() {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            let _ = device.receive(Instant::from_millis(0));
+            thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
+    /// Below `INBOX_CAP`, nothing is dropped.
     #[test]
-    fn ten_thousand_frames_round_trip_through_the_reader() {
+    fn frames_arrive_whole_and_in_order() {
         let (a, mut b) = UnixStream::pair().unwrap();
         let (mut device, _stop) = spawn(a, Arc::new(|| {})).unwrap();
-        let writer = thread::spawn(move || {
-            for i in 0..10_000u32 {
-                let frame = i.to_le_bytes().to_vec();
-                packet::write_frame(&mut b, &frame).unwrap();
-            }
-        });
-        writer.join().unwrap();
+        let sent: Vec<u32> = (0..200).collect();
+        for i in &sent {
+            packet::write_frame(&mut b, &i.to_le_bytes()).unwrap();
+        }
 
-        let mut last = None;
-        let mut received = 0u32;
-        let mut quiet_polls = 0;
-        while quiet_polls < 200 {
-            if let Some((rx, _tx)) = device.receive(Instant::from_millis(0)) {
-                use phy::RxToken as _;
-                rx.consume(|data| {
-                    let v = u32::from_le_bytes(data.try_into().unwrap());
-                    if let Some(prev) = last {
-                        assert!(v > prev, "frames must never arrive out of order");
-                    }
-                    last = Some(v);
-                });
-                received += 1;
-                quiet_polls = 0;
-            } else {
-                quiet_polls += 1;
-                thread::sleep(Duration::from_millis(1));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            assert!(std::time::Instant::now() < deadline, "frames went missing");
+            match device.receive(Instant::from_millis(0)) {
+                Some((rx, _tx)) => {
+                    use phy::RxToken as _;
+                    rx.consume(|data| got.push(u32::from_le_bytes(data.try_into().unwrap())));
+                }
+                None => thread::sleep(Duration::from_millis(1)),
             }
         }
-        assert!(received > 0, "at least some frames must get through");
-        assert!(received <= 10_000);
+        assert_eq!(got, sent);
     }
 
     #[test]
-    fn an_oversize_frame_tears_the_reader_down() {
+    fn an_oversize_frame_fails_the_device() {
         let (a, mut b) = UnixStream::pair().unwrap();
         let (mut device, _stop) = spawn(a, Arc::new(|| {})).unwrap();
         b.write_all(&(u32::try_from(guest_abi::link::MTU).unwrap() + 1).to_le_bytes())
             .unwrap();
-        thread::sleep(Duration::from_millis(100));
-        assert!(device.receive(Instant::from_millis(0)).is_none());
-        b.write_all(&5u32.to_le_bytes()).unwrap();
-        let _ = b.write_all(b"hello");
-        thread::sleep(Duration::from_millis(50));
-        assert!(device.receive(Instant::from_millis(0)).is_none());
+        assert!(wait_failed(&mut device));
+    }
+
+    #[test]
+    fn a_closed_wire_fails_the_device() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (mut device, _stop) = spawn(a, Arc::new(|| {})).unwrap();
+        drop(b);
+        assert!(wait_failed(&mut device));
+    }
+
+    #[test]
+    fn a_failed_transmit_fails_the_device() {
+        use phy::TxToken as _;
+        let (a, b) = UnixStream::pair().unwrap();
+        let (mut device, _stop) = spawn(a, Arc::new(|| {})).unwrap();
+        drop(b);
+        assert!(!device.failed());
+        device
+            .transmit(Instant::from_millis(0))
+            .unwrap()
+            .consume(4, |buf| buf.fill(1));
+        assert!(device.failed());
     }
 
     #[test]
     fn stop_unsticks_a_reader_blocked_on_an_empty_socket() {
         let (a, _b) = UnixStream::pair().unwrap();
-        let (device, stop) = spawn(a, Arc::new(|| {})).unwrap();
+        let (_device, stop) = spawn(a, Arc::new(|| {})).unwrap();
         stop.stop();
-        drop(device);
-    }
-
-    #[test]
-    fn a_full_inbox_drops_frames_instead_of_blocking_the_writer() {
-        let (a, mut b) = UnixStream::pair().unwrap();
-        let (_device, _stop) = spawn(a, Arc::new(|| {})).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        for i in 0..(u32::try_from(INBOX_CAP).unwrap() * 4) {
-            let frame = i.to_le_bytes().to_vec();
-            packet::write_frame(&mut b, &frame).unwrap();
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the writer must never block even once the inbox is full"
-            );
-        }
+        let (done, exited) = mpsc::channel();
+        thread::spawn(move || {
+            stop.join();
+            let _ = done.send(());
+        });
+        exited
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the reader must exit once stopped");
     }
 }

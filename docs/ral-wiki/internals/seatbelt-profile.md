@@ -96,8 +96,12 @@ negative one. Positive clauses are `process-exec` alone, `(allow process-exec
 section's, which renders them whether exec is restricted or not. Support
 (carriers, [[decisions/261004_exec-carriers|exec-carriers]]) arrives among the
 positives as `File` allows. A negative clause is `(deny process-exec …)`, and a
-veto is `(deny process-exec (regex #"/name$"))`, the name wherever it resolves;
-an entry with both bits emits both clauses. Seatbelt matches each form
+veto is `(deny process-exec (regex "/name$"))`, the name wherever it resolves;
+an entry with both bits emits both clauses. Every path and name is spliced as
+an ordinary `"…"` literal with `\` and `"` escaped, a veto's regex
+metacharacters escaped beneath that, so no byte (a newline included) can end
+the literal; never the raw `#"…"`, which has no escape and ends at the first
+`"` (measured: `#"/a\"b$"` fails to compile). Seatbelt matches each form
 caselessly, as the guard reads an exclusion. **Ordering within each group is
 for stable output only; depth grants no exception**, so last-match-wins puts
 every exclusion over every allowance, which is the guard's rule

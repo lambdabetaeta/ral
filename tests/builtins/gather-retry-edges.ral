@@ -1,0 +1,59 @@
+# Test: gather and retry beyond their basic use
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+# gather with no workers is its body's value
+assert_eq 'bare gather' 7 !{gather { return 7 }}
+
+# Workers left unawaited are awaited at exit, in birth order, output kept
+gather {
+    let a = spawn "slow" { sleep 0.2; echo first }
+    let b = spawn "fast" { echo second }
+    return ()
+}
+echo after
+
+# An unawaited worker's failure is the gather's
+assert_eq 'unawaited failure' 6 !{try { gather { let h = spawn "bad" { fail [status: 6, message: boom] }; return 1 } } { |e| return $e[status] }}
+
+# A failure in the body cancels workers still running
+assert_eq 'body failure' 4 !{try { gather { let h = spawn "long" { sleep 30 }; fail [status: 4, message: stop] } } { |e| return $e[status] }}
+
+# gathers nest, and none leaves a worker behind
+assert_eq 'nested' 5 !{gather {
+    let o = spawn "outer" { gather { let i = spawn "inner" { return 5 }; return !{await $i} } }
+    return !{await $o}
+}}
+gather { let h = spawn "short" { sleep 0.01 }; return () }
+assert_eq 'no workers left' 0 !{length !{workers}}
+
+# retry runs the body again after a failure and returns the first success
+let d = temp-dir
+echo 0 > "$d/n"
+let flaky = {
+    let n = int !{from-line < "$d/n"}
+    echo $[$n + 1] > "$d/n"
+    if $[$n < 2] { fail [status: 5, message: 'not yet'] } else { return $n }
+}
+assert_eq 'retry succeeds' 2 !{retry 5 $flaky}
+assert_eq 'attempts made' 3 !{int !{from-line < "$d/n"}}
+
+# Exhausted, the last error is raised as it stands
+echo 0 > "$d/m"
+let e = try { retry 3 { let n = int !{from-line < "$d/m"}; echo $[$n + 1] > "$d/m"; fail [status: 7, message: "try $n"] } } { |e| return $e }
+assert_eq 'exhausted status' 7 $e[status]
+assert_eq 'exhausted is the last error' 'try 2' $e[message]
+assert_eq 'exhausted attempts' 3 !{int !{from-line < "$d/m"}}
+
+# A count below one still runs the body once
+echo 0 > "$d/k"
+try { retry 0 { let n = int !{from-line < "$d/k"}; echo $[$n + 1] > "$d/k"; fail [status: 2, message: x] } } { |_| return 0 }
+assert_eq 'retry zero' 1 !{int !{from-line < "$d/k"}}
+rm -rf $d
+
+echo 'gather and retry tests done'

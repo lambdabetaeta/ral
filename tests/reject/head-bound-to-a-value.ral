@@ -1,4 +1,6 @@
 # codes: T0072 T0072
+# status: 1
+# at: 7:1
 # contains: `date` is bound to an Int
 # contains: if you meant a command named `date`, `^date` runs it
 let date = 5

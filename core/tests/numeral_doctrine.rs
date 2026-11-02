@@ -31,8 +31,6 @@ use ral_core::shell::run::RunReport;
 use ral_core::shell::runtime::Value;
 use ral_core::source::SourceOrigin;
 
-/// A session as every front end builds one: prelude registered, env seeded,
-/// capabilities at root.
 /// What `src` writes to stdout, the run having succeeded.
 fn printed(src: &str) -> String {
     match fresh_shell().run(Run::captured(
@@ -60,10 +58,6 @@ fn printed(src: &str) -> String {
 /// integral values, the magnitudes at either end that print in exponent form,
 /// the representable extremes, and two irrationals whose shortest spelling
 /// uses every digit it is allowed.
-fn finite(f: f64) -> Finite {
-    Finite::new(f).expect("a probe is finite")
-}
-
 const FLOAT_PROBES: [f64; 16] = [
     0.0,
     -0.0,
@@ -82,6 +76,10 @@ const FLOAT_PROBES: [f64; 16] = [
     1.0 / 3.0,
     std::f64::consts::SQRT_2,
 ];
+
+fn finite(f: f64) -> Finite {
+    Finite::new(f).expect("a probe is finite")
+}
 
 // ── One printed spelling per number ──────────────────────────────────────────
 

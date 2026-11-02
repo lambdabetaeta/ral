@@ -43,9 +43,15 @@ fn an_interrupt_through_the_control_sender_stops_an_in_flight_run() {
     )
     .expect("a bare engine boots");
 
+    // The child marks itself started: an interrupt before dispatch is dropped.
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let marker = dir.path().join("started");
     let sender = transport.control().clone();
+    let started_marker = marker.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(250));
+        while !started_marker.exists() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         sender.interrupt();
     });
 
@@ -54,7 +60,13 @@ fn an_interrupt_through_the_control_sender_stops_an_in_flight_run() {
         &transport,
         Run {
             trail: Some(CapturePolicy::Off),
-            ..Run::captured("/bin/sleep 30", SourceOrigin::named("<test>"))
+            ..Run::captured(
+                format!(
+                    "/bin/sh -c ': >\"$0\"; exec /bin/sleep 30' '{}'",
+                    marker.display()
+                ),
+                SourceOrigin::named("<test>"),
+            )
         },
         Arc::new(()),
         None,
@@ -82,9 +94,7 @@ fn an_interrupt_through_the_control_sender_stops_an_in_flight_run() {
     let struck = trail.into_iter().find_map(|fo| {
         let obs = ral_core::shell::runtime::Observation::decode(&fo).ok()?;
         match obs.what {
-            Observed::Command(c) if c.argv.first().is_some_and(|a| a.contains("sleep")) => {
-                Some(c.argv)
-            }
+            Observed::Command(c) if c.argv.iter().any(|a| a.contains("sleep")) => Some(c.argv),
             _ => None,
         }
     });

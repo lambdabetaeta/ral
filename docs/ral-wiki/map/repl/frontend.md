@@ -187,8 +187,7 @@ exactly a `{replacement, display}` record.
 
 `ral/tests/common/pty.rs` opens both terminal ends before spawning; the slave
 name is owned and every descriptor is close-on-exec. The child hook only
-creates its session and acquires its controlling terminal. `pty_isolation.rs`
-checks that parallel sessions retain distinct terminals and independent I/O.
+creates its session and acquires its controlling terminal.
 `send_line` sends CR (Enter), leaving LF for the explicit Ctrl-J newline.
 `prompt_lifecycle.rs` covers non-executing newline insertion;
 `external_editor.rs` covers editor return-to-draft, failure and readback.

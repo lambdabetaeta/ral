@@ -116,6 +116,17 @@ mod tests {
     #[test]
     fn tail_snaps_to_a_char_boundary() {
         assert_eq!(tail_bytes("abé", 2), "é");
+        assert_eq!(
+            tail_bytes("abé", 1),
+            "",
+            "byte 3 is mid-char, so snap forward"
+        );
         assert_eq!(tail_bytes("abé", 9), "abé");
+    }
+
+    #[test]
+    fn a_remote_copy_needs_the_terminal_allowed() {
+        let error = Clipboard::new(true).copy("text", false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
     }
 }

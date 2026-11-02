@@ -13,6 +13,8 @@ use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
+mod arms;
+
 fn builtin_panic_now(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) -> Settled<Value> {
     panic!("a4 test: deliberate mid-eval panic");
 }

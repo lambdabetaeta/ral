@@ -270,7 +270,8 @@ impl Core {
         for handle in handles {
             match self.sockets.get::<tcp::Socket>(handle).state() {
                 tcp::State::Listen | tcp::State::SynReceived => remaining.push(handle),
-                tcp::State::Established => {
+                // A guest may half-close before its first pump: still a connection.
+                tcp::State::Established | tcp::State::CloseWait => {
                     self.accept(handle);
                     remaining.push(fresh_listener(&mut self.sockets));
                 }
@@ -556,9 +557,14 @@ mod tests {
     }
 
     #[test]
-    fn a_half_closed_connection_is_left_alone_inside_the_grace() {
+    fn a_half_closed_connection_is_reaped_only_after_the_grace() {
         assert!(!reap_now(true, true, Some(FIN_GRACE / 2)));
         assert!(!reap_now(true, true, Some(FIN_GRACE)));
+        assert!(reap_now(
+            true,
+            true,
+            Some(FIN_GRACE + Duration::from_nanos(1))
+        ));
     }
 
     #[cfg(unix)]
@@ -776,10 +782,9 @@ mod tests {
         }
 
         #[test]
-        fn output_fin_does_not_age_a_live_worker_and_completion_starts_fresh_grace() {
+        fn output_fin_does_not_age_a_live_worker() {
             let mut h = Harness::new();
-            let start = h.now;
-            let first = h.tunnel(42000, b"upload after FIN");
+            let tunnel = h.tunnel(42000, b"upload after FIN");
             {
                 let connections = h.core.connections.lock_ignore_poison();
                 assert!(connections[0].core.output_finished());
@@ -787,65 +792,39 @@ mod tests {
                 assert_eq!(connections[0].finished_at, None);
             }
 
-            h.now = start + FIN_GRACE + Duration::from_secs(1);
+            h.now += FIN_GRACE + Duration::from_secs(1);
             h.step();
-            assert_eq!(h.core.connections.lock_ignore_poison().len(), 1);
-            assert_eq!(h.core.connections.lock_ignore_poison()[0].finished_at, None);
-            h.upload(&first, b"upload after FIN");
+            let connections = h.core.connections.lock_ignore_poison();
+            assert_eq!(connections.len(), 1);
+            assert_eq!(connections[0].finished_at, None);
+            drop(connections);
+            h.upload(&tunnel, b"upload after FIN");
+        }
 
-            // Also exercise the elapsed-grace guard with a still-live worker.
-            h.core.connections.lock_ignore_poison()[0].finished_at = Some(start);
-            h.step();
-            assert_eq!(h.core.connections.lock_ignore_poison().len(), 1);
-            assert!(h.core.sockets.get::<tcp::Socket>(first.host).is_open());
-            h.core.connections.lock_ignore_poison()[0].finished_at = None;
-
-            let second = h.tunnel(42001, b"another tunnel progresses");
-            h.upload(&second, b"another tunnel progresses");
-            assert_eq!(h.core.connections.lock_ignore_poison().len(), 2);
-            first.finish.send(()).unwrap();
-            second.finish.send(()).unwrap();
+        #[test]
+        fn completion_starts_a_fresh_grace_before_reaping() {
+            let mut h = Harness::new();
+            let tunnel = h.tunnel(42000, b"upload");
+            h.upload(&tunnel, b"upload");
+            tunnel.finish.send(()).unwrap();
             let completed = h.now;
-            h.until(|h| {
-                let connections = h.core.connections.lock_ignore_poison();
-                connections.len() == 2
-                    && connections
-                        .iter()
-                        .all(|conn| conn.finished_at == Some(completed))
-            });
+            h.until(|h| h.core.connections.lock_ignore_poison()[0].finished_at == Some(completed));
 
             for elapsed in [Duration::ZERO, FIN_GRACE / 2, FIN_GRACE] {
                 h.now = completed + elapsed;
                 h.core.pump_connections_at(h.now);
-                assert_eq!(h.core.connections.lock_ignore_poison().len(), 2);
+                assert_eq!(h.core.connections.lock_ignore_poison().len(), 1);
                 assert_eq!(h.core.pending_removal, []);
             }
             h.now = completed + FIN_GRACE + Duration::from_nanos(1);
             h.core.pump_connections_at(h.now);
             assert!(h.core.connections.lock_ignore_poison().is_empty());
-            assert_eq!(h.core.pending_removal.len(), 2);
-            for tunnel in [&first, &second] {
-                assert!(h.core.pending_removal.contains(&tunnel.host));
-                assert_eq!(
-                    h.core.sockets.get::<tcp::Socket>(tunnel.host).state(),
-                    tcp::State::Closed
-                );
-            }
+            assert_eq!(h.core.pending_removal, [tunnel.host]);
+            assert_eq!(
+                h.core.sockets.get::<tcp::Socket>(tunnel.host).state(),
+                tcp::State::Closed
+            );
             assert!(h.core.failures.lock_ignore_poison().is_empty());
-
-            let reused = h.tunnel(42002, b"reused slot");
-            h.upload(&reused, b"reused slot");
-            assert_eq!(h.core.connections.lock_ignore_poison().len(), 1);
         }
-    }
-
-    /// The guest cannot hold a tunnel slot by never closing its half.
-    #[test]
-    fn a_half_closed_connection_is_reaped_once_the_grace_expires() {
-        assert!(reap_now(
-            true,
-            true,
-            Some(FIN_GRACE + Duration::from_secs(1))
-        ));
     }
 }

@@ -1,3 +1,6 @@
+# codes: T0010
+# status: 1
+# at: 6:21
 # contains: a `...x` spread inside a map literal
 let n = 42
 let m = ["a": 1, ...$n]

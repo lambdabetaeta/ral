@@ -378,17 +378,17 @@ enum Filter<'a> {
 impl fmt::Display for Filter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Subpath(path) => write!(f, "(subpath \"{}\")", escape_path(path)),
+            Self::Subpath(path) => write!(f, "(subpath {})", path_literal(path)),
             Self::LocalUnixSubpath(path) => {
                 write!(f, "(local unix-socket {})", Self::Subpath(path))
             }
-            Self::Literal(path) => write!(f, "(literal \"{}\")", escape_path(path)),
+            Self::Literal(path) => write!(f, "(literal {})", path_literal(path)),
             Self::Symlink(path) => write!(
                 f,
                 "(require-all {} (vnode-type SYMLINK))",
                 Self::Literal(path)
             ),
-            Self::Regex(name) => write!(f, "(regex #\"/{}$\")", escape_regex(name)),
+            Self::Regex(name) => write!(f, "(regex {})", veto_literal(name)),
             Self::Outside(paths) => {
                 f.write_str("(require-not (require-any")?;
                 for path in *paths {
@@ -526,26 +526,34 @@ fn emit_ancestor_metadata<'a>(
     }
 }
 
-/// Quote a rendered name for an SBPL string literal.  Taking [`Rendered`] and
-/// not `&str` is what makes it impossible to splice a path into a rule without
+/// A rendered name as an SBPL string literal.  Taking [`Rendered`] and not
+/// `&str` is what makes it impossible to splice a path into a rule without
 /// first passing it through [`render_real`]: every emitter in this file
 /// funnels here, so the only `&str` items left are the denied basenames, which
-/// are final components rather than paths and go to [`escape_regex`].
-fn escape_path(path: &Rendered) -> String {
-    path.as_str().replace('\\', "\\\\").replace('"', "\\\"")
+/// are final components rather than paths and go to [`veto_literal`].
+fn path_literal(path: &Rendered) -> String {
+    string_literal(path.as_str())
 }
 
-/// Escape a command name for an SBPL `(regex …)` pattern, so a name like
-/// `c++` or `python3.11` matches itself instead of acting as a pattern.
-fn escape_regex(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
+/// The `/name$` pattern of a veto, with the name's regex metacharacters
+/// escaped so `c++` matches itself, as an SBPL string literal.
+fn veto_literal(name: &str) -> String {
+    let mut pattern = String::from("/");
     for ch in name.chars() {
         if r".^$*+?()[]{}|\/".contains(ch) {
-            out.push('\\');
+            pattern.push('\\');
         }
-        out.push(ch);
+        pattern.push(ch);
     }
-    out.replace('"', "\\\"")
+    pattern.push('$');
+    string_literal(&pattern)
+}
+
+/// `"…"`, inside which SBPL reads only `\` and `"` specially, so every other
+/// byte (a newline too) stays inside the literal.  Never the raw `#"…"`: it
+/// has no escape, and the first `"` ends it.
+fn string_literal(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 unsafe extern "C" {
@@ -762,7 +770,7 @@ mod tests {
         ];
         let negatives = [
             "(deny process-exec (subpath \"/x/y\"))",
-            r#"(deny process-exec (regex #"/z$"))"#,
+            r#"(deny process-exec (regex "/z$"))"#,
         ];
         let last_positive = positives.iter().map(|f| at(&profile, f)).max().unwrap();
         let first_negative = negatives.iter().map(|f| at(&profile, f)).min().unwrap();
@@ -789,7 +797,7 @@ mod tests {
         );
         let profile = build_profile(&policy).unwrap();
         let any = at(&profile, "(allow process-exec)\n");
-        let deny = at(&profile, r#"(deny process-exec (regex #"/git$"))"#);
+        let deny = at(&profile, r#"(deny process-exec (regex "/git$"))"#);
         assert!(any < deny);
     }
 
@@ -1021,11 +1029,11 @@ mod tests {
         );
         let profile = build_profile(&policy).unwrap();
         let allow = at(&profile, "(allow process-exec (subpath \"/usr/bin\"))");
-        let veto = at(&profile, r#"(deny process-exec (regex #"/git$"))"#);
-        at(&profile, r#"(deny process-exec (regex #"/c\+\+$"))"#);
+        let veto = at(&profile, r#"(deny process-exec (regex "/git$"))"#);
+        at(&profile, r#"(deny process-exec (regex "/c\\+\\+$"))"#);
         assert!(allow < veto, "a veto must follow the allow it overrides");
         assert!(
-            !profile.contains(r#"(deny file-read* (regex #"/git$"))"#),
+            !profile.contains(r#"(deny file-read* (regex "/git$"))"#),
             "a veto must not carve reads:\n{profile}"
         );
     }
@@ -1579,5 +1587,92 @@ mod tests {
             profile.contains(&pin),
             "the ancestor reached only through the alias must be pinned:\n{profile}"
         );
+    }
+
+    /// One SBPL string literal off the front of `s`, read as the profile
+    /// reader does: `\\` takes the next byte, `"` ends it.
+    fn read_literal(s: &str) -> Option<(String, &str)> {
+        let body = s.strip_prefix('"')?;
+        let mut chars = body.char_indices();
+        let mut out = String::new();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '"' => return Some((out, &body[i + 1..])),
+                '\\' => out.push(chars.next()?.1),
+                c => out.push(c),
+            }
+        }
+        None
+    }
+
+    const HOSTILE: &str = "q\"b\\s\nn\")(allow default)";
+
+    #[test]
+    fn a_hostile_path_stays_inside_its_literal() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hostile = dir.path().join(HOSTILE);
+        std::fs::write(&hostile, "").expect("a file with a hostile name");
+        let names = render_real(trace(&hostile).real()).expect("renders");
+        assert_ne!(names, [] as [super::Rendered; 0]);
+        for name in &names {
+            let line = Filter::Literal(name).to_string();
+            let read = line.strip_prefix("(literal ").and_then(read_literal);
+            assert_eq!(read, Some((name.as_str().to_string(), ")")), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_veto_stays_inside_its_regex_literal() {
+        let name = format!("{HOSTILE}a.*+?()[]{{}}|^$/e");
+        let line = Filter::Regex(&name).to_string();
+        let (pattern, rest) = line
+            .strip_prefix("(regex ")
+            .and_then(read_literal)
+            .unwrap_or_else(|| panic!("no literal in {line:?}"));
+        assert_eq!(rest, ")", "{line:?}");
+        let body = pattern
+            .strip_prefix('/')
+            .and_then(|p| p.strip_suffix('$'))
+            .unwrap_or_else(|| panic!("not a final-component pattern: {pattern:?}"));
+        let mut chars = body.chars();
+        let mut matched = String::new();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                matched.extend(chars.next());
+            } else {
+                assert!(
+                    !r".^$*+?()[]{}|\/".contains(c),
+                    "{c:?} unescaped in {pattern:?}"
+                );
+                matched.push(c);
+            }
+        }
+        assert_eq!(matched, name);
+    }
+
+    /// The kernel's reader agrees with `read_literal`: a hostile veto compiles
+    /// and denies its own name alone.
+    #[test]
+    fn the_kernel_reads_a_hostile_veto_as_its_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hostile = dir.path().join(HOSTILE);
+        let plain = dir.path().join("plain");
+        for file in [&hostile, &plain] {
+            std::fs::write(file, "x").expect("a file");
+        }
+        let profile = format!(
+            "(version 1)(allow default)(deny file-read-data {})",
+            Filter::Regex(HOSTILE)
+        );
+        let reads = |file: &std::path::Path| {
+            std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/bin/cat"])
+                .arg(file)
+                .output()
+                .expect("sandbox-exec runs")
+                .status
+                .success()
+        };
+        assert_eq!((reads(&hostile), reads(&plain)), (false, true), "{profile}");
     }
 }

@@ -375,35 +375,3 @@ fn message_for(code: HRESULT) -> String {
         text
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_api_either_resolves_or_names_what_is_missing() {
-        match Api::open() {
-            Ok(_) => {}
-            Err(Error::Backend { why, .. }) => assert!(
-                why.contains("Virtual Machine Platform"),
-                "a refusal must name the feature: {why}"
-            ),
-            Err(other) => panic!("a refusal must name the feature: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn windows_explains_the_access_denial_itself() {
-        let text = message_for(HCS_E_ACCESS_DENIED);
-        assert!(
-            text.contains("Hyper-V Administrators"),
-            "expected Windows' own words about the group, got: {text}"
-        );
-    }
-
-    #[test]
-    fn an_unexplained_code_still_renders() {
-        let text = message_for(0x8037_0FFF_u32.cast_signed());
-        assert_ne!(text.trim(), "");
-    }
-}

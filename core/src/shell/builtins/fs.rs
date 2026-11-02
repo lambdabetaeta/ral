@@ -228,9 +228,9 @@ pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Valu
 }
 
 pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    // Exact on Windows, where `readonly` governs writes alone; on Unix an
-    // approximation of `test -r`, the truth needing uid/gid/acl logic.
-    fs_probe("is-readable", args, shell, LeafMode::Follow, |_| true)
+    fs_probe("is-readable", args, shell, LeafMode::Follow, |located| {
+        located.may_read().is_ok()
+    })
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -330,5 +330,33 @@ mod tests {
         };
         assert_eq!(mode(dir), 0o700);
         assert_eq!(mode(file), 0o600);
+    }
+
+    /// The permission predicates ask the host, not the stat: a file with no
+    /// permission bits exists yet is neither readable nor writable.
+    #[test]
+    fn permission_predicates_answer_for_the_caller_not_for_existence() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            crate::errln!("skipped: running as root");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f");
+        std::fs::write(&file, "").unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        let arg = [Value::string(shown(&file))];
+        let mut ask = |mode: u32| {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+            let truth = |v: Settled<Value>| matches!(v, Ok(Value::Bool(true)));
+            [
+                truth(builtin_exists(&arg, &mut shell)),
+                truth(builtin_is_readable(&arg, &mut shell)),
+                truth(builtin_is_writable(&arg, &mut shell)),
+            ]
+        };
+        assert_eq!(ask(0o000), [true, false, false]);
+        assert_eq!(ask(0o400), [true, true, false]);
+        assert_eq!(ask(0o200), [true, false, true]);
     }
 }

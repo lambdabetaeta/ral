@@ -1,3 +1,6 @@
+# codes: T0020
+# status: 1
+# at: 6:13
 # contains: `` `online `` is not a net mode
 # contains: `offline
 grant [net: `online] { return 1 }

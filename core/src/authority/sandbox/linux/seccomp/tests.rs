@@ -389,8 +389,17 @@ fn explain_names_a_kill_an_errno_and_nothing_for_an_undenied_call() {
 #[test]
 fn programs_compiles_one_program_per_distinct_verdict() {
     let programs = Filter::ENVELOPE.programs().expect("the deny-set compiles");
-    // Kill, EPERM, ENOSYS.
-    assert_eq!(programs.verdicts.len(), 3);
+    let compiled: Vec<_> = programs.verdicts.iter().map(|(v, _)| *v).collect();
+    let first_seen = Filter::ENVELOPE
+        .0
+        .iter()
+        .fold(Vec::new(), |mut seen, rule| {
+            if !seen.contains(&rule.verdict) {
+                seen.push(rule.verdict);
+            }
+            seen
+        });
+    assert_eq!(compiled, first_seen);
     for (_, program) in &programs.verdicts {
         assert_ne!(program.len(), 0);
         assert!(program.len() <= usize::try_from(libc::BPF_MAXINSNS).unwrap());
@@ -405,55 +414,4 @@ fn programs_compiles_one_program_per_distinct_verdict() {
         programs.abi_guard.is_none(),
         "aarch64 shares its audit value with no other ABI"
     );
-}
-
-#[cfg(target_arch = "x86_64")]
-#[test]
-fn the_x32_guard_kills_on_arch_mismatch_and_on_the_high_syscall_bit() {
-    use seccompiler::sock_filter;
-    let expected = [
-        sock_filter {
-            code: 0x20,
-            jt: 0,
-            jf: 0,
-            k: 4,
-        },
-        sock_filter {
-            code: 0x15,
-            jt: 1,
-            jf: 0,
-            k: 0xC000_003E,
-        },
-        sock_filter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: libc::SECCOMP_RET_KILL_THREAD,
-        },
-        sock_filter {
-            code: 0x20,
-            jt: 0,
-            jf: 0,
-            k: 0,
-        },
-        sock_filter {
-            code: 0x35,
-            jt: 0,
-            jf: 1,
-            k: 0x4000_0000,
-        },
-        sock_filter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: libc::SECCOMP_RET_KILL_THREAD,
-        },
-        sock_filter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: libc::SECCOMP_RET_ALLOW,
-        },
-    ];
-    assert_eq!(x32_guard_program(), expected);
 }

@@ -848,7 +848,7 @@ mod tests {
         }
     }
 
-    /// The control decodes, so each refusal is its own defect's.
+    /// The controls decode, so each refusal is its own defect's.
     #[test]
     fn a_malformed_warrant_is_refused() {
         let conf = confinement().spell().into_owned();
@@ -857,7 +857,10 @@ mod tests {
         let control = framed(&[
             MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", b"x",
         ]);
-        assert!(Warrant::decode(&control).is_ok(), "the control must decode");
+        let tool = framed(&[MAGIC, conf, b"tool", b"ls", b"0"]);
+        for bytes in [&control, &tool] {
+            assert!(Warrant::decode(bytes).is_ok(), "the control must decode");
+        }
         for (case, bytes) in [
             ("empty", Vec::new()),
             (
@@ -869,25 +872,39 @@ mod tests {
                     b"/bin/sh",
                     b"sh",
                     b"",
-                    b"0",
+                    b"",
+                    b"1",
+                    b"x",
                 ]),
             ),
             ("cut short", control[..control.len() - 1].to_vec()),
             (
                 "an unknown kind",
-                framed(&[MAGIC, conf, b"exec", b"/bin/sh", b"1", b"x"]),
+                framed(&[
+                    MAGIC, conf, b"exec", b"/bin/sh", b"sh", b"", b"", b"1", b"x",
+                ]),
             ),
             (
                 "an empty file program",
-                framed(&[MAGIC, conf, b"file", b"", b"sh", b"", b"", b"0"]),
+                framed(&[MAGIC, conf, b"file", b"", b"sh", b"", b"", b"1", b"x"]),
             ),
             (
                 "a relative file program",
-                framed(&[MAGIC, conf, b"file", b"./bin/sh", b"sh", b"", b"", b"0"]),
+                framed(&[
+                    MAGIC,
+                    conf,
+                    b"file",
+                    b"./bin/sh",
+                    b"sh",
+                    b"",
+                    b"",
+                    b"1",
+                    b"x",
+                ]),
             ),
             (
                 "a slashless file program",
-                framed(&[MAGIC, conf, b"file", b"sh", b"sh", b"", b"", b"0"]),
+                framed(&[MAGIC, conf, b"file", b"sh", b"sh", b"", b"", b"1", b"x"]),
             ),
             ("an empty tool", framed(&[MAGIC, conf, b"tool", b"", b"0"])),
             (
@@ -930,11 +947,11 @@ mod tests {
             ),
             (
                 "a file without its argv[0]",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"1", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"", b"", b"1", b"x"]),
             ),
             (
                 "a file without its exclusion field",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", b"x"]),
             ),
             (
                 "a tool with an argv[0]",

@@ -1,4 +1,6 @@
 # codes: P0001
+# status: 2
+# at: 6:8
 # contains: `|` does not split a list pattern
 # contains: Help: bind the rest with `...`, as in `[head, ...rest]`
 let [x | xs] = [1, 2]

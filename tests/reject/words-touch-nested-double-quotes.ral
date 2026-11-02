@@ -1,3 +1,6 @@
+# codes: P0002
+# status: 2
+# at: 7:30
 # contains: words touch
 # contains: one argument: "sh -c 'bat --pager=$(p) --width=80'"
 let p = less

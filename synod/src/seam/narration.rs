@@ -475,7 +475,6 @@ mod tests {
         };
         let call_value = serde_json::to_value(&call).expect("tool call serialises");
         assert_eq!(call_value["type"], "tool_call");
-        assert!(call_value.get("summary").is_some());
         assert_eq!(call_value["summary"], "list files");
     }
 
@@ -513,6 +512,144 @@ mod tests {
             !marks.is_empty(),
             "a context survey always renders some ink"
         );
+    }
+
+    fn wire(event: Option<SynodEvent>) -> serde_json::Value {
+        serde_json::to_value(event.expect("an event")).expect("serialisable event")
+    }
+
+    fn stalled(cause: ProviderError) -> ProviderError {
+        ProviderError::Truncated {
+            cause: Box::new(exarch::provider::CutShort::Stalled(cause)),
+        }
+    }
+
+    #[test]
+    fn a_stall_is_a_warning_beside_graded_provider_errors() {
+        use exarch::provider::{CancelSite, CutShort};
+
+        let api = || ProviderError::Api {
+            status: None,
+            model: "m".into(),
+            message: "no".into(),
+            body: None,
+        };
+        let overflow = ProviderError::Overflow {
+            model: "m".into(),
+            provider: None,
+            sent: None,
+            limit: None,
+            listed: None,
+            body: None,
+        };
+        let transient = ProviderError::Transient {
+            cause: "c".into(),
+            attempts: 1,
+            body: None,
+            status: None,
+        };
+        let cut = ProviderError::Truncated {
+            cause: Box::new(CutShort::OutputCap {
+                stop_reason: "length".into(),
+            }),
+        };
+        let graded = [
+            (api(), "provider_error", "bad"),
+            (overflow, "provider_error", "bad"),
+            (ProviderError::Other("x".into()), "provider_error", "bad"),
+            (
+                ProviderError::Cancelled(CancelSite::MidStream),
+                "provider_error",
+                "warn",
+            ),
+            (transient, "provider_error", "warn"),
+            (cut, "provider_error", "warn"),
+            (stalled(api()), "stalled", "warn"),
+        ];
+        for (error, tag, severity) in graded {
+            let value = wire(forensic(Role::Trunk, &Forensic::ProviderError { error }));
+            assert_eq!(value["type"], tag);
+            assert_eq!(value["severity"], severity);
+        }
+    }
+
+    #[test]
+    fn a_helpers_errors_stay_in_the_log_and_the_trunks_reach_the_window() {
+        let error = Forensic::Error {
+            text: "boom".into(),
+        };
+        let provider = Forensic::ProviderError {
+            error: ProviderError::Other("x".into()),
+        };
+        assert!(forensic(Role::Helper, &error).is_none());
+        assert!(forensic(Role::Helper, &provider).is_none());
+        assert_eq!(
+            wire(forensic(Role::Trunk, &error)),
+            serde_json::json!({ "type": "error", "message": "boom" })
+        );
+    }
+
+    #[test]
+    fn a_helper_shows_neither_boundaries_states_stop_reasons_nor_tokens() {
+        let transients = [
+            Transient::Token("t".into()),
+            Transient::State(AgentState::Ready),
+            Transient::StopReason("end_turn".into()),
+            Transient::Boundary,
+        ];
+        let trunk = transients
+            .iter()
+            .map(|t| wire(transient(Role::Trunk, t)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            trunk,
+            [
+                serde_json::json!({ "type": "token", "text": "t" }),
+                serde_json::json!({ "type": "state", "state": "ready" }),
+                serde_json::json!({ "type": "stop_reason", "reason": "end_turn" }),
+                serde_json::json!({ "type": "boundary" }),
+            ]
+        );
+        assert!(
+            transients
+                .iter()
+                .all(|t| transient(Role::Helper, t).is_none())
+        );
+    }
+
+    #[test]
+    fn a_helper_shows_no_tool_calls_and_its_change_becomes_a_process_card() {
+        let call = Record::Display(Display::ToolCall {
+            tool: "ral".into(),
+            cmd: "ls".into(),
+            summary: None,
+        });
+        let harness = Record::Display(Display::HarnessCall {
+            verb: "v".into(),
+            subject: None,
+            payload: "p".into(),
+            failed: false,
+        });
+        for record in [&call, &harness] {
+            assert!(project(Role::Trunk, record).is_some());
+            assert!(project(Role::Helper, record).is_none());
+        }
+
+        let change = Record::Display(Display::Change {
+            change: exarch::card::Change {
+                path: "a.txt".into(),
+                outcome: ral_core::shell::runtime::WriteOutcome::Committed,
+                diff: None,
+            },
+        });
+        let (mut trunk, helper) = (
+            wire(project(Role::Trunk, &change)),
+            wire(project(Role::Helper, &change)),
+        );
+        assert_eq!(trunk["type"], "card");
+        assert_eq!(helper["type"], "process_card");
+        trunk["type"] = helper["type"].clone();
+        assert_eq!(trunk, helper);
     }
 
     #[test]
@@ -744,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn report_fire_clear_and_resume_lines_each_project_at_most_one_event() {
+    fn report_fire_clear_and_resume_lines_project_no_event() {
         use exarch::record::{Control, Record};
         use serde_json::json;
 
@@ -808,11 +945,11 @@ mod tests {
                 }));
             }
             for role in [Role::Trunk, Role::Helper] {
-                let events: Vec<_> = records
+                let events = records
                     .iter()
                     .filter_map(|record| project(role, record))
-                    .collect();
-                assert!(events.len() <= 1, "{name} produced {} events", events.len());
+                    .count();
+                assert_eq!(events, 0, "{name}");
             }
         }
     }

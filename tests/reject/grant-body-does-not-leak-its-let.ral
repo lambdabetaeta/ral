@@ -1,4 +1,6 @@
 # codes: T0071
+# status: 1
+# at: 6:6
 # contains: undefined variable: $leak_grant
 grant [exec: [allow: []]] { let leak_grant = 1 }
 echo $leak_grant

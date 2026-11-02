@@ -1,2 +1,5 @@
+# codes: T0020
+# status: 1
+# at: 5:14
 # contains: `` `dir `` is not a place or a selector
 grant [exec: [allow: [`dir `dir `cwd tools]]] { return 1 }

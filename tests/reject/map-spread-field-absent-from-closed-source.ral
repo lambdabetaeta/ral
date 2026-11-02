@@ -1,2 +1,5 @@
+# codes: T0020
+# status: 1
+# at: 5:73
 # contains: no field named 'missing'
 let base = [host: localhost]; let r = [...$base, host: other]; return $r[missing]

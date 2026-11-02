@@ -8,7 +8,7 @@
 use crate::card::{Card, encode_card, value_to_card};
 use crate::record::context::ContextSurvey;
 use crate::record::{Location, Memory, Span, SpanRow, TranscriptPart};
-use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_duration};
+use crate::schedule::{Asked, CronSchedule, ScheduleInfo, fmt_duration, parse_duration};
 use ral_core::SpawnGrant;
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum, exact_keys, field, tag, untag};
@@ -669,7 +669,7 @@ impl Family for Schedules {
 }
 
 pub(crate) struct Add {
-    pub(crate) trigger: Trigger,
+    pub(crate) trigger: Asked,
     pub(crate) label: String,
     pub(crate) prompt: String,
 }
@@ -682,12 +682,11 @@ record!(Add {
 
 /// Parsed on arrival at either end, so a malformed expression carries its
 /// parser's own message home.
-impl Datum for Trigger {
+impl Datum for Asked {
     fn encode(self) -> FOValue {
         match self {
             Self::Cron { expr, .. } => tag("cron", Some(expr.encode())),
             Self::After(delay) => tag("after", Some(fmt_duration(delay).encode())),
-            Self::At(at) => tag("at", Some(at.to_string().encode())),
         }
     }
 
@@ -1389,13 +1388,19 @@ mod tests {
         let expr = "0 9 * * 1-5";
         round_trips([
             Request::Schedules(Schedules::List),
-            add(Trigger::After(parse_duration("2h").unwrap())),
-            add(Trigger::Cron {
+            add(Asked::After(parse_duration("2h").unwrap())),
+            add(Asked::Cron {
                 schedule: CronSchedule::parse(expr).unwrap(),
                 expr: expr.into(),
             }),
             Request::Schedules(Schedules::Remove("nightly".into())),
         ]);
+    }
+
+    #[test]
+    fn the_harness_only_at_trigger_has_no_wire_spelling() {
+        let at = tag("at", Some(jiff::Timestamp::now().to_string().encode()));
+        assert!(Asked::decode(&at).is_err());
     }
 
     #[test]
@@ -1422,6 +1427,138 @@ mod tests {
             Request::Pins(Pins::Read("tasks".into())),
             Request::Pins(Pins::List),
         ]);
+    }
+
+    /// Each family's own answer passes the validator its request names, and
+    /// no record or scalar of the wrong shape does.
+    #[test]
+    fn every_request_owes_the_answer_of_its_own_shape() {
+        let text = |t: &str| t.to_string();
+        let agent = AgentInfo {
+            name: text("scout"),
+            spawner: Spawner::Human,
+            log_dir: PathBuf::from("/log"),
+            elapsed: Duration::from_secs(3),
+            state: RosterState::Busy,
+            idle: Duration::ZERO,
+        };
+        let summary = Summary {
+            live: 1,
+            replied: 0,
+        };
+        let schedule = ScheduleInfo {
+            label: text("nightly"),
+            trigger: text("after 2h"),
+            next_s: 7,
+            fires: 0,
+        };
+        let card = Card(vec![crate::card::Mark::Text {
+            spans: vec![crate::card::Span::plain("hi")],
+        }]);
+        let evict = || Evict {
+            span: Span::new(1, 3).unwrap(),
+            note: Note("n".into()),
+        };
+        let row = || Row {
+            from: 1,
+            to: 1,
+            role: text("user"),
+            kind: text("turn"),
+            label: text("l"),
+            bytes: 2,
+        };
+        let indexed = Indexed {
+            from: 1,
+            to: 1,
+            role: text("user"),
+            kind: text("turn"),
+            label: text("l"),
+            bytes: 2,
+            location: Location::Resident,
+        };
+        let material = Material {
+            turn: 1,
+            role: text("user"),
+            messages: vec![Said {
+                role: Bare(text("user")),
+                parts: vec![TranscriptPart::Text(text("x"))],
+            }],
+        };
+        let hits = Hits {
+            hits: vec![Hit {
+                from: 1,
+                to: 1,
+                kind: text("turn"),
+                role: text("user"),
+                line: 1,
+                text: text("x"),
+            }],
+            total: 1,
+        };
+        let survey = || Survey {
+            rows: vec![row()],
+            total_bytes: 2,
+        };
+        let table = [
+            (Request::Agents(Agents::List), vec![agent].encode()),
+            (
+                Request::Agents(Agents::Read(text("scout"))),
+                Deposit {
+                    name: text("scout"),
+                    reply: FOValue::Unit,
+                }
+                .encode(),
+            ),
+            (
+                Request::Agents(Agents::Stop(text("scout"))),
+                summary.encode(),
+            ),
+            (Request::Schedules(Schedules::List), vec![schedule].encode()),
+            (Request::Pins(Pins::Clear(text("k"))), FOValue::Unit),
+            (Request::Pins(Pins::Read(text("k"))), tag("none", None)),
+            (
+                Request::Pins(Pins::Read(text("k"))),
+                tag("some", Some(card.encode())),
+            ),
+            (Request::Pins(Pins::List), vec![text("k")].encode()),
+            (Request::Context(Context::Survey), survey().encode()),
+            (Request::Context(Context::Evict(evict())), survey().encode()),
+            (
+                Request::Transcript(Transcript::Index),
+                vec![indexed].encode(),
+            ),
+            (
+                Request::Transcript(Transcript::Read(Reading { turns: vec![1] })),
+                vec![material].encode(),
+            ),
+            (
+                Request::Transcript(Transcript::Grep(Grep {
+                    pattern: Regex::new("x|y").unwrap(),
+                    turns: Turns::All,
+                })),
+                hits.encode(),
+            ),
+        ];
+        for (request, answer) in table {
+            let owed = request.owed();
+            assert_eq!(owed(&answer), Ok(()), "{answer:?}");
+            for foil in [FOValue::Int { value: 1 }, FOValue::Map { entries: vec![] }] {
+                assert!(owed(&foil).is_err(), "{foil:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_unit_is_owed_only_by_the_pin_writes() {
+        let owes_unit = |request: Request| request.owed()(&FOValue::Unit).is_ok();
+        let pin = || Pin {
+            key: "k".into(),
+            body: Card(vec![]),
+        };
+        assert!(owes_unit(Request::Pins(Pins::Set(pin()))));
+        assert!(owes_unit(Request::Pins(Pins::Clear("k".into()))));
+        assert!(!owes_unit(Request::Pins(Pins::List)));
+        assert!(!owes_unit(Request::Agents(Agents::List)));
     }
 
     #[test]
@@ -1616,7 +1753,14 @@ mod tests {
                 })
             ))
         );
-        assert!(Vec::<Indexed>::decode(&FOValue::List { items: vec![row] }).is_ok());
+        let [back] = <[Indexed; 1]>::try_from(
+            Vec::<Indexed>::decode(&FOValue::List {
+                items: vec![row.clone()],
+            })
+            .unwrap(),
+        )
+        .unwrap_or_else(|_| panic!("one row in, one row out"));
+        assert_eq!(back.encode(), row);
     }
 
     #[test]

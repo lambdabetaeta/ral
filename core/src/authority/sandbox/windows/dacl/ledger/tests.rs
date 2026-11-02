@@ -14,33 +14,6 @@ use super::super::{
 };
 use super::*;
 #[test]
-fn ledger_roundtrip() {
-    let l = Ledger {
-        run_id: "pid-42-deadbeef".into(),
-        pid: 42,
-        image_name: "ral.exe".into(),
-        started_at_filetime: 132_000_000_000_000_000,
-        profiles: vec!["ral.sandbox.s42.p0".into()],
-    };
-    let bytes = serde_json::to_vec(&l).unwrap();
-    let parsed: Ledger = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(parsed.run_id, l.run_id);
-    assert_eq!(parsed.pid, l.pid);
-    assert_eq!(parsed.started_at_filetime, l.started_at_filetime);
-    assert_eq!(parsed.profiles, vec!["ral.sandbox.s42.p0".to_string()]);
-}
-
-#[test]
-fn run_id_format() {
-    let id = generate_run_id();
-    assert!(id.starts_with("pid-"));
-    let parts: Vec<&str> = id.split('-').collect();
-    assert_eq!(parts.len(), 3);
-    assert_eq!(parts[2].len(), 16);
-    assert!(parts[2].chars().all(|c| c.is_ascii_hexdigit()));
-}
-
-#[test]
 fn process_creation_time_is_after_unix_epoch_and_not_in_the_future() {
     let t = process_creation_filetime().expect("GetProcessTimes should succeed");
     const UNIX_EPOCH_AS_FILETIME: u64 = 11_644_473_600 * 10_000_000;

@@ -197,12 +197,16 @@ fn an_exit_in_a_worker_ends_the_awaiting_run() {
     assert!(!out.stdout.contains("after"), "stdout: {}", out.stdout);
 }
 
+/// Wait for the worker's end with `is-done`, which never raises; only `poll`
+/// then observes it.
 #[test]
 fn a_poll_of_an_exited_worker_ends_the_run() {
     let out = run_with_timeout(
         "ral_worker_teardown",
         &[],
-        "let h = spawn { exit 3 }; /bin/sleep 0.5; poll $h; echo after",
+        "let h = spawn { exit 3 }\n\
+         let settled = { |_| if !{is-done $h} { return () } else { /bin/sleep 0.01; settled 0 } }\n\
+         settled 0; poll $h; echo after",
         GATE_TIMEOUT,
     )
     .expect("poll of an exited worker hung");

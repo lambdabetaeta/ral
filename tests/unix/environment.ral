@@ -1,27 +1,16 @@
-# Test: env, within [env:]
+# Test: the `env` builtin reads the shell's own environment
 
-# Read environment
-echo !{env}[HOME]
-# Expected: user's home directory
+# HOME is the home directory the shell reports
+echo $[!{env}[HOME] == !{home}]
 
-# within [env:] scoped override
-within [env: [MY_VAR: hello]] {
-    # The override is visible to child processes:
-    printenv MY_VAR
-}
-# Expected: hello
-
-# within [env:] doesn't leak — printenv exits 1 when var is unset, use try
-try { printenv MY_VAR | from-string } { |_| echo 'MY_VAR correctly unset'; return "" }
-# Expected: MY_VAR correctly unset
-
-# Nested within [env:]
+# within [env:] is visible to `env`; nested overrides stack; none leaks
 within [env: [A: 1]] {
     within [env: [B: 2]] {
-        printenv A
-        printenv B
+        let e = env
+        echo $e[A] $e[B]
     }
-    # B is gone
-    printenv A
+    let e = env
+    echo $e[A]
 }
-# Expected: 1, 2, 1
+let after = env
+echo !{try { let v = $after[A]; return false } { |_| return true }}

@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:14
 # contains: `2>&1` would override the `2>` before it
 echo hi 2> e 2>&1

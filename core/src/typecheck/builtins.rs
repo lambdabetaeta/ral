@@ -771,6 +771,37 @@ pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn set(names: &[&'static str]) -> Arc<[Decl]> {
+        names
+            .iter()
+            .map(|name| {
+                Decl::new(
+                    Cow::Borrowed(*name),
+                    Convention::Value,
+                    scheme::str_to_str,
+                    "",
+                    false,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    #[should_panic(expected = "installed twice")]
+    fn a_set_repeating_a_name_is_refused() {
+        Manifest::default().push(set(&["a", "a"]));
+    }
+
+    #[test]
+    #[should_panic(expected = "conflicts with an installed builtin")]
+    fn a_set_colliding_with_an_installed_name_is_refused() {
+        let mut manifest = Manifest::default();
+        manifest.push(set(&["a"]));
+        manifest.push(set(&["b", "a"]));
+    }
+
     /// A `[arg]` in a doc synopsis (before the em dash) reads as optional, and
     /// no argument is: every template is one the caller must write.  A bracket
     /// spelling a record type — `[status: Int, ...]`, one required argument —

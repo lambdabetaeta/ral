@@ -86,41 +86,58 @@ mod tests {
     }
 
     #[test]
-    fn classifies_keyword() {
-        let src = "let x = 'hi'";
-        assert_eq!(find(src, &classify(src), "let"), Class::Keyword);
+    fn classifies_each_token() {
+        for (src, needle, class) in [
+            ("let x = 'hi'", "let", Class::Keyword),
+            ("let x = 'hi'", "'hi'", Class::String),
+            ("let x = 'hi'", "x", Class::Plain),
+            ("[`ok $x]", "`ok", Class::Tag),
+            ("[`ok $x]", "$x", Class::Variable),
+            ("[`ok $x]", "[", Class::Punct),
+            ("[`ok $x]", "]", Class::Punct),
+        ] {
+            assert_eq!(
+                find(src, &classify(src), needle),
+                class,
+                "{needle:?} in {src:?}"
+            );
+        }
+    }
+
+    /// Whitespace and `#` comments: all the lexer leaves between tokens.
+    fn blank_or_comment(gap: &str) -> bool {
+        gap.lines().all(|line| {
+            let line = line.trim_start();
+            line.is_empty() || line.starts_with('#')
+        })
     }
 
     #[test]
-    fn classifies_string() {
-        let src = "let x = 'hi'";
-        assert_eq!(find(src, &classify(src), "'hi'"), Class::String);
-    }
-
-    #[test]
-    fn classifies_tag() {
-        let src = "[`ok $x]";
-        assert_eq!(find(src, &classify(src), "`ok"), Class::Tag);
-    }
-
-    #[test]
-    fn classifies_variable() {
-        let src = "[`ok $x]";
-        assert_eq!(find(src, &classify(src), "$x"), Class::Variable);
-    }
-
-    #[test]
-    fn classifies_identifier_as_plain() {
-        let src = "let x = 'hi'";
-        assert_eq!(find(src, &classify(src), "x"), Class::Plain);
-    }
-
-    #[test]
-    fn classifies_punctuation() {
-        let src = "[`ok $x]";
-        let classes = classify(src);
-        assert_eq!(find(src, &classes, "["), Class::Punct);
-        assert_eq!(find(src, &classes, "]"), Class::Punct);
+    fn ranges_are_ordered_in_bounds_on_char_boundaries_and_gapped_only_by_blanks() {
+        for src in [
+            "echo 'héllo 日本' \"😀 $x é\"",
+            "let x = \"a !{echo é} b $y[k] $[1 + 2] c\"",
+            "echo a # trailing é comment\necho b",
+            "  # lead\n echo a  \n",
+            "[`ok: 1, `err: { |e| return $e }] | cat > out",
+            "if $c { a } else { b }",
+        ] {
+            let classes = classify(src);
+            assert!(!classes.is_empty(), "{src:?} lexes");
+            let mut end = 0;
+            for (range, _) in &classes {
+                let gap = src
+                    .get(end..range.start)
+                    .unwrap_or_else(|| panic!("{src:?}: {end}..{} is no slice", range.start));
+                assert!(blank_or_comment(gap), "{src:?}: gap {gap:?}");
+                assert!(
+                    src.get(range.clone()).is_some_and(|t| !t.is_empty()),
+                    "{src:?}: {range:?} is no slice"
+                );
+                end = range.end;
+            }
+            assert!(blank_or_comment(&src[end..]), "{src:?}: tail");
+        }
     }
 
     #[test]

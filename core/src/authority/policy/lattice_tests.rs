@@ -648,18 +648,9 @@ fn decode_rejects_dot_relative_absolute_places() {
             "fs",
             map(vec![("read", Value::list(vec![tagged("absolute", p)]))]),
         )]);
-        assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
+        let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
+        assert!(err.contains(p), "should name the entry: {err}");
     }
-}
-
-/// It carries a `/`, so it is a path, not a bare command name.
-#[test]
-fn decode_rejects_path_shaped_name() {
-    let v = map(vec![(
-        "exec",
-        map(vec![("allow", Value::list(vec![tagged("name", "./foo")]))]),
-    )]);
-    assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
 }
 
 /// A bare name is a name, not a path, so no place rule applies to it; it

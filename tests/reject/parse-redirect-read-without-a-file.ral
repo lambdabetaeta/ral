@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:5
 # contains: `<` needs a file to read
 cat <

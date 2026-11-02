@@ -1,3 +1,6 @@
+# codes: T0074
+# status: 1
+# at: 6:37
 # contains: nothing (`()`), but a number
 let r = audit { echo hi }
 case $r[outcome] [`ok: { |v| return $[$v + 1] }, `err: { |_| return 0 }]

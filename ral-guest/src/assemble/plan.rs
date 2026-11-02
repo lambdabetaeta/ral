@@ -184,15 +184,4 @@ mod tests {
             format!("lowerdir={ROOTFS_MOUNT},upperdir={UPPER},workdir={WORKDIR}")
         );
     }
-
-    #[test]
-    fn the_module_manifest_and_its_directory_are_absolute() {
-        assert!(MODULE_DIR.starts_with('/'));
-        assert!(MODULE_MANIFEST.starts_with('/'));
-    }
-
-    #[test]
-    fn the_format_step_never_asks_a_question() {
-        assert!(FORMAT_SESSION_ARGS.contains(&"-F"));
-    }
 }

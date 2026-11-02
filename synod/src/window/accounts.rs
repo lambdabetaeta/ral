@@ -143,3 +143,24 @@ pub(crate) fn refresh_menu_async(app: &AppHandle, holdings: Holdings) {
     let app = app.clone();
     std::thread::spawn(move || refresh_menu_now(&app, &holdings));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sign_in_releases_only_its_own_flag() {
+        let state = SignIn::default();
+        let older = Arc::new(AtomicBool::new(false));
+        let newer = Arc::new(AtomicBool::new(false));
+        *state.0.lock_ignore_poison() = Some(Arc::clone(&newer));
+
+        release(&state, &older);
+        let held = state.0.lock_ignore_poison();
+        assert!(held.as_ref().is_some_and(|held| Arc::ptr_eq(held, &newer)));
+        drop(held);
+
+        release(&state, &newer);
+        assert!(state.0.lock_ignore_poison().is_none());
+    }
+}

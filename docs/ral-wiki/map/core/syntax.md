@@ -114,7 +114,9 @@ sees raw bytes and bare words.
   returning a `Cow`), shared with the [[map/repl|REPL]] and the
   `ral-quote` builtin. It is the dual of `WordLiteral::classify`: a string may
   go bare only where the numeral grammar declines it, since a bare `007` would
-  read back as the number 7.
+  read back as the number 7. A bidi control, which the lexer refuses even in
+  quotes, sends the string to `"…"` with a `\u{…}` escape, so every string
+  has a spelling.
 - `highlight.rs` — `classify(src)`, token classes (`Class`) read off the lexer
   for the exarch and synod highlighters, so neither carries a second parser of
   its own.

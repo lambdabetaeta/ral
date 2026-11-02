@@ -213,16 +213,6 @@ fn returning_agent_gets_both_reply_and_pinned_nudges() {
     assert_eq!(nudges.used, 1, "only the reply half spends budget");
 }
 
-#[test]
-fn reset_clears_budget() {
-    let mut nudges = Nudges::new(true);
-    let log = fresh_log();
-    let _ = nudges.react(EMPTY, &facts(), &log);
-    assert!(nudges.used >= 1);
-    nudges.reset();
-    assert_eq!(nudges.used, 0, "reset clears the budget");
-}
-
 /// `Replied` answers `None` for peer and headless-root facts alike, budget
 /// untouched — there is no self-verification round-trip left.
 #[test]

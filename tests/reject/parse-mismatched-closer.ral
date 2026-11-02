@@ -1,4 +1,6 @@
 # codes: L0006
+# status: 2
+# at: 8:1
 # contains: mismatched `]`: the innermost open delimiter is `{`
 # contains: `]` closes nothing
 # contains: `{` opened here

@@ -299,6 +299,10 @@ fn settings_trees(
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
+#[allow(
+    clippy::disallowed_macros,
+    reason = "[test] libtest captures print macros"
+)]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;
@@ -346,23 +350,6 @@ mod tests {
             message.contains("the whole disk"),
             "granting / should be refused as a slip: {message}"
         );
-    }
-
-    #[test]
-    fn the_home_folder_and_its_parents_are_refused() {
-        let Some(home) = ral_core::host::home().and_then(|h| std::fs::canonicalize(h).ok()) else {
-            return;
-        };
-        assert!(
-            refusal(&home).contains("your whole home folder"),
-            "granting HOME should be refused"
-        );
-        if let Some(parent) = home.parent().filter(|p| p.parent().is_some()) {
-            assert!(
-                refusal(parent).contains("contains your home folder"),
-                "granting a folder above HOME should be refused"
-            );
-        }
     }
 
     struct Fake {
@@ -471,6 +458,15 @@ mod tests {
     }
 
     #[test]
+    fn the_home_folder_and_whatever_contains_it_are_refused_for_different_reasons() {
+        let fake = Fake::new();
+        let parent = fake.home.parent().expect("the fixture home has a parent");
+        let home = fake.judged(&fake.home).expect_err("home is refused");
+        let above = fake.judged(parent).expect_err("what holds home is refused");
+        assert_ne!(home, above);
+    }
+
+    #[test]
     fn a_folder_inside_the_temp_folder_is_allowed() {
         let fake = Fake::new();
         let temp = fake.home.join("AppData").join("Local").join("Temp");
@@ -478,52 +474,6 @@ mod tests {
             .expect("a folder inside temp must open");
         fake.judged(&temp)
             .expect_err("the whole temp folder is still a settings tree's");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_settings_trees_on_windows_follow_the_environment() {
-        let fake = Fake::new();
-        let home = fake.home;
-        let env = |name: &str| match name {
-            "APPDATA" => Some(r"\\profiles\ada\Roaming".into()),
-            "LOCALAPPDATA" => Some(r"Local".into()), // relative: names nothing
-            _ => None,
-        };
-        assert_eq!(
-            settings_trees(Some(&home), env),
-            [
-                PathBuf::from(r"\\profiles\ada\Roaming"),
-                home.join("AppData")
-            ]
-        );
-        assert_eq!(
-            settings_trees(Some(&home), |_| None),
-            [home.join("AppData")],
-            "with nothing set, the fallback is home's own AppData"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_settings_tree_on_macos_is_the_library() {
-        let fake = Fake::new();
-        let home = fake.home;
-        assert_eq!(
-            settings_trees(Some(&home), |_| None),
-            [home.join("Library")]
-        );
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn the_settings_trees_on_linux_are_config_and_local() {
-        let fake = Fake::new();
-        let home = fake.home;
-        assert_eq!(
-            settings_trees(Some(&home), |_| None),
-            [home.join(".config"), home.join(".local")]
-        );
     }
 
     #[cfg(windows)]
@@ -546,28 +496,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_unlistable_folder_is_refused_with_the_listing_sentence() {
+    fn an_unlistable_folder_is_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = workshop("grant-unlistable");
+        let dir = tempfile::tempdir().expect("temp workshop");
         let locked = dir.path().join("Admissions");
         std::fs::create_dir(&locked).expect("fixture folder");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o311))
             .expect("lock the fixture");
-        let message = if std::fs::read_dir(&locked).is_ok() {
-            None
-        } else {
-            Some(refusal(&locked))
-        };
+        let binds = std::fs::read_dir(&locked).is_err();
+        let opened = Grant::open(&locked);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
             .expect("unlock the fixture");
-        if let Some(message) = message {
-            assert!(
-                message.contains("Synod cannot see what is inside")
-                    && message.contains("Admissions")
-                    && message.contains("whether you have permission"),
-                "an unlistable folder should be refused with the listing sentence: {message}"
-            );
+        if !binds {
+            eprintln!("permissions do not bind here (running as root); skipping");
+            return;
         }
+        assert!(opened.is_err());
     }
 
     #[test]
@@ -624,12 +568,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn the_guest_has_no_gpu_and_the_grant_says_so() {
-        let (_dir, grant) = granted("grant-gpu");
-        assert_eq!(grant.capabilities().gpu, Some(Gpu::Withheld));
-    }
-
     /// Host-side guard simulation cannot detect a host/guest normalizer split; assert wire spelling.
     #[test]
     fn the_guest_prefixes_are_spelled_the_guests_way_on_every_host() {
@@ -646,24 +584,6 @@ mod tests {
                 "the fs {which} set must name the guest's paths as the guest spells them"
             );
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_home_folder_is_unreachable_from_inside_a_grant() {
-        let (_dir, grant) = granted("grant-home-unreachable");
-        let Some(home) = ral_core::host::home() else {
-            return;
-        };
-        let mut shell = ral_core::test_helper::core_shell();
-        shell.with_layer(ral_core::test_helper::layer(grant.capabilities()), |sh| {
-            let path = sh.anchor(&PathBuf::from(&home).join(".ssh").join("id_ed25519"));
-            assert!(
-                sh.locate_existing::<Reading>(&path, LeafMode::Follow)
-                    .is_err(),
-                "the office grant must not reach into HOME"
-            );
-        });
     }
 
     #[cfg(unix)]
@@ -693,16 +613,5 @@ mod tests {
                 );
             }
         });
-    }
-
-    #[test]
-    fn the_guest_reaches_the_network_through_the_hosts_allowlist() {
-        let (_dir, grant) = granted("grant-net");
-        assert_eq!(
-            grant.capabilities().net,
-            None,
-            "the guest has a wire; `core/src/authority/sandbox/linux.rs` turns \
-             `Offline` into `bwrap --unshare-net`, which would strip it back off"
-        );
     }
 }

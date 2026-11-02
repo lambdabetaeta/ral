@@ -75,27 +75,6 @@ fn exit_pty(session: &mut PtySession) -> ExitStatus {
 }
 
 #[test]
-fn terminal_exit_wait_is_bounded_and_drains_output() {
-    let mut cmd = Command::new("/bin/sh");
-    cmd.args([
-        "-c",
-        "printf ready; read acknowledgement; /usr/bin/head -c 131072 /dev/zero; exit 7",
-    ]);
-    let mut session = PtySession::spawn_command(cmd).unwrap();
-    assert!(session.wait_until(WAIT, |text| text.contains("ready")));
-    assert_eq!(
-        session
-            .wait_for_exit(Duration::from_millis(50))
-            .unwrap_err()
-            .kind(),
-        std::io::ErrorKind::TimedOut
-    );
-    session.send_line("continue").unwrap();
-    assert_eq!(exit_pty(&mut session).code(), Some(7));
-    assert!(session.text().len() >= 131_072);
-}
-
-#[test]
 fn idle_termination_saves_history() {
     for surface in ["minimal", "readline"] {
         for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {

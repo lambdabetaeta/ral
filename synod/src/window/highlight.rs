@@ -47,3 +47,28 @@ fn class_name(class: Class) -> Option<&'static str> {
         Class::Plain => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spans(src: &str, tokens: Vec<(Range<usize>, Class)>) -> Vec<(usize, usize, String)> {
+        to_utf16(src, tokens)
+            .into_iter()
+            .map(|t| (t.start, t.end, t.class))
+            .collect()
+    }
+
+    #[test]
+    fn offsets_count_utf16_units_so_astral_characters_take_two() {
+        // "a😀b": byte offsets 0, 1..5, 5..6; UTF-16 units 0, 1..3, 3..4.
+        let found = spans("a😀b", vec![(1..5, Class::String), (5..6, Class::Keyword)]);
+        assert_eq!(found, [(1, 3, "string".into()), (3, 4, "keyword".into())]);
+    }
+
+    #[test]
+    fn plain_ranges_are_dropped_without_disturbing_later_offsets() {
+        let found = spans("ab😀c", vec![(0..2, Class::Plain), (6..7, Class::Punct)]);
+        assert_eq!(found, [(4, 5, "punct".into())]);
+    }
+}

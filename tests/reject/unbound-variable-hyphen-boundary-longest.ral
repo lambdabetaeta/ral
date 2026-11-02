@@ -1,4 +1,6 @@
 # codes: T0071
+# status: 1
+# at: 7:6
 # contains: write `$(my-os)` to end it there
 let my = "x"
 let my-os = "linux"

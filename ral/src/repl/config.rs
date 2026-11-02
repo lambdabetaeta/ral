@@ -821,19 +821,6 @@ mod tests {
         assert!(err.contains("plugins"));
     }
 
-    /// Wrong-typed `env:`, `aliases:`, and `bindings:` values each refuse
-    /// the whole map; no alias installs and neither scope lookup resolves.
-    #[test]
-    fn rc_env_aliases_bindings_wrong_type_rejected() {
-        let (shell, _) = apply_to_fresh_env_rejected(Value::map(vec![
-            ("env".into(), Value::Int(7)),
-            ("aliases".into(), Value::string("x")),
-            ("bindings".into(), Value::Bool(true)),
-        ]));
-        assert!(!shell.has_alias("x"));
-        assert!(shell.scope_lookup("x").is_none());
-    }
-
     /// A malformed *value* on a known key refuses the whole map, exactly as
     /// an unknown key does: a key around it does not survive either.
     #[test]

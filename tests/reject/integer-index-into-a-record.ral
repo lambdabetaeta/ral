@@ -1,4 +1,6 @@
 # codes: T0062
+# status: 1
+# at: 7:10
 # contains: a record takes a literal label
 # contains: (available: a, b)
 let m = [a: 1, b: 2]

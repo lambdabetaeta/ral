@@ -550,6 +550,166 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_shows_its_destination_and_a_touch_keeps_its_path() {
+        let report = JobReport {
+            changes: vec![
+                Change::Renamed {
+                    from: "old.txt".into(),
+                    to: "new.pdf".into(),
+                },
+                Change::Touched {
+                    path: "stamp.csv".into(),
+                },
+            ],
+            unreadable: Vec::new(),
+        };
+        let files = WindowReport::of(&report).files;
+        let shown: Vec<_> = files
+            .iter()
+            .map(|f| (f.path.as_str(), f.rename_from.as_deref(), f.open))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("new.pdf", Some("old.txt"), Some(OpenAs::Open)),
+                ("stamp.csv", None, Some(OpenAs::Open)),
+            ]
+        );
+        assert!(matches!(files[0].kind, ChangeKind::Renamed));
+        assert!(matches!(files[1].kind, ChangeKind::Touched));
+    }
+
+    #[test]
+    fn a_readout_renders_seconds_as_a_span_and_keeps_only_actionable_hints() {
+        use exarch::record::fault::Field;
+
+        let readout = Readout {
+            headline: "error: rate limited".into(),
+            fields: vec![
+                Field {
+                    label: "retry in".into(),
+                    datum: Datum::Seconds(3725),
+                },
+                Field {
+                    label: "model".into(),
+                    datum: Datum::Text("m".into()),
+                },
+            ],
+            remedies: vec![
+                Remedy::Evict,
+                Remedy::Reroute,
+                Remedy::RaiseMaxTokens,
+                Remedy::SignIn,
+            ],
+        };
+        let dto = serde_json::to_value(ReadoutDto::new(readout, Severity::Bad)).unwrap();
+        assert_eq!(dto["fields"][0]["value"], clock::hms(3725));
+        assert_eq!(dto["fields"][1]["value"], "m");
+        assert_eq!(dto["hints"].as_array().map(Vec::len), Some(2));
+        assert_eq!(dto["severity"], "bad");
+    }
+
+    fn readout_dto(severity: Severity) -> ReadoutDto {
+        ReadoutDto::new(
+            Readout {
+                headline: "h".into(),
+                fields: Vec::new(),
+                remedies: Vec::new(),
+            },
+            severity,
+        )
+    }
+
+    #[test]
+    fn a_readout_event_is_tagged_beside_its_fields() {
+        let flat = |severity| {
+            serde_json::json!({
+                "headline": "h", "fields": [], "hints": [], "severity": severity,
+            })
+        };
+        let tagged = |tag: &str, body: serde_json::Value| {
+            let mut object = body;
+            object["type"] = tag.into();
+            object
+        };
+        assert_eq!(
+            serde_json::to_value(SynodEvent::ProviderError(readout_dto(Severity::Bad))).unwrap(),
+            tagged("provider_error", flat("bad")),
+        );
+        assert_eq!(
+            serde_json::to_value(SynodEvent::Stalled(readout_dto(Severity::Warn))).unwrap(),
+            tagged("stalled", flat("warn")),
+        );
+    }
+
+    #[test]
+    fn a_measure_mark_is_tagged_beside_its_label_and_readout() {
+        use exarch::card::Readout as Gauge;
+
+        let card = Card(vec![
+            Mark::Measure(Measure {
+                label: "tasks".into(),
+                readout: Gauge {
+                    value: 3,
+                    max: Some(12),
+                    unit: None,
+                },
+            }),
+            Mark::Raw {
+                bytes: vec![0xff, b'h'],
+            },
+        ]);
+        assert_eq!(
+            serde_json::to_value(marks_dto(card)).unwrap(),
+            serde_json::json!([
+                { "mark": "measure", "label": "tasks", "value": 3, "max": 12 },
+                { "mark": "raw", "text": "\u{fffd}h" },
+            ]),
+        );
+    }
+
+    #[test]
+    fn models_and_preparation_are_tagged_by_state_and_kind() {
+        fn json(value: &impl Serialize) -> serde_json::Value {
+            serde_json::to_value(value).unwrap()
+        }
+        assert_eq!(
+            json(&Models::Loading),
+            serde_json::json!({ "state": "loading" })
+        );
+        assert_eq!(
+            json(&Models::Listed {
+                choices: vec![ModelChoice {
+                    name: "m".into(),
+                    reasoning: true,
+                }],
+            }),
+            serde_json::json!({
+                "state": "listed",
+                "choices": [{ "name": "m", "reasoning": true }],
+            }),
+        );
+        assert_eq!(
+            json(&Models::Failed { reason: "r".into() }),
+            serde_json::json!({ "state": "failed", "reason": "r" }),
+        );
+        assert_eq!(
+            json(&Preparation::FinishingPrevious),
+            serde_json::json!({ "kind": "finishing_previous" }),
+        );
+        assert_eq!(
+            json(&Preparation::ReadingFolder { files: 3 }),
+            serde_json::json!({ "kind": "reading_folder", "files": 3 }),
+        );
+        assert_eq!(
+            json(&SynodEvent::Preparing {
+                stage: Preparation::Starting,
+            }),
+            serde_json::json!({ "type": "preparing", "stage": { "kind": "starting" } }),
+        );
+    }
+
+    #[test]
     fn a_job_begins_with_its_id() {
         let update = ConversationUpdate::JobBegan { job: JobId(1) };
         assert_eq!(

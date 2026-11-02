@@ -97,6 +97,12 @@ fn bidi_control_name(ch: char) -> Option<&'static str> {
     })
 }
 
+/// Whether the lexer refuses `ch` everywhere, so source can carry it only as
+/// a `\u{…}` escape.
+pub(crate) fn is_bidi_control(ch: char) -> bool {
+    bidi_control_name(ch).is_some()
+}
+
 /// The bare-word characters that are operators inside `$[…]`, where they end
 /// a word instead: `1+1` is a sum there and a word everywhere else.  `=` is
 /// `Assign` until a second `=` makes it `==`; `&` takes its own arms, for

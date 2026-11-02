@@ -1,2 +1,5 @@
+# codes: T0010
+# status: 1
+# at: 5:12
 # contains: `absolute
 grant [fs: [read: ['/tmp']]] { return 1 }

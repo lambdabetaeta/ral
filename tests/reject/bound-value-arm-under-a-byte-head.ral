@@ -1,2 +1,5 @@
+# codes: T0011
+# status: 1
+# at: 5:65
 # contains: couldn't match type Command with type Returns String
 let h = { |args| return "not bytes" }; within [handlers: [echo: $h]] { echo hi }

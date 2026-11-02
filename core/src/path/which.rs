@@ -798,10 +798,63 @@ mod tests {
         assert_eq!(path_dirs(path, None), [tmp.path()]);
     }
 
+    /// Dirs holding, in order, a non-executable `tool`, a directory `tool`,
+    /// and two executable ones; the third dir's is the first hit.
+    fn shadowed_tool() -> (tempfile::TempDir, Vec<PathBuf>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs: Vec<PathBuf> = ["noexec", "dir", "first", "second"]
+            .map(|d| tmp.path().join(d))
+            .into();
+        for d in &dirs {
+            std::fs::create_dir(d).unwrap();
+        }
+        touch(&dirs[0].join("tool"), 0o644);
+        std::fs::create_dir(dirs[1].join("tool")).unwrap();
+        touch(&dirs[2].join("tool"), 0o755);
+        touch(&dirs[3].join("tool"), 0o755);
+        (tmp, dirs)
+    }
+
     #[test]
-    fn an_empty_element_is_dropped_by_path_entries() {
-        let entries: Vec<_> = path_entries(OsStr::new(":/a::")).collect();
-        assert_eq!(entries, [Path::new("/a")]);
+    fn locate_takes_the_first_executable_file_in_path_order() {
+        let _guard = super::memo_tests::cache_guard();
+        let (_tmp, dirs) = shadowed_tool();
+        let path = std::env::join_paths(&dirs).unwrap();
+        assert_eq!(
+            locate("tool", path.to_str(), None),
+            Some(dirs[2].join("tool"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn locate_in_takes_the_first_executable_file_in_the_given_order() {
+        let (_tmp, dirs) = shadowed_tool();
+        assert_eq!(locate_in("tool", dirs.clone()), Some(dirs[2].join("tool")));
+        assert_eq!(locate_in("tool", dirs[..2].to_vec()), None);
+    }
+
+    #[test]
+    fn ral_path_entries_split_the_overlays_list_dropping_empties() {
+        let dirs = [PathBuf::from("/x"), PathBuf::from("/y")];
+        let joined = std::env::join_paths(["", "/x", "", "/y"]).unwrap();
+        let env = EnvVars::from_iter([("RAL_PATH", joined.to_str().unwrap())]);
+        assert_eq!(ral_path_entries(&env), dirs);
+    }
+
+    /// A bump made on one thread clears the memo of another.
+    #[test]
+    fn forgetting_on_another_thread_clears_this_threads_memo() {
+        let _guard = super::memo_tests::cache_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let planted = tmp.path().join("runme");
+        touch(&planted, 0o755);
+        let path = tmp.path().to_str().unwrap();
+
+        assert!(locate("runme", Some(path), None).is_some());
+        std::fs::remove_file(&planted).unwrap();
+        std::thread::spawn(forget_located_commands).join().unwrap();
+        assert_eq!(locate("runme", Some(path), None), None);
     }
 
     /// Candidates include files the executable probe declines.

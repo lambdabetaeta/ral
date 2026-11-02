@@ -72,10 +72,9 @@ fn has_error(src: &str, fragment: &str) {
 }
 
 /// `workers` is data: a row's fields read at their documented types, including
-/// the three-state `state` variant (a consumed worker is never listed), and neither `worker` nor `worker-command`
-/// exists in the builtin manifest.
+/// the three-state `state` variant (a consumed worker is never listed).
 #[test]
-fn workers_lists_rows_at_their_documented_types_and_no_recovery_builtin_exists() {
+fn workers_lists_rows_at_their_documented_types() {
     let errs = errors(
         "let w = workers\n\
          let id = $[$w[0][id] + 1]\n\
@@ -91,9 +90,6 @@ fn workers_lists_rows_at_their_documented_types_and_no_recovery_builtin_exists()
         errs.is_empty(),
         "a `workers` row must read at its documented types, got: {errs:?}"
     );
-    let manifest = common::manifest(&ral_core::HostSurface::default());
-    assert!(manifest.get("worker").is_none());
-    assert!(manifest.get("worker-command").is_none());
 }
 
 /// `poll` returns the four-arm lifecycle variant (`running`, `stopping`,
@@ -117,10 +113,7 @@ fn poll_requires_four_lifecycle_arms_and_rejects_old_two_arm_tags() {
 
     let old_two_arm = "let h = spawn { return 1 }\n\
                        case !{poll $h} [`settled: { |_| return 1 }, `pending: { |_| return 0 }]";
-    assert!(
-        !raw_errors(old_two_arm).is_empty(),
-        "old two-arm `pending`/`settled` poll case must be rejected"
-    );
+    assert_eq!(codes_of(&raw_errors(old_two_arm)), ["T0030"]);
 
     let missing_stopping = "let h = spawn { return 1 }\n\
                             case !{poll $h} [\n\
@@ -128,10 +121,7 @@ fn poll_requires_four_lifecycle_arms_and_rejects_old_two_arm_tags() {
                                 `ready: { |_| return 1 },\n\
                                 `consumed: { |_| return 2 }\n\
                             ]";
-    assert!(
-        !raw_errors(missing_stopping).is_empty(),
-        "omitting `stopping` from `poll` case must fail exhaustiveness"
-    );
+    assert_eq!(codes_of(&raw_errors(missing_stopping)), ["T0030"]);
 }
 
 /// `await` produces what its handle's block produces: a command block's
@@ -262,27 +252,8 @@ fn toplevel_rec_group_members_generalise_independently() {
          let g = { |y| let _ = !{upper $y}; let _ = !{f 1}; return 1 }\n\
          return ()",
     );
-    let (
-        Phrase::Define {
-            schemes: f_schemes, ..
-        },
-        Phrase::Define {
-            schemes: g_schemes, ..
-        },
-    ) = (&top.phrases[0].item, &top.phrases[1].item)
-    else {
-        panic!("expected two Define phrases");
-    };
-    let f_rendered = f_schemes[0].1.to_string();
-    let g_rendered = g_schemes[0].1.to_string();
-    assert!(
-        f_rendered.contains("Integer") && f_rendered.contains("Bool"),
-        "expected f : Integer → F Bool, got: {f_rendered}"
-    );
-    assert!(
-        g_rendered.contains("String") && g_rendered.contains("Integer"),
-        "expected g : String → F Integer, got: {g_rendered}"
-    );
+    assert_eq!(scheme_at(&top, 0), "Integer → Returns Bool");
+    assert_eq!(scheme_at(&top, 1), "String → Returns Integer");
 }
 
 /// The independent dependencies of one binding are checked in source order,
@@ -365,21 +336,10 @@ fn scheme_at(top: &Toplevel, index: usize) -> String {
     schemes[0].1.to_string()
 }
 
-fn codes(src: &str) -> Vec<&'static str> {
-    raw_errors(src).iter().map(|e| e.kind.code()).collect()
-}
-
-#[test]
-fn a_computed_index_nothing_decides_is_refused_at_the_units_end() {
-    let src = "let pick = { |m k| $m[$k] }\nreturn ()";
-    assert_eq!(codes(src), ["T0075"]);
-    has_error(src, "is `$m` a list or a map?");
-}
-
 #[test]
 fn a_label_defaulted_to_a_record_is_what_refuses_a_computed_index() {
     let src = "let f = { |m k| let a = $m[x]; return $m[$k] }\nreturn ()";
-    assert_eq!(codes(src), ["T0062"]);
+    assert_eq!(codes_of(&raw_errors(src)), ["T0062"]);
     has_error(src, "available: x");
 }
 
@@ -392,18 +352,6 @@ fn a_computed_index_helper_is_accepted_at_the_one_container_type_its_unit_uses()
          return ()",
     );
     assert_eq!(scheme_at(&top, 0), "Map Integer → String → Returns Integer");
-}
-
-#[test]
-fn a_computed_index_helper_used_on_a_list_and_a_map_is_a_mismatch() {
-    let src = "let pick = { |m k| $m[$k] }\n\
-               let a = pick [1, 2] 0\n\
-               let b = pick [\"y\": 2] 'y'\n\
-               return ()";
-    let errs = raw_errors(src);
-    assert_eq!(codes(src), ["T0010"], "{errs:?}");
-    let note = errs[0].hint().expect("a mismatch on a weak type is noted");
-    assert!(note.contains("shared by every use"), "{note}");
 }
 
 #[test]
@@ -423,13 +371,12 @@ fn a_computed_key_makes_the_helper_monomorphic_for_the_unit() {
                let a = nth [1, 2] 0\n\
                let b = nth ['x'] 0\n\
                return ()";
-    assert_eq!(codes(src), ["T0010"]);
-    // Its own body fixing the key changes nothing: cost 19.
+    assert_eq!(codes_of(&raw_errors(src)), ["T0010"]);
     let src = "let nth = { |xs i| let j = $[$i + 1]; $xs[$j] }\n\
                let a = nth [1, 2] 0\n\
                let b = nth ['x'] 0\n\
                return ()";
-    assert_eq!(codes(src), ["T0010"]);
+    assert_eq!(codes_of(&raw_errors(src)), ["T0010"]);
 }
 
 /// Whether a helper is generic must not depend on where an independent
@@ -444,7 +391,11 @@ fn the_verdict_on_an_index_helper_is_independent_of_statement_order() {
     };
     for n_first in [true, false] {
         let refused = body(n_first, "['x']");
-        assert_eq!(codes(&refused), ["T0010"], "n first: {n_first}");
+        assert_eq!(
+            codes_of(&raw_errors(&refused)),
+            ["T0010"],
+            "n first: {n_first}"
+        );
         assert!(
             errors(&body(n_first, "[2]")).is_empty(),
             "n first: {n_first}"
@@ -454,13 +405,6 @@ fn the_verdict_on_an_index_helper_is_independent_of_statement_order() {
         .map(|n_first| scheme_at(&toplevel_ok(&body(n_first, "[2]")), 0))
         .into();
     assert_eq!(schemes[0], schemes[1]);
-}
-
-/// A helper that indexes is not generic in its container: an Int is refused.
-#[test]
-fn a_computed_index_on_an_integer_is_refused() {
-    let src = "let pick = { |m k| $m[$k] }\nlet x = pick 5 5\nreturn ()";
-    assert_eq!(codes(src), ["T0062"]);
 }
 
 /// Walking a value of unknown shape by computed keys makes it a map of
@@ -487,14 +431,14 @@ fn a_key_of_number_kind_settles_the_index_as_a_list() {
 #[test]
 fn a_target_of_comparable_kind_is_refused_with_the_kind_sentence() {
     let src = "let f = { |c d k| let b = $[$c < $d]; $c[$k] }\nreturn ()";
-    assert_eq!(codes(src), ["T0074"]);
+    assert_eq!(codes_of(&raw_errors(src)), ["T0074"]);
     has_error(src, "nothing is both");
 }
 
 #[test]
 fn a_key_that_is_neither_an_int_nor_a_string_is_refused() {
     let src = "let k = $[1 < 2]\nlet f = { |m| $m[$k] }\nreturn ()";
-    assert_eq!(codes(src), ["T0074"]);
+    assert_eq!(codes_of(&raw_errors(src)), ["T0074"]);
     has_error(
         src,
         "but an Int key for a list or a String key for a map is needed",
@@ -584,7 +528,7 @@ fn return_schema_demands_a_required_key() {
 #[test]
 fn return_schema_catches_a_wrong_typed_literal_field() {
     let errs = schema_errors("return [n: \"x\"]");
-    assert!(!errs.is_empty(), "expected a schema error, got none");
+    assert_eq!(codes_of(&errs), ["T0010"], "{errs:?}");
 }
 
 #[test]
@@ -598,10 +542,7 @@ fn return_schema_accepts_a_correctly_typed_literal_field() {
 #[test]
 fn return_schema_checks_a_computed_return_value() {
     let errs = schema_errors("let m = [n: \"x\"]\nreturn $m");
-    assert!(
-        !errs.is_empty(),
-        "a computed return carries a row, and the row is checked"
-    );
+    assert_eq!(codes_of(&errs), ["T0010"], "{errs:?}");
 }
 
 /// The bad key arrives through a spread, which a literal-only rule would wave
@@ -702,6 +643,20 @@ fn return_schema_reads_unit_as_nothing_to_set() {
     assert!(contract_errors(declared(Form::Grant), "return ()").is_empty());
     let errs = contract_errors(declared(Form::Manifest), "return ()");
     assert_eq!(codes_of(&errs), ["T0021"], "{errs:?}");
+}
+
+/// A file with no returning phrase evaluates to `()`, so it is ascribed as
+/// `return ()` is.
+#[test]
+fn return_schema_reads_a_file_with_no_returning_phrase_as_unit() {
+    for src in ["", "let name = 'p'"] {
+        assert!(
+            contract_errors(declared(Form::Rc), src).is_empty(),
+            "{src:?}"
+        );
+        let errs = contract_errors(declared(Form::Manifest), src);
+        assert_eq!(codes_of(&errs), ["T0021"], "{src:?}: {errs:?}");
+    }
 }
 
 /// A return typed at a variable is the runtime check's.
@@ -869,13 +824,6 @@ fn grant_offers_dir_for_a_selector_in_an_exec_list_and_places_in_an_fs_list() {
     }
 }
 
-/// Specific advice replaces the nearest-tag guess, which would contradict it.
-#[test]
-fn grant_advice_replaces_the_nearest_tag_guess() {
-    let msgs = grant_messages("grant [exec: [allow: [`dir `name git]]] { return 1 }");
-    assert!(!msgs[0].contains("did you mean"), "{msgs:?}");
-}
-
 /// A mismatch against a vocabulary is worded as the decoder words it.
 #[test]
 fn grant_words_a_type_mismatch_in_the_vocabularys_words() {
@@ -973,12 +921,16 @@ fn grant_refuses_a_wrongly_typed_payload_in_a_bound_table_and_a_profile() {
         ("fs", "[read: [`cwd 1]]"),
         ("exec", "[allow: [`name false]]"),
     ] {
-        let bound = grant_messages(&format!(
+        let bound = raw_errors(&format!(
             "let t = {table}\ngrant [{axis}: $t] {{ return 1 }}"
         ));
-        assert_eq!(bound.len(), 1, "bound {table}: {bound:?}");
+        assert_eq!(codes_of(&bound), ["T0010"], "bound {table}: {bound:?}");
         let profile = contract_errors(declared(Form::Grant), &format!("return [{axis}: {table}]"));
-        assert_eq!(profile.len(), 1, "profile {table}: {profile:?}");
+        assert_eq!(
+            codes_of(&profile),
+            ["T0010"],
+            "profile {table}: {profile:?}"
+        );
     }
 }
 
@@ -1050,11 +1002,6 @@ fn grant_leaves_an_unresolved_table_to_the_decoder() {
 // at any depth, and nothing else: a statement, a bound function, a forced
 // block in hand are left as they are.
 
-/// Compile `src` to an annotated toplevel, asserting it type-checks.
-fn annotated(src: &str) -> Toplevel {
-    toplevel_ok(src)
-}
-
 /// Visit every `Comp` reachable from an annotated toplevel's phrases —
 /// [`common::walk_comp`] from each phrase's own root.
 fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&Comp)) {
@@ -1068,7 +1015,7 @@ fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&Comp)) {
 /// How many `Capture` nodes the checker wrote, anywhere in the tree.
 fn captures(src: &str) -> usize {
     let mut found = 0;
-    walk_toplevel(&annotated(src), &mut |c| {
+    walk_toplevel(&toplevel_ok(src), &mut |c| {
         if matches!(c.item, CompKind::Capture(_)) {
             found += 1;
         }

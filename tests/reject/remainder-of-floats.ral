@@ -1,3 +1,5 @@
 # codes: T0010
+# status: 1
+# at: 5:9
 # contains: a float has no remainder here
 let r = $[5.0 % 2.0]

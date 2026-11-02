@@ -1,4 +1,6 @@
 # codes: T0062
+# status: 1
+# at: 12:10
 # contains: decode bytes first: `bytes-to-string $b`
 let h = spawn { printf hi }
 let b = case !{poll $h} [

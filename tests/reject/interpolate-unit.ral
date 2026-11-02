@@ -1,4 +1,6 @@
 # codes: T0074
+# status: 1
+# at: 6:6
 # contains: `()` is nothing to print
 let out = cd /tmp
 echo "got $out"

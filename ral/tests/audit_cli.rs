@@ -89,3 +89,51 @@ fn audit_pretty_changes_the_bytes_not_the_value() {
     drop_timings(&mut b);
     assert_eq!(a, b);
 }
+
+fn report(o: &Output) -> Value {
+    serde_json::from_str(&dump(&o.stderr)).expect("audit dump must be JSON")
+}
+
+#[test]
+fn audit_reports_a_raised_error_as_an_err_outcome() {
+    let o = run_c(&["--audit"], "fail [status: 3, message: nope]");
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+    assert_eq!(report(&o)["outcome"]["tag"], "err");
+}
+
+#[test]
+fn audit_reports_exit_as_ok_while_the_process_keeps_its_status() {
+    let o = run_c(&["--audit"], "exit 7");
+    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+    assert_eq!(report(&o)["outcome"]["tag"], "ok");
+}
+
+#[test]
+fn audit_reports_a_stopped_run_as_stopped() {
+    let o = run_c(&["--audit"], "/bin/sh -c 'kill -INT $PPID'; /bin/sleep 30");
+    assert_eq!(o.status, 130, "stderr: {}", o.stderr);
+    assert_eq!(report(&o)["outcome"]["tag"], "stopped");
+}
+
+#[test]
+fn audit_of_a_static_error_is_rendered_text_not_a_report() {
+    let o = run_c(&["--audit"], "let = ");
+    assert_ne!(o.status, 0);
+    assert!(
+        !o.stderr
+            .lines()
+            .any(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v.get("outcome").is_some())),
+        "stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
+fn audit_without_a_script_or_command_is_rejected() {
+    let o = ral_command()
+        .arg("--audit")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn ral");
+    assert!(!o.status.success());
+}

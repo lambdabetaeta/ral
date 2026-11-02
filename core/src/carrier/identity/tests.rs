@@ -433,13 +433,20 @@ mod probe_tests {
     #[test]
     fn a_fresh_shell_reads_empty() {
         let transport = fresh();
-        assert!(transport.binding_count().is_ok());
+        assert_eq!(transport.binding_count(), Ok(0));
         assert_eq!(transport.leased_binding_count(), Ok(0));
         assert_eq!(transport.largest_binding_bytes(), Ok(0));
         assert_eq!(transport.workers(), Ok(Vec::new()));
-        assert!(transport.cwd().is_ok());
-        assert!(transport.home().is_ok());
-        assert!(transport.builtin_names().is_ok());
+        assert_eq!(transport.cwd(), Ok(Some(std::env::temp_dir())));
+        assert_eq!(
+            transport.home(),
+            transport
+                .env_var("HOME")
+                .map(|home| home.map(std::path::PathBuf::from)),
+            "HOME reads through the same overlay as the env probe"
+        );
+        let builtins = transport.builtin_names().expect("the probe answers");
+        assert!(builtins.iter().any(|name| name == "fail"), "{builtins:?}");
     }
 
     #[cfg(feature = "test-util")]

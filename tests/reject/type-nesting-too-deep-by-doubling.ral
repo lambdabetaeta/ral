@@ -1,0 +1,16 @@
+# codes: T0003
+# status: 1
+# at: 16:5
+# contains: type nesting exceeds the supported depth
+# ten doublings nest a list 1024 deep
+let d1 = { |x| return [$x] }
+let d2 = { |x| d1 !{d1 $x} }
+let d3 = { |x| d2 !{d2 $x} }
+let d4 = { |x| d3 !{d3 $x} }
+let d5 = { |x| d4 !{d4 $x} }
+let d6 = { |x| d5 !{d5 $x} }
+let d7 = { |x| d6 !{d6 $x} }
+let d8 = { |x| d7 !{d7 $x} }
+let d9 = { |x| d8 !{d8 $x} }
+let d10 = { |x| d9 !{d9 $x} }
+d10 1

@@ -1,3 +1,5 @@
 # codes: T0056
+# status: 1
+# at: 5:23
 # contains: to-json $xs[0]
 let xs = [1]; to-json ...$xs

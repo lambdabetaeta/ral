@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:7
 # contains: expected '='
 let x foo

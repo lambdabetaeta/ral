@@ -172,7 +172,11 @@ mod tests {
     fn the_rule_list_blocks_web_and_socket_schemes() {
         let rules: serde_json::Value = serde_json::from_str(RULES).expect("RULES is JSON");
         let rules = rules.as_array().expect("RULES is an array");
-        assert_eq!(rules.len(), 2);
+        let patterns: Vec<_> = rules
+            .iter()
+            .map(|rule| rule["trigger"]["url-filter"].as_str())
+            .collect();
+        assert_eq!(patterns, [Some("^https?:"), Some("^wss?:")]);
         assert!(rules.iter().all(|rule| rule["action"]["type"] == "block"));
     }
 }

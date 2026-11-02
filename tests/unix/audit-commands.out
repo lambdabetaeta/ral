@@ -1,0 +1,26 @@
+hi
+[/bin/echo, /bin/cat]
+hi
+[cat `external]
+helper
+[/bin/echo]
+[printf `external 0]
+hi
+[/bin/echo]
+one
+two
+[/bin/echo, /bin/echo]
+cleaned
+[/bin/echo]
+cleaned
+7
+audited-from-fn
+[/bin/echo]
+hi
+hi
+ /bin/echo
+0 0
+a
+true
+[cat]
+audit command tests done

@@ -263,6 +263,21 @@ impl Drop for SignalMask {
 mod tests {
     use super::*;
 
+    /// Re-run test `name` alone in a child with `flag` set.  `--exact` that
+    /// matches nothing exits 0, so demand the child's own "1 passed".
+    fn in_child(flag: &str, name: &str) {
+        let crate_relative = module_path!().split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{crate_relative}::{name}")])
+            .env(flag, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{output:?}"
+        );
+    }
+
     #[test]
     fn line_assembly_leaves_typeahead_and_accepts_final_unterminated_utf8() {
         let mut source = "first\n界".as_bytes();
@@ -312,11 +327,10 @@ mod tests {
     #[test]
     fn interrupt_before_read_entry_does_not_block_or_consume_input() {
         if std::env::var_os("RAL_INPUT_EPOCH_TEST").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "repl::frontend::input::tests::interrupt_before_read_entry_does_not_block_or_consume_input"])
-                .env("RAL_INPUT_EPOCH_TEST", "1")
-                .output().unwrap();
-            assert!(output.status.success(), "{output:?}");
+            in_child(
+                "RAL_INPUT_EPOCH_TEST",
+                "interrupt_before_read_entry_does_not_block_or_consume_input",
+            );
             return;
         }
         use std::io::{Read as _, Write as _};
@@ -348,11 +362,10 @@ mod tests {
     #[test]
     fn interrupt_between_epoch_check_and_wait_is_not_lost() {
         if std::env::var_os("RAL_INPUT_WAIT_TEST").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "repl::frontend::input::tests::interrupt_between_epoch_check_and_wait_is_not_lost"])
-                .env("RAL_INPUT_WAIT_TEST", "1")
-                .output().unwrap();
-            assert!(output.status.success(), "{output:?}");
+            in_child(
+                "RAL_INPUT_WAIT_TEST",
+                "interrupt_between_epoch_check_and_wait_is_not_lost",
+            );
             return;
         }
         use std::io::{Read as _, Write as _};
@@ -420,16 +433,10 @@ mod tests {
         use std::os::fd::AsRawFd as _;
 
         if std::env::var_os("RAL_INPUT_WAKE_TEST").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "repl::frontend::input::tests::shutdown_retries_after_an_early_interrupt",
-                    "--nocapture",
-                ])
-                .env("RAL_INPUT_WAKE_TEST", "1")
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
+            in_child(
+                "RAL_INPUT_WAKE_TEST",
+                "shutdown_retries_after_an_early_interrupt",
+            );
             return;
         }
 

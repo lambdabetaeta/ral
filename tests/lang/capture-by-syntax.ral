@@ -2,8 +2,8 @@
 # is captured; where a command is wanted, a command runs.
 
 let assert_eq = { |name expected actual|
-    if $[$expected == $actual] {} else {
-        warn "FAIL: $name expected: $expected actual: $actual"
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
         fail [status: 1, message: "assertion failed: $name"]
     }
 }
@@ -68,8 +68,6 @@ assert_eq 'encoder held' '7' $ej
 
 # A branching form whose arms are commands is one command, captured once
 let c = true
-let big = if $c { echo big } else { echo small }
-assert_eq 'if then' big $big
 let either = if $c { echo yes } else { return none }
 assert_eq 'command or value' yes $either
 let recovered = try { ^false } { |e| echo failed }

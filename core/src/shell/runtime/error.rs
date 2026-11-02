@@ -350,7 +350,7 @@ mod tests {
         let mut err = Error::new("boom").with_witness(witness);
         err.span = span;
         err.hint = hint.map(Into::into);
-        err.render(db, None)
+        crate::io::ansi::strip(&err.render(db, None))
     }
 
     #[test]
@@ -358,8 +358,7 @@ mod tests {
         let (db, file) = db_with("test.al", "x = 5\ny = 10\necho $undefined\n");
         let output = runtime(&db, Some(Span::new(file, 18, 28)), None, None);
         assert!(output.contains("R0001"));
-        assert!(output.contains("boom"));
-        assert!(output.contains("test.al"));
+        assert!(output.contains("test.al:3:6"), "{output}");
     }
 
     #[test]
@@ -371,6 +370,7 @@ mod tests {
             None,
             Some("the right-hand side must evaluate to a list"),
         );
+        assert!(output.contains("test.al:1:1"), "{output}");
         assert!(output.contains("the right-hand side must evaluate to a list"));
     }
 
@@ -383,7 +383,7 @@ mod tests {
             out.contains("here"),
             "a resolved span should draw a caret:\n{out}"
         );
-        assert!(out.contains("main.ral"));
+        assert!(out.contains("main.ral:1:6"), "{out}");
     }
 
     #[test]
@@ -409,12 +409,10 @@ mod tests {
             file_origin("mod.ral"),
             "let a = 1\nfail [status: 1, message: 'kaboom']\n",
         ));
-        // Strip ANSI: colours may split `fail` character by character.
-        let out =
-            crate::io::ansi::strip(&runtime(&db, Some(Span::new(module, 10, 14)), None, None));
+        let out = runtime(&db, Some(Span::new(module, 10, 14)), None, None);
         assert!(out.contains("R0001"));
         assert!(
-            out.contains("mod.ral"),
+            out.contains("mod.ral:2:1"),
             "the caret must be drawn against the module's source:\n{out}"
         );
         assert!(

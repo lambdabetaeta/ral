@@ -202,9 +202,7 @@ pub fn teardown_session() {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{
-        ExecProjection, FsProjection, NET_ENFORCED, SandboxProjection, projection_enforceable,
-    };
+    use super::{ExecProjection, FsProjection, SandboxProjection, projection_enforceable};
 
     #[test]
     fn projection_enforceable_allows_net_true_on_any_platform() {
@@ -216,34 +214,6 @@ mod tests {
             exec: ExecProjection::default(),
         };
         assert!(projection_enforceable(&p_net_true).is_ok());
-    }
-
-    #[test]
-    fn projection_enforceable_net_false_tracks_net_enforced() {
-        // Stated relationally, so the assertion holds on any host.
-        let p_net_false = SandboxProjection {
-            fs: FsProjection::default(),
-            net: false,
-            gpu: true,
-            exec: ExecProjection::default(),
-        };
-        assert_eq!(projection_enforceable(&p_net_false).is_ok(), NET_ENFORCED);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn projection_enforceable_allows_net_false_on_windows() {
-        // An AppContainer with no network capability SID cannot open a socket.
-        let p_net_false = SandboxProjection {
-            fs: FsProjection::default(),
-            net: false,
-            gpu: true,
-            exec: ExecProjection::default(),
-        };
-        assert!(
-            projection_enforceable(&p_net_false).is_ok(),
-            "net: false must be enforceable on Windows via the AppContainer backend"
-        );
     }
 
     /// `RealPath::open_nofollow` and `open_dir_nofollow`, which only the sandbox

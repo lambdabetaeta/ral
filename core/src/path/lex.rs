@@ -2728,4 +2728,73 @@ mod tests {
             assert!(!is_unparsed_head(Path::new(raw)), "{raw}");
         }
     }
+
+    #[test]
+    fn parent_or_cwd_falls_back_to_dot() {
+        for (path, want) in [("a/b", "a"), ("a", "."), ("/a", "/"), ("/", "."), ("", ".")] {
+            assert_eq!(parent_or_cwd(Path::new(path)), Path::new(want), "{path:?}");
+        }
+    }
+
+    /// By spelling alone: no `..` is folded, and a bare name's parent is empty.
+    #[test]
+    fn spelled_parent_drops_the_last_name_and_nothing_else() {
+        for (path, want) in [
+            ("/a/b", Some("/a")),
+            ("/a/b/..", Some("/a/b")),
+            ("/a", Some("/")),
+            ("a", Some("")),
+            ("/", None),
+        ] {
+            assert_eq!(
+                spelled_parent(Path::new(path)),
+                want.map(Path::new),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn basename_is_the_last_name_else_the_path_itself() {
+        for (path, want) in [
+            ("/usr/bin/git", "git"),
+            ("git", "git"),
+            ("dir/", "dir"),
+            ("/", "/"),
+            ("a/..", "a/.."),
+        ] {
+            assert_eq!(basename(path), want, "{path:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn utf8_refuses_a_path_that_is_not_text_and_names_it() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(utf8(Path::new("/a/b")), Ok("/a/b"));
+        let bad = Path::new(OsStr::from_bytes(b"/a/\xff"));
+        assert_eq!(utf8(bad), Err(NotUtf8(bad.to_path_buf())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_key_is_the_slash_joined_names_beneath_the_root() {
+        use std::os::unix::ffi::OsStrExt;
+        let at = |p: &Path| LexicalPath::absolute(p).expect("an absolute fixture");
+        let root = at(Path::new("/r"));
+        for (shown, want) in [
+            (Path::new("/r/a/b"), Some("a/b")),
+            (Path::new("/r"), Some("")),
+            (Path::new("/x/a"), None),
+            (Path::new("/rr/a"), None),
+            (Path::new("/r/a/../b"), None),
+            (Path::new(OsStr::from_bytes(b"/r/\xff")), None),
+        ] {
+            assert_eq!(
+                relative_key(&at(shown), &root).as_deref(),
+                want,
+                "{shown:?}"
+            );
+        }
+    }
 }

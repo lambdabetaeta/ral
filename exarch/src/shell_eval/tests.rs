@@ -1204,6 +1204,168 @@ fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
     );
 }
 
+/// A miss, a miss carrying a literal backslash escape, and a miss that only
+/// indentation separates from a line all fail and leave the file as it was;
+/// a unique match beside them rewrites only itself.
+#[test]
+fn edit_replace_that_finds_nothing_leaves_the_file_untouched() {
+    let engine = fresh();
+    let body = "fn main() {\n\tlet x = 1;\n}\n";
+    let (tmp, path) = scratch_file("edit-replace-miss", "main.rs", body);
+    let file = tmp.path().join("main.rs");
+
+    for (case, from) in [
+        ("an absent FROM", "let y = 2;"),
+        ("a literal backslash-n", "fn main() {\\n\\tlet x = 1;"),
+        ("FROM that differs by indentation", "    let x = 1;"),
+    ] {
+        let r = run_once(
+            &engine,
+            &format!("edit-replace '{path}' '{from}' 'replaced'"),
+        );
+        assert_ne!(r.exit, 0, "{case}: a miss must fail");
+        assert_eq!(
+            std::fs::read(&file).expect("read after failed edit"),
+            body.as_bytes(),
+            "{case}: a miss must leave the file untouched"
+        );
+    }
+
+    let r = run_once(&engine, &format!("edit-replace '{path}' 'x = 1' 'x = 2'"));
+    assert_eq!(
+        r.exit,
+        0,
+        "a unique match must succeed; stderr was: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read after edit"),
+        "fn main() {\n\tlet x = 2;\n}\n"
+    );
+}
+
+/// `explore-dir` lists a tree's entries, root excluded, name-ordered and
+/// cwd-relative, down to the depth asked.
+#[test]
+fn explore_dir_lists_the_tree_to_the_depth_asked() {
+    let engine = fresh();
+    let scratch = scratch_dir("explore-depth");
+    let tmp = scratch
+        .path()
+        .canonicalize()
+        .expect("canonical scratch dir");
+    std::fs::create_dir_all(tmp.join("sub").join("deep")).expect("create tree");
+    for file in ["a.txt", "sub/b.txt", "sub/deep/c.txt"] {
+        std::fs::write(tmp.join(file), "").expect("write fixture");
+    }
+    let root = shown(&tmp);
+    let listing = |depth: usize| -> String {
+        let r = run_once(
+            &engine,
+            &format!("cd '{root}'\nintercalate ',' !{{explore-dir {depth} .}}"),
+        );
+        assert_eq!(
+            r.exit,
+            0,
+            "explore-dir {depth}: stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        r.value.expect("a listing is a value")
+    };
+
+    assert_eq!(listing(1), "a.txt,sub");
+    assert_eq!(listing(2), "a.txt,sub,sub/b.txt,sub/deep");
+    assert_eq!(listing(3), "a.txt,sub,sub/b.txt,sub/deep,sub/deep/c.txt");
+}
+
+/// Inside a repository the walk skips what `.gitignore` lists, and hidden
+/// entries, as `grep-files` does.
+#[test]
+fn explore_dir_skips_ignored_and_hidden_entries() {
+    let engine = fresh();
+    let scratch = scratch_dir("explore-ignore");
+    let tmp = scratch
+        .path()
+        .canonicalize()
+        .expect("canonical scratch dir");
+    for dir in [".git", "src", "target"] {
+        std::fs::create_dir_all(tmp.join(dir)).expect("create fixture dir");
+    }
+    for (file, body) in [
+        (".gitignore", "target/\nnotes.txt\n"),
+        (".env", ""),
+        ("notes.txt", ""),
+        ("src/a.rs", ""),
+        ("target/out.o", ""),
+    ] {
+        std::fs::write(tmp.join(file), body).expect("write fixture");
+    }
+    let r = run_once(
+        &engine,
+        &format!("cd '{}'\nintercalate ',' !{{explore-dir 3 .}}", shown(&tmp)),
+    );
+    assert_eq!(
+        r.exit,
+        0,
+        "stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(r.value.as_deref(), Some("src,src/a.rs"));
+}
+
+/// A negative depth is a runtime refusal; a non-Int one never gets that far,
+/// the type check refusing it first.
+#[test]
+fn explore_dir_rejects_a_depth_that_is_not_a_natural() {
+    let engine = fresh();
+    let r = run_once(&engine, "explore-dir $[0 - 1] .");
+    assert_ne!(r.exit, 0, "a negative depth must fail");
+
+    let applier = Arc::new(super::surface::SurfaceApplier::new(
+        crate::record::Emitter::none(),
+    ));
+    let outcome = run_shell(
+        &engine,
+        "turn 1",
+        "explore-dir 'deep' .",
+        30,
+        applier,
+        Some(&DurableRoot::default().child()),
+    );
+    assert!(
+        matches!(outcome, Ok(ral_core::protocol::Report::Static { .. })),
+        "a String depth must fail the type check"
+    );
+}
+
+/// A walk of a root the grant denies is refused, not listed empty.
+#[test]
+fn explore_dir_refuses_a_denied_root() {
+    let scratch = scratch_dir("explore-denied");
+    let tmp = scratch
+        .path()
+        .canonicalize()
+        .expect("canonical scratch dir");
+    std::fs::write(tmp.join("secret.txt"), "").expect("write fixture");
+    let root = shown(&tmp);
+    let stack = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        fs: Some(ral_core::authority::policy::FsPolicy {
+            read_prefixes: vec![ral_core::path::FrozenPath::root()],
+            write_prefixes: Vec::new(),
+            deny_paths: vec![ral_core::path::FrozenPath::from_surface(&root)],
+        }),
+        ..Capabilities::default()
+    })]);
+    let engine = crate::boot::test_transport_under(stack);
+    let r = run_shell_direct(
+        &engine,
+        &format!("explore-dir 2 '{root}'"),
+        30,
+        &crate::record::Emitter::none(),
+    );
+    assert_ne!(r.exit, 0, "a denied root must be refused");
+}
+
 /// A CRLF file reads and edits as `\n` text and keeps its ending: a multi-line
 /// FROM matches, `$` anchors before `\r\n`, and a grep hit is the bare row, so
 /// a line rebuilt from it gains no stray `\r`.  A mixed file stays as it is.

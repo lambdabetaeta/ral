@@ -1,2 +1,5 @@
-# contains: key
+# codes: P0001
+# status: 2
+# at: 5:6
+# contains: expected a key
 let [42: a] = m

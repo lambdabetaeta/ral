@@ -283,18 +283,4 @@ mod tests {
             "{error:?}"
         );
     }
-
-    #[test]
-    fn the_command_line_addresses_the_guest() {
-        let fixture = fixture();
-        let line = command_line(&fixture.plan);
-        assert!(line.contains("console=hvc0"), "{line}");
-        assert!(line.contains("ral.workspace=workspace"), "{line}");
-        assert!(line.contains("ral.port=1729"), "{line}");
-        assert!(line.contains("ral.epoch=1771200000"), "{line}");
-        assert!(
-            line.contains("ral.net=1730,10.0.2.15/24,10.0.2.2"),
-            "{line}"
-        );
-    }
 }

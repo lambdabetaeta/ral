@@ -1,0 +1,32 @@
+# Test: within [handler:] is a catch-all for external commands
+
+# Catch-all receives (name, args)
+within [handler: { |name args| echo caught $name ...$args }] {
+    foo x y
+}
+
+# Self-masking: handler body doesn't see its own frame
+within [handler: { |name args| echo intercepted $name }] {
+    nonexistent-command
+}
+
+# Catch-all does NOT intercept builtins — they are language-internal
+within [handler: { |name args| echo caught $name }] {
+    echo 'builtin runs normally'
+}
+
+# A per-name entry beats a catch-all, whichever frame holds it
+within [handlers: [other: { |args| echo outer }]] {
+    within [handler: { |n _a| echo catch }] { other }
+}
+
+# A computed catch-all whose body yields unit installs
+let quiet = { |name args| cd ~ }
+within [handler: $quiet] { echo installed }
+
+# A catch-all whose body diverges installs
+within [handler: { |n a| fail [status: 1, message: 'unhandled command'] }] {
+    try { zzz } { |e| echo $e[message] }
+}
+
+echo 'within catch-all tests done'

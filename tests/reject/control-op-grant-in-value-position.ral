@@ -1,3 +1,6 @@
+# codes: T0040
+# status: 1
+# at: 5:9
 # contains: 'grant' is a control operator
 let x = $grant
 return $x

@@ -173,57 +173,16 @@ mod tests {
     }
 
     #[test]
-    fn get_is_refused() {
-        let buf = head(&["GET example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn post_is_refused() {
-        let buf = head(&["POST example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn head_method_is_refused() {
-        let buf = head(&["HEAD example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn put_is_refused() {
-        let buf = head(&["PUT example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn delete_is_refused() {
-        let buf = head(&["DELETE example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn options_is_refused() {
-        let buf = head(&["OPTIONS example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn patch_is_refused() {
-        let buf = head(&["PATCH example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn trace_is_refused() {
-        let buf = head(&["TRACE example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
-    }
-
-    #[test]
-    fn lowercase_connect_is_refused() {
-        let buf = head(&["connect example.com:443 HTTP/1.1", "Host: example.com"]);
-        assert_eq!(decode(&buf).unwrap_err().status, 405);
+    fn non_connect_methods_are_refused_with_405() {
+        for method in [
+            "GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH", "TRACE", "connect",
+        ] {
+            let buf = head(&[
+                &format!("{method} example.com:443 HTTP/1.1"),
+                "Host: example.com",
+            ]);
+            assert_eq!(decode(&buf).unwrap_err().status, 405, "{method}");
+        }
     }
 
     #[test]
@@ -301,33 +260,16 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_url_target_is_refused() {
-        let buf = head(
-            [
-                "CONNECT https://example.com/:443 HTTP/1.1",
-                "Host: example.com",
-            ]
-            .as_ref(),
-        );
-        assert!(decode(&buf).is_err());
-    }
-
-    #[test]
-    fn a_path_target_is_refused() {
-        let buf = head(&["CONNECT /index.html HTTP/1.1", "Host: example.com"]);
-        assert!(decode(&buf).is_err());
-    }
-
-    #[test]
-    fn a_fragment_in_the_target_is_refused() {
-        let buf = connect("example.com:443#frag", "example.com:443");
-        assert!(decode(&buf).is_err());
-    }
-
-    #[test]
-    fn control_bytes_in_the_target_are_refused() {
-        let buf = connect("example.com:44\x013", "example.com:443");
-        assert!(decode(&buf).is_err());
+    fn malformed_targets_are_refused_with_400() {
+        for target in [
+            "https://example.com/:443",
+            "/index.html",
+            "example.com:443#frag",
+            "example.com:44\x013",
+        ] {
+            let buf = connect(target, "example.com:443");
+            assert_eq!(decode(&buf).unwrap_err().status, 400, "{target:?}");
+        }
     }
 
     #[test]
@@ -372,14 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn a_host_header_with_an_explicit_443_matches() {
-        let c = decode(&connect("example.com:443", "example.com:443"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(c.host.as_str(), "example.com");
-    }
-
-    #[test]
     fn user_agent_and_proxy_connection_are_ignored_not_refused() {
         let buf = head(&[
             "CONNECT example.com:443 HTTP/1.1",
@@ -399,14 +333,52 @@ mod tests {
     }
 
     #[test]
-    fn the_fuzz_corpus_never_panics_the_parser() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/connect");
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let bytes = std::fs::read(entry.path()).expect("readable corpus file");
-            let _ = decode(&bytes);
+    fn more_than_32_headers_are_refused_with_400() {
+        let mut lines = vec![
+            "CONNECT example.com:443 HTTP/1.1".to_string(),
+            "Host: example.com".to_string(),
+        ];
+        lines.extend((0..32).map(|i| format!("X-{i}: v")));
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        assert_eq!(decode(&head(&lines)).unwrap_err().status, 400);
+    }
+
+    #[test]
+    fn a_complete_head_over_the_cap_is_refused_with_431() {
+        let pad = format!("X-Pad: {}", "a".repeat(HEAD_MAX));
+        let buf = head(&[
+            "CONNECT example.com:443 HTTP/1.1",
+            "Host: example.com",
+            &pad,
+        ]);
+        assert_eq!(decode(&buf).unwrap_err().status, 431);
+    }
+
+    #[test]
+    fn a_non_utf8_host_header_is_refused_with_400() {
+        let buf = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.\xff\r\n\r\n";
+        assert_eq!(decode(buf).unwrap_err().status, 400);
+    }
+
+    #[test]
+    fn a_host_header_on_another_port_is_refused() {
+        let buf = connect("example.com:443", "example.com:8443");
+        assert_eq!(decode(&buf).unwrap_err().status, 400);
+    }
+
+    #[test]
+    fn whitespace_around_the_host_header_is_trimmed() {
+        let c = decode(&connect("example.com:443", "  example.com:443  "))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.host.as_str(), "example.com");
+    }
+
+    #[test]
+    fn hosts_failing_the_policy_shape_are_refused_with_403() {
+        for target in ["under_score.example:443", "example.com.:443"] {
+            let buf = connect(target, target);
+            assert_eq!(decode(&buf).unwrap_err().status, 403, "{target}");
         }
     }
 }

@@ -1,0 +1,9 @@
+within [handler: { |name args| cd ~ }] { zzz }
+let h = { |name args| cd ~ }; within [handler: $h] { zzz }
+let w = { |h| within [handler: $h] { () } }; w { |name args| cd ~ }
+within [handler: { |n a| echo caught }] { zzz }
+let h = { |n a| echo caught }; within [handler: $h] { zzz }
+let w = { |h| within [handler: $h] { () } }; w { |n a| echo caught }
+within [handler: { |n a| fail [status: 1, message: 'unhandled command'] }] { zzz }
+let h = { |n a| fail [status: 1, message: 'unhandled command'] }; within [handler: $h] { zzz }
+let w = { |h| within [handler: $h] { () } }; w { |n a| fail [status: 1, message: 'unhandled command'] }

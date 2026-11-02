@@ -1,0 +1,5 @@
+[write `write `committed a.txt, read a.txt, write `append `committed a.txt, write `stream `committed s.txt]
+[write `write `aborted never.txt, write `write `failed out.txt]
+false
+[5]
+audit io tests done

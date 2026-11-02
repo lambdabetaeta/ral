@@ -1,4 +1,6 @@
 # codes: T0062
+# status: 1
+# at: 6:11
 # contains: Integer cannot be indexed
 let xs = 42
 return $xs[0]

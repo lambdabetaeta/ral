@@ -193,6 +193,23 @@ mod tests {
     struct Ignore;
     impl Sink for Ignore {}
 
+    /// Logs each transient it is handed.
+    struct Accepting(Log);
+    impl Sink for Accepting {
+        fn transient(&mut self, _: AgentId, _: &Transient) {
+            self.0.borrow_mut().push("accept".into());
+        }
+    }
+
+    fn died(agent: AgentId, failures: &[&str]) -> Signal {
+        Signal::Transient(
+            agent,
+            Transient::Died {
+                failures: failures.iter().map(ToString::to_string).collect(),
+            },
+        )
+    }
+
     type Log = Rc<RefCell<Vec<String>>>;
 
     struct FakeSeat<'a> {
@@ -248,6 +265,8 @@ mod tests {
         log: Log,
         current: Rc<Cell<bool>>,
         after_done: Box<dyn Fn(usize)>,
+        /// Whether the window still wants jobs.
+        began: bool,
     }
 
     impl FakeStage {
@@ -256,6 +275,7 @@ mod tests {
                 log: log.clone(),
                 current: Rc::new(Cell::new(true)),
                 after_done: Box::new(|_| {}),
+                began: true,
             }
         }
     }
@@ -269,7 +289,7 @@ mod tests {
         }
         fn job_began(&self, _: JobId) -> bool {
             self.log.borrow_mut().push("began".into());
-            true
+            self.began
         }
         fn job_done(&self, _: JobId, stopped: bool, _: Option<WindowReport>) {
             let done = {
@@ -378,30 +398,80 @@ mod tests {
     }
 
     #[test]
-    fn failure_during_a_blocked_walk_is_seen_by_the_post_walk_snapshot() {
+    fn a_helper_failure_queued_during_the_walk_is_found_by_the_post_walk_snapshot() {
         let (tx, rx) = exarch::port::channel();
-        let root = AgentId::new(1);
-        let helper = AgentId::new(2);
-        assert!(
-            snapshot_failure(rx.drain_pending(), root, &mut Ignore, |_| "engine".into()).is_none()
+        tx.send_signal(died(AgentId::new(2), &["uncertified"]))
+            .unwrap();
+        let found = snapshot_failure(
+            rx.drain_pending(),
+            AgentId::new(1),
+            &mut Ignore,
+            |_| unreachable!(),
         );
-        let (walking, ready) = std::sync::mpsc::channel();
-        let (continue_walk, finish) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            walking.send(()).unwrap();
-            finish.recv().unwrap();
-            snapshot_failure(rx.drain_pending(), root, &mut Ignore, |_| "engine".into())
-        });
-        ready.recv().unwrap();
-        tx.send_signal(Signal::Transient(
-            helper,
-            Transient::Died {
-                failures: vec!["uncertified".into()],
-            },
-        ))
-        .unwrap();
-        continue_walk.send(()).unwrap();
-        assert_eq!(worker.join().unwrap().as_deref(), Some("uncertified"));
+        assert_eq!(found.as_deref(), Some("uncertified"));
+    }
+
+    #[test]
+    fn a_death_with_failures_names_them_whoever_died() {
+        let root = AgentId::new(1);
+        for agent in [root, AgentId::new(2)] {
+            let found = terminal_failure(&died(agent, &["a", "b"]), root, |_| unreachable!());
+            assert_eq!(found.as_deref(), Some("a\nb"));
+        }
+        assert_eq!(
+            terminal_failure(&died(root, &[]), root, |_| unreachable!()),
+            None
+        );
+    }
+
+    #[test]
+    fn the_root_dying_invalidates_a_snapshot() {
+        let root = AgentId::new(1);
+        let snapshot = |signals| snapshot_failure(signals, root, &mut Ignore, |_| unreachable!());
+        assert!(snapshot(vec![died(root, &[])]).is_some());
+        assert_eq!(
+            snapshot(vec![died(root, &["boom"])]).as_deref(),
+            Some("boom")
+        );
+    }
+
+    #[test]
+    fn a_terminal_signal_reaches_the_sink_before_the_failure_is_published() {
+        let (tx, rx) = exarch::port::channel();
+        let log = Log::default();
+        let mut seat = FakeSeat::new(&rx, &log, || true);
+        tx.send_signal(died(AgentId::new(2), &["uncertified"]))
+            .expect("feed is open");
+        assert_eq!(
+            run(
+                &mut seat,
+                &FakeStage::new(&log),
+                &mut Accepting(log.clone())
+            ),
+            Err(true)
+        );
+        assert_eq!(
+            *log.borrow(),
+            ["release", "accept", "failure: uncertified", "invalidate"]
+        );
+    }
+
+    #[test]
+    fn a_window_that_declines_a_job_ends_the_run_without_a_failure() {
+        let run_dir = ral_core::own::OwnDir::for_test("gate-declined-job").expect("run directory");
+        let host = scripted_host(&run_dir, None, Script::new().then(Reply::text("one")));
+        let (port, root) = (host.port(), host.children()[0]);
+        port.submit(root, "first".into()).expect("live root");
+        let log = Log::default();
+        let mut seat = FakeSeat::new(host.feed(), &log, || host.release(root));
+        seat.root = root;
+        let mut stage = FakeStage::new(&log);
+        stage.began = false;
+
+        assert_eq!(run(&mut seat, &stage, &mut Ignore), Ok(()));
+        assert_eq!(*log.borrow(), ["release", "began"]);
+        drop(seat);
+        assert_eq!(host.end(), Vec::<String>::new());
     }
 
     #[test]

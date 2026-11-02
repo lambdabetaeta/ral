@@ -1,2 +1,5 @@
+# codes: T0074 T0011
+# status: 1
+# at: 5:24
 # contains: couldn't match
 alias inc { |a| return $[$a[0] + 1] }; inc 5

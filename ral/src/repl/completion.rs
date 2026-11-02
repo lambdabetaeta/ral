@@ -836,14 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn complete_offers_commands_at_command_position() {
-        let src = sources(&["grep", "git", "ls"], &[]);
-        let (start, cands) = complete("gi", 2, &src.view());
-        assert_eq!(start, 0);
-        assert!(cands.iter().any(|c| c.display == "git"));
-    }
-
-    #[test]
     fn complete_offers_variables_after_dollar() {
         let src = sources(&["echo"], &["dirs", "data"]);
         let (start, cands) = complete("echo $da", 8, &src.view());

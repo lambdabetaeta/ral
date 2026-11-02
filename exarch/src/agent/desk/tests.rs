@@ -23,7 +23,7 @@ use crate::record::ChildStatus;
 use crate::record::EditAuthority;
 use crate::record::{AgentId, Memory, Voice};
 use crate::record::{Display, Record, Transient};
-use crate::schedule::{Trigger, parse_duration};
+use crate::schedule::{Asked, parse_duration};
 use ral_core::data::datum::tag;
 use ral_core::shell::runtime::NurseryId;
 use regex::Regex;
@@ -424,7 +424,7 @@ fn rail_draws_every_attempt_the_fragment_holds_only_what_landed() {
 
 fn add_req(after: &str, label: &str, prompt: &str) -> Request {
     Request::Schedules(Schedules::Add(Add {
-        trigger: Trigger::After(parse_duration(after).expect("a test duration parses")),
+        trigger: Asked::After(parse_duration(after).expect("a test duration parses")),
         label: label.to_string(),
         prompt: prompt.to_string(),
     }))
@@ -440,6 +440,8 @@ fn reply_req(value: FOValue) -> Request {
 
 mod agents;
 mod context;
+#[cfg(unix)]
+mod factory;
 mod pins;
 mod schedules;
 #[cfg(unix)]
@@ -487,37 +489,5 @@ fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
         .enquire(Request::Agents(Agents::List).encode())
         .unwrap_err();
     assert_eq!(error.status, EnquiryError::no_desk().status);
-    assert_eq!(error.message, EnquiryError::no_desk().message);
-}
-
-#[test]
-fn an_unwinding_desk_dispatch_returns_the_mutated_body() {
-    let mut agent = crate::agent::Agent::for_test("system").unwrap();
-    let call = Call {
-        handle: agent.handle(),
-        life: agent.mailbox.life(),
-        fleet: agent.fleet.clone(),
-        kind: agent.engine().kind(),
-        emit: crate::bus::dummy_emitter().0,
-        acts: AtomicRefCell::new(Vec::new()),
-    };
-    let mut retained = None;
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        agent.body.lend(|loan| {
-            let desk = ExarchDesk {
-                loan: loan.clone(),
-                call,
-            };
-            desk.ask(reply_req(text("before panic"))).unwrap();
-            retained = Some(desk);
-            panic!("the dispatch panicked");
-        });
-    }));
-    assert!(panic.is_err());
-    assert_eq!(agent.body.reply, Some(text("before panic")));
-    let error = retained
-        .unwrap()
-        .ask(Request::Agents(Agents::List))
-        .unwrap_err();
     assert_eq!(error.message, EnquiryError::no_desk().message);
 }

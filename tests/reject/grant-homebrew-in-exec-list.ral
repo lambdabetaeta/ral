@@ -1,2 +1,5 @@
+# codes: T0020
+# status: 1
+# at: 5:14
 # contains: write `` `dir `homebrew ``
 grant [exec: [allow: [`homebrew]]] { return 1 }

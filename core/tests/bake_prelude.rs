@@ -17,7 +17,7 @@ fn rebake() -> Toplevel {
     let src = include_str!("../src/shell/prelude.ral");
     let ast = ral_core::syntax::parser::parse(src).expect("prelude parse");
     let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
-    ral_core::bake_prelude(&top, &common::manifest(&ral_core::HostSurface::default()))
+    ral_core::bake_prelude(&top, &ral_core::HostSurface::default().manifest())
 }
 
 /// Visit every `Comp` reachable from an annotated toplevel's phrases —
@@ -72,7 +72,7 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
     let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
     let schemes = schemes_on_defines(&ral_core::bake_prelude(
         &top,
-        &common::manifest(&ral_core::HostSurface::default()),
+        &ral_core::HostSurface::default().manifest(),
     ));
     assert!(
         schemes.iter().any(|(name, _)| name == "upper"),
@@ -92,8 +92,7 @@ fn bake_inserts_an_interior_capture() {
     let ast = ral_core::syntax::parser::parse("let count = { |p| int !{wc -l < $p} }")
         .expect("fixture parse");
     let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
-    let annotated =
-        ral_core::bake_prelude(&top, &common::manifest(&ral_core::HostSurface::default()));
+    let annotated = ral_core::bake_prelude(&top, &ral_core::HostSurface::default().manifest());
     let mut capture = false;
     walk_toplevel(&annotated, &mut |c| {
         if let CompKind::Capture(_) = &c.item {
@@ -150,7 +149,7 @@ fn prelude_schemes_carry_their_grades() {
 /// returns it, `map` demands a value, `fail` inhabits every producer type.
 #[test]
 fn builtin_schemes_carry_their_grades() {
-    let table = common::manifest(&ral_core::HostSurface::default());
+    let table = ral_core::HostSurface::default().manifest();
     let shown = |name: &str| ral_core::typecheck::builtin_type_hint(&table, name).unwrap();
     assert_eq!(shown("echo"), "[String] → Command");
     assert_eq!(shown("to-json"), "∀α:data. α → Command");

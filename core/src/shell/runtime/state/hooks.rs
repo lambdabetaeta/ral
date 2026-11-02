@@ -414,3 +414,94 @@ impl Shell {
         Some(plugins.remove(plugins.iter().position(|p| p.name == name)?))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::runtime::block_over;
+
+    fn prompt() -> HookName {
+        HookName::session("prompt")
+    }
+
+    fn register(shell: &mut Shell, name: HookName) -> Result<(), RegisterError> {
+        let body = block_over(&shell.env);
+        shell.register_hook(name, body, HookSig::Block, DefaultPolicy::denied())
+    }
+
+    fn entry(name: &str) -> PluginEntry {
+        PluginEntry {
+            name: name.into(),
+            aliases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_name_registers_once() {
+        let mut shell = crate::test_helper::core_shell();
+        register(&mut shell, prompt()).expect("first registration");
+        assert!(matches!(
+            register(&mut shell, prompt()),
+            Err(RegisterError::AlreadyRegistered { name }) if name == prompt()
+        ));
+        assert!(shell.has_hook(&prompt()));
+    }
+
+    #[test]
+    fn a_non_function_is_not_a_hook() {
+        let mut shell = crate::test_helper::core_shell();
+        let refused = shell.register_hook(
+            prompt(),
+            Value::Int(1),
+            HookSig::Block,
+            DefaultPolicy::denied(),
+        );
+        assert!(matches!(refused, Err(RegisterError::NotFunction { .. })));
+        assert!(!shell.has_hook(&prompt()));
+    }
+
+    /// An aside shares no session, so none of the session verbs apply.
+    #[test]
+    fn a_child_shell_has_no_session_to_keep_hooks_or_plugins() {
+        let parent = crate::test_helper::core_shell();
+        let hook = parent
+            .vet_hook(
+                &prompt(),
+                block_over(&parent.env),
+                HookSig::Block,
+                DefaultPolicy::denied(),
+            )
+            .expect("vet");
+        let mut aside = parent.join_session();
+        assert!(matches!(
+            register(&mut aside, prompt()),
+            Err(RegisterError::NoSession)
+        ));
+        assert!(matches!(
+            aside.set_hooks([(prompt(), hook)]),
+            Err(RegisterError::NoSession)
+        ));
+        assert!(matches!(
+            aside.plugin_loaded("p"),
+            Err(RegisterError::NoSession)
+        ));
+        assert!(matches!(
+            aside.commit_plugin(entry("p")),
+            Err(RegisterError::NoSession)
+        ));
+        assert_eq!(aside.take_plugin("p"), None);
+    }
+
+    #[test]
+    fn the_plugin_ledger_round_trips() {
+        let mut shell = crate::test_helper::core_shell();
+        assert!(!shell.plugin_loaded("p").unwrap());
+        shell.commit_plugin(entry("p")).unwrap();
+        shell.commit_plugin(entry("q")).unwrap();
+        assert!(shell.plugin_loaded("p").unwrap());
+        assert_eq!(shell.take_plugin("p"), Some(entry("p")));
+        assert!(!shell.plugin_loaded("p").unwrap());
+        assert!(shell.plugin_loaded("q").unwrap());
+        assert_eq!(shell.take_plugin("p"), None);
+    }
+}

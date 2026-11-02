@@ -226,3 +226,90 @@ impl<'a> IntoIterator for &'a Map {
         self.iter()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::Spanned;
+
+    /// Keys given out of order.
+    const CASES: &[&[(&str, i64)]] = &[
+        &[],
+        &[("a", 1)],
+        &[("b", 2), ("a", 1), ("c", 3)],
+        &[("zz", 9), ("z", 8), ("", 0)],
+    ];
+
+    fn built(entries: &[(&str, i64)]) -> Map {
+        entries
+            .iter()
+            .map(|(k, n)| ((*k).to_string(), Value::Int(*n)))
+            .collect()
+    }
+
+    /// Stably sorted by key, as `form` leaves a literal's node.
+    fn literal(entries: &[(&str, i64)]) -> Map {
+        let mut fields: Vec<_> = entries
+            .iter()
+            .map(|(k, n)| ((*k).into(), Spanned::synthetic(Val::Int(*n))))
+            .collect();
+        fields.sort_by(|a: &(crate::ir::Name, _), b| a.0.cmp(&b.0));
+        Map::captured(FieldsNode::new(fields.into()), Env::new())
+    }
+
+    fn pairs(map: &Map) -> Vec<(String, Value)> {
+        map.iter()
+            .map(|(k, v)| (k.to_string(), v.into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_literal_reads_as_the_built_map() {
+        for case in CASES {
+            let (lit, blt) = (literal(case), built(case));
+            assert!(lit.literal_parts().is_some() && blt.literal_parts().is_none());
+            assert_eq!(lit.len(), blt.len());
+            assert_eq!(lit.is_empty(), blt.is_empty());
+            assert_eq!(pairs(&lit), pairs(&blt));
+            assert!(pairs(&blt).windows(2).all(|w| w[0].0 < w[1].0));
+            for probe in ["", "a", "b", "c", "z", "zz", "absent"] {
+                assert_eq!(lit.get(probe), blt.get(probe), "get {probe:?}");
+                assert_eq!(
+                    lit.contains_key(probe),
+                    blt.contains_key(probe),
+                    "has {probe:?}"
+                );
+            }
+            assert_eq!(lit, blt);
+            assert_eq!(blt, lit);
+        }
+    }
+
+    #[test]
+    fn equality_distinguishes_values_and_keys_across_forms() {
+        let base = [("a", 1), ("b", 2)];
+        for other in [
+            &[("a", 1), ("b", 3)][..],
+            &[("a", 1), ("c", 2)],
+            &[("a", 1)],
+        ] {
+            assert_ne!(literal(&base), built(other));
+            assert_ne!(built(other), literal(&base));
+        }
+    }
+
+    #[test]
+    fn inserting_into_a_literal_keeps_its_entries() {
+        let mut map = literal(&[("a", 1), ("c", 3)]);
+        map.insert("b".into(), Value::Int(2));
+        map.insert("a".into(), Value::Int(10));
+        assert!(map.literal_parts().is_none(), "insert materialises");
+        assert_eq!(map, built(&[("a", 10), ("b", 2), ("c", 3)]));
+    }
+
+    #[test]
+    fn a_literal_lookup_takes_the_first_of_an_equal_run() {
+        let map = literal(&[("a", 1), ("a", 2), ("b", 3)]);
+        assert_eq!(map.get("a").as_deref(), Some(&Value::Int(1)));
+    }
+}

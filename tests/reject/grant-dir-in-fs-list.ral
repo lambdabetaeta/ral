@@ -1,2 +1,5 @@
+# codes: T0020
+# status: 1
+# at: 5:12
 # contains: `` `dir `` is not a place
 grant [fs: [write: [`dir `cwd tools]]] { return 1 }

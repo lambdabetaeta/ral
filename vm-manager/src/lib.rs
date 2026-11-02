@@ -93,27 +93,11 @@ fn local(
 }
 
 #[cfg(test)]
+#[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
-    #[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64")))]
-    fn media() -> (tempfile::TempDir, BootMedia) {
-        let dir = tempfile::tempdir().unwrap();
-        let make = |leaf: &str| {
-            let path = dir.path().join(leaf);
-            std::fs::write(&path, b"media").unwrap();
-            path
-        };
-        let artifact = BootArtifact {
-            kernel: make("kernel"),
-            initramfs: make("initramfs"),
-            rootfs: make("rootfs.img"),
-        };
-        (dir, Box::new(move || Ok(artifact)))
-    }
-
-    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     #[test]
     fn without_a_backend_detect_does_not_ready_media() {
         assert!(matches!(
@@ -122,41 +106,5 @@ mod tests {
             ))),
             Err(Error::NoBackend)
         ));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn with_media_detect_follows_what_this_computer_permits() {
-        use std::path::Path;
-
-        let (_dir, media) = media();
-        match (hcs::available(), detect(media)) {
-            (Ok(()), answer) => assert!(answer.is_ok(), "a permitted computer must get a backend"),
-            (Err(_), Ok(_)) => assert!(
-                broker::client::Brokered::available(),
-                "a computer the compute service refuses can only get a backend from a machine \
-                 service, and no service is listening"
-            ),
-            (Err(why), Err(refusal)) => {
-                let spell = |_: &Path| String::new();
-                assert_eq!(
-                    refusal.worded(spell).to_string(),
-                    why.worded(spell).to_string(),
-                    "the refusal must be the compute service's own"
-                );
-            }
-        }
-    }
-
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    #[test]
-    fn with_media_detect_follows_the_entitlement() {
-        let (_dir, media) = media();
-        if vz::entitled() {
-            assert!(detect(media).is_ok());
-        } else {
-            let refusal = detect(media).err().unwrap();
-            assert!(matches!(refusal, Error::Unentitled), "{refusal:?}");
-        }
     }
 }

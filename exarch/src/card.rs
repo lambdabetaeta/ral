@@ -337,4 +337,81 @@ mod tests {
         assert_eq!(marks[2]["mark"], "raw");
         assert_eq!(marks[2]["bytes"], serde_json::json!([255, 104]));
     }
+
+    fn text(spans: Vec<Span>) -> Mark {
+        Mark::Text { spans }
+    }
+
+    #[test]
+    fn a_summary_line_is_one_line_digesting_the_marks_in_order() {
+        let card = Card(vec![
+            text(vec![
+                Span::new(Role::Strong, "Tasks"),
+                Span::plain("  3\n open"),
+            ]),
+            text(vec![]),
+            Mark::Measure(Measure {
+                label: "n".into(),
+                readout: Readout {
+                    value: 3,
+                    max: Some(12),
+                    unit: None,
+                },
+            }),
+            Mark::Fields {
+                rows: vec![
+                    Field {
+                        label: "a".into(),
+                        value: FieldVal::Inline(vec![Span::plain("1")]),
+                    },
+                    Field {
+                        label: "b".into(),
+                        value: FieldVal::Readout(Readout {
+                            value: 2,
+                            max: None,
+                            unit: None,
+                        }),
+                    },
+                ],
+            },
+            Mark::Diff {
+                path: "a.rs".into(),
+                hunks: vec![],
+            },
+            Mark::Raw {
+                bytes: b"x \n y".to_vec(),
+            },
+        ]);
+        let line = summary_line(&card);
+        assert!(
+            !line.contains(['\n', '\r']) && !line.contains("  "),
+            "{line:?}"
+        );
+        let at = |s| line.find(s).unwrap_or_else(|| panic!("{s} in {line:?}"));
+        assert!(at("Tasks") < at("12") && at("12") < at("a.rs") && at("a.rs") < at("x"));
+        assert_eq!(summary_line(&Card(vec![])), "");
+    }
+
+    /// Whether an observation lands is `Landed::of`'s; this is the decoding around it.
+    #[test]
+    fn a_display_card_is_drawn_only_for_an_observation_that_lands() {
+        use ral_core::fact::{Check, Observed, Resource};
+        let display = |what| {
+            observation_display_card(
+                &Observation {
+                    site: None,
+                    start: 0,
+                    end: 0,
+                    principal: None,
+                    what,
+                }
+                .encode(),
+            )
+        };
+        let check =
+            |resource| Observed::Check(Check::new(resource, std::collections::BTreeMap::new()));
+        assert!(display(check(Resource::Fs)).is_some());
+        assert!(display(check(Resource::Deputy)).is_none());
+        assert!(observation_display_card(&FOValue::Unit).is_none());
+    }
 }

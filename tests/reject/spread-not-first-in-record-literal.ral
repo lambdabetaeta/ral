@@ -1,3 +1,6 @@
+# codes: P0001
+# status: 2
+# at: 7:18
 # contains: a record's spread comes first
 # contains: Help: move it before the fields: `[...$r, k: v]`
 let r = [a: 1]

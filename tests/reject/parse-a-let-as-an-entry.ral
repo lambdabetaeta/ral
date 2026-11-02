@@ -1,4 +1,6 @@
 # codes: P0003
+# status: 2
+# at: 6:13
 # contains: a `let` binds for the statements after it, not inside an entry
 # contains: write the `let` before this collection, and put its name here
 let r = [n: let x = 1]

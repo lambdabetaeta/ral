@@ -1,4 +1,6 @@
 # codes: T0074
+# status: 1
+# at: 6:9
 # contains: String
 let m = ["a": 'x']
 let n = $[$m[a] + 1]

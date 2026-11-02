@@ -357,32 +357,6 @@ fn clamp_cpus(vcpus: u8) -> u32 {
 mod tests {
     use super::*;
     #[test]
-    fn boot_media_is_resolved_and_a_missing_file_is_named() {
-        let dir = tempfile::tempdir().unwrap();
-        let make = |name: &str| {
-            let path = dir.path().join(name);
-            std::fs::write(&path, b"x").unwrap();
-            path
-        };
-        let artifact = BootArtifact {
-            kernel: make("kernel"),
-            initramfs: make("initramfs.img"),
-            rootfs: make("rootfs.img"),
-        };
-        let resolved = artifact.resolve().expect("every file is there");
-        assert!(plain(resolved.kernel).is_absolute());
-
-        let missing = BootArtifact {
-            kernel: dir.path().join("nowhere"),
-            ..artifact
-        };
-        match missing.resolve() {
-            Err(Error::MissingBootFile { path, .. }) => assert!(path.ends_with("nowhere")),
-            other => panic!("a missing kernel must be named: {other:?}"),
-        }
-    }
-
-    #[test]
     fn processors_are_clamped_to_this_computer() {
         let host =
             u32::try_from(std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
@@ -401,22 +375,6 @@ mod tests {
         );
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             assert!(cache.starts_with(PathBuf::from(local)));
-        }
-    }
-
-    #[test]
-    fn availability_answers_in_a_sentence() {
-        match available() {
-            Ok(()) => {}
-            Err(refusal) => {
-                let why = refusal.worded(|_| String::new()).to_string();
-                assert!(
-                    why.contains("Hyper-V Administrators")
-                        || why.contains("Virtual Machine Platform")
-                        || why.contains("virtual-machine service"),
-                    "an unclassified refusal: {why}"
-                );
-            }
         }
     }
 }

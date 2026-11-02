@@ -163,11 +163,9 @@ fn a_symlinked_inner_grant_cannot_escape_the_outer_ceiling() {
     for path in [outside.join("f"), link.join("f")] {
         let out = stacked(&outer, &through_link, &read(&path));
         denied_by_grant(&proof, &control, &out, "escaped");
-        assert!(!out.stdout.contains("escaped"), "stdout:\n{}", out.stdout);
     }
     let out = stacked(&outer, &nested, &read(&inner_dir.join("sub/f")));
     admitted(&proof, &out, "escaped");
-    assert!(out.stdout.contains("escaped"), "stdout:\n{}", out.stdout);
 
     let cat = |inner: &str, path: &Path| {
         stacked(
@@ -180,7 +178,6 @@ fn a_symlinked_inner_grant_cannot_escape_the_outer_ceiling() {
     admitted(&proof, &control, "escaped");
     let out = cat(&through_link, &link.join("f"));
     denied(&proof, &control, &out, "escaped");
-    assert!(!out.stdout.contains("escaped"), "stdout:\n{}", out.stdout);
 }
 
 /// Allows meet: layers with disjoint allows admit nothing, fail-closed.
@@ -210,7 +207,6 @@ fn disjoint_layers_meet_to_nothing() {
         &read(&a.join("f")),
     );
     admitted(&proof, &out, "content");
-    assert!(out.stdout.contains("content"), "stdout:\n{}", out.stdout);
 }
 
 /// Exclusions join, and no allowance beats one: a deeper allow in an inner

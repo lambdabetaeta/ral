@@ -1,4 +1,6 @@
 # codes: T0032
+# status: 1
+# at: 7:14
 # contains: `case` needs a variant value
 # contains: Help:
 let x = 1

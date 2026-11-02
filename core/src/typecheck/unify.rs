@@ -1955,25 +1955,24 @@ mod tests {
             .expect("a wide-but-shallow variant must unify, not be rejected as too deep");
     }
 
-    /// The rewrite pairs labels regardless of spine position: order is free.
+    /// The rewrite pairs labels regardless of spine position: order is free,
+    /// with a shared tail as without, which the divergence guard must let run.
     #[test]
     fn remy_rewrite_under_permutation() {
-        let mut u = Unifier::new();
-        let a = u.fresh_ty();
-        let b = u.fresh_ty();
-        let left = record_row(&[("a", Ty::Int), ("b", Ty::String)]);
-        let right = record_row(&[("b", b.clone()), ("a", a.clone())]);
-        u.unify_row(&left, &right).expect("permuted records unify");
-        assert_eq!(
-            u.apply_ty(&a),
-            Ty::Int,
-            "label `a` matched across positions"
-        );
-        assert_eq!(
-            u.apply_ty(&b),
-            Ty::String,
-            "label `b` matched across positions"
-        );
+        for shared in [false, true] {
+            let mut u = Unifier::new();
+            let tail = shared.then(|| u.fresh_row_var());
+            let row = |fields: &[(&str, Ty)]| match tail {
+                Some(rho) => open_row(fields, rho),
+                None => record_row(fields),
+            };
+            let (a, b) = (u.fresh_ty(), u.fresh_ty());
+            let left = row(&[("a", Ty::Int), ("b", Ty::String)]);
+            let right = row(&[("b", b.clone()), ("a", a.clone())]);
+            u.unify_row(&left, &right).expect("permuted rows unify");
+            assert_eq!(u.apply_ty(&a), Ty::Int, "shared tail: {shared}");
+            assert_eq!(u.apply_ty(&b), Ty::String, "shared tail: {shared}");
+        }
     }
 
     /// An open row against a closed one binds the tail to carry the surplus.
@@ -2044,30 +2043,6 @@ mod tests {
         assert!(
             matches!(err, TypeErrorKind::RecursiveRow),
             "expected RecursiveRow, got {err:?}"
-        );
-    }
-
-    /// A shared tail with the *same* multiset reordered is a permutation, not a
-    /// divergence: it has a solution, and the guard must let the rewrite run.
-    #[test]
-    fn shared_tail_permutation_still_unifies() {
-        let mut u = Unifier::new();
-        let rho = u.fresh_row_var();
-        let a = u.fresh_ty();
-        let b = u.fresh_ty();
-        let left = open_row(&[("a", Ty::Int), ("b", Ty::String)], rho);
-        let right = open_row(&[("b", b.clone()), ("a", a.clone())], rho);
-        u.unify_row(&left, &right)
-            .expect("shared-tail permuted rows unify");
-        assert_eq!(
-            u.apply_ty(&a),
-            Ty::Int,
-            "label `a` matched across positions"
-        );
-        assert_eq!(
-            u.apply_ty(&b),
-            Ty::String,
-            "label `b` matched across positions"
         );
     }
 

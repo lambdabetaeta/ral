@@ -1,2 +1,5 @@
+# codes: T0042
+# status: 1
+# at: 5:9
 # contains: builtin command
 let f = $echo; return $f

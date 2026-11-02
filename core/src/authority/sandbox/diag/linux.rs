@@ -212,11 +212,21 @@ mod tests {
         assert!(describe_denial(&op).is_none());
     }
 
+    /// Raw codes, not libc's names, so the table is independent of the match.
     #[test]
     fn action_decodes_the_kernel_code() {
-        assert_eq!(action(0x0005_0001), Some(SeccompAction::Errno(1)));
-        assert_eq!(action(0x8000_0000), Some(SeccompAction::KillProcess));
-        assert_eq!(action(0x0003_0000), Some(SeccompAction::Trap));
-        assert_eq!(action(0x1234_0000), None);
+        for (code, decoded) in [
+            (0x0000_0000, Some(SeccompAction::KillThread)),
+            (0x8000_0000, Some(SeccompAction::KillProcess)),
+            (0x0003_0000, Some(SeccompAction::Trap)),
+            (0x0005_000d, Some(SeccompAction::Errno(13))),
+            (0x7ff0_0007, Some(SeccompAction::Trace(7))),
+            (0x7ffc_0005, Some(SeccompAction::Log)),
+            (0x7fff_0000, Some(SeccompAction::Allow)),
+            (0x7fc0_0000, None),
+            (0x1234_0000, None),
+        ] {
+            assert_eq!(action(code), decoded, "{code:#x}");
+        }
     }
 }

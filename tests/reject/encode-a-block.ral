@@ -1,4 +1,6 @@
 # codes: T0074
+# status: 1
+# at: 6:9
 # contains: a block has no equality and no encoding
 let f = { |x| $x }
 to-json $f

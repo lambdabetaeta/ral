@@ -314,7 +314,8 @@ one-shot at the reset, whose prompt says when requests were refused and until
 when, and to carry on. It is a wall-clock `Trigger::At`, and fires as an
 ordinary `Input::Wakeup`, a new exchange the log admits after
 `quiesce(Aborted)`. The harness arms it, not the model, so the
-`allow_schedule` grant does not apply. CLI headless runs keep this policy off and fail honestly with the reset in
+`allow_schedule` grant does not apply; the model's `exarch-schedules` `add`
+carries an `Asked` trigger, which has no `At`, so it cannot spell one. CLI headless runs keep this policy off and fail honestly with the reset in
 the summary. Synod also launches with reset-resume and scheduling off; gated
 admission itself permits wakeups. Helpers do not arm provider-reset wakeups:
 `Agent::resumes_at_reset` admits roots only. A child's failure reaches its

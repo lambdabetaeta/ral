@@ -270,12 +270,53 @@ pub fn run_with_timeout(
     out
 }
 
+/// Run `ral <args>` with `input` piped on stdin and `envs` overlaid on the
+/// inherited environment.  Closing stdin ends the REPL loop.
+pub fn repl(args: &[&str], envs: &[(&str, PathBuf)], input: &str) -> Output {
+    let mut cmd = ral_command();
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, val) in envs {
+        cmd.env(key, val);
+    }
+
+    let mut child = cmd.spawn().expect("spawn ral");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.as_bytes()).unwrap();
+    drop(stdin);
+
+    let out = child.wait_with_output().unwrap();
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(1),
+    }
+}
+
+/// A temp `XDG_CONFIG_HOME` holding `ral/rc`, beside an empty `HOME`, so a
+/// spawned session discovers exactly this rc and no profile of the real user.
+/// The returned directory must outlive the run.
+pub fn rc_home(rc: &str) -> (tempfile::TempDir, Vec<(&'static str, PathBuf)>) {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, home) = (dir.path().join("config"), dir.path().join("home"));
+    std::fs::create_dir_all(config.join("ral")).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(config.join("ral").join("rc"), rc).unwrap();
+    (dir, vec![("XDG_CONFIG_HOME", config), ("HOME", home)])
+}
+
 /// Every `.ral` file under `dir`, sorted, never entering a directory named in
 /// `prune`.
 pub fn discover(dir: &Path, prune: &[&str]) -> Vec<PathBuf> {
     let mut scripts = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|e| panic!("read_dir entry in {}: {e}", dir.display()))
+            .path();
         if path.is_dir() {
             if !path
                 .file_name()

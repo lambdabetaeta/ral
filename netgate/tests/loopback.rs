@@ -151,7 +151,7 @@ impl GuestSide {
 
 struct TestDialer {
     fixture: SocketAddr,
-    resolve_to: SocketAddr,
+    resolve_to: Vec<SocketAddr>,
     dial_delay: Duration,
     panic_on_resolve: bool,
     resolve_calls: AtomicUsize,
@@ -163,7 +163,7 @@ impl Default for TestDialer {
     fn default() -> Self {
         Self {
             fixture: "127.0.0.1:1".parse().unwrap(),
-            resolve_to: "93.184.216.34:443".parse().unwrap(),
+            resolve_to: vec!["93.184.216.34:443".parse().unwrap()],
             dial_delay: Duration::ZERO,
             panic_on_resolve: false,
             resolve_calls: AtomicUsize::new(0),
@@ -179,7 +179,7 @@ impl Dialer for TestDialer {
             !self.panic_on_resolve,
             "injected worker panic for the panic-reporting test"
         );
-        Ok(vec![self.resolve_to])
+        Ok(self.resolve_to.clone())
     }
 
     fn dial(&self, _addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
@@ -306,6 +306,14 @@ fn join_within(session: netgate::Session, timeout: Duration) -> Option<Result<()
     rx.recv_timeout(timeout).ok()
 }
 
+fn ledger_records(state: &ral_core::own::OwnDir) -> Vec<serde_json::Value> {
+    let text = String::from_utf8(state.read(LEDGER).expect("the ledger is written"))
+        .expect("the ledger is text");
+    text.lines()
+        .map(|line| serde_json::from_str(line).expect("each line is JSON on its own"))
+        .collect()
+}
+
 /// New lifecycle regressions must also clean up when an assertion fails.
 struct StopOnDrop(Option<netgate::Session>);
 
@@ -423,7 +431,7 @@ fn the_authority_confusion_regression_is_refused_before_any_dial() {
 fn an_allowed_host_that_resolves_to_a_link_local_address_never_dials() {
     let dialer = Arc::new(TestDialer {
         fixture: spawn_echo_fixture(),
-        resolve_to: "169.254.169.254:443".parse().unwrap(),
+        resolve_to: vec!["169.254.169.254:443".parse().unwrap()],
         ..TestDialer::default()
     });
     let (mut guest, session) = harness(dialer.clone());
@@ -547,12 +555,8 @@ fn origin_fin_preserves_the_guest_upload_until_its_own_fin() {
     );
     drop(session);
 
-    let text = String::from_utf8(state.read(LEDGER).unwrap()).unwrap();
-    let records: Vec<serde_json::Value> = text
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(records.len(), 2, "one allow and one close: {text}");
+    let records = ledger_records(&state);
+    assert_eq!(records.len(), 2, "one allow and one close: {records:?}");
     assert_eq!(records[0]["allowed"], true);
     assert_eq!(records[1]["note"], "closed");
     assert_eq!(records[1]["up"], PREFIX.len() + SUFFIX.len());
@@ -703,13 +707,12 @@ fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
         .unwrap()
         .unwrap();
 
-    let text = String::from_utf8(state.read(LEDGER).expect("the ledger is written"))
-        .expect("the ledger is text");
-    let lines: Vec<serde_json::Value> = text
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("each line is JSON on its own"))
-        .collect();
-    assert_eq!(lines.len(), 3, "one refusal, one tunnel, one close: {text}");
+    let lines = ledger_records(&state);
+    assert_eq!(
+        lines.len(),
+        3,
+        "one refusal, one tunnel, one close: {lines:?}"
+    );
 
     assert_eq!(lines[0]["host"], "off-list.example");
     assert_eq!(lines[0]["allowed"], false);
@@ -728,6 +731,109 @@ fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
     assert_eq!(lines[2]["note"], "closed");
     assert_eq!(lines[2]["up"], 4);
     assert_eq!(lines[2]["down"], 4);
+}
+
+#[test]
+#[serial_test::serial]
+fn gate_refusals_reach_the_guest_and_the_ledger() {
+    let prefix = b"CONNECT a.example:443 HTTP/1.1\r\nX-Pad: ";
+    let overlong = [
+        prefix.as_slice(),
+        &vec![b'a'; netgate::connect::HEAD_MAX - prefix.len()],
+    ]
+    .concat();
+    let unreachable = || Arc::new(TestDialer::default());
+    // (status, ledger host, request, then FIN, dialer)
+    let cases = [
+        (408, "", Vec::new(), false, unreachable()),
+        (400, "", b"CONNECT a.ex".to_vec(), true, unreachable()),
+        (431, "", overlong, false, unreachable()),
+        (
+            502,
+            "a.example",
+            connect_request("a.example"),
+            false,
+            Arc::new(TestDialer {
+                resolve_to: Vec::new(),
+                ..TestDialer::default()
+            }),
+        ),
+        (
+            502,
+            "a.example",
+            connect_request("a.example"),
+            false,
+            unreachable(),
+        ),
+    ];
+    for (i, (status, host, request, fin, dialer)) in cases.into_iter().enumerate() {
+        let state = ral_core::own::OwnDir::for_test("netgate-gate-refusal").unwrap();
+        let (mut guest, session) = harness_with(Config {
+            policy: Arc::new(NetPolicy::for_test(&["a.example"])),
+            audit: AuditLog::for_test(&state),
+            dialer,
+        });
+        let session = StopOnDrop(Some(session));
+        let handle = guest.tcp_connect(LINK.gateway, PROXY_PORT, 44000 + u16::try_from(i).unwrap());
+        assert!(guest.poll_until(Duration::from_secs(5), |g| {
+            g.tcp_state(handle) == tcp::State::Established
+        }));
+        guest.tcp_send(handle, &request);
+        if fin {
+            guest.tcp_close(handle);
+        }
+        let mut response = Vec::new();
+        // The 408 case waits out the worker's real handshake deadline.
+        assert!(
+            guest.poll_until(Duration::from_secs(15), |g| {
+                response.extend(g.tcp_recv(handle));
+                g.tcp_peer_closed(handle) && !g.tcp_can_recv(handle)
+            }),
+            "case {i}: the refusal must close the connection"
+        );
+        assert!(
+            response.starts_with(format!("HTTP/1.1 {status} ").as_bytes()),
+            "case {i}: {response:?}"
+        );
+        drop(session);
+
+        let records = ledger_records(&state);
+        assert_eq!(records.len(), 1, "case {i}: {records:?}");
+        assert_eq!(records[0]["host"], host, "case {i}");
+        assert_eq!(records[0]["allowed"], false, "case {i}");
+        assert!(records[0]["addr"].is_null(), "case {i}");
+        assert!(records[0]["note"].is_string(), "case {i}");
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn an_unauditable_proxy_does_not_proxy() {
+    let dialer = Arc::new(TestDialer {
+        fixture: spawn_echo_fixture(),
+        ..TestDialer::default()
+    });
+    let (mut guest, session) = harness_with(Config {
+        policy: Arc::new(NetPolicy::for_test(&["a.example"])),
+        audit: AuditLog::poisoned(),
+        dialer: dialer.clone(),
+    });
+    let _session = StopOnDrop(Some(session));
+    let handle = guest.tcp_connect(LINK.gateway, PROXY_PORT, 44100);
+    assert!(guest.poll_until(Duration::from_secs(5), |g| {
+        g.tcp_state(handle) == tcp::State::Established
+    }));
+    guest.tcp_send(handle, &connect_request("a.example"));
+    let mut response = Vec::new();
+    assert!(guest.poll_until(Duration::from_secs(5), |g| {
+        response.extend(g.tcp_recv(handle));
+        g.tcp_peer_closed(handle) && !g.tcp_can_recv(handle)
+    }));
+    assert!(
+        response.is_empty(),
+        "no 200 without an audit record: {response:?}"
+    );
+    assert_eq!(dialer.dial_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

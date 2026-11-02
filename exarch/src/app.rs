@@ -620,23 +620,13 @@ mod tests {
     use std::fs::TryLockError;
 
     #[test]
-    fn scratch_env_names_the_var_the_homes_and_the_settings() {
+    fn scratch_env_points_the_var_and_the_homes_into_the_scratch_dir() {
         let dir = std::path::Path::new("/tmp/x");
         let env = scratch_env(dir).expect("a Unicode path");
-        assert_eq!(
-            env.len(),
-            1 + TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
-        );
         // Every value is native, as the child reads it back: on Windows the
         // subdirectories join with `\`.
         let native = |p: &std::path::Path| p.to_string_lossy().into_owned();
         assert_eq!(env[0], (SCRATCH_VAR.to_owned(), native(dir)));
-        for (var, _) in TOOL_HOMES {
-            assert!(env.iter().any(|(name, _)| name == var), "{var} is missing");
-        }
-        for (var, value) in CONFINED_TOOL_SETTINGS {
-            assert!(env.contains(&((*var).to_string(), (*value).to_string())));
-        }
         let get = |name: &str| {
             env.iter()
                 .find(|(var, _)| var == name)

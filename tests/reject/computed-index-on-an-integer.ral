@@ -1,4 +1,6 @@
 # codes: T0062
+# status: 1
+# at: 5:22
 # contains: Integer cannot be indexed
 let pick = { |m k| $m[$k] }
 let x = pick 5 5

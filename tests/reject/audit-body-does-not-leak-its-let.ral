@@ -1,4 +1,6 @@
 # codes: T0071
+# status: 1
+# at: 6:6
 # contains: undefined variable: $leak_audit
 audit { let leak_audit = 1 }
 echo $leak_audit

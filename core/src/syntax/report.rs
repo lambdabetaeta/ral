@@ -377,6 +377,43 @@ mod tests {
         }
     }
 
+    fn lex_report_of(text: &str) -> (LexErrorKind, Report) {
+        let err = crate::syntax::parser::parse(text).unwrap_err();
+        let report = err.report(&Source::from_text(file_origin("t.ral"), text));
+        let ParseErrorKind::Lex(kind) = err.kind else {
+            panic!("{text:?} must fail in the lexer, got {err:?}");
+        };
+        (kind, report)
+    }
+
+    #[test]
+    fn an_unclosed_deref_is_l0003_anchored_at_its_opener() {
+        let (kind, report) = lex_report_of("echo $(x");
+        let LexErrorKind::UnclosedDeref { opened } = kind else {
+            panic!("expected UnclosedDeref, got {kind:?}");
+        };
+        assert_eq!(opened.range(), 5..7);
+        assert_eq!(report.code, Some("L0003"));
+        assert_eq!(report.at.and_then(|l| l.span), Some(opened));
+    }
+
+    #[test]
+    fn a_mismatched_closer_is_l0006_between_its_closer_and_its_opener() {
+        let (kind, report) = lex_report_of("{ ]");
+        let LexErrorKind::Mismatched {
+            open,
+            opened,
+            close,
+        } = kind
+        else {
+            panic!("expected Mismatched, got {kind:?}");
+        };
+        assert_eq!((open, close), ('{', ']'));
+        assert_eq!(report.code, Some("L0006"));
+        assert_eq!(report.at.and_then(|l| l.span).map(Span::range), Some(2..3));
+        assert_eq!(report.also.and_then(|l| l.span), Some(opened));
+    }
+
     #[test]
     fn touching_words_label_both_atoms() {
         let output = touching_help("echo --prefix=$d");

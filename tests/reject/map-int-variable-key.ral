@@ -1,3 +1,6 @@
+# codes: T0010
+# status: 1
+# at: 7:10
 # contains: Integer with type String
 # contains: map keys must be Strings
 let k = $[1]

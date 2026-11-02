@@ -1,4 +1,6 @@
 # codes: T0062
+# status: 1
+# at: 5:17
 # contains: Integer cannot be indexed
 let f = { |x| $x[$x] }
 map $f [1]

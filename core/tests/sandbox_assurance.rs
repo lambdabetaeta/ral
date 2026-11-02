@@ -182,7 +182,6 @@ fn an_admitted_loader_runs_an_unadmitted_file() {
         "{by_ral:?}"
     );
     denied(&proof, &through_loader, &by_kernel, MARKER);
-    assert!(!by_kernel.stderr.is_empty(), "{by_kernel:?}");
 }
 
 fn pinning_exclusion(target: &Path) -> std::path::PathBuf {

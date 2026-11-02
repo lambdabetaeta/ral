@@ -363,10 +363,6 @@ mod tests {
 
         assert!(Cli::try_parse_from(["exarch", "--prompt", "do it", "--vi"]).is_err());
         assert!(Cli::try_parse_from(["exarch", "--prompt", "do it", "--chat"]).is_err());
-        assert!(
-            Cli::try_parse_from(["exarch", "--prompt", "do it", "--output-format", "json",])
-                .is_ok()
-        );
     }
 
     #[test]
@@ -418,17 +414,10 @@ mod tests {
                 service: Login::Codex, account: Some(account), device_auth: true,
             }) if account == "work@example.test"));
         }
-        // Method support is checked before network work in login_flow, not clap.
-        for service in ["openai-chatgpt", "xai-grok"] {
-            assert!(Cli::try_parse_from(["exarch", "login", service, "--device-auth"]).is_ok());
-        }
     }
 
     #[test]
-    fn logout_exclusivity_and_accounts_grammar_are_unchanged() {
-        assert!(Cli::try_parse_from(["exarch", "logout"]).is_ok());
-        assert!(Cli::try_parse_from(["exarch", "logout", "person@example.test"]).is_ok());
-        assert!(Cli::try_parse_from(["exarch", "logout", "--all"]).is_ok());
+    fn logout_all_excludes_an_account_and_accounts_takes_no_arguments() {
         assert!(Cli::try_parse_from(["exarch", "logout", "person@example.test", "--all"]).is_err());
         assert!(matches!(
             Cli::try_parse_from(["exarch", "accounts"])

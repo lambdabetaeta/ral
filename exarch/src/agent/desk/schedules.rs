@@ -2,7 +2,7 @@
 
 use crate::bus::Txn;
 use crate::enquiry::Add;
-use crate::schedule::ScheduleInfo;
+use crate::schedule::{ScheduleInfo, Trigger};
 use jiff::Timestamp;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
@@ -41,6 +41,7 @@ impl ExarchDesk {
         self.require_schedule_grant("exarch-schedules `add")?;
         let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         let call = &self.call;
+        let trigger = Trigger::from(trigger);
 
         // The row goes up after the registry call, so a refusal tiers instead
         // of reading as one that landed.

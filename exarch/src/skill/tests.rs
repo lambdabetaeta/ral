@@ -41,6 +41,8 @@ fn valid_names() {
     assert!(valid_skill_name("pdf-processing"));
     assert!(valid_skill_name("code-review-2"));
     assert!(valid_skill_name("a"));
+    assert!(valid_skill_name("3d-printing"), "a digit may lead");
+    assert!(valid_skill_name(&"a".repeat(64)), "64 is the longest");
 }
 
 #[test]
@@ -69,24 +71,22 @@ fn parse_valid_skill() {
     assert_eq!(skill.description, "does things");
 }
 
+/// Each way a frontmatter can fail, against the one good spelling.
 #[test]
-fn name_must_match_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let skill_dir = dir.path().join("my-skill");
-    std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: wrong-name\ndescription: x\n---\n",
-    )
-    .unwrap();
-    assert!(parse_skill(&found(&skill_dir)).is_err());
-}
-
-#[test]
-fn frontmatter_errors_name_the_problem() {
-    let err = |raw| skill_from_frontmatter(raw, "my-skill").unwrap_err();
-    assert!(err("---\nname: other\ndescription: x\n---\n").contains("must match directory name"));
-    assert!(err("---\nname: my-skill\n---\n").contains("description"));
+fn a_frontmatter_must_declare_a_matching_valid_name_and_a_description() {
+    let parse = |raw| skill_from_frontmatter(raw, "my-skill");
+    assert!(parse("---\nname: my-skill\ndescription: x\n---\n").is_ok());
+    for bad in [
+        "# no frontmatter at all\n",
+        "---\nname: [unclosed\ndescription: x\n---\n",
+        "---\nname: 7\ndescription: x\n---\n",
+        "---\nname: My-Skill\ndescription: x\n---\n",
+        "---\nname: other\ndescription: x\n---\n",
+        "---\nname: my-skill\n---\n",
+        "---\ndescription: x\n---\n",
+    ] {
+        assert!(parse(bad).is_err(), "{bad:?}");
+    }
 }
 
 #[test]
@@ -101,34 +101,6 @@ fn read_body_after_frontmatter() {
     .unwrap();
     let body = read_skill_body(&found(&skill_dir)).unwrap();
     assert_eq!(body, "# Hello\nworld");
-}
-
-#[test]
-fn local_overrides_global() {
-    let cwd = tempfile::tempdir().unwrap();
-    let config = tempfile::tempdir().unwrap();
-    let local = cwd.path().join(".exarch").join("skills").join("dup");
-    let global = config.path().join("skills").join("dup");
-    std::fs::create_dir_all(&local).unwrap();
-    std::fs::create_dir_all(&global).unwrap();
-    std::fs::write(local.join("SKILL.md"), "---\nname: dup\n---\n").unwrap();
-    std::fs::write(global.join("SKILL.md"), "---\nname: dup\n---\n").unwrap();
-
-    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
-    let at = CwdPath::new(cwd.path().to_path_buf()).unwrap();
-    let all = discover_all(
-        cwd.path(),
-        Some(config.path()),
-        None,
-        &mut boot(&grants, &baseline, &env, &at),
-    );
-    let dup: Vec<_> = all.iter().filter(|found| found.name == "dup").collect();
-    assert_eq!(dup.len(), 1, "duplicate name should collapse to one entry");
-    assert_eq!(
-        dir_of(dup[0]),
-        Some(local.as_path()),
-        "the local skill must shadow the global one"
-    );
 }
 
 #[test]
@@ -269,4 +241,74 @@ fn a_project_skill_shadows_a_builtin() {
     assert_eq!(hits.len(), 1);
     assert_eq!(dir_of(hits[0]), Some(local.as_path()));
     assert_eq!(read_skill_body(hits[0]).unwrap(), "local body");
+}
+
+/// A skill directory `name` under `root`, its `SKILL.md` holding `md`.
+fn write_skill(root: &Path, name: &str, md: &str) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), md).unwrap();
+}
+
+fn good(name: &str) -> String {
+    format!("---\nname: {name}\ndescription: d\n---\n")
+}
+
+/// The names found under `cwd`'s project root, built-ins aside.
+fn discovered(cwd: &Path) -> Vec<String> {
+    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
+    let at = CwdPath::new(cwd.to_path_buf()).unwrap();
+    let mut reader = boot(&grants, &baseline, &env, &at);
+    let mut names: Vec<_> = discover_all(cwd, None, None, &mut reader)
+        .into_iter()
+        .map(|found| found.name)
+        .filter(|name| BUILTIN.iter().all(|(builtin, _)| builtin != name))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn only_directories_holding_a_skill_md_are_skills() {
+    let cwd = tempfile::tempdir().unwrap();
+    let root = cwd.path().join(".exarch/skills");
+    write_skill(&root, "real", &good("real"));
+    write_skill(&root, ".hidden", &good(".hidden"));
+    std::fs::create_dir_all(root.join("empty")).unwrap();
+    std::fs::write(root.join("loose.md"), good("loose")).unwrap();
+    assert_eq!(discovered(cwd.path()), ["real"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_skill_directory_is_a_skill() {
+    let cwd = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    write_skill(elsewhere.path(), "linked", &good("linked"));
+    let root = cwd.path().join(".exarch/skills");
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path().join("linked"), root.join("linked")).unwrap();
+    assert_eq!(discovered(cwd.path()), ["linked"]);
+}
+
+/// A skill whose frontmatter fails is found but not listed.
+#[test]
+fn metadata_silently_drops_a_skill_whose_frontmatter_fails() {
+    let cwd = tempfile::tempdir().unwrap();
+    let root = cwd.path().join(".exarch/skills");
+    write_skill(&root, "fine", &good("fine"));
+    write_skill(&root, "broken", "no frontmatter\n");
+    write_skill(&root, "renamed", &good("other"));
+    assert_eq!(discovered(cwd.path()), ["broken", "fine", "renamed"]);
+    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
+    let at = CwdPath::new(cwd.path().to_path_buf()).unwrap();
+    let mut reader = boot(&grants, &baseline, &env, &at);
+    let listed = discover_metadata(cwd.path(), None, None, &mut reader);
+    let names: Vec<_> = listed.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        std::iter::once("fine")
+            .chain(BUILTIN.map(|(n, _)| n))
+            .collect::<Vec<_>>()
+    );
 }

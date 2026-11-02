@@ -1,4 +1,6 @@
 # codes: T0071
+# status: 1
+# at: 6:6
 # contains: did you mean `$total`
 let total = 3
 echo $totl

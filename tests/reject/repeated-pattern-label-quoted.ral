@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:12
 # contains: binds 'a' twice
 let [a: x, 'a': y] = [a: 1]

@@ -1,0 +1,5 @@
+# codes: T0010
+# status: 1
+# at: 5:16
+# An Int is already rounded, so `floor` takes a Float only.
+return !{floor 7}

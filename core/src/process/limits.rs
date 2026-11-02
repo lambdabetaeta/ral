@@ -201,3 +201,16 @@ impl ChildHandle {
         }
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::failure_hint;
+
+    #[test]
+    fn only_exit_128_carries_the_fork_brake_hint() {
+        assert!(failure_hint(128).is_some());
+        for code in [0, 1, 127, 129, 255, -1] {
+            assert_eq!(failure_hint(code), None, "{code}");
+        }
+    }
+}

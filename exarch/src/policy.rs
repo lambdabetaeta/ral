@@ -225,39 +225,32 @@ mod tests {
         FreezeCtx::at(EnvVars::new(), cwd).with_scratch(Some(scratch()))
     }
 
+    /// The restrict file lies under the `cwd` it opens to writes, so only its
+    /// own deny can refuse the write.
     #[test]
-    fn an_fs_restricting_restrict_file_is_denied_under_dangerous_base() {
-        let path = std::env::temp_dir().join(format!(
-            "exarch-restrict-test-{}-{}.ral",
-            std::process::id(),
-            "dangerous",
-        ));
-        std::fs::write(&path, "return [fs: [write: [`cwd .]]]\n").unwrap();
-
-        let cwd = std::env::temp_dir().join(format!("exarch-restrict-cwd-{}", std::process::id()));
-        std::fs::create_dir_all(&cwd).unwrap();
+    fn an_fs_restricting_restrict_file_denies_writes_to_itself() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let restrict = dir.path().join("restrict.ral");
+        std::fs::write(&restrict, "return [fs: [write: [`cwd .]]]\n").expect("restrict profile");
         let Invocation { stack, .. } = for_invocation(
-            &CwdPath::new(cwd.clone()).expect("fixture cwd"),
+            &CwdPath::new(dir.path().to_path_buf()).expect("fixture cwd"),
             &scratch(),
             "dangerous",
             None,
-            std::slice::from_ref(&path),
+            std::slice::from_ref(&restrict),
             None,
         )
         .unwrap();
-
         let runtime = ral_core::test_helper::core_runtime();
-        assert!(
-            !stack.admits_fs(
+        let write = |path: &std::path::Path| {
+            stack.admits_fs(
                 runtime.baseline(),
                 &ral_core::authority::policy::FsOp::Write,
-                &ral_core::test_helper::trace(&path)
-            ),
-            "restrict file path should be write-denied"
-        );
-
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_dir(cwd);
+                &ral_core::test_helper::trace(path),
+            )
+        };
+        assert!(write(&dir.path().join("sibling")), "the cwd stays writable");
+        assert!(!write(&restrict));
     }
 
     /// `dangerous` restricts no axis, so no exclusion is pushed and no launch

@@ -1,3 +1,6 @@
+# codes: T0020
+# status: 1
+# at: 7:13
 # contains: no field named 'nope'
 let vs = [[w: 'n']]
 let o = map { |v| [...$v, w: "x"] } $vs

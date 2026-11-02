@@ -1,2 +1,5 @@
-# contains: name
+# codes: P0001
+# status: 2
+# at: 5:12
+# contains: a rest pattern binds a plain name
 let [a, ...42] = $xs

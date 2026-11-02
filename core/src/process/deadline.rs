@@ -257,7 +257,12 @@ mod tests {
     fn a_claimed_deadline_is_reported() {
         let scope = DurableRoot::default().worker();
         let claimed = arm_lifetime(scope.clone(), Duration::from_millis(1));
-        std::thread::sleep(Duration::from_millis(20));
+        for _ in 0..200 {
+            if scope.is_cancelled() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         claimed.disarm().expect("the daemon has claimed it").wait();
         assert!(scope.is_cancelled());
 

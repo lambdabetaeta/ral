@@ -82,9 +82,19 @@ pub fn check(
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
-mod media {
-    use super::read;
-    use ral_core::path::shown;
+mod tests {
+    use super::*;
+    use guest_abi::boot::CONTRACT;
+    use ral_core::protocol::PROTOCOL_VERSION;
+
+    const KEYS: [(&str, u32, &str); 2] = [
+        (BOOT_KEY, CONTRACT, BOOT_CONSEQUENCE),
+        (PROTO_KEY, PROTOCOL_VERSION, PROTO_CONSEQUENCE),
+    ];
+
+    fn verdict(text: &str, (key, expected, consequence): (&str, u32, &str)) -> Result<(), String> {
+        check(text, "boot-manifest.txt", key, expected, consequence)
+    }
 
     #[test]
     fn absent_media_needs_no_manifest() {
@@ -100,170 +110,60 @@ mod media {
             let refusal = read(boot.path()).unwrap_err();
             let manifest = shown(boot.path().join("boot-manifest.txt"));
             assert!(refusal.contains(&manifest), "{refusal}");
-            assert!(refusal.contains("just guest-boot"), "{refusal}");
         }
     }
 
     #[test]
-    fn present_media_reads_its_manifest() {
+    fn a_manifest_this_host_writes_passes_this_hosts_check() {
         let boot = tempfile::tempdir().unwrap();
         std::fs::write(boot.path().join("kernel"), []).unwrap();
-        let text = super::lines();
-        std::fs::write(boot.path().join("boot-manifest.txt"), &text).unwrap();
-        assert_eq!(read(boot.path()).unwrap(), Some(text));
-    }
-}
-
-#[cfg(test)]
-mod boot_contract {
-    use super::{BOOT_CONSEQUENCE, BOOT_KEY, check};
-    use guest_abi::boot::CONTRACT;
-
-    #[test]
-    fn media_recording_this_contract_is_fit_to_package() {
-        let manifest = format!(
-            "arch=amd64\nkernel_version=7.0.0-14-generic\n{BOOT_KEY}={CONTRACT}\n\
-             rust_target=x86_64-unknown-linux-musl\n"
-        );
-        check(
-            &manifest,
-            "out/boot/boot-manifest.txt",
-            BOOT_KEY,
-            CONTRACT,
-            BOOT_CONSEQUENCE,
-        )
-        .expect("matching media must pass");
+        std::fs::write(boot.path().join("boot-manifest.txt"), lines()).unwrap();
+        let text = read(boot.path()).unwrap().expect("media are present");
+        for key in KEYS {
+            verdict(&text, key).unwrap_or_else(|err| panic!("{}: {err}", key.0));
+        }
     }
 
     #[test]
-    fn media_a_contract_behind_the_host_names_both_numbers() {
-        let stale = format!("arch=amd64\n{BOOT_KEY}={}\n", CONTRACT - 1);
-        let err = check(
-            &stale,
-            "vm-image/out/boot/boot-manifest.txt",
-            BOOT_KEY,
-            CONTRACT,
-            BOOT_CONSEQUENCE,
-        )
-        .expect_err("media from an older contract must not be packaged");
-        assert!(err.contains(&format!("version {}", CONTRACT - 1)), "{err}");
-        assert!(err.contains(&format!("version {CONTRACT}")), "{err}");
-        assert!(err.contains("vm-image/out/boot/boot-manifest.txt"), "{err}");
-        assert!(err.contains("just guest-boot amd64"), "{err}");
+    fn a_line_surrounded_by_whitespace_or_crlf_still_counts() {
+        for (key, expected, consequence) in KEYS {
+            for text in [
+                format!("arch=amd64\r\n{key}={expected}\r\n"),
+                format!("  \t{key}={expected}  \n"),
+                format!("{key}={expected}"),
+            ] {
+                verdict(&text, (key, expected, consequence))
+                    .unwrap_or_else(|err| panic!("{text:?}: {err}"));
+            }
+        }
     }
 
     #[test]
-    fn media_predating_the_contract_line_gets_its_own_sentence() {
-        let ancient = "arch=amd64\nral_git_hash=37fe06b\n";
-        let err = check(
-            ancient,
-            "out/boot/boot-manifest.txt",
-            BOOT_KEY,
-            CONTRACT,
-            BOOT_CONSEQUENCE,
-        )
-        .expect_err("a manifest with no contract line must not be packaged");
-        assert!(err.contains(&format!("no `{BOOT_KEY}=` line")), "{err}");
-        assert!(err.contains("just guest-boot"), "{err}");
+    fn a_version_other_than_the_hosts_is_refused() {
+        for (key, expected, consequence) in KEYS {
+            for recorded in [expected - 1, expected + 1] {
+                let text = format!("arch=amd64\n{key}={recorded}\n");
+                assert!(verdict(&text, (key, expected, consequence)).is_err());
+            }
+        }
     }
 
     #[test]
-    fn a_contract_line_that_is_not_a_number_is_refused_as_such() {
-        let err = check(
-            &format!("{BOOT_KEY}=two\n"),
-            "m.txt",
-            BOOT_KEY,
-            CONTRACT,
-            BOOT_CONSEQUENCE,
-        )
-        .expect_err("an unparsable contract version must be refused");
-        assert!(err.contains("not a number"), "{err}");
+    fn a_missing_or_malformed_line_is_refused() {
+        for key in KEYS {
+            for text in [
+                "arch=amd64\nral_git_hash=37fe06b\n".to_string(),
+                format!("{}=seven\n", key.0),
+                format!("{}=\n", key.0),
+            ] {
+                assert!(verdict(&text, key).is_err(), "{text:?}");
+            }
+        }
     }
-}
-
-#[cfg(test)]
-mod engine_protocol {
-    use super::{PROTO_CONSEQUENCE, PROTO_KEY, check};
-    use ral_core::protocol::PROTOCOL_VERSION;
-
-    #[test]
-    fn media_speaking_this_protocol_is_fit_to_package() {
-        let manifest = format!(
-            "arch=amd64\nboot_contract=2\n{PROTO_KEY}={PROTOCOL_VERSION}\n\
-             rust_target=x86_64-unknown-linux-musl\n"
-        );
-        check(
-            &manifest,
-            "out/boot/boot-manifest.txt",
-            PROTO_KEY,
-            PROTOCOL_VERSION,
-            PROTO_CONSEQUENCE,
-        )
-        .expect("matching media must pass");
-    }
-
-    #[test]
-    fn an_engine_behind_the_host_names_both_numbers() {
-        let stale = format!("arch=amd64\n{PROTO_KEY}={}\n", PROTOCOL_VERSION - 3);
-        let err = check(
-            &stale,
-            "vm-image/out/boot/boot-manifest.txt",
-            PROTO_KEY,
-            PROTOCOL_VERSION,
-            PROTO_CONSEQUENCE,
-        )
-        .expect_err("media from an older protocol must not be packaged");
-        assert!(
-            err.contains(&format!("version {}", PROTOCOL_VERSION - 3)),
-            "{err}"
-        );
-        assert!(err.contains(&PROTOCOL_VERSION.to_string()), "{err}");
-        assert!(err.contains("vm-image/out/boot/boot-manifest.txt"), "{err}");
-        assert!(err.contains("just guest-boot amd64"), "{err}");
-    }
-
-    #[test]
-    fn media_predating_the_line_gets_its_own_sentence() {
-        let err = check(
-            "arch=amd64\nral_git_hash=7c1c8ae6\n",
-            "out/boot-manifest.txt",
-            PROTO_KEY,
-            PROTOCOL_VERSION,
-            PROTO_CONSEQUENCE,
-        )
-        .expect_err("a manifest with no protocol line must not be packaged");
-        assert!(err.contains(&format!("no `{PROTO_KEY}=` line")), "{err}");
-        assert!(err.contains("just guest-boot"), "{err}");
-    }
-
-    #[test]
-    fn a_line_that_is_not_a_number_is_refused_as_such() {
-        let err = check(
-            &format!("{PROTO_KEY}=seven\n"),
-            "m.txt",
-            PROTO_KEY,
-            PROTOCOL_VERSION,
-            PROTO_CONSEQUENCE,
-        )
-        .expect_err("an unparsable protocol version must be refused");
-        assert!(err.contains("not a number"), "{err}");
-    }
-}
-
-#[cfg(test)]
-mod keys {
-    use super::check;
 
     #[test]
     fn the_last_exact_key_wins() {
         let text = "version=broken\nversion=7\nversion_extra=8\n";
-        check(
-            text,
-            "manifest.txt",
-            "version",
-            7,
-            "An incompatible guest refuses the host.",
-        )
-        .expect("the last exact key must determine the version");
+        check(text, "manifest.txt", "version", 7, "").expect("the last exact key decides");
     }
 }

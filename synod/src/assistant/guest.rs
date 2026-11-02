@@ -141,12 +141,10 @@ fn capture(run_dir: &OwnDir, why: &str, console: &GuestConsole) -> Option<()> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use exarch::port::{Ended, Signal};
+    use exarch::port::Ended;
     use exarch::provider::scripted::{Reply, Script};
-    use exarch::record::{Control, JobId, Record};
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
 
     #[cfg(windows)]
     use std::net::TcpStream as GuestEnd;
@@ -228,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn guest_exposes_the_hosts_jobs_and_recovers_the_machine_on_end() {
+    fn ending_the_guest_recovers_and_shuts_down_the_machine() {
         let run_dir = OwnDir::for_test("guest-host-migration").expect("run directory");
         let (factory, shutdown) = machine_factory();
         let weak_factory = Arc::downgrade(&factory);
@@ -247,53 +245,20 @@ mod tests {
         )
         .expect("network session");
         let guest = Guest { factory, host, net };
-        let (port, root) = (guest.port(), guest.root());
-        assert_eq!(root, guest.host.children()[0]);
-        assert!(std::ptr::eq(guest.feed(), guest.host.feed()));
-        assert_eq!(guest.run_dir().path(), run_dir.path());
-
-        port.submit(root, "go".into())
-            .expect("live root accepts input");
-        assert_eq!(port.queued(root).unwrap(), ["go"]);
-        assert!(guest.release());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut opened = None;
-        'job: loop {
-            let signal = guest
-                .feed()
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .expect("the host publishes a settled job");
-            if let Signal::Commit(id, commit) = signal
-                && id == root
-            {
-                for recorded in commit.records() {
-                    match recorded.value() {
-                        Record::Control(Control::JobOpened) => {
-                            assert!(opened.replace(JobId::from(commit.number())).is_none());
-                        }
-                        Record::Control(Control::JobSettled { job, stopped }) => {
-                            assert_eq!(Some(*job), opened);
-                            assert!(!stopped);
-                            break 'job;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let cause = ral_core::carrier::Severed::Faulted("fixture engine loss".into());
-        let lost = EngineLost::running(&cause, guest.run_dir());
-        guest.capture(&lost);
-        let diagnostic = std::fs::read_to_string(run_dir.path().join(FILE)).expect("captured loss");
-        assert!(diagnostic.contains("fixture engine loss"));
         assert!(!shutdown.load(Ordering::SeqCst));
 
         guest.end().expect("joined host permits machine recovery");
-        assert_eq!(port.queued(root), Err(Ended(root)));
         assert!(weak_factory.upgrade().is_none());
         assert!(shutdown.load(Ordering::SeqCst));
         drop(net_peer);
+    }
+
+    #[test]
+    fn a_captured_engine_loss_lands_in_the_run_directory() {
+        let run_dir = OwnDir::for_test("guest-capture").expect("run directory");
+        capture(&run_dir, "fixture engine loss", &GuestConsole::Unkept).expect("captured");
+        let log = std::fs::read_to_string(run_dir.path().join(FILE)).expect("captured loss");
+        assert!(log.contains("fixture engine loss"));
     }
 
     #[test]

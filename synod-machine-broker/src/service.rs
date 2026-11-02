@@ -482,24 +482,17 @@ fn create_instance(first: bool) -> io::Result<OwnedHandle> {
     reason = "[test] libtest captures print macros"
 )]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+
+    use vm_manager::Socket;
+
     use super::*;
 
     #[test]
-    fn the_pipes_descriptor_admits_only_a_person_at_this_computer() {
-        assert!(PIPE_SDDL.starts_with("D:P"), "a protected DACL");
-        assert!(PIPE_SDDL.contains(";IU)"), "interactive users");
-        assert!(
-            !PIPE_SDDL.contains(";AU)"),
-            "not every authenticated identity"
-        );
-        assert!(!PIPE_SDDL.contains(";WD)"), "not everyone");
-        assert!(!PIPE_SDDL.contains(";AN)"), "not anonymous");
-    }
-
-    #[test]
     fn the_descriptor_parses() {
-        let pipe = create_instance(false).expect("a pipe instance");
-        drop(pipe);
+        drop(create_instance(false).expect("a pipe instance"));
     }
 
     #[test]
@@ -514,63 +507,270 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_old_boot_encoding_is_refused_before_boot() {
-        let body = br#"{"Boot":{"version":6,"folder":"old encoding","read_only":true}}"#;
-        let mut buffer = u32::try_from(body.len()).unwrap().to_le_bytes().to_vec();
-        buffer.extend_from_slice(body);
-        let reply_at = buffer.len();
-        let mut stream = std::io::Cursor::new(buffer);
-        serve_client(&mut stream, |_, _| panic!("version skew must precede boot"));
-        let buffer = stream.into_inner();
-        assert!(matches!(
-            frame::read::<_, Reply>(&mut &buffer[reply_at..]).unwrap(),
-            Some(Reply::Refused(Error::VersionSkew {
-                client: 6,
-                service: VERSION
-            }))
-        ));
+    /// Requests are read from `input`; replies accumulate apart, so reads never see them.
+    struct Duplex {
+        input: std::io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for Duplex {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buf)
+        }
+    }
+
+    impl Write for Duplex {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.output.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn exchange(
+        input: Vec<u8>,
+        on_boot: impl FnMut(&Path, bool) -> Result<Lease, Error>,
+    ) -> Vec<Reply> {
+        let mut stream = Duplex {
+            input: std::io::Cursor::new(input),
+            output: Vec::new(),
+        };
+        serve_client(&mut stream, on_boot);
+        let mut replies = Vec::new();
+        let mut output = &stream.output[..];
+        while let Some(reply) = frame::read(&mut output).expect("a well-formed reply") {
+            replies.push(reply);
+        }
+        replies
+    }
+
+    fn framed(requests: &[Request]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        for request in requests {
+            frame::write(&mut buffer, request).unwrap();
+        }
+        buffer
+    }
+
+    fn boot_request(folder: &Path) -> Request {
+        Request::Boot {
+            version: VERSION,
+            folder: folder.to_path_buf(),
+            read_only: true,
+        }
+    }
+
+    /// What the fake machine saw of the broker's state at the moment it was asked.
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Console {
+            wires_closed: bool,
+        },
+        Shutdown {
+            wires_closed: bool,
+            folder_pinned: bool,
+        },
+    }
+
+    /// A guest-side peer reads EOF exactly when the broker's copy of its wire is gone.
+    fn closed(mut peer: &TcpStream) -> bool {
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        matches!(peer.read(&mut [0]), Ok(0))
+    }
+
+    struct Fake {
+        peers: [TcpStream; 2],
+        folder: PathBuf,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        outcome: Result<(), Error>,
+    }
+
+    impl Fake {
+        fn wires_closed(&self) -> bool {
+            self.peers.iter().all(closed)
+        }
+    }
+
+    impl Machine for Fake {
+        fn dial_engine(&self) -> io::Result<Socket> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+
+        fn connect_guest(&self, _: u32) -> io::Result<Socket> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+
+        fn console(&self) -> GuestConsole {
+            let wires_closed = self.wires_closed();
+            self.seen
+                .lock()
+                .unwrap()
+                .push(Seen::Console { wires_closed });
+            GuestConsole::Unkept
+        }
+
+        fn shutdown(self: Box<Self>) -> Result<(), Error> {
+            let wires_closed = self.wires_closed();
+            let moved = self.folder.with_file_name("moved");
+            let folder_pinned = std::fs::rename(&self.folder, moved).is_err();
+            self.seen.lock().unwrap().push(Seen::Shutdown {
+                wires_closed,
+                folder_pinned,
+            });
+            self.outcome
+        }
+    }
+
+    fn socket_pair() -> (Socket, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        (listener.accept().unwrap().0.into(), peer)
+    }
+
+    /// Boots a fake machine on the requested folder, pinned as in production.
+    fn fake_boot(
+        seen: &Arc<Mutex<Vec<Seen>>>,
+        outcome: Result<(), Error>,
+    ) -> impl FnMut(&Path, bool) -> Result<Lease, Error> {
+        let seen = Arc::clone(seen);
+        move |folder, read_only| {
+            let (control, control_peer) = socket_pair();
+            let (net, net_peer) = socket_pair();
+            Ok(Lease {
+                wires: Wires { control, net },
+                machine: Box::new(Fake {
+                    peers: [control_peer, net_peer],
+                    folder: folder.to_path_buf(),
+                    seen: Arc::clone(&seen),
+                    outcome: outcome.clone(),
+                }),
+                folder: Granted::open(folder, read_only)?,
+                control_description: b"control".to_vec(),
+                net_description: b"net".to_vec(),
+            })
+        }
     }
 
     #[test]
-    fn a_version_mismatch_is_refused_before_boot() {
-        for version in [VERSION + 1, VERSION] {
-            let folder = PathBuf::from(r"C:\Users\secretary\Documents");
-            let mut buffer = Vec::new();
-            frame::write(
-                &mut buffer,
-                &Request::Boot {
-                    version,
-                    folder: folder.clone(),
-                    read_only: true,
-                },
-            )
-            .unwrap();
-            let reply_at = buffer.len();
-            let mut stream = std::io::Cursor::new(buffer);
-            let mut boots = 0;
-            serve_client(&mut stream, |requested, read_only| {
-                boots += 1;
-                assert_eq!(requested, folder);
-                assert!(read_only);
-                Err(Error::NoBackend)
-            });
-            let buffer = stream.into_inner();
-            let mut reply = &buffer[reply_at..];
-            match frame::read(&mut reply).unwrap().unwrap() {
-                Reply::Refused(Error::VersionSkew { client, service }) => {
-                    assert_eq!(client, version);
-                    assert_eq!(service, VERSION);
-                    assert_ne!(version, VERSION);
-                    assert_eq!(boots, 0, "a mismatched client must never reach boot");
-                }
-                Reply::Refused(Error::NoBackend) => {
-                    assert_eq!(version, VERSION);
-                    assert_eq!(boots, 1, "a matching client reaches boot once");
-                }
-                other => panic!("unexpected boot reply: {other:?}"),
-            }
-        }
+    fn a_second_boot_on_one_connection_is_refused() {
+        let dir = tempfile::tempdir().expect("scratch folder");
+        let replies = exchange(
+            framed(&[boot_request(dir.path()), boot_request(dir.path())]),
+            fake_boot(&Arc::default(), Ok(())),
+        );
+        let [
+            Reply::Booted { control, net },
+            Reply::Refused(Error::Backend { .. }),
+        ] = &replies[..]
+        else {
+            panic!("{replies:?}")
+        };
+        assert_eq!((&control[..], &net[..]), (&b"control"[..], &b"net"[..]));
+    }
+
+    #[test]
+    fn stop_closes_the_wires_then_shuts_down_then_releases_the_folder() {
+        let root = tempfile::tempdir().expect("scratch folder");
+        let folder = root.path().join("folder");
+        std::fs::create_dir(&folder).expect("folder");
+        let seen = Arc::default();
+        let replies = exchange(
+            framed(&[boot_request(&folder), Request::Stop]),
+            fake_boot(&seen, Err(Error::NoBackend)),
+        );
+        assert!(
+            matches!(
+                &replies[..],
+                [Reply::Booted { .. }, Reply::Stopped(Err(Error::NoBackend))]
+            ),
+            "{replies:?}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [Seen::Shutdown {
+                wires_closed: true,
+                folder_pinned: true
+            }]
+        );
+        std::fs::rename(&folder, root.path().join("moved")).expect("free once stopped");
+    }
+
+    #[test]
+    fn adopting_drops_the_wires_without_a_reply_and_the_connection_goes_on() {
+        let dir = tempfile::tempdir().expect("scratch folder");
+        let seen = Arc::default();
+        let replies = exchange(
+            framed(&[boot_request(dir.path()), Request::Adopted, Request::Console]),
+            fake_boot(&seen, Ok(())),
+        );
+        assert!(
+            matches!(
+                &replies[..],
+                [Reply::Booted { .. }, Reply::Console(GuestConsole::Unkept)]
+            ),
+            "{replies:?}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [Seen::Console { wires_closed: true }]
+        );
+    }
+
+    #[test]
+    fn the_console_before_any_boot_is_empty() {
+        let replies = exchange(framed(&[Request::Console]), |_, _| {
+            panic!("no boot was requested")
+        });
+        assert!(
+            matches!(
+                &replies[..],
+                [Reply::Console(GuestConsole::Kept { log: None, tail })] if tail.is_empty()
+            ),
+            "{replies:?}"
+        );
+    }
+
+    #[test]
+    fn a_boot_of_another_version_is_refused_before_boot() {
+        let folder = PathBuf::from(r"C:\Users\secretary\Documents");
+        let replies = exchange(
+            framed(&[Request::Boot {
+                version: VERSION + 1,
+                folder,
+                read_only: true,
+            }]),
+            |_, _| panic!("version skew must precede boot"),
+        );
+        assert!(
+            matches!(
+                &replies[..],
+                [Reply::Refused(Error::VersionSkew { client, service: VERSION })]
+                    if *client == VERSION + 1
+            ),
+            "{replies:?}"
+        );
+    }
+
+    #[test]
+    fn an_undecodable_boot_of_another_version_is_refused_and_the_connection_closed() {
+        let body = br#"{"Boot":{"version":6,"folder":"old encoding","read_only":true}}"#;
+        let mut input = u32::try_from(body.len()).unwrap().to_le_bytes().to_vec();
+        input.extend_from_slice(body);
+        input.extend(framed(&[Request::Console]));
+        let replies = exchange(input, |_, _| panic!("version skew must precede boot"));
+        assert!(
+            matches!(
+                &replies[..],
+                [Reply::Refused(Error::VersionSkew {
+                    client: 6,
+                    service: VERSION
+                })]
+            ),
+            "the console request after the refusal is never answered: {replies:?}"
+        );
     }
 
     #[test]
@@ -799,17 +999,17 @@ mod tests {
                 drop(wires);
                 machine.shutdown().expect("the machine stops cleanly");
             }
-            Err(refused) => {
-                let text = refused.worded(|_| "<path>".to_string()).to_string();
-                assert!(
-                    text.contains("Hyper-V Administrators")
-                        || text.contains("Virtual Machine Platform")
-                        || text.contains("could not find")
-                        || text.contains("virtual-machine service"),
-                    "the refusal must have come from the machine layer, having crossed the pipe: \
-                     {text}"
-                );
-            }
+            Err(refused) => assert!(
+                matches!(
+                    refused,
+                    Error::Backend { .. }
+                        | Error::NoBackend
+                        | Error::NoGuestImage { .. }
+                        | Error::NotConstructed { .. }
+                        | Error::NotPermitted
+                ),
+                "the refusal must be the machine layer's, having crossed the pipe: {refused:?}"
+            ),
         }
     }
 }

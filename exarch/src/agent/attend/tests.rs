@@ -675,7 +675,20 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
             if id == child.id()
     ));
     assert!(parent.mailbox.drain().is_empty());
-    let _records = crate::bus::drain_records(&rx);
+}
+
+#[test]
+fn a_grandchild_report_wakes_a_reported_child_without_nudging_it() {
+    let parent = trunk(false);
+    let mut child = parent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
+    child.report(ChildStatus::Replied(FOValue::Unit));
+    assert_eq!(parent.mailbox.drain().len(), 1);
+    let child_handle = child.handle();
+    let _child_timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
+        child_handle.end();
+    });
+    let (emit, rx) = emitter(&child);
     let grandchild = test_agent(
         &child.fleet,
         TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
@@ -737,6 +750,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
 }
 
 mod lifecycle;
+mod probe;
 
 #[test]
 fn a_failed_status_append_delivers_one_terminal_failure_only_when_owed() {

@@ -3,9 +3,6 @@
 //! There are two jobs here.  First, neither the lexer nor the parser may
 //! panic on any input — we throw both grammar-shaped noise and pure random
 //! bytes at `parse()` and require an `Ok` or an `Err`, never an unwind.
-//! That contract is shared with the older hand-curated suite in
-//! `core/tests/eval_fuzz.rs`; the random side here is its broader, less
-//! ergonomic complement.
 //!
 //! Second — and this is the bar the user actually cares about — every
 //! rejection must read as English to a first-year undergraduate:

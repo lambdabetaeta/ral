@@ -1,4 +1,6 @@
 # codes: T0072
+# status: 1
+# at: 6:1
 # contains: `f` is bound to an Int, so it is not a program
 let f = 42
 f 1 2 3

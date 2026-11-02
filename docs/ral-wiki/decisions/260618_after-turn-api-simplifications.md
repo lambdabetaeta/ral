@@ -97,7 +97,7 @@ it set out to be, not a re-architecture.
    host-embedding re-exec helpers, and ordinary value/rendering types.
 2. **Tests on the public seam — already held.** `core/src/turn.rs`'s
    host-behaviour tests drive `Shell::run_turn`; the eval-semantics integration
-   tests (`sandbox_fail_closed`, `scope_escapes`, …) legitimately use the
+   tests (`confined_write_in_every_context`, `scope_escapes`, …) legitimately use the
    evaluator entry `eval_top_level`, which is core mechanics, not a host turn.
    No host crate assembles a turn by hand — `ral/tests/seam_guards.rs` enforces
    it.

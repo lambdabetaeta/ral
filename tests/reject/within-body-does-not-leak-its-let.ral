@@ -1,4 +1,6 @@
 # codes: T0071
+# status: 1
+# at: 6:6
 # contains: undefined variable: $leak_within
 within [env: [K: v]] { let leak_within = 1 }
 echo $leak_within

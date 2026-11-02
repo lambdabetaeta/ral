@@ -1,0 +1,7 @@
+hi
+[]
+[/bin/echo]
+false
+[`exec `denied /bin/sh]
+[`fs `denied write]
+audit check tests done

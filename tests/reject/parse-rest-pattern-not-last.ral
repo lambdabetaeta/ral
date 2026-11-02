@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:13
 # contains: `...rest` takes the remaining elements, so it comes last
 let [...rest, last] = $xs

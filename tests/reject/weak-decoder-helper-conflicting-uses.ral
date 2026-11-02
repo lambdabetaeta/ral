@@ -1,4 +1,6 @@
 # codes: T0074
+# status: 1
+# at: 9:16
 # contains: what `from-json` reads has one type for the whole unit
 let read = { |p| from-json < $p }
 let a = read 'a.json'

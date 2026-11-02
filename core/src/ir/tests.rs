@@ -25,11 +25,8 @@ fn ret(name: &str) -> Arc<Comp> {
 }
 
 /// One synthetic `Comp` per `CompKind` and `Val` variant: `r_*` labels
-/// what it references, `*_bound` what it merely binds.  The harvest is
-/// asserted *exactly* — a subset would hide a wildcard-arm regression, a
-/// superset a bound name over-renewing.
-#[test]
-fn referenced_names_walks_every_variant() {
+/// what it references, `*_bound` what it merely binds.
+fn every_variant() -> Vec<Arc<Comp>> {
     let lam_param = Pattern::Name("lam_param_bound".into());
     let lam = Spanned::synthetic(CompKind::Lam {
         param: lam_param,
@@ -208,7 +205,7 @@ fn referenced_names_walks_every_variant() {
     // No single `CompKind` holds an arbitrary list of sub-`Comp`s to
     // wrap all of the above in one tree, so each is walked on its own
     // and the harvests are unioned.
-    let nodes: Vec<Arc<Comp>> = vec![
+    vec![
         Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),
         Arc::new(Spanned::synthetic(CompKind::Return(var("r_return")))),
         Arc::new(lam),
@@ -244,14 +241,23 @@ fn referenced_names_walks_every_variant() {
         Arc::new(val_thunk),
         Arc::new(capture),
         Arc::new(decode),
-    ];
+    ]
+}
 
-    for node in &nodes {
+#[test]
+fn every_variant_round_trips_through_postcard() {
+    for node in &every_variant() {
         let bytes = postcard::to_allocvec(node).expect("serialize IR");
         let decoded: Arc<Comp> = postcard::from_bytes(&bytes).expect("deserialize IR");
         assert_eq!(node, &decoded);
     }
+}
 
+/// The harvest is asserted *exactly* — a subset would hide a wildcard-arm
+/// regression, a superset a bound name over-renewing.
+#[test]
+fn referenced_names_walks_every_variant() {
+    let nodes = every_variant();
     let found: std::collections::HashSet<&str> = nodes
         .iter()
         .flat_map(|c| {
@@ -326,29 +332,15 @@ fn referenced_names_walks_every_variant() {
     assert_eq!(
         found.len(),
         expected.len(),
-        "unexpected extra name in {found:?}; every bound-not-referenced \
-         name (lam_param_bound, bind_map_bound, bind_rest_bound, \
-         rec_name_bound) must be absent"
+        "unexpected extra name in {found:?}; a bound-not-referenced name \
+         (`*_bound`) must be absent"
     );
-
-    for bound in [
-        "lam_param_bound",
-        "bind_map_bound",
-        "bind_rest_bound",
-        "rec_name_bound",
-    ] {
-        assert!(
-            !found.contains(bound),
-            "a bound (not referenced) name leaked into the harvest: {bound}"
-        );
-    }
 }
 
 /// A thunk mentioning `b`, `a`, `b` and nesting a thunk over `c`, `a` has
-/// occ `[a, b, c]`: sorted, distinct, and read off the inner node rather
-/// than by re-walking its body.
+/// occ `[a, b, c]`: sorted, distinct, the nested node's names included.
 #[test]
-fn occ_is_sorted_distinct_and_nested_nodes_are_not_walked() {
+fn occ_is_sorted_distinct_and_includes_nested_nodes() {
     let inner = Val::thunk(Arc::new(Spanned::synthetic(CompKind::Binary(
         BinaryOp::Arith(ArithOp::Add),
         var("c"),
@@ -360,11 +352,8 @@ fn occ_is_sorted_distinct_and_nested_nodes_are_not_walked() {
         var("b"),
         inner,
     ]))));
-    let occ = outer.occ();
-    assert_eq!(occ.len(), 3, "sorted and distinct: a, b, c");
-    for name in ["a", "b", "c"] {
-        assert!(occ.contains(name), "occ missing {name}");
-    }
+    let occ: Vec<&str> = outer.occ().names().map(|n| &**n).collect();
+    assert_eq!(occ, ["a", "b", "c"]);
 }
 
 /// A list node serialises to its shape alone, and decodes with the same
@@ -378,4 +367,158 @@ fn a_node_crosses_the_wire_as_its_shape() {
 
     let decoded: Arc<ListNode> = serde_json::from_str(&wire).expect("deserialize node");
     assert_eq!(decoded.occ(), node.occ());
+}
+
+// ── Args, Toplevel, Pattern, Redirects ───────────────────────────────
+
+fn single(name: &str) -> ValListElem {
+    ValListElem::Single(svar(name))
+}
+
+#[test]
+fn positional_and_arity_are_none_once_a_spread_makes_arity_dynamic() {
+    let literal: Args = vec![single("a"), single("b")].into();
+    assert_eq!(literal.positional(), Some(vec![&var("a"), &var("b")]));
+    assert_eq!(literal.arity(), Some(2));
+    assert_eq!(Args::default().arity(), Some(0));
+
+    let spread: Args = vec![single("a"), ValListElem::Spread(svar("b"))].into();
+    assert_eq!(spread.positional(), None);
+    assert_eq!(spread.arity(), None);
+}
+
+fn exec() -> Arc<Comp> {
+    Arc::new(Spanned::synthetic(CompKind::Exec(Exec {
+        head: CommandWord::Name(CommandName::Bare("ls".into())),
+        args: Args::default(),
+        redirects: Redirects::default(),
+        site: None,
+    })))
+}
+
+fn run(comp: Arc<Comp>) -> Spanned<Phrase> {
+    Spanned::synthetic(Phrase::Run(comp))
+}
+
+fn define(name: &str, ty: crate::ty::Ty) -> Spanned<Phrase> {
+    Spanned::synthetic(Phrase::Define {
+        pattern: Arc::new(Pattern::Name(name.into())),
+        comp: ret("v"),
+        schemes: vec![(name.into(), Arc::new(crate::ty::Scheme::mono(ty)))],
+    })
+}
+
+fn toplevel(phrases: Vec<Spanned<Phrase>>) -> Toplevel {
+    Toplevel {
+        phrases,
+        admits: vec![],
+    }
+}
+
+#[test]
+fn only_a_lone_exec_run_is_a_single_command() {
+    for (phrases, lone) in [
+        (vec![], false),
+        (vec![run(exec())], true),
+        (vec![run(ret("v"))], false),
+        (vec![define("x", crate::ty::Ty::Int)], false),
+        (vec![run(exec()), run(exec())], false),
+    ] {
+        assert_eq!(toplevel(phrases).is_single_command(), lone);
+    }
+}
+
+#[test]
+fn the_last_let_of_a_name_wins_the_exported_scheme() {
+    use crate::ty::{Scheme, Ty};
+    let unit = toplevel(vec![
+        define("x", Ty::Int),
+        run(exec()),
+        define("y", Ty::String),
+        define("x", Ty::Bool),
+    ]);
+    let scheme = |ty| Arc::new(Scheme::mono(ty));
+    assert_eq!(
+        unit.exported_schemes(),
+        [
+            ("x".to_string(), scheme(Ty::Bool)),
+            ("y".to_string(), scheme(Ty::String))
+        ]
+    );
+}
+
+/// `Pattern`'s `Display` is the pattern as written, a map entry binding its
+/// own key collapsing to the key.
+#[test]
+fn a_pattern_displays_as_written() {
+    let name = |n: &str| Pattern::Name(n.into());
+    let entry = |key: &str, pattern| MapPatternEntry {
+        key: key.into(),
+        pattern,
+    };
+    for (pattern, shown) in [
+        (Pattern::Wildcard, "_"),
+        (name("x"), "x"),
+        (
+            Pattern::List {
+                elems: vec![name("a"), Pattern::Wildcard],
+                rest: Some("rest".into()),
+            },
+            "[a _ ...rest]",
+        ),
+        (
+            Pattern::Map(vec![entry("host", name("host")), entry("port", name("p"))]),
+            "[host port: p]",
+        ),
+    ] {
+        assert_eq!(pattern.to_string(), shown);
+    }
+}
+
+fn redirects() -> Redirects<u8> {
+    Redirects {
+        stdin: Some(StdinSource::Here(1)),
+        stdout: Some((WriteMode::Write, 2)),
+        stderr: Some(StderrTarget::File(WriteMode::Append, 3)),
+    }
+}
+
+#[test]
+fn redirect_operands_come_in_opening_order_and_a_dup_has_none() {
+    assert_eq!(
+        redirects().operands().copied().collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let dup = Redirects {
+        stderr: Some(StderrTarget::Stdout),
+        ..redirects()
+    };
+    assert_eq!(dup.operands().copied().collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(Redirects::<u8>::default().operands().count(), 0);
+}
+
+#[test]
+fn try_map_visits_operands_in_opening_order_and_stops_at_the_first_error() {
+    let mut seen = Vec::new();
+    let doubled = redirects().try_map(|&t| {
+        seen.push(t);
+        Ok::<_, u8>(t * 2)
+    });
+    assert_eq!(
+        doubled,
+        Ok(Redirects {
+            stdin: Some(StdinSource::Here(2)),
+            stdout: Some((WriteMode::Write, 4)),
+            stderr: Some(StderrTarget::File(WriteMode::Append, 6)),
+        })
+    );
+    assert_eq!(seen, [1, 2, 3]);
+
+    seen.clear();
+    let failed = redirects().try_map(|&t| {
+        seen.push(t);
+        if t == 2 { Err(t) } else { Ok(t) }
+    });
+    assert_eq!(failed, Err(2));
+    assert_eq!(seen, [1, 2], "stderr is not reached");
 }

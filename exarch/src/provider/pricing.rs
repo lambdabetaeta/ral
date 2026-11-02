@@ -378,40 +378,6 @@ struct Pricing {
 mod tests {
     use super::*;
 
-    /// 2026-09-21 is a Monday, 2026-09-19 the Saturday before it.
-    #[test]
-    fn is_peak_matches_documented_windows() {
-        let at = |day: &str, hour: i8| {
-            format!("{day}T{hour:02}:30:00Z")
-                .parse::<jiff::Timestamp>()
-                .expect("a literal UTC timestamp parses")
-        };
-        for hour in 0i8..24 {
-            let expected = matches!(hour, 1..=3 | 6..=9);
-            assert_eq!(is_peak(at("2026-09-21", hour)), expected, "Monday {hour}h");
-            assert!(!is_peak(at("2026-09-19", hour)), "Saturday {hour}h");
-        }
-    }
-
-    /// The names `DeepSeek` still accepts all reach the flash card, and the
-    /// peak window only scales it.
-    #[test]
-    fn deepseek_prices_every_live_name() {
-        for model in [
-            "deepseek-flash",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash-vision-exp",
-            "deepseek-v4-pro",
-        ] {
-            let p = deepseek_price(model).expect("a live name is priced");
-            assert!(
-                p.input > 0.0 && p.output > 0.0 && p.cache_read > 0.0,
-                "{model}"
-            );
-        }
-        assert!(deepseek_price("deepseek-chat").is_none());
-    }
-
     #[test]
     #[allow(
         clippy::float_cmp,

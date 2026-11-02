@@ -75,10 +75,13 @@ fn racing_unnamed_reservations_have_distinct_owners() {
 fn malformed_names_leave_no_reservation() {
     let fleet = Fleet::for_test();
     for name in ["", "two words", "a/b", "é", "abcdefghijklmnopqrstuvwxy"] {
-        let Some(Unborn::NameMalformed(why)) = fleet.registry.name(name).err() else {
-            panic!("invalid name {name:?} must be refused");
-        };
-        assert!(why.contains("ASCII"), "{why}");
+        assert!(
+            matches!(
+                fleet.registry.name(name).err(),
+                Some(Unborn::NameMalformed(_))
+            ),
+            "invalid name {name:?} must be refused"
+        );
         assert!(fleet.registry.is_empty());
     }
     let name = fleet.registry.name("Ab_9-abcdefghijklmnopqrs").unwrap();

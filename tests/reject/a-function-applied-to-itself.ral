@@ -1,4 +1,6 @@
 # codes: T0073
+# status: 1
+# at: 5:18
 # contains: is applied to itself
 let w = { |x| $x $x }
 w $w

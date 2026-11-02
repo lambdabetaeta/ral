@@ -1,4 +1,6 @@
 # codes: T0071
+# status: 1
+# at: 6:11
 # contains: undefined variable: $extent_y
 !{ let extent_y = 1; return $extent_y }
 !{ return $extent_y }

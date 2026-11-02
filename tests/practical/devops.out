@@ -1,0 +1,10 @@
+true
+true
+al-test-1.txt: test1
+al-test-2.txt: test2
+al-test-3.txt: test3
+caught error with status 1
+cleanup marker exists
+true
+4 5 9 6
+all done

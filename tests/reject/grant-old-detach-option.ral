@@ -1,3 +1,6 @@
+# codes: T0026
+# status: 1
+# at: 6:16
 # contains: does not take 'detach'
 # contains: `detach` is a shell verb
 grant [detach: false] { return 1 }

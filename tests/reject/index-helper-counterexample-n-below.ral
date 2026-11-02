@@ -1,4 +1,6 @@
 # codes: T0010
+# status: 1
+# at: 9:5
 # contains: shared by every use in its unit
 let run = { |i|
   let h = { |c| $c[$i] }

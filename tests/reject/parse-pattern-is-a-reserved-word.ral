@@ -1,2 +1,5 @@
-# contains: reserved
+# codes: P0001
+# status: 2
+# at: 5:5
+# contains: is a reserved keyword and cannot be used as a binding name
 let if = 1

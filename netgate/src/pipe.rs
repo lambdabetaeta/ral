@@ -308,6 +308,7 @@ pub fn new_pipe(wake: Wake) -> (CoreSide, ProxyPipe) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -348,22 +349,18 @@ mod tests {
     }
 
     #[test]
-    fn dropping_the_worker_reports_broken_pipe_to_a_blocked_writer() {
-        let (core, worker) = new_pipe(Arc::new(|| {}));
-        drop(worker);
-        assert!(core.output_finished());
-    }
-
-    #[test]
     fn a_write_blocked_on_a_full_ring_wakes_once_the_core_side_drains_it() {
         let (core, mut worker) = new_pipe(Arc::new(|| {}));
         let filler = vec![0u8; RING_CAP];
         worker.write_all(&filler).unwrap();
-        let handle = thread::spawn(move || worker.write_all(b"more"));
-        thread::sleep(Duration::from_millis(50));
+        let (done, written) = mpsc::channel();
+        thread::spawn(move || done.send(worker.write_all(b"more")));
         let mut sink = vec![0u8; RING_CAP];
         assert_eq!(core.pull_for_guest(&mut sink), RING_CAP);
-        handle.join().unwrap().unwrap();
+        written
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the writer must finish once the ring is drained")
+            .unwrap();
         let mut tail = [0u8; 4];
         assert_eq!(core.pull_for_guest(&mut tail), 4);
         assert_eq!(&tail, b"more");
@@ -414,13 +411,13 @@ mod tests {
         let (core, mut worker) = new_pipe(Arc::new(|| {}));
         let filler = vec![0u8; RING_CAP];
         worker.write_all(&filler).unwrap();
-        let handle = thread::spawn(move || worker.write_all(b"more"));
-        thread::sleep(Duration::from_millis(50));
+        let (done, written) = mpsc::channel();
+        thread::spawn(move || done.send(worker.write_all(b"more")));
         drop(core);
-        let result = handle.join().unwrap();
-        assert!(
-            result.is_err(),
-            "a writer blocked on a full ring must wake to an error, not hang forever"
-        );
+        let err = written
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a writer on a full ring must wake once the core is gone")
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     }
 }

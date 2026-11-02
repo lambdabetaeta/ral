@@ -1,3 +1,5 @@
 # codes: T0011
+# status: 1
+# at: 5:1
 # contains: a value in stage position writes nothing to the pipe
 '3' | cat

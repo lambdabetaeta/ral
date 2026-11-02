@@ -90,3 +90,96 @@ pub(crate) fn boot_line(workspace: Export, console: &str, epoch: u64) -> String 
         console,
     )
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+
+    fn file_in(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"x").unwrap();
+        path
+    }
+
+    fn folder(path: PathBuf) -> MachineSpec {
+        MachineSpec {
+            folder: path,
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn a_folder_resolves_to_its_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let roundabout = work.join("..").join("work");
+        assert_eq!(
+            folder(roundabout).resolve().unwrap(),
+            work.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_missing_folder_is_named_as_given() {
+        let missing = tempfile::tempdir().unwrap().path().join("nowhere");
+        assert!(matches!(
+            folder(missing.clone()).resolve(),
+            Err(Error::NoSuchFolder(path)) if path == missing
+        ));
+    }
+
+    #[test]
+    fn a_file_is_not_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir, "notes.txt");
+        assert!(matches!(
+            folder(file.clone()).resolve(),
+            Err(Error::NotAFolder(path)) if path == file.canonicalize().unwrap()
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_through_a_file_is_unreadable_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let inside = file_in(&dir, "notes.txt").join("inside");
+        assert!(matches!(
+            folder(inside.clone()).resolve(),
+            Err(Error::FolderUnreadable { path, .. }) if path == inside
+        ));
+    }
+
+    #[test]
+    fn boot_files_resolve_to_canonical_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = BootArtifact {
+            kernel: file_in(&dir, "kernel"),
+            initramfs: file_in(&dir, "initramfs.img"),
+            rootfs: file_in(&dir, "rootfs.img"),
+        };
+        let resolved = artifact.resolve().unwrap();
+        for (found, given) in [
+            (&resolved.kernel, &artifact.kernel),
+            (&resolved.initramfs, &artifact.initramfs),
+            (&resolved.rootfs, &artifact.rootfs),
+        ] {
+            assert_eq!(found, &given.canonicalize().unwrap());
+        }
+    }
+
+    #[test]
+    fn the_first_missing_boot_file_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = BootArtifact {
+            kernel: file_in(&dir, "kernel"),
+            initramfs: dir.path().join("no-initramfs"),
+            rootfs: dir.path().join("no-rootfs"),
+        };
+        assert!(matches!(
+            artifact.resolve(),
+            Err(Error::MissingBootFile { path, .. }) if path == artifact.initramfs
+        ));
+    }
+}

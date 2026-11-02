@@ -78,13 +78,56 @@ fn epitaph(why: &str) -> String {
 mod tests {
     use super::*;
 
+    fn pipe() -> (File, File) {
+        let (reader, writer) = std::io::pipe().unwrap();
+        (
+            File::from(OwnedFd::from(reader)),
+            File::from(OwnedFd::from(writer)),
+        )
+    }
+
+    fn drained(mut from: File) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        from.read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
     #[test]
-    fn the_epitaph_names_the_failure_and_the_shutdown() {
-        let text = epitaph("in the tun→net direction saw the tun device close");
-        assert!(
-            text.contains("tun→net direction saw the tun device close"),
-            "{text}"
-        );
-        assert!(text.contains("cannot be resumed"), "{text}");
+    fn tun_packets_are_framed_onto_the_wire_until_the_tun_closes() {
+        let (tun, mut tun_in) = pipe();
+        let (net_out, net) = pipe();
+        tun_in.write_all(b"abc").unwrap();
+        drop(tun_in);
+        tun_to_net(tun, net).unwrap_err();
+        assert_eq!(drained(net_out), [3, 0, 0, 0, b'a', b'b', b'c']);
+    }
+
+    #[test]
+    fn a_dead_net_wire_ends_the_tun_direction() {
+        let (tun, mut tun_in) = pipe();
+        let (net_out, net) = pipe();
+        drop(net_out);
+        tun_in.write_all(b"abc").unwrap();
+        tun_to_net(tun, net).unwrap_err();
+    }
+
+    #[test]
+    fn wire_frames_are_unframed_onto_the_tun_until_the_wire_closes() {
+        let (net, mut net_in) = pipe();
+        let (tun_out, tun) = pipe();
+        packet::write_frame(&mut net_in, b"abc").unwrap();
+        packet::write_frame(&mut net_in, b"de").unwrap();
+        drop(net_in);
+        net_to_tun(net, tun).unwrap_err();
+        assert_eq!(drained(tun_out), b"abcde");
+    }
+
+    #[test]
+    fn a_dead_tun_ends_the_wire_direction() {
+        let (net, mut net_in) = pipe();
+        let (tun_out, tun) = pipe();
+        drop(tun_out);
+        packet::write_frame(&mut net_in, b"abc").unwrap();
+        net_to_tun(net, tun).unwrap_err();
     }
 }

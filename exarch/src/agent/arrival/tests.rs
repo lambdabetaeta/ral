@@ -1,49 +1,12 @@
 use super::*;
-use crate::agent::testkit::{
-    WORKER_REGISTRY_TEST_BUILTINS, dressed_trunk, scheme_test_clear_block_forever, workers,
-};
+use crate::agent::testkit::{HeldWorker, WORKER_REGISTRY_TEST_BUILTINS, dressed_trunk, workers};
 use crate::bus::Emitter;
 use crate::card::testkit::card_value;
 use crate::record::{ChildStatus, Display, Record};
 use ral_core::carrier::Severed;
 use ral_core::process::DurableRoot;
-use ral_core::shell::runtime::{
-    BuiltinBody, BuiltinEntry, Done, DoneEvent, Mooring, Settled, WorkerId,
-};
-use ral_core::{Shell, Value};
-use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, Ordering};
+use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
 use std::time::{Duration, Instant};
-
-static ARRIVAL_STOP_ENTERED: AtomicBool = AtomicBool::new(false);
-static ARRIVAL_STOP_RELEASE: AtomicBool = AtomicBool::new(false);
-
-struct ReleaseGuard(&'static AtomicBool);
-impl Drop for ReleaseGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
-fn builtin_arrival_hold_until_released(
-    _args: &[Value],
-    _mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    ARRIVAL_STOP_ENTERED.store(true, Ordering::Release);
-    while !ARRIVAL_STOP_RELEASE.load(Ordering::Acquire) {
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    shell.poll()?;
-    Ok(Value::Unit)
-}
-
-static ARRIVAL_TEST_BUILTINS: [BuiltinEntry; 1] = [BuiltinEntry::new(
-    Cow::Borrowed("test-arrival-hold"),
-    scheme_test_clear_block_forever,
-    "test-only: hold until ARRIVAL_STOP_RELEASE, then poll.",
-    BuiltinBody::Static(builtin_arrival_hold_until_released),
-)];
 
 fn attach_sink(session: &Agent) -> crate::bus::BusReceiver {
     let (tx, rx) = crate::bus::channel();
@@ -198,14 +161,13 @@ fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
 /// cards; an unclaimed `Ready` worker (and a still-`Running` worker) delivers.
 #[test]
 fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
-    ARRIVAL_STOP_ENTERED.store(false, Ordering::Release);
-    ARRIVAL_STOP_RELEASE.store(false, Ordering::Release);
-    let mut session = dressed_trunk(|runtime| {
+    let held = HeldWorker::new("test-arrival-hold");
+    let builtins = held.builtins();
+    let mut session = dressed_trunk(move |runtime| {
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
-        runtime.install_builtins(&ARRIVAL_TEST_BUILTINS);
+        runtime.install_captured_builtins(&builtins);
     });
-    // Declared after the session, so the hold ends before its teardown.
-    let _release = ReleaseGuard(&ARRIVAL_STOP_RELEASE);
+    let _release = held.release_on_drop();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     session.couple(&emit);
@@ -218,9 +180,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
         10,
         &emit,
     );
-    while !ARRIVAL_STOP_ENTERED.load(Ordering::Acquire) {
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    held.wait_entered();
     session.ral(&DurableRoot::default().child(), "cancel $h_stop", 10, &emit);
 
     let deadline = Instant::now() + Duration::from_secs(10);

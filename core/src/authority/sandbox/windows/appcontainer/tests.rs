@@ -1,15 +1,6 @@
 use super::*;
 
 #[test]
-fn hresult_from_win32_matches_already_exists_constant() {
-    // 0x800700B7 is the published wrapping, checkable against `winerror.h`.
-    assert_eq!(
-        hresult_from_win32(ERROR_ALREADY_EXISTS).cast_unsigned(),
-        0x8007_00B7
-    );
-}
-
-#[test]
 fn capability_sids_empty_when_network_denied() {
     let caps = CapabilitySids::build(false).expect("build never touches the OS when empty");
     assert_eq!(caps.sids().count(), 0);

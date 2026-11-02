@@ -172,10 +172,10 @@ fn a_loop_carries_the_actual_link_not_the_unresolved_continuation() {
     assert!(loop_trace(&loop_error()).is_none());
 }
 
-/// Forty splices are the budget: a chain of forty links walks, one of
-/// forty-one is a loop.
+/// `MAX_HOPS` splices are the budget: a chain of that many links walks, one
+/// link more is a loop.
 #[test]
-fn the_splice_budget_is_forty() {
+fn the_splice_budget_is_max_hops() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("end"), b"").unwrap();
@@ -191,7 +191,7 @@ fn the_splice_budget_is_forty() {
         dir.join("end")
     );
     let Err(err) = located(&dir.join(format!("l{MAX_HOPS}"))) else {
-        panic!("forty-one splices are a loop");
+        panic!("one splice past the budget is a loop");
     };
     assert_eq!(err.to_string(), LOOP_MESSAGE);
 }

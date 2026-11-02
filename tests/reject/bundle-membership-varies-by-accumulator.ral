@@ -1,3 +1,6 @@
+# codes: P0001
+# status: 2
+# at: 7:8
 # contains: `within` takes its options written in its own bracket
 let step = { |acc x| return [...$acc, dir: "/tmp"] }
 let o = fold $step [env: [:]] [1]

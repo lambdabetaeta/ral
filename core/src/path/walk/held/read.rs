@@ -51,6 +51,16 @@ impl<A: Peeks> Located<A> {
         }
     }
 
+    /// `access(2)` for reading against the real uid/gid (Windows: an open for
+    /// reading), never the stat's mode bits, which ignore ownership.  Follows,
+    /// as `test -r` does.
+    ///
+    /// # Errors
+    /// The host's refusal.
+    pub(crate) fn may_read(&self) -> io::Result<()> {
+        host::may_read(self.dir(), self.entry())
+    }
+
     /// `access(2)` for writing against the real uid/gid (Windows: an open for
     /// writing), never the stat's mode bits, which ignore ownership.  Follows,
     /// as `test -w` does.

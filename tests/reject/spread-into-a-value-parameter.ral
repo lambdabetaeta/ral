@@ -1,2 +1,4 @@
 # codes: T0056
+# status: 1
+# at: 4:26
 let appl = { |f args| $f ...$args }; appl $to-json [1]

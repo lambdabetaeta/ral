@@ -460,12 +460,15 @@ fn a_pumped_descendant_does_not_outlive_the_reader_gone_kill() {
 // ── SIGINT kills external child ──────────────────────────────────────────────
 
 /// Run `script` in a ral of its own process group — so `kill(-pid)` reaches
-/// exactly ral, not the test runner — `SIGINT` that group once `settle` has
-/// let the pipeline start, and return how ral ended within 3 s: `None` if it
+/// exactly ral, not the test runner — `SIGINT` that group once `ready` says
+/// the pipeline is running, and return how ral ended within 3 s: `None` if it
 /// did not.  In batch mode the shell itself receives the SIGINT and cancels
 /// the run, so it must *exit* — a status with no code means a signal killed
 /// it (a `SIGPIPE` from its own interior edge, say).
-fn ral_exits_after_sigint(script: &str, settle: Duration) -> Option<std::process::ExitStatus> {
+fn ral_exits_after_sigint(
+    script: &str,
+    ready: impl FnOnce() -> bool,
+) -> Option<std::process::ExitStatus> {
     let tmp = fresh_tmp_path("ral_sigint", "ral");
     std::fs::write(&tmp, script).unwrap();
     let mut cmd = ral_command();
@@ -481,10 +484,10 @@ fn ral_exits_after_sigint(script: &str, settle: Duration) -> Option<std::process
         });
     }
     let mut child = cmd.spawn().expect("spawn");
-    std::thread::sleep(settle);
-    unsafe {
-        libc::kill(-child.id().cast_signed(), libc::SIGINT);
-    }
+    let started = ready();
+    let group = -child.id().cast_signed();
+    unsafe { libc::kill(group, if started { libc::SIGINT } else { libc::SIGKILL }) };
+    assert!(started, "the pipeline never started");
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let ended = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -501,20 +504,42 @@ fn ral_exits_after_sigint(script: &str, settle: Duration) -> Option<std::process
     ended
 }
 
-fn assert_ral_exited_after_sigint(script: &str, settle: Duration, hang: &str) {
-    let status = ral_exits_after_sigint(script, settle).unwrap_or_else(|| panic!("{hang}"));
+fn assert_ral_exited_after_sigint(script: &str, ready: impl FnOnce() -> bool, hang: &str) {
+    let status = ral_exits_after_sigint(script, ready).unwrap_or_else(|| panic!("{hang}"));
     assert!(
         status.code().is_some(),
         "ral was killed by a signal instead of exiting: {status}"
     );
 }
 
+/// A fresh, absent marker path for a script to touch once its pipeline runs.
+fn ready_marker() -> std::path::PathBuf {
+    fresh_tmp_path("ral_sigint", "ready")
+}
+
+/// Poll until `marker` exists, then remove it; `false` after 10 s.
+fn marker_appears(marker: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::remove_file(marker).ok();
+    true
+}
+
 #[test]
 fn sigint_kills_external_child_in_pipeline() {
     // The externals have SIG_DFL and die of the relayed signal.
+    let ready = ready_marker();
     assert_ral_exited_after_sigint(
-        "/bin/echo start | sleep 60\n",
-        Duration::from_millis(100),
+        &format!(
+            "/bin/echo start | sh -c #': > {}; exec sleep 60'#\n",
+            ready.display()
+        ),
+        || marker_appears(&ready),
         "ral did not exit after SIGINT",
     );
 }
@@ -523,9 +548,13 @@ fn sigint_kills_external_child_in_pipeline() {
 fn sigint_kills_a_ral_stage_blocked_reading_a_live_upstream() {
     // A stage thread blocked in `from-line` on a producer that never
     // writes: only the wake can end its read.
+    let ready = ready_marker();
     assert_ral_exited_after_sigint(
-        "sleep 100 | !{ from-line }\n",
-        Duration::from_millis(200),
+        &format!(
+            "sleep 100 | !{{ touch '{}'; from-line }}\n",
+            ready.display()
+        ),
+        || marker_appears(&ready),
         "a stage thread blocked on a live upstream was not woken",
     );
 }
@@ -535,9 +564,13 @@ fn sigint_kills_a_ral_stage_blocked_writing_to_a_full_edge() {
     // The producer fills the edge (well under a second) and blocks in
     // `echo`.  Only the wake may end that write: the parent holds the edge's
     // read end, and an `EPIPE` there would be a `SIGPIPE` to the whole shell.
+    // No marker can mark "full", so this one keeps a settle span.
     assert_ral_exited_after_sigint(
         "!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | sleep 100\n",
-        Duration::from_secs(1),
+        || {
+            std::thread::sleep(Duration::from_secs(1));
+            true
+        },
         "a stage thread blocked writing into a full edge was not woken",
     );
 }
@@ -1313,14 +1346,6 @@ fn pipeline_permission_denied_path_reports_126() {
         o.stderr
     );
 }
-
-// The non-transferable retained-value invariant — that a byte-routed
-// helper does not pay for serialising its (unused) return value — is
-// covered by `child_eval::tests::stage_job_skips_report_value_when_parent_does_not_need_it`
-// at the protocol layer.  Constructing an end-to-end script that
-// exercises it is awkward because a byte route pairs with `Unit`, so such
-// a helper's body returns nothing worth transferring; the unit test names
-// the contract more clearly than any indirect integration shape.
 
 // ── Audit + redirect: no panic ───────────────────────────────────────────────
 //

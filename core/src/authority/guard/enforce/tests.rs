@@ -404,3 +404,109 @@ fn a_case_variant_spelling_meets_the_deny() {
     assert_eq!(access.real().as_path(), secret.join("key"));
     assert!(!grants.admits_fs(&Baseline::default(), &FsOp::Read, &access));
 }
+
+/// The fact a refused fs check leaves on the trail: which op, at what path,
+/// and by which exclusion or pinned binary.
+mod fs_facts {
+    use super::*;
+    use crate::authority::guard::enforce::check_fs_exact;
+    use crate::fact::Resource;
+    use crate::path::LexicalPath;
+
+    fn denial_at(
+        grants: &GrantStack,
+        baseline: &Baseline,
+        op: &FsOp,
+        at: &std::path::Path,
+    ) -> crate::authority::guard::Denial {
+        let path = LexicalPath::absolute(at).expect("an absolute path");
+        match check_fs_exact(grants, baseline, &trace(at), op, &path) {
+            Ok(()) => panic!("{} should be refused", at.display()),
+            Err(denial) => denial,
+        }
+    }
+
+    #[test]
+    fn a_missing_allowance_records_op_and_path_only() {
+        let grants = stack(FsPolicy::default());
+        for op in [FsOp::Read, FsOp::Write] {
+            let at = std::path::Path::new("/nowhere/x");
+            let denial = denial_at(&grants, &Baseline::default(), &op, at);
+            let shown = LexicalPath::absolute(at).unwrap().shown();
+            assert_eq!(denial.check.resource, Resource::Fs);
+            assert_eq!(denial.check.fields["op"], <&str>::from(&op));
+            assert_eq!(denial.check.fields["path"], shown);
+            assert_eq!(denial.check.fields.len(), 2, "{:?}", denial.check.fields);
+            assert!(denial.error.hint.is_some_and(|h| !h.is_empty()));
+        }
+    }
+
+    #[test]
+    fn an_exclusion_records_the_deny_beside_op_and_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let secret = root.join("secret");
+        std::fs::write(&secret, "s").unwrap();
+        let spell = |p: &std::path::Path| FrozenPath::from_surface(crate::path::utf8(p).unwrap());
+        let grants = stack(FsPolicy {
+            read_prefixes: vec![spell(&root)],
+            write_prefixes: vec![spell(&root)],
+            deny_paths: vec![spell(&secret)],
+        });
+        let denial = denial_at(&grants, &Baseline::default(), &FsOp::Read, &secret);
+        let fields = &denial.check.fields;
+        assert_eq!(fields["op"], <&str>::from(&FsOp::Read));
+        assert_eq!(
+            fields["path"],
+            LexicalPath::absolute(&secret).unwrap().shown()
+        );
+        assert!(fields["deny"].contains("secret"), "{fields:?}");
+        assert!(!fields.contains_key("pinned"));
+        assert!(denial.error.hint.is_some_and(|h| !h.is_empty()));
+    }
+
+    #[test]
+    fn a_pinned_binary_is_guarded_and_recorded_as_pinned() {
+        crate::authority::sandbox::pin();
+        let own = std::env::current_exe().expect("own path");
+        let denial = denial_at(
+            &GrantStack::root(),
+            &Baseline::of_host().unwrap(),
+            &FsOp::Write,
+            &own,
+        );
+        let fields = &denial.check.fields;
+        assert_eq!(denial.check.resource, Resource::Fs);
+        assert_eq!(fields["op"], <&str>::from(&FsOp::Write));
+        assert_eq!(fields["path"], LexicalPath::absolute(&own).unwrap().shown());
+        assert_eq!(fields["pinned"], "ral");
+        assert!(!fields.contains_key("deny"));
+        assert!(denial.error.hint.is_some_and(|h| !h.is_empty()));
+    }
+}
+
+#[test]
+fn a_flag_is_permitted_by_silence_or_by_its_listing() {
+    use crate::authority::guard::enforce::check_flag;
+    use crate::authority::policy::{EditorVerb, Flag, ShellVerb};
+    use std::collections::BTreeSet;
+    let silent = GrantStack::root();
+    let chdir_only = crate::test_helper::stack([layer(Capabilities {
+        editor: Some(BTreeSet::new()),
+        shell: Some(BTreeSet::from([ShellVerb::Chdir])),
+        ..Capabilities::default()
+    })]);
+    for (grants, flag, permitted) in [
+        (&silent, Flag::Shell(ShellVerb::Detach), true),
+        (&silent, Flag::Editor(EditorVerb::Tui), true),
+        (&chdir_only, Flag::Shell(ShellVerb::Chdir), true),
+        (&chdir_only, Flag::Shell(ShellVerb::Detach), false),
+        (&chdir_only, Flag::Editor(EditorVerb::Tui), false),
+    ] {
+        assert_eq!(
+            check_flag(grants, flag, "who").is_ok(),
+            permitted,
+            "{flag:?}"
+        );
+    }
+}

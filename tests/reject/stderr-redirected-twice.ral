@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:14
 # contains: standard error is redirected twice
 echo hi 2> a 2> b

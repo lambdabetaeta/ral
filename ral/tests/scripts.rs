@@ -8,48 +8,43 @@ mod common;
 
 use std::fs;
 use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
-/// Scripts excluded from running at all — not because they're broken, but
-/// because they can't reach a clean exit in the configuration the test builds.
-/// Each reason is noted inline.
-const RUN_SKIP: &[&str] = &[
-    "args", // takes positional argv; not a self-contained script
-];
-
-/// Scripts that run cleanly (exit 0) but whose stdout is NOT golden-checked:
-/// either a deferred output bug, or machine-specific / nondeterministic output.
-const GOLDEN_SKIP: &[&str] = &[
-    // non-portable / nondeterministic output
-    "log-processor", // nondeterministic line counts between runs
-    "devops",        // prints hostname / username
-    "environment",   // prints the home directory
-    "pipes",         // prints OS-specific `ls` error text
-    "concurrency",   // `spawn { /bin/false }` — status differs by platform
-                     // (`/bin/false` is 127 not-found on macOS, 1 on Linux)
-];
-
-/// Drop `\r` bytes so CRLF goldens (as git checks them out on Windows)
-/// compare equal to ral's LF-only output.
-fn strip_cr(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().copied().filter(|&b| b != b'\r').collect()
+/// On Windows git checks goldens out with CRLF while `ral` emits LF; compare
+/// modulo `\r` there, byte for byte elsewhere.
+fn same_bytes(expected: &[u8], actual: &[u8]) -> bool {
+    #[cfg(unix)]
+    return expected == actual;
+    #[cfg(not(unix))]
+    return expected
+        .iter()
+        .filter(|&&b| b != b'\r')
+        .eq(actual.iter().filter(|&&b| b != b'\r'));
 }
+
+/// A script that outlives this is hung, not slow.
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The static corpora, run by `corpus.rs`: their programs are rejected or
 /// merely checked, never run.
 const CORPUS_DIRS: &[&str] = &["reject", "accept"];
 
-/// Run a `.ral` script through the `ral` binary and return its captured output.
-fn run_capture(path: &Path) -> std::process::Output {
+/// Run a `.ral` script through the `ral` binary; `None` if it hung and was killed.
+fn run_capture(path: &Path) -> Option<common::Output> {
     // Run as a subprocess to avoid dup2 redirect interference between tests.
-    common::ral_command()
+    let child = common::ral_command()
         .arg(path)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to run {}: {e}", path.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", path.display()));
+    common::wait_with_timeout(child, SCRIPT_TIMEOUT)
 }
 
-/// Smoke-test the whole `.ral` corpus, and golden-check stdout for the portable,
-/// deterministic subset. Every runnable script must exit 0; every goldened
-/// script must reproduce its sibling `<name>.out` byte for byte. `RAL_BLESS=1`
+/// Run every `.ral` script: it must exit 0 and reproduce its sibling
+/// `<name>.out` on stdout byte for byte. `RAL_BLESS=1`
 /// (re)writes the goldens from current output instead of comparing.
 #[test]
 fn scripts() {
@@ -63,31 +58,29 @@ fn scripts() {
     );
 
     let total = scripts.len();
-    let (mut passed, mut skipped, mut blessed) = (0, 0, 0);
+    let (mut passed, mut blessed) = (0, 0);
     let mut failures = Vec::new();
 
     for script in &scripts {
-        let name = script.file_stem().unwrap().to_string_lossy();
-
-        if RUN_SKIP.contains(&name.as_ref()) {
-            skipped += 1;
-            continue;
-        }
-        // Skip Unix-specific scripts on non-Unix platforms.
+        // Unix-specific scripts do not run elsewhere.
         #[cfg(not(unix))]
         if script.components().any(|c| c.as_os_str() == "unix") {
-            skipped += 1;
             continue;
         }
 
-        let output = run_capture(script);
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            failures.push(format!("{}: non-zero exit\n{stderr}", script.display()));
+        let Some(output) = run_capture(script) else {
+            failures.push(format!(
+                "{}: no exit within {SCRIPT_TIMEOUT:?}; killed",
+                script.display()
+            ));
             continue;
-        }
-        if GOLDEN_SKIP.contains(&name.as_ref()) {
-            passed += 1; // smoke-tested for exit 0; stdout intentionally not goldened
+        };
+        if output.status != 0 {
+            failures.push(format!(
+                "{}: non-zero exit\n{}",
+                script.display(),
+                output.stderr
+            ));
             continue;
         }
 
@@ -99,16 +92,13 @@ fn scripts() {
             continue;
         }
         match fs::read(&golden) {
-            // Compare line-ending-insensitively: on Windows git checks the
-            // golden `.out` files out with CRLF, while `ral` always emits LF,
-            // so a raw byte compare would spuriously differ on every script.
-            Ok(expected) if strip_cr(&expected) == strip_cr(&output.stdout) => passed += 1,
+            Ok(expected) if same_bytes(&expected, output.stdout.as_bytes()) => passed += 1,
             Ok(expected) => failures.push(format!(
                 "{}: stdout differs from {}\n--- golden ---\n{}\n--- actual ---\n{}",
                 script.display(),
                 golden.display(),
                 String::from_utf8_lossy(&expected),
-                String::from_utf8_lossy(&output.stdout),
+                output.stdout,
             )),
             Err(_) => failures.push(format!(
                 "{}: missing golden {} — run `RAL_BLESS=1 cargo test -p ral --test scripts`",
@@ -119,7 +109,7 @@ fn scripts() {
     }
 
     eprintln!(
-        "{passed} passed, {} failed, {skipped} skipped, {blessed} blessed out of {total}",
+        "{passed} passed, {} failed, {blessed} blessed out of {total}",
         failures.len()
     );
 

@@ -1,0 +1,51 @@
+# Test: audit records file effects: reads, and writes with mode and outcome
+
+# File effects are observations too: a read, and a write with its mode and
+# outcome. A failing body aborts an atomic write; an unopenable target fails it.
+let io-facts = { |report|
+    fold { |acc o|
+        case $o[what] [
+            `write:   { |w| return [...$acc, "write !{str $w[mode]} !{str $w[outcome]} !{basename $w[path]}"] },
+            `read:    { |r| return [...$acc, "read !{basename $r[path]}"] },
+            `check:   { |_| return $acc },
+            `command: { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc }
+        ]
+    } [] $report[trail]
+}
+let io-dir = temp-dir
+echo !{io-facts !{audit {
+    to-string x > "$io-dir/a.txt"
+    from-string < "$io-dir/a.txt"
+    to-string y >> "$io-dir/a.txt"
+    to-string z >~ "$io-dir/s.txt"
+}}}
+echo !{io-facts !{audit {
+    try { !{ fail [status: 1, message: 'boom'] } > "$io-dir/never.txt" } { |_| return () }
+    try { to-string x > "$io-dir/no-such-dir/out.txt" } { |_| return () }
+}}}
+echo !{exists "$io-dir/never.txt"}
+
+# A write is stamped at its redirect, never at the body's last command
+let write-cols = { |report|
+    fold { |acc o|
+        case $o[what] [
+            `write:   { |_| case $o[site] [`some: { |s| return [...$acc, $s[col]] }, `none: { |_| return $acc }] },
+            `read:    { |_| return $acc },
+            `check:   { |_| return $acc },
+            `command: { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc }
+        ]
+    } [] $report[trail]
+}
+let stamped = audit {
+    !{ echo a; true } > "$io-dir/site.txt"
+}
+echo !{write-cols $stamped}
+rm -rf $io-dir
+
+echo 'audit io tests done'

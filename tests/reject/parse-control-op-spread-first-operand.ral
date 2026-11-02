@@ -1,3 +1,6 @@
-# contains: spread
+# codes: P0001
+# status: 2
+# at: 6:5
+# contains: a spread `...` has no meaning here
 let x = [1, 2]
 try ...$x { |e| return () }

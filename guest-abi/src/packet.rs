@@ -94,6 +94,21 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_layout_is_a_little_endian_length_then_the_packet() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &[0xAA, 0xBB, 0xCC]).unwrap();
+        assert_eq!(wire, [3, 0, 0, 0, 0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn a_frame_of_exactly_the_mtu_is_accepted() {
+        let packet = vec![7u8; MTU];
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &packet).unwrap();
+        assert_eq!(read_frame(&mut wire.as_slice()).unwrap(), packet);
+    }
+
+    #[test]
     fn a_frame_declaring_zero_length_is_refused() {
         let wire = 0u32.to_le_bytes();
         let mut cursor = wire.as_slice();

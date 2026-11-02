@@ -181,3 +181,6 @@ mod tests {
         assert!(!prompt(true, &Roles::default()).contains("# Roles"));
     }
 }
+
+#[cfg(test)]
+mod gating;

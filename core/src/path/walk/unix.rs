@@ -279,12 +279,22 @@ pub(super) fn reopen(dir: &File) -> io::Result<File> {
     ))
 }
 
+/// `access(2)` for reading against the real uid and gid, as `test -r` asks;
+/// follows.
+pub(super) fn may_read(dir: &File, name: &OsStr) -> io::Result<()> {
+    access(dir, name, Amode::READ_OK)
+}
+
 /// `access(2)` for writing against the real uid and gid, as `test -w` asks;
 /// follows.
 pub(super) fn may_write(dir: &File, name: &OsStr) -> io::Result<()> {
+    access(dir, name, Amode::WRITE_OK)
+}
+
+fn access(dir: &File, name: &OsStr, mode: Amode) -> io::Result<()> {
     Ok(site!(
         Silent::WalkAccess,
-        rustix::fs::accessat(dir, name, Amode::WRITE_OK, AtFlags::empty())
+        rustix::fs::accessat(dir, name, mode, AtFlags::empty())
     )?)
 }
 

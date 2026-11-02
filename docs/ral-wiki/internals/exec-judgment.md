@@ -163,7 +163,7 @@ keeps the old advice. No dependency resolver is built.
 **A copy of an excluded binary under another name is a different file.** It
 carries no trace of the refused name, and an allowed directory admits it. That
 is true in the guard, and in the macOS profile too, since Seatbelt's
-`(deny process-exec (regex #"/bash$"))` also sees only the new name. A program
+`(deny process-exec (regex "/bash$"))` also sees only the new name. A program
 written into a writable, runnable folder, or a script fed to an admitted
 interpreter, is the same.
 

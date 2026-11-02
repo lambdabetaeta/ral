@@ -5,7 +5,6 @@ use ral_core::carrier::Transport as _;
 use ral_core::data::FOValue;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
 use std::borrow::Cow;
-use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 thread_local! {
@@ -114,117 +113,107 @@ fn a_batch_from_the_old_generation_is_declined_but_the_new_sink_is_live() {
     assert!(agent.admit(input).is_some());
 }
 
-#[test]
-fn failed_clear_preparation_preserves_helpers_workers_history_and_registers() {
+/// An agent holding everything a failed `/clear` must leave alone.
+struct Seeded {
+    agent: Agent,
+    outgoing: Arc<ral_core::carrier::IdentityTransport>,
+    helper: AgentHandle,
+    helper_engine: Arc<ral_core::carrier::IdentityTransport>,
+    entries: Vec<ral_core::shell::runtime::WorkerEntry>,
+    facts: crate::agent::nudge::Facts,
+    before: Vec<u8>,
+    boots: u32,
+}
+
+fn seeded(pending_call: bool) -> Seeded {
     use genai::chat::{ContentPart, ToolCall};
-    for failure in ["unready", "unavailable", "boot"] {
-        let mut agent = Agent::for_test_with(TestLaunch {
-            installers: &INSTALLERS,
-            ..TestLaunch::new("system")
-        })
-        .unwrap();
-        let (emit, _rx) = crate::bus::dummy_emitter();
-        let result = agent.ral(
-            &DurableRoot::default().child(),
-            r#"let keep = 1
+    let mut agent = Agent::for_test_with(TestLaunch {
+        installers: &INSTALLERS,
+        ..TestLaunch::new("system")
+    })
+    .unwrap();
+    let (emit, _rx) = crate::bus::dummy_emitter();
+    let result = agent.ral(
+        &DurableRoot::default().child(),
+        r#"let keep = 1
 spawn "blocker" { test-clear-block-forever }
 exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#,
-            5,
-            &emit,
+        5,
+        &emit,
+    );
+    assert!(!result.failed, "{}", result.text);
+    let entries = workers(&agent);
+    assert_eq!(entries.len(), 1);
+    let child = agent.fork_named("helper").unwrap();
+    take_task(&child.handle(), &child.mailbox);
+    let helper_engine = identity(&child);
+    let helper = launch_child(&mut agent, child, None, &emit);
+    crate::agent::testkit::schedule(
+        &mut agent,
+        crate::schedule::Trigger::After(Duration::from_hours(1)),
+        "ping".into(),
+        "ping".into(),
+    );
+    agent.seed("keep queued".into());
+    agent.body.readings.measure = Some(crate::agent::gauge::Measure { tokens: 17, at: 2 });
+    assert!(agent.body.readings.gauges.disk(2, 1).is_some());
+    let facts = crate::agent::nudge::Facts {
+        must_reply: false,
+        pinned: Some("keep".into()),
+        quiet: true,
+    };
+    {
+        let body = &mut *agent.body;
+        assert!(
+            body.readings
+                .nudges
+                .react(
+                    Ok(&crate::agent::outcome::Outcome::Complete),
+                    &facts,
+                    &body.log
+                )
+                .is_some()
         );
-        assert!(!result.failed, "{}", result.text);
-        let entries = workers(&agent);
-        assert_eq!(entries.len(), 1);
-        let child = agent.fork_named("helper").unwrap();
-        take_task(&child.handle(), &child.mailbox);
-        let helper_engine = identity(&child);
-        let helper = launch_child(&mut agent, child, None, &emit);
-        crate::agent::testkit::schedule(
-            &mut agent,
-            crate::schedule::Trigger::After(Duration::from_hours(1)),
-            "ping".into(),
-            "ping".into(),
-        );
-        agent.seed("keep queued".into());
-        agent.body.readings.measure = Some(crate::agent::gauge::Measure { tokens: 17, at: 2 });
-        assert!(agent.body.readings.gauges.disk(2, 1).is_some());
-        let facts = crate::agent::nudge::Facts {
-            must_reply: false,
-            pinned: Some("keep".into()),
-            quiet: true,
-        };
-        {
-            let body = &mut *agent.body;
-            assert!(
-                body.readings
-                    .nudges
-                    .react(
-                        Ok(&crate::agent::outcome::Outcome::Complete),
-                        &facts,
-                        &body.log
-                    )
-                    .is_some()
-            );
+        body.log
+            .append_user("keep history".into(), None, Voice::Human)
+            .unwrap();
+        if pending_call {
             body.log
-                .append_user("keep history".into(), None, Voice::Human)
+                .append_assistant(
+                    ChatMessage::assistant(vec![ContentPart::ToolCall(ToolCall {
+                        call_id: "pending".into(),
+                        fn_name: "ral".into(),
+                        fn_arguments: serde_json::json!({"command": "pwd"}),
+                        thought_signatures: None,
+                    })]),
+                    vec!["pending".into()],
+                    None,
+                )
                 .unwrap();
-            if failure == "unready" {
-                body.log
-                    .append_assistant(
-                        ChatMessage::assistant(vec![ContentPart::ToolCall(ToolCall {
-                            call_id: "pending".into(),
-                            fn_name: "ral".into(),
-                            fn_arguments: serde_json::json!({"command": "pwd"}),
-                            thought_signatures: None,
-                        })]),
-                        vec!["pending".into()],
-                        None,
-                    )
-                    .unwrap();
-            }
         }
-        let before = serde_json::to_vec(&agent.rendered_messages()).unwrap();
-        let outgoing = identity(&agent);
-        let boots = BOOTS.get();
-        match failure {
-            "boot" => REFUSE_BOOT.set(true),
-            "unavailable" => {
-                let recorder = agent.recorder();
-                recorder.fail_after(1);
-                assert!(
-                    recorder
-                        .emit(Forensic::SystemNote {
-                            text: "fail".into()
-                        })
-                        .is_err()
-                );
-            }
-            "unready" => {}
-            _ => unreachable!(),
-        }
-        assert_ne!(agent.clear().unwrap_err(), "");
-        assert_eq!(BOOTS.get() - boots, u32::from(failure == "boot"));
-        assert!(Arc::ptr_eq(&outgoing, &identity(&agent)));
+    }
+    let before = serde_json::to_vec(&agent.rendered_messages()).unwrap();
+    let outgoing = identity(&agent);
+    let boots = BOOTS.get();
+    Seeded {
+        agent,
+        outgoing,
+        helper,
+        helper_engine,
+        entries,
+        facts,
+        before,
+        boots,
+    }
+}
+
+impl Seeded {
+    /// The failed clear left the engine, its registers and the history as seeded.
+    fn assert_state_kept(&mut self) {
+        let agent = &mut self.agent;
+        assert!(Arc::ptr_eq(&self.outgoing, &identity(agent)));
         assert_eq!(agent.generation, 0);
-        assert_eq!(outgoing.session_ended().unwrap(), None);
-        if failure != "unavailable" {
-            assert_eq!(helper_engine.session_ended().unwrap(), None);
-        }
-        assert_eq!(helper.is_live(), failure != "unavailable");
-        if failure == "unavailable" {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !helper
-                .status()
-                .is_ok_and(|status| matches!(status.report, Some(ChildStatus::Failed(_))))
-            {
-                assert!(Instant::now() < deadline, "ended helper did not report");
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            assert!(!agent.rest().pending);
-        } else {
-            assert!(agent.rest().pending);
-            assert_eq!(agent.handle().queued(), ["keep queued"]);
-        }
+        assert_eq!(self.outgoing.session_ended().unwrap(), None);
         assert!(
             agent
                 .engine()
@@ -233,32 +222,85 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
                 .iter()
                 .any(|binding| binding.name == "keep" && binding.preview == "1")
         );
-        assert!(!entries[0].handle.cancel.is_cancelled());
-        assert_eq!(crate::agent::testkit::schedules(&agent).len(), 1);
+        assert!(!self.entries[0].handle.cancel.is_cancelled());
+        assert_eq!(crate::agent::testkit::schedules(agent).len(), 1);
         assert_eq!(agent.body.pins.len(), 1);
         assert_eq!(
             agent.body.readings.measure.map(|m| (m.tokens, m.at)),
             Some((17, 2))
         );
         assert!(agent.body.readings.gauges.disk(2, 1).is_none());
-        {
-            let body = &mut *agent.body;
-            assert!(
-                body.readings
-                    .nudges
-                    .react(
-                        Ok(&crate::agent::outcome::Outcome::Complete),
-                        &facts,
-                        &body.log
-                    )
-                    .is_none()
-            );
-        }
+        let body = &mut *agent.body;
+        assert!(
+            body.readings
+                .nudges
+                .react(
+                    Ok(&crate::agent::outcome::Outcome::Complete),
+                    &self.facts,
+                    &body.log
+                )
+                .is_none()
+        );
         assert_eq!(
             serde_json::to_vec(&agent.rendered_messages()).unwrap(),
-            before
+            self.before
         );
     }
+
+    /// The helper and the human's queued input survive.
+    fn assert_helper_kept(&self) {
+        assert_eq!(self.helper_engine.session_ended().unwrap(), None);
+        assert!(self.helper.is_live());
+        assert!(self.agent.rest().pending);
+        assert_eq!(self.agent.handle().queued(), ["keep queued"]);
+    }
+}
+
+#[test]
+fn a_clear_with_an_unanswered_tool_call_changes_nothing() {
+    let mut seeded = seeded(true);
+    assert_ne!(seeded.agent.clear().unwrap_err(), "");
+    assert_eq!(BOOTS.get(), seeded.boots);
+    seeded.assert_state_kept();
+    seeded.assert_helper_kept();
+}
+
+#[test]
+fn a_clear_whose_engine_will_not_boot_changes_nothing() {
+    let mut seeded = seeded(false);
+    REFUSE_BOOT.set(true);
+    assert_ne!(seeded.agent.clear().unwrap_err(), "");
+    assert_eq!(BOOTS.get() - seeded.boots, 1);
+    seeded.assert_state_kept();
+    seeded.assert_helper_kept();
+}
+
+#[test]
+fn a_clear_after_the_record_fails_keeps_state_but_ends_the_helper() {
+    let mut seeded = seeded(false);
+    let recorder = seeded.agent.recorder();
+    recorder.fail_after(1);
+    assert!(
+        recorder
+            .emit(Forensic::SystemNote {
+                text: "fail".into()
+            })
+            .is_err()
+    );
+    assert_ne!(seeded.agent.clear().unwrap_err(), "");
+    assert_eq!(BOOTS.get(), seeded.boots);
+    seeded.assert_state_kept();
+    assert!(!seeded.helper.is_live());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !seeded
+        .helper
+        .status()
+        .is_ok_and(|status| matches!(status.report, Some(ChildStatus::Failed(_))))
+    {
+        assert!(Instant::now() < deadline, "ended helper did not report");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!seeded.agent.rest().pending);
 }
 
 #[test]
@@ -439,39 +481,15 @@ fn rewind_validates_the_anchor_and_rearms_nudge_edges() {
     )));
 }
 
-struct ReleaseOnDrop(Arc<AtomicBool>);
-impl Drop for ReleaseOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
-fn held_trunk(release: &Arc<AtomicBool>) -> Agent {
-    let release = release.clone();
-    let held: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
-        Cow::Borrowed("test-held"),
-        scheme_test_clear_block_forever,
-        "test-only: ignore cancellation until released.",
-        BuiltinBody::Captured(Arc::new(move |_, _, shell| {
-            loop {
-                if release.load(Ordering::Acquire) {
-                    shell.poll()?;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        })),
-    )]);
-    dressed_trunk_over(
-        move |runtime| runtime.install_captured_builtins(&held),
-        |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
-    )
-}
-
 #[test]
 fn clear_cancels_workers_and_records_the_outgoing_engines_failure_once() {
-    let release = Arc::new(AtomicBool::new(false));
-    let _release = ReleaseOnDrop(release.clone());
-    let mut agent = held_trunk(&release);
+    let held = HeldWorker::new("test-held");
+    let _release = held.release_on_drop();
+    let builtins = held.builtins();
+    let mut agent = dressed_trunk_over(
+        move |runtime| runtime.install_captured_builtins(&builtins),
+        |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
+    );
     let record = agent.log_dir().path().join(RECORD);
     let _fleet = agent.fleet.clone();
     let outgoing = identity(&agent);
@@ -509,7 +527,7 @@ fn clear_cancels_workers_and_records_the_outgoing_engines_failure_once() {
         recorded, failures,
         "a clean final engine never loses or duplicates the outgoing failure"
     );
-    release.store(true, Ordering::Release);
+    held.release();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !entries[0].handle.sample().has_ended() {
         assert!(Instant::now() < deadline, "released worker did not settle");

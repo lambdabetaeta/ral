@@ -73,39 +73,6 @@ fn context_survey_records_a_display_commit() {
     );
 }
 
-static RESOURCES_STOP_ENTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static RESOURCES_STOP_RELEASE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-struct ResourcesReleaseGuard(&'static std::sync::atomic::AtomicBool);
-impl Drop for ResourcesReleaseGuard {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
-fn builtin_resources_hold_until_released(
-    _args: &[ral_core::Value],
-    _mooring: &ral_core::shell::runtime::Mooring,
-    shell: &mut ral_core::Shell,
-) -> ral_core::shell::runtime::Settled<ral_core::Value> {
-    RESOURCES_STOP_ENTERED.store(true, std::sync::atomic::Ordering::Release);
-    while !RESOURCES_STOP_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    shell.poll()?;
-    Ok(ral_core::Value::Unit)
-}
-
-static RESOURCES_TEST_BUILTINS: [ral_core::shell::runtime::BuiltinEntry; 1] =
-    [ral_core::shell::runtime::BuiltinEntry::new(
-        std::borrow::Cow::Borrowed("test-resources-hold"),
-        scheme_test_clear_block_forever,
-        "test-only: hold until RESOURCES_STOP_RELEASE, then poll.",
-        ral_core::shell::runtime::BuiltinBody::Static(builtin_resources_hold_until_released),
-    )];
-
 /// The agent half surveys what this thread owns: the worker registry's
 /// running/settled split (counting `Stopping` against the running cap and
 /// `Ready` under settled with its retention note), the binding count,
@@ -113,14 +80,13 @@ static RESOURCES_TEST_BUILTINS: [ral_core::shell::runtime::BuiltinEntry; 1] =
 /// fallback when nothing has forked.
 #[test]
 fn resource_rows_survey_the_agents_accumulators() {
-    RESOURCES_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
-    RESOURCES_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
-    let mut session = dressed_trunk(|runtime| {
+    let held = HeldWorker::new("test-resources-hold");
+    let builtins = held.builtins();
+    let mut session = dressed_trunk(move |runtime| {
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
-        runtime.install_builtins(&RESOURCES_TEST_BUILTINS);
+        runtime.install_captured_builtins(&builtins);
     });
-    // Declared after the session, so the hold ends before its teardown.
-    let _release = ResourcesReleaseGuard(&RESOURCES_STOP_RELEASE);
+    let _release = held.release_on_drop();
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
 
@@ -136,9 +102,7 @@ fn resource_rows_survey_the_agents_accumulators() {
         30,
         &emit,
     );
-    while !RESOURCES_STOP_ENTERED.load(std::sync::atomic::Ordering::Acquire) {
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    held.wait_entered();
     session.ral(&DurableRoot::default().child(), "cancel $h_stop", 30, &emit);
     session.ral(
         &DurableRoot::default().child(),

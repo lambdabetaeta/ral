@@ -1,0 +1,5 @@
+# codes: L0003
+# status: 2
+# at: 5:1
+# contains: expected closing `)` before end of input
+$(

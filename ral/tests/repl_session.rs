@@ -12,49 +12,12 @@
 mod common;
 
 #[cfg(unix)]
-use common::repl_output_lines;
-use common::{Output, ral_command};
+use common::{ral_command, repl_output_lines};
+use common::{rc_home, repl};
+#[cfg(unix)]
 use std::io::Write;
-use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Stdio;
-use tempfile::TempDir;
-
-/// Run `ral <args>` with `input` piped on stdin and `envs` overlaid on the
-/// inherited environment.  Closing stdin ends the REPL loop.
-fn repl(args: &[&str], envs: &[(&str, PathBuf)], input: &str) -> Output {
-    let mut cmd = ral_command();
-    cmd.args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (key, val) in envs {
-        cmd.env(key, val);
-    }
-
-    let mut child = cmd.spawn().expect("spawn ral");
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(input.as_bytes()).unwrap();
-    drop(stdin);
-
-    let out = child.wait_with_output().unwrap();
-    Output {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        status: out.status.code().unwrap_or(1),
-    }
-}
-
-/// A temp `XDG_CONFIG_HOME` holding `ral/rc`, beside an empty `HOME`, so a
-/// spawned session discovers exactly this rc and no profile of the real user.
-/// The returned directory must outlive the run.
-fn rc_home(rc: &str) -> (TempDir, Vec<(&'static str, PathBuf)>) {
-    let dir = tempfile::tempdir().unwrap();
-    let (config, home) = (dir.path().join("config"), dir.path().join("home"));
-    std::fs::create_dir_all(config.join("ral")).unwrap();
-    std::fs::create_dir(&home).unwrap();
-    std::fs::write(config.join("ral").join("rc"), rc).unwrap();
-    (dir, vec![("XDG_CONFIG_HOME", config), ("HOME", home)])
-}
 
 // ── The rc file reaches the session ────────────────────────────────────────
 

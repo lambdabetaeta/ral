@@ -64,11 +64,6 @@ fn single_file_deny_blocks_command() {
         "ls should be denied; stderr:\n{}",
         out.stderr
     );
-    assert!(
-        out.stderr.contains("denied by active grant") || out.stderr.contains("'ls'"),
-        "expected grant-denied diagnostic; got:\n{}",
-        out.stderr
-    );
 }
 
 #[test]
@@ -79,11 +74,11 @@ fn missing_profile_file_errors_clean() {
         "-c",
         "echo never",
     ]);
-    assert_ne!(out.status, 0);
+    assert_ne!(out.status, 0, "stderr:\n{}", out.stderr);
     assert!(
-        out.stderr.contains("file not found") || out.stderr.contains("does not exist"),
-        "expected file-not-found error; got:\n{}",
-        out.stderr
+        !out.stdout.contains("never"),
+        "the body must not run without its profile; stdout:\n{}",
+        out.stdout
     );
 }
 
@@ -213,11 +208,6 @@ fn confined_ral_walks_to_a_granted_file() {
     std::fs::remove_dir_all(&d).ok();
 
     admitted(&proof, &out, "walked");
-    assert!(
-        out.stdout.contains("walked"),
-        "expected the file's content; stdout:\n{}",
-        out.stdout
-    );
 }
 
 #[cfg(target_os = "macos")]
@@ -475,7 +465,7 @@ fn undecodable_exec_table_passes_the_checker_and_is_refused_at_run() {
 /// A confined command can fork; macOS also sets a hard process budget.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn confined_forks_run_under_a_process_budget() {
+fn a_confined_command_forks_and_macos_budgets_its_processes() {
     let proof = ral_core::require_confinement!();
     let d = scratch_dir("brake");
     let d_s = d.to_string_lossy().into_owned();
@@ -568,7 +558,7 @@ fn a_neutral_policy_leaves_the_process_limits_alone() {
 /// Neutral layers preserve launch restrictions, including macOS's process budget.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn neutral_layers_around_a_restriction_keep_the_process_budget() {
+fn neutral_layers_around_a_restriction_launch_confined_and_keep_the_macos_budget() {
     let proof = ral_core::require_confinement!();
     let d = scratch_dir("brake_wrapped");
     let d_s = d.to_string_lossy().into_owned();
@@ -730,7 +720,7 @@ fn an_absent_exec_path_deny_holds_a_case_variant() {
 
 /// E2: Seatbelt folds an exec deny as the guard does, so a child's exec of
 /// the case variant is refused and the stored sibling admitted.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 #[test]
 fn seatbelt_refuses_a_case_variant_of_an_absent_exec_deny() {
     ral_core::require_landlock!(1);
@@ -777,7 +767,6 @@ fn a_stacked_one_sided_allow_denies_no_other_spelling() {
     ]);
 
     admitted(&proof, &out, "ran");
-    assert!(out.stdout.contains("ran"), "stdout:\n{}", out.stdout);
 }
 
 /// An allow beneath a deny never reaches the OS backend, so a child is

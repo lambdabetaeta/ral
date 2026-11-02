@@ -193,7 +193,57 @@ mod tests {
     fn an_oversized_frame_is_refused_before_allocation() {
         let mut stream = std::io::Cursor::new(u32::MAX.to_le_bytes().to_vec());
         let error = frame::read::<_, Request>(&mut stream).expect_err("refused");
-        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::Other,
+            "a body read would have hit end of stream instead"
+        );
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_not_written() {
+        let mut buffer = Vec::new();
+        let oversized = "x".repeat(frame::MAX as usize);
+        let error = frame::write(&mut buffer, &oversized).expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(buffer.is_empty(), "no prefix may precede a refused body");
+    }
+
+    #[test]
+    fn a_truncated_body_is_an_error_but_a_missing_prefix_is_a_departure() {
+        let mut short = 10u32.to_le_bytes().to_vec();
+        short.extend_from_slice(b"abc");
+        let error = frame::read::<_, Request>(&mut &short[..]).expect_err("cut mid-body");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+
+        assert!(frame::read::<_, Request>(&mut &[][..]).unwrap().is_none());
+    }
+
+    #[test]
+    fn every_reply_round_trips() {
+        let replies = [
+            Reply::Booted {
+                control: vec![1, 2, 3],
+                net: vec![4, 5],
+            },
+            Reply::Stopped(Ok(())),
+            Reply::Stopped(Err(Error::ForcedStop {
+                hypervisor: "Hyper-V".into(),
+                grace_secs: 5,
+            })),
+            Reply::Console(GuestConsole::Unkept),
+            Reply::Console(GuestConsole::Kept {
+                log: Some(std::path::PathBuf::from(r"C:\cache\console.log")),
+                tail: vec!["panic".to_string()],
+            }),
+            Reply::Refused(Error::NotPermitted),
+        ];
+        for reply in replies {
+            let mut buffer = Vec::new();
+            frame::write(&mut buffer, &reply).unwrap();
+            let back: Reply = frame::read(&mut &buffer[..]).unwrap().unwrap();
+            assert_eq!(format!("{back:?}"), format!("{reply:?}"));
+        }
     }
 
     fn longest_path() -> std::path::PathBuf {

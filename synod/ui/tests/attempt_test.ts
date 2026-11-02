@@ -51,3 +51,20 @@ Deno.test("late failure withdraws the displayed account before narration, but no
   equal(report, "successor report");
   equal(events, ["withdraw", "narrate:null", "narrate:successor report"]);
 });
+
+Deno.test("acceptance admits only a starting attempt", () => {
+  const accepted = { attempt: "a", type: "accepted" } as const;
+  equal(advance({ attempt: "a", phase: "starting" }, accepted), { attempt: "a", phase: "accepted", job: null });
+  equal(advance({ attempt: "a", phase: "accepted", job: null }, accepted), null);
+  equal(advance({ attempt: "a", phase: "ready", job: null }, accepted), null);
+  equal(advance({ attempt: "b", phase: "starting" }, accepted), null);
+});
+
+Deno.test("opening readies the attempt, keeping a job begun while accepted, and never reopens", () => {
+  const opening = { attempt: "a", type: "opening" } as const;
+  equal(advance({ attempt: "a", phase: "starting" }, opening), { attempt: "a", phase: "ready", job: null });
+  equal(advance({ attempt: "a", phase: "accepted", job: null }, opening), { attempt: "a", phase: "ready", job: null });
+  equal(advance({ attempt: "a", phase: "accepted", job: 3 }, opening), { attempt: "a", phase: "ready", job: 3 });
+  equal(advance({ attempt: "a", phase: "ready", job: 3 }, opening), null);
+  equal(advance({ attempt: "a", phase: "ended" }, opening), null);
+});

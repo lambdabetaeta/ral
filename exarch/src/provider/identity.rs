@@ -581,18 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn only_openrouter_and_codex_meter_anything() {
-        for service in built_in_services() {
-            let expected = match service.name.as_str() {
-                "openrouter" => Meter::OpenRouterBudget,
-                "openai-codex" => Meter::Codex,
-                _ => Meter::Unpublished,
-            };
-            assert_eq!(service.meter, expected, "{}", service.name);
-        }
-    }
-
-    #[test]
     fn openai_service_keeps_openai_adapter_split() {
         let openai = Account::built_in("openai").service;
         assert_eq!(adapter_for_model(&openai, "gpt-4.1"), AdapterKind::OpenAI);

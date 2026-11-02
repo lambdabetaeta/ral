@@ -1,4 +1,6 @@
 # codes: P0001
+# status: 2
+# at: 6:13
 # contains: this `,` follows no entry
 # contains: Help: remove the extra `,`
 let xs = [a,, b]

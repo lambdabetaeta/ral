@@ -139,157 +139,62 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn unspecified_ipv4_is_rejected() {
-        assert!(!is_public("0.0.0.0".parse().unwrap()));
-        assert!(!is_public("0.255.255.255".parse().unwrap()));
-    }
-
-    #[test]
-    fn broadcast_ipv4_is_rejected() {
-        assert!(!is_public("255.255.255.255".parse().unwrap()));
-    }
-
-    #[test]
-    fn loopback_ipv4_is_rejected() {
-        assert!(!is_public("127.0.0.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn private_use_ipv4_is_rejected() {
-        assert!(!is_public("10.1.2.3".parse().unwrap()));
-        assert!(!is_public("172.16.0.1".parse().unwrap()));
-        assert!(!is_public("192.168.1.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn link_local_ipv4_is_rejected() {
-        assert!(!is_public("169.254.169.254".parse().unwrap()));
-    }
-
-    #[test]
-    fn carrier_grade_nat_ipv4_is_rejected() {
-        assert!(!is_public("100.64.0.1".parse().unwrap()));
-        assert!(!is_public("100.127.255.255".parse().unwrap()));
-    }
-
-    #[test]
-    fn documentation_ipv4_is_rejected() {
-        assert!(!is_public("192.0.2.1".parse().unwrap()));
-        assert!(!is_public("198.51.100.1".parse().unwrap()));
-        assert!(!is_public("203.0.113.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn benchmarking_ipv4_is_rejected() {
-        assert!(!is_public("198.18.0.1".parse().unwrap()));
-        assert!(!is_public("198.19.255.255".parse().unwrap()));
-    }
-
-    #[test]
-    fn ietf_protocol_assignments_ipv4_is_rejected() {
-        assert!(!is_public("192.0.0.8".parse().unwrap()));
-    }
-
-    #[test]
-    fn multicast_ipv4_is_rejected() {
-        assert!(!is_public("224.0.0.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn reserved_ipv4_is_rejected() {
-        assert!(!is_public("240.0.0.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn unspecified_ipv6_is_rejected() {
-        assert!(!is_public("::".parse().unwrap()));
-    }
-
-    #[test]
-    fn loopback_ipv6_is_rejected() {
-        assert!(!is_public("::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn unique_local_ipv6_is_rejected() {
-        assert!(!is_public("fc00::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn link_local_ipv6_is_rejected() {
-        assert!(!is_public("fe80::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn documentation_ipv6_is_rejected() {
-        assert!(!is_public("2001:db8::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn multicast_ipv6_is_rejected() {
-        assert!(!is_public("ff00::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn non_global_unicast_ipv6_is_rejected() {
-        assert!(!is_public("4000::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn six_to_four_ipv6_is_rejected() {
-        assert!(!is_public("2002::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn six_to_four_wrapped_link_local_ipv4_is_rejected() {
-        assert!(!is_public("2002:a9fe:a9fe::".parse().unwrap()));
-    }
-
-    #[test]
-    fn teredo_ipv6_is_rejected() {
-        assert!(!is_public("2001::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn benchmarking_ipv6_is_rejected() {
-        assert!(!is_public("2001:2::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn orchid_ipv6_is_rejected() {
-        assert!(!is_public("2001:10::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn orchidv2_ipv6_is_rejected() {
-        assert!(!is_public("2001:20::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn documentation_ipv6_rfc9637_is_rejected() {
-        assert!(!is_public("3fff::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn public_ipv4_is_admitted() {
-        assert!(is_public("93.184.216.34".parse().unwrap()));
-    }
-
-    #[test]
-    fn public_ipv6_is_admitted() {
-        assert!(is_public(
-            "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap()
-        ));
-    }
-
-    #[test]
-    fn ipv4_mapped_private_address_is_rejected() {
-        assert!(!is_public("::ffff:10.0.0.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn ipv4_mapped_link_local_address_is_rejected() {
-        assert!(!is_public("::ffff:169.254.169.254".parse().unwrap()));
+    fn is_public_classifies_boundaries() {
+        let cases = [
+            ("0.0.0.0", false),
+            ("0.255.255.255", false),
+            ("255.255.255.255", false),
+            ("127.0.0.1", false),
+            ("10.1.2.3", false),
+            ("172.16.0.1", false),
+            ("192.168.1.1", false),
+            ("169.254.169.254", false),
+            ("100.64.0.1", false),
+            ("100.127.255.255", false),
+            ("192.0.2.1", false),
+            ("198.51.100.1", false),
+            ("203.0.113.1", false),
+            ("198.18.0.1", false),
+            ("198.19.255.255", false),
+            ("192.0.0.8", false),
+            ("224.0.0.1", false),
+            ("240.0.0.1", false),
+            ("::", false),
+            ("::1", false),
+            ("fc00::1", false),
+            ("fe80::1", false),
+            ("2001:db8::1", false),
+            ("ff00::1", false),
+            ("4000::1", false),
+            ("2002::1", false),
+            ("2002:a9fe:a9fe::", false),
+            ("2001::1", false),
+            ("2001:2::1", false),
+            ("2001:10::1", false),
+            ("2001:20::1", false),
+            ("3fff::1", false),
+            ("::ffff:10.0.0.1", false),
+            ("::ffff:169.254.169.254", false),
+            ("::10.0.0.1", false),
+            ("64:ff9b::1.2.3.4", false),
+            ("93.184.216.34", true),
+            ("100.63.255.255", true),
+            ("100.128.0.1", true),
+            ("172.15.255.255", true),
+            ("172.32.0.1", true),
+            ("198.17.255.255", true),
+            ("198.20.0.1", true),
+            ("192.0.1.1", true),
+            ("223.255.255.254", true),
+            ("2606:2800:220:1:248:1893:25c8:1946", true),
+            ("2001:4860::1", true),
+            ("2400::1", true),
+            ("::ffff:93.184.216.34", true),
+            ("::93.184.216.34", true),
+        ];
+        for (ip, public) in cases {
+            assert_eq!(is_public(ip.parse().unwrap()), public, "{ip}");
+        }
     }
 
     struct FakeDialer {
@@ -335,19 +240,32 @@ mod tests {
     }
 
     #[test]
-    fn mixed_public_and_private_answer_keeps_only_public_addresses_in_order() {
-        let addrs = vec![
+    fn mixed_answer_dials_only_the_public_addresses_in_order() {
+        let dialer = FakeDialer::returning(vec![
             "10.0.0.1:443".parse().unwrap(),
             "93.184.216.34:443".parse().unwrap(),
             "192.168.1.1:443".parse().unwrap(),
-        ];
-        let dialer = FakeDialer::returning(addrs);
+            "93.184.216.35:443".parse().unwrap(),
+        ]);
         let host = Host::parse("example.com").unwrap();
-        let _ = open(&host, &dialer, Duration::from_millis(50));
+        let refusal = open(&host, &dialer, Duration::from_millis(50)).unwrap_err();
+        assert_eq!(refusal.status, 502);
         assert_eq!(
             *dialer.dial_calls.lock().unwrap(),
-            vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()]
+            vec![
+                "93.184.216.34:443".parse::<SocketAddr>().unwrap(),
+                "93.184.216.35:443".parse().unwrap(),
+            ]
         );
+    }
+
+    #[test]
+    fn an_empty_answer_refuses_with_502_and_never_dials() {
+        let dialer = FakeDialer::returning(vec![]);
+        let host = Host::parse("example.com").unwrap();
+        let refusal = open(&host, &dialer, Duration::from_millis(50)).unwrap_err();
+        assert_eq!(refusal.status, 502);
+        assert!(dialer.dial_calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -384,16 +302,27 @@ mod tests {
         assert!(dialer.dial_calls.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn dialer_receives_the_exact_vetted_socket_addr() {
-        let addrs = vec!["93.184.216.34:443".parse().unwrap()];
-        let dialer = FakeDialer::returning(addrs);
-        let host = Host::parse("example.com").unwrap();
-        let _ = open(&host, &dialer, Duration::from_millis(50));
-        assert_eq!(
-            *dialer.dial_calls.lock().unwrap(),
-            vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()]
-        );
+    struct FakeDialerWithSelectiveFailure {
+        inner: FakeDialer,
+        real_addr: SocketAddr,
+        fail_first: SocketAddr,
+    }
+
+    impl Dialer for FakeDialerWithSelectiveFailure {
+        fn resolve(&self, host: &Host) -> io::Result<Vec<SocketAddr>> {
+            self.inner.resolve(host)
+        }
+
+        fn dial(&self, addr: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+            self.inner.dial_calls.lock().unwrap().push(addr);
+            if addr == self.fail_first {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "first address refuses",
+                ));
+            }
+            TcpStream::connect_timeout(&self.real_addr, timeout)
+        }
     }
 
     #[test]
@@ -422,28 +351,5 @@ mod tests {
                 "93.184.216.2:443".parse::<SocketAddr>().unwrap()
             ]
         );
-    }
-
-    struct FakeDialerWithSelectiveFailure {
-        inner: FakeDialer,
-        real_addr: SocketAddr,
-        fail_first: SocketAddr,
-    }
-
-    impl Dialer for FakeDialerWithSelectiveFailure {
-        fn resolve(&self, host: &Host) -> io::Result<Vec<SocketAddr>> {
-            self.inner.resolve(host)
-        }
-
-        fn dial(&self, addr: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
-            self.inner.dial_calls.lock().unwrap().push(addr);
-            if addr == self.fail_first {
-                return Err(io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    "first address refuses",
-                ));
-            }
-            TcpStream::connect_timeout(&self.real_addr, timeout)
-        }
     }
 }

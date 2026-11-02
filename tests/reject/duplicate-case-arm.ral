@@ -1,3 +1,6 @@
+# codes: P0001
+# status: 2
+# at: 6:44
 # contains: already has a `ok arm
 let r = `ok 5
 let x = case $r [`ok: { |s| !{upper $s} }, `ok: { |i| return $[$i + 1] }, `err: { |_| return 0 }]

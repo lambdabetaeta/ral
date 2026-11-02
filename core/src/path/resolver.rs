@@ -219,29 +219,28 @@ mod tests {
         }
     }
 
-    /// A script's path resolves as an ordinary one with the script's
-    /// directory for the cwd, row by row: a relative path joins it, a
-    /// drive-relative one on its drive too, and an absolute one, a malformed
-    /// or mixed head included, is kept as `resolve` keeps it rather than lent
-    /// the directory's drive.
+    /// A script's path is read beside the script, not the cwd; an absolute
+    /// one, a malformed or mixed head included, is kept as `resolve` keeps it.
     #[test]
-    fn a_script_path_resolves_as_an_ordinary_one_beside_the_script() {
+    fn a_script_path_is_read_beside_the_script() {
         let dir = if cfg!(windows) {
             Path::new(r"C:\work\proj")
         } else {
             Path::new("/work/proj")
         };
         let script = dir.join("main.ral");
-        let (elsewhere, here) = (elsewhere(), cwd(dir.to_str().expect("UTF-8")));
-        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let elsewhere = elsewhere();
+        let env = EnvVars::new();
         let r = Resolver::at(&env, &elsewhere);
-        let beside = Resolver::at(&env, &here);
+        let beside = |raw: &str| {
+            r.resolve_in_script(raw, &script)
+                .expect("the directory is a cwd")
+                .folded()
+        };
+        assert_eq!(beside("lib.ral").as_path(), dir.join("lib.ral"));
+        assert_eq!(beside("../x").as_path(), dir.parent().unwrap().join("x"));
         for raw in [
-            "lib.ral",
-            "../x/./y",
             "/abs/x",
-            r"\x\y",
-            "C:x",
             r"C:\x\..\y",
             r"\\x",
             "//x/../y",
@@ -251,23 +250,15 @@ mod tests {
             r"\\?\x",
             r"\\.\pipe\x",
             r"\\srv\sh\x",
-            "~/x",
-        ] {
-            let in_script = r
-                .resolve_in_script(raw, &script)
-                .expect("the directory is a cwd");
+        ]
+        .into_iter()
+        .filter(|raw| lex::is_absolute(raw))
+        {
             assert_eq!(
-                in_script.as_path(),
-                beside.resolve(raw).as_path(),
+                beside(raw).as_path(),
+                lex::fold_dots(Path::new(raw)),
                 "{raw:?}"
             );
-            if lex::is_absolute(raw) {
-                assert_eq!(
-                    in_script.folded().as_path(),
-                    lex::fold_dots(Path::new(raw)),
-                    "{raw:?}"
-                );
-            }
         }
     }
 

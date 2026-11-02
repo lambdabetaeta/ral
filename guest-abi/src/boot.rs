@@ -597,14 +597,23 @@ mod tests {
 
     #[test]
     fn a_gateway_outside_the_subnet_is_refused() {
-        let err =
-            Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.3.2")
-                .expect_err("a gateway outside the subnet must be refused");
+        let address = Ipv4Addr::new(10, 0, 2, 15);
+        let gateway = Ipv4Addr::new(10, 0, 3, 2);
+        let link = Link {
+            address,
+            prefix: 24,
+            gateway,
+        };
         assert_eq!(
-            err,
-            "`ral.net=1730,10.0.2.15/24,10.0.3.2` names a gateway, 10.0.3.2, that is not inside \
-             10.0.2.15/24; the guest could never route to it. Fix the prefix or the gateway."
+            Net::new(1730, link),
+            Err(NetError::GatewayOutside {
+                gateway,
+                address,
+                prefix: 24,
+            })
         );
+        Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.3.2")
+            .expect_err("a gateway outside the subnet must be refused");
     }
 
     #[test]

@@ -474,3 +474,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod assembly;

@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:14
 # contains: expected `|` to close the parameter list
 let f = { |x }

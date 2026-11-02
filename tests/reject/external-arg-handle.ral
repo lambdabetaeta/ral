@@ -1,4 +1,6 @@
 # codes: T0057
+# status: 1
+# at: 6:39
 # contains: to external command '/bin/echo'
 # contains: await
 let h = spawn { return 1 }; /bin/echo $h

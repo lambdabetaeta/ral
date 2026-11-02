@@ -6,8 +6,7 @@ fn round_trip(card: &Card) -> Card {
     value_to_card(&encode_card(card)).expect("an encoded card decodes")
 }
 
-/// Every mark variant, each optional field present and then absent —
-/// mirrors `decode::tests::decodes_every_mark`.
+/// Every mark variant, each optional field present and then absent.
 #[test]
 fn round_trips_every_mark_with_optionals() {
     let full = Card(vec![

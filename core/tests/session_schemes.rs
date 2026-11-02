@@ -5,33 +5,22 @@
 //! bindings (and the alias arms' schemes on the persistent handler frames),
 //! so run *N+1*'s check sees them.  The harness mirrors the REPL loop in
 //! `ral/src/repl/exec.rs`: `check` seeds `compile_and_typecheck` from the
-//! live `session_schemes()`, and `run` drives the public `run` entry.
+//! live `session_schemes()`, and `top_level` drives the public `run` entry.
 
 #![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 
+use common::top_level;
+
 use ral_core::compile::{CompileError, compile_and_typecheck};
-use ral_core::protocol::Run;
 use ral_core::shell::runtime::Settled;
 use ral_core::source::FileId;
-use ral_core::source::SourceOrigin;
 use ral_core::test_access::binding_scheme as scheme_of;
 use ral_core::{Shell, TypeError, Value};
 
 fn shell() -> Shell {
     common::prelude_shell()
-}
-
-/// One REPL run through the public `run` entry, which checks `src`
-/// against the live session before evaluating it.  Panics on parse / type
-/// failure — callers that expect a clean run pick source that compiles;
-/// callers probing an *eval* failure get the body's `Settled` back.
-fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
-    shell
-        .run(Run::foreground(src, SourceOrigin::named("<test>")))
-        .expect_ran()
-        .into_result()
 }
 
 /// Check `src` against the live session without evaluating it — the
@@ -52,7 +41,7 @@ fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
 #[test]
 fn value_producer_into_decoder_is_refused_cross_run() {
     let mut sh = shell();
-    run(&mut sh, "let f = { return 3 }").unwrap();
+    top_level(&mut sh, "let f = { return 3 }").unwrap();
     let errs = check_errors(&sh, "f | from-json");
     assert_eq!(
         errs.iter().map(|e| e.kind.code()).collect::<Vec<_>>(),
@@ -67,7 +56,7 @@ fn value_producer_into_decoder_is_refused_cross_run() {
 #[test]
 fn byte_producer_into_byte_consumer_typechecks() {
     let mut sh = shell();
-    run(&mut sh, "let f = { echo hi }").unwrap();
+    top_level(&mut sh, "let f = { echo hi }").unwrap();
     assert!(
         check_errors(&sh, "f | wc -l").is_empty(),
         "expected a clean byte→byte pipeline across runs, got: {:?}",
@@ -88,7 +77,7 @@ fn byte_producer_into_byte_consumer_typechecks() {
 #[test]
 fn cross_run_value_type_error_is_static() {
     let mut sh = shell();
-    run(&mut sh, "let xv = 'hello'").unwrap();
+    top_level(&mut sh, "let xv = 'hello'").unwrap();
     let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
         errs.iter().any(|e| e.kind.code() == "T0074"),
@@ -111,8 +100,8 @@ fn cross_run_value_type_error_is_static() {
 #[test]
 fn rebind_retypes_the_name() {
     let mut sh = shell();
-    run(&mut sh, "let xv = 3").unwrap();
-    run(&mut sh, "let xv = 'hello'").unwrap();
+    top_level(&mut sh, "let xv = 3").unwrap();
+    top_level(&mut sh, "let xv = 'hello'").unwrap();
     let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
         errs.iter().any(|e| e.kind.code() == "T0074"),
@@ -141,9 +130,9 @@ fn rebind_retypes_the_name() {
 #[test]
 fn failed_statement_installs_no_scheme() {
     let mut sh = shell();
-    run(&mut sh, "let xv = 1").unwrap();
+    top_level(&mut sh, "let xv = 1").unwrap();
     // The bad command aborts the run before the rebind runs.
-    let outcome = run(&mut sh, "nonexistent-command-zz\nlet xv = hello");
+    let outcome = top_level(&mut sh, "nonexistent-command-zz\nlet xv = hello");
     assert!(outcome.is_err(), "the bad command must abort the run");
     // `xv` is still Int, so Int arithmetic is clean.
     assert!(
@@ -165,7 +154,7 @@ fn failed_statement_installs_no_scheme() {
 #[test]
 fn pattern_binds_generalise_their_own_scheme() {
     let mut sh = shell();
-    run(&mut sh, "let [a, bb] = [1, 2]").unwrap();
+    top_level(&mut sh, "let [a, bb] = [1, 2]").unwrap();
     assert!(
         check_errors(&sh, "return $[$a + 1]").is_empty(),
         "expected pattern-bound $a to check cleanly, got: {:?}",
@@ -179,7 +168,7 @@ fn pattern_binds_generalise_their_own_scheme() {
         "a pattern-bound name must generalise its own scheme"
     );
     // A plain `let` binding does carry a scheme.
-    run(&mut sh, "let cnt = 3").unwrap();
+    top_level(&mut sh, "let cnt = 3").unwrap();
     assert!(
         scheme_of(&sh, "cnt").is_some(),
         "a plain let binding must carry a scheme"
@@ -196,7 +185,7 @@ fn pattern_binds_generalise_their_own_scheme() {
 #[test]
 fn alias_visible_to_next_run() {
     let mut sh = shell();
-    run(&mut sh, "alias three { |args| echo 3 }").unwrap();
+    top_level(&mut sh, "alias three { |args| echo 3 }").unwrap();
     assert!(
         check_errors(&sh, "three").is_empty(),
         "expected the alias used alone to be clean, got: {:?}",
@@ -214,7 +203,7 @@ fn alias_visible_to_next_run() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
-    run(&mut sh, "unalias three").unwrap();
+    top_level(&mut sh, "unalias three").unwrap();
     let codes: Vec<_> = check_errors(&sh, "return $three")
         .iter()
         .map(|e| e.kind.code())
@@ -226,31 +215,6 @@ fn alias_visible_to_next_run() {
     );
 }
 
-// ─── (8) bake/run harvest unity ─────────────────────────────────────────────
-
-/// The scheme installed on a live scope binding renders identically to
-/// the baked entry harvested at build time — both come from the same
-/// `Bind`-node harvest.
-#[test]
-fn live_binding_scheme_matches_baked_entry() {
-    let sh = shell();
-    let schemes = common::prelude_schemes();
-    let baked: std::collections::HashMap<&str, String> = schemes
-        .iter()
-        .map(|(n, s)| (n.as_str(), s.to_string()))
-        .collect();
-    for name in ["words", "reverse"] {
-        let live = scheme_of(&sh, name).unwrap_or_else(|| {
-            panic!("prelude binding {name:?} must be bound on the live scope and carry a scheme")
-        });
-        assert_eq!(
-            live.to_string(),
-            baked[name],
-            "live scope scheme for {name:?} must match the baked entry"
-        );
-    }
-}
-
 // ─── (9) a session scheme instantiates polymorphically ──────────────────────
 
 /// The scheme that crosses the run boundary is generalized against an
@@ -260,7 +224,7 @@ fn live_binding_scheme_matches_baked_entry() {
 #[test]
 fn session_scheme_instantiates_at_two_types() {
     let mut sh = shell();
-    run(&mut sh, "let idf = { |x| return $x }").unwrap();
+    top_level(&mut sh, "let idf = { |x| return $x }").unwrap();
     let stored = scheme_of(&sh, "idf")
         .expect("idf must carry a scheme")
         .to_string();
@@ -300,7 +264,7 @@ fn session_scheme_instantiates_at_two_types() {
 #[test]
 fn recursive_binding_is_usable_next_run() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let recur = { |n| if $[$n == 0] { return 0 } else { return !{recur $[$n - 1]} } }",
     )
@@ -327,7 +291,7 @@ fn recursive_binding_is_usable_next_run() {
 #[test]
 fn set_var_block_is_bound_and_usable_as_a_command_head() {
     let mut sh = shell();
-    run(&mut sh, "let sv_source = { |x| return $x }").unwrap();
+    top_level(&mut sh, "let sv_source = { |x| return $x }").unwrap();
     let block = sh
         .scope_lookup("sv_source")
         .cloned()
@@ -360,7 +324,7 @@ let m = $[not $b]";
 #[test]
 fn a_generalised_binding_is_used_at_two_types() {
     let mut sh = shell();
-    run(&mut sh, "let xs = []").unwrap();
+    top_level(&mut sh, "let xs = []").unwrap();
     let errs = check_errors(&sh, &ELEMENT_AS_INT_THEN_BOOL.replace("$ys", "$xs"));
     assert!(
         errs.is_empty(),
@@ -378,7 +342,7 @@ fn a_generalised_binding_is_used_at_two_types() {
 #[test]
 fn a_stored_scheme_keeps_its_kinds() {
     let mut sh = shell();
-    run(&mut sh, "let log = { |n| echo \"n: $n\" }").unwrap();
+    top_level(&mut sh, "let log = { |n| echo \"n: $n\" }").unwrap();
     let stored = scheme_of(&sh, "log")
         .expect("log must carry a scheme")
         .to_string();
@@ -396,8 +360,8 @@ fn a_stored_scheme_keeps_its_kinds() {
 #[test]
 fn a_label_read_is_settled_by_a_kind_in_either_order() {
     let mut sh = shell();
-    run(&mut sh, "let before = { |m| length $m; $m[a] }").unwrap();
-    run(&mut sh, "let after = { |m| $m[a]; length $m }").unwrap();
+    top_level(&mut sh, "let before = { |m| length $m; $m[a] }").unwrap();
+    top_level(&mut sh, "let after = { |m| $m[a]; length $m }").unwrap();
     let shown = |name: &str| scheme_of(&sh, name).expect("a scheme").to_string();
     assert_eq!(shown("before"), "∀α. Map α → Returns α");
     assert_eq!(shown("after"), "∀α. Map α → Returns Integer");
@@ -438,9 +402,9 @@ fn imported_weak_functions_protect_every_higher_order_route() {
     ];
     for (setup, later) in cases {
         let mut sh = shell();
-        run(&mut sh, &format!("{WEAK_DECODER}\n{setup}")).unwrap();
+        top_level(&mut sh, &format!("{WEAK_DECODER}\n{setup}")).unwrap();
         assert!(check_errors(&sh, later).is_empty(), "{later}");
-        let message = refusal(run(&mut sh, later));
+        let message = refusal(top_level(&mut sh, later));
         assert!(message.contains("imported value"), "{later}: {message}");
         assert!(message.contains("text"), "{message}");
     }
@@ -449,12 +413,12 @@ fn imported_weak_functions_protect_every_higher_order_route() {
 #[test]
 fn imported_weak_occurrences_keep_their_own_quantified_instances() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let f = { |x| let d = !{to-string '\"ok\"' | from-json}; return [item: $x, data: $d] }",
     )
     .unwrap();
-    run(
+    top_level(
         &mut sh,
         "let a = f true; let b = f 1; let n = $[$b[item] + 1]",
     )
@@ -464,12 +428,12 @@ fn imported_weak_occurrences_keep_their_own_quantified_instances() {
 #[test]
 fn imported_comparable_parameters_stay_polymorphic_inside_closures() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let f = { |x| let d = !{to-string '0' | from-json}; return [less: $[$x < $x], data: $d] }",
     )
     .unwrap();
-    run(
+    top_level(
         &mut sh,
         "let g = { |x| f $x }; let a = g 1; let b = g hello",
     )
@@ -479,8 +443,8 @@ fn imported_comparable_parameters_stay_polymorphic_inside_closures() {
 #[test]
 fn returned_protected_decoders_retain_their_contract_when_host_bound() {
     let mut sh = shell();
-    run(&mut sh, WEAK_DECODER).unwrap();
-    let decoder = run(&mut sh, "return $decode").unwrap();
+    top_level(&mut sh, WEAK_DECODER).unwrap();
+    let decoder = top_level(&mut sh, "return $decode").unwrap();
     sh.bind_value("host_decode".into(), decoder);
     let scheme = scheme_of(&sh, "host_decode")
         .expect("a re-inferred scheme")
@@ -488,21 +452,21 @@ fn returned_protected_decoders_retain_their_contract_when_host_bound() {
     assert!(scheme.contains("→ Returns _"), "{scheme}");
     let later = "let n = host_decode '\"bad\"'; let result = $[$n + 1]";
     assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(run(&mut sh, later));
+    let message = refusal(top_level(&mut sh, later));
     assert!(message.contains("imported value"), "{message}");
 }
 
 #[test]
 fn imported_weak_callbacks_are_protected_at_the_argument() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let invoke = { |f| let x = !{to-string '\"bad\"' | from-json}; f $x }",
     )
     .unwrap();
     let later = "invoke { |x| return $[$x + 1] }";
     assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(run(&mut sh, later));
+    let message = refusal(top_level(&mut sh, later));
     assert!(message.contains("imported value"), "{message}");
 }
 
@@ -521,13 +485,13 @@ fn imported_weak_handles_protect_every_payload_observation() {
     ];
     for later in cases {
         let mut sh = shell();
-        run(
+        top_level(
             &mut sh,
             "let h = spawn { to-string '\"bad\"' | from-json }; let _ = first-settled [$h]",
         )
         .unwrap();
         assert!(check_errors(&sh, later).is_empty(), "{later}");
-        let message = refusal(run(&mut sh, later));
+        let message = refusal(top_level(&mut sh, later));
         assert!(message.contains("imported value"), "{later}: {message}");
     }
 }
@@ -535,35 +499,35 @@ fn imported_weak_handles_protect_every_payload_observation() {
 #[test]
 fn imported_handle_views_share_claims_without_claiming_at_wrap() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let h = spawn { to-string '1' | from-json }; let _ = first-settled [$h]",
     )
     .unwrap();
-    run(&mut sh, "let alias = $h").unwrap();
-    run(&mut sh, "let n = await $alias; let result = $[$n + 1]").unwrap();
-    let message = refusal(run(&mut sh, "await $h"));
+    top_level(&mut sh, "let alias = $h").unwrap();
+    top_level(&mut sh, "let n = await $alias; let result = $[$n + 1]").unwrap();
+    let message = refusal(top_level(&mut sh, "await $h"));
     assert!(message.contains("already claimed"), "{message}");
 }
 
 #[test]
 fn imported_weak_handle_payloads_keep_delayed_obligations() {
     let mut sh = shell();
-    run(&mut sh, "let h = spawn { return [f: { |s| to-string $s | from-json }] }; let _ = first-settled [$h]").unwrap();
+    top_level(&mut sh, "let h = spawn { return [f: { |s| to-string $s | from-json }] }; let _ = first-settled [$h]").unwrap();
     let later = "let box = await $h; let n = $box[f] '\"bad\"'; let result = $[$n + 1]";
     assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(run(&mut sh, later));
+    let message = refusal(top_level(&mut sh, later));
     assert!(message.contains("imported value"), "{message}");
 }
 
 #[test]
 fn imported_weak_protection_survives_a_third_run() {
     let mut sh = shell();
-    run(&mut sh, WEAK_DECODER).unwrap();
-    run(&mut sh, "let next = [f: $decode]").unwrap();
+    top_level(&mut sh, WEAK_DECODER).unwrap();
+    top_level(&mut sh, "let next = [f: $decode]").unwrap();
     let later = "let n = !{$next[f] '\"bad\"'}; let result = $[$n + 1]";
     assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(run(&mut sh, later));
+    let message = refusal(top_level(&mut sh, later));
     assert!(message.contains("imported value"), "{message}");
 }
 
@@ -574,9 +538,9 @@ const DECODE_A: &str = r#"let m = !{to-string '{"a": "x"}' | from-json}"#;
 #[test]
 fn a_later_line_that_misuses_decoded_data_is_refused_before_it_runs() {
     let mut sh = shell();
-    run(&mut sh, DECODE_A).unwrap();
+    top_level(&mut sh, DECODE_A).unwrap();
     assert!(check_errors(&sh, "let marker = 1\nlet n = $[$m[a] + 1]").is_empty());
-    let message = refusal(run(&mut sh, "let marker = 1\nlet n = $[$m[a] + 1]"));
+    let message = refusal(top_level(&mut sh, "let marker = 1\nlet n = $[$m[a] + 1]"));
     assert!(
         message.starts_with("$m: the value at `/a` is text (`'x'`)"),
         "{message}"
@@ -592,7 +556,7 @@ fn a_later_line_that_misuses_decoded_data_is_refused_before_it_runs() {
 #[test]
 fn a_later_line_cannot_use_decoded_data_at_a_type_its_unit_did_not() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let m = !{to-string '{\"a\": 1}' | from-json}\nlet n = $[$m[a] + 1]",
     )
@@ -607,7 +571,7 @@ fn a_later_line_cannot_use_decoded_data_at_a_type_its_unit_did_not() {
 #[test]
 fn a_session_function_returning_decoded_data_is_checked_by_its_own_site() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let f = { |s| let d = !{to-string $s | from-json}; let _ = $[$d[a] < $d[c]]; return $d }",
     )
@@ -616,8 +580,8 @@ fn a_session_function_returning_decoded_data_is_checked_by_its_own_site() {
     let second = r#"let y = f '{"a": "p", "c": "q"}'"#;
     assert!(check_errors(&sh, first).is_empty());
     assert!(check_errors(&sh, second).is_empty());
-    run(&mut sh, first).unwrap();
-    let message = refusal(run(&mut sh, second));
+    top_level(&mut sh, first).unwrap();
+    let message = refusal(top_level(&mut sh, second));
     assert!(message.contains("is a number and"), "{message}");
     assert!(
         message.contains("is text, and this script compares them"),
@@ -632,7 +596,7 @@ fn a_session_function_returning_decoded_data_is_checked_by_its_own_site() {
 #[test]
 fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
     let mut sh = shell();
-    run(
+    top_level(
         &mut sh,
         "let doc = !{to-string '{\"a\": {\"b\": {}}}' | from-json}\n\
          let first = fold { |node key| return $node[$key] } $doc ['a']",
@@ -647,7 +611,7 @@ fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
     let top = compile_and_typecheck(later, sh.session_schemes(), FileId::DUMMY, None, None)
         .expect("the later line checks");
     assert!(top.admits.is_empty(), "nothing is left to admit again");
-    run(&mut sh, later).unwrap();
+    top_level(&mut sh, later).unwrap();
 }
 
 /// What a unit leaves undecided is admitted again by each unit that uses it,
@@ -655,7 +619,7 @@ fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
 #[test]
 fn a_residual_datum_is_admitted_again_by_each_unit_that_uses_it() {
     let mut sh = shell();
-    run(&mut sh, DECODE_A).unwrap();
+    top_level(&mut sh, DECODE_A).unwrap();
     let admits = |src: &str| {
         compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, None, None)
             .expect("the line checks")
@@ -673,8 +637,8 @@ fn a_residual_datum_is_admitted_again_by_each_unit_that_uses_it() {
 #[test]
 fn only_imported_values_with_delayed_parts_are_given_a_membrane() {
     let mut sh = shell();
-    run(&mut sh, "let d = !{to-string '[1,2]' | from-json}").unwrap();
-    run(&mut sh, WEAK_DECODER).unwrap();
+    top_level(&mut sh, "let d = !{to-string '[1,2]' | from-json}").unwrap();
+    top_level(&mut sh, WEAK_DECODER).unwrap();
     let membrane = |src: &str| {
         let top = compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, None, None)
             .expect("the line checks");

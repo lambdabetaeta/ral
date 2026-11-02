@@ -1,3 +1,6 @@
+# codes: T0010
+# status: 1
+# at: 6:23
 # contains: a handler or an alias is invoked as a command, so its one parameter is the argv
 let h = { |n| return $[$n + 1] }
 within [handlers: [g: { !$h }]] { g 1 }

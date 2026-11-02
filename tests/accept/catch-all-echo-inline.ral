@@ -1,1 +1,0 @@
-within [handler: { |n a| echo caught }] { zzz }

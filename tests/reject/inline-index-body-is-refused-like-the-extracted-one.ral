@@ -1,3 +1,5 @@
 # codes: T0062
+# status: 1
+# at: 5:13
 # contains: Integer cannot be indexed
 map { |x| $x[$x] } [1]

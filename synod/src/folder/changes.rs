@@ -370,7 +370,7 @@ mod tests {
         before.unread = vec!["scans".to_string()];
         let after = manifest(&[
             ("edited.txt", file(9, 200)),
-            ("scans/photo.jpg", file(7, 100)),
+            ("scans/photo.jpg", file(8, 200)),
         ]);
 
         let report = job_report(&before, &after);
@@ -380,6 +380,75 @@ mod tests {
                 path: "edited.txt".into(),
                 now: file(9, 200),
             }]
+        );
+    }
+
+    #[test]
+    fn a_mode_change_alone_is_a_modification() {
+        let with_mode = |mode| EntryKind::File {
+            size: 4,
+            mtime_ns: 100,
+            mode,
+        };
+        let report = job_report(
+            &manifest(&[("run.sh", with_mode(0o644))]),
+            &manifest(&[("run.sh", with_mode(0o755))]),
+        );
+        assert_eq!(
+            report.changes,
+            vec![Change::Modified {
+                path: "run.sh".into(),
+                now: with_mode(0o755),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_removed_folder_is_a_folder_deletion() {
+        let report = job_report(&manifest(&[("old", EntryKind::Folder)]), &manifest(&[]));
+        assert_eq!(
+            report.changes,
+            vec![Change::Deleted {
+                path: "old".into(),
+                folder: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn one_deleted_file_pairs_with_the_first_of_several_matching_creations_and_vice_versa() {
+        let renamed = |from: &str, to: &str| Change::Renamed {
+            from: from.into(),
+            to: to.into(),
+        };
+        let one_to_many = job_report(
+            &manifest(&[("a/x", file(8, 500))]),
+            &manifest(&[("b/x", file(8, 500)), ("c/x", file(8, 500))]),
+        );
+        assert_eq!(
+            one_to_many.changes,
+            vec![
+                renamed("a/x", "b/x"),
+                Change::Created {
+                    path: "c/x".into(),
+                    now: file(8, 500),
+                },
+            ]
+        );
+
+        let many_to_one = job_report(
+            &manifest(&[("a/x", file(8, 500)), ("b/x", file(8, 500))]),
+            &manifest(&[("c/x", file(8, 500))]),
+        );
+        assert_eq!(
+            many_to_one.changes,
+            vec![
+                renamed("a/x", "c/x"),
+                Change::Deleted {
+                    path: "b/x".into(),
+                    folder: false,
+                },
+            ]
         );
     }
 

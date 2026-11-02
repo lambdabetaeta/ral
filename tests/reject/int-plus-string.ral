@@ -1,2 +1,5 @@
+# codes: T0074
+# status: 1
+# at: 5:23
 # contains: but a number (Int or Float) is needed
 let x = hello; return $[$x + 1]

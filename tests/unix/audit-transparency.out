@@ -1,0 +1,43 @@
+quiet
+true
+0
+step one
+step two
+true
+2
+/bin/echo
+step two
+handled
+continued
+true
+3
+/bin/sh
+1
+/bin/echo
+/bin/echo
+a
+b
+true
+2
+a
+b
+false
+3 no index
+outer
+inner
+true
+2
+/bin/echo
+/bin/echo
+inside
+1
+/bin/echo
+inside
+1
+/bin/echo
+body
+cleanup
+2
+/bin/echo
+/bin/echo
+audit transparency tests done

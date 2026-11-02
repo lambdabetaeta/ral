@@ -1,3 +1,6 @@
+# codes: T0070
+# status: 1
+# at: 6:11
 # contains: the pipe writes into a stdin this `<` replaces
 # contains: run the stage's producer as its own statement
 echo hi | cat < notes.txt

@@ -5,12 +5,15 @@
 //! is written hash-bumped: `n` `#`s then `'`, closing only on `'` then
 //! `n` `#`s.  These are ral's rules, not POSIX's: `ral-quote` is this
 //! module, while `posix-quote` keeps POSIX semantics so it round-trips with
-//! `posix-split`.
+//! `posix-split`.  A body holding a character the lexer refuses even in
+//! quotes (a bidi control) has no raw spelling, so it is double-quoted with
+//! that character as a `\u{…}` escape.
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 
 use crate::syntax::ast::{Word, WordLiteral};
-use crate::syntax::lexer::{Lexeme, Token, lex};
+use crate::syntax::lexer::{Lexeme, Token, is_bidi_control, lex};
 
 /// True when `s` lexes as one bare word *and* reads back as the string `s`.
 ///
@@ -39,12 +42,16 @@ pub fn is_bare_word(s: &str) -> bool {
 }
 
 /// Ral source for `s`: bare (borrowed) where it can be, else single-quoted,
-/// else hash-bumped to the smallest level the body leaves free.
+/// else hash-bumped to the smallest level the body leaves free, else (a body
+/// no raw quote can carry) double-quoted with escapes.
 pub fn quote_word(s: &str) -> Cow<'_, str> {
     if is_bare_word(s) {
         return Cow::Borrowed(s);
     }
-    Cow::Owned(if s.contains('\'') {
+    Cow::Owned(if s.chars().any(is_bidi_control) {
+        let home = if s.starts_with('~') { "\\" } else { "" };
+        format!("\"{home}{}\"", escape_for_interpolation(s))
+    } else if s.contains('\'') {
         let hashes = "#".repeat(min_bump_level(s));
         format!("{hashes}'{s}'{hashes}")
     } else {
@@ -64,6 +71,9 @@ pub fn escape_for_interpolation(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
+            _ if is_bidi_control(c) => {
+                let _ = write!(out, "\\u{{{:X}}}", u32::from(c));
+            }
             _ => out.push(c),
         }
     }
@@ -127,7 +137,7 @@ fn min_bump_level(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::lexer::{Token, lex};
+    use crate::syntax::lexer::{StringPart, Token, lex};
 
     fn lex_round_trip(src: &str, expected: &str) {
         let toks = lex(src).expect("lex");
@@ -146,6 +156,13 @@ mod tests {
             | Token::Word(crate::syntax::ast::Word::Plain(s) | crate::syntax::ast::Word::Path(s)) => {
                 s.clone()
             }
+            Token::DoubleQuoted(parts) => parts
+                .iter()
+                .map(|p| match &p.item {
+                    StringPart::Literal(s) => s.as_str(),
+                    StringPart::Splice(_) => panic!("{src:?} splices"),
+                })
+                .collect(),
             other => panic!("unexpected token kind for {src:?}: {other:?}"),
         };
         assert_eq!(body, expected, "round-trip failed for source {src:?}");
@@ -274,10 +291,65 @@ mod tests {
         assert!(matches!(quote_word("a b"), Cow::Owned(_)));
     }
 
+    // ── escape_for_interpolation, one_word ───────────────────────────
+
+    #[test]
+    fn escape_for_interpolation_escapes_the_string_metacharacters() {
+        for (raw, escaped) in [
+            ("a\nb", "a\\nb"),
+            ("a\tb", "a\\tb"),
+            ("a\rb", "a\\rb"),
+            ("a\\b", "a\\\\b"),
+            ("a\"b", "a\\\"b"),
+            ("a$b", "a\\$b"),
+            ("a!b", "a\\!b"),
+            ("plain 日本", "plain 日本"),
+            ("a\u{202E}b", "a\\u{202E}b"),
+        ] {
+            assert_eq!(escape_for_interpolation(raw), escaped, "{raw:?}");
+        }
+    }
+
+    /// `one_word` re-spells a run of touching atoms as one `"…"` that lexes
+    /// back to a single literal of the text the atoms spell together.
+    #[test]
+    fn one_word_relexes_as_one_literal_of_the_same_text() {
+        for (run, text) in [
+            ("foo", "foo"),
+            ("a'b c'd", "ab cd"),
+            ("'$x !y \\ \"'", "$x !y \\ \""),
+            ("'~x'", "~x"),
+            ("'a\nb'", "a\nb"),
+        ] {
+            let word = one_word(run).unwrap_or_else(|| panic!("{run:?} is one word"));
+            let tokens = lex(&word).expect("lex");
+            let [
+                Lexeme {
+                    token: Token::DoubleQuoted(parts),
+                    ..
+                },
+                Lexeme {
+                    token: Token::Eof, ..
+                },
+            ] = tokens.as_slice()
+            else {
+                panic!("{run:?} -> {word:?} is not one string: {tokens:?}");
+            };
+            let spelled: String = parts
+                .iter()
+                .map(|p| match &p.item {
+                    StringPart::Literal(s) => s.as_str(),
+                    StringPart::Splice(_) => panic!("{word:?} splices"),
+                })
+                .collect();
+            assert_eq!(spelled, text, "{run:?} -> {word:?}");
+        }
+    }
+
     // ── lexer round-trips ────────────────────────────────────────────
 
     /// The whole corpus is load-bearing: `lex_round_trip` accepts only a
-    /// single `SingleQuoted`/`Plain`/`Path` token, so any input whose
+    /// single quoted or `Plain`/`Path` token, so any input whose
     /// emission is left bare (`$HOME`, `a!b`, `~foo`, …) lexes as some
     /// other token kind and fails here.  Trim it and that cover is lost.
     #[test]
@@ -295,6 +367,15 @@ mod tests {
             "a'#b",
             "日本語",
             "",
+            // Raw bodies keep line breaks and C0/DEL bytes verbatim.
+            "a\nb",
+            "a\rb",
+            "a\r\nb",
+            "\n",
+            "a\tb",
+            "a\u{1}b",
+            "a\u{7f}b",
+            "a\0b",
             // Positional metacharacters, invisible to a per-char scan.
             "#foo",    // leading `#` opens a comment
             "#f.txt#", // emacs backup name
@@ -311,6 +392,11 @@ mod tests {
             "-0",
             ".5",
             "true",
+            // Refused raw even in quotes, so spelled as a `\u{…}` escape.
+            "a\u{202E}b",
+            "\u{2066}it's\u{2069}",
+            "~\u{202A}",
+            "a\u{202E}$x!\"\n",
         ] {
             let src = quote_word(input);
             lex_round_trip(&src, input);

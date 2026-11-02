@@ -1,3 +1,6 @@
+# codes: T0074
+# status: 1
+# at: 8:6
 # contains: `$out` is `()`
 # contains: `let out = deploy … | from-line`
 let deploy = { |env| echo deploying $env; return () }

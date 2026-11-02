@@ -910,14 +910,18 @@ mod tests {
 
     #[test]
     fn a_nested_table_is_a_record() {
-        for value in [Value::Unit, rec(&[]), Value::string("x")] {
-            let r = decode(&rec(&[("fs", value.clone())]));
-            match value {
-                // an empty map is a record at run time: it restricts to the baseline
-                Value::Map(_) => assert!(r.is_ok()),
-                _ => assert!(r.unwrap_err().message.contains("a grant table is a record")),
-            }
+        // an empty map is a record at run time: it restricts to the baseline
+        for (value, accepted) in [
+            (Value::Unit, false),
+            (rec(&[]), true),
+            (Value::string("x"), false),
+        ] {
+            assert_eq!(decode(&rec(&[("fs", value)])).is_ok(), accepted);
         }
+    }
+
+    #[test]
+    fn a_unit_exec_table_shows_the_record_it_wants() {
         let e = exec_refusal(Value::Unit);
         assert!(e.message.contains("exec: [allow: []]"), "{}", e.message);
     }

@@ -1,2 +1,5 @@
+# codes: T0010
+# status: 1
+# at: 5:15
 # contains: `chdir
 grant [shell: [chdir: false]] { return 1 }

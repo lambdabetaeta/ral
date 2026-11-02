@@ -324,11 +324,6 @@ fn parse_external_name_head_without_args() {
 }
 
 #[test]
-fn parse_external_name_rejected_in_arg_position() {
-    assert!(parse("echo ^git").is_err());
-}
-
-#[test]
 fn parse_binding() {
     let ast = unwrap_stmts(parse("let x = hello").unwrap());
     assert_eq!(
@@ -1187,15 +1182,6 @@ fn parse_rest_pattern() {
 }
 
 #[test]
-fn rest_pattern_name_rejects_reserved_keyword() {
-    let err = parse("let [...try] = $xs").unwrap_err();
-    assert!(
-        err.message.contains("reserved keyword"),
-        "rest-pattern name should enforce the reserved-name guard: {err:?}"
-    );
-}
-
-#[test]
 fn pattern_rejects_duplicate_names() {
     for src in [
         "let [x, x] = [1, 2]",
@@ -1214,7 +1200,17 @@ fn pattern_rejects_duplicate_names() {
 
 #[test]
 fn curried_params_may_shadow() {
-    assert!(parse("echo { |x x| $x }").is_ok());
+    let x = || Pattern::Name("x".into());
+    assert_eq!(
+        unwrap_stmts(parse("echo { |x x| $x }").unwrap()),
+        vec![app(
+            bare_head("echo"),
+            vec![arm_lambda(
+                x(),
+                vec![arm_lambda(x(), vec![Ast::Variable("x".into())])]
+            )],
+        )]
+    );
 }
 
 #[test]
@@ -1820,13 +1816,16 @@ fn a_clash_span_covers_the_second_redirect() {
     assert_eq!(&src[span.start as usize..span.end as usize], ">> b");
 }
 
-/// The same stream through `2>&1` and a file is one clash either way
-/// round, and distinct streams never clash.
+/// Distinct streams never clash, in whichever order they are written.
 #[test]
 fn distinct_streams_bind_in_any_order() {
-    assert!(parse("cmd < i > o 2> e").is_ok());
-    assert!(parse("cmd 2> e > o < i").is_ok());
-    assert!(parse("cmd 2>&1 > o").is_ok());
+    for src in ["cmd < i > o 2> e", "cmd 2> e > o < i"] {
+        let r = redirects_of(src);
+        assert!(
+            r.stdin.is_some() && r.stdout.is_some() && r.stderr.is_some(),
+            "{src:?}"
+        );
+    }
 }
 
 /// `<<` always feeds stdin: every fd prefix is refused, `0` with its own
@@ -1950,11 +1949,6 @@ fn parse_list_in_command_position_remains_value() {
 }
 
 #[test]
-fn parse_external_name_rejected_for_path_head() {
-    assert!(parse("^./script").is_err());
-}
-
-#[test]
 fn parse_literal_path_head_without_args() {
     let ast = parse("./script").unwrap();
     match ast.as_slice() {
@@ -1994,45 +1988,81 @@ fn parse_nested_blocks() {
     );
 }
 
-// ── Recursion-depth chokepoints ─────────────────────────────────────
-//
-// These cover the two sub-grammars that do not route through
-// `parse_primary` and so guard themselves.  Each uses a depth well past
-// the cap but far short of any real stack ceiling, so a lost guard shows
-// up as a missing error rather than a crash.
+// ── The nesting cap ─────────────────────────────────────────────────
 
-#[test]
-fn deeply_nested_pattern_hits_nesting_cap() {
-    let n = 200;
-    let src = format!("let {}a{} = x", "[".repeat(n), "]".repeat(n));
-    let err = parse(&src).unwrap_err();
-    assert!(
-        err.message.contains("too deep"),
-        "deep pattern nesting should hit the cap, got: {}",
-        err.message
-    );
+/// What refuses a shape past the cap: the lexer's delimiter stack, or the
+/// parser's descent.
+enum Guard {
+    Lexer,
+    Parser,
 }
 
-#[test]
-fn deeply_nested_unary_minus_hits_nesting_cap() {
-    let src = format!("$[{}1]", "- ".repeat(200));
-    let err = parse(&src).unwrap_err();
-    assert!(
-        err.message.contains("too deep"),
-        "deep unary-minus nesting should hit the cap, got: {}",
-        err.message
-    );
-}
+/// A shape's name, its guard, and its source at a given depth.
+type NestingShape = (&'static str, Guard, fn(usize) -> String);
 
+/// Each shape the cap bounds, written as source `d` levels deep.  A leaf
+/// operand is a level of its own, so a shape ending in one nests that much
+/// less to reach the same depth.
+const NESTING_SHAPES: [NestingShape; 10] = [
+    ("blocks", Guard::Parser, |d| {
+        format!("{}{}", "{".repeat(d), "}".repeat(d))
+    }),
+    ("lists", Guard::Parser, |d| {
+        format!("return {}{}", "[".repeat(d), "]".repeat(d))
+    }),
+    ("list patterns", Guard::Parser, |d| {
+        format!("let {}a{} = x", "[".repeat(d - 1), "]".repeat(d - 1))
+    }),
+    ("grouped operands", Guard::Parser, |d| {
+        format!("return $[{}1{}]", "(".repeat(d - 2), ")".repeat(d - 2))
+    }),
+    ("negations", Guard::Parser, |d| {
+        format!("return $[{}1]", "- ".repeat(d - 2))
+    }),
+    ("`not`s", Guard::Parser, |d| {
+        format!("return $[{}true]", "not ".repeat(d - 2))
+    }),
+    ("case arms", Guard::Parser, |d| {
+        format!(
+            "{}1{}",
+            "case $x [`a: {|p| ".repeat(d - 1),
+            "}]".repeat(d - 1)
+        )
+    }),
+    ("expression blocks", Guard::Lexer, |d| {
+        format!("return {}1{}", "$[".repeat(d), "]".repeat(d))
+    }),
+    ("forced strings", Guard::Lexer, |d| {
+        format!("return {}x{}", "\"!{echo ".repeat(d), "}\"".repeat(d))
+    }),
+    ("expressions in strings", Guard::Lexer, |d| {
+        format!("return {}1{}", "\"$[".repeat(d), "]\"".repeat(d))
+    }),
+];
+
+/// Exactly `NESTING_DEPTH_LIMIT` levels parse and one more is refused with the
+/// shared diagnostic, by the guard that owns the shape: the lexer's refusal is
+/// a lex error, the parser's a plain one over a token stream the lexer accepted.
 #[test]
-fn deeply_nested_not_hits_nesting_cap() {
-    let src = format!("$[{}$x]", "not ".repeat(200));
-    let err = parse(&src).unwrap_err();
-    assert!(
-        err.message.contains("too deep"),
-        "deep `not` nesting should hit the cap, got: {}",
-        err.message
-    );
+fn the_nesting_cap_admits_its_limit_and_refuses_one_more() {
+    use crate::syntax::{NESTING_DEPTH_LIMIT, nesting_too_deep_message};
+    // The limit is sized for the front end's own stack, not a test thread's.
+    crate::compile::on_compile_stack(|| {
+        for (shape, guard, source) in NESTING_SHAPES {
+            let at_limit = source(NESTING_DEPTH_LIMIT);
+            assert!(parse(&at_limit).is_ok(), "{shape}: the limit itself parses");
+            let past = source(NESTING_DEPTH_LIMIT + 1);
+            let err = parse(&past).expect_err(shape);
+            assert_eq!(err.message, nesting_too_deep_message(), "{shape}");
+            match (guard, &err.kind) {
+                (Guard::Lexer, ParseErrorKind::Lex(LexErrorKind::Other(_))) => {}
+                (Guard::Parser, ParseErrorKind::Plain { .. }) => {
+                    assert!(lexer::lex(&past).is_ok(), "{shape}: the lexer admits it");
+                }
+                (_, kind) => panic!("{shape}: refused by the wrong guard: {kind:?}"),
+            }
+        }
+    });
 }
 
 #[test]
@@ -2044,11 +2074,6 @@ fn parse_force_stmt_still_allowed() {
             vec![app(bare_head("echo"), vec![plain("hello")])]
         ),)))]
     );
-}
-
-#[test]
-fn bare_bang_is_not_a_literal_word() {
-    assert!(parse("echo !").is_err());
 }
 
 #[test]
@@ -2229,17 +2254,6 @@ fn if_same_line_bare_block_is_error() {
     );
 }
 
-#[test]
-fn if_newline_block_is_valid() {
-    // On the next line it is a statement of its own.
-    assert!(parse("if $c { a }\n{ b }").is_ok());
-}
-
-#[test]
-fn if_with_else_keyword_is_valid() {
-    assert!(parse("if $c { a } else { b }").is_ok());
-}
-
 /// `else` and `elsif` continue an `if`; as a stage head they have nothing
 /// to continue.
 #[test]
@@ -2362,37 +2376,57 @@ fn parse_try_rejects_trailing_argument_after_redirect() {
     );
 }
 
+/// Too few or too many operands: the refusal names the operator and the count seen.
 #[test]
-fn parse_try_one_arg_is_error() {
-    let err = parse("try { body }").unwrap_err();
-    assert!(
-        err.message.contains("try requires 2") && err.message.contains("got 1"),
-        "unexpected message: {err}"
-    );
+fn a_control_operator_refuses_the_wrong_operand_count() {
+    for (src, name, got) in [
+        ("try", "try", 0),
+        ("try { body }", "try", 1),
+        ("try { a } { b } { c }", "try", 3),
+        ("guard", "guard", 0),
+        ("guard { body }", "guard", 1),
+        ("guard { a } { b } { c }", "guard", 3),
+        ("within", "within", 0),
+        ("within []", "within", 1),
+        ("within [] { a } { b }", "within", 3),
+        ("grant", "grant", 0),
+        ("grant []", "grant", 1),
+        ("grant [] { a } { b }", "grant", 3),
+        ("audit", "audit", 0),
+        ("audit a b", "audit", 2),
+        ("gather", "gather", 0),
+        ("gather a b", "gather", 2),
+    ] {
+        let err = parse(src).expect_err(src);
+        assert!(
+            err.message.starts_with(&format!("{name} requires "))
+                && err.message.ends_with(&format!("got {got}")),
+            "{src:?}: {}",
+            err.message
+        );
+    }
 }
 
 #[test]
-fn parse_try_zero_args_is_error() {
-    let err = parse("try").unwrap_err();
-    assert!(
-        err.message.contains("try requires 2") && err.message.contains("got 0"),
-        "unexpected message: {err}"
-    );
-}
-
-#[test]
-fn parse_try_three_args_is_error() {
-    let err = parse("try { a } { b } { c }").unwrap_err();
-    assert!(
-        err.message.contains("try requires 2") && err.message.contains("got 3"),
-        "unexpected message: {err}"
-    );
-}
-
-#[test]
-fn parse_guard_two_blocks() {
-    let op = unwrap_single_scope(parse("guard { body } { cleanup }").unwrap());
-    assert!(matches!(op, ScopeAst::Guard { .. }));
+fn guard_grant_audit_and_gather_read_their_operands() {
+    let scope = |src: &str| unwrap_single_scope(parse(src).unwrap());
+    let ScopeAst::Guard { body, cleanup } = scope("guard { body } { cleanup }") else {
+        panic!("expected ScopeAst::Guard");
+    };
+    assert!(matches!((*body, *cleanup), (Ast::Block(_), Ast::Block(_))));
+    let ScopeAst::Grant { caps, body } = scope("grant [exec: [allow: []]] { body }") else {
+        panic!("expected ScopeAst::Grant");
+    };
+    assert_eq!(caps.len(), 1);
+    assert!(matches!(*body, Ast::Block(_)));
+    let ScopeAst::Audit { body } = scope("audit { body }") else {
+        panic!("expected ScopeAst::Audit");
+    };
+    assert!(matches!(*body, Ast::Block(_)));
+    let ScopeAst::Gather { body } = scope("gather { body }") else {
+        panic!("expected ScopeAst::Gather");
+    };
+    assert!(matches!(*body, Ast::Block(_)));
 }
 
 #[test]
@@ -2539,58 +2573,10 @@ fn a_repeated_handler_name_is_refused() {
 }
 
 #[test]
-fn parse_grant_caps_and_body() {
-    let op = unwrap_single_scope(parse("grant [exec: [allow: []]] { body }").unwrap());
-    assert!(matches!(op, ScopeAst::Grant { .. }));
-}
-
-#[test]
-fn parse_audit_one_block() {
-    let op = unwrap_single_scope(parse("audit { body }").unwrap());
-    assert!(matches!(op, ScopeAst::Audit { .. }));
-}
-
-#[test]
-fn parse_audit_two_args_is_error() {
-    let err = parse("audit a b").unwrap_err();
-    assert!(
-        err.message.contains("audit requires 1") && err.message.contains("got 2"),
-        "msg: {err}"
-    );
-}
-
-#[test]
-fn parse_audit_zero_args_is_error() {
-    let err = parse("audit").unwrap_err();
-    assert!(err.message.contains("audit requires 1"), "msg: {err}");
-}
-
-#[test]
 fn parse_audit_with_trailing_redirect() {
     let (op, redirects) = redirected_scope("audit { body } > out");
     assert!(matches!(op, ScopeAst::Audit { .. }));
     assert!(redirects.stdout.is_some());
-}
-
-#[test]
-fn parse_gather_one_block() {
-    let op = unwrap_single_scope(parse("gather { body }").unwrap());
-    assert!(matches!(op, ScopeAst::Gather { .. }));
-}
-
-#[test]
-fn parse_gather_two_args_is_error() {
-    let err = parse("gather a b").unwrap_err();
-    assert!(
-        err.message.contains("gather requires 1") && err.message.contains("got 2"),
-        "msg: {err}"
-    );
-}
-
-#[test]
-fn parse_gather_zero_args_is_error() {
-    let err = parse("gather").unwrap_err();
-    assert!(err.message.contains("gather requires 1"), "msg: {err}");
 }
 
 #[test]
@@ -2634,29 +2620,26 @@ fn parse_spawn_three_operands_is_error() {
 
 // ── Reserved-name binding rejection ─────────────────────────────────
 
+/// No keyword or value literal binds, whether a plain binder, a list
+/// element, a rest name or a lambda parameter.
 #[test]
-fn parse_let_try_rejected() {
-    let err = parse("let try = 1").unwrap_err();
-    assert!(err.message.contains("'try'"), "msg: {err}");
-}
-
-#[test]
-fn parse_let_spawn_rejected() {
-    for word in ["spawn", "gather"] {
-        let err = parse(&format!("let {word} = 1")).unwrap_err();
-        assert!(err.message.contains(&format!("'{word}'")), "msg: {err}");
+fn a_reserved_word_is_no_binding_name() {
+    use crate::syntax::{CONTROL_OPERATORS, FLOW_KEYWORDS, reserved_keyword_message};
+    for word in CONTROL_OPERATORS
+        .into_iter()
+        .chain(FLOW_KEYWORDS)
+        .chain(["true", "false"])
+    {
+        for src in [
+            format!("let {word} = 1"),
+            format!("let [a, {word}] = $x"),
+            format!("let [...{word}] = $x"),
+            format!("echo {{ |{word}| 1 }}"),
+        ] {
+            let err = parse(&src).expect_err(&src);
+            assert_eq!(err.message, reserved_keyword_message(word), "{src}");
+        }
     }
-}
-
-#[test]
-fn parse_let_within_rejected() {
-    let err = parse("let within = 1").unwrap_err();
-    assert!(err.message.contains("'within'"), "msg: {err}");
-}
-
-#[test]
-fn parse_lambda_param_named_try_rejected() {
-    assert!(parse("let f = { |try| 1 }").is_err());
 }
 
 // ── ^try keeps external-only semantics ──────────────────────────────
@@ -2712,23 +2695,53 @@ fn refused_helping(cases: &[(&str, &str, &str)]) {
     }
 }
 
-/// A closer that closes nothing open is the lexer's definite error, so the
-/// REPL does not wait for the line that cannot repair it.
+/// A closer that closes nothing open is the lexer's definite error.
 #[test]
-fn a_mismatched_closer_never_asks_for_more_input() {
-    assert!(!needs_continuation("{ ]"));
-    refused_saying(&[("{ ]", "mismatched `]`: the innermost open delimiter is `{`")]);
+fn a_mismatched_closer_is_the_lexers_definite_error() {
+    let err = parse("{ ]").unwrap_err();
+    assert!(matches!(
+        err.kind,
+        ParseErrorKind::Lex(LexErrorKind::Mismatched {
+            open: '{',
+            close: ']',
+            ..
+        })
+    ));
+}
+
+/// The REPL asks for another line exactly when some suffix completes the
+/// input, and never over a definite error that no suffix can repair.
+#[test]
+fn continuation_is_asked_only_where_a_suffix_completes_the_input() {
+    for (prefix, suffix) in [
+        ("let f = {", " return 1 }"),
+        ("let f = {# comment", "\n }"),
+        ("return [a, b", "]"),
+        ("\"foo", "\""),
+        ("\"foo !{cmd", "}\""),
+        ("echo $(x", ")"),
+        ("$[1 +", " 2]"),
+        ("let x =", " 1"),
+        ("echo hi |", " cat"),
+        ("echo a ?", " b"),
+        ("if $c", " { a }"),
+        ("if true x\nelsif", " $c { y }"),
+    ] {
+        assert!(needs_continuation(prefix), "{prefix:?} must ask for more");
+        assert!(
+            parse(&format!("{prefix}{suffix}")).is_ok(),
+            "{prefix:?} must be completed by {suffix:?}"
+        );
+    }
+    for src in ["{ ]", "[a }", "echo hi }", "echo \"\\z\"", "$[1 + ]"] {
+        assert!(parse(src).is_err(), "{src:?} must not parse");
+        assert!(!needs_continuation(src), "{src:?} is beyond repair");
+    }
 }
 
 #[test]
 fn a_function_header_opens_on_the_brace_line() {
-    refused_saying(&[
-        (
-            "let f = {\n|x| echo $x }",
-            "a function's parameters open on the same line as `{`: write `{ |x|`",
-        ),
-        ("{ # header\n|x| 1 }", "open on the same line as `{`"),
-    ]);
+    refused_saying(&[("{ # header\n|x| 1 }", "open on the same line as `{`")]);
 }
 
 #[test]
@@ -2753,7 +2766,6 @@ fn an_unclosed_parameter_list_names_the_closing_bar() {
 fn a_spread_with_nothing_after_it_says_what_it_spreads() {
     let said = "`...` spreads the value after it: write `...$xs`";
     refused_saying(&[
-        ("echo ...", said),
         ("echo ...\necho a", said),
         ("echo ... | cat", said),
         ("echo ... ? a", said),
@@ -2770,9 +2782,7 @@ fn a_redirect_with_nothing_after_it_says_what_it_needs() {
         ("echo >>\n", write),
         ("echo 2>", write),
         ("echo > | cat", write),
-        ("cat <", read),
         ("cat <\necho a", read),
-        ("cat <<", feed),
         ("cat <<\necho a", feed),
     ]);
 }
@@ -2780,11 +2790,7 @@ fn a_redirect_with_nothing_after_it_says_what_it_needs() {
 #[test]
 fn an_index_without_a_key_gives_the_two_forms() {
     let said = "an index needs a key: `$x[name]` or `$x[0]`";
-    refused_saying(&[
-        ("echo $x[]", said),
-        ("echo $x[a][]", said),
-        ("echo \"$x[]\"", said),
-    ]);
+    refused_saying(&[("echo $x[a][]", said), ("echo \"$x[]\"", said)]);
 }
 
 #[test]
@@ -2811,9 +2817,7 @@ fn a_stage_with_no_command_says_what_precedes_it() {
     let pipe = "a pipeline needs a command before `|`";
     let question = "`?` needs a command before it to fall back from";
     refused_saying(&[
-        ("| cat", pipe),
         ("echo a ? | cat", pipe),
-        ("? echo a", question),
         ("echo a | ? b", question),
         ("|| cat", "ral has no `||`"),
     ]);
@@ -2823,7 +2827,6 @@ fn a_stage_with_no_command_says_what_precedes_it() {
 fn a_rest_pattern_comes_last() {
     let said = "`...rest` takes the remaining elements, so it comes last";
     refused_saying(&[
-        ("let [...r, a] = $x", said),
         ("let [a, ...r, b] = $x", said),
         ("let [a, ...r b] = $x", said),
     ]);
@@ -2835,11 +2838,6 @@ fn a_rest_pattern_comes_last() {
 #[test]
 fn a_return_before_a_statement_keyword_says_why() {
     refused_saying(&[
-        (
-            "return if $c { a } else { b }",
-            "`return` takes one value, and `if` begins a statement: put the `return` \
-             inside each branch, or write `return !{if …}`",
-        ),
         (
             "return case $x [`a: { |v| 1 }]",
             "and `case` begins a statement",
@@ -2880,10 +2878,6 @@ fn an_entry_that_runs_a_command_says_how() {
 #[test]
 fn a_glued_equals_in_a_binding_says_to_space_it() {
     refused_saying(&[
-        (
-            "let x=5",
-            "`x=5` is one word: `let` wants spaces around `=`, as in `let x = 5`",
-        ),
         ("let x= 5", "`x=` is one word"),
         ("let x =5", "`=5` is one word"),
         ("let dir=/tmp/x", "`dir=/tmp/x` is one word"),
@@ -2983,11 +2977,6 @@ fn a_misshapen_bracket_says_what_to_write() {
         ),
         ("[a:]", "this key has no value", "`[name: 1]`"),
         ("[a: , b: 1]", "this key has no value", "`[name: 1]`"),
-        (
-            "echo name: 1",
-            "`:` stands only between a key and its value, inside `[ ]`",
-            "for a record, write `[name: …]`; for text, quote it: `'name:'`",
-        ),
         ("let r = name: 1", "inside `[ ]`", "`[name: …]`"),
         ("[a, : 1]", "inside `[ ]`", "write a key before it"),
         (

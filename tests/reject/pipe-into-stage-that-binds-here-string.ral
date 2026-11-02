@@ -1,2 +1,5 @@
+# codes: T0070
+# status: 1
+# at: 5:11
 # contains: the pipe writes into a stdin this `<<` replaces
 echo hi | from-string << #'body'#

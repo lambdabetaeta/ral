@@ -153,28 +153,3 @@ impl Interface {
         Ok(tun.into())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn net(address: &str, prefix: u8, gateway: &str) -> boot::Net {
-        boot::Net::new(
-            1730,
-            guest_abi::link::Link {
-                address: address.parse().unwrap(),
-                prefix,
-                gateway: gateway.parse().unwrap(),
-            },
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn a_gateway_on_the_subnet_is_accepted() {
-        let interface = plan(&net("10.0.2.15", 24, "10.0.2.2"));
-        assert_eq!(interface.address, Ipv4Addr::new(10, 0, 2, 15));
-        assert_eq!(interface.netmask, Ipv4Addr::new(255, 255, 255, 0));
-        assert_eq!(interface.gateway, Ipv4Addr::new(10, 0, 2, 2));
-    }
-}

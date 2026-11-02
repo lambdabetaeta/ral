@@ -49,3 +49,53 @@ pub(crate) fn interrupt<T>(thread: &std::thread::JoinHandle<T>) {
 pub(crate) fn aborted(e: &io::Error) -> bool {
     e.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED.cast_signed())
 }
+
+#[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
+    use std::os::unix::thread::JoinHandleExt as _;
+    use std::time::Duration;
+
+    extern "C" fn nothing(_: libc::c_int) {}
+
+    /// Signals aimed at the waiting thread, without `SA_RESTART`, for far
+    /// longer than a slice: a fresh deadline per `EINTR` would outlast them.
+    #[test]
+    fn eintr_is_retried_against_the_slices_own_deadline() {
+        // SIGURG is ignored by default, so no other test sees the handler.
+        let action = SigAction::new(
+            SigHandler::Handler(nothing),
+            SaFlags::empty(),
+            SigSet::empty(),
+        );
+        // SAFETY: the handler does nothing, async-signal-safely.
+        unsafe { sigaction(Signal::SIGURG, &action) }.expect("install the handler");
+
+        let (idle, _writer) = crate::process::cloexec_pipe().expect("pipe");
+        let waiter = std::thread::spawn(move || {
+            let begun = Instant::now();
+            let verdict = poll_slice(&idle, PollFlags::IN);
+            (verdict, begun.elapsed())
+        });
+        let barrage = Instant::now() + Duration::from_millis(500);
+        while !waiter.is_finished() && Instant::now() < barrage {
+            let thread = waiter.as_pthread_t() as libc::pthread_t;
+            // SAFETY: the waiter is not joined yet, so its thread id is live;
+            // it may have just exited, which `ESRCH` reports and we ignore.
+            let _ = unsafe { libc::pthread_kill(thread, libc::SIGURG) };
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (verdict, elapsed) = waiter.join().expect("waiter thread");
+        assert_eq!(verdict.expect("EINTR is not an error"), None);
+        assert!(
+            elapsed >= POLL_SLICE,
+            "the slice ran its course: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "the barrage did not renew the deadline: {elapsed:?}"
+        );
+    }
+}

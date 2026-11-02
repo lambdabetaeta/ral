@@ -1,3 +1,6 @@
+# codes: T0020
+# status: 1
+# at: 6:10
 # contains: no field named 'missing'
 let r = [a: 1, b: 2]
 return $r[missing]

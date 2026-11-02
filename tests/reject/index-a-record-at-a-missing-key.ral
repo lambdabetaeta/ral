@@ -1,4 +1,6 @@
 # codes: T0020
+# status: 1
+# at: 6:8
 # contains: this record has no field named 'b'
 let m = [a: 1]
 echo $m[b]

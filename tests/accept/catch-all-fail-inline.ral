@@ -1,1 +1,0 @@
-within [handler: { |n a| fail [status: 1, message: 'unhandled command'] }] { zzz }

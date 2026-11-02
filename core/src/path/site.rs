@@ -223,10 +223,10 @@ pub(in crate::path) enum Silent {
     /// and sandbox reopens raise no card of their own.
     #[cfg(windows)]
     WalkReopen,
-    /// Whether a write open would be granted, by name under the held
-    /// directory: the `is-writable` predicate, and a staged write's check of
-    /// the file it would replace.  A permission predicate, not turn-time
-    /// model data I/O.
+    /// Whether a read or write open would be granted, by name under the held
+    /// directory: the `is-readable` and `is-writable` predicates, and a staged
+    /// write's check of the file it would replace.  A permission predicate,
+    /// not turn-time model data I/O.
     WalkAccess,
     /// The discard device (`/dev/null`, `\\.\NUL`) opened by its fixed name: no
     /// bytes reach or leave the model, and no grant region can contain a

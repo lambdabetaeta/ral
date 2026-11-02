@@ -3,22 +3,14 @@
 //! The inference pass is unconditional — it writes the evaluator's mode
 //! wires — and any type error is fatal: a value-type clash and a mode
 //! mismatch alike report and refuse to evaluate.  The refusals themselves are
-//! the `tests/reject/` corpus; these tests pin what only the binary shows: the
-//! agreement of `--check` with a real run, and the rc-skip-but-boot policy.
+//! the `tests/reject/` corpus; these tests pin what only the binary shows: a
+//! type error stops a real run, and `--check` agrees with a real run.
 
 #![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::time::Duration;
-
-/// Captured output of a `ral` boot.
-struct Run {
-    stdout: String,
-    stderr: String,
-}
 
 // ── batch honesty: `--check` sees exactly what `run` will run ────────────
 //
@@ -75,83 +67,14 @@ fn run_agrees_ed_insert_is_external_in_batch() {
     );
 }
 
-// ── rc files at boot ──────────────────────────────────────────────────────
-//
-// An rc check error is reported and the boot survives — never fatal.  The
-// rc file is found via `$XDG_CONFIG_HOME/ral/rc`; isolating both
-// `XDG_CONFIG_HOME` and `HOME` to a temp dir keeps the test off the
-// developer's real rc and history.  The shell boots interactive (`-i`) with
-// a one-line piped stdin that runs after rc sourcing, so its output reports
-// what the rc left behind.
+// ── a type error refuses the whole run ────────────────────────────────────
 
-/// Boot `ral -i` with `rc_body` written to the isolated rc file and `line`
-/// fed as the single REPL run after rc sourcing.
-fn boot_with_rc(rc_body: &str, line: &str) -> Run {
-    let dir = common::fresh_tmp_path("ral_rc_home", "d");
-    std::fs::create_dir_all(dir.join("ral")).unwrap();
-    std::fs::write(dir.join("ral").join("rc"), rc_body).unwrap();
-
-    let mut child = Command::new(common::ral_bin())
-        .arg("-i")
-        .env("HOME", &dir)
-        .env("XDG_CONFIG_HOME", &dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn ral");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(line.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    std::fs::remove_dir_all(&dir).ok();
-    Run {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    }
-}
-
-/// An rc file with a value-type error is skipped — the error is fatal to the
-/// file, so `marker` never installs — but the shell still boots (the next
-/// run happens).
+/// A type error anywhere in a script blocks evaluation: nothing before it
+/// runs either.
 #[test]
-fn rc_value_type_error_skips_file_but_boots() {
-    let rc = "let marker = 'applied'\nlet bad = [a: 1]\nreturn $bad[b]\n";
-    let r = boot_with_rc(rc, "return marker-absent\n");
-    assert!(
-        r.stderr.contains("skipped, since it does not compile"),
-        "the rc file must be skipped; stderr was:\n{}",
-        r.stderr
-    );
-    assert!(
-        !r.stdout.contains("applied"),
-        "a skipped rc file must not install its bindings; stdout was:\n{}",
-        r.stdout
-    );
-    // The shell still booted: the piped run completed.
-    assert!(
-        r.stdout.contains("marker-absent"),
-        "the shell must boot even when the rc file is skipped; stdout was:\n{}",
-        r.stdout
-    );
-}
-
-/// An rc file whose pipeline cannot run is skipped, but the shell boots.
-#[test]
-fn rc_stage_shape_error_skips_file_but_boots() {
-    let rc = "let marker = 'applied'\necho foo | length\n";
-    let r = boot_with_rc(rc, "return booted\n");
-    assert!(
-        r.stderr.contains("T0050") && r.stderr.contains("skipped, since it does not compile"),
-        "an rc stage-shape error must skip the file; stderr was:\n{}",
-        r.stderr
-    );
-    assert!(
-        r.stdout.contains("booted"),
-        "the shell must boot despite the rc mode error; stdout was:\n{}",
-        r.stdout
-    );
+fn a_type_error_blocks_the_run_before_any_output() {
+    let r = common::run("type_error_blocks_run", "echo before; return $[1 + 'x']");
+    assert_ne!(r.status, 0, "a type error must fail the run");
+    assert!(r.stderr.contains("T0010"), "stderr was:\n{}", r.stderr);
+    assert_eq!(r.stdout, "", "nothing may run past a type error");
 }

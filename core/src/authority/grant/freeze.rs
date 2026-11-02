@@ -1041,7 +1041,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_homeless_path_is_refused_only_for_the_root() {
-        assert!(path_dirs_in::<Trace>(OsStr::new("/usr/bin:/h"), None).is_ok());
+        let dirs = path_dirs_in::<Trace>(OsStr::new("/usr/bin:/h"), None).unwrap();
+        let dirs: Vec<_> = dirs.iter().map(|d| d.written.as_str()).collect();
+        assert_eq!(dirs, ["/usr/bin", "/h"]);
         assert!(path_dirs_in::<Trace>(OsStr::new("/usr/bin:/"), None).is_err());
     }
 
@@ -1151,7 +1153,14 @@ mod tests {
             "XDG_DATA_HOME",
             Some(&data.to_string_lossy()),
             || {
-                frozen(&[xdg(XdgKind::Data, ".")], &ctx(&home_str, "/cwd")).unwrap();
+                let paths = frozen(&[xdg(XdgKind::Data, ".")], &ctx(&home_str, "/cwd")).unwrap();
+                let [accepted] = &*paths else {
+                    panic!("one place freezes to one path: {paths:?}")
+                };
+                assert_eq!(
+                    std::fs::canonicalize(accepted).unwrap(),
+                    std::fs::canonicalize(&data).unwrap()
+                );
             },
         );
     }
@@ -1180,7 +1189,14 @@ mod tests {
     #[test]
     fn freeze_accepts_xdg_under_a_drive_root_home() {
         crate::host::env::test_support::with_var("XDG_DATA_HOME", None, || {
-            frozen(&[xdg(XdgKind::Data, ".")], &ctx(r"C:\", r"C:\cwd")).unwrap();
+            let paths = frozen(&[xdg(XdgKind::Data, ".")], &ctx(r"C:\", r"C:\cwd")).unwrap();
+            let [accepted] = &*paths else {
+                panic!("one place freezes to one path: {paths:?}")
+            };
+            assert!(
+                accepted.to_ascii_uppercase().starts_with(r"C:\"),
+                "{accepted}"
+            );
         });
     }
 

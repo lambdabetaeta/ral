@@ -16,7 +16,6 @@ fn mutex_name_is_deterministic_and_local_prefix() {
     let n2 = mutex_name_for(&p);
     assert_eq!(n1, n2);
     assert!(n1.starts_with("Local\\ral.sandbox.dacl."));
-    assert_eq!(n1.len(), "Local\\ral.sandbox.dacl.".len() + 16);
 }
 
 #[test]

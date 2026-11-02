@@ -242,3 +242,10 @@ fn a_wire_dispatch_under_cancelled_within_runs_no_effect() {
         "the strike must precede its own dispatch: {frames:?}"
     );
 }
+
+#[test]
+fn an_idle_probe_returns_the_engines_reading_over_the_wire() {
+    let _serial = REQUEST_SERIAL.lock();
+    let (cwd, _) = with_engine(WireTransport::cwd);
+    assert_eq!(cwd.unwrap(), Some(std::env::current_dir().unwrap()));
+}

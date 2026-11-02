@@ -1,3 +1,6 @@
+# codes: L0001
+# status: 2
+# at: 6:1
 # contains: unterminated double-quoted string
 # no final newline: a newline would end the `$(` before the string does
 "foo $(cmd

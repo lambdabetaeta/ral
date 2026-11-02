@@ -27,6 +27,8 @@ let slow = spawn "slow" { sleep 30; return slow }
 let fast = spawn "fast" { return fast }
 echo !{race [$slow, $fast]}
 # Expected: fast
+echo !{try { let _ = await $slow; return awaited } { |_| return ended }}
+# Expected: ended
 
 # par starts the next item as soon as any running one settles: on two slots,
 # item 0 waits for a flag only item 2 raises, so item 2 must take item 1's

@@ -165,3 +165,114 @@ pub(crate) struct Review(pub(crate) Mutex<Option<Held>>);
 /// Single-flight sign-in avoids competing for the loopback port.
 #[derive(Default)]
 pub(crate) struct SignIn(pub(crate) Mutex<Option<Arc<AtomicBool>>>);
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use crate::folder::manifest::Stop;
+    use crate::test_fixture::scripted_host;
+    use exarch::provider::scripted::{Reply, Script};
+
+    fn handle(generation: u64, inlet: Inlet) -> (Handle, Stop) {
+        let stop = Stop::default();
+        let handle = Handle {
+            generation,
+            attempt: "attempt".into(),
+            inlet,
+            join: std::thread::spawn(|| {}),
+            baseline_stop: stop.clone(),
+        };
+        (handle, stop)
+    }
+
+    #[test]
+    fn begin_close_hands_shutdown_to_exactly_one_caller() {
+        let (registered, stop) = handle(1, Inlet::Booting(Vec::new()));
+        let running = Running(Arc::new(Mutex::new(Owner::Open(Some(registered)))));
+
+        let close = running
+            .begin_close()
+            .expect("the first close owns shutdown");
+        assert!(running.begin_close().is_none());
+        assert!(
+            !stop.is_stopped(),
+            "stopping waits for the owner of shutdown"
+        );
+        close.wait();
+        assert!(stop.is_stopped());
+        assert!(running.begin_close().is_none());
+    }
+
+    #[test]
+    fn closing_an_empty_window_still_forbids_registration() {
+        let running = Running::default();
+        running.begin_close().expect("the first close").wait();
+        assert!(running.0.lock_ignore_poison().open().is_none());
+    }
+
+    #[test]
+    fn a_generation_owns_the_window_until_it_is_closing() {
+        let (registered, _) = handle(7, Inlet::Booting(Vec::new()));
+        let mut owner = Owner::Open(Some(registered));
+        assert!(owner.owned_by(7).is_some());
+        assert!(owner.owned_by_mut(7).is_some());
+        assert!(owner.owned_by(8).is_none());
+        assert!(owner.owned_by_mut(8).is_none());
+
+        owner = Owner::Closing;
+        assert!(owner.current().is_none());
+        assert!(owner.owned_by(7).is_none());
+        assert!(owner.owned_by_mut(7).is_none());
+    }
+
+    #[test]
+    fn a_booting_inlet_holds_messages_until_the_port_is_installed() {
+        let run_dir = ral_core::own::OwnDir::for_test("inlet-install").expect("run directory");
+        let host = scripted_host(&run_dir, None, Script::new().then(Reply::text("done")));
+        let (port, root) = (host.port(), host.children()[0]);
+
+        let mut inlet = Inlet::Booting(Vec::new());
+        inlet.steer("first".into()).expect("held");
+        inlet.steer("second".into()).expect("held");
+        assert_eq!(inlet.queued(), ["first", "second"]);
+        assert_eq!(inlet.recall(), ["first", "second"]);
+        assert_eq!(inlet.queued(), Vec::<String>::new());
+
+        inlet.steer("held".into()).expect("held");
+        assert_eq!(inlet.install(port.clone(), root), ["held"]);
+        assert!(matches!(inlet, Inlet::Live { .. }));
+        assert!(
+            port.queued(root).unwrap().is_empty(),
+            "held messages are returned, not forwarded"
+        );
+        assert!(
+            inlet.install(port, root).is_empty(),
+            "a live inlet holds nothing"
+        );
+
+        assert_eq!(host.end(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_live_inlet_routes_to_the_agent_until_it_ends() {
+        let run_dir = ral_core::own::OwnDir::for_test("inlet-live").expect("run directory");
+        let host = scripted_host(&run_dir, None, Script::new().then(Reply::text("done")));
+        let (port, root) = (host.port(), host.children()[0]);
+
+        let mut inlet = Inlet::Live {
+            port: port.clone(),
+            agent: root,
+        };
+        inlet.steer("go".into()).expect("a live root accepts input");
+        assert_eq!(port.queued(root).unwrap(), ["go"]);
+        assert_eq!(inlet.queued(), ["go"]);
+        assert_eq!(inlet.recall(), ["go"]);
+        assert_eq!(port.queued(root).unwrap(), Vec::<String>::new());
+
+        assert_eq!(host.end(), Vec::<String>::new());
+        assert!(inlet.steer("late".into()).is_err());
+        assert_eq!(inlet.queued(), Vec::<String>::new());
+        assert_eq!(inlet.recall(), Vec::<String>::new());
+    }
+}

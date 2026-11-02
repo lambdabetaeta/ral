@@ -1,3 +1,6 @@
+# codes: T0020
+# status: 1
+# at: 6:15
 # contains: `` `chdr `` is not a verb
 # contains: did you mean `` `chdir ``
 grant [shell: [`chdr]] { return 1 }

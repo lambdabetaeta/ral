@@ -1,0 +1,318 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
+
+//! Evaluator tests that need the Rust harness: direct `Value` and IR
+//! inspection, `Shell` API configuration, timing, and `coreutils`-gated
+//! pipelines. Pure-language behaviour lives in the golden scripts under
+//! `tests/`; static rejections (type and parse diagnostics a script cannot
+//! catch with `try`) in the `tests/reject/` corpus.
+
+mod common;
+
+use ral_core::protocol::Run;
+use ral_core::shell::run::RunReport;
+use ral_core::shell::runtime::{Break, Shell, Value};
+use ral_core::source::SourceOrigin;
+
+/// Evaluate `input` through the public run entry on an already-configured
+/// `shell` — parse, elaborate, typecheck against the prelude schemes, run
+/// the phrases.
+fn run_on(shell: &mut Shell, input: &str) -> ral_core::shell::runtime::Settled<Value> {
+    match shell.run(Run::foreground(input, SourceOrigin::named("<test>"))) {
+        RunReport::Ran { ending, .. } => ending.into_result(),
+        // A static diagnostic reads as a failed run: no value was produced.
+        RunReport::Static { diagnostics } => {
+            let msg = diagnostics.render().0;
+            Err(ral_core::shell::runtime::Error::raised(msg, 2).into())
+        }
+        // A panic is never a legitimate "no value": it fails the test.
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
+    }
+}
+
+/// [`run_on`] against a fresh shell seeded with `path` on `PATH`.
+fn eval_on_path(input: &str, path: &str) -> ral_core::shell::runtime::Settled<Value> {
+    let mut shell = common::prelude_shell();
+    shell.set_env_var("PATH", path);
+    run_on(&mut shell, input)
+}
+
+/// Evaluate independently of whichever tools happen to be installed on the
+/// test host. Individual process tests supply an explicit path when needed.
+fn eval(input: &str) -> ral_core::shell::runtime::Settled<Value> {
+    #[cfg(unix)]
+    let path = "/bin:/usr/bin".to_string();
+    #[cfg(windows)]
+    let path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .find(|dir| {
+            ["cat.exe", "pwd.exe", "sleep.exe"]
+                .iter()
+                .all(|name| dir.join(name).is_file())
+        })
+        .unwrap_or_else(|| {
+            panic!("eval_harness needs cat.exe, pwd.exe, and sleep.exe in one PATH directory")
+        })
+        .to_string_lossy()
+        .into_owned();
+
+    eval_on_path(input, &path)
+}
+
+fn must_succeed(input: &str) -> Value {
+    eval(input).unwrap_or_else(|e| panic!("should succeed: {input:?}\n  error: {e:?}"))
+}
+
+#[cfg(all(unix, feature = "coreutils"))]
+fn must_fail(input: &str) {
+    assert!(eval(input).is_err(), "should fail: {input:?}");
+}
+
+#[test]
+fn try_error_record_carries_the_script() {
+    assert_eq!(
+        must_succeed(
+            "try { fail [status: 1, message: 'x'] } { |err| \
+             case $err[site] [`some: { |s| return \"$s[script]:$s[line]\" }, `none: { |_| return none }] }"
+        ),
+        Value::string("<test>:1")
+    );
+}
+
+#[test]
+fn env_overrides_shadow_process_env_in_dollar_env() {
+    let mut shell = common::prelude_shell();
+    shell.set_env_var("RAL_TEST_ENV", "override");
+    let result = run_on(&mut shell, "return !{env}[RAL_TEST_ENV]").expect("evaluate env");
+    assert_eq!(result, Value::string("override"));
+}
+
+/// `$STATUS` is not a name any longer: a failure carries its status in the
+/// `Err` record `try` binds, so reading the register is refused statically
+/// like any other unbound name — and the hint says where the status went.
+#[test]
+fn status_is_an_unbound_variable_that_names_its_replacement() {
+    let Err(Break::Error(e)) = eval("return $STATUS") else {
+        panic!("$STATUS must not resolve");
+    };
+    assert!(
+        e.message.contains("undefined variable: $STATUS"),
+        "unexpected diagnostic: {}",
+        e.message
+    );
+    assert!(
+        e.message.contains("`try`"),
+        "the diagnostic must point at `try`: {}",
+        e.message
+    );
+}
+
+/// A session `let` shadows the command of the same name, in every binder:
+/// plain, recursive, and destructuring.
+#[cfg(unix)]
+#[test]
+fn session_scope_let_shadows_a_path_command() {
+    assert_eq!(must_succeed("let cat = 1\nreturn $cat"), Value::Int(1));
+    assert_eq!(
+        must_succeed(
+            "let cat = { |x| if $[$x <= 0] { return 0 } else { cat $[$x - 1] } }\nreturn !{cat 3}"
+        ),
+        Value::Int(0)
+    );
+    assert_eq!(
+        must_succeed("let [cat, other] = [1, 2]\nreturn $[$cat + $other]"),
+        Value::Int(3)
+    );
+}
+
+#[cfg(feature = "coreutils")]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
+#[test]
+fn bundled_uutils_capture_honours_scoped_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = format!(
+        "within [dir: '{}'] {{ let out = pwd\nreturn $out }}",
+        dir.path().display()
+    );
+    let Value::String(output) = must_succeed(&script) else {
+        panic!("expected pwd output string");
+    };
+    assert_eq!(
+        std::fs::canonicalize(output.as_str()).unwrap(),
+        dir.path().canonicalize().unwrap()
+    );
+}
+
+#[cfg(feature = "coreutils")]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
+#[test]
+fn bundled_uutils_capture_completes_with_buffer_sink() {
+    let out = must_succeed("let out = ls -lah\nreturn $out");
+    match out {
+        Value::String(s) => assert!(!s.is_empty()),
+        other => panic!("expected captured ls output, got {other:?}"),
+    }
+}
+
+/// `$upper` is a plain env hit on the native — the entry *is* the value.
+#[test]
+fn return_deref_name_is_bound_value() {
+    let v = must_succeed("return $upper");
+    match v {
+        Value::Native { entry, applied } => {
+            assert_eq!(entry.decl.name, "upper");
+            assert!(applied.is_empty());
+        }
+        other => panic!("expected the native itself, got {other:?}"),
+    }
+}
+
+#[test]
+fn lexical_non_head_name_uses_deref_to_get_value() {
+    let v = must_succeed("let f = { |x| return $x }\nreturn $f");
+    assert!(matches!(v, Value::Thunk(_)), "expected thunk, got {v:?}");
+}
+
+#[test]
+fn list_position_deref_gives_thunk() {
+    // $upper in list position is a variable lookup.
+    let v = must_succeed("let upper = { |x| return $x }\nreturn [$upper]");
+    match v {
+        Value::List(items) => {
+            assert!(
+                matches!(items.get(0).as_deref(), Some(Value::Thunk(_))),
+                "expected thunk, got {:?}",
+                items.get(0)
+            );
+        }
+        other => panic!("expected list, got {other:?}"),
+    }
+}
+
+#[test]
+fn race_first_wins() {
+    // Two spawns: one returns immediately, one sleeps. Race picks the fast one.
+    assert_eq!(
+        must_succeed(
+            r"
+            let fast = !{spawn { return winner }}
+            let slow = !{spawn { sleep 10; return loser }}
+            let r = race [$fast, $slow]
+            return $r
+        "
+        ),
+        Value::string("winner")
+    );
+}
+
+/// A bundled byte stage runs as a direct `ral --ral-bundled-tool` child
+/// (no helper eval) and produces correct bytes and a success status.
+/// `printf … | wc -l` spawns both `printf` and `wc` as direct bundled
+/// children; capturing the count through `from-string` recovers `wc`'s
+/// bytes (`"4\n"` for four lines) and proves the pipeline succeeded — a
+/// non-zero `wc` would fail the `from-string` capture instead.
+#[cfg(all(unix, feature = "coreutils"))]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
+#[test]
+fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
+    assert_eq!(
+        must_succeed("!{printf 'a\\nb\\nc\\nd\\n' | wc -l | from-string}"),
+        Value::string("4\n"),
+        "a bundled `wc -l` over four lines must emit `4`, recovered through \
+         the byte-to-value `from-string` edge"
+    );
+}
+
+/// A failing bundled tool in a process-staged pipeline surfaces a
+/// failure rather than swallowing the non-zero status: `wc` on a missing
+/// path exits non-zero, and the pipeline must fail-fast.
+#[cfg(all(unix, feature = "coreutils"))]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
+#[test]
+fn failing_bundled_byte_stage_surfaces_failure() {
+    must_fail("printf 'a\\nb\\n' | wc /nonexistent/path");
+}
+
+/// `Exec` heads carrying trailing redirects must elaborate to a plain
+/// `Exec` with `redirects` populated — `CompKind::Exec` is the only
+/// place redirects-on-shell-call live, and the pipeline analyser
+/// relies on that exclusivity at `runtime/pipeline/resolve.rs` (its
+/// External fast path destructures `CompKind::Exec` directly).
+#[test]
+fn elaborator_never_wraps_exec_in_redirect() {
+    use ral_core::ir::CompKind;
+
+    // Each source uses an `Exec` head (bare external name, `^name`,
+    // `./path`, `~/path`) with trailing redirects of every flavour
+    // (stdout, stderr, append, stdin, fd-dup).  All must elaborate to
+    // `Exec` with non-empty `redirects` — never to a `Scope::Redirect`
+    // wrapping an `Exec`.
+    let sources = &[
+        "cat < in.txt",
+        "echo hi > out.txt",
+        "echo hi >> out.txt",
+        "cmd 2> err.txt",
+        "cmd 2>&1",
+        "^cat < in.txt",
+        "./run.sh > out.txt",
+        "~/bin/tool 2> err.log",
+        "cmd < in.txt > out.txt 2>&1",
+    ];
+
+    fn walk(comp: &ral_core::ir::Comp, saw_exec_with_redirects: &mut bool) {
+        match &comp.item {
+            CompKind::Exec(e) if ral_core::test_access::exec_has_redirects(e) => {
+                *saw_exec_with_redirects = true;
+            }
+            CompKind::Lam { body, .. } => walk(body, saw_exec_with_redirects),
+            CompKind::Bind { comp, rest, .. } => {
+                walk(comp, saw_exec_with_redirects);
+                walk(rest, saw_exec_with_redirects);
+            }
+            CompKind::App { head, .. } => walk(head, saw_exec_with_redirects),
+            CompKind::Pipeline { stages } => {
+                for s in stages {
+                    walk(s, saw_exec_with_redirects);
+                }
+            }
+            CompKind::If { then, else_, .. } => {
+                for arm in [then, else_] {
+                    if let ral_core::ir::Val::Thunk(node) = &arm.item {
+                        walk(node.shape(), saw_exec_with_redirects);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for src in sources {
+        let ast =
+            ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
+        let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
+        let mut saw = false;
+        for phrase in &top {
+            let comp: &ral_core::ir::Comp = match &phrase.item {
+                ral_core::ir::Phrase::Define { comp, .. } | ral_core::ir::Phrase::Run(comp) => comp,
+            };
+            walk(comp, &mut saw);
+        }
+        assert!(
+            saw,
+            "test bug: {src:?} elaborated without producing an `Exec` \
+             with non-empty redirects — the invariant test would pass \
+             vacuously.  Adjust the source to exercise the Exec+redirect \
+             elaboration path."
+        );
+    }
+}

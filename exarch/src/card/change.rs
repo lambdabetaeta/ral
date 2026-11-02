@@ -88,3 +88,98 @@ pub fn change_card(change: &Change) -> Card {
     };
     Card(unsettled.into_iter().chain([diff]).chain(cut).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ral_core::data::Bytes;
+    use ral_core::fact::Write;
+    use ral_core::ir::WriteMode;
+
+    fn write(old: Option<&[u8]>, new: Option<&[u8]>, outcome: WriteOutcome) -> Observed {
+        Observed::Write(Write {
+            path: "a.txt".into(),
+            mode: WriteMode::Write,
+            outcome,
+            new_bytes: new.map(Bytes::from),
+            old_bytes: old.map(Bytes::from),
+        })
+    }
+
+    #[test]
+    fn a_diff_needs_both_sides_as_text() {
+        let diff = |old, new| {
+            Change::of(&write(old, new, WriteOutcome::Committed))
+                .unwrap()
+                .diff
+        };
+        let created = diff(Some(b""), Some(b"x\n")).expect("an empty before-image is a creation");
+        assert_eq!((created.added, created.removed), (1, 0));
+        assert!(diff(None, Some(b"x\n")).is_none(), "unknown before-image");
+        assert!(diff(Some(b"x\n"), None).is_none(), "unknown after-image");
+        assert!(
+            diff(Some(&[0xff, 0xfe]), Some(b"x\n")).is_none(),
+            "binary before"
+        );
+        assert!(
+            diff(Some(b"x\n"), Some(&[0xff, 0xfe])).is_none(),
+            "binary after"
+        );
+    }
+
+    #[test]
+    fn only_a_write_is_a_change() {
+        let read = Observed::Read(ral_core::fact::Read { path: "a".into() });
+        assert!(Change::of(&read).is_none());
+    }
+
+    #[test]
+    fn lines_count_the_diff_or_nothing() {
+        let change = |old, new| Change::of(&write(old, new, WriteOutcome::Committed)).unwrap();
+        assert_eq!(change(Some(b"a\n"), Some(b"b\nc\n")).lines(), 3);
+        assert_eq!(change(None, Some(b"b\n")).lines(), 0);
+    }
+
+    fn card_of(old: Option<&[u8]>, new: Option<&[u8]>, outcome: WriteOutcome) -> Card {
+        change_card(&Change::of(&write(old, new, outcome)).unwrap())
+    }
+
+    #[test]
+    fn a_committed_diff_is_its_own_card() {
+        let card = card_of(Some(b"a\n"), Some(b"b\n"), WriteOutcome::Committed);
+        assert!(matches!(card.marks(), [Mark::Diff { path, .. }] if path == "a.txt"));
+    }
+
+    #[test]
+    fn an_unsettled_write_is_headed_above_its_diff() {
+        let card = card_of(Some(b"a\n"), Some(b"b\n"), WriteOutcome::Aborted);
+        let [Mark::Text { spans }, Mark::Diff { .. }] = card.marks() else {
+            panic!("a heading, then the diff: {card:?}");
+        };
+        assert_eq!(spans.last().and_then(|s| s.role), Some(Role::Warn));
+    }
+
+    #[test]
+    fn a_change_without_a_diff_is_only_its_heading() {
+        let card = card_of(None, Some(b"b\n"), WriteOutcome::Committed);
+        assert!(matches!(card.marks(), [Mark::Text { .. }]));
+    }
+
+    #[test]
+    fn a_cut_diff_ends_in_a_note_of_what_it_cut() {
+        let big = "x\n".repeat(2500);
+        let change = Change::of(&write(
+            Some(b""),
+            Some(big.as_bytes()),
+            WriteOutcome::Committed,
+        ))
+        .unwrap();
+        let cut = change.diff.as_ref().unwrap().cut();
+        assert!(cut > 0);
+        let card = change_card(&change);
+        let [Mark::Diff { .. }, Mark::Text { spans }] = card.marks() else {
+            panic!("the diff, then a cut note: {card:?}");
+        };
+        assert!(spans[0].text.contains(&cut.to_string()));
+    }
+}

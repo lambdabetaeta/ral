@@ -800,24 +800,33 @@ mod engine_session_tests {
     }
 
     fn start_with(patience: Patience) -> Host {
+        let mut host = unattached(patience);
+        host.send(&Frame::Attach(attach("test")));
+        host
+    }
+
+    /// An engine session awaiting its first frame.
+    fn unattached(patience: Patience) -> Host {
         let (host_end, engine_end) = crate::process::cloexec_socketpair().expect("socketpair");
         let end = host_end.try_clone().expect("dup the host's end");
         let engine_ch = WireChannel::from_stream(engine_end);
         let engine = std::thread::spawn(move || engine_session(engine_ch, INSTALLERS, patience));
-        let mut host = Host {
+        Host {
             ch: WireChannel::from_stream(host_end),
             end,
             seen: Vec::new(),
             engine,
-        };
-        host.send(&Frame::Attach(Attach::new(
-            "test",
+        }
+    }
+
+    fn attach(installer: &str) -> Attach {
+        Attach::new(
+            installer,
             EnginePath::Host(std::env::current_dir().expect("test cwd")),
             EnginePath::Host(
                 std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from),
             ),
-        )));
-        host
+        )
     }
 
     impl Host {
@@ -934,6 +943,34 @@ mod engine_session_tests {
         host.send(&Frame::Detach);
         host.await_frame(|f| matches!(f, Frame::Session(SessionEvent::Ended)));
         assert_eq!(host.engine.join().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_first_frame_other_than_attach_ends_the_session_with_one() {
+        let _g = REQUEST_SERIAL.lock();
+        let mut host = unattached(Patience::default());
+        host.send(&Frame::Ping(1));
+        assert_eq!(host.engine.join().expect("engine thread"), 1);
+    }
+
+    #[test]
+    fn eof_before_attach_ends_the_session_cleanly() {
+        let _g = REQUEST_SERIAL.lock();
+        assert_eq!(unattached(Patience::default()).hang_up_and_join(), 0);
+    }
+
+    /// A version mismatch and an unknown installer are both boot failures.
+    #[test]
+    fn a_failed_boot_is_answered_refused_and_exits_one() {
+        let _g = REQUEST_SERIAL.lock();
+        let mut skewed = attach("test");
+        skewed.engine.proto_version += 1;
+        for attach in [skewed, attach("no-such-installer")] {
+            let mut host = unattached(Patience::default());
+            host.send(&Frame::Attach(attach));
+            host.await_frame(|f| matches!(f, Frame::Session(SessionEvent::Refused(_))));
+            assert_eq!(host.engine.join().expect("engine thread"), 1);
+        }
     }
 
     /// One rendezvous, so one refusal arm for both riders.

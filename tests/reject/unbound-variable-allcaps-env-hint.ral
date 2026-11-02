@@ -1,4 +1,6 @@
 # codes: T0071
+# status: 1
+# at: 6:6
 # contains: environment variables are read as
 # contains: !{env}[EDITOR]
 echo $EDITOR

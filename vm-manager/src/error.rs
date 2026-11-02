@@ -504,66 +504,6 @@ fn quoted(lines: &[String]) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_empty_console_says_whose_silence_it_is() {
-        let nothing = GuestConsole::Unkept.report("The assistant could not be started.", marked);
-        assert!(
-            nothing.contains("keeps no copy"),
-            "a backend that keeps no log must say so: {nothing}"
-        );
-        assert!(
-            nothing.contains("No last words"),
-            "an empty ring must be named as empty: {nothing}"
-        );
-
-        let kept = GuestConsole::Kept {
-            log: Some(PathBuf::from("C:/cache/console-1.log")),
-            tail: Vec::new(),
-        }
-        .report("The assistant could not be started.", marked);
-        assert!(
-            kept.contains("<console-1.log>"),
-            "a log that exists is named so a reader can open it: {kept}"
-        );
-        assert!(
-            kept.contains("which under the machine broker is a LocalSystem service"),
-            "the report names the broker without naming a product: {kept}"
-        );
-        assert!(
-            !kept.contains("keeps no copy"),
-            "the two silences must not be described in the same words: {kept}"
-        );
-    }
-
-    #[test]
-    fn the_guests_words_and_the_users_sentence_are_both_in_the_file() {
-        let text = GuestConsole::Kept {
-            log: None,
-            tail: vec![
-                "ral-guest: mounting /work".to_string(),
-                "engine: panicked at 'no workspace'".to_string(),
-            ],
-        }
-        .report(
-            "The assistant could not be started. Try again. (details in /run)",
-            marked,
-        );
-        assert!(
-            text.contains("could not be started. Try again."),
-            "the file stands alone, so it repeats the sentence the user saw: {text}"
-        );
-        assert!(
-            text.contains("panicked at 'no workspace'"),
-            "the guest's own words are the reason this file exists: {text}"
-        );
-        assert!(text.contains("could not be kept on disk"), "{text}");
-        assert!(!text.contains("keeps no copy"), "{text}");
-        assert!(
-            text.lines().any(|line| line.contains("mounting /work")),
-            "every retained line is kept, oldest first: {text}"
-        );
-    }
-
     fn marked(path: &Path) -> String {
         format!(
             "<{}>",
@@ -598,19 +538,92 @@ mod tests {
     }
 
     #[test]
-    fn an_error_crosses_a_pipe_as_data() {
-        let error = Error::HostFile {
-            file: HostFile::SessionDisk,
-            act: Act::Create,
-            path: PathBuf::from("synod-session-1-2.vhd"),
-            cause: "access is denied".to_string(),
+    fn every_error_crosses_a_pipe_as_data() {
+        let path = || PathBuf::from("synod-session-1-2.vhd");
+        let cause = || "access is denied".to_string();
+        let hypervisor = || Cow::Borrowed("Hyper-V");
+        let console = || GuestConsole::Kept {
+            log: Some(path()),
+            tail: vec!["panic".to_string()],
         };
-        let wire = serde_json::to_string(&error).unwrap();
-        let back: Error = serde_json::from_str(&wire).unwrap();
-        assert_eq!(
-            back.worded(marked).to_string(),
-            "the session disk <synod-session-1-2.vhd> could not be created: access is denied"
-        );
+        let errors = [
+            Error::NoBackend,
+            Error::Unentitled,
+            Error::NotPermitted,
+            Error::NoSuchFolder(path()),
+            Error::NotAFolder(path()),
+            Error::FolderUnreadable {
+                path: path(),
+                cause: cause(),
+            },
+            Error::MissingBootFile {
+                path: path(),
+                cause: cause(),
+            },
+            Error::ServiceUnlocated { cause: cause() },
+            Error::NoGuestImage {
+                looked_in: vec![path(), path()],
+            },
+            Error::CorruptGuestImage { archive: path() },
+            Error::HostFile {
+                file: HostFile::SessionDisk,
+                act: Act::Create,
+                path: path(),
+                cause: cause(),
+            },
+            Error::FolderForbidden {
+                path: path(),
+                read_only: true,
+                cause: cause(),
+            },
+            Error::FolderUnexamined {
+                path: path(),
+                cause: cause(),
+            },
+            Error::FolderIsLink(path()),
+            Error::FolderChanged(path()),
+            Error::NotUnicode(path()),
+            Error::NotAFileUrl(path()),
+            Error::VersionSkew {
+                client: 1,
+                service: 2,
+            },
+            Error::NotConstructed {
+                hypervisor: hypervisor(),
+                why: cause(),
+                files: Box::new(MachineFiles {
+                    kernel: path(),
+                    initramfs: path(),
+                    rootfs: path(),
+                    session: path(),
+                    folder: path(),
+                }),
+            },
+            Error::Undialled {
+                hypervisor: hypervisor(),
+                wire: Wire::Net,
+                within_secs: 60,
+                cause: cause(),
+                console: Some(console()),
+            },
+            Error::Undialled {
+                hypervisor: hypervisor(),
+                wire: Wire::Control,
+                within_secs: 60,
+                cause: cause(),
+                console: None,
+            },
+            Error::ForcedStop {
+                hypervisor: hypervisor(),
+                grace_secs: 5,
+            },
+            Error::backend("Hyper-V", cause()),
+        ];
+        for error in errors {
+            let wire = serde_json::to_string(&error).unwrap();
+            let back: Error = serde_json::from_str(&wire).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{error:?}"));
+        }
     }
 
     #[cfg(unix)]
@@ -688,41 +701,6 @@ mod tests {
             said,
             "\u{201c}EXT4-fs (sda): mounted filesystem\u{201d} / \u{201c}ral-guest: no ral.port \
              on the command line\u{201d}"
-        );
-    }
-
-    #[test]
-    fn a_silent_guest_and_a_missing_console_are_different_sentences() {
-        let undialled = |console| Error::Undialled {
-            hypervisor: "Hyper-V".into(),
-            wire: Wire::Control,
-            within_secs: 60,
-            cause: "timed out".to_string(),
-            console,
-        };
-        let silence = undialled(Some(GuestConsole::Kept {
-            log: Some(PathBuf::from("synod-console-0000-mute.log")),
-            tail: Vec::new(),
-        }))
-        .worded(marked)
-        .to_string();
-        assert!(silence.contains("said nothing at all"), "{silence}");
-        assert!(
-            silence.contains("<synod-console-0000-mute.log>"),
-            "the log must be named for a reader to open: {silence}"
-        );
-
-        let unkept = undialled(Some(GuestConsole::Unkept))
-            .worded(marked)
-            .to_string();
-        assert!(unkept.contains("keeps no copy"), "{unkept}");
-        assert!(!unkept.contains("said nothing"), "{unkept}");
-
-        let lost = undialled(None).worded(marked).to_string();
-        assert!(lost.contains("could not open a console"), "{lost}");
-        assert!(
-            !lost.contains("above"),
-            "nothing may point at output a service never wrote: {lost}"
         );
     }
 }

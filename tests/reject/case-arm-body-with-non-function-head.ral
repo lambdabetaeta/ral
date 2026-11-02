@@ -1,4 +1,6 @@
 # codes: T0072
+# status: 1
+# at: 6:23
 # contains: `n` is bound to an Int
 let n = 7
 case `a () [`a: { |_| $n x }]

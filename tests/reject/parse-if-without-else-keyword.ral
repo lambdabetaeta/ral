@@ -1,2 +1,5 @@
-# contains: else
+# codes: P0001
+# status: 2
+# at: 5:22
+# contains: did you mean `else { … }`
 if true { return 1 } { return 2 }

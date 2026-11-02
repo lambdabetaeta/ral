@@ -5,10 +5,7 @@ use crate::agent::Admission;
 use crate::agent::nursery::Joined;
 use crate::bus::{ENDED_BEFORE_REPORTING, Refused, Source};
 use crate::record::{ChildStatus, RECORD, Settlement, read_records};
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
-use std::borrow::Cow;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 fn next_child(parent: &Agent) -> (crate::record::AgentId, ChildStatus) {
     let handle = parent.handle();
@@ -726,55 +723,13 @@ fn a_stopped_notice_has_the_new_settlement_not_a_legacy_failure() {
     )));
 }
 
-/// A captured builtin `name` that ignores cancellation until released, and
-/// records that it has been entered.
-struct HeldWorker {
-    entered: Arc<AtomicBool>,
-    released: Arc<AtomicBool>,
-}
-
-impl HeldWorker {
-    fn install(name: &'static str) -> Self {
-        let entered = Arc::new(AtomicBool::new(false));
-        let released = Arc::new(AtomicBool::new(false));
-        let (seen, ready) = (entered.clone(), released.clone());
-        let held: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
-            Cow::Borrowed(name),
-            scheme_test_clear_block_forever,
-            "test-only: hold a worker past engine teardown.",
-            BuiltinBody::Captured(Arc::new(move |_, _, shell| {
-                seen.store(true, Ordering::Release);
-                loop {
-                    if ready.load(Ordering::Acquire) {
-                        shell.poll()?;
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            })),
-        )]);
-        dressed_over(
-            move |runtime| runtime.install_captured_builtins(&held),
-            |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
-        );
-        Self { entered, released }
-    }
-
-    fn entered(&self) {
-        wait_until("the worker never entered its hold", || {
-            self.entered.load(Ordering::Acquire)
-        });
-    }
-
-    fn release(&self) {
-        self.released.store(true, Ordering::Release);
-    }
-}
-
-// A failing test must not leave the worker holding its thread.
-impl Drop for HeldWorker {
-    fn drop(&mut self) {
-        self.release();
-    }
+/// Fit the next boot with `worker` and a short drain grace.
+fn dress_held(worker: &HeldWorker) {
+    let builtins = worker.builtins();
+    dressed_over(
+        move |runtime| runtime.install_captured_builtins(&builtins),
+        |shell| shell.set_worker_drain_grace(Duration::from_millis(20)),
+    );
 }
 
 #[test]
@@ -784,7 +739,9 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let worker = HeldWorker::install("test-uncertified-helper-worker");
+    let worker = HeldWorker::new("test-uncertified-helper-worker");
+    let _release = worker.release_on_drop();
+    dress_held(&worker);
     let mut child = parent.fork_named("helper").unwrap();
     let log = child.log_dir().path().join(RECORD);
     let (emit, _rx) = emitter(&parent);
@@ -797,7 +754,7 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
     assert!(!result.failed, "{}", result.text);
     let entries = workers(&child);
     assert_eq!(entries.len(), 1);
-    worker.entered();
+    worker.wait_entered();
     let helper = launch_child(&mut parent, child, None, &emit);
     let teardown = parent.teardown();
     assert_eq!(teardown.failures.len(), 1);
@@ -945,7 +902,9 @@ fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let worker = HeldWorker::install("test-uncertified-writer-worker");
+    let worker = HeldWorker::new("test-uncertified-writer-worker");
+    let _release = worker.release_on_drop();
+    dress_held(&worker);
     let mut child = parent.fork_named("helper").unwrap();
     let (emit, rx) = emitter(&parent);
     let result = child.ral(
@@ -957,7 +916,7 @@ fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
     assert!(!result.failed, "{}", result.text);
     let entries = workers(&child);
     assert_eq!(entries.len(), 1);
-    worker.entered();
+    worker.wait_entered();
     child.report(ChildStatus::Replied(FOValue::Unit));
     let recorder = child.recorder();
     recorder.fail_after(0);

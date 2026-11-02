@@ -1,3 +1,5 @@
 # codes: T0076
+# status: 1
+# at: 5:14
 # contains: unknown key 'nett': `grant` takes exec, fs, net, gpu, editor, shell
 grant [nett: `offline] { return "ok" }

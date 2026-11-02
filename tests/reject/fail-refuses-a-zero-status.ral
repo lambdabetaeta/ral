@@ -1,2 +1,5 @@
+# codes: T0051
+# status: 1
+# at: 5:1
 # contains: fail requires a nonzero status
 fail [status: 0, message: 'zero status should be rejected']

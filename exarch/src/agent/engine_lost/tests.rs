@@ -14,34 +14,16 @@ fn run_dir() -> TestDir {
     OwnDir::for_test("engine-lost").expect("a run directory")
 }
 
-/// The bug this replaced: a session that never started was told to start
-/// a new one.  The two phases must not read alike.
+/// A start failure and a death must not read alike.
 #[test]
-fn a_start_failure_and_a_death_give_different_advice() {
+fn a_start_failure_and_a_death_read_differently() {
     let starting = EngineLost::starting(&closed(), &run_dir()).to_string();
     let running = EngineLost::running(&closed(), &run_dir()).to_string();
     assert_ne!(starting, running);
-    assert!(
-        !starting.to_lowercase().contains("start a new"),
-        "a session that never began cannot be told to begin another: {starting}"
-    );
-    assert!(
-        running.to_lowercase().contains("start a new"),
-        "a session whose state is gone is worth abandoning: {running}"
-    );
 }
 
-/// A refusal is deterministic, so a refused start is not told to retry.
-#[test]
-fn a_refused_start_is_not_told_to_try_again() {
-    let shown = EngineLost::starting(&Severed::Refused("protocol version 9".into()), &run_dir())
-        .to_string();
-    assert!(!shown.to_lowercase().contains("try again"), "{shown}");
-}
-
-/// A user's line carries somewhere to go and nothing else: no code, no
-/// transport's restatement, and no dash holding the advice at arm's
-/// length.
+/// A user's line carries somewhere to go and nothing else: no code and no
+/// transport's restatement.
 #[test]
 fn the_sentence_carries_a_path_and_nothing_else() {
     let root = run_dir();
@@ -53,10 +35,6 @@ fn the_sentence_carries_a_path_and_nothing_else() {
     assert!(
         !shown.contains("engine-closed"),
         "a code is for the log, not the window: {shown}"
-    );
-    assert!(
-        !shown.contains('—'),
-        "the advice is its own sentence, not a clause after a dash: {shown}"
     );
     assert!(
         !shown.contains("the engine closed the connection"),

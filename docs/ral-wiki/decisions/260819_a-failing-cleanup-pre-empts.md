@@ -71,7 +71,7 @@ give, owed to no other clause.
   reader can see the decision instead of inferring it from a form's folklore.
 - `docs/SPEC.md` §8.7 and §17.8 state the single rule, and
   [[design/failure|failure]] states its precedence beside `try` and `attempt`.
-- `guard_cleanup_error_pre_empts_the_body` (`core/tests/scope_escapes.rs`)
+- `a_cleanups_fail_pre_empts_an_exit` (`core/tests/guard_under_exit.rs`)
   carries the new meaning, beside the escape test it is now a second reading
   of.
 

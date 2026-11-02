@@ -508,13 +508,15 @@ fn open(
 
 #[cfg(test)]
 mod tests {
-    use super::{Host, combine_failures, launch_config};
+    use super::{Declined, Host, combine_failures, launch_config, lock_resumable};
     use crate::agent::RootEngine;
     use crate::app::{self, Scratch};
     use crate::provider::roles::Roles;
     use crate::provider::scripted::Script;
     use crate::provider::{Bureau, Provider};
+    use crate::record::{AgentId, AgentLog, Opening, Selected};
     use clap::Parser;
+    use ral_core::own::OwnDir;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -567,5 +569,44 @@ mod tests {
             assert_eq!(host.fleet().launch.idle, idle);
             assert_eq!(host.end(), [] as [String; 0]);
         }
+    }
+
+    fn is_locked(run: &OwnDir) -> bool {
+        app::RunLock::try_acquire(run).is_err()
+    }
+
+    #[test]
+    fn a_run_is_resumable_only_when_it_has_an_open_session_and_a_free_lock() {
+        let project = OwnDir::for_test("lock-resumable").expect("a project directory");
+        let closed = project.make_dir("closed").unwrap();
+        closed.make_dir("sessions").unwrap();
+        assert!(matches!(
+            lock_resumable(&closed),
+            Ok(Err(Declined::NoOpenSession))
+        ));
+        assert!(!is_locked(&closed), "a declined run's lock is not taken");
+
+        let run = project.make_dir("open").unwrap();
+        AgentLog::create(
+            &run.make_dir("sessions").unwrap(),
+            AgentId::new(0),
+            Opening {
+                parent: None,
+                name: "main",
+                returns: false,
+                selected: &Selected::for_test("test-model"),
+                system: "system",
+                inherited: None,
+            },
+        )
+        .expect("an open session");
+        let Ok(Ok(lock)) = lock_resumable(&run) else {
+            panic!("an open, unlocked run is resumable")
+        };
+        assert!(is_locked(&run));
+        assert!(matches!(lock_resumable(&run), Ok(Err(Declined::InUse))));
+        drop(lock);
+        assert!(!is_locked(&run));
+        assert!(matches!(lock_resumable(&run), Ok(Ok(_))));
     }
 }

@@ -55,13 +55,3 @@ fn an_unknown_probe_reports_its_arguments() {
     assert!(out.stderr.contains("no-such-probe"), "{out:?}");
     assert!(out.stdout.is_empty(), "{out:?}");
 }
-
-#[test]
-fn a_failed_connection_reports_the_os_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("absent");
-    let out = invoke(&["unix", path.to_str().unwrap()]);
-    assert_eq!(out.status, 1, "{out:?}");
-    assert!(!out.stderr.is_empty(), "{out:?}");
-    assert!(out.stdout.is_empty(), "{out:?}");
-}

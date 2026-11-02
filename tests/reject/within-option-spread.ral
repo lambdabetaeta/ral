@@ -1,3 +1,6 @@
+# codes: P0001
+# status: 2
+# at: 6:25
 # contains: `within` takes its options written in its own bracket
 let rest = [env: [:]]
 within [dir: "/tmp", ...$rest] { return "ok" }

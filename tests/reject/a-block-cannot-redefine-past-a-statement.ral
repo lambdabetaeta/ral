@@ -1,3 +1,6 @@
+# codes: P0001
+# status: 2
+# at: 6:14
 # contains: a block further down defines `last`
 # contains: or rename it
 let main = { last [1, 2] }

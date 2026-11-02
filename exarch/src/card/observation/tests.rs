@@ -1,6 +1,6 @@
 use super::*;
-use ral_core::fact::AuditIo;
-use ral_core::shell::runtime::{CommandOrigin, Resource};
+use ral_core::fact::{Act, AuditIo, Write};
+use ral_core::shell::runtime::{CommandOrigin, Resource, WriteOutcome};
 
 /// The card's first [`Mark::Text`] flattened — the on-screen line, roling
 /// dropped.
@@ -12,16 +12,20 @@ fn line(card: &Card) -> String {
     }
 }
 
-fn command(argv: &[&str], status: i32) -> Landed {
+fn fact(argv: &[&str], status: i32) -> Command {
     let (shown, args) = argv.split_first().expect("a command names a program");
-    Landed::Effect(Effect::Command(Command::new(
+    Command::new(
         shown,
         args.iter().map(ToString::to_string),
         status,
         CommandOrigin::External,
         AuditIo::default(),
         None,
-    )))
+    )
+}
+
+fn command(argv: &[&str], status: i32) -> Landed {
+    Landed::Effect(Effect::Command(fact(argv, status)))
 }
 
 #[test]
@@ -77,4 +81,63 @@ fn errand_birth_names_the_identity_and_title() {
         .map(|span| span.text.as_str())
         .collect::<String>();
     assert_eq!(text, "errand #7 started · building");
+}
+
+fn check(resource: Resource) -> Check {
+    Check::new(resource, BTreeMap::new())
+}
+
+#[test]
+fn only_effects_denials_and_births_land() {
+    assert!(matches!(
+        Landed::of(&Observed::Command(fact(&["ls"], 0))),
+        Some(Landed::Effect(Effect::Command(_)))
+    ));
+    assert!(matches!(
+        Landed::of(&Observed::Read(Read { path: "a".into() })),
+        Some(Landed::Effect(Effect::Read(_)))
+    ));
+    assert!(matches!(
+        Landed::of(&Observed::Grep(Grep {
+            scope: "src".into(),
+            pattern: "x".into()
+        })),
+        Some(Landed::Effect(Effect::Grep(_)))
+    ));
+    assert!(matches!(
+        Landed::of(&Observed::Worker(Worker {
+            id: WorkerId(1),
+            title: "t".into()
+        })),
+        Some(Landed::Announced(_))
+    ));
+    assert!(matches!(
+        Landed::of(&Observed::Check(check(Resource::Fs))),
+        Some(Landed::Surfaced(_))
+    ));
+}
+
+/// A flagged deputy check is no denial; a write draws as its change, an act is the desk's.
+#[test]
+fn quiet_observations_land_nowhere() {
+    let write = Write {
+        path: "a".into(),
+        mode: ral_core::ir::WriteMode::Write,
+        outcome: WriteOutcome::Committed,
+        new_bytes: None,
+        old_bytes: None,
+    };
+    let act = Act {
+        verb: "v".into(),
+        subject: None,
+        payload: String::new(),
+        refused: false,
+    };
+    for what in [
+        Observed::Check(check(Resource::Deputy)),
+        Observed::Write(write),
+        Observed::Act(act),
+    ] {
+        assert!(Landed::of(&what).is_none());
+    }
 }

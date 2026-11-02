@@ -1,3 +1,5 @@
 # codes: T0011
+# status: 1
+# at: 5:11
 # contains: apply it to its argument
 echo hi | !{ |x| echo $x }

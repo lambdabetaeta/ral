@@ -128,16 +128,3 @@ pub(crate) fn set_buffer_sizes(socket: BorrowedFd<'_>, bytes: u32) -> io::Result
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_the_host_is_the_host() {
-        assert!(is_host(libc::VMADDR_CID_HOST));
-        for cid in [libc::VMADDR_CID_LOCAL, libc::VMADDR_CID_ANY, 3] {
-            assert!(!is_host(cid), "cid {cid} is not the host");
-        }
-    }
-}

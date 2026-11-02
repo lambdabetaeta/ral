@@ -480,3 +480,41 @@ pub(super) fn annotate_toplevel(
         admits: walk.ctx.readmits.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::FileId;
+
+    /// Every node a capture coercion adds carries the span of the body it
+    /// wraps, so a decode failure names what the user wrote.
+    #[test]
+    fn capture_nodes_take_the_bodys_span() {
+        let span = Span::new(FileId::DUMMY, 3, 9);
+        let mut ctx = InferCtx::new();
+
+        let body = Spanned::new(span, CompKind::Return(Val::Unit));
+        let CompKind::Bind { comp, rest, .. } = captured_string(body, &mut ctx) else {
+            panic!("a capture is bound to its decode");
+        };
+        assert!(matches!(comp.item, CompKind::Capture(_)));
+        assert!(matches!(rest.item, CompKind::Decode(_)));
+        assert_eq!([comp.span, rest.span], [Some(span); 2]);
+
+        let Val::Thunk(block) = captured_block(Val::Unit, 1, Some(span), &mut ctx) else {
+            panic!("a captured value is wrapped in a block");
+        };
+        let lam = block.shape();
+        let CompKind::Lam { body, .. } = &lam.item else {
+            panic!("the block takes its parameter");
+        };
+        let CompKind::Bind { comp, rest, .. } = &body.item else {
+            panic!("the block's body is a capture and its decode");
+        };
+        let CompKind::Capture(call) = &comp.item else {
+            panic!("the bound computation is the capture");
+        };
+        let spans = [lam.span, body.span, comp.span, rest.span, call.span];
+        assert_eq!(spans, [Some(span); 5]);
+    }
+}

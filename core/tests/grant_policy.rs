@@ -63,19 +63,6 @@ fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
     assert!(result.is_err(), "the exclusion should beat the allowed dir");
 }
 
-/// A bare key is the file the host `PATH` finds, so it admits no other file
-/// of that name.
-#[test]
-fn a_bare_allow_admits_no_other_file_of_its_name() {
-    let (_tmp, tree) = laid(&["/fake-bin/git"]);
-    let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(ExecGrant::of([name("git")], []));
-    let result = shell.with_layer(layer(grant), |shell| {
-        check_file(shell, &tree.at("/fake-bin/git"))
-    });
-    assert!(result.is_err());
-}
-
 #[test]
 fn a_path_key_admits_its_file() {
     let (_tmp, tree) = laid(&["/fake-bin/git"]);

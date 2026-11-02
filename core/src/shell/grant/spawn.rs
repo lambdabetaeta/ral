@@ -140,13 +140,14 @@ mod tests {
     #[test]
     fn a_malformed_restriction_is_refused_by_the_decoder() {
         let record = Value::map(vec![("net".to_string(), Value::string("yes"))]);
+        let ctx = cwd("/work/proj");
         let refusal = restrict(&record)
-            .layer(unreachable_narrower, &cwd("/work/proj"))
+            .layer(unreachable_narrower, &ctx)
             .expect_err("a net axis that is not `offline`");
-        assert_eq!(
-            refusal,
-            "grant net: expected a net mode, got the string yes\nhint: a grant only narrows: omit `net` to inherit, or write `` net: `offline ``"
-        );
+        let decoder = decode_capability_map(&record, "grant", &ctx)
+            .expect_err("the decoder refuses it first");
+        let hint = decoder.hint.expect("the refusal carries a hint");
+        assert_eq!(refusal, format!("{}\nhint: {hint}", decoder.message));
     }
 
     #[test]
@@ -177,5 +178,40 @@ mod tests {
                 "{refusal}"
             );
         }
+    }
+
+    fn offline() -> GrantLayer {
+        GrantLayer::new(
+            None,
+            None,
+            Some(crate::authority::policy::Net::Offline),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Only the name `tight` resolves, so the result is the narrower's own.
+    fn tight_only(base: &str, _ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+        if base == "tight" {
+            Ok(offline())
+        } else {
+            Err(base.to_owned())
+        }
+    }
+
+    #[test]
+    fn a_base_is_resolved_by_the_narrower_it_is_given() {
+        let ctx = cwd("/work/proj");
+        let layer = SpawnGrant::Base("tight".into())
+            .layer(tight_only, &ctx)
+            .expect("the narrower resolves `tight`");
+        assert_eq!(layer, offline());
+        assert!(layer.is_restrictive());
+        assert_eq!(
+            SpawnGrant::Base("loose".into()).layer(tight_only, &ctx),
+            Err("loose".to_owned()),
+            "the narrower's refusal is the layer's, verbatim"
+        );
     }
 }

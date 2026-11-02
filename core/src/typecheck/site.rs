@@ -350,7 +350,23 @@ impl Build<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty::{closed_record, closed_variant, open_record, open_variant};
+    use crate::source::{FileId, Span};
+    use crate::ty::{Kind, closed_record, closed_variant, open_record, open_variant};
+
+    /// `ty` as `u` solved it, frozen and instantiated into a fresh unifier.
+    fn thaw(u: &Unifier, ty: &Ty) -> (Unifier, Ty) {
+        let mut fresh = Unifier::new();
+        let thawed = Site::snapshot(u, ty, UnitId::fresh()).instantiate(&mut fresh);
+        (fresh, thawed)
+    }
+
+    /// A record's fields in written order.
+    fn fields_of(u: &Unifier, record: &Ty) -> Vec<Ty> {
+        let Ty::Record(row) = u.resolve_ty(record) else {
+            panic!("not a record: {record:?}");
+        };
+        row.fields().map(|(_, ty)| ty.clone()).collect()
+    }
 
     fn agrees_with_unification(mut u: Unifier, want: &[Ty; 2], have: &[Ty; 2], fits: bool) {
         let snapshot = Site::snapshot(
@@ -448,5 +464,125 @@ mod tests {
                 agrees_with_unification(u, &want, &have, !shared || same);
             }
         }
+    }
+
+    #[test]
+    fn a_cyclic_type_snapshots_to_one_self_referring_node() {
+        let mut u = Unifier::new();
+        let a = u.fresh_ty();
+        u.unify_ty(&a, &Ty::list(a.clone())).expect("a data cycle");
+        let site = Site::snapshot(&u, &a, UnitId::fresh());
+        assert_eq!(site.nodes.len(), 1);
+        assert_eq!(site.nodes[0].shape, Shape::List(0));
+
+        let mut v = Unifier::new();
+        let Ty::Var(root) = site.instantiate(&mut v) else {
+            panic!("the root of a cycle is a variable");
+        };
+        let Ty::List(elem) = v.resolve_ty(&Ty::Var(root)) else {
+            panic!("the root stands for a list");
+        };
+        let Ty::Var(inner) = *elem else {
+            panic!("the element closes the cycle on a variable");
+        };
+        assert_eq!(v.ty_root(inner), v.ty_root(root));
+    }
+
+    /// A variable used twice is one variable after the round trip.
+    #[test]
+    fn a_shared_variable_stays_shared_and_distinct_ones_stay_apart() {
+        for shared in [false, true] {
+            let mut u = Unifier::new();
+            let x = u.fresh_ty();
+            let y = if shared { x.clone() } else { u.fresh_ty() };
+            let (mut v, ty) = thaw(&u, &closed_record(&[("a", x), ("b", y)]));
+            let [a, b] = &fields_of(&v, &ty)[..] else {
+                panic!("two fields");
+            };
+            v.unify_ty(a, &Ty::Int).expect("a free variable");
+            assert_eq!(matches!(v.apply_ty(b), Ty::Int), shared);
+        }
+    }
+
+    #[test]
+    fn functions_returns_and_handles_round_trip() {
+        let block = |cty| Ty::Thunk(Box::new(cty));
+        let tys = [
+            block(CompTy::pure(Ty::Int)),
+            block(CompTy::arrows(
+                [Ty::Int, Ty::String],
+                CompTy::Return(Grade::Output, Box::new(Ty::Unit)),
+            )),
+            block(CompTy::arrows(
+                [block(CompTy::pure(Ty::Bool))],
+                CompTy::pure(Ty::list(Ty::Float)),
+            )),
+            Ty::Handle(Grade::Output, Box::new(Ty::map(Ty::Bytes))),
+        ];
+        for ty in tys {
+            let (v, thawed) = thaw(&Unifier::new(), &ty);
+            assert_eq!(v.apply_ty(&thawed), ty);
+        }
+    }
+
+    #[test]
+    fn a_kinded_variable_keeps_its_kind() {
+        let block = Ty::Thunk(Box::new(CompTy::pure(Ty::Unit)));
+        for (kind, admitted, refused) in [
+            (Kind::NUMBER, Ty::Int, Ty::String),
+            (Kind::DATA, Ty::Int, block),
+        ] {
+            let mut u = Unifier::new();
+            let free = u.fresh_kinded(kind);
+            let (mut v, thawed) = thaw(&u, &free);
+            assert!(v.unify_ty(&thawed, &refused).is_err(), "{kind:?}");
+            let (mut v, thawed) = thaw(&u, &free);
+            assert!(v.unify_ty(&thawed, &admitted).is_ok(), "{kind:?}");
+        }
+    }
+
+    /// A node remembers the use that narrowed its kind or fixed its structure.
+    #[test]
+    fn witnesses_are_the_spans_that_imposed_the_node() {
+        let (narrowed, fixed) = (
+            Span::new(FileId::DUMMY, 1, 2),
+            Span::new(FileId::DUMMY, 5, 6),
+        );
+        let mut u = Unifier::new();
+        u.at = Some(narrowed);
+        let kinded = u.fresh_kinded(Kind::NUMBER);
+        u.at = Some(fixed);
+        let bound = u.fresh_ty();
+        u.unify_ty(&bound, &Ty::Int).expect("a free variable");
+        let site = Site::snapshot(
+            &u,
+            &closed_record(&[("k", kinded), ("b", bound)]),
+            UnitId::fresh(),
+        );
+        let witnesses: Vec<_> = site.nodes.iter().map(|n| n.witness).collect();
+        assert!(witnesses.contains(&Some(narrowed)), "{witnesses:?}");
+        assert!(witnesses.contains(&Some(fixed)), "{witnesses:?}");
+    }
+
+    /// A script that uses no such export, or no record at all, has nothing to
+    /// check an export against.
+    #[test]
+    fn exports_without_a_named_field_have_nothing_to_fit() {
+        let mut u = Unifier::new();
+        let tail = u.fresh_row_var();
+        let int = Arc::new(Scheme::mono(Ty::Int));
+        for (ty, name) in [
+            (Ty::Int, "a"),
+            (closed_record(&[("a", Ty::Int)]), "other"),
+            (open_record(&[("a", Ty::Int)], tail), "other"),
+        ] {
+            let mut exports = Site::snapshot(&u, &ty, UnitId::fresh()).exports();
+            assert!(exports.fits(name, &int).is_none(), "{ty:?} / {name}");
+        }
+        let mut exports =
+            Site::snapshot(&u, &closed_record(&[("a", Ty::Int)]), UnitId::fresh()).exports();
+        assert!(matches!(exports.fits("a", &int), Some(Ok(()))));
+        let string = Arc::new(Scheme::mono(Ty::String));
+        assert!(matches!(exports.fits("a", &string), Some(Err(_))));
     }
 }

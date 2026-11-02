@@ -500,6 +500,7 @@ impl InferCtx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::FileId;
 
     /// The second use meets `Int`, which the weak variable was fixed to, not
     /// the variable itself.
@@ -534,5 +535,28 @@ mod tests {
             err.hint()
                 .is_some_and(|h| !h.contains("another use fixed it"))
         );
+    }
+
+    /// One sentence is said once per span: a repeat is dropped, a new span or a
+    /// new sentence is kept.
+    #[test]
+    fn raise_drops_only_the_same_sentence_at_the_same_span() {
+        let mismatch = |actual| TypeErrorKind::TyMismatch {
+            expected: Box::new(Ty::Int),
+            actual: Box::new(actual),
+        };
+        let at = |start| Some(Span::new(FileId::DUMMY, start, start + 1));
+        let mut ctx = InferCtx::new();
+        for (pos, ty) in [
+            (at(0), Ty::String),
+            (at(0), Ty::String),
+            (at(2), Ty::String),
+            (at(0), Ty::Bool),
+        ] {
+            ctx.pos = pos;
+            ctx.diagnose(mismatch(ty));
+        }
+        let kept: Vec<_> = ctx.errors.iter().map(|e| e.pos).collect();
+        assert_eq!(kept, [at(0), at(2), at(0)]);
     }
 }

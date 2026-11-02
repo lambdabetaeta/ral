@@ -1,0 +1,29 @@
+# Test: alias pushes an arm above the enclosing within frame
+
+# An alias installed inside the body sits above the frame
+within [handlers: [foo: { |args| echo A }]] {
+    alias foo { |args| echo B }
+    foo
+}
+
+# The last alias pushed wins
+alias greet { |args| echo hi }
+alias greet { |args| echo 42 }
+greet
+
+# unalias removes an alias, not a within-installed handler
+within [handlers: [keep: { |args| echo kept }]] {
+    attempt { unalias keep }
+    keep
+}
+
+# An alias arm may capture and re-emit its own output
+alias cap { |args| let u = echo hi; echo $u }
+cap
+
+# An alias over an alias keeps the route
+alias one { |args| echo one }
+alias two { |args| one }
+two
+
+echo 'alias tests done'

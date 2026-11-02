@@ -1,2 +1,6 @@
+# codes: T0010
+# status: 1
+# at: 6:13
+# contains: expected a net mode, got a Bool
 # contains: a grant only narrows: omit `net` to inherit, or write `` net: `offline ``
 grant [net: true] { return 1 }

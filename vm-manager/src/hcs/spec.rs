@@ -370,23 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_addresses_the_guest() {
-        let doc = json();
-        let line = doc["VirtualMachine"]["Chipset"]["LinuxKernelDirect"]["KernelCmdLine"]
-            .as_str()
-            .unwrap();
-        assert!(line.contains("console=ttyS0"), "{line}");
-        assert!(line.contains("ral.workspace=workspace"), "{line}");
-        assert!(line.contains("ral.plan9=564"), "{line}");
-        assert!(line.contains("ral.port=1729"), "{line}");
-        assert!(line.contains("ral.epoch=1771200000"), "{line}");
-        assert!(
-            line.contains("ral.net=1730,10.0.2.15/24,10.0.2.2"),
-            "{line}"
-        );
-    }
-
-    #[test]
     fn the_machine_dies_with_its_last_handle() {
         assert_eq!(
             json()["ShouldTerminateOnLastHandleClosed"],

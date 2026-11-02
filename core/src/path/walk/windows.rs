@@ -1057,9 +1057,19 @@ pub(super) fn discard(_dir: &File, sibling: &File, _name: &EntryName) -> io::Res
     Ok(())
 }
 
+/// Whether the entry `name` of `dir` may be opened for reading, following a
+/// link: `Err` is the open's refusal.
+pub(super) fn may_read(dir: &File, name: &OsStr) -> io::Result<()> {
+    access(dir, name, true, false)
+}
+
 /// Whether the entry `name` of `dir` may be opened for writing, following a
 /// link: `Err` is the open's refusal.
 pub(super) fn may_write(dir: &File, name: &OsStr) -> io::Result<()> {
+    access(dir, name, false, true)
+}
+
+fn access(dir: &File, name: &OsStr, readable: bool, writable: bool) -> io::Result<()> {
     let name: &Path = name.as_ref();
     site!(
         Silent::WalkAccess,
@@ -1067,8 +1077,8 @@ pub(super) fn may_write(dir: &File, name: &OsStr) -> io::Result<()> {
             dir,
             name,
             cap_primitives::fs::AccessType::Access(cap_primitives::fs::AccessModes {
-                readable: false,
-                writable: true,
+                readable,
+                writable,
                 executable: false,
             }),
             FollowSymlinks::Yes,

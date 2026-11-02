@@ -1,3 +1,6 @@
+# codes: T0030
+# status: 1
+# at: 6:9
 # contains: no arm for `` `err ``
 let r = if true { return `ok 1 } else { return `err hello }
 let x = case $r [`ok: { |i| return $i }]

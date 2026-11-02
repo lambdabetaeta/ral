@@ -13,7 +13,7 @@ use super::super::super::trace::{RealPath, Stat, Trace};
 use super::super::Writing;
 use super::super::resolve::{LeafMode, walk, walk_dir};
 use super::super::{Dir, Installing, Judged, Listing, Located, Reading, Unjudged};
-use crate::path::{LexicalPath, shown};
+use crate::path::LexicalPath;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
@@ -231,63 +231,4 @@ fn only_an_installing_handle_lends_its_descriptor() {
     let (_tmp, located, _) = walked();
     let located: Located<Installing> = located.marked();
     let _: Option<BorrowedFd<'_>> = located.leaf_fd();
-}
-
-/// Where the source of this crate lies.
-fn source() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
-}
-
-fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            found.push(path);
-        }
-    }
-}
-
-/// The files of this crate that make `token` where it is declared, other than
-/// `home` and this scan (whose string literals spell the constructors),
-/// relative to `src/`: lines of code, not comments.
-fn made_outside(home: &str, token: &str) -> Vec<String> {
-    let mut files = Vec::new();
-    rust_files(&source(), &mut files);
-    files
-        .into_iter()
-        .filter(|file| !file.ends_with(home) && !file.ends_with("path/walk/tests/markers.rs"))
-        .filter(|file| {
-            std::fs::read_to_string(file).unwrap().lines().any(|line| {
-                !line.trim_start().starts_with("//") && line.contains(&format!("{token}("))
-            })
-        })
-        .map(|file| shown(file.strip_prefix(source()).unwrap()))
-        .collect()
-}
-
-/// `Verdict` and `InstallToken` are tokens whose field only their own module
-/// can make, so neither can be forged from outside it; widening a field
-/// would let any file write the constructor, which no compiler objects to.
-#[test]
-fn the_two_tokens_are_made_in_their_own_modules_alone() {
-    let read = |file: &str| std::fs::read_to_string(source().join(file)).unwrap();
-    assert!(
-        read("authority/policy/fs.rs")
-            .contains("pub(crate) struct Verdict<O: Op>(PhantomData<O>);"),
-        "`Verdict`'s field must stay private to `authority/policy/fs.rs`"
-    );
-    assert!(
-        read("authority/sandbox.rs").contains("pub(crate) struct InstallToken(());"),
-        "`InstallToken`'s field must stay private to `authority/sandbox.rs`"
-    );
-    assert_eq!(
-        made_outside("authority/policy/fs.rs", "Verdict"),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        made_outside("authority/sandbox.rs", "InstallToken"),
-        Vec::<String>::new()
-    );
 }

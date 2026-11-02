@@ -2,6 +2,8 @@ use super::*;
 use crate::agent::TestLaunch;
 use crate::record::Span;
 
+mod disk;
+
 fn load() -> Load {
     Load {
         used: 400,
@@ -26,17 +28,6 @@ fn pressure_line_sits_a_full_reserve_before_the_trigger() {
         "eviction due implies pressure due"
     );
     assert!(!pressure_due(w / 2, w), "half a window is not pressure");
-}
-
-/// The reminder carries the reading and the trigger and the span a forced
-/// eviction would take; the wording is the nudge module's.
-#[test]
-fn pressure_hands_the_model_its_reading_and_the_planned_cut() {
-    let Some(Warning::Model(Reminder::Pressure(reminded))) = Gauges::default().pressure(over())
-    else {
-        panic!("pressure due should remind the model");
-    };
-    assert_eq!(reminded, load());
 }
 
 /// A stale token measure (`Unknown`) neither warns nor re-arms a warning

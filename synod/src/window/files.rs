@@ -234,8 +234,10 @@ mod tests {
         let target = file_to_open(&review, 1, "run.bat").expect("the held file");
         assert_eq!(target.how, OpenAs::Reveal);
 
-        assert!(file_to_open(&review, 1, "report.pdf").is_err());
-        assert!(file_to_open(&review, 7, "report.pdf").is_err());
+        for index in [1, 7] {
+            let why = file_to_open(&review, index, "report.pdf").err();
+            assert!(why.is_some_and(|why| why.contains("report.pdf")), "{index}");
+        }
     }
 
     #[test]
@@ -243,8 +245,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("scratch folder");
         std::fs::create_dir(dir.path().join("sub.pdf")).expect("scratch folder");
         let review = holding(dir.path(), &["gone.pdf", "sub.pdf"]);
-        assert!(file_to_open(&review, 0, "gone.pdf").is_err());
-        assert!(file_to_open(&review, 1, "sub.pdf").is_err());
+        for (index, name) in [(0, "gone.pdf"), (1, "sub.pdf")] {
+            let why = file_to_open(&review, index, name).err();
+            assert!(why.is_some_and(|why| why.contains(name)), "{name}");
+        }
     }
 
     #[cfg(unix)]
@@ -309,13 +313,19 @@ mod tests {
 
     #[test]
     fn web_and_email_links_are_followed() {
-        for link in [
-            "https://example.com/page?q=1",
-            "http://example.com",
-            "HTTPS://Example.com/",
-            "mailto:someone@example.com",
+        for (link, followed) in [
+            (
+                "https://example.com/page?q=1",
+                "https://example.com/page?q=1",
+            ),
+            ("http://example.com", "http://example.com/"),
+            ("HTTPS://Example.com/", "https://example.com/"),
+            ("mailto:someone@example.com", "mailto:someone@example.com"),
         ] {
-            assert!(link_to_follow(link).is_ok(), "{link}");
+            assert_eq!(
+                link_to_follow(link).as_ref().map(url::Url::as_str),
+                Ok(followed)
+            );
         }
     }
 

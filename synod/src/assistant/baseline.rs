@@ -82,13 +82,11 @@ mod tests {
         let dir = workshop("baseline-settled");
         std::fs::write(dir.path().join("letter.txt"), b"dear all").expect("fixture");
 
-        let mut baseline = Baseline::spawn(
-            dir.path().to_path_buf(),
-            &Stop::default(),
-            Box::new(|_so_far| {}),
-        );
+        let stop = Stop::default();
+        let mut baseline = Baseline::spawn(dir.path().to_path_buf(), &stop, Box::new(|_so_far| {}));
         let manifest = baseline.manifest().expect("the baseline walk succeeds");
         assert!(manifest.entries.contains_key("letter.txt"));
+        assert!(!stop.is_stopped());
 
         assert!(
             baseline

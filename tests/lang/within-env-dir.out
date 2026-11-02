@@ -1,0 +1,13 @@
+hello
+TEST_VAR correctly unset
+1
+2
+1
+dir changed
+cwd restored
+bound
+no options
+missing dir refused
+PWD refused
+OLDPWD refused
+within env/dir tests done

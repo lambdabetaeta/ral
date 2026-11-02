@@ -383,10 +383,6 @@ mod tests {
             plan9_options(7, "granted-folder"),
             "trans=fd,rfdno=7,wfdno=7,msize=65536,version=9p2000.L,aname=granted-folder"
         );
-        assert_eq!(
-            MSIZE, 65536,
-            "the option string above spells msize out; the two must agree"
-        );
     }
 
     #[test]

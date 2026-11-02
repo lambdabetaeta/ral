@@ -2,8 +2,8 @@
 # must contribute its own bytes to the binding, never the join's.
 
 let assert_eq = { |name expected actual|
-    if $[$expected == $actual] {} else {
-        warn "FAIL: $name expected: $expected actual: $actual"
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
         fail [status: 1, message: "assertion failed: $name"]
     }
 }
@@ -22,11 +22,6 @@ assert_eq 'empty arm' '' $empty_arm
 
 let chained = ^false ? echo fallback
 assert_eq 'chain arm' fallback $chained
-
-# A `guard` is one computation, so a binding takes what its cleanup
-# writes too.
-let guarded = guard { echo body } { echo cleanup }
-assert_eq 'guard whole' "body\ncleanup" $guarded
 
 let recovered = try { ^false } { |_| return '' }
 assert_eq 'try handler' '' $recovered

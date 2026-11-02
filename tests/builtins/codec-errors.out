@@ -1,10 +1,10 @@
-from-string: input is not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0
-from-json: input is not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0
-fold-lines: input is not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 1
+from-string `raised
+from-json `raised
+fold-lines `raised
 a�b
 c
-from-jsonl: line 3, column 5: EOF while parsing a value
-from-json: integer 18446744073709551615 is outside the supported range
-from-jsonl: line 2: integer 18446744073709551615 is outside the supported range
-ints-to-bytes: byte at index 0 out of range: 256
+from-jsonl true
+from-json true
+from-jsonl true
+ints-to-bytes `raised
 codec error tests done

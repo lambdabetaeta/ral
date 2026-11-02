@@ -32,7 +32,7 @@ rm -rf $tmpdir
 # elem — list membership
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {
-        warn "FAIL: $name"
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
         fail [status: 1, message: "assertion failed: $name"]
     }
 }

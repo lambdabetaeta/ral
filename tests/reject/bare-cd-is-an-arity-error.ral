@@ -1,4 +1,6 @@
 # codes: T0050
+# status: 1
+# at: 6:1
 # contains: `cd` expected 1 argument
 # contains: explain cd
 cd

@@ -1,2 +1,5 @@
+# codes: T0010 T0011
+# status: 1
+# at: 5:30
 # contains: type [String]
 alias f { |a| return !{upper $a} }; f x

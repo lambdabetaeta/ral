@@ -1,2 +1,5 @@
+# codes: T0010
+# status: 1
+# at: 5:43
 # contains: to-lines
 let b = !{echo hi | from-bytes}; to-lines $b

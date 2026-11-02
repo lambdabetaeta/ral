@@ -1,2 +1,5 @@
+# codes: T0074
+# status: 1
+# at: 5:73
 # contains: but a number (Int or Float) is needed
 alias greet { |args| echo 41 }; unalias greet; let r = !{greet}; return $[$r + 0]

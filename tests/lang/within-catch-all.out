@@ -1,0 +1,7 @@
+caught foo x y
+intercepted nonexistent-command
+builtin runs normally
+outer
+installed
+unhandled command
+within catch-all tests done

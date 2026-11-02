@@ -203,7 +203,7 @@ fn read_refuses_an_old_reply_while_a_follow_up_is_working() {
         child
             .report(ChildStatus::Replied(text("old answer")))
             .unwrap();
-        assert!(desk.agent_read("helper".into()).is_ok());
+        desk.agent_read("helper".into()).unwrap();
         child.message(&agent, "follow up".into()).unwrap();
         assert!(
             desk.agent_read("helper".into())
@@ -630,7 +630,6 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
             for helper in [&root, &mid, &sibling, &grandchild, &great_grandchild] {
                 assert!(helper.is_live());
             }
-            assert!(desk.agent_stop("missing").is_ok());
         },
     );
 }
@@ -773,7 +772,7 @@ fn message_reaches_a_working_peer_but_a_resting_helper_admits_only_its_parent() 
             .unwrap();
             desk.call.handle = (*mid).clone();
             desk.call.life = mid.mailbox.life();
-            assert!(desk.ask(message_req("parent", "hi")).is_ok());
+            desk.ask(message_req("parent", "hi")).unwrap();
             assert!(
                 desk.ask(message_req("mid", "hi"))
                     .unwrap_err()

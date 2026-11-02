@@ -16,13 +16,6 @@ fn out(script: &str) -> String {
     o.stdout.trim_end().to_string()
 }
 
-/// `script`, refused by the checker: its stderr.
-fn refused(script: &str) -> String {
-    let o = run("ral_graded_f", script);
-    assert_ne!(o.status, 0, "script: {script}\nstdout: {}", o.stdout);
-    o.stderr
-}
-
 #[test]
 fn a_let_binds_a_command_block_whole() {
     assert_eq!(
@@ -101,33 +94,8 @@ fn a_unit_arm_stands_as_a_command_beside_a_command_arm() {
 }
 
 #[test]
-fn a_command_arm_joined_with_an_int_names_the_command() {
-    let stderr = refused("let x = if true { hostname } else { return 5 }");
-    assert!(stderr.contains("T0011"), "{stderr}");
-    assert!(
-        stderr.contains("one branch is a command, whose value is its output"),
-        "{stderr}"
-    );
-}
-
-#[test]
 fn a_block_runner_streams_a_command_at_any_grade_into_a_pipe() {
     assert_eq!(out("each { |x| echo $x } [1, 2] | cat"), "1\n2");
-}
-
-#[test]
-fn a_decoder_ends_the_byte_pipeline() {
-    let stderr = refused("from-json | cat");
-    assert!(stderr.contains("T0078"), "{stderr}");
-    assert!(
-        stderr.contains("a decoder ends the byte pipeline"),
-        "{stderr}"
-    );
-    let stderr = refused("str 1 | cat");
-    assert!(
-        stderr.contains("a stage feeds the next by writing"),
-        "{stderr}"
-    );
 }
 
 #[test]
@@ -137,45 +105,39 @@ fn a_unit_stub_stands_in_for_a_command_and_captures_nothing() {
 }
 
 #[test]
-fn explain_prints_a_command_and_a_value_producer_apart() {
-    let shown = out("explain echo");
-    assert!(shown.contains("[String] → Command"), "{shown}");
-    let shown = out("explain length");
-    assert!(shown.contains("∀α:sized. α → Returns Integer"), "{shown}");
-}
-
-#[test]
 fn a_block_ending_in_a_value_streams_what_it_wrote_before() {
     let script = "let d = temp-dir\necho x > \"$d/f\"\nlet n = !{ echo progress; line-count \"$d/f\" }\nto-json $n";
     assert_eq!(out(script), "progress\n1");
 }
 
 #[test]
-fn spawn_and_audit_absorb_a_command() {
+fn spawn_absorbs_a_command() {
     assert_eq!(
         out("let x = spawn { echo host }\nlet r = await $x\nto-json $r"),
         r#""host""#
     );
     assert_eq!(out("let x = spawn { echo host }\nawait $x"), "host");
+}
+
+#[test]
+fn audit_absorbs_a_command() {
     let script = "let d = temp-dir\necho ERROR > \"$d/log\"\nlet r = audit { grep -c ERROR \"$d/log\" }\ncase $r[outcome] [`ok: { |v| to-json $v }, `err: { |_| echo failed }]";
     assert_eq!(out(script), "1\nnull");
 }
 
 #[test]
-fn a_predicate_demanded_of_a_command_points_at_succeeds() {
-    let stderr = refused("let d = temp-dir\nfilter { |f| grep -q x $f } [\"$d/a\"]");
-    assert!(
-        stderr.contains("Returns Bool with type Command"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("`succeeds { … }`"), "{stderr}");
+fn echo_binds_its_line() {
+    assert_eq!(out("let x = echo\nto-json $x"), r#""""#);
+    assert_eq!(out("let x = echo a b c\nto-json $x"), r#""a b c""#);
 }
 
 #[test]
-fn echo_binds_its_line_and_prints_as_a_statement() {
-    assert_eq!(out("let x = echo\nto-json $x"), r#""""#);
-    assert_eq!(out("let x = echo a b c\nto-json $x"), r#""a b c""#);
+fn echo_as_a_statement_prints() {
     assert_eq!(out("echo hi"), "hi");
+}
+
+#[test]
+fn a_forced_command_block_piped_into_a_decoder_yields_its_output() {
     assert_eq!(
         out("let s = { echo one; echo two }\nlet x = !$s | from-string\nto-json $x"),
         r#""one\ntwo\n""#

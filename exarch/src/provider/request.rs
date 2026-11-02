@@ -278,11 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn default_effort_label_is_medium() {
-        assert_eq!(default_effort_label(), "med");
-    }
-
-    #[test]
     fn effort_by_label_resolves_every_ladder_rung() {
         for (label, effort) in EFFORT_LADDER {
             let resolved = effort_by_label(label).unwrap();

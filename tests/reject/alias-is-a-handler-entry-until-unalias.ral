@@ -1,4 +1,6 @@
 # codes: T0041 T0071
+# status: 1
+# at: 7:9
 # contains: is a handler entry
 # contains: undefined variable: $foo
 alias foo { |args| echo 3 }

@@ -466,7 +466,7 @@ hazard (same container id ⇒ one run's revoke wipes the other's live grants).
 **no end-to-end confined-child spawn test on Windows** — the Windows suites
 exercise DACL/SID/profile primitives only, while macOS has real
 confined-spawn denial tests (`sandbox/launch.rs`, `core/tests/denied_fs_children.rs`,
-`core/tests/sandbox_fail_closed.rs`). Add, under `#[cfg(windows)]` on
+`core/tests/confined_write_in_every_context.rs`). Add, under `#[cfg(windows)]` on
 `windows-latest` CI (`.github/workflows/windows.yml` already builds+tests
 ral-core/ral/exarch): a BFS configure/enforce/clear round trip, a tier-detector
 probe test, Phase-G threshold tests, and a first real confined-spawn

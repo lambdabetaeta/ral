@@ -13,6 +13,8 @@
 //!
 //!   ```text
 //!   # codes: T0050 T0020      exact ordered diagnostic codes
+//!   # status: 1               exact exit status (default: 1 or 2)
+//!   # at: 2:5                 LINE:COL of the first diagnostic, header included
 //!   # contains: <fragment>    must appear in the rendered report (repeatable)
 //!   # absent: <fragment>      must not appear (repeatable)
 //!   ```
@@ -64,6 +66,8 @@ const JARGON_FRAGMENTS: &[&str] = &[
 #[derive(Default)]
 struct Expect {
     codes: Option<Vec<String>>,
+    status: Option<i32>,
+    at: Option<String>,
     contains: Vec<String>,
     absent: Vec<String>,
 }
@@ -75,10 +79,19 @@ fn expectations(source: &str) -> Expect {
         let line = line.trim_start_matches('#').trim();
         if let Some(codes) = line.strip_prefix("codes:") {
             expect.codes = Some(codes.split_whitespace().map(str::to_owned).collect());
+        } else if let Some(status) = line.strip_prefix("status:") {
+            expect.status = Some(status.trim().parse().expect("`# status:` is an integer"));
+        } else if let Some(at) = line.strip_prefix("at:") {
+            expect.at = Some(at.trim().to_owned());
         } else if let Some(fragment) = line.strip_prefix("contains:") {
             expect.contains.push(fragment.trim().to_owned());
         } else if let Some(fragment) = line.strip_prefix("absent:") {
             expect.absent.push(fragment.trim().to_owned());
+        } else if let Some((key, _)) = line.split_once(':') {
+            assert!(
+                key.contains(char::is_whitespace),
+                "unknown header `# {key}:`"
+            );
         }
     }
     expect
@@ -128,10 +141,20 @@ fn rejection_faults(path: &Path) -> Vec<String> {
     let Checked { status, report } = check(path);
     let mut faults = Vec::new();
 
-    if !matches!(status, 1 | 2) {
+    let wanted = expect.status.map_or(1..=2, |s| s..=s);
+    if !wanted.contains(&status) {
         faults.push(format!(
-            "expected status 1 (type error) or 2 (syntax error), got {status}"
+            "expected status {wanted:?} (1 type error, 2 syntax error), got {status}"
         ));
+    }
+    // The first locus line ends `file:LINE:COL ]`, the file name being stripped.
+    if let Some(at) = &expect.at
+        && !report
+            .lines()
+            .find(|l| l.contains("╭─["))
+            .is_some_and(|l| l.ends_with(&format!(":{at} ]")))
+    {
+        faults.push(format!("first diagnostic is not at {at}"));
     }
     if let Some(want) = &expect.codes {
         let got = codes(&report);

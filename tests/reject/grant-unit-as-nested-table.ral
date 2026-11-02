@@ -1,3 +1,6 @@
+# codes: T0079
+# status: 1
+# at: 6:14
 # contains: a grant table is a record
 # contains: exec: [allow: []]
 grant [exec: ()] { return 1 }

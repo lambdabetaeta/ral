@@ -1,4 +1,6 @@
 # codes: T0011
+# status: 1
+# at: 7:1
 # contains: cannot be used as a command head
 # contains: function or a thunk
 # absent: argument type

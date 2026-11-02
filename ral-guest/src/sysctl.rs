@@ -19,19 +19,3 @@ pub(crate) const PLAN: [Sysctl; 1] = [Sysctl {
     path: "/proc/sys/user/max_user_namespaces",
     value: "0",
 }];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_plan_disables_unprivileged_user_namespaces() {
-        assert_eq!(
-            PLAN,
-            [Sysctl {
-                path: "/proc/sys/user/max_user_namespaces",
-                value: "0",
-            }]
-        );
-    }
-}

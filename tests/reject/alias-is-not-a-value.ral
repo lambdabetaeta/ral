@@ -1,2 +1,5 @@
+# codes: T0041
+# status: 1
+# at: 5:41
 # contains: handler entry
 alias greet { |args| echo hi }; let f = $greet; return $f

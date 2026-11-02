@@ -1,3 +1,6 @@
+# codes: T0010
+# status: 1
+# at: 6:16
 # contains: a list holds one type
 # contains: write a record, as in `[name: $n, status: $s]`
 let xs = ["a", 1]

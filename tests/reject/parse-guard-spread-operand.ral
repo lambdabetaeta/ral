@@ -1,2 +1,5 @@
-# contains: spread
+# codes: P0001
+# status: 2
+# at: 5:7
+# contains: a spread `...` has no meaning here
 guard ...$b { echo done }

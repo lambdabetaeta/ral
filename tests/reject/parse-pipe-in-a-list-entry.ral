@@ -1,3 +1,5 @@
 # codes: P0003
+# status: 2
+# at: 5:15
 # contains: Help: `ls | wc` runs a command: write `!{ls | wc}`, or, if these are separate entries, put `,` between them
 let counts = [ls | wc]

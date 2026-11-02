@@ -12,13 +12,13 @@
 #![allow(dead_code)] // not every test file uses every helper
 
 use ral_core::io::terminal::TerminalState;
+use ral_core::ir::Comp;
 use ral_core::protocol::Run;
 use ral_core::shell::boot::{BakedPrelude, HostSurface, boot_runtime, boot_shell};
 use ral_core::shell::run::RunRequest;
 use ral_core::shell::runtime::{Map, Observation, Settled, Shell, Value};
 use ral_core::source::SourceOrigin;
 use ral_core::{EventSink, SurfaceSink};
-use ral_core::{Scheme, ir::Comp};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
@@ -59,27 +59,18 @@ pub fn fresh_shell() -> Shell {
     .expect(HOST)
 }
 
-/// `surface`'s Σ, as the checker sees it.
-pub fn manifest(surface: &HostSurface) -> ral_core::typecheck::Manifest {
-    surface.manifest()
-}
-
-/// The schemes on the baked prelude's `Phrase::Define`s, in phrase order.
-pub fn prelude_schemes() -> Vec<(String, Arc<Scheme>)> {
-    prelude()
-        .comp()
-        .phrases
-        .iter()
-        .flat_map(|phrase| match &phrase.item {
-            ral_core::ir::Phrase::Define { schemes, .. } => schemes.clone(),
-            ral_core::ir::Phrase::Run(_) => Vec::new(),
-        })
-        .collect()
+/// One top-level run of `source` through the public `run` entry, settled.
+/// Callers pick source that compiles: a static diagnostic is a test bug.
+pub fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
+    shell
+        .run(Run::foreground(source, SourceOrigin::named("<test>")))
+        .expect_ran()
+        .into_result()
 }
 
 /// The checker's seed for a surface: the baked prelude's schemes over its Σ.
 pub fn schemes_for(surface: &HostSurface) -> ral_core::SessionSchemes {
-    ral_core::SessionSchemes::from_prelude(prelude().comp(), manifest(surface))
+    ral_core::SessionSchemes::from_prelude(prelude().comp(), surface.manifest())
 }
 
 /// Visit every `Comp` in a tree, descending past the top-level spine into

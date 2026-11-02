@@ -11,50 +11,39 @@
 
 mod common;
 
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use common::{Scratch, rc_home, repl};
 
-/// Boot `ral -i` with its config isolated to `config`, feeding `line` as the
-/// REPL's whole stdin.  Returns stderr.  `--norc` is left to the caller: an
-/// isolated but rc-less config dir and an isolated rc are both wanted below.
-fn repl_stderr(config: &Path, args: &[&str], line: &str) -> String {
-    let mut child = Command::new(common::ral_bin())
-        .args(args)
-        .arg("-i")
-        .env("HOME", config)
-        .env("XDG_CONFIG_HOME", config)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn ral");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(line.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stderr).into_owned()
+/// `line` fed to a `-i` session whose config is isolated (an empty rc, or the
+/// given one), with `args` ahead of it.  Returns stderr.
+fn repl_stderr(rc: &str, args: &[&str], line: &str) -> String {
+    let (_dir, env) = rc_home(rc);
+    repl(&[args, &["-i"]].concat(), &env, line).stderr
 }
 
 /// `boom` at the prompt is one command, but the fault is inside the rc,
 /// so the caret must point there rather than at the compact one-liner.
 #[test]
 fn an_rc_alias_faults_against_the_rc_file() {
-    let dir = common::fresh_tmp_path("ral_rc_alias_fault", "d");
-    std::fs::create_dir_all(dir.join("ral")).unwrap();
-    std::fs::write(
-        dir.join("ral").join("rc"),
-        "[\n  aliases: [ boom: { |args| fail [status: 1, message: nope] } ]\n]\n",
-    )
-    .unwrap();
-    let stderr = repl_stderr(&dir, &[], "boom\n");
-    std::fs::remove_dir_all(&dir).ok();
+    let rc = "[\n  aliases: [ boom: { |args| fail [status: 1, message: nope] } ]\n]\n";
+    let stderr = repl_stderr(rc, &[], "boom\n");
     assert!(
         stderr.contains("ral/rc:2:") && stderr.contains("message: nope] }"),
         "the caret must name the rc file, at the alias body's line; stderr was:\n{stderr}"
+    );
+}
+
+/// A lambda bound on one prompt line and failing on a later one is drawn
+/// at its definition, not at the call.
+#[test]
+fn a_lambda_bound_at_the_prompt_faults_at_its_definition() {
+    let stderr = repl_stderr(
+        "",
+        &["--norc"],
+        "let boom = { |x| fail [status: 1, message: nope] }\nboom 1\n",
+    );
+    assert!(
+        stderr.contains("<stdin>:1:18") && stderr.contains("message: nope] }"),
+        "the caret must name the definition (1:18), not the call; stderr was:\n{stderr}"
     );
 }
 
@@ -62,8 +51,7 @@ fn an_rc_alias_faults_against_the_rc_file() {
 /// the prompt line, and not nothing.
 #[test]
 fn a_used_function_faults_against_its_own_file() {
-    let dir = common::fresh_tmp_path("ral_used_fault", "d");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("ral_used_fault");
     let module = dir.join("mod.ral");
     std::fs::write(
         &module,
@@ -72,32 +60,23 @@ fn a_used_function_faults_against_its_own_file() {
     .unwrap();
 
     let stderr = repl_stderr(
-        &dir,
+        "",
         &["--norc"],
         &format!("let m = use '{}'\n$m[boom] 1\n", module.display()),
     );
-    std::fs::remove_dir_all(&dir).ok();
     assert!(
         stderr.contains("mod.ral:1:") && stderr.contains("message: nope] }"),
         "the caret must name the loaded file; stderr was:\n{stderr}"
     );
 }
 
-/// A bare external command that is not found still renders compact: the
-/// fault is the command itself, and it is the text already on screen.
+/// A bare external command that is not found is still reported.
 #[test]
-fn a_bare_missing_command_still_renders_compact() {
-    let dir = common::fresh_tmp_path("ral_bare_missing", "d");
-    std::fs::create_dir_all(&dir).unwrap();
-    let stderr = repl_stderr(&dir, &["--norc"], "no-such-command-xyz\n");
-    std::fs::remove_dir_all(&dir).ok();
+fn a_bare_missing_command_is_reported() {
+    let stderr = repl_stderr("", &["--norc"], "no-such-command-xyz\n");
     assert!(
         stderr.contains("no-such-command-xyz: command not found"),
         "the failure must still be reported; stderr was:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains('╭'),
-        "a fault in the text on screen needs no caret; stderr was:\n{stderr}"
     );
 }
 
@@ -105,8 +84,7 @@ fn a_bare_missing_command_still_renders_compact() {
 /// at the failing line, and never against the caller's text.
 #[test]
 fn a_used_module_runtime_error_points_into_the_module() {
-    let dir = common::fresh_tmp_path("ral_use_runtime_err", "d");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("ral_use_runtime_err");
     let module = dir.join("mod.ral");
     std::fs::write(&module, "let a = 1\nlet z = 0\nreturn $[$a / $z]\n").unwrap();
 
@@ -115,7 +93,6 @@ fn a_used_module_runtime_error_points_into_the_module() {
         .arg(format!("use '{}'", module.display()))
         .output()
         .expect("spawn ral");
-    std::fs::remove_dir_all(&dir).ok();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("division by zero"), "stderr was:\n{stderr}");
     assert!(

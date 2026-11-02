@@ -1,4 +1,6 @@
 # codes: T0011
+# status: 1
+# at: 7:1
 # contains: `length` returns an Int instead
 # contains: Did you mean `echo !{length …} | cat`
 let xs = [1, 2]

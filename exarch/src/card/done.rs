@@ -125,6 +125,7 @@ pub fn settled_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ral_core::process::CancelCause;
     use ral_core::shell::runtime::{ErrorRecord, Status};
 
     fn done(outcome: Done) -> FOValue {
@@ -153,6 +154,17 @@ mod tests {
             value_to_done(&done(Done::Panic("kaput".into()))),
             named(DoneOutcome::Panic {
                 message: "kaput".into(),
+            })
+        );
+        assert_eq!(
+            value_to_done(&done(Done::Exited(3))),
+            named(DoneOutcome::Exited { status: 3 })
+        );
+        let cause = CancelCause::Cancelled;
+        assert_eq!(
+            value_to_done(&done(Done::Stopped(cause))),
+            named(DoneOutcome::Stopped {
+                cause: cause.message().into(),
             })
         );
     }

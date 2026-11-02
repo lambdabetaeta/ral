@@ -267,6 +267,10 @@ pub(crate) fn merge_unread(a: &[String], b: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
+#[allow(
+    clippy::disallowed_macros,
+    reason = "[test] libtest captures print macros"
+)]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;
@@ -346,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_root_that_cannot_be_entered_fails_the_manifest() {
-        let dir = workshop("manifest-root");
+        let dir = tempfile::tempdir().expect("temp workshop");
         std::fs::write(dir.path().join("file"), b"x").expect("fixture");
         assert!(Manifest::of_folder(&dir.path().join("gone")).is_err());
         assert!(Manifest::of_folder(&dir.path().join("file")).is_err());
@@ -357,12 +361,15 @@ mod tests {
             std::fs::create_dir(&locked).expect("fixture");
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
                 .expect("fixture");
-            // Root can list a 0000 directory; this case binds only where permissions do.
-            let refused = std::fs::read_dir(&locked).is_err();
+            let binds = std::fs::read_dir(&locked).is_err();
             let result = Manifest::of_folder(&locked);
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
                 .expect("fixture");
-            assert!(!refused || result.is_err());
+            if !binds {
+                eprintln!("permissions do not bind here (running as root); skipping");
+                return;
+            }
+            assert!(result.is_err());
         }
     }
 
@@ -387,15 +394,57 @@ mod tests {
     #[test]
     fn a_subfolder_that_refuses_permission_fails_the_manifest() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = workshop("manifest-refused");
+        let dir = tempfile::tempdir().expect("temp workshop");
         let locked = dir.path().join("locked");
         std::fs::create_dir(&locked).expect("fixture");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("fixture");
-        // Root can list a 0000 directory; this case binds only where permissions do.
-        let refused = std::fs::read_dir(&locked).is_err();
+        let binds = std::fs::read_dir(&locked).is_err();
         let result = Manifest::of_folder(dir.path());
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("fixture");
-        assert!(!refused || result.is_err());
+        if !binds {
+            eprintln!("permissions do not bind here (running as root); skipping");
+            return;
+        }
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_name_covers_itself_and_its_descendants_only() {
+        for (path, name, covered) in [
+            ("scans", "scans", true),
+            ("scans/photo.jpg", "scans", true),
+            ("scans/2026/a.jpg", "scans", true),
+            ("scans2", "scans", false),
+            ("scans2/photo.jpg", "scans", false),
+            ("scan", "scans", false),
+        ] {
+            assert_eq!(covers(path, name), covered, "{path} under {name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_special_file_fails_the_manifest_naming_it() {
+        let dir = workshop("mo");
+        let socket = dir.path().join("s");
+        drop(std::os::unix::net::UnixListener::bind(&socket).expect("fixture"));
+        let why = Manifest::of_folder(dir.path()).expect_err("a socket cannot be accounted for");
+        assert!(why.contains(&shown(&socket)), "{why}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_an_unreadable_name_fails_the_manifest_naming_the_link() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = workshop("manifest-link-name");
+        let link = dir.path().join("odd");
+        let target = std::ffi::OsStr::from_bytes(b"caf\xe9");
+        if std::os::unix::fs::symlink(target, &link).is_err() {
+            eprintln!("this filesystem refuses a non-UTF-8 link target; skipping");
+            return;
+        }
+        let why = Manifest::of_folder(dir.path()).expect_err("an unreadable target");
+        assert!(why.contains(&shown(&link)), "{why}");
     }
 
     #[test]

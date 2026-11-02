@@ -1,2 +1,5 @@
+# codes: P0001
+# status: 2
+# at: 5:37
 # contains: standard output is redirected twice
 try { echo hi } { |_| echo no } > a > b

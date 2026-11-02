@@ -109,6 +109,8 @@ fn rewind_past_the_last_turn_reports_the_bad_anchor() {
     )));
 }
 
+mod rewrite;
+
 const WAIT: Duration = Duration::from_secs(10);
 
 fn with_minting(mut session: Agent, scripts: Vec<Script>) -> Agent {

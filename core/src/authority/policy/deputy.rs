@@ -270,6 +270,28 @@ mod tests {
         assert_eq!(found, disk.named(&["/a", "/b"]));
     }
 
+    /// A file or name key says nothing about a prefix a write could drop a
+    /// binary under, whether it allows or excludes.
+    #[test]
+    fn only_directory_keys_are_runnable_prefixes() {
+        let disk = Disk::new();
+        let root = disk.tree.root();
+        std::fs::create_dir_all(root.join("work/bin")).unwrap();
+        std::fs::write(root.join("work/bin/tool"), "").unwrap();
+        let dir = || ExecKey::Dir(disk.lit("/work/bin"));
+        let file = || ExecKey::Path(disk.lit("/work/bin/tool"));
+        let name = || ExecKey::Name("tool".into());
+        let (none, finding) = (Vec::new(), disk.named(&["/work/bin"]));
+        for (exec, want) in [
+            (ExecGrant::of([file()], []), &none),
+            (ExecGrant::of([name()], []), &none),
+            (ExecGrant::of([dir()], []), &finding),
+            (ExecGrant::of([dir()], [file(), name()]), &finding),
+        ] {
+            assert_eq!(&found(exec, disk.fs(&["/work"], &[])), want);
+        }
+    }
+
     #[test]
     fn an_exec_that_denotes_top_has_no_finding() {
         let disk = Disk::new();

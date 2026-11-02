@@ -239,6 +239,7 @@ fn core_worktree_of(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -269,5 +270,65 @@ mod tests {
             core_worktree_of("[core]\n\tworktree = \"/work/tree\"\n"),
             Some("/work/tree".to_string())
         );
+    }
+
+    /// Why a `.git` file in a fresh directory, read through `read`, is refused.
+    fn bad_pointer(read: impl FnMut(&LexicalPath) -> io::Result<String>) -> Pointer {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".git"), "").unwrap();
+        match discover_git_dir(tmp.path(), read) {
+            Err(bad) => bad.why,
+            Ok(_) => panic!("a bad pointer must be refused"),
+        }
+    }
+
+    #[test]
+    fn a_pointer_that_cannot_be_read_is_unreadable() {
+        let denied =
+            |_: &LexicalPath| -> io::Result<String> { Err(io::ErrorKind::PermissionDenied.into()) };
+        assert!(matches!(bad_pointer(denied), Pointer::Unreadable(_)));
+    }
+
+    #[test]
+    fn a_pointer_file_without_a_gitdir_line_names_nothing() {
+        let body = |_: &LexicalPath| -> io::Result<String> { Ok("not a pointer\n".into()) };
+        assert!(matches!(bad_pointer(body), Pointer::NoGitdirLine));
+    }
+
+    #[test]
+    fn a_target_that_claims_nothing_is_unclaimed_and_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        let read = |p: &LexicalPath| std::fs::read_to_string(p.as_path());
+        let Err(BadPointer {
+            why: Pointer::Unclaimed(target),
+            ..
+        }) = discover_git_dir(tmp.path(), read)
+        else {
+            panic!("a target with no back-pointer must be unclaimed");
+        };
+        assert_eq!(target, tmp.path().join("elsewhere"));
+    }
+
+    #[test]
+    fn common_dir_reads_the_named_directory_against_the_git_dir() {
+        let git_dir = Path::new("/r/.git/worktrees/w");
+        for (commondir, expect) in [
+            (Some("../..\n"), "/r/.git"),
+            (Some("/abs/common\n"), "/abs/common"),
+            (Some("\n"), "/r/.git/worktrees/w"),
+            (None, "/r/.git/worktrees/w"),
+        ] {
+            let read = |_: &LexicalPath| -> io::Result<String> {
+                commondir
+                    .map(str::to_string)
+                    .ok_or_else(|| io::ErrorKind::NotFound.into())
+            };
+            assert_eq!(
+                common_dir(git_dir, read),
+                Path::new(expect),
+                "{commondir:?}"
+            );
+        }
     }
 }

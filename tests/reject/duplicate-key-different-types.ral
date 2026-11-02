@@ -1,3 +1,6 @@
+# codes: T0022
+# status: 1
+# at: 5:19
 # contains: writes the field 'x' twice
 let m = [x: 1, x: "two"]
 return $m

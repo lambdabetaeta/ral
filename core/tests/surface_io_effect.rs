@@ -12,50 +12,9 @@
 
 mod common;
 
-use common::fresh_shell;
+use common::{fresh_shell, run_recorded};
 
-use ral_core::protocol::Run;
-use ral_core::shell::run::RunRequest;
-use ral_core::shell::runtime::{Observation, Settled, Shell, Value};
-use ral_core::source::SourceOrigin;
-use ral_core::{EventSink, SurfaceSink};
-use std::sync::{Arc, Mutex};
-
-/// A sink that records every surfaced observation as the record a trail
-/// carries.
-struct Recorder(Arc<Mutex<Vec<Value>>>);
-
-impl EventSink for Recorder {
-    fn emit(&self, ev: &ral_core::data::FOValue) {
-        if let Some(obs) = Observation::from_surface(ev) {
-            self.0.lock().unwrap().push(Value::from_datum(obs));
-        }
-    }
-}
-
-fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
-    let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink: SurfaceSink = Arc::new(Recorder(Arc::clone(&log)));
-    (log, sink)
-}
-
-/// Run one run of `source` with a recording surface sink and return the
-/// settled value alongside the captured events.  Unlike `surface_effect.rs`'s
-/// helper this tolerates a failing run result, since several I/O operations
-/// (a failed exec, an aborted write) emit their event *and* surface an
-/// error.
-fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
-    let (log, sink) = recording();
-    let result = shell
-        .run(RunRequest {
-            surface: Some(sink),
-            ..RunRequest::from(Run::foreground(source, SourceOrigin::named("<test>")))
-        })
-        .expect_ran()
-        .into_result();
-    let events = log.lock().unwrap().clone();
-    (result, events)
-}
+use ral_core::shell::runtime::{Settled, Shell, Value};
 
 /// The fact of the single observation tagged `kind` among the captured
 /// events, asserting exactly one fired.  Core reports every dispatch it makes,
@@ -86,6 +45,12 @@ fn single_observation(events: &[Value], kind: &str) -> ral_core::shell::runtime:
     facts.into_iter().next().expect("checked above")
 }
 
+/// [`run_recorded`] with the sink always installed: several I/O operations
+/// (a failed exec, an aborted write) emit their event *and* surface an error.
+fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
+    run_recorded(shell, source, true)
+}
+
 fn s(v: &str) -> Value {
     Value::string(v)
 }
@@ -94,7 +59,7 @@ fn s(v: &str) -> Value {
 //
 // A builtin dispatch never reaches the rail — only a command that actually
 // left the shell (external, detached) surfaces.  Redirect and command
-// observations in the audit trail are goldened in `tests/unix/audit-trail.ral`;
+// observations in the audit trail are goldened in `tests/unix/audit-*.ral`;
 // this one pins delivery through the surface sink itself.
 
 /// A bare external command (`/usr/bin/true`) emits one command observation
@@ -176,6 +141,7 @@ fn a_streaming_appends_images_are_read_from_the_derived_reader() {
 fn a_write_to_an_unreadable_file_lands_with_no_before_image() {
     use std::os::unix::fs::PermissionsExt;
     if rustix::process::geteuid().is_root() {
+        ral_core::errln!("skipped: running as root");
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -205,6 +171,7 @@ fn a_write_to_an_unreadable_file_lands_with_no_before_image() {
 fn a_write_to_a_file_the_walk_cannot_hold_is_refused_and_leaves_it() {
     use std::os::unix::fs::PermissionsExt;
     if rustix::process::geteuid().is_root() {
+        ral_core::errln!("skipped: running as root");
         return;
     }
     let tmp = tempfile::tempdir().unwrap();

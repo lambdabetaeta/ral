@@ -729,3 +729,241 @@ fn the_string_containment_helpers_gain_no_caller() {
          caller is admitted — update STRING_CONTAINMENT_CALLERS only when a caller goes."
     );
 }
+
+// ── The scanner itself ────────────────────────────────────────────────
+//
+// Every rule above passes on a tree with no violation, so a parser that
+// accepts everything passes too. These feed it source it must judge.
+
+/// `text` with `<lint>` spelled as the lint, which this file never spells whole.
+fn lint(text: &str) -> String {
+    text.replace("<lint>", LINT)
+}
+
+fn source(rel: &str, within: &str, text: &str) -> Source {
+    Source {
+        rel: rel.to_owned(),
+        within: within.to_owned(),
+        code: code_of(&lint(text)),
+    }
+}
+
+/// The verdict on the lint's first mention in `text`, as the file `rel`.
+fn judged(rel: &str, within: &str, text: &str) -> Result<(), String> {
+    let source = source(rel, within, text);
+    let at = source
+        .code
+        .find(OLD_LINT)
+        .expect("the fixture names the lint");
+    judge(&source, at)
+}
+
+fn judged_in_tests(text: &str) -> Result<(), String> {
+    judged("core/tests/x.rs", "tests/x.rs", text)
+}
+
+fn judged_in_src(text: &str) -> Result<(), String> {
+    judged("core/src/x.rs", "src/x.rs", text)
+}
+
+#[test]
+fn attribute_end_nests_brackets_and_skips_strings() {
+    let end = |code: &str| attribute_end(code, 0);
+    assert_eq!(end("#[a] fn"), Some(4));
+    assert_eq!(end("#[a(b[0])] x"), Some(10));
+    assert_eq!(end(r#"#[a(reason = "]")] x"#), Some(18));
+    assert_eq!(end(r#"#[a(reason = "\"]")] x"#), Some(20));
+    assert_eq!(end("#[a(b"), None);
+    assert_eq!(end("]"), None);
+}
+
+#[test]
+fn string_text_reads_the_first_literal_verbatim() {
+    assert_eq!(string_text(r#"reason = "hi""#).as_deref(), Some("hi"));
+    assert_eq!(string_text(r#"a "x" "y""#).as_deref(), Some("x"));
+    assert_eq!(string_text(r#""a\"b""#).as_deref(), Some(r#"a\"b"#));
+    assert_eq!(string_text(r#""""#).as_deref(), Some(""));
+    assert_eq!(string_text("no literal"), None);
+    assert_eq!(string_text(r#""open"#).as_deref(), Some("open"));
+}
+
+#[test]
+fn top_level_arguments_split_only_at_depth_zero_outside_strings() {
+    assert_eq!(top_level_arguments(""), [""]);
+    assert_eq!(top_level_arguments("a, b"), ["a", " b"]);
+    assert_eq!(top_level_arguments("all(a, b), c"), ["all(a, b)", " c"]);
+    assert_eq!(
+        top_level_arguments(r#"k = "x,y", z"#),
+        [r#"k = "x,y""#, " z"]
+    );
+    assert_eq!(
+        top_level_arguments("f(g(a, b), c), d"),
+        ["f(g(a, b), c)", " d"]
+    );
+}
+
+#[test]
+fn cfg_implies_test_only_where_the_predicate_needs_test() {
+    for implies in [
+        "#[cfg(test)]",
+        "#[cfg( test )]",
+        "#[cfg(all(test, unix))]",
+        "#[cfg(all(unix, test))]",
+        r#"#[cfg(all(unix, test, feature = "x"))]"#,
+        r#"#[cfg(any(test, feature = "test-util"))]"#,
+        r#"#[cfg(any( test , feature = "test-util" ))]"#,
+    ] {
+        assert!(cfg_implies_test(implies), "{implies}");
+    }
+    for holds_without_test in [
+        "#[cfg(any(test, unix))]",
+        "#[cfg(any(unix, test))]",
+        r#"#[cfg(any(test, feature = "test-util", unix))]"#,
+        "#[cfg(all(unix, any(test, unix)))]",
+        "#[cfg(unix)]",
+        "#[cfg(not(test))]",
+        r#"#[cfg(all(unix, feature = "test"))]"#,
+        "#[derive(test)]",
+        "#[cfg(test)",
+        "cfg(test)",
+    ] {
+        assert!(
+            !cfg_implies_test(holds_without_test),
+            "{holds_without_test}"
+        );
+    }
+}
+
+#[test]
+fn inherits_workspace_lints_reads_only_the_lints_table() {
+    assert!(inherits_workspace_lints(
+        "[package]\nname = \"x\"\n\n[lints]\nworkspace = true # yes\n"
+    ));
+    assert!(inherits_workspace_lints("[lints]\nworkspace=true"));
+    for unbound in [
+        "[package]\nname = \"x\"\n",
+        "[package]\nworkspace = true\n",
+        "[dependencies]\nworkspace = true\n[lints]\n",
+        "[lints]\nworkspace = false\n",
+        "[lints.clippy]\nworkspace = true\n",
+        "[lints]\n# workspace = true\n",
+        "",
+    ] {
+        assert!(!inherits_workspace_lints(unbound), "{unbound:?}");
+    }
+}
+
+#[test]
+fn a_mention_outside_an_attribute_is_never_an_exemption() {
+    assert!(judged_in_tests(r#"const NAME: &str = "<lint>";"#).is_err());
+    assert!(judged_in_tests(r##"let s = "#[x]"; let t = "<lint>";"##).is_err());
+}
+
+#[test]
+fn rule_b_admits_a_leading_inner_allow_of_a_blanket_root() {
+    for (rel, within) in [
+        ("core/tests/x.rs", "tests/x.rs"),
+        ("ral/examples/y.rs", "examples/y.rs"),
+        ("core/build.rs", "build.rs"),
+        ("ral-guest/src/main.rs", "src/main.rs"),
+    ] {
+        let text = "//! doc\n#![allow(<lint>, reason = \"test code\")]\n#![deny(x)]\nfn main() {}";
+        assert!(judged(rel, within, text).is_ok(), "{rel}");
+    }
+    let old = lint("#![allow(<lint>, reason = \"r\")]").replace(LINT, OLD_LINT);
+    assert!(judged_in_tests(&old).is_ok());
+}
+
+#[test]
+fn rule_b_refuses_what_is_not_a_leading_plain_allow_of_a_blanket_root() {
+    for text in [
+        "#![allow(<lint>)]",
+        "#![allow(<lint>, reason = \"\")]",
+        "#![allow(<lint>, other, reason = \"r\")]",
+        "#![expect(<lint>, reason = \"r\")]",
+        "#![warn(<lint>, reason = \"r\")]",
+        "fn f() {}\n#![allow(<lint>, reason = \"r\")]",
+        "#[allow(<lint>, reason = \"r\")]\nfn f() {}",
+    ] {
+        assert!(judged_in_tests(text).is_err(), "{text}");
+    }
+    assert!(judged_in_src("#![allow(<lint>, reason = \"r\")]").is_err());
+    assert!(
+        judged(
+            "core/tests/sub/x.rs",
+            "tests/sub/x.rs",
+            "#![allow(<lint>, reason = \"r\")]"
+        )
+        .is_err()
+    );
+    assert!(
+        judged(
+            "core/src/main.rs",
+            "src/main.rs",
+            "#![allow(<lint>, reason = \"r\")]"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn rule_c_admits_a_test_code_allow_on_a_test_mod() {
+    for text in [
+        "#[cfg(test)]\n#[allow(<lint>, reason = \"test code\")]\nmod tests {}",
+        "#[allow(<lint>, reason = \"test code\")]\n#[cfg(test)]\nmod tests;",
+        "#[cfg(all(test, unix))]\n#[allow(<lint>, reason = \"test code\")]\npub(crate) mod tests {}",
+        "#[cfg(any(test, feature = \"test-util\"))]\n#[allow(<lint>, reason = \"test code\")]\npub mod t {}",
+        "#[cfg(test)]\n#[path = \"x.rs\"]\n#[allow(<lint>, reason = \"test code\")]\nmod tests;",
+    ] {
+        assert!(judged_in_src(text).is_ok(), "{text}");
+    }
+}
+
+#[test]
+fn rule_c_refuses_an_allow_that_could_reach_production() {
+    for text in [
+        "#[cfg(any(test, unix))]\n#[allow(<lint>, reason = \"test code\")]\nmod tests {}",
+        "#[allow(<lint>, reason = \"test code\")]\nmod tests {}",
+        "#[cfg(unix)]\n#[allow(<lint>, reason = \"test code\")]\nmod tests {}",
+        "#[cfg(not(test))]\n#[allow(<lint>, reason = \"test code\")]\nmod tests {}",
+        "#[cfg(test)]\n#[allow(<lint>, reason = \"test code\")]\nfn f() {}",
+        "#[cfg(test)]\n#[allow(<lint>, reason = \"test code\")]\nimpl X {}",
+        "#[cfg(test)]\n#[allow(<lint>, reason = \"because\")]\nmod tests {}",
+        "#[cfg(test)]\n#[allow(<lint>)]\nmod tests {}",
+        "#[cfg(test)]\n#[allow(<lint>, other, reason = \"test code\")]\nmod tests {}",
+        "#[cfg(test)]\n#[warn(<lint>, reason = \"test code\")]\nmod tests {}",
+    ] {
+        assert!(judged_in_src(text).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn rule_d_admits_only_the_tauri_context_expect() {
+    let expect = "#[expect(<lint>, <macros>, reason = \"codegen\")]\n";
+    let statement = format!("{expect}let context = tauri::generate_context!();")
+        .replace("<macros>", MACROS_LINT);
+    let judge_in = |rel: &str, text: &str| judged(rel, "src/main.rs", text);
+    assert!(judge_in(TAURI_FILE, &statement).is_ok());
+
+    assert!(
+        judge_in("core/src/main.rs", &statement).is_err(),
+        "another file"
+    );
+    let other_statement = statement.replace("generate_context", "other_macro");
+    assert!(
+        judge_in(TAURI_FILE, &other_statement).is_err(),
+        "another statement"
+    );
+    let one_lint =
+        lint("#[expect(<lint>, reason = \"r\")]\nlet context = tauri::generate_context!();");
+    assert!(judge_in(TAURI_FILE, &one_lint).is_err(), "one lint only");
+    let three = statement.replace(", reason", ", extra, reason");
+    assert!(judge_in(TAURI_FILE, &three).is_err(), "three lints");
+
+    // An `allow` is read by rule (c), never admitted as the exception.
+    let allow = statement.replace("#[expect", "#[allow");
+    assert!(judge_in(TAURI_FILE, &allow).is_err());
+    let not_expect = source(TAURI_FILE, "src/main.rs", &allow);
+    let attribute = attribute_at(&not_expect.code, 0).expect("an attribute");
+    assert!(rule_d(&not_expect, &attribute).is_err());
+}

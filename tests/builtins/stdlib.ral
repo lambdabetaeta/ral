@@ -2,16 +2,13 @@
 
 # sum
 echo !{sum [1, 2, 3, 4, 5]}
-# Expected: 15
 
 echo !{sum [10, 20, 30]}
-# Expected: 60
 
 # lines
 let parts = lines "hello\nworld\nfoo"
 let nparts = length $parts
 echo $nparts
-# Expected: 3
 
 # line-count
 let tmpdir = temp-dir
@@ -19,48 +16,38 @@ echo hello > "$tmpdir/test"
 echo world >> "$tmpdir/test"
 echo foo >> "$tmpdir/test"
 echo !{line-count "$tmpdir/test"}
-# Expected: 3
 
 # read file via from-string < path
 let content = !{from-string < "$tmpdir/test"}
 echo $content
-# Expected: hello\nworld\nfoo (as one string)
 
 rm -rf $tmpdir
 
 # data-last fold
 echo !{fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]}
-# Expected: 6
 
 # data-last reduce
 echo !{reduce { |a b| return $[$a * $b] } [2, 3, 4]}
-# Expected: 24
 
 # Composition via substitution
 let doubled = map { |x| return $[$x * 2] } [1, 2, 3, 4, 5]
 let result = sum $doubled
 echo $result
-# Expected: 30
 
 # range — builtin integer sequence, start (inclusive) to end (exclusive)
 echo !{range 0 5}
-# Expected: [0, 1, 2, 3, 4]
 
 echo !{range 3 7}
-# Expected: [3, 4, 5, 6]
 
 echo !{range 5 5}
-# Expected: []
 
 echo !{range -2 1}
-# Expected: [-2, -1, 0]
 
 # first-where is a non-failing search
 echo !{first-where { |_| return true } []}
 echo !{first-where { |x| $[$x > 2] } [1, 2, 3, 4]}
 
 echo !{flat-map { |x| return [$x, $x] } [1, 2]}
-# Expected: [1, 1, 2, 2]
 
 # extension — what follows the last component's last dot, when a non-dot precedes it
 let show-ext = { |path|
@@ -84,6 +71,5 @@ show-ext 'foo.'
 show-ext 'foo..'
 show-ext '.a.b'
 show-ext '..a.b'
-# Expected: none for the first nine, then some [txt], some [gz], some [], some [], some [b], some [b]
 
 echo 'stdlib tests done'

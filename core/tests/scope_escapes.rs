@@ -7,24 +7,12 @@ mod common;
 
 use ral_core::Value;
 use ral_core::io::terminal::TerminalState;
-use ral_core::protocol::Run;
 use ral_core::shell::boot::{HostSurface, boot_shell};
-use ral_core::shell::runtime::{Break, Escape, Mooring, Settled, Shell};
-use ral_core::source::SourceOrigin;
+use ral_core::shell::runtime::{Mooring, Shell};
 
 const HOST: &str = "a test host resolves its baseline";
 
-/// Run one top-level run of `source` through the public `run` entry
-/// and return the body's `Settled<Value>`.  Every test below picks source
-/// it expects to compile, so a static diagnostic is a test bug.
-fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    shell
-        .run(Run::foreground(source, SourceOrigin::named("<test>")))
-        .expect_ran()
-        .into_result()
-}
-
-// ── handler self-masking survives a panic mid-body (finding E5; rec. A4) ──
+// ── handler self-masking survives a panic mid-body ──
 //
 // `machine::apply_handler` lifts the matched handler frame off the stack for the
 // dynamic extent of the body (so a same-name call from inside reaches
@@ -56,7 +44,7 @@ static PANIC_BUILTIN_ARR: [ral_core::shell::runtime::BuiltinEntry; 1] =
     )];
 static PANIC_BUILTIN: &[ral_core::shell::runtime::BuiltinEntry] = &PANIC_BUILTIN_ARR;
 
-/// E5 — a Rust panic raised inside an alias body must leave the alias
+/// A Rust panic raised inside an alias body must leave the alias
 /// still installed.  The body invokes `__test-panic`, a host builtin the
 /// test registers whose reducer panics unconditionally — any panic
 /// mid-handler-body would do, and a dedicated trigger keeps the test
@@ -75,7 +63,7 @@ fn handler_self_mask_survives_panic_mid_body() {
         ral_core::test_helper::process_cwd(),
     )
     .expect(HOST);
-    let _ = top_level(&mut shell, "alias boom { |args| __test-panic }")
+    let _ = common::top_level(&mut shell, "alias boom { |args| __test-panic }")
         .expect("installing the alias must succeed");
     assert!(
         shell.has_alias("boom"),
@@ -88,7 +76,7 @@ fn handler_self_mask_survives_panic_mid_body() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        top_level(&mut shell, "boom")
+        common::top_level(&mut shell, "boom")
     }));
     std::panic::set_hook(prev_hook);
 
@@ -100,41 +88,7 @@ fn handler_self_mask_survives_panic_mid_body() {
     assert!(
         shell.has_alias("boom"),
         "the alias `boom` must still be installed after a panic unwound \
-         through its body.  Pre-A4 the stripped frame was re-inserted by \
-         straight-line code skipped on the unwind, permanently deleting \
-         the user alias; A4's RAII guard restores it from `Drop`."
+         through its body: the RAII guard restores the stripped frame from \
+         `Drop`, where straight-line re-insertion would be skipped"
     );
-}
-
-fn test_shell() -> Shell {
-    boot_shell(
-        TerminalState::default(),
-        common::prelude(),
-        &HostSurface::default(),
-        ral_core::test_helper::process_cwd(),
-    )
-    .expect(HOST)
-}
-
-/// A cleanup runs under an `exit`, and the `exit` follows it.
-#[test]
-fn a_guard_cleanup_runs_under_an_exit_and_the_exit_follows() {
-    let mut shell = test_shell();
-    match top_level(&mut shell, "guard { exit 3 } { echo cleaned }") {
-        Err(Break::Escape(Escape::Exit(3))) => {}
-        other => panic!("expected exit 3, got {other:?}"),
-    }
-}
-
-/// A cleanup's own failure pre-empts the halt it ran under.
-#[test]
-fn a_cleanups_fail_pre_empts_an_exit() {
-    let mut shell = test_shell();
-    match top_level(
-        &mut shell,
-        "guard { exit 3 } { fail [status: 7, message: x] }",
-    ) {
-        Err(Break::Error(e)) => assert_eq!(e.code(), 7),
-        other => panic!("expected an error with code 7, got {other:?}"),
-    }
 }

@@ -1943,10 +1943,14 @@ impl Inferencer<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::{TypeErrorKind, coverage_verdict};
     use crate::syntax::parser::parse;
-    use crate::ty::{Scheme, Ty};
+    use crate::ty::{Label, Row, RowVar, Scheme, Ty};
     use crate::{SessionSchemes, elaborator::elaborate, typecheck};
     use std::sync::Arc;
+
+    /// The missing and the extra tags a case is judged to have.
+    type Verdict<'a> = Option<(&'a [&'a str], &'a [&'a str])>;
 
     fn error_codes(src: &str) -> Vec<&'static str> {
         error_codes_seeded(src, Vec::new())
@@ -2013,5 +2017,46 @@ mod tests {
             error_codes("let k = 'x'\nreturn [$k: 1, a: 1, a: 2]"),
             ["T0022"]
         );
+    }
+
+    /// Missing arms are named always; extra arms only where the value's row is
+    /// closed, an open tail being free to absorb one.
+    #[test]
+    fn coverage_names_missing_arms_and_extra_arms_of_a_closed_row_only() {
+        let row = |tags: &[&str], tail: Row| {
+            tags.iter().rev().fold(tail, |rest, tag| {
+                Row::Extend(
+                    Label::Case((*tag).into()),
+                    Box::new(Ty::Unit),
+                    Box::new(rest),
+                )
+            })
+        };
+        let arms = |tags: &[&str]| -> Vec<Label> {
+            tags.iter().map(|t| Label::Case((*t).into())).collect()
+        };
+        let strings =
+            |tags: &[&str]| -> Vec<String> { arms(tags).iter().map(Label::to_string).collect() };
+        let open = || Row::Var(RowVar(0));
+        let cases: [(Row, &[&str], Verdict); 6] = [
+            (row(&["a", "b"], Row::Empty), &["a", "b"], None),
+            (row(&["a", "b"], Row::Empty), &["a"], Some((&["b"], &[]))),
+            (row(&["a"], Row::Empty), &["a", "b"], Some((&[], &["b"]))),
+            (
+                row(&["a"], Row::Empty),
+                &["b", "c"],
+                Some((&["a"], &["b", "c"])),
+            ),
+            (row(&["a"], open()), &["a", "b"], None),
+            (row(&["a", "b"], open()), &["a", "c"], Some((&["b"], &[]))),
+        ];
+        for (scrutinee, arm_tags, expected) in cases {
+            let got = coverage_verdict(&scrutinee, &arms(arm_tags)).map(|k| match k {
+                TypeErrorKind::CaseNotExhaustive { missing, extra } => (missing, extra),
+                other => panic!("not a coverage verdict: {other:?}"),
+            });
+            let want = expected.map(|(missing, extra)| (strings(missing), strings(extra)));
+            assert_eq!(got, want, "{scrutinee:?} against {arm_tags:?}");
+        }
     }
 }

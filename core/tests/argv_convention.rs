@@ -34,8 +34,6 @@ use ral_core::shell::run::{RunReport, StaticDiagnostics};
 use ral_core::shell::runtime::{Break, Value};
 use ral_core::source::SourceOrigin;
 
-/// A session as every front end builds one: prelude registered, env seeded,
-/// capabilities at root.
 /// One top-level dispatch through the public entry, stdout captured — the report
 /// as a front end receives it, diagnosed or run.
 fn report(src: &str) -> RunReport {
@@ -111,10 +109,15 @@ fn the_exec_boundary_names_the_spread_that_lowers_a_list() {
 /// running.
 #[test]
 fn a_polymorphic_argument_is_left_to_the_spawn() {
+    let call = "let show = { |v| cat $v }; show [a: 1]";
     assert!(
-        static_codes("let show = { |v| cat $v }; show [a: 1]").is_empty(),
+        static_codes(call).is_empty(),
         "a parameter's shape is not known here, so nothing may be refused"
     );
+    match run_capture(call).0 {
+        Err(Break::Error(e)) => assert!(e.hint.is_some(), "the refusal carries the idiom"),
+        other => panic!("`vet` must refuse the shape at run time, got {other:?}"),
+    }
     // Nor is a spread's elements' shape: an empty spread reaches `execve(2)`
     // cleanly, and a static refusal would reject a call that runs.
     assert!(

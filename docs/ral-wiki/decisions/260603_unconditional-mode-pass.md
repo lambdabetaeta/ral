@@ -285,12 +285,12 @@ a future node-reading consumer could reintroduce:
   fragments and the runtime spawn even under `--no-typecheck`. Fixed to
   `Background(Val::Thunk(body))` (`core/src/elaborator.rs`), with three behavioural
   tests.
-- **`eval_fuzz`'s harness discarded the annotation.** The test harness evaluated
+- **`eval_harness` discarded the annotation.** The test harness evaluated
   the *bare elaborated* comp, throwing away the annotation it had just computed.
   This was harmless while modes were re-inferred at runtime — the discarded wires
   were recomputed — and fatal the moment the evaluator reads wires off the node (it
   would read the elaborator's `Wire::EMPTY` placeholder). The harness now runs the
-  checked IR (`core/tests/eval_fuzz.rs`).
+  checked IR (`core/tests/eval_harness.rs`).
 
 ## Closing the window
 

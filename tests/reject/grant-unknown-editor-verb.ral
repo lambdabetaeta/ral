@@ -1,3 +1,6 @@
+# codes: T0020
+# status: 1
+# at: 6:16
 # contains: `` `wirte `` is not a verb
 # contains: did you mean `` `write ``
 grant [editor: [`wirte]] { return 1 }

@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+mod invalid;
+
 #[test]
 fn parse_accepts_command_and_description() {
     let a = parse_args(&json!({
@@ -13,58 +15,6 @@ fn parse_accepts_command_and_description() {
 }
 
 #[test]
-fn parse_rejects_missing_command() {
-    let e = parse_args(&json!({
-        "description": "noop",
-    }))
-    .unwrap_err();
-    assert!(e.contains("`command`"));
-}
-
-#[test]
-fn parse_names_the_fields_received() {
-    let e = parse_args(&json!({
-        "cmd": "pwd",
-        "description": "x",
-    }))
-    .unwrap_err();
-    assert!(e.contains("`command`"));
-    assert!(e.contains("got `cmd`, `description`"));
-}
-
-#[test]
-fn parse_rejects_non_string_command() {
-    let e = parse_args(&json!({
-        "command": 3,
-        "description": "x",
-    }))
-    .unwrap_err();
-    assert!(e.contains("must be a string"));
-}
-
-#[test]
-fn parse_rejects_non_object() {
-    let e = parse_args(&json!("oops")).unwrap_err();
-    assert!(e.contains("not a JSON object"));
-}
-
-#[test]
-fn parse_rejects_missing_description() {
-    let e = parse_args(&json!({ "command": "pwd" })).unwrap_err();
-    assert!(e.contains("`description`"));
-}
-
-#[test]
-fn parse_rejects_empty_description() {
-    let e = parse_args(&json!({
-        "command": "pwd",
-        "description": "   ",
-    }))
-    .unwrap_err();
-    assert!(e.contains("`description`"));
-}
-
-#[test]
 fn parse_truncates_oversize_description() {
     let big = "x".repeat(DESCRIPTION_MAX + 1);
     let a = parse_args(&json!({
@@ -73,16 +23,6 @@ fn parse_truncates_oversize_description() {
     }))
     .unwrap();
     assert_eq!(a.description, "x".repeat(DESCRIPTION_MAX) + "...");
-}
-
-#[test]
-fn parse_rejects_multiline_description() {
-    let e = parse_args(&json!({
-        "command": "pwd",
-        "description": "first\nsecond",
-    }))
-    .unwrap_err();
-    assert!(e.contains("`description`"));
 }
 
 #[test]
@@ -118,54 +58,24 @@ fn parse_timeout_null_takes_default() {
     assert_eq!(a.timeout_secs, CALL_TIMEOUT_SECS);
 }
 
-/// Zero parses as a `u64`, so the floor has to be a check of its own.
 #[test]
-fn parse_timeout_rejects_zero() {
-    let e = parse_args(&json!({
-        "command": "pwd",
-        "description": "noop",
-        "timeout_secs": 0,
-    }))
-    .unwrap_err();
-    assert!(e.contains("`timeout_secs`"));
-    assert!(e.contains("≥1"));
-}
-
-#[test]
-fn parse_timeout_rejects_negative() {
-    let e = parse_args(&json!({
-        "command": "pwd",
-        "description": "noop",
-        "timeout_secs": -5,
-    }))
-    .unwrap_err();
-    assert!(e.contains("`timeout_secs`"));
-    assert!(e.contains("positive integer"));
-}
-
-/// Even an integral float like `5.0` is not a `u64` to serde.
-#[test]
-fn parse_timeout_rejects_float() {
-    let e = parse_args(&json!({
-        "command": "pwd",
-        "description": "noop",
-        "timeout_secs": 5.0,
-    }))
-    .unwrap_err();
-    assert!(e.contains("`timeout_secs`"));
-    assert!(e.contains("positive integer"));
-}
-
-#[test]
-fn parse_timeout_rejects_string() {
-    let e = parse_args(&json!({
-        "command": "pwd",
-        "description": "noop",
-        "timeout_secs": "30",
-    }))
-    .unwrap_err();
-    assert!(e.contains("`timeout_secs`"));
-    assert!(e.contains("positive integer"));
+fn malformed_arguments_are_rejected() {
+    for input in [
+        json!({ "description": "x" }),
+        json!({ "cmd": "pwd", "description": "x" }),
+        json!({ "command": 3, "description": "x" }),
+        json!("oops"),
+        json!({ "command": "pwd" }),
+        json!({ "command": "pwd", "description": "   " }),
+        json!({ "command": "pwd", "description": "first\nsecond" }),
+        // Zero parses as a `u64`, and an integral float is not one to serde.
+        json!({ "command": "pwd", "description": "x", "timeout_secs": 0 }),
+        json!({ "command": "pwd", "description": "x", "timeout_secs": -5 }),
+        json!({ "command": "pwd", "description": "x", "timeout_secs": 5.0 }),
+        json!({ "command": "pwd", "description": "x", "timeout_secs": "30" }),
+    ] {
+        assert!(parse_args(&input).is_err(), "{input}");
+    }
 }
 
 #[test]

@@ -1,4 +1,6 @@
 # codes: T0078
+# status: 1
+# at: 6:17
 # contains: a decoder ends the byte pipeline: `from-json` returns a value and writes nothing, so nothing reaches `wc`
 # contains: bind the value first
 cat data.json | from-json | wc -l

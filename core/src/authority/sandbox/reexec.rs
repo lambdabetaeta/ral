@@ -285,3 +285,7 @@ fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
 fn build_pin(arg0: &Path, _: &Trace) -> Option<(Pin, PathBuf)> {
     Some((Pin::Unguarded, arg0.to_path_buf()))
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests;

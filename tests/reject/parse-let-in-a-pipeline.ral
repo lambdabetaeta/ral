@@ -1,2 +1,5 @@
-# contains: binding
+# codes: P0001
+# status: 2
+# at: 5:8
+# contains: `let` is a statement, not a pipeline stage
 echo | let x = 1

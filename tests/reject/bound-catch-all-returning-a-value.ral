@@ -1,3 +1,6 @@
+# codes: T0011
+# status: 1
+# at: 6:48
 # contains: stands in for every command
 # contains: String
 let k = { |n a| return 'x' }; within [handler: $k] { zzz }

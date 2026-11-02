@@ -220,22 +220,90 @@ mod tests {
     }
 
     #[test]
-    fn search_true_round_trips() {
-        let policy = parse("return [hosts: ['a.example'], search: true]")
-            .expect("a well-formed policy with search: true must parse");
+    fn a_missing_hosts_key_is_a_hard_error() {
+        let err = parse("return [search: true]").unwrap_err();
+        assert!(err.contains("missing 'hosts'"), "got: {err}");
+    }
+
+    #[test]
+    fn a_terminal_value_that_is_not_a_map_is_refused() {
+        for source in [
+            "return ['a.example']",
+            "return 'a.example'",
+            "return 1",
+            "return true",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn hosts_that_is_not_a_list_is_refused() {
+        for hosts in ["'a.example'", "1", "true", "[a: true]"] {
+            assert!(
+                parse(&format!("return [hosts: {hosts}, search: true]")).is_err(),
+                "{hosts}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_entry_that_is_not_a_string_is_refused() {
+        // One entry alone: beside a string it would be a type error, not a decode one.
+        for entry in ["1", "true", "['a.example']", "[a: 1]"] {
+            assert!(
+                parse(&format!("return [hosts: [{entry}], search: true]")).is_err(),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_host_parse_rejects_is_refused() {
+        for host in [
+            "*.example.com",
+            "example.com:443",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "example.com.",
+            "",
+        ] {
+            assert!(Host::parse(host).is_err(), "{host}: the premise");
+            assert!(parse(&hosts_policy(&[host])).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn search_that_is_not_a_bool_is_refused() {
+        for search in ["'true'", "1", "['a']"] {
+            assert!(
+                parse(&format!("return [hosts: ['a.example'], search: {search}]")).is_err(),
+                "{search}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_search_key_is_refused_not_defaulted() {
+        assert!(parse("return [hosts: ['a.example']]").is_err());
+    }
+
+    #[test]
+    fn the_decoded_hosts_are_exactly_the_listed_hosts_lowercased() {
+        let policy = parse(&hosts_policy(&["B.example", "a.example"])).expect("well-formed");
+        let expected = ["a.example", "b.example"]
+            .map(|h| Host::parse(h).unwrap())
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(policy.hosts, expected);
         assert!(policy.search);
     }
 
     #[test]
-    fn search_false_round_trips() {
-        let policy = parse("return [hosts: ['a.example'], search: false]")
-            .expect("a well-formed policy with search: false must parse");
+    fn an_empty_host_list_decodes_to_a_policy_admitting_nothing() {
+        let policy = parse("return [hosts: [], search: false]").expect("well-formed");
+        assert!(policy.hosts.is_empty());
         assert!(!policy.search);
-    }
-
-    #[test]
-    fn a_missing_hosts_key_is_a_hard_error() {
-        let err = parse("return [search: true]").unwrap_err();
-        assert!(err.contains("missing 'hosts'"), "got: {err}");
     }
 }

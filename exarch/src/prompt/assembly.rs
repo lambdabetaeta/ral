@@ -1,0 +1,207 @@
+//! The assembled prompt's shape: section order and presence, the file chain
+//! behind `Workspace`, and the grant lines.
+
+use super::*;
+use ral_core::authority::policy::GrantStack;
+use std::fs;
+
+const HEADINGS: [&str; 9] = [
+    "Ral",
+    "Editing",
+    "Builtins",
+    "Tasks",
+    "Context management",
+    "Host",
+    "Workspace",
+    "Skills",
+    "Surfacing",
+];
+
+/// A scratch tree under its canonical root, held for as long as the test runs.
+fn tree() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    (tmp, root)
+}
+
+fn assembled(
+    files: &[PathBuf],
+    cwd: &Path,
+    config: Option<&Path>,
+    interactive: bool,
+    edit: EditScheme,
+) -> Result<String, String> {
+    let invocation = Invocation {
+        stack: GrantStack::root(),
+        restricts: Vec::new(),
+    };
+    assemble(
+        files,
+        &invocation,
+        &Baseline::default(),
+        crate::app::EXARCH,
+        &CwdPath::new(cwd.to_path_buf()).unwrap(),
+        config,
+        interactive,
+        edit,
+    )
+}
+
+/// The section headings `prompt` carries, in order.
+fn headings(prompt: &str) -> Vec<&str> {
+    prompt
+        .lines()
+        .filter_map(|line| line.strip_prefix("# "))
+        .filter(|heading| HEADINGS.contains(heading))
+        .collect()
+}
+
+fn plain(cwd: &Path, interactive: bool, edit: EditScheme) -> String {
+    assembled(&[], cwd, None, interactive, edit).unwrap()
+}
+
+#[test]
+fn sections_come_in_the_order_they_are_built() {
+    let (_tmp, root) = tree();
+    fs::write(root.join("AGENTS.md"), "workspace text").unwrap();
+    let prompt = plain(&root, true, EditScheme::Replace);
+    assert_eq!(headings(&prompt), HEADINGS);
+    assert!(prompt.contains("workspace text"));
+    assert!(prompt.contains(crate::skill::BUILTIN[0].0));
+}
+
+#[test]
+fn surfacing_is_taught_only_to_an_interactive_agent() {
+    let (_tmp, root) = tree();
+    for interactive in [false, true] {
+        let prompt = plain(&root, interactive, EditScheme::Replace);
+        assert_eq!(headings(&prompt).contains(&"Surfacing"), interactive);
+    }
+}
+
+#[test]
+fn workspace_appears_only_where_an_agents_file_is_found() {
+    let (_tmp, root) = tree();
+    assert!(!headings(&plain(&root, false, EditScheme::Replace)).contains(&"Workspace"));
+    fs::write(root.join("AGENTS.md"), "found").unwrap();
+    assert!(headings(&plain(&root, false, EditScheme::Replace)).contains(&"Workspace"));
+}
+
+#[test]
+fn the_edit_scheme_chooses_the_editing_section() {
+    let (_tmp, root) = tree();
+    let replace = plain(&root, false, EditScheme::Replace);
+    let hash = plain(&root, false, EditScheme::Hash);
+    assert!(replace.contains(EDIT_REPLACE.trim_end()) && !replace.contains(EDIT_HASH.trim_end()));
+    assert!(hash.contains(EDIT_HASH.trim_end()) && !hash.contains(EDIT_REPLACE.trim_end()));
+}
+
+/// `--system` replaces the persona and nothing after it.
+#[test]
+fn system_files_replace_only_the_persona() {
+    let (_tmp, root) = tree();
+    let (first, second) = (root.join("one.md"), root.join("two.md"));
+    fs::write(&first, "first persona").unwrap();
+    fs::write(&second, "second persona").unwrap();
+    let default = plain(&root, true, EditScheme::Replace);
+    let custom = assembled(&[first, second], &root, None, true, EditScheme::Replace).unwrap();
+    assert!(custom.starts_with("first persona\n\nsecond persona\n\n# Ral"));
+    assert!(default.starts_with(include_str!("../../data/system.md").trim_end()));
+    assert_eq!(headings(&custom), headings(&default));
+    assert!(custom.contains(RAL_REFERENCE.trim_end()));
+}
+
+#[test]
+fn an_unreadable_system_file_fails_the_assembly_naming_it() {
+    let (_tmp, root) = tree();
+    let error = assembled(
+        &[root.join("missing.md")],
+        &root,
+        None,
+        true,
+        EditScheme::Replace,
+    )
+    .unwrap_err();
+    assert!(error.contains("missing.md"), "{error}");
+}
+
+/// The operator's file, then the repo root down to `cwd`; a directory with
+/// none is skipped.
+#[test]
+fn agents_files_read_the_config_dir_first_then_the_repo_chain_outermost_first() {
+    let (_tmp, root) = tree();
+    let (config, repo) = (root.join("config"), root.join("repo"));
+    let sub = repo.join("middle/sub");
+    fs::create_dir_all(&config).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(&sub).unwrap();
+    for (dir, text) in [(&config, "config"), (&repo, "repo"), (&sub, "sub")] {
+        fs::write(dir.join("AGENTS.md"), text).unwrap();
+    }
+    let (baseline, env) = (Baseline::default(), EnvVars::new());
+    let stack = GrantStack::root();
+    let cwd = CwdPath::new(sub.clone()).unwrap();
+    let reader = Boot::new(&stack, &baseline, &env, &cwd);
+    assert_eq!(
+        read_agents(&sub, Some(&config), &reader).unwrap(),
+        "config\n\nrepo\n\nsub"
+    );
+}
+
+#[test]
+fn an_agents_file_that_exists_but_cannot_be_read_fails_the_assembly() {
+    let (_tmp, root) = tree();
+    fs::write(root.join("AGENTS.md"), [0xffu8, 0xfe, 0xfd]).unwrap();
+    let error = assembled(&[], &root, None, false, EditScheme::Replace).unwrap_err();
+    assert!(error.contains("AGENTS.md"), "{error}");
+}
+
+#[test]
+fn exec_lines_follow_every_and_the_admitted_keys() {
+    let exec = |every, allows: &[&str]| ExecSummary {
+        every,
+        allows: allows.iter().map(ToString::to_string).collect(),
+        denies: Vec::new(),
+    };
+    assert_eq!(exec_line(None), "unrestricted");
+    let every = exec_line(Some(&exec(true, &[])));
+    assert!(every.contains("every"), "{every}");
+    let also = exec_line(Some(&exec(true, &["`name git"])));
+    assert!(
+        also.starts_with(&every) && also.contains("`name git"),
+        "{also}"
+    );
+    assert_eq!(exec_line(Some(&exec(false, &[]))), "(none)");
+    assert_eq!(
+        exec_line(Some(&exec(false, &["`name git", "`name ls"]))),
+        "`name git, `name ls"
+    );
+    // A directory allowance is shown on its own line, never among the keys.
+    assert_eq!(
+        exec_line(Some(&exec(false, &["`dir `absolute /usr/bin"]))),
+        "(none)"
+    );
+}
+
+/// Without a layer there is nothing to describe or to be denied: no legend,
+/// no bullets, where any layer brings both.
+#[test]
+fn a_stack_without_layers_is_ambient_and_describes_none() {
+    let ambient = grant_summary(&GrantSummary::of(Vec::new(), false));
+    let layer = LayerSummary {
+        fs: None,
+        exec: None,
+        net: None,
+        gpu: None,
+        editor: None,
+        shell: None,
+    };
+    let described = grant_summary(&GrantSummary::of(vec![layer], false));
+    for bullet in ["- exec:", "- net:", "- gpu:"] {
+        assert!(
+            !ambient.contains(bullet) && described.contains(bullet),
+            "{bullet}"
+        );
+    }
+    assert!(described.contains(legend().trim_end()) && !ambient.contains(legend().trim_end()));
+}

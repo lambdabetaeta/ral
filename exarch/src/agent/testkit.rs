@@ -23,6 +23,7 @@ use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 type Dress = Box<dyn FnOnce(&mut Shell)>;
@@ -547,3 +548,72 @@ static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new
 )];
 pub(crate) static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] =
     &WORKER_REGISTRY_TEST_BUILTINS_ARR;
+
+/// A captured builtin `name` that ignores cancellation until released, and
+/// records that it has been entered.
+#[derive(Clone)]
+pub(crate) struct HeldWorker {
+    entered: Arc<AtomicBool>,
+    released: Arc<AtomicBool>,
+    builtins: Arc<[BuiltinEntry]>,
+}
+
+impl HeldWorker {
+    pub(crate) fn new(name: &'static str) -> Self {
+        let entered = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let (seen, ready) = (entered.clone(), released.clone());
+        let builtins: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
+            Cow::Borrowed(name),
+            scheme_test_clear_block_forever,
+            "test-only: hold a worker until released.",
+            BuiltinBody::Captured(Arc::new(move |_, _, shell| {
+                seen.store(true, Ordering::Release);
+                loop {
+                    if ready.load(Ordering::Acquire) {
+                        shell.poll()?;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })),
+        )]);
+        Self {
+            entered,
+            released,
+            builtins,
+        }
+    }
+
+    pub(crate) fn builtins(&self) -> Arc<[BuiltinEntry]> {
+        self.builtins.clone()
+    }
+
+    pub(crate) fn wait_entered(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.entered.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "the worker never entered its hold"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.released.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn release_on_drop(&self) -> ReleaseOnDrop {
+        ReleaseOnDrop(self.clone())
+    }
+}
+
+/// Releases its worker on drop, so a failing test never leaves it holding
+/// its thread; declare it after the session so the hold ends before teardown.
+pub(crate) struct ReleaseOnDrop(HeldWorker);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}

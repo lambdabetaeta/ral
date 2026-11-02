@@ -269,8 +269,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_session_disk_declares_its_size_and_costs_a_table() {
+    fn session_bytes() -> Vec<u8> {
         let dir = tempfile::tempdir().unwrap();
         let session = crate::lifecycle::SessionDisk::create(
             dir.path(),
@@ -278,8 +277,12 @@ mod tests {
             write_session_vhd,
         )
         .expect("a session disk is made");
-        let bytes = std::fs::read(session.path()).unwrap();
+        std::fs::read(session.path()).unwrap()
+    }
 
+    #[test]
+    fn a_session_disk_costs_its_metadata_and_not_its_size() {
+        let bytes = session_bytes();
         let expected = sector() + 1024 + block_table_bytes(SESSION_BYTES) + sector();
         assert_eq!(
             bytes.len(),
@@ -290,7 +293,11 @@ mod tests {
             u64::try_from(bytes.len()).unwrap() < SESSION_BYTES,
             "the file must not cost what the disk declares"
         );
+    }
 
+    #[test]
+    fn a_session_disk_footers_declare_a_dynamic_disk_of_the_whole_size() {
+        let bytes = session_bytes();
         assert_eq!(&bytes[0..8], b"conectix");
         assert_eq!(&bytes[bytes.len() - sector()..][..8], b"conectix");
         assert_eq!(u32::from_be_bytes(bytes[60..64].try_into().unwrap()), 3);
@@ -303,7 +310,11 @@ mod tests {
             SESSION_BYTES,
             "the declared size is the guest's whole disk"
         );
+    }
 
+    #[test]
+    fn a_session_disk_header_has_a_table_entry_per_block_and_a_valid_checksum() {
+        let bytes = session_bytes();
         let header = &bytes[sector()..sector() + 1024];
         assert_eq!(&header[0..8], b"cxsparse");
         assert_eq!(
@@ -322,9 +333,13 @@ mod tests {
             .iter()
             .fold(0_u32, |acc, byte| acc.wrapping_add(u32::from(*byte)));
         assert_eq!(stated, !sum, "the header's checksum must verify");
+    }
 
+    #[test]
+    fn every_block_of_a_session_disk_starts_unallocated() {
+        let bytes = session_bytes();
         let table = &bytes[usize::try_from(TABLE_OFFSET).unwrap()..][..4];
-        assert_eq!(table, [0xFF; 4], "every block starts unallocated");
+        assert_eq!(table, [0xFF; 4]);
     }
 
     #[test]
