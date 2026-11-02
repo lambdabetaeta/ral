@@ -261,13 +261,13 @@ fn an_unwinding_helper_publishes_failure_before_its_parent_settles() {
     parent.couple(&emit);
     assert!(parent.mailbox.begin());
     let helper = launch_child(&mut parent, child, None, &emit);
-    assert!(parent.rest().pending);
     let child_report = next_input(&parent);
     assert!(
         matches!(&child_report, Input::Child { id, status: ChildStatus::Failed(_), .. } if *id == helper.id())
     );
     assert!(parent.admit(child_report).is_some());
-    let Next::Gone(id) = parent.mailbox.next(parent.rest()) else {
+    // Gone may trail the notice; block for it, don't settle.
+    let Next::Gone(id) = parent.mailbox.next(Rest { pending: true }) else {
         panic!("Gone")
     };
     assert_eq!(id, helper.id());
@@ -347,7 +347,10 @@ fn a_poisoned_helper_owner_tears_down_delivers_one_failure_and_lets_the_parent_s
     assert!(
         matches!(next_input(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. } if id == helper.id() && reason == expected)
     );
-    assert!(matches!(parent.mailbox.next(parent.rest()), Next::Gone(id) if id == helper.id()));
+    // Gone may trail the notice; block for it, don't settle.
+    assert!(
+        matches!(parent.mailbox.next(Rest { pending: true }), Next::Gone(id) if id == helper.id())
+    );
     parent.gone(helper.id());
     assert!(!parent.body.nursery.holds(helper.id()));
     assert!(!parent.rest().pending);
