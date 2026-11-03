@@ -314,8 +314,53 @@ struct InForce<'a> {
     since: Instant,
 }
 
+fn now() -> Instant {
+    #[cfg(test)]
+    if let Some(instant) = TEST_NOW.with(std::cell::Cell::get) {
+        return instant;
+    }
+    Instant::now()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_NOW: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// A fixed cancellation clock for synchronous tests on this thread.
+#[cfg(test)]
+#[must_use]
+pub(crate) struct TestClock {
+    previous: Option<Instant>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl TestClock {
+    pub(crate) fn enter(instant: Instant) -> Self {
+        Self {
+            previous: TEST_NOW.with(|clock| clock.replace(Some(instant))),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn advance(duration: Duration) {
+        TEST_NOW.with(|clock| {
+            let instant = clock.get().expect("advance requires an active test clock");
+            clock.set(Some(instant + duration));
+        });
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        TEST_NOW.with(|clock| clock.set(self.previous));
+    }
+}
+
 /// A shielded node admits from above only `Aborted`, and everything once
-/// `since + grace` has passed.  `Instant::now()` is read only at a shielded
+/// `since + grace` has passed.  `now()` is read only at a shielded
 /// node with something above it.  Root-first over the chain, iteratively:
 /// the chain is as deep as the nested cleanups, which only the recursion
 /// limit bounds.
@@ -325,7 +370,7 @@ fn resolve(scope: &Arc<Vertex>) -> Option<InForce<'_>> {
     chain.iter().rev().fold(None, |above, &node| {
         let above = above.filter(|j: &InForce<'_>| {
             node.shield.is_none_or(|grace| {
-                j.cause >= CancelCause::Aborted as u8 || Instant::now() >= j.since + grace
+                j.cause >= CancelCause::Aborted as u8 || now() >= j.since + grace
             })
         });
         let own = node.flag.load(Ordering::Acquire);
@@ -443,7 +488,7 @@ impl ScopeNode {
     /// sees the flag sees the instant.
     pub fn cancel(&self, cause: CancelCause) {
         let v = &self.0.0;
-        v.cancelled_at.get_or_init(Instant::now);
+        v.cancelled_at.get_or_init(now);
         v.flag.fetch_max(cause as u8, Ordering::Release);
     }
 }
@@ -516,6 +561,52 @@ pub(crate) static REQUEST_SERIAL: Serial = Serial::new();
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_clock_advances_and_restores_on_drop() {
+        assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
+        let start = Instant::now();
+        {
+            let _clock = TestClock::enter(start);
+            TestClock::advance(Duration::from_millis(600));
+            let advanced = start + Duration::from_millis(600);
+            assert_eq!(now(), advanced);
+            {
+                let _nested = TestClock::enter(start);
+                TestClock::advance(Duration::from_secs(2));
+                assert_eq!(now(), start + Duration::from_secs(2));
+            }
+            assert_eq!(now(), advanced);
+        }
+        assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
+    }
+
+    #[test]
+    fn test_clock_restores_on_unwind() {
+        let start = Instant::now();
+        let _clock = TestClock::enter(start);
+        let result = std::panic::catch_unwind(|| {
+            let _nested = TestClock::enter(start + Duration::from_secs(1));
+            TestClock::advance(Duration::from_secs(2));
+            panic!("unwind the clock guard");
+        });
+        assert!(result.is_err());
+        assert_eq!(now(), start);
+    }
+
+    #[test]
+    fn test_clock_is_thread_local_and_requires_an_override() {
+        let start = Instant::now();
+        let _clock = TestClock::enter(start);
+        std::thread::spawn(|| {
+            assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
+            assert!(std::panic::catch_unwind(|| TestClock::advance(Duration::ZERO)).is_err());
+            assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(now(), start);
+    }
 
     /// The escalation order being total is what makes `fetch_max` on the flag
     /// byte mean "never downgrade".

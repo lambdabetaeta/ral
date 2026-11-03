@@ -1,4 +1,5 @@
 use super::*;
+use crate::process::cancel::TestClock;
 use crate::source::SourceOrigin;
 use crate::test_helper::SLEEP;
 use std::sync::{Arc, Mutex};
@@ -1234,11 +1235,18 @@ fn a_cleanup_under_a_value_is_shielded_too() {
 /// start would not be.
 #[test]
 fn a_cleanup_struck_late_gets_the_grace() {
-    let (runtime, marked) = marking_runtime();
+    let _clock = TestClock::enter(std::time::Instant::now());
+    let (mut runtime, marked) = marking_runtime();
+    install_act(&mut runtime, "advance-before", |_, _| {
+        TestClock::advance(std::time::Duration::from_millis(500));
+    });
+    install_act(&mut runtime, "advance-after", |_, _| {
+        TestClock::advance(std::time::Duration::from_millis(700));
+    });
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            &format!("guard {{ return 1 }} {{ {SLEEP} 0.5\nstrike\n{SLEEP} 0.7\nmark }}"),
+            "guard { return 1 } { advance-before\nstrike\nadvance-after\nmark }",
             std::time::Duration::from_secs(1),
         ),
     );
@@ -1317,36 +1325,57 @@ fn the_scope_comes_back_after_a_cleanup() {
     }
 }
 
-/// One grace from the strike ends both at 1 s; renewed at the inner
-/// cleanup's (or outer finaliser's) entry, it would run to 1.6 s.
+fn install_shared_grace_acts(runtime: &mut crate::Runtime) -> Arc<Mutex<[bool; 2]>> {
+    let ran = Arc::new(Mutex::new([false; 2]));
+    let first = Arc::clone(&ran);
+    install_act(runtime, "consume-first", move |_, _| {
+        TestClock::advance(std::time::Duration::from_millis(600));
+        first.lock().unwrap()[0] = true;
+    });
+    let second = Arc::clone(&ran);
+    install_act(runtime, "cross-deadline", move |_, shell| {
+        assert_eq!(shell.scope.poll(), Ok(()));
+        TestClock::advance(std::time::Duration::from_millis(500));
+        assert_eq!(
+            shell.scope.poll().expect_err("grace expired").cause,
+            CancelCause::Interrupted
+        );
+        second.lock().unwrap()[1] = true;
+    });
+    ran
+}
+
+/// Shared grace ends at 1 s; renewed grace would last until 1.6 s.
 #[test]
 fn nested_cleanups_share_one_grace() {
-    let (runtime, marked) = marking_runtime();
-    let started = std::time::Instant::now();
+    let _clock = TestClock::enter(std::time::Instant::now());
+    let (mut runtime, marked) = marking_runtime();
+    let callbacks = install_shared_grace_acts(&mut runtime);
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            &format!("guard {{ strike }} {{ guard {{ {SLEEP} 0.6 }} {{ {SLEEP} 5\nmark }} }}"),
+            "guard { strike } { guard { consume-first } { cross-deadline\nmark } }",
             std::time::Duration::from_secs(1),
         ),
     );
-    assert!(started.elapsed() < std::time::Duration::from_millis(1400));
+    assert_eq!(*callbacks.lock().unwrap(), [true, true]);
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
     assert!(!*marked.lock().unwrap());
 }
 
 #[test]
 fn successive_cleanups_share_one_grace() {
-    let (runtime, marked) = marking_runtime();
-    let started = std::time::Instant::now();
+    let _clock = TestClock::enter(std::time::Instant::now());
+    let (mut runtime, marked) = marking_runtime();
+    let callbacks = install_shared_grace_acts(&mut runtime);
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            &format!("guard {{ guard {{ strike }} {{ {SLEEP} 0.6 }} }} {{ {SLEEP} 5\nmark }}"),
+            "guard { guard { strike } { consume-first } } { cross-deadline\nmark }",
             std::time::Duration::from_secs(1),
         ),
     );
-    assert!(started.elapsed() < std::time::Duration::from_millis(1400));
+    assert_eq!(*callbacks.lock().unwrap(), [true, true]);
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
     assert!(!*marked.lock().unwrap());
 }

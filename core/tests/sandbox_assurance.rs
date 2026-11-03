@@ -158,8 +158,9 @@ fn an_admitted_loader_runs_an_unadmitted_file() {
     ral_core::require_landlock!(1);
     let tree = tempfile::tempdir().unwrap();
     let target = tree.path().join("unadmitted");
+    // Use the already-required shell: a copied echo may dispatch by executable name.
     // Dynamic: ld.so re-execs a static program by path, which the grant rightly denies.
-    std::fs::copy("/bin/echo", &target).unwrap();
+    std::fs::copy("/bin/sh", &target).unwrap();
     let caps = Capabilities {
         exec: Some(ExecGrant::of(
             [
@@ -173,9 +174,12 @@ fn an_admitted_loader_runs_an_unadmitted_file() {
     let grants = stack([layer(caps)]);
     let target = target.display();
     let launch = |command: &str| run(grants.clone(), command);
-    let through_loader = launch(&format!("{LOADER} {target} ok"));
-    let by_ral = launch(&target.to_string());
-    let by_kernel = launch(&format!("/bin/sh -c 'exec \"$0\"' '{target}'"));
+    let args = r#"-c 'printf "ok\n"'"#;
+    let through_loader = launch(&format!("{LOADER} {target} {args}"));
+    let by_ral = launch(&format!("{target} {args}"));
+    let by_kernel = launch(&format!(
+        "/bin/sh -c 'exec \"$0\" \"$@\"' '{target}' {args}"
+    ));
     denied(&proof, &through_loader, &by_ral, MARKER);
     assert!(
         by_ral.stderr.contains("denied by active grant"),
