@@ -99,6 +99,8 @@ spelling is only the destination at which the opened object is bound.
 - **An unusable bwrap refuses in its own words.** A bwrap that builds no
   envelope refuses every confined launch. A failed `--ro-bind-fd` probe keeps
   bwrap's own error; only an unknown-option error adds the version question.
+  A bwrap that mounts a descriptor through a symlinked destination, lacking
+  the check of 0.10.0, refuses every confined launch too.
 
 Pinned by `authority::sandbox::linux::tests::render::a_bind_is_opened_for_each_name_no_other_bind_shows`,
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,

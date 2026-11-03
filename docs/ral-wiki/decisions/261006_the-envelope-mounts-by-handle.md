@@ -81,12 +81,15 @@ table, and its signature holds no descriptor.
   you made that change"), exec paths having been frozen when the grant was
   decoded, possibly long before.
 - **Fail closed on an old bwrap.** `HostEnvelope::builds` probes the
-  mechanism itself: a bare envelope first, then one lending `/` at
-  `Slot::Mount(0)` through the real `Handoff`, each running ral's own pin by
-  descriptor as a pipeline anchor, never a host binary that may be absent. A
-  bwrap that builds no envelope refuses every confined launch in its own
-  words; one without `--ro-bind-fd` (before 0.8.0) refuses it naming its path
-  and the version. There is no by-name fallback: it would
+  mechanism itself: a bare envelope first, then two lending `/` through the
+  real `Handoff`, at a directory in a fresh `/tmp` and at a symlink to it,
+  each running ral's own pin by descriptor as a pipeline anchor, never a host
+  binary that may be absent. A bwrap that builds no envelope refuses every
+  confined launch in its own words; one without `--ro-bind-fd` (before 0.8.0)
+  refuses it naming its path and the version, and so does one that mounts
+  through the symlink (before 0.10.0), which lacks the destination check
+  below. The two mounts differ in their destination alone, so the refusal is
+  read from bwrap's status, never its words. There is no by-name fallback: it would
   keep the race alive on exactly the hosts least likely to be updated, and be
   a second renderer to keep in agreement.
 
@@ -129,9 +132,9 @@ by descriptor all the same.
 
 ## Consequences
 
-- bwrap verifies `fstat(fd)` against `lstat(dest)` after each mount, so a
-  destination the host turned into a symlink after the open kills the launch
-  rather than moving the mount.
+- bwrap verifies `fstat(fd)` against `lstat(dest)` after each mount (since
+  0.10.0, which the probe demands), so a destination the host turned into a
+  symlink after the open kills the launch rather than moving the mount.
 - **The destination residual.** A destination is still a name bwrap resolves
   inside the new root. A writer that turns an *ancestor* under a writable bind
   into a symlink during setup can put a handle's content at another name, or

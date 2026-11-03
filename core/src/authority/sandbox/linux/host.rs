@@ -37,7 +37,8 @@ pub(crate) struct HostEnvelope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Builds {
     /// Envelopes mounting lent descriptors (`--ro-bind-fd`, bubblewrap
-    /// 0.8.0): the only way the envelope mounts anything.
+    /// 0.8.0), the only way the envelope mounts anything, and refusing a
+    /// mount whose destination a symlink redirects (bubblewrap 0.10.0).
     ByFd,
     /// No envelope at all, for the reason bwrap gave.
     Nothing(&'static str),
@@ -65,7 +66,9 @@ impl HostEnvelope {
 impl Builds {
     /// A bare envelope first, so a bwrap that builds none is never blamed
     /// on its version; then `/` mounted from a lent descriptor, as every
-    /// launch's binds are.
+    /// launch's binds are, at a directory and at a symlink to it.  The two
+    /// mounts differ in their destination alone, so only a bwrap that checks
+    /// the mount against the descriptor refuses the second, whatever its words.
     fn probe(bwrap: &Pinned, trampoline: &Pinned) -> Self {
         if let Err(why) = bwrap_builds(bwrap, trampoline, &[], Handoff::default()) {
             // Leaked once: the probe runs once a process, and keeps the fact `Copy`.
@@ -74,20 +77,29 @@ impl Builds {
         let Ok(Some(root)) = super::open_dir_nofollow(&RealPath::universal()) else {
             return Self::Nothing("ral cannot open / to lend bwrap a descriptor");
         };
-        let mut handoff = Handoff::default();
-        let at = match handoff.lend(root.as_fd()) {
-            Ok(at) => at,
-            // Leaked once, as above: it carries `lift`'s `ulimit -n` hint.
-            Err(why) => return Self::Nothing(why.leak()),
+        // Outer: whether ral lent `/`, which fails with `lift`'s `ulimit -n`
+        // hint; inner: whether bwrap mounted it at `dest`, in a fresh `/tmp`
+        // holding `real` and `link`, a symlink to it.
+        let mount_root_at = |dest: &str| -> Result<Result<(), String>, String> {
+            let mut handoff = Handoff::default();
+            let at = handoff.lend(root.as_fd())?.to_string();
+            let pieces = [
+                "--tmpfs",
+                "/tmp",
+                "--dir",
+                "/tmp/real",
+                "--symlink",
+                "real",
+                "/tmp/link",
+                "--ro-bind-fd",
+                &at,
+                dest,
+            ];
+            Ok(bwrap_builds(bwrap, trampoline, &pieces, handoff))
         };
-        match bwrap_builds(
-            bwrap,
-            trampoline,
-            &["--ro-bind-fd", &at.to_string(), "/"],
-            handoff,
-        ) {
-            Ok(()) => Self::ByFd,
-            Err(why) => {
+        match mount_root_at("/tmp/real") {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => {
                 let unknown = why.contains("--ro-bind-fd")
                     && (why.contains("Unknown option")
                         || why.contains("unknown option")
@@ -97,11 +109,21 @@ impl Builds {
                 } else {
                     why
                 };
-                Self::Nothing(why.leak())
+                return Self::Nothing(why.leak());
             }
+            Err(why) => return Self::Nothing(why.leak()),
+        }
+        match mount_root_at("/tmp/link") {
+            Ok(Err(_)) => Self::ByFd,
+            Ok(Ok(())) => Self::Nothing(REDIRECTED),
+            Err(why) => Self::Nothing(why.leak()),
         }
     }
 }
+
+/// Why a bwrap that mounts through a symlinked destination builds nothing.
+const REDIRECTED: &str = "it mounts a lent descriptor wherever a symlink at its destination \
+     points, rather than refusing it; is bubblewrap older than 0.10.0?";
 
 /// Whether the pinned bwrap builds an envelope carrying `pieces`, handed
 /// `handoff`, and execs `trampoline` in it by descriptor, as a launch does;
@@ -142,10 +164,28 @@ mod tests {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
 
+    /// A pinned stand-in for bwrap: `script`, a `sh` body that sees bwrap's
+    /// argv as `$*`.
+    fn fake_bwrap(dir: &std::path::Path, name: &str, script: &str) -> Pinned {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{script}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bwrap = Pinned::open(path).unwrap();
+        // The script interpreter must reopen the pin after exec.
+        assert_eq!(
+            unsafe { libc::fcntl(bwrap.fd().as_raw_fd(), libc::F_SETFD, 0) },
+            0
+        );
+        bwrap
+    }
+
+    fn trampoline() -> Pinned {
+        Pinned::open(std::env::current_exe().unwrap()).unwrap()
+    }
+
     #[test]
     fn a_failed_fd_probe_keeps_bwraps_reason_and_versions_only_unknown_options() {
         let dir = tempfile::tempdir().unwrap();
-        let trampoline = Pinned::open(std::env::current_exe().unwrap()).unwrap();
         for (index, reason, outdated) in [
             (0, "bwrap: Unknown option --ro-bind-fd", true),
             (
@@ -155,18 +195,14 @@ mod tests {
             ),
             (2, "bwrap: --ro-bind-fd: Bad file descriptor", false),
         ] {
-            let path = dir.path().join(format!("bwrap-{index}"));
-            std::fs::write(&path, format!(
-                "#!/bin/sh\ncase \"$*\" in\n*--ro-bind-fd*) printf '%s\\n' '{reason}' >&2; exit 1;;\nesac\nexit 0\n"
-            )).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let bwrap = Pinned::open(path).unwrap();
-            // The script interpreter must reopen the pin after exec.
-            assert_eq!(
-                unsafe { libc::fcntl(bwrap.fd().as_raw_fd(), libc::F_SETFD, 0) },
-                0
+            let bwrap = fake_bwrap(
+                dir.path(),
+                &format!("bwrap-{index}"),
+                &format!(
+                    "case \"$*\" in\n*--ro-bind-fd*) printf '%s\\n' '{reason}' >&2; exit 1;;\nesac\nexit 0\n"
+                ),
             );
-            let Builds::Nothing(why) = Builds::probe(&bwrap, &trampoline) else {
+            let Builds::Nothing(why) = Builds::probe(&bwrap, &trampoline()) else {
                 panic!("a failed descriptor mount must refuse the envelope");
             };
             assert!(why.contains(reason), "{why}");
@@ -176,5 +212,22 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    /// Only the refusal of the symlinked destination admits a bwrap.
+    #[test]
+    fn a_bwrap_that_mounts_through_a_symlinked_destination_builds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let follows = fake_bwrap(dir.path(), "follows", "exit 0\n");
+        assert_eq!(
+            Builds::probe(&follows, &trampoline()),
+            Builds::Nothing(REDIRECTED)
+        );
+        let refuses = fake_bwrap(
+            dir.path(),
+            "refuses",
+            "case \"$*\" in\n*'--ro-bind-fd '*' /tmp/link '*) exit 1;;\nesac\nexit 0\n",
+        );
+        assert_eq!(Builds::probe(&refuses, &trampoline()), Builds::ByFd);
     }
 }

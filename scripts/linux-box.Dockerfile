@@ -3,7 +3,8 @@
 # ships; glibc builds only build scripts and proc macros.
 #
 # Unpinned: rust-toolchain.toml tracks `stable`, so a pin here would disagree.
-FROM rust:bookworm
+# Trixie, for a bubblewrap at ral's floor (0.10.0): bookworm's is 0.8.0.
+FROM rust:trixie
 
 # musl-tools: the C half of the musl target.  clang: assembles psm for the
 # other arch without a cross toolchain (`just check`).  bubblewrap: the sandbox

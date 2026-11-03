@@ -132,7 +132,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 
 | | held by | when the host lacks it |
 |---|---|---|
-| `fs` read/write prefixes, `deny` masks; what the exec table admits is readable | bwrap mounts, each source a handle ral opened without following a symlink, each mask at every name a bind shows the denied path ([[decisions/261006_the-envelope-mounts-by-handle]]) | refuse: `confinement_unavailable`, a bwrap that builds no envelope or lacks `--ro-bind-fd` (before 0.8.0) included |
+| `fs` read/write prefixes, `deny` masks; what the exec table admits is readable | bwrap mounts, each source a handle ral opened without following a symlink, each mask at every name a bind shows the denied path ([[decisions/261006_the-envelope-mounts-by-handle]]) | refuse: `confinement_unavailable`, a bwrap that builds no envelope, lacks `--ro-bind-fd` (before 0.8.0) or mounts through a symlinked destination (before 0.10.0) included |
 | ``net: `offline`` | `--unshare-net` | refuse: `projection_enforceable` |
 | ``gpu: `withheld`` | no GPU node in the envelope's `/dev`, masks over the host's; no Landlock part | never lacking on Linux |
 | `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, judging enumerated entries by identity and position, listing a directory where an exclusion's recorded position lies inside it or the directory is on its recorded spine by identity; every directory admission, `every` among them, lowered against the envelope's binds | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
