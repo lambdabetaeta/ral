@@ -1,5 +1,6 @@
 use super::*;
 use crate::carrier::{Transport as _, WireTransport, dispatch_to_report};
+use crate::host::env::test_support::env_guard;
 use crate::path::EnginePath;
 use crate::process::DurableRoot;
 use crate::process::cancel::REQUEST_SERIAL;
@@ -12,6 +13,8 @@ const WAIT: Duration = Duration::from_secs(5);
 
 // The relay records actual host frames before the engine can answer them.
 fn with_engine<R>(run: impl FnOnce(&WireTransport) -> R) -> (R, Vec<Frame>) {
+    // Startup can restore HOME; exclude env mutations through engine join.
+    let _env = env_guard();
     let (front, relay_front) = crate::process::cloexec_socketpair().unwrap();
     let (relay_back, back) = crate::process::cloexec_socketpair().unwrap();
     let end = relay_back.try_clone().unwrap();

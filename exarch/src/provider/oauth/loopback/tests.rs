@@ -295,10 +295,6 @@ fn overall_deadline_is_not_reset_by_stray_traffic() {
     let mut idle = flow.connect();
     let deadline = Instant::now() + Duration::from_millis(600);
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "stray traffic kept the flow alive"
-        );
         match flow.result.try_recv() {
             Ok(result) => {
                 assert!(result.is_err());
@@ -307,6 +303,10 @@ fn overall_deadline_is_not_reset_by_stray_traffic() {
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => panic!("callback worker disappeared"),
         }
+        assert!(
+            Instant::now() < deadline,
+            "stray traffic kept the flow alive"
+        );
         if let Ok(mut stream) = TcpStream::connect(flow.addr) {
             stream
                 .set_read_timeout(Some(Duration::from_millis(100)))

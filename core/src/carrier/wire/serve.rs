@@ -762,11 +762,13 @@ mod wire_desk_tests {
 // test playing the host on the other; timing is poll-until with multi-second
 // slack, the dev fleet including a jittery VM. `engine_session` hears this
 // process's signals, so every test that runs one must hold `REQUEST_SERIAL`
-// against the siblings that raise an ambient cause.
+// against the siblings that raise an ambient cause. Hold `env_guard` from
+// attach construction through join: startup can restore the snapshotted HOME.
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod engine_session_tests {
     use super::*;
+    use crate::host::env::test_support::env_guard;
     use crate::path::EnginePath;
     use crate::process::cancel::REQUEST_SERIAL;
 
@@ -930,6 +932,7 @@ mod engine_session_tests {
     #[test]
     fn dispatch_round_trips_to_a_report() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
         assert_eq!(host.hang_up_and_join(), 0);
@@ -938,6 +941,7 @@ mod engine_session_tests {
     #[test]
     fn detach_acknowledges_engine_and_loose_worker_teardown() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = start();
         host.run(1, "let h = spawn { /bin/sleep 30 }");
         host.send(&Frame::Detach);
@@ -948,6 +952,7 @@ mod engine_session_tests {
     #[test]
     fn a_first_frame_other_than_attach_ends_the_session_with_one() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = unattached(Patience::default());
         host.send(&Frame::Ping(1));
         assert_eq!(host.engine.join().expect("engine thread"), 1);
@@ -956,6 +961,7 @@ mod engine_session_tests {
     #[test]
     fn eof_before_attach_ends_the_session_cleanly() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         assert_eq!(unattached(Patience::default()).hang_up_and_join(), 0);
     }
 
@@ -963,6 +969,7 @@ mod engine_session_tests {
     #[test]
     fn a_failed_boot_is_answered_refused_and_exits_one() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut skewed = attach("test");
         skewed.engine.proto_version += 1;
         for attach in [skewed, attach("no-such-installer")] {
@@ -977,6 +984,7 @@ mod engine_session_tests {
     #[test]
     fn busy_refuses_a_second_dispatch_and_a_probe() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = start();
         host.dispatch(1, "/bin/sleep 15");
         assert!(is_engine_busy(&host.run(2, "$[1 + 1]")));
@@ -991,6 +999,7 @@ mod engine_session_tests {
     #[test]
     fn cancel_settles_an_in_flight_run_promptly() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = start();
         host.dispatch(1, "/bin/sleep 30");
         host.cancel(1);
@@ -1002,6 +1011,7 @@ mod engine_session_tests {
     #[test]
     fn an_interrupt_unwinds_the_run_it_names() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = start();
         host.dispatch(1, "/bin/sleep 30");
         host.send(&Frame::Control(Control::Strike(
@@ -1022,6 +1032,7 @@ mod engine_session_tests {
     #[test]
     fn a_process_terminate_ends_the_wire_engines_session() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
         crate::process::request_root_cancel(CancelCause::Terminated);
@@ -1037,6 +1048,7 @@ mod engine_session_tests {
     #[test]
     fn deferred_batch_crosses_as_a_session_frame() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let mut host = start();
         host.run(1, "let h = spawn { /bin/sleep 1 }");
         let frame =
@@ -1060,6 +1072,7 @@ mod engine_session_tests {
     #[test]
     fn a_front_end_that_stops_reading_is_treated_as_dead() {
         let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
         let brisk = Patience {
             silence: Duration::from_millis(500),
             write_stall: Duration::from_millis(300),
