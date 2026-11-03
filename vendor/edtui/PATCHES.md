@@ -76,6 +76,9 @@ on explicit request, through the workspace `clipboard` crate.
 `Cargo.toml` removes targets for omitted examples, retains the ratatui test
 dependency, adds `unicode-segmentation`, drops `arboard`, and uses the
 workspace's Rust 2024 edition.
+It runs no doctests: they are upstream's usage examples, and on Windows cargo
+links every workspace doctest against each build script's search path, where
+synod's tauri-build leaves a stub `msvcrt.lib` for its static VC runtime.
 `view/syntax_higlighting.rs` uses syntect's built-in theme set rather than an
 omitted binary theme dump; optional syntax-highlighting callers must use those
 names or supply a custom set. The README and crate example name a built-in theme.
