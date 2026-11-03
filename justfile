@@ -1,6 +1,3 @@
-# A registry of commands, not a place for logic: each recipe delegates to cargo
-# or to scripts/.
-
 set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
 
 mod vm 'vm-image/mod.just'
@@ -11,6 +8,9 @@ export RUSTFLAGS := env('RUSTFLAGS', '-D warnings')
 
 # What releases ship, so CI compiles what ships.
 features := 'ral/allutils'
+
+# Where `cargo install` puts binaries, and `install` the notices beside them.
+cargo_home := env('CARGO_HOME', home_directory() / '.cargo')
 
 [private]
 default:
@@ -87,9 +87,33 @@ box +recipes:
         -v ral-linux-target:/workspace/.target-linux \
         ral-linux-box sh -c 'rustup -q target add "$(uname -m)-unknown-linux-musl" && exec just "$@"' box {{recipes}}
 
-# Build and install ral and exarch from source.
-install:
-    cargo run -p ral --quiet -- scripts/install.ral
+# Build and install ral and exarch from source, with their notices.
+[unix]
+install: _install-crates
+    #!/bin/sh
+    set -eu
+    cargo_home={{quote(cargo_home)}}
+    for package in ral exarch; do
+        mkdir -p "$cargo_home/share/$package"
+        cp LICENSE-APACHE LICENSE-MIT NOTICE "$cargo_home/share/$package"
+    done
+    cp vendor/edtui/LICENSE.md "$cargo_home/share/exarch/LICENSE-EDTUI"
+    # ral-sh is a name, not a binary: the POSIX bridge lives in ral and keys on argv[0].
+    ln -sfn ral "$cargo_home/bin/ral-sh"
+    # Ad-hoc signing is a macOS ritual.
+    if [ "$(uname -s)" = Darwin ]; then codesign -s - "$cargo_home/bin/ral"; fi
+
+# Build and install ral and exarch from source, with their notices.
+[windows]
+install: _install-crates
+    New-Item -ItemType Directory -Force '{{cargo_home}}/share/ral', '{{cargo_home}}/share/exarch' > $null
+    Copy-Item LICENSE-APACHE, LICENSE-MIT, NOTICE '{{cargo_home}}/share/ral'
+    Copy-Item LICENSE-APACHE, LICENSE-MIT, NOTICE '{{cargo_home}}/share/exarch'
+    Copy-Item vendor/edtui/LICENSE.md '{{cargo_home}}/share/exarch/LICENSE-EDTUI'
+
+_install-crates:
+    cargo +stable install --force --locked --path ral
+    cargo +stable install --force --locked --path exarch
 
 # Build the release matrix, passing flags through, e.g. `just release --local`.
 release *args:
