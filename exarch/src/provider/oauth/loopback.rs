@@ -125,10 +125,29 @@ fn receive(
     cancel: &AtomicBool,
     policy: Policy,
 ) -> Result<Callback, String> {
-    let deadline = Instant::now() + policy.flow;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("could not configure callback listener: {e}"))?;
+    receive_from(
+        || {
+            let (stream, _) = listener.accept()?;
+            Ok(stream.set_nonblocking(true).is_ok().then_some(stream))
+        },
+        expected_state,
+        cancel,
+        policy,
+    )
+}
+
+/// [`receive`] over any source of connections: `accept` yields a waiting
+/// connection, `None` for one unfit to serve, or `WouldBlock` when none waits.
+fn receive_from<S: Read + Write>(
+    mut accept: impl FnMut() -> std::io::Result<Option<S>>,
+    expected_state: &str,
+    cancel: &AtomicBool,
+    policy: Policy,
+) -> Result<Callback, String> {
+    let deadline = Instant::now() + policy.flow;
     let mut pending = Vec::new();
     let mut settled = None;
     loop {
@@ -141,11 +160,9 @@ fn receive(
         }
         if settled.is_none() {
             for _ in 0..policy.connections {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        if pending.len() < policy.connections
-                            && stream.set_nonblocking(true).is_ok()
-                        {
+                match accept() {
+                    Ok(Some(stream)) => {
+                        if pending.len() < policy.connections {
                             pending.push(Connection {
                                 stream,
                                 deadline: (Instant::now() + policy.request).min(deadline),
@@ -153,6 +170,7 @@ fn receive(
                             });
                         }
                     }
+                    Ok(None) => {}
                     Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                     Err(e) if e.kind() == ErrorKind::Interrupted => {}
                     Err(e) => return Err(format!("could not accept callback connection: {e}")),

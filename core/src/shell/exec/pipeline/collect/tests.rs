@@ -1110,16 +1110,27 @@ fn a_panic_mid_teardown_escalates_to_abort() {
 }
 
 /// A stronger cause read on the scope mid-teardown is written over the
-/// survivors.
+/// survivors.  The helper paces itself on what the stages hold, not on the
+/// clock: the cause arrives once the teardown has written its own, and the
+/// stages end once the collector has had the chance to write the stronger
+/// one.  Each wait is bounded, so a collector that never writes it fails
+/// below rather than hanging.
 #[test]
 fn a_stronger_cause_mid_teardown_is_written_on_the_stages() {
     let (mut state, scopes, tx) = threads_with(2);
     let held = DurableRoot::default().worker();
     state.scope = Scope::clone(&held);
+    let survivors = scopes.clone();
     let helper = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
+        let all_hold = |cause| {
+            let by = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < by && survivors.iter().any(|s| s.cause() != Some(cause)) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        all_hold(CancelCause::Interrupted);
         held.cancel(CancelCause::Cancelled);
-        std::thread::sleep(Duration::from_millis(50));
+        all_hold(CancelCause::Cancelled);
         let _ = tx.send(returned(0, StageObservation::ok()));
         let _ = tx.send(returned(1, StageObservation::ok()));
     });

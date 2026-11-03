@@ -370,20 +370,45 @@ fn blocked_response_expires_without_waiting_for_the_peer() {
     assert_eq!(sent, 0);
 }
 
+/// A peer that delivers the callback whole on its first read and never takes
+/// the acknowledgement: scripted, so the flow settles on its first pass
+/// whatever the host's loopback timing.
 #[test]
 fn acknowledgement_expiry_preserves_an_already_validated_callback() {
-    let listener = bind(&["127.0.0.1:0"]).unwrap();
-    let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    peer.write_all(b"GET /auth/callback?state=expected&code=good HTTP/1.1\r\n")
-        .unwrap();
-    let received = receive(
-        &listener,
+    struct Unacknowledging(Option<&'static [u8]>);
+
+    impl Read for Unacknowledging {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let line = self.0.take().ok_or(ErrorKind::WouldBlock)?;
+            buf[..line.len()].copy_from_slice(line);
+            Ok(line.len())
+        }
+    }
+
+    impl Write for Unacknowledging {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(ErrorKind::WouldBlock.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut peer = Some(Unacknowledging(Some(
+        b"GET /auth/callback?state=expected&code=good HTTP/1.1\r\n",
+    )));
+    let received = receive_from(
+        || {
+            peer.take()
+                .map(Some)
+                .ok_or_else(|| ErrorKind::WouldBlock.into())
+        },
         "expected",
         &AtomicBool::new(false),
         Policy {
             flow: Duration::from_millis(100),
             response: Duration::from_secs(1),
-            poll: Duration::from_secs(1),
             ..TEST_POLICY
         },
     )
