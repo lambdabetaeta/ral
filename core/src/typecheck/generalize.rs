@@ -318,18 +318,18 @@ pub(crate) fn has_result_only_var(scheme: &Scheme) -> bool {
     })
 }
 
-/// Guards closure at the three empty-environment generalisation sites —
-/// `annotate`'s `Bind` rule, `alias_arm_scheme`, `binding_value_scheme` — so a
-/// violation trips there, not in a later run.  `msg` names the site.
+/// Check closure before a scheme leaves its inference session.
 pub(crate) fn debug_assert_scheme_closed(scheme: &Scheme, msg: &str) {
     debug_assert!(scheme_is_closed(scheme), "{msg}");
 }
 
-/// `scheme` as its unit leaves it: each weak variable it mentions resolved as
-/// far as the unit fixed it, a cycle through one snapshotted like any other,
-/// and the still-free ones recorded.
+/// `scheme` as its unit leaves it: weak variables and residual grades resolved
+/// as far as the unit fixed them, cycles snapshotted, still-free grades
+/// quantified, and still-weak variables recorded.
 pub(crate) fn settle_weak(u: &Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
-    if scheme.weak.is_empty() {
+    let mut residuals = scheme_free_vars(&scheme);
+    residuals.remove_quantified(&scheme);
+    if scheme.weak.is_empty() && residuals.grades.is_empty() {
         return scheme;
     }
     // Only residuals belong to `u`; local ∀/μ names stay opaque.
@@ -352,7 +352,11 @@ pub(crate) fn settle_weak(u: &Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
             .iter()
             .map(|&v| (v, u.apply_comp_ty(&CompTy::Var(v))))
             .collect(),
-        gm: HashMap::new(),
+        gm: residuals
+            .grades
+            .iter()
+            .map(|&v| (v, u.resolve_grade(Grade::Var(v))))
+            .collect(),
     };
     let mut settled = (*scheme).clone();
     sm.graph(&mut settled);
@@ -380,6 +384,10 @@ pub(crate) fn settle_weak(u: &Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
     settled.ty_bindings = tys.into_iter().collect();
     let mut fvs = scheme_free_vars(&settled);
     fvs.remove_quantified(&settled);
+    settled.grade_vars.extend(&fvs.grades);
+    if let Some(cached) = &mut settled.cached_fv {
+        cached.grade_fv.clear();
+    }
     fvs.tys
         .retain(|v| !settled.ty_bindings.iter().any(|(r, _)| r == v));
     fvs.comps
@@ -606,6 +614,10 @@ mod tests {
             Box::new(param),
             Box::new(CompTy::pure(result)),
         )))
+    }
+
+    fn unit_block(grade: Grade) -> Ty {
+        Ty::Thunk(Box::new(CompTy::Return(grade, Box::new(Ty::Unit))))
     }
 
     #[test]
@@ -908,6 +920,168 @@ mod tests {
         assert_eq!(fvs.rows.len(), 2);
         assert_eq!(fvs.comps.len(), 2);
         assert!(scheme_is_closed(&seeded));
+    }
+
+    #[test]
+    fn settling_quantifies_grades_exposed_by_weak_images() {
+        let mut u = Unifier::new();
+        let weak = u.fresh_ty();
+        u.mark_weak(&weak, &WeakSource::Boundary("from-json".into()));
+        let scheme = Arc::new(generalized(&u, &weak));
+        let grade = u.fresh_grade_var();
+        let block = Ty::Thunk(Box::new(CompTy::Return(
+            Grade::Var(grade),
+            Box::new(Ty::Unit),
+        )));
+        u.unify_ty(&weak, &block).unwrap();
+        let settled = settle_weak(&u, scheme);
+        assert_eq!(settled.ty, block);
+        assert_eq!(settled.grade_vars, [grade]);
+        assert!(settled.weak.is_empty());
+        assert!(scheme_is_closed(&settled));
+    }
+
+    #[test]
+    fn settling_clears_cached_grades_before_next_session_generalization() {
+        let mut first = Unifier::new();
+        let weak = first.fresh_ty();
+        first.mark_weak(&weak, &WeakSource::Host("sv".into()));
+        let mut env = TyEnv::new();
+        env.bind("sv".into(), Scheme::mono(weak.clone()));
+        let grade = first.fresh_grade_var();
+        let block = Ty::Thunk(Box::new(CompTy::Return(
+            Grade::Var(grade),
+            Box::new(Ty::Unit),
+        )));
+        first.unify_ty(&weak, &block).unwrap();
+        let scheme = generalize(&first, &env, &weak);
+        assert_eq!(scheme.grade_vars, Vec::<GradeVar>::new());
+        assert!(scheme.cached_fv.as_ref().unwrap().grade_fv.contains(&grade));
+        let settled = settle_weak(&first, Arc::new(scheme));
+        assert_eq!(settled.grade_vars, [grade]);
+        assert!(settled.weak.is_empty());
+        assert!(scheme_is_closed(&settled));
+        let bytes = postcard::to_allocvec(&*settled).unwrap();
+        let stored: Scheme = postcard::from_bytes(&bytes).unwrap();
+
+        let mut next = Unifier::new();
+        let mut env = TyEnv::new();
+        env.bind("y".into(), reseed_weak(&mut next, Arc::new(stored)));
+        let fresh = next.fresh_grade_var();
+        assert_eq!(fresh, grade, "force the old namespace collision");
+        let block = Ty::Thunk(Box::new(CompTy::Return(
+            Grade::Var(fresh),
+            Box::new(Ty::Unit),
+        )));
+        let scheme = generalize(&next, &env, &block);
+        assert_eq!(scheme.grade_vars, [fresh]);
+        assert!(scheme_is_closed(&scheme));
+        assert!(env_free_vars(&next, &env).grades.is_empty());
+    }
+
+    #[test]
+    fn settling_closes_grade_only_residuals_without_weak_anchors() {
+        let mut u = Unifier::new();
+        let grade = u.fresh_grade_var();
+        let block = unit_block(Grade::Var(grade));
+        let mut env = TyEnv::new();
+        env.bind("sv".into(), Scheme::mono(block.clone()));
+        let scheme = generalize(&u, &env, &block);
+        assert!(scheme.weak.is_empty());
+        assert_eq!(scheme.grade_vars, Vec::<GradeVar>::new());
+        assert!(scheme.cached_fv.as_ref().unwrap().grade_fv.contains(&grade));
+        assert!(!scheme_is_closed(&scheme));
+
+        let settled = settle_weak(&u, Arc::new(scheme));
+        assert_eq!(settled.ty, block);
+        assert_eq!(settled.grade_vars, [grade]);
+        assert!(settled.cached_fv.as_ref().unwrap().grade_fv.is_empty());
+        assert!(settled.weak.is_empty());
+        assert!(scheme_is_closed(&settled));
+    }
+
+    #[test]
+    fn settling_resolves_grades_fixed_after_generalization() {
+        for weak_data in [false, true] {
+            for fixed in [Grade::Value, Grade::Output] {
+                let mut u = Unifier::new();
+                let grade = u.fresh_grade_var();
+                let block = unit_block(Grade::Var(grade));
+                let data = if weak_data {
+                    let data = u.fresh_ty();
+                    u.mark_weak(&data, &WeakSource::Host("sv_data".into()));
+                    data
+                } else {
+                    Ty::Unit
+                };
+                let mut env = TyEnv::new();
+                env.bind("sv".into(), Scheme::mono(block.clone()));
+                let scheme = generalize(&u, &env, &arrow(block, data.clone()));
+                assert_eq!(scheme.grade_vars, Vec::<GradeVar>::new());
+                assert!(scheme.cached_fv.as_ref().unwrap().grade_fv.contains(&grade));
+                u.bind_grade(grade, fixed);
+
+                let settled = settle_weak(&u, Arc::new(scheme));
+                assert_eq!(settled.ty, arrow(unit_block(fixed), data));
+                assert_eq!(settled.grade_vars, Vec::<GradeVar>::new());
+                assert!(settled.cached_fv.as_ref().unwrap().grade_fv.is_empty());
+                assert_eq!(!settled.weak.is_empty(), weak_data);
+                assert!(scheme_is_closed(&settled));
+            }
+        }
+    }
+
+    #[test]
+    fn settling_quantifies_only_resolved_grade_roots() {
+        let mut u = Unifier::new();
+        let (grade, root) = (u.fresh_grade_var(), u.fresh_grade_var());
+        let block = unit_block(Grade::Var(grade));
+        let mut env = TyEnv::new();
+        env.bind("sv".into(), Scheme::mono(block.clone()));
+        let scheme = generalize(&u, &env, &block);
+        u.unify_comp_ty(
+            &CompTy::Return(Grade::Var(grade), Box::new(Ty::Unit)),
+            &CompTy::Return(Grade::Var(root), Box::new(Ty::Unit)),
+        )
+        .unwrap();
+        assert_eq!(u.resolve_grade(Grade::Var(grade)), Grade::Var(root));
+
+        let settled = settle_weak(&u, Arc::new(scheme));
+        assert_eq!(settled.ty, unit_block(Grade::Var(root)));
+        assert_eq!(settled.grade_vars, [root]);
+        assert!(settled.cached_fv.as_ref().unwrap().grade_fv.is_empty());
+        assert!(scheme_is_closed(&settled));
+    }
+
+    #[test]
+    fn settlement_keeps_quantified_grades_opaque_while_resolving_residuals() {
+        let mut u = Unifier::new();
+        let (local, residual) = (u.fresh_grade_var(), u.fresh_grade_var());
+        let weak = u.fresh_ty();
+        u.mark_weak(&weak, &WeakSource::Host("sv_data".into()));
+        let mut env = TyEnv::new();
+        env.bind("sv".into(), Scheme::mono(unit_block(Grade::Var(residual))));
+        let ty = arrow(
+            unit_block(Grade::Var(local)),
+            arrow(unit_block(Grade::Var(residual)), weak.clone()),
+        );
+        let scheme = generalize(&u, &env, &ty);
+        assert_eq!(scheme.grade_vars, [local]);
+        u.bind_grade(local, Grade::Value);
+        u.bind_grade(residual, Grade::Output);
+
+        let settled = settle_weak(&u, Arc::new(scheme));
+        assert_eq!(
+            settled.ty,
+            arrow(
+                unit_block(Grade::Var(local)),
+                arrow(unit_block(Grade::Output), weak),
+            )
+        );
+        assert_eq!(settled.grade_vars, [local]);
+        assert!(settled.cached_fv.as_ref().unwrap().grade_fv.is_empty());
+        assert!(!settled.weak.is_empty());
+        assert!(scheme_is_closed(&settled));
     }
 
     #[test]

@@ -14,10 +14,12 @@ mod common;
 use common::top_level;
 
 use ral_core::compile::{CompileError, compile_and_typecheck};
+use ral_core::ir::Phrase;
+use ral_core::shell::boot::HostSurface;
 use ral_core::shell::runtime::Settled;
 use ral_core::source::FileId;
-use ral_core::test_access::binding_scheme as scheme_of;
-use ral_core::{Shell, TypeError, Value};
+use ral_core::test_access::{binding_scheme as scheme_of, has_weak_residuals, scheme_is_closed};
+use ral_core::{SessionSchemes, Shell, TypeError, Value};
 
 fn shell() -> Shell {
     common::prelude_shell()
@@ -310,6 +312,132 @@ fn set_var_block_is_bound_and_usable_as_a_command_head() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn settled_weak_block_instantiates_at_both_grades_next_unit() {
+    let surface = HostSurface::default();
+    let first = compile_and_typecheck(
+        "let f = from-json; each $f [1]",
+        common::schemes_for(&surface),
+        FileId::DUMMY,
+        None,
+        None,
+    )
+    .unwrap();
+    let Phrase::Define { schemes, .. } = &first.phrases[0].item else {
+        panic!("expected a Define for f");
+    };
+    let (_, scheme) = schemes.iter().find(|(name, _)| name == "f").unwrap();
+    assert!(scheme_is_closed(scheme));
+    compile_and_typecheck(
+        "if true { f 1 } else { echo a }; let y = f 1",
+        SessionSchemes::from_prelude(&first, surface.manifest()),
+        FileId::DUMMY,
+        None,
+        None,
+    )
+    .unwrap();
+}
+
+#[test]
+fn scheme_less_host_binding_exports_a_closed_weak_scheme() {
+    let mut sh = shell();
+    sh.set_var("sv".into(), Value::Int(1));
+    let checked = compile_and_typecheck(
+        "let y = $sv",
+        sh.session_schemes(),
+        FileId::DUMMY,
+        None,
+        None,
+    )
+    .unwrap();
+    let Phrase::Define { schemes, .. } = &checked.phrases[0].item else {
+        panic!("expected a Define for y");
+    };
+    let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
+    assert!(scheme_is_closed(scheme));
+    assert!(has_weak_residuals(scheme));
+    assert_eq!(scheme.to_string(), "_α");
+}
+
+#[test]
+fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
+    let mut sh = shell();
+    sh.set_var("sv".into(), Value::Int(1));
+    let first = compile_and_typecheck(
+        "let take_step = { |f| fold $f () [()] }\n\
+         take_step $sv\n\
+         let y = { sv () () }",
+        sh.session_schemes(),
+        FileId::DUMMY,
+        None,
+        None,
+    )
+    .unwrap();
+    let Phrase::Define { schemes, .. } = &first.phrases[2].item else {
+        panic!("expected a Define for y");
+    };
+    let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
+    assert!(scheme_is_closed(scheme));
+    assert!(!has_weak_residuals(scheme));
+    assert_eq!(scheme.to_string(), "∀ν. ν Unit");
+
+    let next = compile_and_typecheck(
+        "if true { y } else { echo a }; let result = y",
+        SessionSchemes::from_prelude(&first, HostSurface::default().manifest()),
+        FileId::DUMMY,
+        None,
+        None,
+    )
+    .unwrap();
+    let Phrase::Define { schemes, .. } = &next.phrases[1].item else {
+        panic!("expected a Define for result");
+    };
+    let (_, scheme) = schemes.iter().find(|(name, _)| name == "result").unwrap();
+    assert!(scheme_is_closed(scheme));
+    assert_eq!(scheme.to_string(), "Unit");
+}
+
+#[test]
+fn host_fold_wrapper_keeps_a_grade_fixed_after_generalization_next_unit() {
+    let mut sh = shell();
+    sh.set_var("sv".into(), Value::Int(1));
+    sh.set_var("sv_data".into(), Value::Int(1));
+    let first = compile_and_typecheck(
+        "let take_step = { |f| fold $f () [()] }\n\
+         take_step $sv\n\
+         let y = [run: { sv () () }, data: $sv_data]\n\
+         if true { sv () () } else { echo a }",
+        sh.session_schemes(),
+        FileId::DUMMY,
+        None,
+        None,
+    )
+    .unwrap();
+    let Phrase::Define { schemes, .. } = &first.phrases[2].item else {
+        panic!("expected a Define for y");
+    };
+    let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
+    assert!(scheme_is_closed(scheme));
+    assert!(has_weak_residuals(scheme));
+    assert!(scheme.to_string().contains("run: {Command}"));
+    assert!(!scheme.to_string().starts_with('∀'));
+
+    let next = compile_and_typecheck(
+        "let run = $y[run]; let captured = run; upper $captured",
+        SessionSchemes::from_prelude(&first, HostSurface::default().manifest()),
+        FileId::DUMMY,
+        None,
+        None,
+    )
+    .unwrap();
+    let Phrase::Define { schemes, .. } = &next.phrases[1].item else {
+        panic!("expected a Define for captured");
+    };
+    let (_, scheme) = schemes.iter().find(|(name, _)| name == "captured").unwrap();
+    assert!(scheme_is_closed(scheme));
+    assert_eq!(scheme.to_string(), "String");
 }
 
 // ─── a generalised binding stays polymorphic across runs ───────────────────

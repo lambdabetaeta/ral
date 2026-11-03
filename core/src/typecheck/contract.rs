@@ -22,6 +22,8 @@
 
 mod grant;
 
+use std::fmt;
+
 pub(crate) use grant::{DIR_TARGET, EDITOR, EXEC_TARGET, GPU, NET, PLACE, SHELL};
 
 use super::env::InferCtx;
@@ -92,7 +94,6 @@ impl Holds {
 /// The row itself is minted from `row`, so what a clash names and what the
 /// checker admits are one list; the decoder words its refusals from the same
 /// vocabulary.
-#[derive(Debug)]
 pub struct Vocab {
     /// What a member is called: "place".
     pub noun: &'static str,
@@ -107,6 +108,19 @@ pub struct Vocab {
     /// Tags whose payload is a vocabulary of its own, held to it first so that
     /// a clash inside the payload is worded by the row it met.
     pub within: &'static [(&'static str, &'static Self)],
+}
+
+impl fmt::Debug for Vocab {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Vocab")
+            .field("noun", &self.noun)
+            .field("row", &(self.row)())
+            .field("untagged", &self.untagged)
+            .field("payload", &self.payload)
+            .field("within", &self.within)
+            // Callback identity is not vocabulary content.
+            .finish_non_exhaustive()
+    }
 }
 
 impl Vocab {
@@ -614,6 +628,34 @@ mod tests {
     use super::{Form, Holds, declared};
     use crate::syntax::parser::parse;
     use crate::{TypeError, elaborator::elaborate, typecheck};
+
+    #[test]
+    fn vocab_debug_is_stable_and_semantic() {
+        assert_eq!(
+            format!("{:?}", super::GPU),
+            "Vocab { noun: \"GPU mode\", row: [(\"withheld\", Unit)], untagged: \"a grant only narrows: omit `gpu` to inherit, or write `` gpu: `withheld ``\", payload: \"`` `withheld `` takes no payload\", within: [], .. }"
+        );
+        for vocab in [
+            &super::PLACE,
+            &super::EXEC_TARGET,
+            &super::DIR_TARGET,
+            &super::NET,
+            &super::GPU,
+            &super::EDITOR,
+            &super::SHELL,
+        ] {
+            let debug = format!("{vocab:#?}");
+            assert_eq!(debug, format!("{vocab:#?}"));
+            assert!(debug.contains(vocab.noun));
+            assert!(debug.contains("row:"));
+            assert!(!debug.contains("0x"), "{debug}");
+            assert!(!debug.contains("misses:"), "{debug}");
+        }
+        let nested = format!("{:#?}", super::EXEC_TARGET);
+        assert!(nested.contains("place or a selector"));
+        assert!(nested.contains("String"));
+        assert!(nested.contains("Variant"));
+    }
 
     fn contract_errors(form: Form, src: &str) -> Vec<TypeError> {
         let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));

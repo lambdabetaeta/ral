@@ -563,6 +563,9 @@ fn weak_note(source: &WeakSource) -> String {
             "{SHARED}what `{name}` reads has one type for the whole unit, which its door checks \
              every use of. Write one function per shape, or decode once and bind the result"
         ),
+        WeakSource::Host(name) => format!(
+            "{SHARED}the host set `${name}` without a type, so it has one type for the whole unit"
+        ),
         WeakSource::Residual => format!(
             "{SHARED}data of a shape the program did not decide keeps its type across units. \
              Write one function per shape, or decode once and bind the result"

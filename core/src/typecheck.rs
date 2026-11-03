@@ -10,6 +10,9 @@ mod env;
 mod error;
 mod explain;
 mod generalize;
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod golden_tests;
 mod grade;
 pub(crate) mod infer;
 mod scope;
@@ -28,9 +31,9 @@ pub(crate) use self::explain::{
 pub use self::unify::Unifier;
 
 use self::env::HandlerOrigin;
-#[cfg(any(test, feature = "test-util"))]
-pub(crate) use self::generalize::has_result_only_var;
 use self::generalize::{generalize, settle_weak};
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) use self::generalize::{has_result_only_var, scheme_is_closed};
 pub(crate) use self::generalize::{instantiate, reseed_weak};
 use crate::ir::{Comp, Phrase, Toplevel, Val};
 use crate::source::Spanned;
@@ -108,9 +111,12 @@ fn seed_env(
     }
     let mut residuals = Vec::new();
     for (name, scheme) in schemes.bindings {
-        let scheme = match scheme {
-            Some(scheme) => reseed_weak(u, scheme),
-            None => Arc::new(Scheme::mono(u.fresh_ty())),
+        let scheme = if let Some(scheme) = scheme {
+            reseed_weak(u, scheme)
+        } else {
+            let ty = u.fresh_ty();
+            u.mark_weak(&ty, &self::unify::WeakSource::Host(name.as_str().into()));
+            Arc::new(Scheme::mono(ty))
         };
         // Any binding with weak residuals is re-admitted against its first use
         // here; delayed parts are guarded per occurrence (`InferCtx::imported_sites`).
@@ -205,6 +211,10 @@ pub fn typecheck(
     }
     for (_, scheme) in phrase_schemes.iter_mut().flatten() {
         *scheme = settle_weak(&ctx.unifier, Arc::clone(scheme));
+        self::generalize::debug_assert_scheme_closed(
+            scheme,
+            "settled Define scheme must be closed",
+        );
     }
 
     ctx.snapshot_sites();

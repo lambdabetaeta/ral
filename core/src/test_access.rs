@@ -274,6 +274,11 @@ pub fn has_result_only_var(scheme: &Scheme) -> bool {
     crate::typecheck::has_result_only_var(scheme)
 }
 
+/// Whether every scheme variable is quantified, cyclic, or weak.
+pub fn scheme_is_closed(scheme: &Scheme) -> bool {
+    crate::typecheck::scheme_is_closed(scheme)
+}
+
 /// Whether a scheme leaves weak variables unquantified — the mark a boundary's
 /// result carries into a stored binding.
 pub fn has_weak_residuals(scheme: &Scheme) -> bool {

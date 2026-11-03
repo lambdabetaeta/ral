@@ -25,6 +25,8 @@ use std::sync::Arc;
 pub(crate) enum WeakSource {
     /// The result of a boundary, named as the program spells it.
     Boundary(Arc<str>),
+    /// A host binding without a scheme.
+    Host(Arc<str>),
     /// A residual an earlier unit stored, whose own source is gone.
     Residual,
 }
