@@ -10,7 +10,7 @@ nothing.** If the awaiter's cancel scope is already cancelled when `await`
 begins, `await` raises that stop before inspecting the handle, so a pending
 cancellation is never lost to an already-`ready` worker. The sinks are the awaiter's:
 inside a capture `let x = await $h`
-binds the output as `let x = { … }` would, under `2> f` the stderr goes to
+binds the output as `let x = !{ … }` would, under `2> f` the stderr goes to
 `f`, and inside a worker the bytes land in that worker's buffers. The ending
 is the block's: a value returned, an error raised as it stands, an `exit` or
 a stop re-raised, a panic resumed. The type says the same thing — a handle

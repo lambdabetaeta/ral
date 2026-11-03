@@ -1,5 +1,5 @@
-<!-- verified_at_commit: d56977ff -->
-<!-- generated_at_commit: d56977ff -->
+<!-- verified_at_commit: b1ba0713 -->
+<!-- generated_at_commit: b1ba0713 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -2756,7 +2756,7 @@ A handle carries its block's type, grade included (§17.3): `spawn` of a block
 of type `F_ε A` returns a `Handle_ε A`, printed `Handle (Returns A)`,
 `Handle Command`, or, with a visible grade variable, `Handle (Command[ν] A)`; and
 `await : Handle_ε A -> F_ε A`. So `await` of `spawn { echo hi }` is a command,
-and `let x = await $h` binds `"hi"` as `let x = { echo hi }` would; `await` of
+and `let x = await $h` binds `"hi"` as `let x = !{ echo hi }` would; `await` of
 `spawn { echo pre; return 5 }` writes `pre` and returns `5`, as the block
 would inline. Replaying bytes changes nothing about the grade, which says how
 a result is produced, not whether anything is written.
@@ -5006,7 +5006,7 @@ Script arguments are returned by `args`. Arguments are text: one that is not UTF
 
 ### 16.2. Batch processing
 
-A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed because it also annotates the program: each command right-hand side captured by a binding is wrapped in capture/decode, and each pipeline stage records its type.
+A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed: inference builds the checked IR beside its types, inserting capture/decode at bindings and explicit forces for returned-thunk application. After inference and ascription succeed, the unit's sites are frozen and its binding schemes settled. A pipeline carries no per-stage type annotations.
 
 The batch-only inspection flags are:
 
@@ -5420,8 +5420,12 @@ value type `Unit`. A command is `F_w Unit`: an external, a base frame such as
 is at unit, and every copied grade keeps its paired value type. When meeting
 two returners or two handles, if either grade resolves to `w`, the other
 value type must resolve to unit or a variable whose kind admits unit.
-Otherwise unification fails before binding either grade. It then unifies
-grades followed by value types. Grades are atomic and never weak.
+Otherwise unification fails before binding either grade. After this guard,
+when neither grade is `p` and either a value-type variable admits unit or the
+two value types differ in unit capability, it validates the fallible payload
+equation before joining grades. Other pairs unify grades before value types.
+Thus a failed payload equation leaves no hazardous grade alias. Grades are
+atomic and never weak.
 
 **Only commands, boundaries and value demands fix a grade.**
 
@@ -5512,10 +5516,12 @@ sacrificing polymorphism.
 A stored scheme is closed over its whole graph: body and recursive equations.
 All variables are quantified, recursive roots, or listed weak residuals.
 Cross-unit reseeding alpha-renames local binders and weak residuals
-simultaneously, without capture; settlement substitutes live weak residuals
-through the whole graph without interpreting local binder names as unifier
-slots. Cached environment residual ids are resolved through the current
-unifier, since later constraints may unite them or bind them to structures.
+simultaneously, without capture; settlement substitutes live weak-variable
+images and resolves residual grades through the whole graph, even with no weak
+variables, without interpreting local ∀/μ binder names as unifier slots.
+It quantifies remaining free grades and clears cached grade residuals.
+Cached environment residual ids are resolved through the current unifier,
+since later constraints may unite them or bind them to structures.
 
 The principal judgments are:
 
@@ -5762,7 +5768,7 @@ body wrote sit in the trail's observations. `map`, `each`, `fold` and `fold-line
 body likewise: they run it, stream its output, and keep its value, which for a
 command is `()`. `spawn` and `watch` do not absorb: the handle keeps the body's
 grade, so `let x = await $h` binds what a command block wrote, as
-`let x = { … }` would.
+`let x = !{ … }` would.
 
 ### 17.6. Branch and variant rules
 
@@ -6031,10 +6037,29 @@ children are torn down and reaped before their cancelled computation returns.
 
 ### 17.9. Grounding and execution
 
-Successful checking is followed by annotation, a structural rebuild of the IR.
-All remaining type, row and computation substitutions are applied; quantified
-schemes are closed; each pipeline node records the value type of each stage; and
-each command right-hand side captured by a binding (§17.5) is wrapped in `capture` under `decode`.
+Each inference rule builds its checked node beside its type. A binding
+immediately constructs capture/decode (§17.5) or Let-fun; application constructs
+returned-thunk bind/force segments, and boundary calls are saturated or
+η-expanded at their inference rule. Imported residual execution heads force a
+protected variable; imported value occurrences receive pending membranes.
+
+Once inference, nested checks and return-contract ascription succeed, one fold
+freezes the sites and settles the `Define` schemes. IR site parameters default
+to `Arc<Site>`; during inference they hold `Pending`: `Open(ty)` becomes a
+snapshot, `Kept(site)` preserves an existing checked site, and `Imported(ty)`
+occurs only on a protected value, whose membrane remains only if the snapshot
+has delayed obligations. Frozen contracts may retain free weak variables and
+delayed types; they need not be ground. One fresh unit identity serves all new
+site snapshots and the first-use readmissions in `Toplevel.admits`. These
+readmissions precede execution and are distinct from diagnostics for names
+bound to unit-valued calls.
+
+Freeze applies `settle_weak` to the schemes carried by each `Phrase::Define`
+and checks closure. It makes no capture or type-inference decisions. Inference
+and freeze each memoise recursive groups by `Arc` identity, so their projections
+share one group. A unit with errors is refused whole and its built IR discarded
+without freezing; one-shot inference sessions also discard their built IR.
+Pipelines carry no per-stage type annotations.
 
 The machine decides nothing about capture: it runs the `capture` the checker
 wrote. The capture frame has three rules, with `buf` a fresh buffer and `prev`
@@ -6057,7 +6082,7 @@ standard input is the pipe and its buffer takes what the command writes.
 A handler arm dispatched under a capture runs where the command would have run,
 so its writes land in the buffer.
 
-Evaluation begins only from this annotated IR. A type mismatch is therefore a
+Evaluation begins only from this finalized checked IR. A type mismatch is therefore a
 static error, not a request for the runtime to guess a codec. Runtime checks
 remain for genuinely dynamic facts: missing record keys, bounds, dynamic option
 maps, operating-system failures, cancellation, and external exit statuses. A

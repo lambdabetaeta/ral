@@ -72,10 +72,8 @@ fn byte_producer_into_byte_consumer_typechecks() {
 // ─── (3) cross-run value-type error ─────────────────────────────────────────
 
 /// A run-*N* binding used at a clashing value type in run *N+1* is
-/// reported statically: `x` is `String` (the literal `'hello'`), so
-/// `$x + 1` is a String where a number is needed.  The suite's established clash
-/// is `String + Int` (see `typecheck.rs`), not the `Int + "hi"` the ADR
-/// sketches — the language has no string literal inside `$[…]`.
+/// reported statically: `xv` is `String` (the literal `'hello'`), so
+/// `$xv + 1` requires a number where the stored scheme supplies a String.
 #[test]
 fn cross_run_value_type_error_is_static() {
     let mut sh = shell();
@@ -381,7 +379,7 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
     let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
     assert!(scheme_is_closed(scheme));
     assert!(!has_weak_residuals(scheme));
-    // Capture-at-let plan §1.7: the quantified grade can still become a command.
+    // The quantified grade can still become a command (SPEC §17.3).
     assert_eq!(scheme.to_string(), "∀ν. Command[ν] Unit");
 
     let next = compile_and_typecheck(
@@ -505,7 +503,7 @@ fn a_sized_kind_does_not_change_the_key_forms_read_rule() {
     top_level(&mut sh, "let before = { |m k| length $m; $m[$k] }").unwrap();
     top_level(&mut sh, "let after = { |m k| $m[$k]; length $m }").unwrap();
     let shown = |name: &str| scheme_of(&sh, name).expect("a scheme").to_string();
-    // Capture-at-let plan §1.7: the generic read's fresh grade is visible,
+    // The generic read's fresh grade is visible (SPEC §17.3),
     // unlike the grade paired with `length`'s concrete Integer below.
     assert_eq!(shown("before"), "∀α ν. Map α → String → Command[ν] α");
     assert_eq!(shown("after"), "∀α. Map α → String → Returns Integer");

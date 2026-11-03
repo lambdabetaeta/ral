@@ -59,12 +59,12 @@ all spreads; the first spread wins among spreads.
 A written position is a whole number from zero. Negative or fractional
 numerals are parse errors, with a hint to quote a numeric field name:
 `$r['1.5']`. A path or tilde word must also be quoted, as in `$r['a/b']`.
-A computed list position uses **`nth : ∀α. Int → [α] → F α`**, written
+A computed list position uses **`nth : ∀α ν. Integer → [α] → Command[ν] α`**, written
 `nth $i $xs`, with the same runtime checks as a written position.
 
 The AST's `IndexKey` and IR's `Key` carry `Label`, `Position` or `Data`.
 No pass recovers the form from a value's shape. Only `Data` is traversed by
-annotation and name collection. Each read unifies at once: no disjunction,
+freeze and name collection. Each read unifies at once: no disjunction,
 shape default, deferred read constraint or index-made weak variable.
 `let lookup = { |m k| $m[$k] }` therefore generalises over map element types.
 These reads are the formal core's `prim` operations `index (fld ℓ)`,
@@ -75,10 +75,10 @@ These reads are the formal core's `prim` operations `index (fld ℓ)`,
 `from-json`, `from-csv` and `env` take the shape the script uses, checked at
 that call ([[decisions/260930_a-boundary-is-checked-against-its-type|checked boundaries]]).
 
-- `env : ∀α. F α`: `!{env}[HOME]` uses a record and checks that field is
+- `env : ∀α. Returns α`: `!{env}[HOME]` uses a record and checks that field is
   present; `keys !{env}` and `has !{env} X` use maps. Each call is its own
   door. Values remain text, so a numeric use fails there.
-- `from-csv : ∀α. F [α]`: label reads make rows records, computed reads make
+- `from-csv : ∀α. Returns [α]`: label reads make rows records, computed reads make
   them maps. Cells remain text; a numeric use fails at decode, naming the
   column and the line of use.
 - `to-csv : ∀α:data. [α] → writes`: rows may be records or maps, one runtime

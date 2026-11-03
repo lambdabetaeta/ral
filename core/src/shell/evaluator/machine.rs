@@ -259,7 +259,7 @@ fn located(body: &Arc<Comp>, span: Option<Span>) -> Arc<Comp> {
     }
 }
 
-/// A boundary runs saturated: `annotate` η-expands an under-applied call, so
+/// A boundary runs saturated: inference η-expands an under-applied call, so
 /// a call that is not is one the checker never saw.
 fn run_boundary(
     entry: &BuiltinEntry,

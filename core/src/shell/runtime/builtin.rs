@@ -150,7 +150,7 @@ impl BuiltinEntry {
             (BuiltinBody::Static(f), _) => f(args, mooring, shell),
             (BuiltinBody::Captured(f), _) => f(args, mooring, shell),
             (BuiltinBody::Boundary(f), Some(site)) => f(args, site, mooring, shell),
-            // `annotate` gives every boundary call a site; only a host calling
+            // Checking gives every boundary call a frozen site; only a host calling
             // a door outside a checked program reaches this.
             (BuiltinBody::Boundary(_), None) => Err(crate::shell::runtime::sig(format!(
                 "{}: reached without a checked site",

@@ -128,8 +128,8 @@ the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
 - `CompKind::Capture` returns `Bytes`; `Prim::Decode` drops one trailing LF
   or CRLF and strictly decodes UTF-8. Invalid text fails; use `from-bytes`
   to keep binary data. Neither term has surface syntax.
-- `rhs_bound_ty` records `Bound::Captured` or `Bound::Thunked` in
-  `InferCtx.bound`; `annotate` rebuilds the right-hand side accordingly.
+- `rhs_bound_ty` returns `Bound::Captured` or `Bound::Thunked`;
+  `infer_let` applies it immediately to the right-hand side it inferred.
 - A stand-in runs whole under its caller's capture. A fresh unit-returning
   stub for an external is a command and captures `""`.
 - A capture reaching the 16 MiB buffer cap fails rather than bind a prefix.

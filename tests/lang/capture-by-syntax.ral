@@ -29,7 +29,7 @@ assert_eq 'function called' "1\ndone" $z
 let w = f 2 | from-line
 assert_eq 'function piped' "2\ndone" $w
 
-# Plan §1.10 row let-binding wrapper: its argument captures explicitly.
+# A let-binding wrapper's argument captures explicitly (SPEC §17.5).
 let time = { |t| let r = !$t; $r }
 assert_eq 'wrapper of explicitly captured output' hi !{time { return !{echo hi} }}
 assert_eq 'wrapper of a value' hi !{time { return hi }}
@@ -65,7 +65,7 @@ let enc = to-json
 let ej = enc 7
 assert_eq 'encoder held' '7' $ej
 
-# Plan §1.10 row Command/String join: return captured output in the arm.
+# Return captured output beside a String arm (SPEC §17.6).
 let c = true
 let either = if $c { return !{echo yes} } else { return none }
 assert_eq 'explicitly captured output or value' yes $either
@@ -116,7 +116,7 @@ let cmd_a = { echo a }
 let cmd_b = { echo b }
 let picked = if true $cmd_a else $cmd_b
 assert_eq 'command arms in hand' a $picked
-# Plan §1.10 row Command/String join: capture the in-hand command explicitly.
+# Capture the in-hand command explicitly beside a String arm.
 let mixed = if false { return !{!$cmd_a} } else { return b }
 assert_eq 'captured command arm in hand joined with a value' b $mixed
 let mixed_taken = if true { return !{!$cmd_a} } else { return b }
@@ -136,7 +136,7 @@ within [handlers: [curl: { |a| return () }]] {
     assert_eq 'a () stub stands in for a command' '' $stub
 }
 
-# Plan §1.10 rows bound `map` and `map $g`: collect output explicitly.
+# Bound `map` and `map $g` collect output only with explicit capture.
 let mapped_each = map { |e| return !{echo $e} } [a, b]
 assert_eq 'map of captured commands' 2 !{length $mapped_each}
 assert_eq 'first captured result' a $mapped_each[0]

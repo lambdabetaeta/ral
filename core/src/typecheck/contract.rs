@@ -645,7 +645,6 @@ mod tests {
             &super::SHELL,
         ] {
             let debug = format!("{vocab:#?}");
-            assert_eq!(debug, format!("{vocab:#?}"));
             assert!(debug.contains(vocab.noun));
             assert!(debug.contains("row:"));
             assert!(!debug.contains("0x"), "{debug}");

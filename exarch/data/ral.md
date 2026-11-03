@@ -319,7 +319,7 @@ You need not wait for it: end the turn when nothing else remains, and if its res
 
 `await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. A handle's result is claimed once: you may await it turns later, but a second `await` of it, or one after `cancel` or `race` claimed it, fails. An `exit` inside the block exits the turn that awaits it.
 
-    let out = await $h          # a command's output, as `let out = { … }` would bind it
+    let out = await $h          # a command's output, as `let out = !{ … }` would bind it
     try { await $h } { |e| echo "failed: $e[message]" }    # or this instead, to recover
 
 Retain the handle returned by `spawn` (or `watch`) whenever you will need its result or individual cancellation; a worker ID in `workers` or a completion notice is for observation only and cannot recover a handle.

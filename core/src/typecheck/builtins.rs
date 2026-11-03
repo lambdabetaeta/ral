@@ -436,6 +436,7 @@ pub mod scheme {
     // has :: ∀α. Map<α> → Str → F Bool
     scheme!(has<av: Kind::ANY>: [Ty::map(Ty::Var(av)), Ty::String] -> Ty::Bool);
 
+    /// `map :: ∀ε ν α β. U(α → F^ε β) → [α] → F^ν [β]` — outer ν generalized by `Decl::scheme`.
     pub(crate) fn map_op(u: &mut Unifier) -> Scheme {
         let (av, bv, ev) = (u.fresh_tyvar(), u.fresh_tyvar(), u.fresh_grade_var());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));

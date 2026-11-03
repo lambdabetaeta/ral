@@ -15,15 +15,16 @@ run and the next run's ids restart at zero. An open scheme imported into a
 fresh unifier therefore silently aliases *that* unifier's variables — type
 corruption that no check catches, not an error that surfaces.
 
-Closure is enforced where schemes are minted for exit, by generalising against
-the empty `TyEnv`: with no environment to subtract, `generalize` quantifies
-every residual variable and resolves the body against the final unifier
-(`core/src/typecheck/generalize.rs`). Two sites mint:
+Closure is enforced where schemes leave their unifier
+(`core/src/typecheck/generalize.rs`):
 
-- the top-level `Bind`-node annotation, where each statement's scheme rides
-  the IR into the evaluator (`typecheck::annotate`);
-- the alias arm stored on the persistent handler frame at install
-  (`typecheck::alias_arm_scheme`).
+- Inference harvests generalised per-name schemes onto `Phrase::Define`.
+  Successful freeze settles their weak references and residual grades with
+  `settle_weak` and asserts syntactic closure before the IR reaches the evaluator
+  (`typecheck::freeze::freeze_toplevel`).
+- An alias arm is generalised against the empty `TyEnv` for storage on the
+  persistent handler frame at install (`typecheck::alias_arm_scheme`).
+  The one-shot inference session discards its constructed IR.
 
 Every other carrier only transports what those two closed: the build-time
 prelude bake carries the schemes on the annotated prelude's `Define` phrases
@@ -40,9 +41,11 @@ settled before it is stored, so no foreign id is ever read
 
 Closure is syntactic over the **whole scheme graph**: the body and every
 value/computation μ-equation. It must not follow the checking unifier's slots,
-which could hide a dangling id by resolving it to ground. Settlement likewise
-updates weak references in every equation, not only in the body; local ∀/μ
-names remain opaque. Reseeding alpha-renames all local binders as well as
+which could hide a dangling id by resolving it to ground. Settlement substitutes
+live weak-variable images and resolves residual grades in every equation, not
+only in the body, even with no weak variables; local ∀/μ names remain opaque.
+It quantifies remaining free grades and clears cached grade residuals.
+Reseeding alpha-renames all local binders as well as
 minting weak residuals, simultaneously, into disjoint fresh names. Otherwise a
 fresh weak id could equal an old binder and be captured on instantiation.
 

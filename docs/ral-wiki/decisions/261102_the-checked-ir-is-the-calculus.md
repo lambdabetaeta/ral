@@ -1,10 +1,10 @@
 ---
 status: active
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
-verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_date: 2026-11-02
-anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, native_code, captured_string, Annotate::split, Adaptation]
+generated_at_commit: b1ba0713
+generated_at_date: 2026-11-03
+verified_at_commit: b1ba0713
+verified_at_date: 2026-11-03
+anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, native_code, captured_string, Inferencer::split, rhs_bound_ty, freeze_toplevel]
 ---
 
 # The checked IR is the calculus
@@ -82,7 +82,11 @@ and the application and sequencing rules of
 ## Where
 
 - `core/src/ir.rs`: `CompKind`, `Prim`, `Val`.
-- `core/src/typecheck/annotate.rs`: explicit coercions and returned-thunk splits.
+- `core/src/typecheck/infer.rs`: `infer_let`, `captured_string` and
+  `Inferencer::split` construct binding coercions and returned-thunk splits;
+  `grade.rs::rhs_bound_ty` decides binding capture and Let-fun.
+- `core/src/typecheck/freeze.rs`: `freeze_toplevel` snapshots sites and settles
+  schemes after successful inference and ascription.
 - `core/src/shell/evaluator/machine.rs`: `Focus`, `Terminal`, `Frame`.
 - `dev/agda/Extrinsic/{Syntax/Term,Prims,Semantics/Machine}.agda`:
   corresponding syntax, primitives and CK rules.

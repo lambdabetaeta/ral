@@ -2,12 +2,11 @@
 
 use super::contract::NestedCheck;
 use super::error::{Clash, Reason, TypeError, TypeErrorKind, UnitCall};
-use super::grade::Bound;
 use super::unify::{Unifier, WeakSource};
-use crate::ir::{Comp, GroupNode, Name, Val, synthetic};
+use crate::ir::{GroupNode, Name, synthetic};
 use crate::source::Span;
+use crate::ty::Site;
 use crate::ty::{CompTy, Kind, Scheme, Ty};
-use crate::ty::{Site, UnitId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -171,90 +170,33 @@ impl TyEnv {
 // Inference context
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The key of a node in [`InferCtx`]'s side tables: its address in the one
-/// live tree both passes walk, tagged by the kind of node, so one kind's
-/// address can never find another's entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum Node {
-    Comp(usize),
-    Val(usize),
-    Group(usize),
+/// A site as inference leaves it, frozen once the unit succeeds.
+pub(super) enum Pending {
+    /// Preserve a checked tree's site, including its unit identity.
+    Kept(Arc<Site>),
+    /// Snapshot this unit's solved type.
+    Open(Ty),
+    /// Only on `Val::Protected`; keep the membrane only for delayed parts.
+    Imported(Ty),
 }
 
-impl Node {
-    pub(super) fn comp(comp: &Comp) -> Self {
-        Self::Comp(std::ptr::from_ref(comp) as usize)
-    }
-
-    pub(super) fn val(val: &Val) -> Self {
-        Self::Val(std::ptr::from_ref(val) as usize)
-    }
-
-    pub(super) fn group(group: &Arc<GroupNode>) -> Self {
-        Self::Group(Arc::as_ptr(group) as usize)
-    }
-}
-
-/// A boundary builtin used as a value: what `annotate` rebuilds into the block
-/// `{ |x…| name x… }`, whose call carries the site.
-pub(super) struct BoundaryValue {
-    pub(super) name: String,
-    pub(super) arity: usize,
-}
-
-/// Side tables inference fills and the annotation pass reads back.  Every map is
-/// keyed by node address, so both passes must walk the very same live tree; a
-/// clone between them silently misses.
+/// Per-unit inference state and obligations awaiting successful closure.
 pub struct InferCtx {
     pub(crate) unifier: Unifier,
     pub(crate) errors: Vec<TypeError>,
-    /// Source position for newly emitted [`TypeError`]s, narrowed by `with_span`.
+    /// Source position for new diagnostics, narrowed by `with_span`.
     pub pos: Option<Span>,
-    /// Nontrivial bind decisions, keyed by right-hand side.
-    pub(super) bound: HashMap<Node, Bound>,
-    /// Each read of a name bound to what a call returned, which was `()`, at the
-    /// span it was read at: an error raised there says why the name is `()`.
+    /// Diagnostic provenance for reads of names bound to unit-valued calls.
     pub(super) unit_reads: Vec<(Span, UnitCall)>,
-    /// Nested grant tables awaiting ascription, drained once by `typecheck`;
-    /// the one-shot sessions re-infer accepted bodies and never read it.
+    /// Nested option tables awaiting ascription after inference.
     pub(super) nested: Vec<NestedCheck>,
-    /// A `Rec` group's member types, inferred once per `Arc` within a run
-    /// and keyed by its identity — every projection of the same group reads
-    /// the same betas rather than re-inferring the group.
-    pub(super) rec_groups: HashMap<Node, Vec<CompTy>>,
-    /// `annotate`'s rebuilt `GroupNode` per source group's identity, so every
-    /// `Rec` projection of one group shares the one node the elaborator
-    /// built, rather than each rebuilding its own.
-    pub(super) rec_group_rebuilds: HashMap<Node, Arc<GroupNode>>,
-    /// The result type of each boundary call, keyed by the `Exec` node's
-    /// address, and of each boundary builtin used as a value, keyed by its
-    /// `Val`'s; frozen into a [`Site`] once the unit is solved.
-    pub(super) boundary_results: HashMap<Node, Ty>,
-    /// What `annotate` rebuilds a boundary builtin used as a value into: a
-    /// block holding the saturated call, keyed like [`Self::boundary_results`].
-    pub(super) boundary_values: HashMap<Node, BoundaryValue>,
-    /// How many arguments an under-applied boundary call lacks, keyed by its
-    /// `Exec`: `annotate` η-expands it to a saturated call, where the site is.
-    pub(super) boundary_missing: HashMap<Node, usize>,
-    /// Before which argument each call forced a returned thunk, once per
-    /// thunk, in order (0: the head's own result), keyed by its `App` or
-    /// `Exec`: `annotate` splits the call there, as `to h. force h`.
-    pub(super) splits: HashMap<Node, Vec<usize>>,
-    /// The sites [`Self::snapshot_sites`] froze, under the same keys.
-    pub(super) sites: HashMap<Node, Arc<Site>>,
-    /// Stored session bindings that entered this unit with weak residuals, as
-    /// seeded.
+    /// All projections share one inferred group.
+    pub(super) rec_groups: HashMap<*const GroupNode, (Vec<CompTy>, Arc<GroupNode<Pending>>)>,
+    /// Imported residual schemes, identified by their stored identity.
     pub(super) residuals: Vec<(String, Arc<Scheme>)>,
-    /// The type of the first use, in this unit, of each of [`Self::residuals`].
-    residual_uses: Vec<(String, Ty)>,
-    /// Quantified parts differ per occurrence even when residuals are shared.
-    imported_values: HashMap<Node, Ty>,
-    pub(super) imported_sites: HashMap<Node, Arc<Site>>,
-    /// The sites a binding with residuals is re-admitted against before the
-    /// unit runs.
-    pub(crate) readmits: Vec<(String, Arc<Site>)>,
-    /// Fresh-name counter for compiler-synthesized binders (η-expansion's
-    /// parameters, the decode coercion's bind).
+    /// Frozen into `Toplevel.admits` in first-use order.
+    pub(super) residual_uses: Vec<(String, Ty)>,
+    /// Unit-local freshness for compiler-written binders.
     synth_counter: usize,
 }
 
@@ -270,21 +212,11 @@ impl InferCtx {
             unifier: Unifier::new(),
             errors: Vec::new(),
             pos: None,
-            bound: HashMap::new(),
             unit_reads: Vec::new(),
             nested: Vec::new(),
             rec_groups: HashMap::new(),
-            rec_group_rebuilds: HashMap::new(),
-            boundary_results: HashMap::new(),
-            boundary_values: HashMap::new(),
-            boundary_missing: HashMap::new(),
-            splits: HashMap::new(),
-            sites: HashMap::new(),
             residuals: Vec::new(),
             residual_uses: Vec::new(),
-            imported_values: HashMap::new(),
-            imported_sites: HashMap::new(),
-            readmits: Vec::new(),
             synth_counter: 0,
         }
     }
@@ -296,57 +228,22 @@ impl InferCtx {
         synthetic(purpose, self.synth_counter)
     }
 
-    /// Record `ty` as the result of the boundary node at `key`, and make what
-    /// is free in it weak: its one type for the unit is what its door admits
-    /// the value against.
-    pub(super) fn record_boundary(&mut self, key: Node, name: &str, ty: Ty) {
+    /// Mark a boundary's result weak.
+    pub(super) fn record_boundary(&mut self, name: &str, ty: &Ty) {
         self.unifier
-            .mark_weak(&ty, &WeakSource::Boundary(name.into()));
-        self.boundary_results.insert(key, ty);
+            .mark_weak(ty, &WeakSource::Boundary(name.into()));
     }
 
-    /// Note that the stored binding `name`, read at `scheme`, is used here at
-    /// `ty`: every occurrence is recorded (a membrane, if its contract has
-    /// delayed parts), the first also gets readmission.
-    pub(super) fn note_residual_use(
-        &mut self,
-        key: Node,
-        name: &str,
-        scheme: &Arc<Scheme>,
-        ty: &Ty,
-    ) {
+    /// Record an imported binding's first use.
+    pub(super) fn note_residual_use(&mut self, name: &str, scheme: &Arc<Scheme>, ty: &Ty) -> bool {
         let residual = self
             .residuals
             .iter()
             .any(|(n, stored)| n == name && Arc::ptr_eq(stored, scheme));
-        if residual {
-            self.imported_values.insert(key, ty.clone());
-            if !self.residual_uses.iter().any(|(n, _)| n == name) {
-                self.residual_uses.push((name.to_owned(), ty.clone()));
-            }
+        if residual && !self.residual_uses.iter().any(|(n, _)| n == name) {
+            self.residual_uses.push((name.to_owned(), ty.clone()));
         }
-    }
-
-    /// Freeze every recorded boundary, and every residual use, as the unit's
-    /// solution has left it.  All of them name one fresh unit.
-    pub(super) fn snapshot_sites(&mut self) {
-        let unit = UnitId::fresh();
-        let freeze = |ty: &Ty| Arc::new(Site::snapshot(&self.unifier, ty, unit));
-        self.sites = self
-            .boundary_results
-            .iter()
-            .map(|(&key, ty)| (key, freeze(ty)))
-            .collect();
-        self.imported_sites = self
-            .imported_values
-            .iter()
-            .map(|(&key, ty)| (key, freeze(ty)))
-            .collect();
-        self.readmits = self
-            .residual_uses
-            .iter()
-            .map(|(name, ty)| (name.clone(), freeze(ty)))
-            .collect();
+        residual
     }
 
     /// Push a diagnosis that is its own story, with no constraint provenance.

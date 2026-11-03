@@ -3,7 +3,7 @@
 # at: 8:61
 # contains: couldn't match type Integer with type String
 # contains: exactly one arm happens
-# Plan §1.4 direct joins: value-only mismatch, not a capture change.
+# Value-only joins require matching result types (SPEC §17.6).
 let r = `ok 5
 let x = case $r [`ok: { |x| return $x }, `err: { |_| return hello }]
 return $x

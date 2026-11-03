@@ -75,8 +75,8 @@ pub fn schemes_for(surface: &HostSurface) -> ral_core::SessionSchemes {
 
 /// Visit every `Comp` in a tree, descending past the top-level spine into
 /// thunk bodies, lambda bodies, branches, call arguments, and pipeline
-/// stages — so the nodes the annotation pass writes at any depth (a
-/// `Pipeline`'s wires, a `Capture` node) are all reached.
+/// stages — so checker-built nodes at any depth, such as `Capture`, are
+/// all reached.
 pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
     use ral_core::ir::{CompKind, Val};
     visit(comp);

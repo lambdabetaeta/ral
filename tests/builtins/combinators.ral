@@ -47,7 +47,7 @@ cat "$d/log"
 rm -rf $d
 # Expected: 0 1 2 / 1 / 2 / 0
 
-# Plan §1.10 row `both`: capture explicitly to return output as `fst`.
+# `both` needs explicit capture to return output as `fst`.
 let p = both { return !{echo hi} } { return 42 }
 echo $p[fst] $p[snd]
 # Expected: hi 42

@@ -1,22 +1,125 @@
-//! Type synthesis for the CBPV pair: `infer_val` yields a `Ty`, `infer_comp` a
-//! `CompTy`, mutually recursive through thunks.
+//! Infer types and build pending CBPV nodes, mutually recursive through thunks.
 
 use super::builtins::{BuiltinDiagnostic, Decl, LANGUAGE_CONSTANTS, fail_status_is_zero_literal};
 use super::contract::catch_all_shape;
-use super::env::{BoundaryValue, HandlerBinding, HandlerOrigin, InferCtx, Node, TyEnv};
+use super::env::{HandlerBinding, HandlerOrigin, InferCtx, Pending, TyEnv};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::generalize;
 use super::grade::{Bound, JoinArm};
+use crate::data::Str;
 use crate::ir::{
-    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, GroupNode, Key,
-    MapEntryV, Name, Pattern, Phrase, Prim, ThunkNode, Val, ValListElem, is_synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, FieldsNode,
+    GroupNode, Key, MapEntryV, Name, Pattern, Phrase, Prim, ThunkNode, Val, ValListElem,
+    is_synthetic,
 };
-use crate::ir::{ArithOp, BinaryOp, StdinSource};
+use crate::ir::{ArithOp, BinaryOp, Redirects, StdinSource};
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::ty::{CompTy, Kind, Label, Producer, RefusedArg, Row, Scheme, Site, Ty};
 use std::sync::Arc;
+
+/// Bind captured bytes before value-only decode; both nodes blame the body.
+/// A synthetic binder is unobservable and cannot be rebound by user code.
+fn captured_string<S>(body: Comp<S>, ctx: &mut InferCtx) -> CompKind<S> {
+    let span = body.span;
+    let name = ctx.fresh_name("decode");
+    CompKind::bind(
+        Pattern::Name(name.clone()),
+        Spanned::with_span(span, CompKind::Capture(Arc::new(body))),
+        Spanned::with_span(span, CompKind::Prim(Prim::Decode(Val::Variable(name)))),
+    )
+}
+
+/// Fresh parameters and the arguments that pass them on.
+fn eta<S>(ctx: &mut InferCtx, n: usize) -> (Vec<Name>, Vec<Spanned<Val<S>>>) {
+    let params: Vec<Name> = (0..n).map(|_| ctx.fresh_name("eta")).collect();
+    let args = params
+        .iter()
+        .map(|p| Spanned::synthetic(Val::Variable(p.clone())))
+        .collect();
+    (params, args)
+}
+
+/// Apply arguments, leaving an argumentless head alone.
+fn applied<S>(span: Option<Span>, head: Comp<S>, args: Vec<Spanned<Val<S>>>) -> Comp<S> {
+    if args.is_empty() {
+        head
+    } else {
+        Spanned::with_span(
+            span,
+            CompKind::App {
+                head: Arc::new(head),
+                args: args.into(),
+            },
+        )
+    }
+}
+
+fn exec_node<S>(
+    head: &CommandWord,
+    argv: Argv<S>,
+    redirects: Redirects<Val<S>>,
+    site: Option<S>,
+) -> CompKind<S> {
+    CompKind::Exec(Exec {
+        head: head.clone(),
+        argv,
+        redirects,
+        site,
+    })
+}
+
+/// Enclose the body only when redirects are present.
+fn redirected<S>(body: Comp<S>, redirects: Redirects<Val<S>>) -> CompKind<S> {
+    if redirects.is_empty() {
+        body.item
+    } else {
+        CompKind::Redirect {
+            body: Arc::new(body),
+            redirects,
+        }
+    }
+}
+
+/// Thunk the nested lambdas over `params`.
+fn lambda<S>(span: Option<Span>, params: Vec<Name>, body: CompKind<S>) -> Val<S> {
+    Val::thunk(Arc::new(lambda_comp(span, params, body)))
+}
+
+/// Nest lambdas in parameter order.
+fn lambda_comp<S>(span: Option<Span>, params: Vec<Name>, body: CompKind<S>) -> Comp<S> {
+    params
+        .into_iter()
+        .rev()
+        .fold(Spanned::with_span(span, body), |body, param| {
+            Spanned::with_span(
+                span,
+                CompKind::Lam {
+                    param,
+                    body: Arc::new(body),
+                },
+            )
+        })
+}
+
+/// A boundary value holds a saturated call carrying its site.
+fn boundary_block<S>(
+    name: &str,
+    arity: usize,
+    site: S,
+    span: Option<Span>,
+    ctx: &mut InferCtx,
+) -> Val<S> {
+    let (params, args) = eta(ctx, arity);
+    let call = exec_node(
+        &CommandWord::Name(CommandName::Bare(name.into())),
+        args.into_iter().map(ValListElem::Single).collect(),
+        Redirects::default(),
+        Some(site),
+    );
+    lambda(span, params, call)
+}
 
 /// Which slot an arm fills.  The slot, never the arm's spelling, fixes its
 /// parameters (SPEC §17.7).
@@ -160,8 +263,15 @@ fn bare_call(comp: &Comp) -> Option<(&str, &Exec)> {
 /// The elaborator's IR shape for `alias name { body }` and `unalias name`,
 /// which bind and unbind a handler scheme for the statements after them.
 enum HandlerStatement<'a> {
-    Alias(&'a str, &'a Val),
-    Unalias(&'a str),
+    Alias {
+        head: &'a CommandWord,
+        name: Spanned<&'a Str>,
+        block: &'a Spanned<Val>,
+    },
+    Unalias {
+        head: &'a CommandWord,
+        name: Spanned<&'a Str>,
+    },
 }
 
 impl<'a> HandlerStatement<'a> {
@@ -181,34 +291,52 @@ impl<'a> HandlerStatement<'a> {
         if !exec.redirects.is_empty() {
             return Err(malformed("redirects are not allowed here"));
         }
-        let Some(positional) = exec.argv.positional() else {
+        if exec
+            .argv
+            .iter()
+            .any(|slot| matches!(slot, ValListElem::Spread(_)))
+        {
             return Err(malformed("spread arguments are not allowed here"));
-        };
-        let positional: Vec<&Val> = positional.into_iter().map(|slot| &slot.item).collect();
-        match (head, &positional[..]) {
-            ("alias", [Val::String(name), thunk]) if matches!(thunk, Val::Thunk(_)) => {
-                Ok(Some(Self::Alias(name.as_str(), thunk)))
-            }
+        }
+        match (head, &exec.argv[..]) {
+            (
+                "alias",
+                [
+                    ValListElem::Single(Spanned {
+                        item: Val::String(name),
+                        span,
+                    }),
+                    ValListElem::Single(block),
+                ],
+            ) if matches!(block.item, Val::Thunk(_)) => Ok(Some(Self::Alias {
+                head: &exec.head,
+                name: Spanned::with_span(*span, name),
+                block,
+            })),
             ("alias", _) => Err(malformed("expected `alias name { body }`")),
-            (_, [Val::String(name)]) => Ok(Some(Self::Unalias(name.as_str()))),
+            (
+                _,
+                [
+                    ValListElem::Single(Spanned {
+                        item: Val::String(name),
+                        span,
+                    }),
+                ],
+            ) => Ok(Some(Self::Unalias {
+                head: &exec.head,
+                name: Spanned::with_span(*span, name),
+            })),
             _ => Err(malformed("expected `unalias name`")),
         }
     }
 }
 
-/// Type-check whole phrases: infer each phrase in order, extending
-/// `TyEnv` at each `Define`, and binding/unbinding an `alias`/`unalias` `Run`
-/// phrase's handler scheme for the phrases after it, as `Seq` does for a
-/// nested discarded statement. Returns each `Define` phrase's generalised per-name
-/// schemes, parallel to `top.phrases` and empty for every other phrase —
-/// `annotate::annotate_toplevel` writes it straight onto the rebuilt
-/// `Phrase::Define`, and the last phrase's computation type, which a contract
-/// file's table is ascribed once inference has finished.
-pub(crate) fn infer_toplevel(
+/// Build phrases with unsettled schemes, returning the original tail's type.
+pub(super) fn infer_toplevel(
     ctx: &mut InferCtx,
     env: &mut TyEnv,
     phrases: &[Spanned<Phrase<()>>],
-) -> (Vec<DefineSchemes>, Option<CompTy>) {
+) -> (Vec<Spanned<Phrase<DefineSchemes, Pending>>>, Option<CompTy>) {
     Inferencer { ctx, env }.infer_phrases(phrases)
 }
 
@@ -225,6 +353,33 @@ impl WithSpan for Inferencer<'_> {
 }
 
 impl Inferencer<'_> {
+    /// Bind each returned thunk before applying the next argument segment.
+    fn split<S>(
+        &mut self,
+        span: Option<Span>,
+        splits: &[usize],
+        mut args: Vec<Spanned<Val<S>>>,
+        first: impl FnOnce(Vec<Spanned<Val<S>>>) -> Comp<S>,
+    ) -> CompKind<S> {
+        let mut later: Vec<_> = splits.iter().rev().map(|&k| args.split_off(k)).collect();
+        later.reverse();
+        let mut call = first(args);
+        let mut binds = Vec::with_capacity(later.len());
+        for segment in later {
+            let thunk = self.ctx.fresh_name("split");
+            let head = Spanned::with_span(span, CompKind::Force(Val::Variable(thunk.clone())));
+            binds.push((thunk, call));
+            call = applied(span, head, segment);
+        }
+        binds
+            .into_iter()
+            .rev()
+            .fold(call, |rest, (thunk, rhs)| {
+                Spanned::with_span(span, CompKind::bind(Pattern::Name(thunk), rhs, rest))
+            })
+            .item
+    }
+
     pub(super) fn with_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved_pos = self.ctx.pos;
         self.env.push();
@@ -388,9 +543,7 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Unwrap each thunk `cty` returns, noting `at`, the argument about to be
-    /// applied, in `splits` once per thunk: `annotate` forces each there, as
-    /// `to h. force h`.
+    /// Record each returned thunk's force before argument `at`.
     fn autoderef_thunk_return(
         &mut self,
         mut cty: CompTy,
@@ -436,69 +589,70 @@ impl Inferencer<'_> {
         });
     }
 
-    /// The call at `node`, of type `cty`, applied to `args`: the residual
-    /// computation.
+    /// Apply arguments, returning their nodes and force positions.
     pub(super) fn apply_args<'v>(
         &mut self,
-        node: Node,
         cty: CompTy,
         args: impl IntoIterator<Item = &'v Spanned<Val>>,
-    ) -> CompTy {
-        self.apply_args_capped(node, cty, args, usize::MAX)
+    ) -> (CompTy, Vec<Spanned<Val<Pending>>>, Vec<usize>) {
+        self.apply_args_capped(cty, args, usize::MAX)
     }
 
-    /// [`Self::apply_args`], applying no more than `cap` arguments: the
-    /// surplus is still inferred, for the errors inside it, but unified
-    /// against nothing — the same zip an over-applied builtin needs so its
-    /// one arity diagnostic is not followed by an anonymous mismatch on the
-    /// surplus.  Where a returned thunk was forced on the way, `node` is noted
-    /// for `annotate` to split.
+    /// Infer surplus arguments for their own errors, without cascading arity mismatches.
     fn apply_args_capped<'v>(
         &mut self,
-        node: Node,
         mut cty: CompTy,
         args: impl IntoIterator<Item = &'v Spanned<Val>>,
         cap: usize,
-    ) -> CompTy {
-        // A block argument, its body held back until the whole spine is
-        // unified, so a parameter a *later* argument determines — the element
-        // type in `map { |x| … } $xs` — is known by the time the body reads it.
+    ) -> (CompTy, Vec<Spanned<Val<Pending>>>, Vec<usize>) {
+        // Later arguments fix `map`'s element type before its literal body reads it.
+        // Rebuild deferred bodies into their original argument slots.
         let mut deferred = Vec::new();
         let mut splits = Vec::new();
+        let mut rebuilt = Vec::new();
         for (i, arg) in args.into_iter().enumerate() {
             if i >= cap {
-                let _ = self.infer_val(&arg.item);
+                let _ = self.infer_val(&arg.item, arg.span);
                 continue;
             }
             cty = self.autoderef_thunk_return(cty, i, &mut splits);
-            // Underline the offending argument, not the whole call.  A
-            // synthetic entry carries no span, and `with_span` leaves pos alone.
             cty = self.with_span(arg.span, |this| {
                 if let Val::Thunk(body) = &arg.item {
                     let wanted = this.ctx.unifier.fresh_comp_ty();
-                    deferred.push((arg.span, body, wanted.clone()));
+                    deferred.push((i, arg.span, body, wanted.clone()));
+                    rebuilt.push(None);
                     this.apply_to(&cty, Ty::Thunk(Box::new(wanted)))
                 } else {
-                    let ty = this.infer_val(&arg.item);
+                    let (ty, value) = this.infer_val(&arg.item, arg.span);
+                    rebuilt.push(Some(Spanned::with_span(arg.span, value)));
                     this.apply_to(&cty, ty)
                 }
             });
         }
-        for (span, body, wanted) in deferred {
-            self.demand_block(span, body, &wanted);
+        for (i, span, body, wanted) in deferred {
+            rebuilt[i] = Some(self.demand_block(span, body, &wanted));
         }
-        if !splits.is_empty() {
-            self.ctx.splits.insert(node, splits);
-        }
-        cty
+        (
+            cty,
+            rebuilt
+                .into_iter()
+                .map(|v| v.expect("argument inferred"))
+                .collect(),
+            splits,
+        )
     }
 
-    /// A literal block meets its parameter without adaptation.
-    fn demand_block(&mut self, span: Option<Span>, body: &ThunkNode, wanted: &CompTy) {
+    fn demand_block(
+        &mut self,
+        span: Option<Span>,
+        body: &ThunkNode,
+        wanted: &CompTy,
+    ) -> Spanned<Val<Pending>> {
         self.with_span(span, |this| {
-            let given = this.with_scope(|this| this.check_comp(body.shape(), wanted));
+            let (given, body) = this.with_scope(|this| this.check_comp(body.shape(), wanted));
             this.ctx.unify_comp_ty(wanted, &given, Reason::Argument);
-        });
+            Spanned::with_span(span, Val::thunk(Arc::new(body)))
+        })
     }
 
     /// `callee` applied to an argument of type `ty`: the residual computation.
@@ -525,11 +679,10 @@ impl Inferencer<'_> {
     /// all ([[invariants/fixed-arity]]).
     pub(super) fn apply_builtin(
         &mut self,
-        node: Node,
         entry: &Decl,
         name: &str,
         argv: &Argv,
-    ) -> CompTy {
+    ) -> (CompTy, Vec<Spanned<Val<Pending>>>, Vec<usize>) {
         let fixed_arity = entry.fixed_arity();
 
         // There is no positional reading exactly when the call writes a
@@ -546,7 +699,7 @@ impl Inferencer<'_> {
             );
             // Nothing was applied and nothing is residual: the refusal is the
             // whole story of this call, so its type is the saturated result.
-            return self.saturated_result(name, entry);
+            return (self.saturated_result(name, entry), Vec::new(), Vec::new());
         };
 
         if positional.len() > fixed_arity {
@@ -570,7 +723,7 @@ impl Inferencer<'_> {
 
         let scheme = entry.scheme(&mut self.ctx.unifier);
         let head_cty = self.instantiate_comp(name, &scheme);
-        self.apply_args_capped(node, head_cty, positional, fixed_arity)
+        self.apply_args_capped(head_cty, positional, fixed_arity)
     }
 
     /// Peel `cty`'s whole curry spine, stopping at the first non-`Fun`: what a
@@ -619,7 +772,12 @@ impl Inferencer<'_> {
     /// the type the arm is installed at anyway: the run-time door renders it
     /// in its own words.  A join's arm meets its join in place instead
     /// (`check_arm`).
-    pub(super) fn arm(&mut self, block: &Val, arm: Arm<'_>) -> ArmVerdict {
+    pub(super) fn arm(
+        &mut self,
+        block: &Val,
+        arm: Arm<'_>,
+        at: Option<Span>,
+    ) -> (ArmVerdict, Val<Pending>) {
         let producer = CompTy::Return(
             self.ctx.unifier.fresh_grade(),
             Box::new(self.ctx.unifier.fresh_ty()),
@@ -628,18 +786,21 @@ impl Inferencer<'_> {
             Arm::Named(_) => (CompTy::arrows([Ty::argv()], producer), Reason::AliasParam),
             Arm::CatchAll => (catch_all_shape(producer), Reason::CatchAllParams),
         };
-        let met = match block {
+        let (met, node) = match block {
             Val::Thunk(comp) => {
-                let got = self.with_scope(|this| this.check_comp(comp.shape(), &wanted));
-                self.ctx
-                    .try_unify_comp_ty(&wanted, &got)
-                    .map_err(|kind| (kind, why))
+                let (got, node) = self.with_scope(|this| this.check_comp(comp.shape(), &wanted));
+                (
+                    self.ctx
+                        .try_unify_comp_ty(&wanted, &got)
+                        .map_err(|kind| (kind, why)),
+                    Val::thunk(Arc::new(node)),
+                )
             }
             // A value in hand is a block first, then one of the slot's type.
             held => {
-                let ty = self.infer_val(held);
+                let (ty, node) = self.infer_val(held, at);
                 let got = self.ctx.unifier.fresh_comp_ty();
-                match self
+                let met = match self
                     .ctx
                     .try_unify_ty(&ty, &Ty::Thunk(Box::new(got.clone())))
                 {
@@ -648,33 +809,47 @@ impl Inferencer<'_> {
                         .try_unify_comp_ty(&wanted, &got)
                         .map_err(|kind| (kind, why)),
                     Err(kind) => Err((kind, Reason::HandlerArm)),
-                }
+                };
+                (met, node)
             }
         };
         let (head, standing) = self.stands_for(arm);
         let stands = self.arm_stands_in(&wanted, &head, standing);
-        match met {
+        let verdict = match met {
             Ok(()) => stands,
             Err((kind, why)) => {
                 let installed = stands.unwrap_or_else(|(cty, _)| cty);
                 Err((installed, self.refusal(kind, why)))
             }
-        }
+        };
+        (verdict, node)
     }
 
     /// [`Self::arm`] at the checker, a refusal raised: the type the arm is
     /// installed at.
-    pub(super) fn checked_arm(&mut self, block: &Val, arm: Arm<'_>) -> CompTy {
-        self.arm(block, arm).unwrap_or_else(|(cty, error)| {
+    pub(super) fn checked_arm(
+        &mut self,
+        block: &Val,
+        arm: Arm<'_>,
+        at: Option<Span>,
+    ) -> (CompTy, Val<Pending>) {
+        let (verdict, node) = self.arm(block, arm, at);
+        let cty = verdict.unwrap_or_else(|(cty, error)| {
             self.ctx.raise(*error);
             cty
-        })
+        });
+        (cty, node)
     }
 
-    /// The scheme a named arm is bound at for what follows it.
-    pub(super) fn install_arm(&mut self, block: &Val, name: &str) -> Scheme {
-        let thunk_ty = Ty::Thunk(Box::new(self.checked_arm(block, Arm::Named(name))));
-        generalize(&self.ctx.unifier, self.env, &thunk_ty)
+    pub(super) fn install_arm(
+        &mut self,
+        block: &Val,
+        name: &str,
+        at: Option<Span>,
+    ) -> (Scheme, Val<Pending>) {
+        let (cty, node) = self.checked_arm(block, Arm::Named(name), at);
+        let thunk_ty = Ty::Thunk(Box::new(cty));
+        (generalize(&self.ctx.unifier, self.env, &thunk_ty), node)
     }
 
     /// What the head an arm stands in for is: under a name, the base frame or
@@ -760,44 +935,58 @@ impl Inferencer<'_> {
     /// site's argv, which every arm takes as its one parameter
     /// ([`Self::arm`]).  The argv rule's contribution is its walk and its
     /// refusals: its type is always [`Ty::argv`].
-    fn apply_alias_arm(&mut self, name: &str, scheme: &Scheme, argv: &Argv) -> CompTy {
+    fn apply_alias_arm(
+        &mut self,
+        name: &str,
+        scheme: &Scheme,
+        argv: &Argv,
+    ) -> (CompTy, Argv<Pending>) {
         let cty = self.instantiate_comp(name, scheme);
-        let _argv = self.argv_ty(argv, ArgvBoundary::InShell(name));
+        let argv = self.argv_ty(argv, ArgvBoundary::InShell(name));
         let CompTy::Fun(_, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
             unreachable!(
                 "every arm takes the argv: `Inferencer::arm` installs it so, as every base frame is"
             )
         };
-        *body
+        (*body, argv)
     }
 
     /// `comp` against a type already known: a block whose parameter the
     /// expectation names binds *that* type rather than a fresh one, so the
     /// body reads a parameter its own call site determined.  Anything else has
     /// nothing to push inwards and is inferred as ever, the caller unifying.
-    pub(super) fn check_comp(&mut self, comp: &Comp, expected: &CompTy) -> CompTy {
+    pub(super) fn check_comp(&mut self, comp: &Comp, expected: &CompTy) -> (CompTy, Comp<Pending>) {
         match (&comp.item, self.ctx.unifier.resolve_comp_ty(expected)) {
             (CompKind::Lam { param, body }, CompTy::Fun(param_ty, result)) => {
-                let body_ty = self.with_scope(|this| {
+                let (body_ty, body) = self.with_scope(|this| {
                     this.env
                         .bind(param.to_string(), Scheme::mono(*param_ty.clone()));
                     this.check_comp(body, &result)
                 });
-                CompTy::Fun(param_ty, Box::new(body_ty))
+                (
+                    CompTy::Fun(param_ty, Box::new(body_ty)),
+                    Spanned::with_span(
+                        comp.span,
+                        CompKind::Lam {
+                            param: param.clone(),
+                            body: Arc::new(body),
+                        },
+                    ),
+                )
             }
             _ => self.infer_comp(comp),
         }
     }
 
-    fn infer_not(&mut self, val: &Val) -> Ty {
-        let ty = self.infer_val(val);
+    fn infer_not(&mut self, val: &Val) -> (Ty, Prim<Pending>) {
+        let (ty, val) = self.infer_val(val, None);
         self.ctx.unify_ty(&ty, &Ty::Bool, Reason::NotOperand);
-        Ty::Bool
+        (Ty::Bool, Prim::Not(val))
     }
 
-    fn infer_binary(&mut self, op: BinaryOp, lhs: &Val, rhs: &Val) -> Ty {
-        let lhs_ty = self.infer_val(lhs);
-        let rhs_ty = self.infer_val(rhs);
+    fn infer_binary(&mut self, op: BinaryOp, lhs: &Val, rhs: &Val) -> (Ty, Prim<Pending>) {
+        let (lhs_ty, lhs) = self.infer_val(lhs, None);
+        let (rhs_ty, rhs) = self.infer_val(rhs, None);
         let why = Reason::BinaryOperands(op);
         let operand = match op {
             BinaryOp::Arith(_) => self.ctx.fresh_kinded(Kind::NUMBER),
@@ -809,10 +998,11 @@ impl Inferencer<'_> {
         if op == BinaryOp::Arith(ArithOp::Mod) {
             self.ctx.unify_ty(&operand, &Ty::Int, why);
         }
-        match op {
+        let ty = match op {
             BinaryOp::Eq(_) | BinaryOp::Compare(_) => Ty::Bool,
             BinaryOp::Arith(_) => operand,
-        }
+        };
+        (ty, Prim::Binary(op, lhs, rhs))
     }
 
     /// A bare command head's type, by the lookup order the runtime uses —
@@ -826,30 +1016,109 @@ impl Inferencer<'_> {
     /// calculus: arguments by application, at an arity the head's own type
     /// declares, so `...` has no argv to spread into and is refused.  The last
     /// two take an argv, and `...` is exactly its notation.
-    fn exec_comp_ty(&mut self, comp: &Comp, name: &str, argv: &Argv) -> CompTy {
-        let node = Node::comp(comp);
+    fn exec_comp_ty(
+        &mut self,
+        comp: &Comp,
+        name: &str,
+        exec: &Exec,
+        redirects: Redirects<Val<Pending>>,
+    ) -> (CompTy, CompKind<Pending>) {
+        let argv = &exec.argv;
         match self.head_class(name) {
             HeadClass::Binding(scheme) => {
                 let ty = self.ctx.instantiate(&scheme);
-                self.ctx.note_residual_use(node, name, &scheme, &ty);
+                let imported = self.ctx.note_residual_use(name, &scheme, &ty);
                 let body = self.thunk_body(name, &ty, Reason::AutoderefHead);
-                if let Some(args) = argv.positional() {
-                    self.apply_args(node, body, args)
-                } else {
+                let Some(args) = argv.positional() else {
                     self.infer_refused_args(argv.iter().map(ValListElem::slot));
                     self.refuse_spread(argv, super::error::SpreadHead::Applied);
-                    self.peel_curry_spine(&body)
-                }
+                    return (self.peel_curry_spine(&body), CompKind::Return(Val::Unit));
+                };
+                let (cty, args, splits) = self.apply_args(body, args);
+                let call = if imported {
+                    let head = Spanned::with_span(
+                        comp.span,
+                        CompKind::Force(Val::Protected {
+                            value: Box::new(Val::Variable(name.into())),
+                            site: Pending::Open(ty),
+                        }),
+                    );
+                    self.split(comp.span, &splits, args, |args| {
+                        applied(comp.span, head, args)
+                    })
+                } else {
+                    return (
+                        cty,
+                        self.exec_call(comp.span, &exec.head, args, &splits, redirects, None),
+                    );
+                };
+                (
+                    cty,
+                    redirected(Spanned::with_span(comp.span, call), redirects),
+                )
             }
             HeadClass::Value(entry) => {
-                let cty = self.apply_builtin(node, &entry, name, argv);
-                self.note_boundary_call(comp, &entry, argv, &cty);
-                cty
+                let (cty, args, splits) = self.apply_builtin(&entry, name, argv);
+                let boundary = self.note_boundary_call(&entry, argv, &cty);
+                let (site, missing) = match boundary {
+                    Some((ty, missing)) => (Some(Pending::Open(ty)), missing),
+                    None => (None, 0),
+                };
+                if missing > 0 {
+                    let (params, extra) = eta(self.ctx, missing);
+                    let mut argv: Argv<Pending> =
+                        args.into_iter().map(ValListElem::Single).collect();
+                    argv.extend(extra.into_iter().map(ValListElem::Single));
+                    let call = exec_node(&exec.head, argv, redirects, site);
+                    return (cty, lambda_comp(comp.span, params, call).item);
+                }
+                (
+                    cty,
+                    self.exec_call(comp.span, &exec.head, args, &splits, redirects, site),
+                )
             }
-            HeadClass::Arm(handler) => self.apply_alias_arm(name, &handler.scheme, argv),
-            // Prelude functions arrive as an `App` on a bound variable, never
-            // as a bare `Exec` head.
-            HeadClass::External => self.external_exec_comp_ty(name, argv),
+            HeadClass::Arm(handler) => {
+                let (cty, argv) = self.apply_alias_arm(name, &handler.scheme, argv);
+                (cty, exec_node(&exec.head, argv, redirects, None))
+            }
+            // Prelude functions arrive as `App` on bindings, not bare `Exec` heads.
+            HeadClass::External => {
+                let (cty, argv) = self.external_exec_comp_ty(name, argv);
+                (cty, exec_node(&exec.head, argv, redirects, None))
+            }
+        }
+    }
+
+    /// Fuse redirects into an unsplit call; otherwise enclose the whole split.
+    fn exec_call(
+        &mut self,
+        span: Option<Span>,
+        head: &CommandWord,
+        args: Vec<Spanned<Val<Pending>>>,
+        splits: &[usize],
+        redirects: Redirects<Val<Pending>>,
+        site: Option<Pending>,
+    ) -> CompKind<Pending> {
+        if splits.is_empty() {
+            exec_node(
+                head,
+                args.into_iter().map(ValListElem::Single).collect(),
+                redirects,
+                site,
+            )
+        } else {
+            let call = self.split(span, splits, args, |args| {
+                Spanned::with_span(
+                    span,
+                    exec_node(
+                        head,
+                        args.into_iter().map(ValListElem::Single).collect(),
+                        Redirects::default(),
+                        site,
+                    ),
+                )
+            });
+            redirected(Spanned::with_span(span, call), redirects)
         }
     }
 
@@ -867,29 +1136,29 @@ impl Inferencer<'_> {
     }
 
     /// A call of a boundary row: its result is weak, and the node gets a site.
-    fn note_boundary_call(&mut self, comp: &Comp, entry: &Decl, argv: &Argv, cty: &CompTy) {
+    fn note_boundary_call(
+        &mut self,
+        entry: &Decl,
+        argv: &Argv,
+        cty: &CompTy,
+    ) -> Option<(Ty, usize)> {
         if !entry.is_boundary() {
-            return;
+            return None;
         }
-        let Some(producer) = self.spine(cty).producer() else {
-            return;
-        };
-        let key = Node::comp(comp);
-        self.ctx.record_boundary(key, &entry.name, producer.ty);
+        let producer = self.spine(cty).producer()?;
+        self.ctx.record_boundary(&entry.name, &producer.ty);
         let arity = entry.fixed_arity();
         let given = argv.arity().unwrap_or(arity);
-        if given < arity {
-            self.ctx.boundary_missing.insert(key, arity - given);
-        }
+        Some((producer.ty, arity.saturating_sub(given)))
     }
 
     /// An external takes an argv and is a command: its value is its output.
     ///
     /// Nothing here declares a parameter for that argv to meet, so the rule's
     /// contribution is its walk and its refusals rather than its type.
-    fn external_exec_comp_ty(&mut self, shown: &str, argv: &Argv) -> CompTy {
-        let _argv = self.argv_ty(argv, ArgvBoundary::Exec(shown));
-        CompTy::command()
+    fn external_exec_comp_ty(&mut self, shown: &str, argv: &Argv) -> (CompTy, Argv<Pending>) {
+        let argv = self.argv_ty(argv, ArgvBoundary::Exec(shown));
+        (CompTy::command(), argv)
     }
 
     /// The argv rule: a command's arguments are an argv, and an argv is
@@ -903,26 +1172,26 @@ impl Inferencer<'_> {
     /// whether `boundary` gates what crosses.  Each element is still inferred,
     /// under its own span, for the errors inside it, and a `...` must still
     /// spread a list: what its elements are is free, what it is is not.
-    fn argv_ty(&mut self, argv: &Argv, boundary: ArgvBoundary<'_>) -> Ty {
-        for entry in argv {
-            self.with_span(entry.slot().span, |this| match entry {
-                ValListElem::Single(arg) => {
-                    let ty = this.infer_val(&arg.item);
-                    this.gate_arg(&ty, boundary);
-                }
-                // A spread contributes as many elements as the list holds, and
-                // how many that is only the run knows: an empty one contributes
-                // none, and refuses nothing.  So its elements are left to the
-                // spawn-time gate, which counts them.
-                ValListElem::Spread(arg) => {
-                    let spread_ty = this.infer_val(&arg.item);
-                    let elem = this.ctx.unifier.fresh_ty();
-                    this.ctx
-                        .unify_ty(&spread_ty, &Ty::list(elem), Reason::ListSpread);
-                }
-            });
-        }
-        Ty::argv()
+    fn argv_ty(&mut self, argv: &Argv, boundary: ArgvBoundary<'_>) -> Argv<Pending> {
+        argv.iter()
+            .map(|entry| {
+                self.with_span(entry.slot().span, |this| match entry {
+                    ValListElem::Single(arg) => {
+                        let (ty, value) = this.infer_val(&arg.item, arg.span);
+                        this.gate_arg(&ty, boundary);
+                        ValListElem::Single(Spanned::with_span(arg.span, value))
+                    }
+                    // An empty spread refuses nothing; runtime gates actual elements.
+                    ValListElem::Spread(arg) => {
+                        let (spread_ty, value) = this.infer_val(&arg.item, arg.span);
+                        let elem = this.ctx.unifier.fresh_ty();
+                        this.ctx
+                            .unify_ty(&spread_ty, &Ty::list(elem), Reason::ListSpread);
+                        ValListElem::Spread(Spanned::with_span(arg.span, value))
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Refuse an argv element the boundary has no argument for, one step
@@ -959,7 +1228,7 @@ impl Inferencer<'_> {
     ) {
         for slot in args {
             self.with_span(slot.span, |this| {
-                let _ = this.infer_val(&slot.item);
+                let _ = this.infer_val(&slot.item, slot.span);
             });
         }
     }
@@ -974,12 +1243,12 @@ impl Inferencer<'_> {
     fn infer_phrases(
         &mut self,
         phrases: &[Spanned<Phrase<()>>],
-    ) -> (Vec<DefineSchemes>, Option<CompTy>) {
+    ) -> (Vec<Spanned<Phrase<DefineSchemes, Pending>>>, Option<CompTy>) {
         let mut schemes = Vec::with_capacity(phrases.len());
         let mut tail = None;
         for phrase in phrases {
             let (names, cty) = self.with_span(phrase.span, |this| this.infer_phrase(&phrase.item));
-            schemes.push(names);
+            schemes.push(Spanned::with_span(phrase.span, names));
             tail = cty;
         }
         (schemes, tail)
@@ -988,10 +1257,13 @@ impl Inferencer<'_> {
     /// One phrase.  Every `Run`'s value is held to the discarded shape, the
     /// tail's included — its own writes are never captured into the report.
     /// Only a `Run` has a value, so only a `Run` hands a `CompTy` back.
-    fn infer_phrase(&mut self, phrase: &Phrase<()>) -> (DefineSchemes, Option<CompTy>) {
+    fn infer_phrase(
+        &mut self,
+        phrase: &Phrase<()>,
+    ) -> (Phrase<DefineSchemes, Pending>, Option<CompTy>) {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
-                self.infer_let(pattern, comp);
+                let comp = self.infer_let(pattern, comp);
                 let schemes = pattern
                     .names()
                     .into_iter()
@@ -1004,52 +1276,80 @@ impl Inferencer<'_> {
                         (name.to_string(), scheme)
                     })
                     .collect();
-                (schemes, None)
+                (
+                    Phrase::Define {
+                        pattern: Arc::clone(pattern),
+                        comp,
+                        schemes,
+                    },
+                    None,
+                )
             }
-            Phrase::Run(comp) => (Vec::new(), Some(self.infer_statement(comp))),
+            Phrase::Run(comp) => {
+                let (cty, comp) = self.infer_statement(comp);
+                (Phrase::Run(Arc::new(comp)), Some(cty))
+            }
         }
     }
 
     /// Infer, bind and generalise a `let` right-hand side.
-    fn infer_let(&mut self, pattern: &Pattern, rhs: &Comp) {
-        let cty = self.infer_comp(rhs);
+    fn infer_let(&mut self, pattern: &Pattern, rhs: &Comp) -> Arc<Comp<Pending>> {
+        let (cty, node) = self.infer_comp(rhs);
         let (bound_ty, bound) = self.rhs_bound_ty(cty);
-        if bound != Bound::Ran {
-            self.ctx.bound.insert(Node::comp(rhs), bound);
-        }
+        let node = match bound {
+            Bound::Thunked => {
+                Spanned::with_span(rhs.span, CompKind::Return(Val::thunk(Arc::new(node))))
+            }
+            Bound::Captured => Spanned::with_span(rhs.span, captured_string(node, self.ctx)),
+            Bound::Ran => node,
+        };
         let concrete = self.ctx.unifier.apply_ty_keeping_weak(&bound_ty);
         self.bind_pattern(pattern, &concrete);
         self.note_called(pattern, rhs);
+        Arc::new(node)
     }
 
     /// A discarded statement: an `alias`/`unalias` binds or unbinds its
     /// handler scheme for what follows, and anything else is inferred and
     /// held to the discarded shape.
-    fn infer_statement(&mut self, comp: &Comp) -> CompTy {
+    fn infer_statement(&mut self, comp: &Comp) -> (CompTy, Comp<Pending>) {
         let handled = match HandlerStatement::of(comp) {
-            Ok(Some(HandlerStatement::Alias(name, block))) => {
-                let scheme = self.install_arm(block, name);
+            Ok(Some(HandlerStatement::Alias { head, name, block })) => {
+                let (scheme, arm) = self.install_arm(&block.item, name.item.as_str(), block.span);
                 self.env
-                    .bind_handler(name.to_string(), scheme, HandlerOrigin::Alias);
-                true
+                    .bind_handler(name.item.to_string(), scheme, HandlerOrigin::Alias);
+                let argv = vec![
+                    ValListElem::Single(Spanned::with_span(
+                        name.span,
+                        Val::String(name.item.clone()),
+                    )),
+                    ValListElem::Single(Spanned::with_span(block.span, arm)),
+                ]
+                .into();
+                Some(exec_node(head, argv, Redirects::default(), None))
             }
-            Ok(Some(HandlerStatement::Unalias(name))) => {
-                self.env.unbind_removable_handler(name);
-                true
+            Ok(Some(HandlerStatement::Unalias { head, name })) => {
+                self.env.unbind_removable_handler(name.item.as_str());
+                let argv = vec![ValListElem::Single(Spanned::with_span(
+                    name.span,
+                    Val::String(name.item.clone()),
+                ))]
+                .into();
+                Some(exec_node(head, argv, Redirects::default(), None))
             }
-            Ok(None) => false,
+            Ok(None) => None,
             Err(kind) => {
                 self.ctx.diagnose(kind);
-                true
+                Some(CompKind::Return(Val::Unit))
             }
         };
-        let cty = if handled {
-            self.produces(Ty::Unit)
+        let (cty, node) = if let Some(item) = handled {
+            (self.produces(Ty::Unit), Spanned::with_span(comp.span, item))
         } else {
             self.infer_comp(comp)
         };
         self.force_discarded_shape(comp, &cty);
-        cty
+        (cty, node)
     }
 
     /// Whether `key` repeats a label `existing` already yields — diagnosing
@@ -1087,33 +1387,57 @@ impl Inferencer<'_> {
         key: &str,
         value: &Spanned<Val>,
         fields: &mut Vec<(String, Ty)>,
-    ) {
-        let (duplicate, ty) = self.with_span(value.span, |this| {
+    ) -> Spanned<Val<Pending>> {
+        let (duplicate, ty, node) = self.with_span(value.span, |this| {
             let duplicate = this.diagnose_if_duplicate(key, fields.iter().map(|(k, _)| k.as_str()));
-            let ty = this.infer_val(&value.item);
-            (duplicate, ty)
+            let (ty, node) = this.infer_val(&value.item, value.span);
+            (duplicate, ty, node)
         });
         if !duplicate {
             fields.push((key.to_string(), ty));
         }
+        Spanned::with_span(value.span, node)
     }
 
     /// A plain record literal: no spread, so one row, closed.
-    fn infer_record_val(&mut self, entries: &[(Name, Spanned<Val>)]) -> Ty {
+    fn infer_record_val(
+        &mut self,
+        entries: &[(Name, Spanned<Val>)],
+    ) -> (Ty, Arc<FieldsNode<Pending>>) {
         let mut fields: Vec<(String, Ty)> = Vec::new();
-        for (key, value) in entries {
-            self.infer_record_field(key, value, &mut fields);
-        }
-        Ty::Record(Self::fields_row(fields, Row::Empty))
+        let nodes = entries
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    self.infer_record_field(key, value, &mut fields),
+                )
+            })
+            .collect();
+        (
+            Ty::Record(Self::fields_row(fields, Row::Empty)),
+            FieldsNode::new(nodes),
+        )
     }
 
     /// Update existing slots, preserving the base's row tail.
-    fn infer_update(&mut self, base: &Spanned<Val>, entries: &[(Name, Spanned<Val>)]) -> Ty {
-        let base_ty = self.with_span(base.span, |this| this.infer_val(&base.item));
+    fn infer_update(
+        &mut self,
+        base: &Spanned<Val>,
+        entries: &[(Name, Spanned<Val>)],
+    ) -> (Ty, Prim<Pending>) {
+        let (base_ty, base_node) =
+            self.with_span(base.span, |this| this.infer_val(&base.item, base.span));
         let mut fields = Vec::new();
-        for (key, value) in entries {
-            self.infer_record_field(key, value, &mut fields);
-        }
+        let nodes = entries
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    self.infer_record_field(key, value, &mut fields),
+                )
+            })
+            .collect();
         let tail = self.ctx.unifier.fresh_row();
         let probe = fields.iter().rev().fold(tail.clone(), |rest, (key, _)| {
             let old = self.ctx.unifier.fresh_ty();
@@ -1125,36 +1449,49 @@ impl Inferencer<'_> {
         self.with_span(base.span, |this| {
             this.ctx.unify_ty(&base_ty, &Ty::Record(probe), reason);
         });
-        Ty::Record(Self::fields_row(fields, tail))
+        (
+            Ty::Record(Self::fields_row(fields, tail)),
+            Prim::Update {
+                base: Spanned::with_span(base.span, base_node),
+                fields: nodes,
+            },
+        )
     }
 
     /// A plain map literal: `Map<elem>`, every key written out — so the
     /// checker refuses a duplicate exactly as a record's (T0022).
-    fn infer_map_val(&mut self, entries: &[(Name, Spanned<Val>)]) -> Ty {
+    fn infer_map_val(
+        &mut self,
+        entries: &[(Name, Spanned<Val>)],
+    ) -> (Ty, Arc<FieldsNode<Pending>>) {
         let elem = self.ctx.unifier.fresh_ty();
         let mut seen: Vec<Name> = Vec::new();
+        let mut nodes = Vec::new();
         for (key, value) in entries {
-            let duplicate = self.with_span(value.span, |this| {
+            let (duplicate, node) = self.with_span(value.span, |this| {
                 let duplicate = this.diagnose_if_duplicate(key, seen.iter().map(AsRef::as_ref));
-                let value_ty = this.infer_val(&value.item);
+                let (value_ty, node) = this.infer_val(&value.item, value.span);
                 this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
-                duplicate
+                (duplicate, node)
             });
             if !duplicate {
                 seen.push(key.clone());
             }
+            nodes.push((key.clone(), Spanned::with_span(value.span, node)));
         }
-        Ty::map(elem)
+        (Ty::map(elem), FieldsNode::new(nodes.into()))
     }
 
     /// One element type; repeated computed keys are refused at run time.
-    fn infer_map(&mut self, entries: &[MapEntryV]) -> Ty {
+    fn infer_map(&mut self, entries: &[MapEntryV]) -> (Ty, Prim<Pending>) {
         let elem = self.ctx.unifier.fresh_ty();
         let mut seen: Vec<String> = Vec::new();
+        let mut nodes = Vec::new();
         for entry in entries {
             match entry {
                 MapEntryV::Entry(key, value) => {
-                    let key_ty = self.with_span(key.span, |this| this.infer_val(&key.item));
+                    let (key_ty, key_node) =
+                        self.with_span(key.span, |this| this.infer_val(&key.item, key.span));
                     self.with_span(key.span, |this| {
                         this.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
                         if let Val::String(label) = &key.item {
@@ -1165,51 +1502,71 @@ impl Inferencer<'_> {
                             seen.push(label.as_str().to_string());
                         }
                     });
-                    let value_ty = self.with_span(value.span, |this| this.infer_val(&value.item));
+                    let (value_ty, value_node) =
+                        self.with_span(value.span, |this| this.infer_val(&value.item, value.span));
                     self.with_span(value.span, |this| {
                         this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                     });
+                    nodes.push(MapEntryV::Entry(
+                        Spanned::with_span(key.span, key_node),
+                        Spanned::with_span(value.span, value_node),
+                    ));
                 }
                 MapEntryV::Spread(value) => {
-                    let spread_ty = self.with_span(value.span, |this| this.infer_val(&value.item));
+                    let (spread_ty, value_node) =
+                        self.with_span(value.span, |this| this.infer_val(&value.item, value.span));
                     self.with_span(value.span, |this| {
                         this.ctx
                             .unify_ty(&spread_ty, &Ty::map(elem.clone()), Reason::MapSpread);
                     });
+                    nodes.push(MapEntryV::Spread(Spanned::with_span(
+                        value.span, value_node,
+                    )));
                 }
             }
         }
-        Ty::map(elem)
+        (Ty::map(elem), Prim::Map(nodes.into()))
     }
 
     /// One list element's contribution to `elem`, the list's shared element
     /// type: a plain value unifies directly, a spread's own element type
     /// does. Shared by a plain list and [`Prim::List`].
-    fn infer_list_entry(&mut self, value: &Spanned<Val>, spread: bool, elem: &Ty) {
+    fn infer_list_entry(
+        &mut self,
+        value: &Spanned<Val>,
+        spread: bool,
+        elem: &Ty,
+    ) -> Spanned<Val<Pending>> {
         self.with_span(value.span, |this| {
+            let (ty, node) = this.infer_val(&value.item, value.span);
             let entry_ty = if spread {
-                let spread_ty = this.infer_val(&value.item);
                 let inner = this.ctx.unifier.fresh_ty();
                 this.ctx
-                    .unify_ty(&spread_ty, &Ty::list(inner.clone()), Reason::ListSpread);
+                    .unify_ty(&ty, &Ty::list(inner.clone()), Reason::ListSpread);
                 inner
             } else {
-                this.infer_val(&value.item)
+                ty
             };
             this.ctx.unify_ty(&entry_ty, elem, Reason::ListElem);
-        });
+            Spanned::with_span(value.span, node)
+        })
     }
 
-    /// A list literal with a spread.
-    fn infer_list(&mut self, elems: &[ValListElem]) -> Ty {
+    /// A spread-bearing list shares one type across all contributed elements.
+    fn infer_list(&mut self, elems: &[ValListElem]) -> (Ty, Prim<Pending>) {
         let elem = self.ctx.unifier.fresh_ty();
-        for entry in elems {
-            match entry {
-                ValListElem::Single(v) => self.infer_list_entry(v, false, &elem),
-                ValListElem::Spread(v) => self.infer_list_entry(v, true, &elem),
-            }
-        }
-        Ty::list(elem)
+        let nodes = elems
+            .iter()
+            .map(|entry| match entry {
+                ValListElem::Single(v) => {
+                    ValListElem::Single(self.infer_list_entry(v, false, &elem))
+                }
+                ValListElem::Spread(v) => {
+                    ValListElem::Spread(self.infer_list_entry(v, true, &elem))
+                }
+            })
+            .collect();
+        (Ty::list(elem), Prim::List(nodes))
     }
 
     /// `$name` is bound nowhere; the nearest names that are — bindings and
@@ -1237,112 +1594,138 @@ impl Inferencer<'_> {
         });
     }
 
-    /// A builtin held as a value.  A boundary's result is weak here too, and
-    /// `annotate` rebuilds the reference into the block holding its checked
-    /// call, so a value is admitted like any call.
-    fn builtin_value(&mut self, val: &Val, entry: &Decl) -> Ty {
+    /// Boundary values hold a saturated call.
+    fn builtin_value(&mut self, entry: &Decl, at: Option<Span>) -> (Ty, Val<Pending>) {
         let scheme = entry.scheme(&mut self.ctx.unifier);
         let ty = self.ctx.instantiate(&scheme);
         if entry.is_boundary()
             && let Ty::Thunk(body) = &ty
             && let Some(producer) = self.spine(body).producer()
         {
-            let key = Node::val(val);
-            self.ctx.record_boundary(key, &entry.name, producer.ty);
-            self.ctx.boundary_values.insert(
-                key,
-                BoundaryValue {
-                    name: entry.name.to_string(),
-                    arity: entry.fixed_arity(),
-                },
+            self.ctx.record_boundary(&entry.name, &producer.ty);
+            let node = boundary_block(
+                &entry.name,
+                entry.fixed_arity(),
+                Pending::Open(producer.ty),
+                at,
+                self.ctx,
             );
+            return (ty, node);
         }
-        ty
+        (ty, Val::Variable(entry.name.clone().into()))
     }
 
-    /// A value held to its contract: inferred, then unified with the site's type.
-    fn infer_protected_val(&mut self, value: &Val, site: &Site) -> Ty {
-        let have = self.infer_val(value);
+    /// Infer a value against a fresh instance of its retained contract.
+    fn infer_protected_val(&mut self, value: &Val, site: &Arc<Site>) -> (Ty, Val<Pending>) {
+        let (have, value) = self.infer_val(value, None);
         let want = site.instantiate(&mut self.ctx.unifier);
         self.ctx.unify_ty(&have, &want, Reason::ProtectContract);
-        want
+        (
+            want,
+            Val::Protected {
+                value: Box::new(value),
+                site: Pending::Kept(Arc::clone(site)),
+            },
+        )
     }
 
-    pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
+    /// `at` places boundary blocks; it never changes the diagnostic position.
+    pub(super) fn infer_val(&mut self, val: &Val, at: Option<Span>) -> (Ty, Val<Pending>) {
         match val {
             Val::Protected { value, site } => self.infer_protected_val(value, site),
-            Val::Unit => Ty::Unit,
-            Val::String(_) => Ty::String,
-            Val::Int(_) => Ty::Int,
-            Val::Float(_) => Ty::Float,
-            Val::Bool(_) => Ty::Bool,
+            Val::Unit => (Ty::Unit, Val::Unit),
+            Val::String(v) => (Ty::String, Val::String(v.clone())),
+            Val::Int(v) => (Ty::Int, Val::Int(*v)),
+            Val::Float(v) => (Ty::Float, Val::Float(*v)),
+            Val::Bool(v) => (Ty::Bool, Val::Bool(*v)),
             Val::Variable(name) => {
                 if crate::syntax::is_control_operator(name) {
                     self.ctx.diagnose(TypeErrorKind::ControlOperatorAsValue {
                         name: name.to_string(),
                     });
-                    self.ctx.unifier.fresh_ty()
+                    (self.ctx.unifier.fresh_ty(), Val::Unit)
                 } else {
                     match self.env.lookup_binding(name).cloned() {
                         Some(scheme) => {
                             let ty = self.ctx.instantiate(&scheme);
-                            self.ctx
-                                .note_residual_use(Node::val(val), name, &scheme, &ty);
+                            let imported = self.ctx.note_residual_use(name, &scheme, &ty);
                             self.note_unit_read(name, &ty);
-                            ty
+                            let value = Val::Variable(name.clone());
+                            let value = if imported {
+                                Val::Protected {
+                                    value: Box::new(value),
+                                    site: Pending::Imported(ty.clone()),
+                                }
+                            } else {
+                                value
+                            };
+                            (ty, value)
                         }
                         None => match self.env.builtins.value(name) {
                             Some(entry) => {
                                 let entry = entry.clone();
-                                self.builtin_value(val, &entry)
+                                self.builtin_value(&entry, at)
                             }
-                            // A base frame is a builtin *and* a handler:
-                            // name the builtin, which is what the user
-                            // wrote and what `explain` documents.
+                            // Base frames are also handlers; name the builtin the user wrote.
                             None if self.env.builtins.get(name).is_some() => {
                                 self.ctx.diagnose(TypeErrorKind::BuiltinNotFirstClass {
                                     name: name.to_string(),
                                 });
-                                self.ctx.unifier.fresh_ty()
+                                (self.ctx.unifier.fresh_ty(), Val::Unit)
                             }
                             None if self.env.lookup_handler(name).is_some() => {
                                 self.ctx.diagnose(TypeErrorKind::HandlerNotFirstClass {
                                     name: name.to_string(),
                                 });
-                                self.ctx.unifier.fresh_ty()
+                                (self.ctx.unifier.fresh_ty(), Val::Unit)
                             }
                             None if LANGUAGE_CONSTANTS.iter().any(|&(c, _)| c == &**name) => {
-                                Ty::Bool
+                                (Ty::Bool, Val::Variable(name.clone()))
                             }
                             None => {
                                 self.diagnose_unbound(name);
-                                self.ctx.unifier.fresh_ty()
+                                (self.ctx.unifier.fresh_ty(), Val::Unit)
                             }
                         },
                     }
                 }
             }
-            Val::Thunk(comp) => Ty::Thunk(Box::new(
-                self.with_scope(|this| this.infer_comp(comp.shape())),
-            )),
+            Val::Thunk(comp) => {
+                let (cty, comp) = self.with_scope(|this| this.infer_comp(comp.shape()));
+                (Ty::Thunk(Box::new(cty)), Val::thunk(Arc::new(comp)))
+            }
             Val::List(elems) => {
                 let elem = self.ctx.unifier.fresh_ty();
-                for entry in elems.shape() {
-                    self.infer_list_entry(entry, false, &elem);
-                }
-                Ty::list(elem)
+                let nodes: Vec<_> = elems
+                    .shape()
+                    .iter()
+                    .map(|entry| self.infer_list_entry(entry, false, &elem))
+                    .collect();
+                (Ty::list(elem), Val::list(nodes))
             }
-            Val::Record(entries) => self.infer_record_val(entries.shape()),
-            Val::Map(entries) => self.infer_map_val(entries.shape()),
+            Val::Record(entries) => {
+                let (ty, entries) = self.infer_record_val(entries.shape());
+                (ty, Val::Record(entries))
+            }
+            Val::Map(entries) => {
+                let (ty, entries) = self.infer_map_val(entries.shape());
+                (ty, Val::Map(entries))
+            }
             Val::Variant { label, payload } => {
-                // Construction is open: `` `ok 5 `` gets a fresh row tail.
-                let payload_ty = self.infer_val(payload);
+                // Construction leaves the row open for other alternatives.
+                let (payload_ty, payload) = self.infer_val(payload, None);
                 let rest = self.ctx.unifier.fresh_row();
-                Ty::Variant(Row::Extend(
-                    Label::Case(label.to_string()),
-                    Box::new(payload_ty),
-                    Box::new(rest),
-                ))
+                (
+                    Ty::Variant(Row::Extend(
+                        Label::Case(label.to_string()),
+                        Box::new(payload_ty),
+                        Box::new(rest),
+                    )),
+                    Val::Variant {
+                        label: label.clone(),
+                        payload: Box::new(payload),
+                    },
+                )
             }
         }
     }
@@ -1359,12 +1742,13 @@ impl Inferencer<'_> {
     /// standard input at its own root, since the feed would answer every read
     /// it makes and leave the producer working for nobody
     /// ([`stage_root_stdin_feed`]).
-    fn infer_pipeline(&mut self, stages: &[Arc<Comp>]) -> CompTy {
+    fn infer_pipeline(&mut self, stages: &[Arc<Comp>]) -> (CompTy, CompKind<Pending>) {
         // The parser unwraps a single-stage pipeline to the bare stage and the
         // elaborator preserves that shape, so a `Pipeline` node always has two.
         debug_assert!(stages.len() >= 2, "Pipeline carries ≥2 stages");
 
         let mut last = None;
+        let mut nodes = Vec::new();
         for (position, stage) in stages.iter().enumerate() {
             if position > 0
                 && let Some(feed) = stage_root_stdin_feed(stage)
@@ -1373,7 +1757,7 @@ impl Inferencer<'_> {
                     this.ctx.diagnose(TypeErrorKind::DeadPipeEdge { feed });
                 });
             }
-            let cty = self.infer_comp(stage);
+            let (cty, node) = self.infer_comp(stage);
             let producer = self.with_span(stage.span, |this| {
                 this.force_ready_shape(stage, &cty, Reason::PipelineStageShape)
             });
@@ -1385,9 +1769,13 @@ impl Inferencer<'_> {
                 });
             }
             last = Some(producer.into());
+            nodes.push(Arc::new(node));
         }
         // The pipeline produces what its last stage does, at its own grade.
-        last.expect("≥2 stages by invariant above")
+        (
+            last.expect("≥2 stages by invariant above"),
+            CompKind::Pipeline { stages: nodes },
+        )
     }
 
     /// `(pipe)` for a stage before the last, `producer`: it feeds `next` by
@@ -1437,26 +1825,39 @@ impl Inferencer<'_> {
         }
     }
 
-    fn infer_index(&mut self, target: &Val, key: &Spanned<Key>) -> Ty {
+    fn infer_index(&mut self, target: &Val, key: &Spanned<Key>) -> (Ty, Prim<Pending>) {
         if let Some(literal) = spell_literal(target) {
             if let Key::Data(value) = &key.item {
-                self.infer_val(value);
+                self.infer_val(value, None);
             }
             self.ctx.diagnose(TypeErrorKind::IndexOnLiteral {
                 literal,
                 key: spell_key(&key.item),
             });
-            return self.ctx.unifier.fresh_ty();
+            return (
+                self.ctx.unifier.fresh_ty(),
+                Prim::Index {
+                    target: Val::Unit,
+                    key: Spanned::with_span(key.span, Key::Position(0)),
+                },
+            );
         }
-        let target_ty = self.infer_val(target);
-        self.with_span(key.span, |this| {
+        let (target_ty, target) = self.infer_val(target, None);
+        let (ty, key_node) = self.with_span(key.span, |this| {
             this.infer_index_step(&target_ty, &key.item)
-        })
+        });
+        (
+            ty,
+            Prim::Index {
+                target,
+                key: Spanned::with_span(key.span, key_node),
+            },
+        )
     }
 
-    fn infer_index_step(&mut self, current_ty: &Ty, key: &Key) -> Ty {
+    fn infer_index_step(&mut self, current_ty: &Ty, key: &Key) -> (Ty, Key<Pending>) {
         let elem = self.ctx.unifier.fresh_ty();
-        match key {
+        let key = match key {
             Key::Label(label) => {
                 let tail = self.ctx.unifier.fresh_row();
                 let record = Ty::Record(Row::Extend(
@@ -1466,27 +1867,36 @@ impl Inferencer<'_> {
                 ));
                 self.ctx
                     .unify_ty(current_ty, &record, Reason::RecordFieldRead);
+                Key::Label(label.clone())
             }
-            Key::Position(_) => {
+            Key::Position(n) => {
                 self.ctx.unify_ty(
                     current_ty,
                     &Ty::list(elem.clone()),
                     Reason::ListPositionRead,
                 );
+                Key::Position(*n)
             }
             Key::Data(value) => {
-                let key_ty = self.infer_val(value);
+                let (key_ty, value) = self.infer_val(value, None);
                 self.ctx
                     .unify_ty(current_ty, &Ty::map(elem.clone()), Reason::MapKeyRead);
                 self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapIndexKey);
+                Key::Data(value)
             }
-        }
-        elem
+        };
+        (elem, key)
     }
 
-    fn infer_case(&mut self, scrutinee: &crate::source::Spanned<Val>, arms: &[CaseArm]) -> CompTy {
+    fn infer_case(
+        &mut self,
+        scrutinee: &crate::source::Spanned<Val>,
+        arms: &[CaseArm],
+    ) -> (CompTy, CompKind<Pending>) {
         let scrutinee_span = scrutinee.span;
-        let scrut_ty = self.with_span(scrutinee_span, |this| this.infer_val(&scrutinee.item));
+        let (scrut_ty, scrutinee) = self.with_span(scrutinee_span, |this| {
+            this.infer_val(&scrutinee.item, scrutinee_span)
+        });
 
         // A scrutinee that is concretely not a variant gets a sentence: the raw
         // row mismatch prints `[...ρ]`, which a beginner cannot read.
@@ -1540,7 +1950,7 @@ impl Inferencer<'_> {
                 JoinArm::new(&arm.body, vec![payload.clone()], why)
             })
             .collect();
-        let joined = self.join_arms(&join_arms, &Reason::CaseArms);
+        let (joined, nodes) = self.join_arms(&join_arms, &Reason::CaseArms);
         let closed: Vec<(Label, Ty)> = arms
             .iter()
             .zip(&payloads)
@@ -1574,19 +1984,38 @@ impl Inferencer<'_> {
             self.ctx.diagnose(translated);
         }
 
-        joined
+        (
+            joined,
+            CompKind::Case {
+                scrutinee: Spanned::with_span(scrutinee_span, scrutinee),
+                arms: arms
+                    .iter()
+                    .zip(nodes)
+                    .map(|(arm, body)| CaseArm {
+                        tag: arm.tag.clone(),
+                        body: Spanned::with_span(arm.body.span, body),
+                    })
+                    .collect(),
+            },
+        )
     }
 
     /// The `Rec` rule: bind each name to a self-referential mono
     /// computation type, infer every member in that recursive environment,
     /// unify each against its own type, unbind the self-bindings, and answer
-    /// the `index`-th member's type — memoized in `ctx.rec_groups` per
-    /// `Arc` identity, so a group is inferred once within a run however many
-    /// of its members are projected.
-    fn infer_rec(&mut self, group: &Arc<GroupNode>, index: usize) -> CompTy {
-        let key = Node::group(group);
-        if let Some(betas) = self.ctx.rec_groups.get(&key) {
-            return betas[index].clone();
+    /// the `index`-th member's type beside its projection. Member types and
+    /// the pending group are memoized in `ctx.rec_groups` per source `Arc`
+    /// identity, so all projections share one inferred group.
+    fn infer_rec(&mut self, group: &Arc<GroupNode>, index: usize) -> (CompTy, CompKind<Pending>) {
+        let key = Arc::as_ptr(group);
+        if let Some((betas, group)) = self.ctx.rec_groups.get(&key) {
+            return (
+                betas[index].clone(),
+                CompKind::Rec {
+                    group: Arc::clone(group),
+                    index,
+                },
+            );
         }
         let members = group.shape();
 
@@ -1601,15 +2030,19 @@ impl Inferencer<'_> {
                 Scheme::mono(Ty::Thunk(Box::new(beta.clone()))),
             );
         }
-        for ((_, member), beta) in members.iter().zip(betas.iter()) {
-            let member_ty = self.infer_comp(member);
+        let mut nodes = Vec::new();
+        for ((name, member), beta) in members.iter().zip(betas.iter()) {
+            let (member_ty, member) = self.infer_comp(member);
             self.ctx.unify_comp_ty(&member_ty, beta, Reason::LetRecSelf);
+            nodes.push((name.clone(), Arc::new(member)));
         }
         for (name, _) in members {
             self.env.unbind(name);
         }
-        self.ctx.rec_groups.insert(key, betas.clone());
-        betas[index].clone()
+        let group = GroupNode::new(nodes.into());
+        let cty = betas[index].clone();
+        self.ctx.rec_groups.insert(key, (betas, Arc::clone(&group)));
+        (cty, CompKind::Rec { group, index })
     }
 
     /// Note, for the `()` note, that `pattern` binds what a call returned.
@@ -1652,23 +2085,33 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A computation's result held to its contract, as [`Self::infer_protected_val`].
-    fn infer_protected_comp(&mut self, body: &Comp, site: &Site) -> CompTy {
-        let have = self.infer_comp(body);
+    /// Hold the result, not its producer grade, to the retained contract.
+    fn infer_protected_comp(
+        &mut self,
+        body: &Comp,
+        site: &Arc<Site>,
+    ) -> (CompTy, CompKind<Pending>) {
+        let (have, body) = self.infer_comp(body);
         let result = self.force_return_shape(&have, Reason::ProtectContract).ty;
         let want = site.instantiate(&mut self.ctx.unifier);
         self.ctx.unify_ty(&result, &want, Reason::ProtectContract);
-        have
+        (
+            have,
+            CompKind::Protect {
+                body: Arc::new(body),
+                site: Pending::Kept(Arc::clone(site)),
+            },
+        )
     }
 
-    fn infer_prim(&mut self, prim: &Prim) -> Ty {
+    fn infer_prim(&mut self, prim: &Prim) -> (Ty, Prim<Pending>) {
         match prim {
             Prim::Binary(op, lhs, rhs) => self.infer_binary(*op, lhs, rhs),
             Prim::Negate(value) => {
-                let ty = self.infer_val(value);
+                let (ty, value) = self.infer_val(value, None);
                 let number = self.ctx.fresh_kinded(Kind::NUMBER);
                 self.ctx.unify_ty(&ty, &number, Reason::Negation);
-                number
+                (number, Prim::Negate(value))
             }
             Prim::Not(value) => self.infer_not(value),
             Prim::Index { target, key } => self.infer_index(target, key),
@@ -1676,132 +2119,190 @@ impl Inferencer<'_> {
             Prim::List(elems) => self.infer_list(elems),
             Prim::Map(entries) => self.infer_map(entries),
             Prim::Render(value) => {
-                let ty = self.infer_val(value);
+                let (ty, value) = self.infer_val(value, None);
                 let scalar = self.ctx.fresh_kinded(Kind::SCALAR);
                 self.ctx.unify_ty(&ty, &scalar, Reason::Interpolation);
-                Ty::String
+                (Ty::String, Prim::Render(value))
             }
             Prim::Concat(parts) => {
+                let mut nodes = Vec::new();
                 for value in parts {
-                    let ty = self.infer_val(value);
+                    let (ty, value) = self.infer_val(value, None);
                     self.ctx.unify_ty(&ty, &Ty::String, Reason::Interpolation);
+                    nodes.push(value);
                 }
-                Ty::String
+                (Ty::String, Prim::Concat(nodes.into()))
             }
             Prim::Decode(value) => {
-                let ty = self.infer_val(value);
+                let (ty, value) = self.infer_val(value, None);
                 self.ctx.unify_ty(&ty, &Ty::Bytes, Reason::Capture);
-                Ty::String
+                (Ty::String, Prim::Decode(value))
             }
         }
     }
 
-    pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
+    // Keep rule-local node temporaries off the recursive dispatch frame: in
+    // debug builds every nested rule otherwise reserves their combined space.
+    fn infer_app(
+        &mut self,
+        span: Option<Span>,
+        head: &Comp,
+        args: &[Spanned<Val>],
+    ) -> (CompTy, CompKind<Pending>) {
+        let (head_ty, head_node) = match &head.item {
+            // The forced value's type is read here, not through the
+            // `Force` rule, so a value used as a command head is named
+            // as such before the general mismatch says it in jargon.
+            CompKind::Force(value) => {
+                let (ty, node) = self.with_span(head.span, |this| this.infer_val(value, None));
+                if let Some(ty) = self.non_thunk_ty(&ty) {
+                    match written(value) {
+                        Some(name) => {
+                            let kind = TypeErrorKind::HeadBoundToValue {
+                                name: name.to_string(),
+                                ty,
+                            };
+                            self.with_span(head.span, |this| this.ctx.diagnose(kind));
+                        }
+                        None => self.ctx.diagnose(TypeErrorKind::CommandNotFunction { ty }),
+                    }
+                    // Check the args anyway, then hand the enclosing
+                    // pipeline or chain a coherent fresh result.
+                    self.infer_refused_args(args);
+                    return (
+                        self.ctx.unifier.fresh_comp_ty(),
+                        CompKind::Return(Val::Unit),
+                    );
+                }
+                let cty = self.with_span(head.span, |this| {
+                    this.forced(value, &ty, Reason::AutoderefHead)
+                });
+                (cty, Spanned::with_span(head.span, CompKind::Force(node)))
+            }
+            _ => self.with_span(head.span, |this| this.infer_comp(head)),
+        };
+        let (cty, args, splits) = self.apply_args(head_ty, args);
+        let node = self.split(span, &splits, args, |args| applied(span, head_node, args));
+        (cty, node)
+    }
+
+    fn infer_exec(&mut self, comp: &Comp, e: &Exec) -> (CompTy, CompKind<Pending>) {
+        let redirects = e.redirects.map(|operand| self.infer_val(operand, None).1);
+        let (cty, node) = match &e.head {
+            CommandWord::Name(CommandName::Bare(name)) => {
+                self.exec_comp_ty(comp, name, e, redirects)
+            }
+            CommandWord::External(name)
+            | CommandWord::Name(name @ (CommandName::Path(_) | CommandName::TildePath(_))) => {
+                let (cty, argv) = self.external_exec_comp_ty(&name.written(), &e.argv);
+                (cty, exec_node(&e.head, argv, redirects, None))
+            }
+        };
+        let cty = if e.redirects.is_empty() {
+            cty
+        } else {
+            self.redirected(&cty, e.redirects.stdout.is_some())
+        };
+        (cty, node)
+    }
+
+    fn infer_if(
+        &mut self,
+        cond: &Spanned<Val>,
+        then: &Spanned<Val>,
+        else_: &Spanned<Val>,
+    ) -> (CompTy, CompKind<Pending>) {
+        let (cond_ty, cond_node) = self.infer_val(&cond.item, cond.span);
+        // Underline just the cond, not the whole `if … else …` form.
+        self.with_span(cond.span, |this| {
+            this.ctx.unify_ty(&cond_ty, &Ty::Bool, Reason::IfCond);
+        });
+        let arms = [then, else_].map(|arm| JoinArm::new(arm, vec![], Reason::IfBranches));
+        let (cty, nodes) = self.join_arms(&arms, &Reason::IfBranches);
+        let mut nodes = nodes.into_iter();
+        (
+            cty,
+            CompKind::If {
+                cond: Spanned::with_span(cond.span, cond_node),
+                then: Spanned::with_span(then.span, nodes.next().expect("then arm")),
+                else_: Spanned::with_span(else_.span, nodes.next().expect("else arm")),
+            },
+        )
+    }
+
+    pub(super) fn infer_comp(&mut self, comp: &Comp) -> (CompTy, Comp<Pending>) {
         if let Some(span) = comp.span {
             self.ctx.pos = Some(span);
         }
 
-        match &comp.item {
+        let (cty, item) = match &comp.item {
             CompKind::Protect { body, site } => self.infer_protected_comp(body, site),
             CompKind::Return(value) => {
-                let ty = self.infer_val(value);
-                self.produces(ty)
+                let (ty, value) = self.infer_val(value, None);
+                (self.produces(ty), CompKind::Return(value))
             }
             CompKind::Lam { param, body } => {
                 let param_ty = self.ctx.unifier.fresh_ty();
-                let body_ty = self.with_scope(|this| {
+                let (body_ty, body) = self.with_scope(|this| {
                     this.env
                         .bind(param.to_string(), Scheme::mono(param_ty.clone()));
                     this.infer_comp(body)
                 });
-                CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
+                (
+                    CompTy::Fun(Box::new(param_ty), Box::new(body_ty)),
+                    CompKind::Lam {
+                        param: param.clone(),
+                        body: Arc::new(body),
+                    },
+                )
             }
             CompKind::Force(value) => {
-                let val_ty = self.infer_val(value);
-                self.forced(value, &val_ty, Reason::ForceOperand)
+                let (val_ty, node) = self.infer_val(value, None);
+                (
+                    self.forced(value, &val_ty, Reason::ForceOperand),
+                    CompKind::Force(node),
+                )
             }
             CompKind::Bind {
                 comp: inner,
                 pattern,
                 rest,
             } => {
-                self.infer_let(pattern, inner);
-                self.infer_comp(rest)
+                let inner = self.infer_let(pattern, inner);
+                let (cty, rest) = self.infer_comp(rest);
+                (
+                    cty,
+                    CompKind::Bind {
+                        comp: inner,
+                        pattern: Arc::clone(pattern),
+                        rest: Arc::new(rest),
+                    },
+                )
             }
             CompKind::Seq { first, rest } => {
-                self.infer_statement(first);
-                self.infer_comp(rest)
+                let (_, first) = self.infer_statement(first);
+                let (cty, rest) = self.infer_comp(rest);
+                (
+                    cty,
+                    CompKind::Seq {
+                        first: Arc::new(first),
+                        rest: Arc::new(rest),
+                    },
+                )
             }
-            CompKind::App { head, args } => {
-                let head_ty = match &head.item {
-                    // The forced value's type is read here, not through the
-                    // `Force` rule, so a value used as a command head is named
-                    // as such before the general mismatch says it in jargon.
-                    CompKind::Force(value) => {
-                        let ty = self.with_span(head.span, |this| this.infer_val(value));
-                        if let Some(ty) = self.non_thunk_ty(&ty) {
-                            match written(value) {
-                                Some(name) => {
-                                    let kind = TypeErrorKind::HeadBoundToValue {
-                                        name: name.to_string(),
-                                        ty,
-                                    };
-                                    self.with_span(head.span, |this| this.ctx.diagnose(kind));
-                                }
-                                None => self.ctx.diagnose(TypeErrorKind::CommandNotFunction { ty }),
-                            }
-                            // Check the args anyway, then hand the enclosing
-                            // pipeline or chain a coherent fresh result.
-                            self.infer_refused_args(args);
-                            return self.ctx.unifier.fresh_comp_ty();
-                        }
-                        self.with_span(head.span, |this| {
-                            this.forced(value, &ty, Reason::AutoderefHead)
-                        })
-                    }
-                    _ => self.with_span(head.span, |this| this.infer_comp(head)),
-                };
-                self.apply_args(Node::comp(comp), head_ty, args)
-            }
-            CompKind::Exec(e) => {
-                // Runtime renders any value; inference still checks embedded blocks.
-                for operand in e.redirects.operands() {
-                    self.infer_val(operand);
-                }
-                let cty = match &e.head {
-                    CommandWord::Name(CommandName::Bare(name)) => {
-                        self.exec_comp_ty(comp, name, &e.argv)
-                    }
-                    CommandWord::External(name)
-                    | CommandWord::Name(
-                        name @ (CommandName::Path(_) | CommandName::TildePath(_)),
-                    ) => self.external_exec_comp_ty(&name.written(), &e.argv),
-                };
-                if e.redirects.is_empty() {
-                    cty
-                } else {
-                    self.redirected(&cty, e.redirects.stdout.is_some())
-                }
-            }
+            CompKind::App { head, args } => self.infer_app(comp.span, head, args),
+            CompKind::Exec(exec) => self.infer_exec(comp, exec),
             CompKind::Native { .. } => {
                 unreachable!("a native's code is built by forcing it, never checked")
             }
             CompKind::Pipeline { stages } => self.infer_pipeline(stages),
             CompKind::Prim(prim) => {
-                let ty = self.infer_prim(prim);
-                self.produces(ty)
+                let (ty, prim) = self.infer_prim(prim);
+                (self.produces(ty), CompKind::Prim(prim))
             }
             CompKind::Rec { group, index } => self.infer_rec(group, *index),
-            CompKind::Tilde(_) => self.produces(Ty::String),
-            CompKind::If { cond, then, else_ } => {
-                let cond_ty = self.infer_val(&cond.item);
-                // Underline just the cond, not the whole `if … else …` form.
-                self.with_span(cond.span, |this| {
-                    this.ctx.unify_ty(&cond_ty, &Ty::Bool, Reason::IfCond);
-                });
-                let arms = [then, else_].map(|arm| JoinArm::new(arm, vec![], Reason::IfBranches));
-                self.join_arms(&arms, &Reason::IfBranches)
-            }
+            CompKind::Tilde(path) => (self.produces(Ty::String), CompKind::Tilde(path.clone())),
+            CompKind::If { cond, then, else_ } => self.infer_if(cond, then, else_),
             CompKind::Case { scrutinee, arms } => self.infer_case(scrutinee, arms),
             CompKind::Within {
                 opts,
@@ -1818,33 +2319,52 @@ impl Inferencer<'_> {
             // `Arc<Comp>` rather than a thunk-shaped `Val` like the scope
             // forms above, so infer it directly.
             CompKind::Redirect { body, redirects } => {
-                for operand in redirects.operands() {
-                    self.infer_val(operand);
-                }
-                let cty = self.infer_comp(body);
-                self.redirected(&cty, redirects.stdout.is_some())
+                let redirects = redirects.map(|operand| self.infer_val(operand, None).1);
+                let (cty, body) = self.infer_comp(body);
+                (
+                    self.redirected(&cty, redirects.stdout.is_some()),
+                    CompKind::Redirect {
+                        body: Arc::new(body),
+                        redirects,
+                    },
+                )
             }
-            // Inserted by `annotate`'s write-back pass, so it is absent from a
-            // freshly elaborated tree but present in every tree re-inferred
-            // from a live value — a handler arm vetted at install, a bound
-            // lambda's body.  `cap M` runs a command and returns what it wrote.
+            // Rechecked live closures can already contain captures.
             CompKind::Capture(body) => {
-                let body_ty = self.infer_comp(body);
+                let (body_ty, body) = self.infer_comp(body);
                 self.ctx
                     .unify_comp_ty(&body_ty, &CompTy::command(), Reason::Capture);
-                self.produces(Ty::Bytes)
+                (self.produces(Ty::Bytes), CompKind::Capture(Arc::new(body)))
             }
-        }
+        };
+        (cty, Spanned::with_span(comp.span, item))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TypeErrorKind, coverage_verdict};
+    use super::InferCtx;
+    use super::{TypeErrorKind, captured_string, coverage_verdict};
+    use crate::ir::{Comp, CompKind, Prim, Val};
+    use crate::source::{FileId, Span, Spanned};
     use crate::syntax::parser::parse;
     use crate::ty::{Label, Row, RowVar, Scheme, Ty};
     use crate::{SessionSchemes, elaborator::elaborate, typecheck};
     use std::sync::Arc;
+
+    #[test]
+    fn capture_nodes_take_the_bodys_span() {
+        let span = Span::new(FileId::DUMMY, 3, 9);
+        let mut ctx = InferCtx::new();
+
+        let body: Comp = Spanned::new(span, CompKind::Return(Val::Unit));
+        let CompKind::Bind { comp, rest, .. } = captured_string(body, &mut ctx) else {
+            panic!("a capture is bound to its decode");
+        };
+        assert!(matches!(comp.item, CompKind::Capture(_)));
+        assert!(matches!(rest.item, CompKind::Prim(Prim::Decode(_))));
+        assert_eq!([comp.span, rest.span], [Some(span); 2]);
+    }
 
     /// The missing and the extra tags a case is judged to have.
     type Verdict<'a> = Option<(&'a [&'a str], &'a [&'a str])>;

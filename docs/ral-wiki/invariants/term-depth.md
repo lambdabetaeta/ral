@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: b1ba0713
 ---
 
 # Term depth
@@ -19,7 +19,7 @@ door, or it is a stack overflow waiting for a long enough program.**
   `Chain` lowers to right-nested `try`, `elsif` folds, and a block body folds
   into a `Bind`/`Seq` chain.
 - **Why not a measure.** A block *is* a `Bind`/`Seq` chain, walked by the checker,
-  the annotator and the drop glue alike, so no depth measure rejects a deep
+  freeze and the drop glue alike, so no depth measure rejects a deep
   term without rejecting a long block; and a limit safe on Windows' 1 MB main
   stack would reject a few hundred statements.
 - **Why not `stacker`.** Tried and declined: it protects only the walks that
@@ -36,7 +36,9 @@ door, or it is a stack overflow waiting for a long enough program.**
   `?` arms or `elsif` branches overflowed the checker; a 5 000-statement block
   or 5 000-term sum survived and 20 000 did not. A debug build spends about
   13 KB of stack a level in the elaborator. `core/tests/deep_terms.rs` holds
-  the five shapes at 2 000 on the 2 MB test thread.
+  the five shapes at 2 000 on the 2 MB test thread, plus a refused bind chain:
+  six cases over five shapes. The refused unit's partial checked IR is dropped
+  on the compile thread without freezing.
 - **Unification alone is budgeted.** A depth budget belongs to unification,
   not to every traversal of a type: `MAX_UNIFY_DEPTH = 512` (`unify.rs`),
   charged by `deeper()` on each descent into a strictly deeper subterm, since

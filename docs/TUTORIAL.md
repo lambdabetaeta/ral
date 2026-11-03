@@ -86,13 +86,13 @@ with one trailing newline removed:
 
     echo "$branch on $host has $count lines of notes"
 
-A `let` captures the command that produces its value. A function, a block in
-hand, or a handle in that position binds what it *returns*; add `| from-line`
-to bind what it writes:
+A `let` captures a command's stdout even through a bound block or function.
+A value-returning computation instead binds its result. Use `| from-line` to
+decode stdout explicitly:
 
     let f    = { hostname }
-    let x    = f               # prints the host name; x is ()
-    let host = f | from-line   # binds it
+    let x    = f               # binds the host name as a String; no streamed stdout
+    let host = f | from-line   # explicitly decodes the same output
 
 A bare word runs a command only at the head of a command. In a list, record,
 argument, or `return`, it is a string:
@@ -591,7 +591,7 @@ string before the block is its title, which says what the work is:
 `await` behaves as if the block had run on that line: its output appears
 here, its value is returned, and its failure is raised here, so put the
 `await` inside `try` to recover. `let log = await $tests` binds the output, as
-`let log = { cargo test -q }` would. The interactive shell lets you leave the
+`let log = cargo test -q` would. The interactive shell lets you leave the
 title out, `spawn { cargo test -q }`; an agent host requires it. There is no
 trailing `&`: a POSIX `&` makes a job for `fg`/`bg`, while `spawn` makes a
 worker you `await`, so ral asks you to say which you meant.
@@ -633,14 +633,14 @@ in the order it was born; when it fails or is interrupted, they are all
 cancelled. The prelude builds the common shapes on it:
 
     par { |file| convert $file } $files !{nproc}
-    both { cargo test -q } { cargo clippy -q }
+    both { return !{cargo test -q} } { return !{cargo clippy -q} }
     first-of [{ fetch-from a }, { fetch-from b }]
     race [$first, $second]
 
 `par` is a bounded parallel `map` that keeps input order, output included.
-`both` runs two blocks at once and returns `[fst: …, snd: …]`; it awaits `fst`
-then `snd`, so a failure in either is raised when its turn comes and the other
-is cancelled. `first-of` runs several blocks and behaves as the first to
+`both` runs two value-returning blocks at once and returns `[fst: …, snd: …]`;
+it awaits `fst` then `snd`, so a failure in either is raised in its turn and
+the other is cancelled. `first-of` runs several blocks and behaves as the first to
 finish, cancelling the rest. `race` does the same for handles you already hold:
 it claims the first to finish and cancels the others. In `par`, `first-of` and
 `race` the first failure cancels the others and is raised, and Ctrl-C cancels

@@ -23,7 +23,7 @@ case $tagged [`some: { |pl| $named $pl }, `none: { |pl| echo other }]
 # A free Unit handler joins the command body's grade.
 try { echo relaxed } { |_| return () }
 
-# Plan §1.10 row Command/String join: its caller captures output explicitly.
+# The caller captures command output explicitly beside a String arm.
 let either = { |thunk val| if true { !$thunk } else { return $val } }
 echo !{either { return !{echo hi} } ''}
 let three = either { return 3 } 4

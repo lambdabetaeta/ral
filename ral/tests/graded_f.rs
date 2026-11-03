@@ -47,13 +47,13 @@ fn a_wrapper_that_runs_a_block_produces_what_the_block_does() {
     assert_eq!(out("let x = attempt { echo hi }\nto-json $x"), "hi\nnull");
 }
 
-// §1.10: bare `map` writes each command's output.
+// Bare `map` writes each command's output.
 #[test]
 fn map_command_blocks_write_in_input_order() {
     assert_eq!(out("map { |f| echo $f } [1, 2]"), "1\n2");
 }
 
-// §1.10: bound `map` writes output and binds Unit elements.
+// Bound `map` writes output and binds Unit elements.
 #[test]
 fn a_bound_map_of_command_blocks_binds_units() {
     assert_eq!(
@@ -62,7 +62,7 @@ fn a_bound_map_of_command_blocks_binds_units() {
     );
 }
 
-// §1.10: `map $g` follows the same rule for a command block in hand.
+// `map $g` also writes output from a command block in hand.
 #[test]
 fn a_bound_map_of_a_command_block_in_hand_binds_units() {
     assert_eq!(
@@ -71,7 +71,7 @@ fn a_bound_map_of_a_command_block_in_hand_binds_units() {
     );
 }
 
-// §1.10: `par` replays command output in input order and returns Units.
+// `par` replays command output in input order and returns Units.
 #[test]
 fn par_command_blocks_replay_output_and_bind_units() {
     assert_eq!(
@@ -80,19 +80,19 @@ fn par_command_blocks_replay_output_and_bind_units() {
     );
 }
 
-// §1.10: `cross`, a wrapper over `map`, writes command output.
+// `cross`, a wrapper over `map`, writes command output.
 #[test]
 fn cross_command_blocks_write_in_input_order() {
     assert_eq!(out("cross [1, 3] [2] { |x y| echo \"$x$y\" }"), "12\n32");
 }
 
-// §1.10: heterogeneous `each` joins a command and a free Unit producer.
+// Heterogeneous `each` joins a command and a free Unit producer.
 #[test]
 fn each_runs_command_and_unit_blocks_from_one_list() {
     assert_eq!(out("each { |b| !$b } [{ echo hi }, { return () }]"), "hi");
 }
 
-// §1.10: a let-binding wrapper needs its argument to capture explicitly.
+// A let-binding wrapper needs its argument to capture explicitly.
 #[test]
 fn a_value_demanding_wrapper_accepts_explicit_capture() {
     assert_eq!(
@@ -111,7 +111,7 @@ fn a_stdout_redirect_leaves_a_value() {
     );
 }
 
-// §1.10: a mixed `try` needs explicit capture in its command body.
+// A mixed `try` needs explicit capture in its command body.
 #[test]
 fn a_try_joins_explicitly_captured_output_with_a_value_handler() {
     assert_eq!(

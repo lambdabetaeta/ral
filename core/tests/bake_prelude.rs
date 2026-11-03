@@ -1,10 +1,10 @@
 //! Regression test for the prelude bake.
 //!
-//! The prelude elaborates to a [`ral_core::ir::Toplevel`], one `Phrase` per
-//! top-level statement; `bake_prelude` checks the phrases in order, each
-//! `Phrase::Define` carrying its generalised schemes.  This test pins that
-//! they reach every top-level `let`, and that the checked pass's interior
-//! annotations (`Capture`, a pipeline's yield) land on the baked tree.
+//! The prelude elaborates to unchecked phrases, one per top-level statement;
+//! `bake_prelude` checks them in order and returns a [`ral_core::ir::Toplevel`],
+//! each `Phrase::Define` carrying its settled schemes. This test pins that
+//! they reach every top-level `let`, and that interior checker-built nodes
+//! (`Capture`) land on the baked tree.
 
 #![allow(clippy::disallowed_methods, reason = "test code")]
 
@@ -80,9 +80,9 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
     );
 }
 
-/// The bake runs one checked pass — parse, elaborate, annotate — so the
-/// toplevel blob the build embeds already carries the checker's ground
-/// verdicts on interior nodes, not just each phrase's own root.  The
+/// The bake parses, elaborates and typechecks: inference constructs the IR,
+/// then freeze snapshots sites and settles schemes. The embedded blob carries
+/// checked interior nodes, not just each phrase's own root.  The
 /// elaborator never emits a `Capture` node, so one below a phrase's root is
 /// proof the checked pass descended and inserted it — were the bake to embed
 /// the bare elaborated toplevel, none would exist anywhere in the tree.  A
@@ -119,7 +119,7 @@ fn prelude_schemes_carry_their_grades() {
             .unwrap_or_else(|| panic!("the prelude binds {name}"));
         scheme.to_string()
     };
-    // Capture-at-let plan §§1.2, 1.7: fresh grades print only where unit is possible.
+    // Fresh grades print only where unit is possible (SPEC §17.3).
     assert_eq!(
         shown("retry"),
         "∀α ν. Integer → {Command[ν] α} → Command[ν] α"
@@ -143,7 +143,7 @@ fn prelude_schemes_carry_their_grades() {
         "∀α ν ξ. {String → Command[ξ] α} → Command[ν] Unit"
     );
     assert_eq!(shown("bytes-to-string"), "Bytes → Returns String");
-    // §1.10's `par` row: its callback's output is replayed, not captured.
+    // `par` replays its callback's output rather than capturing it.
     assert_eq!(
         shown("par"),
         "∀α β ν. {α → Command[ν] β} → [α] → Integer → Returns [β]"
@@ -164,7 +164,7 @@ fn builtin_schemes_carry_their_grades() {
     let shown = |name: &str| ral_core::typecheck::builtin_type_hint(&table, name).unwrap();
     assert_eq!(shown("echo"), "[String] → Command");
     assert_eq!(shown("to-json"), "∀α:data. α → Command");
-    // Capture-at-let plan §1.7: visible grade variables use `Command[ν]`.
+    // Visible grade variables use `Command[ν]` (SPEC §17.3).
     assert_eq!(shown("await"), "∀α ν. Handle (Command[ν] α) → Command[ν] α");
     assert_eq!(
         shown("is-done"),
@@ -174,7 +174,7 @@ fn builtin_schemes_carry_their_grades() {
         shown("each"),
         "∀α β ν ξ. {α → Command[ν] β} → [α] → Command[ξ] Unit"
     );
-    // §1.10's `map { |f| echo $f }` row requires a grade-polymorphic callback.
+    // `map { |f| echo $f }` requires a grade-polymorphic callback.
     assert_eq!(
         shown("map"),
         "∀α β ν. {α → Command[ν] β} → [α] → Returns [β]"
@@ -187,7 +187,7 @@ fn builtin_schemes_carry_their_grades() {
         shown("fail"),
         "∀α ν ρ. [status: Integer, message: String, ...ρ] → Command[ν] α"
     );
-    // §1.7: no printed quantifier for a grade paired with a non-unit type.
+    // No printed quantifier for a grade paired with a non-unit type.
     assert_eq!(shown("cd"), "∀ν. String → Command[ν] Unit");
     assert_eq!(shown("length"), "∀α:sized. α → Returns Integer");
 }

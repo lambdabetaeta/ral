@@ -3,16 +3,13 @@
 //!
 //! Seeding and entry points live here; the inference rules live in `infer`.
 
-mod annotate;
 pub mod builtins;
 pub mod contract;
 mod env;
 mod error;
 mod explain;
+mod freeze;
 mod generalize;
-#[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test code")]
-mod golden_tests;
 mod grade;
 pub(crate) mod infer;
 mod scope;
@@ -37,7 +34,7 @@ pub(crate) use self::generalize::{has_result_only_var, scheme_is_closed};
 pub(crate) use self::generalize::{instantiate, reseed_weak};
 use crate::ir::{Comp, Phrase, Toplevel, Val};
 use crate::source::Spanned;
-use crate::ty::{CompTy, Scheme, Ty};
+use crate::ty::{CompTy, Scheme, Ty, UnitId};
 use std::sync::Arc;
 
 /// What a form holds its programs' own return value to: the declared
@@ -119,7 +116,7 @@ fn seed_env(
             Arc::new(Scheme::mono(ty))
         };
         // Any binding with weak residuals is re-admitted against its first use
-        // here; delayed parts are guarded per occurrence (`InferCtx::imported_sites`).
+        // here; delayed parts are guarded per occurrence with pending sites.
         if !scheme.weak.is_empty() {
             residuals.push((name.clone(), Arc::clone(&scheme)));
         }
@@ -142,7 +139,7 @@ fn seeded_session(schemes: SessionSchemes) -> (InferCtx, TyEnv) {
 
 /// Run `f` inside a fresh one-shot inference session over `schemes` — closed
 /// against its own unifier, and dropped when `f` returns so its variable ids
-/// cannot alias a later run's.
+/// cannot alias a later run's. Constructed IR is discarded without freezing.
 fn one_shot_inference<R>(
     schemes: SessionSchemes,
     f: impl FnOnce(&mut infer::Inferencer) -> R,
@@ -173,9 +170,9 @@ fn close_thunk_scheme(
 
 /// Type-check `phrases`, seeding from the live session.
 ///
-/// Infer each phrase in order, extending `TyEnv` at each `Define`, then
-/// write back the verdict — each `Define`'s generalised per-name schemes
-/// land on its own `Phrase::Define`, not on a shared spine.  Only closed
+/// Infer each phrase in order, building its checked IR beside its type and
+/// extending `TyEnv` at each `Define`. After ascription succeeds, freeze sites,
+/// settle `Define` schemes and build readmissions under one fresh unit. Only closed
 /// schemes leave — a run's unifier dies with the run and its variable ids
 /// restart at zero, so an open scheme from run *N* would alias run
 /// *N+1*'s fresh variables.
@@ -190,8 +187,7 @@ fn close_thunk_scheme(
 ///
 /// # Errors
 /// Every diagnostic inference collected, whenever that list is non-empty.
-/// Inference alone judges; the write-back pass runs only on a program it
-/// accepted, and places the coercions that verdict implies.
+/// Erroneous units are refused whole and their inferred IR is dropped without freezing.
 pub fn typecheck(
     phrases: &[Spanned<Phrase<()>>],
     schemes: SessionSchemes,
@@ -199,7 +195,7 @@ pub fn typecheck(
 ) -> Result<Toplevel, Vec<TypeError>> {
     let (mut ctx, mut env) = seeded_session(schemes);
 
-    let (mut phrase_schemes, tail) = infer::infer_toplevel(&mut ctx, &mut env, phrases);
+    let (pending, tail) = infer::infer_toplevel(&mut ctx, &mut env, phrases);
     contract::drain_nested(&mut ctx);
     if ctx.errors.is_empty()
         && let Some(table) = contract
@@ -209,20 +205,8 @@ pub fn typecheck(
     if !ctx.errors.is_empty() {
         return Err(ctx.errors);
     }
-    for (_, scheme) in phrase_schemes.iter_mut().flatten() {
-        *scheme = settle_weak(&ctx.unifier, Arc::clone(scheme));
-        self::generalize::debug_assert_scheme_closed(
-            scheme,
-            "settled Define scheme must be closed",
-        );
-    }
-
-    ctx.snapshot_sites();
-    Ok(annotate::annotate_toplevel(
-        phrases,
-        &mut ctx,
-        phrase_schemes,
-    ))
+    let unit = UnitId::fresh();
+    Ok(freeze::freeze_toplevel(&pending, &ctx, unit))
 }
 
 /// Type-check the prelude IR against `manifest`, returning the annotated
@@ -259,9 +243,9 @@ pub(crate) fn alias_arm_scheme(
     schemes: SessionSchemes,
 ) -> Result<Scheme, Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
-        let cty = inferencer
-            .arm(&Val::thunk(Arc::clone(arm)), infer::Arm::Named(head))
-            .map_err(|(_, error)| error)?;
+        let (verdict, _) =
+            inferencer.arm(&Val::thunk(Arc::clone(arm)), infer::Arm::Named(head), None);
+        let cty = verdict.map_err(|(_, error)| error)?;
         Ok(close_thunk_scheme(
             inferencer,
             cty,
@@ -281,10 +265,8 @@ pub(crate) fn catch_all_stands_in(
     schemes: SessionSchemes,
 ) -> Result<(), Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
-        inferencer
-            .arm(&Val::thunk(Arc::clone(arm)), infer::Arm::CatchAll)
-            .map(drop)
-            .map_err(|(_, error)| error)
+        let (verdict, _) = inferencer.arm(&Val::thunk(Arc::clone(arm)), infer::Arm::CatchAll, None);
+        verdict.map(drop).map_err(|(_, error)| error)
     })
 }
 
@@ -292,7 +274,7 @@ pub(crate) fn catch_all_stands_in(
 /// the closure's comp inferred as written, closed against its own unifier.
 pub(crate) fn binding_value_scheme(body: &Comp, schemes: SessionSchemes) -> Scheme {
     one_shot_inference(schemes, |inferencer| {
-        let cty = inferencer.with_scope(|this| this.infer_comp(body));
+        let (cty, _) = inferencer.with_scope(|this| this.infer_comp(body));
         close_thunk_scheme(
             inferencer,
             cty,

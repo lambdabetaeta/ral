@@ -3,5 +3,5 @@
 # at: 7:48
 # contains: couldn't match type Command with type Returns Integer
 # contains: this branch returns an Int and an earlier one is a command; give that one a value of that type too (`… | from-json`, or `return` one), or write this branch's value out with `echo`
-# Plan §1.10 row mixed join, with Int; §1.4 blames the later arm.
+# A command/Int join blames the later arm (SPEC §17.6).
 let f = { |c| if $c { hostname } else { return 5 } }

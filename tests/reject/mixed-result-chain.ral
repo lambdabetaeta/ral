@@ -4,6 +4,6 @@
 # contains: couldn't match type String with type Integer
 # contains: exactly one outcome happens
 # contains: this is text (String), but a number (Int or Float) is needed
-# Plan §1.4 direct joins: retain the downstream numeric-use error.
+# A mismatched join retains the downstream numeric-use error.
 let zzv = return hello ? return 1
 return $[$zzv + 1]

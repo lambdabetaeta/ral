@@ -1280,6 +1280,7 @@ impl Unifier {
                 self.unify_ty_inner(&a1, &b1, pairs, depth)
             }
             (Ty::Handle(ga, a1), Ty::Handle(gb, b1)) => {
+                // Payload failures retain their budget, cycle or kind diagnosis.
                 if self.unify_producers((ga, &a1), (gb, &b1), pairs, depth)? {
                     Ok(())
                 } else {
@@ -1606,7 +1607,7 @@ impl Unifier {
         self.unify_comp_ty_inner(a, b, &mut pairs, 0)
     }
 
-    /// Refuse an impossible output pair before binding either grade.
+    /// Preserve Unit capability across a grade class, even after a payload error.
     fn unify_producers(
         &mut self,
         a: (Grade, &Ty),
@@ -1614,15 +1615,29 @@ impl Unifier {
         pairs: &mut Pairs,
         depth: u32,
     ) -> Result<bool, TypeErrorKind> {
-        let admits_unit = |ty: &Ty| match self.resolve_ty(ty) {
+        let (ta, tb) = (self.head_ty(a.1), self.head_ty(b.1));
+        let admits_unit = |ty: &Ty| match ty {
             Ty::Unit => true,
-            Ty::Var(v) => self.kinded(v).kind.admits(Head::Unit),
+            Ty::Var(v) => self.kinded(*v).kind.admits(Head::Unit),
             _ => false,
         };
-        if (self.resolve_grade(a.0) == Grade::Output && !admits_unit(b.1))
-            || (self.resolve_grade(b.0) == Grade::Output && !admits_unit(a.1))
-            || !self.unify_grade(a.0, b.0)
-        {
+        let (ga, gb) = (self.resolve_grade(a.0), self.resolve_grade(b.0));
+        let (a_unit, b_unit) = (admits_unit(&ta), admits_unit(&tb));
+        if (ga == Grade::Output && !b_unit) || (gb == Grade::Output && !a_unit) {
+            return Ok(false);
+        }
+        let unit_variable =
+            (a_unit && matches!(&*ta, Ty::Var(_))) || (b_unit && matches!(&*tb, Ty::Var(_)));
+        if ga != Grade::Value && gb != Grade::Value && (unit_variable || a_unit != b_unit) {
+            // A failed payload equation must not leave an alias or Output
+            // beside a type that can later exclude Unit. Admission can fail
+            // below an admitted head, or exhaust the depth budget even at Unit.
+            // A free type variable or Unit is at the head of this equation, so
+            // it neither unifies nested grades nor allocates fresh variables.
+            self.unify_ty_inner(a.1, b.1, pairs, depth)?;
+            return Ok(self.unify_grade(ga, gb));
+        }
+        if !self.unify_grade(ga, gb) {
             return Ok(false);
         }
         self.unify_ty_inner(a.1, b.1, pairs, depth)?;
@@ -1682,6 +1697,7 @@ impl Unifier {
                 };
                 match self.unify_producers((ga, &ta), (gb, &tb), pairs, depth) {
                     Ok(true) => Ok(()),
+                    // Budget, cycle and kind failures explain more than a shape mismatch.
                     Err(
                         e @ (TypeErrorKind::TypeTooDeep
                         | TypeErrorKind::CyclicType { .. }
@@ -1733,6 +1749,219 @@ fn guard_expansion<V: Eq + std::hash::Hash, K: Eq + std::hash::Hash>(
 mod tests {
     use super::*;
     use crate::source::FileId;
+
+    fn unify_test_producers(
+        u: &mut Unifier,
+        handles: bool,
+        a: (Grade, &Ty),
+        b: (Grade, &Ty),
+    ) -> Result<(), TypeErrorKind> {
+        if handles {
+            u.unify_ty(
+                &Ty::Handle(a.0, Box::new(a.1.clone())),
+                &Ty::Handle(b.0, Box::new(b.1.clone())),
+            )
+        } else {
+            u.unify_comp_ty(
+                &CompTy::Return(a.0, Box::new(a.1.clone())),
+                &CompTy::Return(b.0, Box::new(b.1.clone())),
+            )
+        }
+    }
+
+    #[test]
+    fn failed_unit_payload_equations_do_not_alias_producer_grades() {
+        for handles in [false, true] {
+            for reversed in [false, true] {
+                let mut u = Unifier::new();
+                let (unit_grade, int_grade) = (u.fresh_grade(), u.fresh_grade());
+                let (unit, int) = ((unit_grade, &Ty::Unit), (int_grade, &Ty::Int));
+                let (a, b) = if reversed { (int, unit) } else { (unit, int) };
+                let err = unify_test_producers(&mut u, handles, a, b).unwrap_err();
+                if handles {
+                    assert!(matches!(err, TypeErrorKind::TyMismatch { .. }));
+                } else {
+                    assert!(matches!(err, TypeErrorKind::CompTyMismatch { .. }));
+                }
+                assert_eq!(u.resolve_grade(unit_grade), unit_grade);
+                assert_eq!(u.resolve_grade(int_grade), int_grade);
+
+                // Continue after the error: only the Unit producer may become
+                // output. The rejected alias must not poison the Int producer.
+                unify_test_producers(&mut u, handles, unit, (Grade::Output, &Ty::Unit))
+                    .expect("Unit can produce output");
+                assert_eq!(u.resolve_grade(unit_grade), Grade::Output);
+                assert_eq!(u.resolve_grade(int_grade), int_grade);
+                assert!(
+                    unify_test_producers(&mut u, handles, int, (Grade::Output, &Ty::Unit)).is_err()
+                );
+                assert_eq!(u.resolve_grade(int_grade), int_grade);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_deep_data_payload_equations_do_not_alias_producer_grades() {
+        for handles in [false, true] {
+            for reversed in [false, true] {
+                let mut u = Unifier::new();
+                let data = u.fresh_kinded(Kind::DATA);
+                let record = Ty::Record(record_row(&[(
+                    "fn",
+                    Ty::Thunk(Box::new(CompTy::pure(Ty::Unit))),
+                )]));
+                assert!(Kind::DATA.admits(Head::Unit));
+                assert!(Kind::DATA.admits(Head::Record));
+                let (data_grade, record_grade) = (u.fresh_grade(), u.fresh_grade());
+                let (data_pair, record_pair) = ((data_grade, &data), (record_grade, &record));
+                let (a, b) = if reversed {
+                    (record_pair, data_pair)
+                } else {
+                    (data_pair, record_pair)
+                };
+                let (found, kind) = kind_refusal(unify_test_producers(&mut u, handles, a, b));
+                assert_eq!(kind, Kind::DATA);
+                assert!(matches!(found, KindFound::Type(ty) if matches!(*ty, Ty::Thunk(_))));
+                assert_eq!(kind_of(&u, &data), Kind::DATA);
+                assert_eq!(u.resolve_grade(data_grade), data_grade);
+                assert_eq!(u.resolve_grade(record_grade), record_grade);
+
+                unify_test_producers(&mut u, handles, data_pair, (Grade::Output, &Ty::Unit))
+                    .expect("the refused DATA binding still admits Unit");
+                assert_eq!(u.resolve_ty(&data), Ty::Unit);
+                assert_eq!(u.resolve_grade(data_grade), Grade::Output);
+                assert_eq!(u.resolve_grade(record_grade), record_grade);
+                assert!(
+                    unify_test_producers(&mut u, handles, record_pair, (Grade::Output, &Ty::Unit))
+                        .is_err()
+                );
+                assert_eq!(u.resolve_grade(record_grade), record_grade);
+            }
+        }
+    }
+
+    #[test]
+    fn successful_unit_capability_narrowing_still_shares_producer_grades() {
+        for handles in [false, true] {
+            for reversed in [false, true] {
+                let mut u = Unifier::new();
+                let (data, number) = (u.fresh_kinded(Kind::DATA), u.fresh_kinded(Kind::NUMBER));
+                let (data_grade, number_grade) = (u.fresh_grade(), u.fresh_grade());
+                let (data_pair, number_pair) = ((data_grade, &data), (number_grade, &number));
+                let (a, b) = if reversed {
+                    (number_pair, data_pair)
+                } else {
+                    (data_pair, number_pair)
+                };
+                unify_test_producers(&mut u, handles, a, b)
+                    .expect("numbers satisfy the data obligation");
+                assert_eq!(kind_of(&u, &data), Kind::NUMBER);
+                assert_eq!(kind_of(&u, &number), Kind::NUMBER);
+                assert_eq!(u.resolve_grade(data_grade), u.resolve_grade(number_grade));
+                assert!(matches!(u.resolve_grade(data_grade), Grade::Var(_)));
+                unify_test_producers(&mut u, handles, data_pair, (Grade::Value, &Ty::Int))
+                    .expect("both producers can be fixed to return Int");
+                assert_eq!(u.resolve_ty(&data), Ty::Int);
+                assert_eq!(u.resolve_ty(&number), Ty::Int);
+                assert_eq!(u.resolve_grade(data_grade), Grade::Value);
+                assert_eq!(u.resolve_grade(number_grade), Grade::Value);
+            }
+        }
+    }
+
+    #[test]
+    fn cyclic_payload_refusal_does_not_alias_producer_grades() {
+        for handles in [false, true] {
+            for reversed in [false, true] {
+                let mut u = Unifier::new();
+                let var = u.fresh_ty();
+                let cycle = Ty::Thunk(Box::new(CompTy::pure(var.clone())));
+                let (var_grade, cycle_grade) = (u.fresh_grade(), u.fresh_grade());
+                let (var_pair, cycle_pair) = ((var_grade, &var), (cycle_grade, &cycle));
+                let (a, b) = if reversed {
+                    (cycle_pair, var_pair)
+                } else {
+                    (var_pair, cycle_pair)
+                };
+                assert!(matches!(
+                    unify_test_producers(&mut u, handles, a, b),
+                    Err(TypeErrorKind::CyclicType { .. })
+                ));
+                assert_eq!(u.resolve_ty(&var), var);
+                assert_eq!(u.resolve_grade(var_grade), var_grade);
+                assert_eq!(u.resolve_grade(cycle_grade), cycle_grade);
+                unify_test_producers(&mut u, handles, var_pair, (Grade::Output, &Ty::Unit))
+                    .expect("the refused cycle leaves its variable free");
+                assert_eq!(u.resolve_grade(var_grade), Grade::Output);
+                assert_eq!(u.resolve_grade(cycle_grade), cycle_grade);
+            }
+        }
+    }
+
+    #[test]
+    fn depth_refusal_does_not_bind_or_alias_a_unit_capable_producers_grade() {
+        for handles in [false, true] {
+            for reversed in [false, true] {
+                for fixed_output in [false, true] {
+                    let mut u = Unifier::new();
+                    let data = u.fresh_kinded(Kind::DATA);
+                    let data_grade = u.fresh_grade();
+                    let unit_grade = if fixed_output {
+                        Grade::Output
+                    } else {
+                        u.fresh_grade()
+                    };
+                    let (data_pair, unit_pair) = ((data_grade, &data), (unit_grade, &Ty::Unit));
+                    let (a, b) = if reversed {
+                        (unit_pair, data_pair)
+                    } else {
+                        (data_pair, unit_pair)
+                    };
+                    let mut pairs = Pairs::default();
+                    // Enter the public pair's structural arm with one level
+                    // left; DATA admission itself must report TypeTooDeep.
+                    let depth = MAX_UNIFY_DEPTH - 1;
+                    let result = if handles {
+                        u.unify_ty_inner(
+                            &Ty::Handle(a.0, Box::new(a.1.clone())),
+                            &Ty::Handle(b.0, Box::new(b.1.clone())),
+                            &mut pairs,
+                            depth,
+                        )
+                    } else {
+                        u.unify_comp_ty_inner(
+                            &CompTy::Return(a.0, Box::new(a.1.clone())),
+                            &CompTy::Return(b.0, Box::new(b.1.clone())),
+                            &mut pairs,
+                            depth,
+                        )
+                    };
+                    assert!(matches!(result, Err(TypeErrorKind::TypeTooDeep)));
+                    assert_eq!(kind_of(&u, &data), Kind::DATA);
+                    assert_eq!(u.resolve_grade(data_grade), data_grade);
+                    assert_eq!(u.resolve_grade(unit_grade), unit_grade);
+
+                    u.unify_ty(&data, &Ty::Int)
+                        .expect("failed Unit admission leaves DATA free");
+                    unify_test_producers(&mut u, handles, unit_pair, (Grade::Output, &Ty::Unit))
+                        .expect("the other Unit producer can still become output");
+                    assert_eq!(u.resolve_grade(unit_grade), Grade::Output);
+                    assert_eq!(u.resolve_grade(data_grade), data_grade);
+                    assert_eq!(u.resolve_ty(&data), Ty::Int);
+                    assert!(
+                        unify_test_producers(
+                            &mut u,
+                            handles,
+                            data_pair,
+                            (Grade::Output, &Ty::Unit),
+                        )
+                        .is_err()
+                    );
+                    assert_eq!(u.resolve_grade(data_grade), data_grade);
+                }
+            }
+        }
+    }
 
     /// ``Variant{`more: {head: String, tail: Thunk(tail)}, `done: Unit}``.
     fn step(tail: CompTy) -> Ty {

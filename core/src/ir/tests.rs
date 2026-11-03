@@ -398,7 +398,8 @@ fn positional_and_arity_are_none_once_a_spread_makes_arity_dynamic() {
     let literal: Argv = vec![single("a"), single("b")].into();
     assert_eq!(literal.positional(), Some(vec![&svar("a"), &svar("b")]));
     assert_eq!(literal.arity(), Some(2));
-    assert_eq!(Argv::default().arity(), Some(0));
+    let empty: Argv = Argv::default();
+    assert_eq!(empty.arity(), Some(0));
 
     let spread: Argv = vec![single("a"), ValListElem::Spread(svar("b"))].into();
     assert_eq!(spread.positional(), None);

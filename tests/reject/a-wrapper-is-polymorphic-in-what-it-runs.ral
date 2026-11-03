@@ -3,7 +3,7 @@
 # at: 8:6
 # contains: couldn't match type Returns α with type Command
 # contains: this block is a command, but a block that returns a value is wanted here: return its output, `{ |…| return !{…} }`
-# Plan §1.10 row let-binding wrapper: its argument must return a value.
+# A let-binding wrapper requires a value-producing argument (SPEC §17.5).
 let time = { |t| let r = !$t; $r }
 time { echo hi }
 let n = time { return 3 }

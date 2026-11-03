@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d56977ff
+generated_at_commit: b1ba0713
 generated_at_date: 2026-11-03
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -7,24 +7,22 @@ covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 # Map: core / typecheck
 
 `core/src/typecheck/` is Hindley–Milner inference over the CBPV
-[[map/core/ir|IR]]. Types sit on `Val` and `Comp` after
-[[map/core/elaboration|elaboration]].
+[[map/core/ir|IR]]. Each rule builds its checked node beside its type after
+[[map/core/elaboration|elaboration]]; a successful unit freezes its sites.
 
 Entry points (`typecheck.rs`):
 
-- `typecheck(top: &Toplevel, SessionSchemes) -> Result<Toplevel, Vec<TypeError>>`
-  — this function checks a program: infer each phrase in order, extending
-  `TyEnv` at each `Define`, then `annotate::annotate_toplevel` writes the
-  verdict back, on success returning an *annotated* `Toplevel`. `annotate`
-  writes explicit verdicts onto the rebuilt IR: a generalised `Scheme` per name a
-  `Phrase::Define` binds — landed on its own phrase, not a shared spine —
-  resolved against the final unifier and closed by quantifying its
-  residuals, that is, generalised against the empty environment; and a
-  `Capture`/`Prim::Decode` pair around each command right-hand side a binding captured,
-  and explicit
-  bind/force segments for returned-thunk application
-  ([[map/core/ir|ir]]). A pipeline's value is its final stage's, so
-  there is nothing per-pipeline to annotate
+- `typecheck(phrases: &[Spanned<Phrase<()>>], SessionSchemes, Option<ReturnContract>)
+  -> Result<Toplevel, Vec<TypeError>>` — infer phrases in order, extending
+  `TyEnv` at each `Define`, and build `Phrase<DefineSchemes, Pending>` nodes.
+  Rules immediately construct capture/decode, Let-fun, returned-thunk splits,
+  boundary saturation and imported protection. Each `Define` carries its
+  harvested schemes unsettled. After nested checks and return-contract
+  ascription succeed, one `UnitId` is made and `freeze_toplevel` snapshots
+  sites, settles schemes with `settle_weak`, and builds `Toplevel.admits`
+  from first residual uses. A unit with errors is refused whole and its
+  built IR dropped without freezing ([[map/core/ir|ir]]).
+  A pipeline's value is its final stage's, with no per-stage type annotations
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   The seed for a check is one `SessionSchemes { bindings, aliases,
   builtins }`
@@ -61,6 +59,7 @@ Entry points (`typecheck.rs`):
   `Arm::Named(head)`), seeded by `Shell::closure_schemes` from what the
   closure captured, and closes it, for `HandlerEntry::vet` to store on an
   alias frame; `catch_all_stands_in` is the same for `within [handler: $k]`.
+  These one-shot inference sessions discard their constructed IR.
   An arm's parameters are its slot's — the argv, or the name and the argv —
   and its arity is its type, never its spelling, so `{ forward 'git' }` is as
   unary as `{ |args| … }` ([[invariants/fixed-arity|fixed-arity]],
@@ -73,8 +72,8 @@ The sorts split with CBPV:
 - records are open-row-polymorphic ([[design/row-types|row-types]]: `Row` /
   `RowVar`).
 
-Generalisation happens at `Bind`; recursive bindings (`Rec`) stay
-monomorphic to keep generalisation sound.
+Generalisation happens at bindings; recursive members (`Rec`) stay
+monomorphic while their group is inferred, then generalise at their bindings.
 
 Internals:
 
@@ -102,9 +101,10 @@ Internals:
   free-variable collection and the weak-source search are both a fold over it;
 - `Site` (data in `core/src/ty/site.rs`, built by `typecheck/site.rs`, walked
   and admitted by `core/src/shell/runtime/admit.rs`) — the type solved at a boundary
-  call, frozen at the unit's end by `InferCtx::snapshot_sites` and written onto
-  the `Exec` by `annotate`; `Site::exports` hands the module check one scratch
-  unifier over a whole export record, so export types that share variables are
+  call, placed on the inferred `Exec` as `Pending::Open(ty)` and snapshotted
+  at the successful unit's end by freeze. Sites can retain free weak variables
+  and delayed contracts; they need not be ground. `Site::exports` hands the
+  module check one scratch unifier over a whole export record, so export types that share variables are
   checked together; the unifier keeps the span that first bound each variable so a
   refusal can point at the use that imposed what the value met;
 - the type language (`Ty`, `CompTy`, `Grade`, rows, `Kind`, `Scheme`, `Site` data) is
@@ -116,20 +116,28 @@ Internals:
   so each message is unit-testable. Its wildcard-free `Reason` match gives each
   reason prose or deliberately lists it as hintless: the constraint's other
   side is fresh, or the error kind is already its own diagnosis;
-- `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
-  IR with schemes, boundary sites, stage types, `Capture`/`Prim::Decode`,
-  returned-thunk application splits, and `Val::Protected` membranes
-  for imported weak values, attached per occurrence only where the contract
-  reaches a thunk or handle;
-  its side tables in `InferCtx` are keyed by `Node`, a node address tagged
-  `Comp`, `Val` or `Group`;
+- `freeze.rs` — `freeze_toplevel` maps pending sites to final sites, settles
+  `Define` schemes and builds unit readmissions in `Toplevel.admits`.
+  `Open(ty)` snapshots under the unit's final unifier; `Kept(site)` preserves
+  the existing `Arc`. `Imported(ty)` occurs only on `Val::Protected` and
+  retains the membrane only when the snapshot `has_delayed()`.
+  Group rebuilding is memoised by `Arc::as_ptr`. `Prim::map_operands` and
+  `Redirects::map` perform structural conversion here; primitive inference
+  sub-rules construct their own variants in their required inference order.
+  Freeze makes no capture or typing decisions;
 - `generalize.rs` — quantification, capture-avoiding instantiation and weak
-  reseeding over the whole scheme graph; settlement substitutes only live weak
-  residuals, leaving local ∀/μ names opaque. Closure is syntactic over the body
-  and equations. Cached residual ids are seeds resolved through the current
-  unifier, not assumed to remain unbound canonical roots
+  reseeding over the whole scheme graph; settlement substitutes live weak-variable
+  images and resolves residual grades, even with no weak variables, leaving local
+  ∀/μ names opaque. It quantifies remaining free grades and clears cached grade
+  residuals. Closure is syntactic over the body and equations. Cached residual ids
+  are seeds resolved through the current unifier, not assumed to remain unbound
+  canonical roots
   ([[invariants/schemes-leave-closed|schemes-leave-closed]]);
-- `env.rs` — `TyEnv`, `InferCtx`;
+- `env.rs` — `TyEnv`, `Pending`, `InferCtx`: the unifier, errors and position;
+  unit-read diagnostics and nested checks; recursive member types plus their
+  shared pending group, memoised by source `Arc` identity; residual bindings
+  and first-use types; and the synthetic-name counter. Synthetic names are
+  minted in inference order;
 - `site.rs` — `impl Site { snapshot, instantiate, scheme, exports }`: freezing
   solved boundary and imported-weak occurrence types, preserving sharing and
   weakness on reinstantiation, and rebuilding authoritative closed contracts
@@ -237,11 +245,10 @@ a fresh grade ([[design/capture|grades and capture]]).
   `Return(Output, Unit)` captures and binds `String`; `Return(Value, a)`
   binds `a`; a free grade fixes to `Value`; a computation variable unifies
   with `Return(Value, fresh)`. This is the sole default.
-- `infer_let` records non-running cases in `InferCtx.bound`, keyed by RHS
-  address: `Bound::Captured` or `Bound::Thunked`.
-- `Annotate::rhs` reads that map: `captured_string` builds
-  `Capture(body) to x. Prim::Decode(x)` with the RHS span on both nodes;
-  Let-fun writes `return (thunk M)`. No argument or arm is wrapped.
+- `infer_let` applies the returned `Bound` to its inferred RHS node:
+  `captured_string` builds `Capture(body) to x. Prim::Decode(x)` with the
+  RHS span on both nodes; Let-fun builds `return (thunk M)`.
+  No argument or arm is wrapped.
 - `CompKind::Capture` checks a command body and returns bytes at a fresh
   grade; `Prim::Decode` checks bytes and returns text at a fresh grade.
   Re-inference preserves those explicit boundaries.
@@ -249,10 +256,12 @@ a fresh grade ([[design/capture|grades and capture]]).
   (`builtins.rs`) freshens ordinary builtin results, leaving commands,
   boundaries and already graded results alone. Boundary results stay `p`.
   `map` accepts either callback grade; `filter`/`sort-list-by` demand values.
-- `Unifier::unify_producers` is shared by returners and handles: if either
-  grade resolves to output, it refuses before binding grades unless the
-  other type is unit or a variable whose kind admits unit. It then unifies
-  grades followed by types, preserving the pairing and mismatch diagnosis.
+- `Unifier::unify_producers` is shared by returners and handles: `Output`
+  immediately refuses an opposing type that cannot admit `Unit`. For
+  output-capable grades, a Unit-capable variable or differing Unit capability
+  requires payload validation before grades join: failure must leave no
+  hazardous alias. Pairs containing known `Value` and other safe pairs keep
+  grade-first unification.
 - `redirected` forces outer return shape under `Reason::RedirectShape`;
   a partial application is refused. Stdout produces at a fresh grade with
   the input payload type; stdin/stderr and `2>&1` preserve the input grade.
@@ -263,9 +272,10 @@ runtime's lookup order: `Binding`, `Value(entry)`, `Arm`, `External`.
 ## Application and binders
 
 `autoderef_thunk_return` records each argument index before which a returned
-thunk must be forced, once per unwrapped thunk, in `InferCtx.splits`.
-`Annotate::split` writes the `App` or binding-resolved `Exec` as explicit
-bind/force segments; repeated indices give repeated forces before one argument.
+thunk must be forced, once per unwrapped thunk. `apply_args_capped` returns
+these positions with the inferred arguments; the `App` or binding-resolved
+`Exec` rule builds explicit bind/force segments. Repeated indices give
+repeated forces before one argument.
 Redirects and binding capture wrap the whole split call. Re-inference is
 idempotent ([[invariants/ir-pure-cbpv|the IR invariant]]).
 

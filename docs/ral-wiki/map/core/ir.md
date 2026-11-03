@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d56977ff
+generated_at_commit: b1ba0713
 generated_at_date: 2026-11-03
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
@@ -10,7 +10,8 @@ covers_paths: [core/src/ir.rs, core/src/ir/]
 representation — the target of [[map/core/elaboration|elaboration]] and the input
 to the [[map/core/evaluator|evaluator]].
 
-A whole program is a `Toplevel { phrases: Vec<Spanned<Phrase>> }`: each
+A whole program is a `Toplevel { phrases, admits }`: `admits` holds imported
+bindings' first-use contracts for readmission before execution; each
 `Phrase` — `Define` (a top-level `let`, one closed `Scheme` per name the
 pattern binds,
 [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]) or
@@ -18,6 +19,14 @@ pattern binds,
 session environment the next phrase sees. `Toplevel::referenced_names` is
 the phrase-level analogue of the `Comp`-level walk below, for the same lease
 ledger.
+
+IR types that can contain sites are generic over `S = Arc<Site>`: `Val`,
+`CompKind`, `Prim`, `Exec`, their operand types and shared-node aliases.
+`Val::Protected.site` and `CompKind::Protect.site` hold `S`, and `Exec.site`
+holds `Option<S>`. Inference builds these with `S = Pending`; successful
+freeze converts them to the default final IR. `Toplevel` is always final.
+`Prim::map_operands` converts `Prim<S>` to `Prim<T>` for freeze, preserving
+operand spans; inference's individual sub-rules retain their own operand order.
 
 Values, computations and shared nodes:
 
@@ -83,15 +92,15 @@ constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
 
 See [[invariants/ir-pure-cbpv|the IR invariant]] for the correspondence rule.
 
-The checker's verdict rides on the IR too, as **ground** annotations written by
-`annotate`. Because the inference pass is unconditional — every evaluated IR is
-annotated ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]])
-— the slots are not optional: "the checker has not run yet" is not a
-representable state.
+**The checker builds explicit verdicts into the IR.** Inference constructs
+nodes beside their types; freeze snapshots their pending sites and settles
+schemes only after the unit succeeds. Frozen site graphs may retain free weak
+variables and delayed obligations. Every evaluated `Toplevel` has passed this
+check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
 
 - `CompKind::Pipeline` is a struct variant `{ stages }`. The form's value is
-  its final stage's. There is nothing per-stage to
-  annotate, because every interior edge is an operating-system byte pipe
+  its final stage's. There is no per-stage type field, because every
+  interior edge is an operating-system byte pipe
   allocated from stage position and no rule relates one stage's type to its
   neighbour's
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]],
@@ -104,11 +113,11 @@ representable state.
 - `CompKind::Case { scrutinee, arms: Vec<CaseArm> }` is Levy's sum eliminator:
   a `CaseArm` is a tag and the thunk of a function of its payload to run, so
   the alternatives are a list fixed at parse time and every arm is a node the
-  checker can annotate — an `if` with as many branches as the row has labels
+  checker builds — an `if` with as many branches as the row has labels
   ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 - `Prim::Index { target, key }` carries one `Spanned<Key>`:
   `Label(Str)`, `Position(usize)` or `Data(Val)`. The key's form is explicit;
-  no pass infers it from a `Val`. Annotation and `Mentions` traverse only
+  no pass infers it from a `Val`. Freeze and `Mentions` traverse only
   `Data`; the checker requires a record, list or map, respectively.
   An index chain is a sequence of these primitives joined by binds.
 - `Exec { head, argv, redirects, site }` is an external or builtin call;
@@ -120,19 +129,22 @@ representable state.
   other half: read that `Bytes` value as text, one trailing terminator dropped
   and a strict UTF-8 decode, which is the partial step — the kernel's `decode`
   takes a value, so it reads a bound variable rather than nesting a `Comp`.
-  [[map/core/typecheck|typecheck]]'s `annotate` composes capture and decode
+  [[map/core/typecheck|typecheck]]'s `infer_let` composes capture and decode
   as `Capture(body) to x. Prim::Decode(x)` around each command RHS
-  a binding recorded, and `Mentions`' walk descends into the `Capture`
+  a binding captures, and `Mentions`' walk descends into the `Capture`
   and the `Bind`. The reading is a node and not a command so that its meaning
   is fixed where the checker writes it
   ([[design/capture|grades and capture]],
   [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]). Neither has surface syntax.
 
-- `Val::Protected { value, site }` marks an imported weak value occurrence whose
-  solved contract reaches a thunk or handle (`Site::has_delayed`). Forming it
-  wraps those delayed obligations recursively and admits nothing; it does not
-  run a thunk or consume a handle.
+- `Val::Protected { value, site }` carries a contract's delayed obligations.
+  An imported weak value occurrence is built with `Pending::Imported(ty)`;
+  freeze keeps its membrane only if the snapshot reaches a thunk or handle
+  (`Site::has_delayed`). An imported `Exec` head instead forces a protected
+  variable with `Pending::Open(ty)`, whose protection stays. Re-inferred
+  protection uses `Pending::Kept(site)` to preserve the checked site.
+  Forming a membrane admits nothing; it does not run a thunk or consume a handle.
   `CompKind::Protect { body, site }` checks and wraps the body's returned value,
   so generated thunk wrappers can guard arguments and results at their actual
   elimination points. Neither form has surface syntax; both retain their
@@ -143,8 +155,9 @@ representable state.
   generalisation of Levy's `rec x. M`, which is a group of one. `group`'s occ
   is the union of every member's mentions, computed once when the elaborator
   builds the `GroupNode`; every `Rec` projection of one group shares that one
-  `Arc`, and `annotate` (`typecheck/annotate.rs`) preserves the sharing by
-  memoizing its rebuild per source `Arc`'s identity.
+  `Arc`. Inference memoises member types and the pending group by source
+  `Arc` identity; freeze memoises the final group by pending `Arc` identity.
+  Each rebuilt group's occ is computed from its own shape.
 
 Every verdict
 the evaluator needs from the checker is explicit: capture/decode,
@@ -160,10 +173,11 @@ The IR owns the vocabulary it shares with the AST (`ir/pattern.rs`,
 `Display`), `BinaryOp` (`Arith`/`Compare`/`Eq`, each category its own enum), and
 `Redirects` with its stream-once binding. A pattern binds names, never carries
 a computation, so there is no parser syntax for elaboration to strip out
-([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<S>` is indexed by its
-schemes: elaboration yields `Unchecked` (`Phrase<()>`), and only the checker
-makes a `Toplevel` of checked phrases, so the evaluator cannot be handed
-unchecked IR. `Exec::argv` is `Argv`, a newtype over list slots admitting
+([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<D = DefineSchemes, S = Arc<Site>>`
+is indexed first by schemes, then sites: elaboration yields `Unchecked`
+(`Phrase<()>`); inference returns `Phrase<DefineSchemes, Pending>` carrying
+unsettled schemes. Only successful freeze makes a final `Toplevel`, so the
+evaluator cannot be handed unchecked IR. `Exec::argv` is `Argv`, a newtype over list slots admitting
 spreads (`positional()`, `arity()`). Value application instead has a fixed
 slice of arguments.
 

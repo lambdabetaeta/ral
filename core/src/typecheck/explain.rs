@@ -422,35 +422,51 @@ fn command_against_value(kind: &TypeErrorKind) -> Option<(&Ty, bool)> {
     }
 }
 
+enum JoinForm {
+    Branch,
+    Arm,
+    Outcome,
+}
+
+impl JoinForm {
+    fn words(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Branch => ("branch", "a branch"),
+            Self::Arm => ("arm", "an arm"),
+            Self::Outcome => ("outcome", "an outcome"),
+        }
+    }
+}
+
 /// The hint where a command met a value producer, by what demanded which.
 fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     let (value, command_found) = command_against_value(kind)?;
     let form = match reason {
-        Some(Reason::IfBranches) => Some("branch"),
-        Some(Reason::CaseArms) => Some("arm"),
-        Some(Reason::TryArms) => Some("outcome"),
+        Some(Reason::IfBranches) => Some(JoinForm::Branch),
+        Some(Reason::CaseArms) => Some(JoinForm::Arm),
+        Some(Reason::TryArms) => Some(JoinForm::Outcome),
         Some(Reason::Argument) => None,
         // Every other reason says what it demanded in its own words.
         _ => return None,
     };
-    Some(match (form, command_found, value) {
-        (Some(form), true, Ty::String | Ty::Var(_)) => format!(
-            "this {form} is a command and an earlier one returns a value; a {form}'s output is not captured: return it, `{{ return !{{…}} }}`"
+    Some(match (form.map(|form| form.words()), command_found, value) {
+        (Some((form, phrase)), true, Ty::String | Ty::Var(_)) => format!(
+            "this {form} is a command and an earlier one returns a value; {phrase}'s output is not captured: return it, `{{ return !{{…}} }}`"
         ),
-        (Some(form), false, Ty::String | Ty::Var(_)) => format!(
-            "this {form} returns a value and an earlier one is a command; a {form}'s output is not captured: make that one return it, `{{ return !{{…}} }}`"
+        (Some((form, phrase)), false, Ty::String | Ty::Var(_)) => format!(
+            "this {form} returns a value and an earlier one is a command; {phrase}'s output is not captured: make that one return it, `{{ return !{{…}} }}`"
         ),
-        (Some(form), true, Ty::Bool) => format!(
+        (Some((form, _)), true, Ty::Bool) => format!(
             "this {form} is a command and an earlier one returns a Bool; for a yes/no answer from a command, `succeeds {{ … }}`"
         ),
-        (Some(form), false, Ty::Bool) => format!(
+        (Some((form, _)), false, Ty::Bool) => format!(
             "this {form} returns a Bool and an earlier one is a command; for a yes/no answer from that command, `succeeds {{ … }}`"
         ),
-        (Some(form), true, _) => format!(
+        (Some((form, _)), true, _) => format!(
             "this {form} is a command and an earlier one returns {}; give this {form} a value of that type too (`… | from-json`, or `return` one), or write the earlier one's value out with `echo`",
             describe(value)
         ),
-        (Some(form), false, _) => format!(
+        (Some((form, _)), false, _) => format!(
             "this {form} returns {} and an earlier one is a command; give that one a value of that type too (`… | from-json`, or `return` one), or write this {form}'s value out with `echo`",
             describe(value)
         ),
@@ -1046,10 +1062,8 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
 /// list, or a record for one of its `String` fields.  Which side lands in
 /// `expected` is an accident of the call site, so both orders are checked.
 fn argument_hint(kind: &TypeErrorKind) -> Option<String> {
-    let TypeErrorKind::TyMismatch { expected, actual } = kind else {
-        return None;
-    };
-    [(&**expected, &**actual), (&**actual, &**expected)]
+    let (expected, actual) = value_sides(kind)?;
+    [(expected, actual), (actual, expected)]
         .into_iter()
         .find_map(|pair| match pair {
             (Ty::List(_), Ty::String) => Some(
@@ -1088,16 +1102,14 @@ fn meets_as_peers(reason: &Reason) -> bool {
     )
 }
 
-/// Help for a `TyMismatch` derived from the types' own shapes, not from which
+/// Help for a value mismatch derived from the types' own shapes, not from which
 /// reason raised it — a `Ty::Thunk` parameter, an error-record `[status: Int |
 /// r]`, and a byte/list confusion each name what the mismatch *is*, whether it
 /// arose at an argument, a spread, or a branch join. Which side lands in
 /// `expected` is an accident of the call site, so every test here considers
 /// both orders.
 fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
-    let TypeErrorKind::TyMismatch { expected, actual } = kind else {
-        return None;
-    };
+    let (expected, actual) = value_sides(kind)?;
     let is_record = |t: &Ty| matches!(t, Ty::Record(_));
     let is_map = |t: &Ty| matches!(t, Ty::Map(_));
     if (is_record(expected) && is_map(actual)) || (is_map(expected) && is_record(actual)) {
@@ -1414,6 +1426,142 @@ mod tests {
         TypeErrorKind::TyMismatch {
             expected: Box::new(expected),
             actual: Box::new(actual),
+        }
+    }
+
+    fn producer_mismatch(expected: Ty, actual: Ty, grades: (Grade, Grade)) -> TypeErrorKind {
+        TypeErrorKind::CompTyMismatch {
+            expected: CompTy::Return(grades.0, Box::new(expected)),
+            actual: CompTy::Return(grades.1, Box::new(actual)),
+        }
+    }
+
+    #[test]
+    fn same_grade_producer_mismatches_keep_value_shape_hints() {
+        let shapes = [
+            (
+                Ty::Record(Row::Empty),
+                Ty::map(Ty::String),
+                "a record and a map",
+            ),
+            (Ty::Variant(Row::Empty), Ty::Int, "a tagged value"),
+            (
+                Ty::Thunk(Box::new(CompTy::pure(Ty::Unit))),
+                Ty::Int,
+                "a block value",
+            ),
+            (
+                Ty::Record(Row::Empty).extend("status", Ty::Int),
+                Ty::String,
+                "an error record",
+            ),
+            (Ty::Bytes, Ty::list(Ty::Int), "Bytes are not a list"),
+        ];
+        for (left, right, fragment) in shapes {
+            for (expected, actual) in [(&left, &right), (&right, &left)] {
+                let plain = mismatch(expected.clone(), actual.clone());
+                let wanted = guidance(&plain, Some(&Reason::Argument));
+                assert!(wanted.as_deref().is_some_and(|h| h.contains(fragment)));
+                for grade in [Grade::Value, Grade::Var(crate::ty::GradeVar(0))] {
+                    let producer =
+                        producer_mismatch(expected.clone(), actual.clone(), (grade, grade));
+                    assert_eq!(shape_hint(&producer), shape_hint(&plain));
+                    for reason in [
+                        Reason::Argument,
+                        Reason::IfBranches,
+                        Reason::CaseArms,
+                        Reason::TryArms,
+                    ] {
+                        assert_eq!(
+                            guidance(&producer, Some(&reason)),
+                            wanted,
+                            "{producer:?}: {reason:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn different_grade_producers_do_not_use_payload_hints() {
+        let free = Grade::Var(crate::ty::GradeVar(0));
+        let other = Grade::Var(crate::ty::GradeVar(1));
+        for grades in [(Grade::Value, free), (free, Grade::Value), (free, other)] {
+            for (expected, actual) in [
+                (Ty::Record(Row::Empty), Ty::map(Ty::String)),
+                (Ty::String, Ty::list(Ty::Int)),
+            ] {
+                let producer = producer_mismatch(expected, actual, grades);
+                assert_eq!(value_sides(&producer), None);
+                assert_eq!(shape_hint(&producer), None);
+                assert_eq!(argument_hint(&producer), None);
+                for (reason, form) in [
+                    (Reason::IfBranches, "branch"),
+                    (Reason::CaseArms, "arm"),
+                    (Reason::TryArms, "outcome"),
+                ] {
+                    assert_eq!(
+                        guidance(&producer, Some(&reason)),
+                        Some(arm_join_hint(form))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn command_value_grade_hints_take_priority_over_payload_shapes() {
+        for value in [
+            Ty::Record(Row::Empty).extend("status", Ty::Int),
+            Ty::Variant(Row::Empty),
+            Ty::Thunk(Box::new(CompTy::pure(Ty::Unit))),
+            Ty::Bytes,
+        ] {
+            for (expected, actual, grades) in [
+                (value.clone(), Ty::Unit, (Grade::Value, Grade::Output)),
+                (Ty::Unit, value, (Grade::Output, Grade::Value)),
+            ] {
+                let producer = producer_mismatch(expected, actual, grades);
+                assert_eq!(value_sides(&producer), None);
+                assert_eq!(shape_hint(&producer), None);
+                assert_eq!(argument_hint(&producer), None);
+                for reason in [
+                    Reason::Argument,
+                    Reason::IfBranches,
+                    Reason::CaseArms,
+                    Reason::TryArms,
+                ] {
+                    let wanted = grade_hint(&producer, Some(&reason));
+                    assert!(wanted.is_some());
+                    assert_eq!(guidance(&producer, Some(&reason)), wanted);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn same_grade_producer_arguments_keep_value_argument_hints() {
+        for (left, right, fragment) in [
+            (Ty::list(Ty::Int), Ty::String, "`lines $s`"),
+            (
+                Ty::Record(Row::Empty).extend("name", Ty::String),
+                Ty::String,
+                "`$x[name]`",
+            ),
+        ] {
+            for (expected, actual) in [(&left, &right), (&right, &left)] {
+                let wanted = guidance(
+                    &mismatch(expected.clone(), actual.clone()),
+                    Some(&Reason::Argument),
+                );
+                assert!(wanted.as_deref().is_some_and(|h| h.contains(fragment)));
+                for grade in [Grade::Value, Grade::Var(crate::ty::GradeVar(0))] {
+                    let producer =
+                        producer_mismatch(expected.clone(), actual.clone(), (grade, grade));
+                    assert_eq!(guidance(&producer, Some(&Reason::Argument)), wanted);
+                }
+            }
         }
     }
 

@@ -8,7 +8,7 @@
 mod common;
 
 use ral_core::HostSurface;
-use ral_core::compile::compile_and_typecheck;
+use ral_core::compile::{CompileError, compile_and_typecheck};
 use ral_core::source::FileId;
 
 const N: usize = 2_000;
@@ -48,4 +48,16 @@ fn deep_elsif_chain() {
 #[test]
 fn deep_block() {
     survives(&format!("{{\n{}return $x\n}}", "let x = 1\n".repeat(N)));
+}
+
+#[test]
+fn deep_block_is_refused() {
+    let src = format!("{{\n{}return $['x' + 1]\n}}", "let x = 1\n".repeat(N));
+    let schemes = common::schemes_for(&HostSurface::default());
+    let result = compile_and_typecheck(&src, schemes, FileId::DUMMY, None, None);
+    let Err(CompileError::Types(errors)) = result else {
+        panic!("depth {N} must be refused with type errors, got {result:?}");
+    };
+    let codes: Vec<_> = errors.iter().map(|error| error.kind.code()).collect();
+    assert_eq!(codes, ["T0074"]);
 }

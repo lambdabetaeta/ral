@@ -1,8 +1,8 @@
 ---
-generated_at_commit: d56977ff
-verified_at_commit: d56977ff
+generated_at_commit: b1ba0713
+verified_at_commit: b1ba0713
 verified_at_date: 2026-11-03
-anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_update, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, rhs_bound_ty, unify_producers, stage_writes]
+anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_update, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, freeze_toplevel, Pending, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, rhs_bound_ty, unify_producers, stage_writes]
 ---
 
 # Type inference: the algorithm
@@ -11,9 +11,10 @@ anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite
 `core/src/typecheck/` infers it — constraint-based Hindley–Milner over the CBPV
 [[map/core/ir|IR]] after [[internals/compilation-ladder|elaboration]].
 
-**The Inferencer walks the typed IR.** `infer.rs` traverses `Val` / `Comp`,
-allocating fresh type, computation and row variables and emitting unification
-constraints as it goes; `infer_case` is kept whole at ~100 lines by decision
+**The Inferencer builds checked IR beside its types.** `infer.rs` traverses
+`Val` / `Comp`, allocating fresh type, computation and row variables and
+emitting unification constraints as it constructs pending nodes.
+`infer_case` is kept whole by decision
 ([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Builtin
 signatures enter through per-builtin rules carried with the body
 ([[internals/builtins-registry|builtins registry]]: `fixed_arity`,
@@ -113,9 +114,11 @@ and never weak. A *command* — an external, `^name`, a path head, a value row t
 writes, or a handler arm standing in for one — is `Return(Output, Unit)`,
 printed `Command`; `CompTy::command()` builds it and `CompTy::pure` is
 `Return(Value, _)`. `Unifier::unify_producers` meets the grade/type pair for returners and handles.
-If either grade is `Output`, the other type must be `Unit` or a variable whose
-kind admits it; otherwise it refuses before binding either grade. It then
-unifies grades and values. The inferred invariant is `F^w A ⇒ A = Unit`:
+`Output` immediately refuses an opposing type that cannot admit `Unit`.
+For output-capable grades, a Unit-capable variable or differing Unit capability
+requires payload validation before grades join, so failed equations leave no
+hazardous aliases. Pairs containing known `Value` and other safe pairs keep
+grade-first unification. The inferred invariant is `F^w A ⇒ A = Unit`:
 all rules introduce output at unit and preserve the pairing
 ([[design/capture|grades and capture]]). `CompKind::Capture` checks its body
 as a command and produces bytes at a fresh grade.
@@ -126,8 +129,8 @@ as a command and produces bytes at a fresh grade.
   `Fun` binds a thunk; `Return(Output, Unit)` captures and binds `String`;
   `Return(Value, a)` binds `a`; a free grade fixes to `Value`, and a
   computation variable opens to `Return(Value, fresh)`. The last case is
-  the sole default. `InferCtx.bound` records `Bound::Thunked` or
-  `Bound::Captured`, keyed by RHS address; `Bound::Ran` needs no entry.
+  the sole default. `infer_let` applies the returned `Bound` directly to the
+  RHS node it inferred.
 - `produces` pairs a fresh grade with a value type for `return`, primitives,
   `~`, capture and handled alias statements. `Decl::scheme` freshens ordinary
   builtin result grades; boundaries keep `p`, commands `w`, and already
@@ -139,15 +142,15 @@ as a command and produces bytes at a fresh grade.
 - `redirected` forces an outer return shape under `Reason::RedirectShape`.
   Stdout gets a fresh result grade at the same payload type, leaving the
   input grade alone; stdin, stderr and `2>&1` preserve it.
-- `annotate` structurally rebuilds the tree. `Annotate::rhs` reads `bound`:
-  captured RHSs become `cap M to d. decode d`, and function RHSs become
-  `return (thunk M)` (Let-fun).
+- Each inference rule returns its node beside its type. `infer_let` builds
+  `cap M to d. decode d` for a captured RHS and `return (thunk M)` for a
+  function RHS (Let-fun). No later pass decides these rewrites.
 
 **Returned-thunk application is explicit in the checked tree.**
 `autoderef_thunk_return` records every argument position before which a
 returned thunk must be forced. Positions may repeat when several thunks are
-unwrapped before one argument. `InferCtx.splits` records them for `App` and
-binding-resolved `Exec`; `Annotate::split` writes
+unwrapped before one argument. `apply_args_capped` returns the positions with
+the inferred argument nodes; the `App` or binding-resolved `Exec` rule builds
 `App(head, prefix) to h. App(Force h, suffix)`, repeated as needed. Redirects
 wrap the whole split call; binding capture also wraps the whole. A
 re-inferred checked tree records no further split
@@ -305,16 +308,18 @@ There is no value restriction: a `let` of anything generalises
 ([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
 Only a checked boundary call marks its result
 ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]);
-once the unit is solved, `annotate` freezes each recorded result as a `Site` on
-the call. A site's graph preserves type and computation roots, and canonical
+the rule places `Pending::Open(ty)` on the constructed call. After inference
+and ascription succeed, freeze snapshots that result as a `Site` on the call.
+A site's graph preserves type and computation roots, and canonical
 free row-tail and grade ids. Reinstantiation freshens each identity once across
 the whole graph, so checking module exports in one scratch unifier keeps the
 same sharing constraints as direct unification.
 `settle_weak` closes a scheme at its unit's end: simultaneous substitution
-updates weak references throughout the body and all μ-equations. Only these
-substitution images belong to the live unifier; local ∀/μ names stay opaque.
-Cycles reached through the live images are snapshotted (`cyclic_bindings`), so
-`μα. Map α` survives the unit without resolving a local binder as a live slot.
+updates live weak-variable images and resolves residual grades throughout the
+body and all μ-equations, even with no weak variables. Local ∀/μ names stay
+opaque. Remaining free grades are quantified and cached grade residuals cleared.
+Cycles reached through the live weak images are snapshotted (`cyclic_bindings`),
+so `μα. Map α` survives the unit without resolving a local binder as a live slot.
 
 **A type variable carries a kind** (`kind.rs`): a set of admissible heads and a
 deep bit, and a row variable a deep bit alone. The unconstrained `any` has every
@@ -368,15 +373,14 @@ no binder node and no de Bruijn index: a variable is
   every μ-equation must be quantified, a μ-root or a listed weak residual;
   resolving against a live unifier could hide an escaping id as ground.
 
-**The verdict survives into the next run.** The checker is a transformation:
-on success `annotate` writes each top-level name-bind's generalised `Scheme` onto
-its `Bind` node — and each `Pipeline`'s per-stage value
-types onto the node — the scheme closed against the empty environment so it
-carries no residual variable that could alias the next run's fresh ids. The next
-run's check is seeded from the live session — one `SessionSchemes` (the scope's
+**The verdict survives into the next run.** Inference builds each
+`Phrase::Define` with its harvested per-name schemes, still unsettled.
+Successful freeze applies `settle_weak` and asserts closure over the whole
+scheme graph before it leaves the unit. A pipeline carries no per-stage type
+annotations. The next run's check is seeded from the live session — one `SessionSchemes` (the scope's
 name→scheme map plus the alias arms' schemes) — so a name bound in run *N* is
-checked at its inferred scheme in run *N+1*; a name from an unchecked path (a
-`source`d file, a plugin) is `None` and infers afresh
+checked at its inferred scheme in run *N+1*; a host binding without a stored
+scheme is `None` and infers afresh
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
 A residual *weak* variable is the exception to that closure, and it is kept
@@ -390,15 +394,37 @@ fresh weak residuals; otherwise a new residual could be captured by an old
 binder with the same numeric id. The name is then used at one type in the next
 unit, as it was in the defining one, and no foreign id is ever read.
 
-An imported weak value's membrane is attached per occurrence as
-`Val::Protected`, using that occurrence's solved type, only when that type
-reaches a thunk or handle (`Site::has_delayed`). Its shared `Arc` site
-graph preserves canonical row/grade identities and freezes whether each
-remaining variable is weak or quantified. The membrane admits nothing: a stored
-data binding is admitted once per name, before the unit runs, against its first
-use's type (`readmits`), which covers every occurrence since weak variables are
-shared across the unit. Recursive wrapping carries delayed obligations through
-containers, thunk arguments/results (`CompKind::Protect`), and handle views at
+**Sites freeze once the unit succeeds.** IR site parameters default to
+`Arc<Site>`; inference builds `Comp<Pending>` and `Val<Pending>` instead.
+`Pending::Open(ty)` becomes a snapshot under the final unifier.
+`Pending::Kept(site)` preserves an existing checked site's `Arc`, including
+its unit identity. Only `Val::Protected` uses `Pending::Imported(ty)`:
+freeze snapshots the occurrence's type and drops that membrane unless
+`Site::has_delayed` reaches a thunk or handle. Boundary values are built as
+blocks holding saturated calls, and under-applied boundary calls are
+η-expanded during inference, not freeze.
+
+An imported residual used as an `Exec` head instead becomes
+`Force(Protected { Variable(name), site: Open(ty) })`; its protection stays.
+These execution-head and value-occurrence rules are distinct. Snapshot graphs
+preserve canonical row/grade identities and whether remaining variables are
+weak or quantified; freezing does not make all types ground.
+
+A membrane admits nothing. Freeze constructs `Toplevel.admits` from
+`InferCtx.residual_uses`, snapshotting each imported name's first-use type
+in first-use order. These readmissions share one fresh `UnitId` with all new
+sites and run before the first phrase. Weak variables are shared across the
+unit, so the first-use type covers every occurrence. `InferCtx.unit_reads`
+instead supplies diagnostics for names bound to unit-valued calls.
+
+Inference memoises member types and the pending `Arc<GroupNode>` by source
+group identity; freeze memoises final groups by pending `Arc` identity. Every
+projection therefore shares the group in both phases. An erroneous unit's
+built IR is discarded whole without freezing, and one-shot inference sessions
+discard the IR they build.
+
+Recursive wrapping carries delayed obligations through containers, thunk
+arguments/results (`CompKind::Protect`), and handle views at
 `await`, ready `poll`, and `race`, without forcing or consuming them at import.
 Only weak `comparable` identities acquire session fixings; a quantified
 parameter remains fresh on every call. Generated wrappers capture the raw value

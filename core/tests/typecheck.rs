@@ -2,7 +2,7 @@
 //! computes and annotates, read off the checker's own data.
 //!
 //! Every test parses + elaborates a small ral program and runs `typecheck()`.
-//! The capture-at-let plan's pinned refusals and hints are checked here too;
+//! Capture and grade refusals and hints (SPEC §17.6) are checked here too;
 //! the broader corpus lives under `tests/reject/` and `tests/accept/`, run by
 //! `ral/tests/corpus.rs`.
 
@@ -10,11 +10,12 @@
 
 mod common;
 
-use ral_core::ir::{Comp, CompKind, Phrase, Toplevel, Unchecked, Val};
+use ral_core::ir::{Comp, CompKind, GroupNode, Phrase, Toplevel, Unchecked, Val};
 use ral_core::ty::{CompTy, Grade, Ty};
 use ral_core::typecheck::contract::declared;
 use ral_core::typecheck::{Form, TypeErrorKind};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
+use std::sync::Arc;
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
     errors_against(src, &ral_core::HostSurface::default())
@@ -170,7 +171,7 @@ fn gather_passes_its_bodys_type() {
     assert_eq!(scheme_at(&top, 1), "Returns Integer");
 }
 
-/// Capture-at-let plan §1.10's `par` row: command callbacks replay output;
+/// `par` command callbacks replay output;
 /// the list holds their unit values, not captured strings.
 #[test]
 fn par_accepts_a_command_callback_and_returns_its_unit_values() {
@@ -260,6 +261,37 @@ fn toplevel_rec_group_members_generalise_independently() {
     );
     assert_eq!(scheme_at(&top, 0), "Integer → Returns Bool");
     assert_eq!(scheme_at(&top, 1), "String → Returns Integer");
+}
+
+#[test]
+fn checked_mutual_recursion_projections_share_one_group_arc() {
+    let top = toplevel_ok(
+        "let f = { |x| let _ = $[$x + 1]; let _ = !{g \"s\"}; return true }\n\
+         let g = { |y| let _ = !{upper $y}; let _ = !{f 1}; return 1 }\n\
+         return ()",
+    );
+    fn projection(phrase: &Phrase) -> (&Arc<GroupNode>, usize) {
+        let Phrase::Define { comp, .. } = phrase else {
+            panic!("expected a Define, got {phrase:?}");
+        };
+        let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
+            panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
+        };
+        let CompKind::Rec { group, index } = &rec.shape().item else {
+            panic!("expected a Rec node, got {:?}", rec.shape().item);
+        };
+        (group, *index)
+    }
+    let (f_group, f_index) = projection(&top.phrases[0].item);
+    let (g_group, g_index) = projection(&top.phrases[1].item);
+    assert_eq!((f_index, g_index), (0, 1));
+    assert!(
+        Arc::ptr_eq(f_group, g_group),
+        "checked projections must share one group Arc"
+    );
+    assert_eq!(f_group.shape().len(), 2);
+    assert_eq!(f_group.shape()[0].0.as_ref(), "f");
+    assert_eq!(f_group.shape()[1].0.as_ref(), "g");
 }
 
 /// The independent dependencies of one binding are checked in source order,
@@ -382,7 +414,7 @@ fn a_computed_key_helper_generalises_over_map_element_types() {
          let b = pick [:, y: true] 'y'\n\
          return ()",
     );
-    // Capture-at-let plan §1.7: α admits unit, so its fresh grade stays visible.
+    // α admits unit, so its fresh grade stays visible (SPEC §17.3).
     assert_eq!(scheme_at(&top, 0), "∀α ν. Map α → String → Command[ν] α");
     assert_eq!(scheme_at(&top, 1), "Integer");
     assert_eq!(scheme_at(&top, 2), "Bool");
@@ -396,7 +428,7 @@ fn a_written_position_is_the_list_rule_and_stays_generic() {
          let b = first ['x']\n\
          return ()",
     );
-    // Capture-at-let plan §1.7: the generic read keeps its fresh grade.
+    // The generic read keeps its fresh grade (SPEC §17.3).
     assert_eq!(scheme_at(&top, 0), "∀α ν. [α] → Command[ν] α");
 }
 
@@ -419,7 +451,7 @@ fn nth_helpers_generalise_over_list_element_types() {
              let b = pick ['x', 'y'] 0\n\
              return ()"
         ));
-        // Capture-at-let plan §1.7: the result's α admits unit.
+        // The result's α admits unit (SPEC §17.3).
         assert_eq!(scheme_at(&top, 0), "∀α ν. [α] → Integer → Command[ν] α");
         assert_eq!(scheme_at(&top, 1), "Integer");
         assert_eq!(scheme_at(&top, 2), "String");
@@ -1038,7 +1070,7 @@ fn grant_leaves_an_unresolved_table_to_the_decoder() {
 
 // ─── IR capture annotation ────────────────────────────────────────────────────
 //
-// The annotation pass wraps each command a `let` captures in a `Capture` node,
+// Binding inference wraps each command a `let` captures in a `Capture` node,
 // at any depth, and nothing else: a statement, a bound function, a forced
 // block in hand are left as they are.
 
@@ -1089,7 +1121,7 @@ fn redirect_operands_are_inferred_without_a_string_requirement() {
 
 #[test]
 fn case_joins_use_known_payloads_without_capturing_arms() {
-    // §1.10's `return $u` beside a command row applies to `case` too.
+    // A free Unit producer joins a command in `case` too.
     for (payload, body) in [("()", "return $p"), ("{ echo hi }", "!$p")] {
         for arms in [
             format!("`a: {{ |p| {body} }}, `b: {{ |_| echo bye }}"),
@@ -1101,17 +1133,17 @@ fn case_joins_use_known_payloads_without_capturing_arms() {
         }
     }
 
-    // §1.10's command/String join row: `case` cannot capture its command arm.
-    // §1.4: source order blames the later arm, even with a known payload.
+    // `case` cannot capture its command arm (SPEC §17.6).
+    // Source order blames the later arm, even with a known payload.
     for (arms, hint, later) in [
         (
             "`a: { |p| return $p }, `b: { |_| echo bye }",
-            "this arm is a command and an earlier one returns a value; a arm's output is not captured: return it, `{ return !{…} }`",
+            "this arm is a command and an earlier one returns a value; an arm's output is not captured: return it, `{ return !{…} }`",
             "echo bye",
         ),
         (
             "`b: { |_| echo bye }, `a: { |p| return $p }",
-            "this arm returns a value and an earlier one is a command; a arm's output is not captured: make that one return it, `{ return !{…} }`",
+            "this arm returns a value and an earlier one is a command; an arm's output is not captured: make that one return it, `{ return !{…} }`",
             "return $p",
         ),
     ] {
@@ -1146,7 +1178,7 @@ fn redirects_scope_ready_computations_not_partial_applications() {
 fn abstract_stdout_discharge_has_a_fresh_result_grade() {
     let top =
         toplevel_ok("let f = { |t| !$t > out }; let x = f { echo hi }; let n = f { return 42 }");
-    // Capture-at-let plan §§1.2, 1.7: redirecting preserves the value type,
+    // Redirecting preserves the value type (SPEC §17.3),
     // but its result grade is independent of the input's.
     assert_eq!(scheme_at(&top, 0), "∀α ν ξ. {Command[ν] α} → Command[ξ] α");
     assert_eq!(scheme_at(&top, 1), "Unit");
@@ -1180,7 +1212,7 @@ fn a_let_captures_a_pipeline_and_a_join_whole() {
     );
 }
 
-/// §1.10's literal and in-hand `map` rows: neither callback is adapted.
+/// Literal and in-hand `map` callbacks are never implicitly captured.
 #[test]
 fn map_command_callbacks_are_not_implicitly_captured() {
     for (src, index) in [
@@ -1194,7 +1226,7 @@ fn map_command_callbacks_are_not_implicitly_captured() {
 
 #[test]
 fn map_callbacks_capture_only_with_an_explicit_let() {
-    // §1.10's `map` rows: return a hoisted capture to request strings per item.
+    // Return a hoisted capture to request strings per item from `map`.
     for (src, index) in [
         ("let xs = map { |f| return !{echo $f} } [1, 2]", 0),
         (
@@ -1209,7 +1241,7 @@ fn map_callbacks_capture_only_with_an_explicit_let() {
 
 #[test]
 fn in_hand_command_arms_are_not_implicitly_captured() {
-    // §1.10's command/String `if` row, with the command block already in hand.
+    // A command/String `if` join with the command block already in hand.
     let src = "let t = { echo a }; let x = if true $t else { return b }";
     let err = one_error_with_hint(
         src,
@@ -1223,18 +1255,81 @@ fn in_hand_command_arms_are_not_implicitly_captured() {
 }
 
 #[test]
+fn value_joins_keep_specific_shape_hints() {
+    for (left, right, fragment) in [
+        (
+            "return [:, a: 'x']",
+            "return [a: 'x']",
+            "a record and a map are different types",
+        ),
+        ("return `ok 1", "return 1", "a tagged value"),
+        ("return { return () }", "return 1", "a block value"),
+        (
+            "return [status: 1, message: 'bad']",
+            "return 'bad'",
+            "an error record",
+        ),
+        ("from-bytes", "return [65]", "Bytes are not a list"),
+    ] {
+        for (first, later) in [(left, right), (right, left)] {
+            for src in [
+                format!("let x = if true {{ {first} }} else {{ {later} }}"),
+                format!("let x = case `a () [`a: {{ |_| {first} }}, `b: {{ |_| {later} }}]"),
+                format!("let x = try {{ {first} }} {{ |_| {later} }}"),
+                format!("let x = {first} ? {later}"),
+            ] {
+                let errs = raw_errors(&src);
+                assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
+                assert!(
+                    matches!(&errs[0].kind, TypeErrorKind::CompTyMismatch {
+                        expected: CompTy::Return(g, _), actual: CompTy::Return(h, _),
+                    } if g == h),
+                    "{src}: {errs:?}"
+                );
+                assert!(
+                    errs[0].hint().is_some_and(|h| h.contains(fragment)),
+                    "{src}: {errs:?}"
+                );
+                assert_error_in(&src, &errs[0], later);
+            }
+        }
+    }
+}
+
+#[test]
+fn block_result_mismatches_keep_specific_argument_hints() {
+    for (src, fragment) in [
+        (
+            "let f = { |b| let xs = !{!$b}; return [...$xs] }; f { return text }",
+            "`lines $s`",
+        ),
+        (
+            "let f = { |b| let r = !{!$b}; string-replace 'x' 'y' $r[name] }; f { return text }",
+            "`$x[name]`",
+        ),
+    ] {
+        let errs = raw_errors(src);
+        assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
+        assert!(
+            errs[0].hint().is_some_and(|h| h.contains(fragment)),
+            "{src}: {errs:?}"
+        );
+    }
+}
+
+#[test]
 fn try_command_and_string_outcomes_require_explicit_capture() {
-    // §1.10's `try { echo a } { |e| return 'none' }` row.
-    // §1.4: the later outcome is blamed in either order.
+    // A mixed `try` cannot capture its command outcome (SPEC §17.6).
+    // The later outcome is blamed in either order.
     for (src, hint, later) in [
         (
             "let x = try { hostname } { |e| return none }",
-            "this outcome returns a value and an earlier one is a command; a outcome's output is not captured: make that one return it, `{ return !{…} }`",
+            "this outcome returns a value and an earlier one is a command; an outcome's output is not captured: make that one return it, `{ return !{…} }`",
             "return none",
         ),
         (
             "let x = try { return none } { |e| hostname }",
-            "this outcome is a command and an earlier one returns a value; a outcome's output is not captured: return it, `{ return !{…} }`",
+            "this outcome is a command and an earlier one returns a value; an outcome's output is not captured: return it, `{ return !{…} }`",
             "hostname",
         ),
     ] {
@@ -1246,7 +1341,7 @@ fn try_command_and_string_outcomes_require_explicit_capture() {
     }
 }
 
-// ─── Capture-at-let plan §7 typing pins ───────────────────────────────────────
+// Capture and grade typing pins (SPEC §§17.3–17.6).
 
 const COMMAND_AFTER_VALUE_BRANCH_HINT: &str = "this branch is a command and an earlier one returns a value; a branch's output is not captured: return it, `{ return !{…} }`";
 const VALUE_AFTER_COMMAND_BRANCH_HINT: &str = "this branch returns a value and an earlier one is a command; a branch's output is not captured: make that one return it, `{ return !{…} }`";
@@ -1256,7 +1351,7 @@ const COMMAND_VALUE_ARGUMENT_HINT: &str = "this block is a command, but a block 
 
 #[test]
 fn command_compatible_unit_producers_join_without_capture() {
-    // §1.10's `try { each-line … }` and `let u = (); return $u` rows.
+    // Unit producers join commands in `try` and after binding.
     for src in [
         "let f = { try { each-line { |l| warn $l } } { |e| echo failed } }",
         "let f = { let u = (); let c = true; if $c { return $u } else { echo a } }",
@@ -1265,13 +1360,13 @@ fn command_compatible_unit_producers_join_without_capture() {
         assert_eq!(scheme_at(&toplevel_ok(src), 0), "Command");
         assert_eq!(captures(src), 0);
     }
-    // §1.10's heterogeneous block-list row: a free unit grade can be a command.
+    // A heterogeneous block list permits a free unit grade to become a command.
     assert_eq!(captures("each { |b| !$b } [{ echo hi }, { return () }]"), 0);
 }
 
 #[test]
 fn command_and_string_joins_require_explicit_capture_in_both_orders() {
-    // §1.10's hostname/String `if` row; §1.4 blames the later branch.
+    // A hostname/String `if` join blames the later branch.
     for (first, later, hint) in [
         ("hostname", "return 'b'", VALUE_AFTER_COMMAND_BRANCH_HINT),
         ("return 'b'", "hostname", COMMAND_AFTER_VALUE_BRANCH_HINT),
@@ -1288,8 +1383,8 @@ fn command_and_string_joins_require_explicit_capture_in_both_orders() {
 
 #[test]
 fn command_and_int_joins_keep_directional_hints_in_both_orders() {
-    // §1.10's refused mixed-join row, with the Int-specific §1.8 advice.
-    // §1.4: later branches are actual, not reordered to prefer commands.
+    // A refused command/Int join receives Int-specific advice.
+    // Later branches are actual, not reordered to prefer commands.
     for (first, later, hint) in [
         ("echo a", "return 1", INT_AFTER_COMMAND_BRANCH_HINT),
         ("return 1", "echo a", COMMAND_AFTER_INT_BRANCH_HINT),
@@ -1309,7 +1404,7 @@ fn command_and_int_joins_keep_directional_hints_in_both_orders() {
 
 #[test]
 fn subtraction_by_one_joins_keep_int_hints_in_both_orders() {
-    // §7's exact n-1 case, extending §1.10's refused mixed-join row.
+    // Subtraction by a literal fixes the payload before a command/value join.
     // Here `1` fixes n to Int; the next test retains a genuine NUMBER variable.
     for (first, later, hint) in [
         (
@@ -1340,8 +1435,8 @@ fn subtraction_by_one_joins_keep_int_hints_in_both_orders() {
 
 #[test]
 fn number_kind_joins_keep_the_value_grade_in_both_orders() {
-    // §1.6's kind guard and §1.10's refused mixed-join row: n-n leaves NUMBER
-    // free, unlike §7's literal n-1. §1.8 treats that variable as a value.
+    // Kind admission protects command/value joins: n-n leaves NUMBER
+    // free, unlike literal n-1; that variable still requires a value.
     for (first, later, hint) in [
         (
             "return $[$n - $n]",
@@ -1382,9 +1477,86 @@ fn number_kind_joins_keep_the_value_grade_in_both_orders() {
 }
 
 #[test]
+fn rejected_producer_equations_do_not_poison_later_command_joins() {
+    for rejected_join in ["if true $g else $f", "if true $f else $g"] {
+        let src = format!(
+            "let broken = {{ |f g| \
+             if true $f else {{ return 1 }}; \
+             if true $g else {{ return () }}; \
+             {rejected_join}; \
+             if true $g else {{ echo hi }}; \
+             let x = !$f; return $x }}"
+        );
+        let errs = raw_errors(&src);
+        assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
+        let TypeErrorKind::CompTyMismatch { expected, actual } = &errs[0].kind else {
+            panic!("expected a producer mismatch: {errs:?}");
+        };
+        let (CompTy::Return(a, _), CompTy::Return(b, _)) = (expected, actual) else {
+            panic!("expected two producers: {errs:?}");
+        };
+        assert!(matches!((a, b), (Grade::Var(_), Grade::Var(_))));
+        assert_ne!(a, b, "a rejected payload must not share grades: {errs:?}");
+    }
+}
+
+#[test]
+fn rejected_data_payload_equation_does_not_poison_a_later_let() {
+    let src = "let broken = { |f g| \
+               to-json !{map $f []}; \
+               if true { g () } else { return [fn: { return () }] }; \
+               if true { f () } else { g () }; \
+               if true { f () } else { echo hi }; \
+               let x = g (); return $x }";
+    let errs = raw_errors(src);
+    assert_eq!(codes_of(&errs), ["T0074"], "{errs:?}");
+    assert!(matches!(
+        &errs[0].kind,
+        TypeErrorKind::KindMismatch {
+            found: ral_core::typecheck::KindFound::Type(ty),
+            kind,
+            ..
+        } if matches!(**ty, Ty::Thunk(_)) && *kind == ral_core::ty::Kind::DATA
+    ));
+}
+
+#[test]
+fn rejected_handle_equations_do_not_poison_a_later_await() {
+    for rejected_join in [
+        "if true { return $g } else { return $f }",
+        "if true { return $f } else { return $g }",
+    ] {
+        let src = format!(
+            "let broken = {{ |f g| \
+             if true {{ return $f }} else {{ spawn {{ return 1 }} }}; \
+             if true {{ return $g }} else {{ spawn {{ return () }} }}; \
+             {rejected_join}; \
+             if true {{ return $g }} else {{ spawn {{ echo hi }} }}; \
+             let x = await $f; return $x }}"
+        );
+        let errs = raw_errors(&src);
+        assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
+        let TypeErrorKind::CompTyMismatch { expected, actual } = &errs[0].kind else {
+            panic!("expected a producer mismatch: {errs:?}");
+        };
+        let (CompTy::Return(_, a), CompTy::Return(_, b)) = (expected, actual) else {
+            panic!("expected two handle producers: {errs:?}");
+        };
+        let (Ty::Handle(a, _), Ty::Handle(b, _)) = (a.as_ref(), b.as_ref()) else {
+            panic!("expected two handles: {errs:?}");
+        };
+        assert!(matches!((a, b), (Grade::Var(_), Grade::Var(_))));
+        assert_ne!(
+            a, b,
+            "a rejected handle payload must not share grades: {errs:?}"
+        );
+    }
+}
+
+#[test]
 fn numeric_spawn_handle_lists_keep_grade_type_pairing_in_both_orders() {
-    // §7's handle pairing pin extends §1.10's refused command/value join row.
-    // §1.6's same guard protects Handle; unlike a join, this uses ListElem's hint.
+    // Handle payloads and grades must remain paired (SPEC §17.3).
+    // Kind admission protects Handle too; list mismatch advice still applies.
     let hint = "a list holds one type, and this element's differs from its neighbours': to keep different things side by side, write a record, as in `[name: $n, status: $s]`; for alternatives, tag each element and `case` on it downstream";
     for (expression, variable) in [("$[$n - 1]", false), ("$[$n - $n]", true)] {
         for handles in ["[$value, $command]", "[$command, $value]"] {
@@ -1418,7 +1590,7 @@ fn numeric_spawn_handle_lists_keep_grade_type_pairing_in_both_orders() {
 
 #[test]
 fn twice_fixes_its_callbacks_grade_until_an_explicit_unit_return() {
-    // §1.10's `twice` row: its inner let fixes p, even when its value is unit.
+    // `twice`'s inner let fixes the value grade, even for unit (SPEC §17.5).
     let src = "let twice = { |f| let _ = !$f; !$f }; let c = true; \
                if $c { twice { return () } } else { echo a }";
     let err = one_error_with_hint(
@@ -1434,7 +1606,7 @@ fn twice_fixes_its_callbacks_grade_until_an_explicit_unit_return() {
 
 #[test]
 fn both_demands_value_blocks_without_implicit_capture() {
-    // §1.10's `both { echo a } { echo b }` row, with each argument pinned too.
+    // `both` refuses each command argument without implicit capture.
     for (args, errors) in [
         ("{ echo a } { return b }", 1),
         ("{ return a } { echo b }", 1),
@@ -1459,7 +1631,7 @@ fn both_demands_value_blocks_without_implicit_capture() {
 
 #[test]
 fn filter_demands_a_bool_block_without_implicit_capture() {
-    // §1.5/§7's filter pin, alongside §1.10's refused value-block arguments.
+    // `filter` requires Bool-producing blocks (SPEC §17.6).
     let hint = "this block is a command, but a block that returns a Bool is wanted here; for a yes/no answer, `succeeds { … }`";
     for src in [
         "filter { |x| echo $x } [1, 2]",
@@ -1474,8 +1646,8 @@ fn filter_demands_a_bool_block_without_implicit_capture() {
 
 #[test]
 fn decoder_results_cannot_join_commands_in_either_order() {
-    // §1.10's `echo`/`from-json` row: a boundary result is p, never a command.
-    // §1.4 still blames the later arm; the existing weak-boundary note remains.
+    // A boundary result has value grade, never command grade (SPEC §17.3).
+    // Blame the later arm and retain the weak-boundary note.
     let weak_note = "this type is shared by every use in its unit, and another use fixed it: what `from-json` reads has one type for the whole unit, which its door checks every use of. Write one function per shape, or decode once and bind the result";
     for (first, later, hint) in [
         ("echo a", "from-json < f", VALUE_AFTER_COMMAND_BRANCH_HINT),

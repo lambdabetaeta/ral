@@ -2,9 +2,9 @@
 # status: 1
 # at: 10:55
 # contains: couldn't match type Returns String with type Command
-# contains: this arm is a command and an earlier one returns a value; a arm's output is not captured: return it, `{ return !{…} }`
-# contains: couldn't match type String with type Unit
+# contains: this arm is a command and an earlier one returns a value; an arm's output is not captured: return it, `{ return !{…} }`
+# contains: couldn't match type Returns String with type Command[ν] Unit
 # contains: exactly one arm happens
-# Plan §1.10 row mixed join; a free Unit cannot also join a String.
+# A free Unit can join a command, but cannot also join a String.
 let v = `c ()
 let x = case $v [`a: { |_| return 'five' }, `b: { |_| echo hi }, `c: { |_| return () }]

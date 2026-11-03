@@ -1,8 +1,8 @@
 ---
-generated_at_commit: d56977ff
-verified_at_commit: d56977ff
+generated_at_commit: b1ba0713
+verified_at_commit: b1ba0713
 verified_at_date: 2026-11-03
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, annotate, Capture, captured_string, Bound]
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, freeze_toplevel, Pending, Capture, captured_string, Bound]
 ---
 
 # The compilation ladder: source to typed IR
@@ -37,19 +37,23 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   head; checking refuses one into a builtin or session binding.
   What it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
-- **IR → typed IR.** Hindley–Milner inference annotates the `Val` / `Comp`
-  tree ([[design/types|types]]). The checker is a transformation, `annotate`: a
-  structural rebuild of the inferred tree carrying explicit verdicts.
+- **IR → checked IR.** Each Hindley–Milner inference rule returns its type
+  beside the node it builds ([[design/types|types]]). Binding capture,
+  Let-fun, returned-thunk splits and boundary η-expansion are constructed
+  where their rules decide them; the tree carries pending sites until the
+  unit succeeds.
 
-  - Each top-level name-bind carries the generalised `Scheme` it inferred,
-    closed against the empty environment so the scheme outlives the per-run
-    unifier
+  - Each `Phrase::Define` carries its harvested per-name `Scheme`s unsettled.
+    The successful unit's freeze settles weak references and residual grades
+    with `settle_weak` and checks closure, so the schemes outlive the per-run unifier
     ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
   - A `Pipeline` carries nothing per stage: every interior edge is a byte pipe
     allocated from position, so there is nothing to write
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
-  - Each boundary call carries the `Site` inference recorded for it.
-  - A command the checker recorded as captured is wrapped as
+  - Boundary calls carry `Pending::Open(ty)`; freeze snapshots their solved
+    types as `Site`s. These graphs can retain weak variables and delayed
+    obligations, not just ground types.
+  - A command captured by a binding is wrapped immediately as
     `cap M to d. decode d` (`CompKind::Capture`, `Prim::Decode`, built by
     `captured_string`)
     ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
@@ -62,13 +66,13 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   binding point. A mutually recursive group stays monomorphic until its fixed
   point.
 
-  An arrow-typed right-hand side is bound unrun, as its thunk: the bind rule
-  records it (`InferCtx::bound`, `Bound::Thunked`) and `annotate` writes it `return (thunk M)`
-  (Let-fun, SPEC §17.5).
+  An arrow-typed right-hand side is bound unrun, as its thunk:
+  `rhs_bound_ty` returns `Bound::Thunked`, and `infer_let` builds
+  `return (thunk M)` (Let-fun, SPEC §17.5).
 
-  Only a binding records a capture: `rhs_bound_ty` reads the resolved RHS,
-  and `InferCtx.bound` records `Bound::Captured` at its address. `annotate`
-  wraps that RHS; arguments and joins only unify
+  Only a binding inserts a capture: `rhs_bound_ty` reads the resolved RHS,
+  and `infer_let` applies `Bound::Captured` to its constructed RHS;
+  arguments and joins only unify
   ([[internals/type-inference|type-inference]],
   [[design/capture|grades and capture]]).
 
@@ -88,6 +92,16 @@ built it, so a key misspelled inside a spread is caught with one written out.
 function is refused with the spelling to use. A program whose return is a
 variable — `from-json` — or a manifest factory's `Thunk` is left to its
 loader's runtime check, which dispatches off the same table.
+
+After inference, nested checks and return-contract ascription succeed,
+`freeze_toplevel` maps the pending tree to the final `Toplevel`. One fresh
+`UnitId` identifies all new site snapshots and the first-use readmissions in
+`Toplevel.admits`. Imported value membranes survive only when their solved
+contract has delayed parts; existing checked sites are kept unchanged.
+Inference and freeze each memoise recursive groups by `Arc` identity, so
+projections share one group through both phases. An erroneous unit is refused
+whole and its built IR discarded without freezing; one-shot inference sessions
+also discard their built IR.
 
 Each run's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map plus the alias arms' schemes — so a binding made in one

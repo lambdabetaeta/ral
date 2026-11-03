@@ -1,10 +1,12 @@
 //! Fresh producer grades, source-order joins, and capture at `let` only.
 
+use super::env::Pending;
 use super::error::Reason;
 use super::infer::Inferencer;
 use crate::ir::Val;
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, Grade, Producer, Spine, Ty};
+use std::sync::Arc;
 
 /// What an arm of a joining form is checked as: the value written, the
 /// parameter types its form hands it, and the reason its own shape is held
@@ -131,41 +133,47 @@ impl Inferencer<'_> {
     }
 
     /// Check independently, then join in source order.
-    pub(super) fn join_arms(&mut self, arms: &[JoinArm<'_>], why: &Reason) -> CompTy {
-        let results: Vec<CompTy> = arms
+    pub(super) fn join_arms(
+        &mut self,
+        arms: &[JoinArm<'_>],
+        why: &Reason,
+    ) -> (CompTy, Vec<Val<Pending>>) {
+        let results: Vec<(CompTy, Val<Pending>)> = arms
             .iter()
             .map(|arm| {
                 let rho = self.ctx.unifier.fresh_comp_ty();
-                self.check_arm(arm, &arm.shaped(rho.clone()));
-                rho
+                let node = self.check_arm(arm, &arm.shaped(rho.clone()));
+                (rho, node)
             })
             .collect();
         let target = self.ctx.unifier.fresh_comp_ty();
-        for (arm, rho) in arms.iter().zip(&results) {
+        for (arm, (rho, _)) in arms.iter().zip(&results) {
             self.with_span(arm.result_span(), |this| {
                 this.ctx.unify_comp_ty(&target, rho, why.clone());
             });
         }
-        target
+        (target, results.into_iter().map(|(_, node)| node).collect())
     }
 
     /// `arm` against the computation type `expected`: a literal block is
     /// inferred in a scope of its own, pushing `expected` inwards as a
     /// lambda's parameter; a thunk in hand is unified.  A mismatch is blamed
     /// on the arm's own span.
-    fn check_arm(&mut self, arm: &JoinArm<'_>, expected: &CompTy) {
+    fn check_arm(&mut self, arm: &JoinArm<'_>, expected: &CompTy) -> Val<Pending> {
         self.with_span(arm.span, |this| match arm.value {
             Val::Thunk(comp) => {
-                let got = this.with_scope(|this| this.check_comp(comp.shape(), expected));
+                let (got, node) = this.with_scope(|this| this.check_comp(comp.shape(), expected));
                 this.with_span(arm.result_span(), |this| {
                     this.ctx.unify_comp_ty(expected, &got, arm.why.clone());
                 });
+                Val::thunk(Arc::new(node))
             }
             other => {
-                let ty = this.infer_val(other);
+                let (ty, node) = this.infer_val(other, arm.span);
                 let expected = Ty::Thunk(Box::new(expected.clone()));
                 this.ctx.unify_ty(&ty, &expected, arm.why.clone());
+                node
             }
-        });
+        })
     }
 }

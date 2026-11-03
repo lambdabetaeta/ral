@@ -81,11 +81,15 @@ rule that introduces `w` does so at `Unit`, every rule that copies a grade
 copies the value type with it, and a grade variable is only ever unified
 together with the one value type it is paired with, so output appears only at
 `Unit` — given that every builtin scheme, and the error type of `fail` and
-`try`, pair their grade variables in the same way. Before binding either grade, `Unifier::unify_producers` refuses an output pair
-against a type whose kind excludes `Unit`; returners and handles share it. A sweep in
-`core/tests/builtin_registry_property.rs` and a `debug_assert` in `generalize`
-guard it; the pairing argument is checked in a mechanised model. Grades are atomic — a grade variable binds only to `p` or `w` — so
-there is no occurs check, no kind, and a grade is never weak.
+`try`, pair their grade variables in the same way. Before binding either grade,
+`Unifier::unify_producers` (`core/src/typecheck/unify.rs`) refuses an output pair
+against a type whose kind excludes `Unit`; returners and handles share this check.
+`every_scheme_pairs_a_grade_with_one_value_type` in `core/src/shell/builtins/tests.rs`
+checks builtin schemes; `rhs_bound_ty` in `core/src/typecheck/grade.rs` asserts
+that a captured command's payload is `Unit`. Pairing is an inference invariant,
+not a restriction on declarative type formation. Grades are atomic — a grade
+variable binds only to `p` or `w` — so there is no occurs check, no kind, and a
+grade is never weak.
 
 Every external command is `F^w Unit` (`external_exec_comp_ty` in
 `core/src/typecheck/infer.rs`). A head has one class (`HeadClass`, same file,
@@ -102,8 +106,8 @@ without wrappers ([[design/capture|grades and capture]]).
 - `F^w Unit` is captured and binds `String`; `F^p A` binds `A`.
 - `F^ν A` fixes `ν := p`; a computation variable unifies with `F^p α`.
   This local rule is the sole grade default; no value type is defaulted.
-- `annotate` wraps right-hand sides recorded by `rhs_bound_ty` in
-  `InferCtx.bound`, preserving the explicit capture/decode terms.
+- `infer_let` applies `rhs_bound_ty`'s decision to its inferred node,
+  constructing the explicit capture/decode or Let-fun terms immediately.
 
 Commands introduce `w`; builtin parameters demanding values and boundary
 results introduce `p`. Other term producers and ordinary builtin results have
@@ -194,7 +198,7 @@ both `number` and `sized`, so it is refused though `f` is bound and never
 called. The same properness is assumed of every scheme in the environment and
 every builtin's.
 
-Inference is annotation-free; generalisation happens at the `Bind` boundary. A
+Programs need no type annotations; generalisation happens at the `Bind` boundary. A
 leaf, meanwhile, commits before inference begins: a bare word's value type is
 fixed by the grammar that classifies it, never by the hole it lands in
 ([[invariants/numerals-denote-numbers|numerals-denote-numbers]]), so no
