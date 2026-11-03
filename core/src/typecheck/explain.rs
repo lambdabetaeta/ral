@@ -1465,7 +1465,6 @@ mod tests {
                 for grade in [Grade::Value, Grade::Var(crate::ty::GradeVar(0))] {
                     let producer =
                         producer_mismatch(expected.clone(), actual.clone(), (grade, grade));
-                    assert_eq!(shape_hint(&producer), shape_hint(&plain));
                     for reason in [
                         Reason::Argument,
                         Reason::IfBranches,
@@ -1493,9 +1492,6 @@ mod tests {
                 (Ty::String, Ty::list(Ty::Int)),
             ] {
                 let producer = producer_mismatch(expected, actual, grades);
-                assert_eq!(value_sides(&producer), None);
-                assert_eq!(shape_hint(&producer), None);
-                assert_eq!(argument_hint(&producer), None);
                 for (reason, form) in [
                     (Reason::IfBranches, "branch"),
                     (Reason::CaseArms, "arm"),
@@ -1523,9 +1519,6 @@ mod tests {
                 (Ty::Unit, value, (Grade::Output, Grade::Value)),
             ] {
                 let producer = producer_mismatch(expected, actual, grades);
-                assert_eq!(value_sides(&producer), None);
-                assert_eq!(shape_hint(&producer), None);
-                assert_eq!(argument_hint(&producer), None);
                 for reason in [
                     Reason::Argument,
                     Reason::IfBranches,

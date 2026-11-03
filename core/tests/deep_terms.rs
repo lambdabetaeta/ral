@@ -51,12 +51,12 @@ fn deep_block() {
 }
 
 #[test]
-fn deep_block_is_refused() {
+fn deep_block_reports_an_arithmetic_type_error() {
     let src = format!("{{\n{}return $['x' + 1]\n}}", "let x = 1\n".repeat(N));
     let schemes = common::schemes_for(&HostSurface::default());
     let result = compile_and_typecheck(&src, schemes, FileId::DUMMY, None, None);
     let Err(CompileError::Types(errors)) = result else {
-        panic!("depth {N} must be refused with type errors, got {result:?}");
+        panic!("invalid arithmetic at depth {N} must report type errors, got {result:?}");
     };
     let codes: Vec<_> = errors.iter().map(|error| error.kind.code()).collect();
     assert_eq!(codes, ["T0074"]);

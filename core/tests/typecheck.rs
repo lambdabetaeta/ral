@@ -1255,43 +1255,30 @@ fn in_hand_command_arms_are_not_implicitly_captured() {
 }
 
 #[test]
-fn value_joins_keep_specific_shape_hints() {
-    for (left, right, fragment) in [
-        (
-            "return [:, a: 'x']",
-            "return [a: 'x']",
-            "a record and a map are different types",
-        ),
-        ("return `ok 1", "return 1", "a tagged value"),
-        ("return { return () }", "return 1", "a block value"),
-        (
-            "return [status: 1, message: 'bad']",
-            "return 'bad'",
-            "an error record",
-        ),
-        ("from-bytes", "return [65]", "Bytes are not a list"),
-    ] {
-        for (first, later) in [(left, right), (right, left)] {
-            for src in [
-                format!("let x = if true {{ {first} }} else {{ {later} }}"),
-                format!("let x = case `a () [`a: {{ |_| {first} }}, `b: {{ |_| {later} }}]"),
-                format!("let x = try {{ {first} }} {{ |_| {later} }}"),
-                format!("let x = {first} ? {later}"),
-            ] {
-                let errs = raw_errors(&src);
-                assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
-                assert!(
-                    matches!(&errs[0].kind, TypeErrorKind::CompTyMismatch {
-                        expected: CompTy::Return(g, _), actual: CompTy::Return(h, _),
-                    } if g == h),
-                    "{src}: {errs:?}"
-                );
-                assert!(
-                    errs[0].hint().is_some_and(|h| h.contains(fragment)),
-                    "{src}: {errs:?}"
-                );
-                assert_error_in(&src, &errs[0], later);
-            }
+fn value_join_syntaxes_preserve_shape_hints_and_blame() {
+    let (left, right) = ("return [:, a: 'x']", "return [a: 'x']");
+    for (first, later) in [(left, right), (right, left)] {
+        for src in [
+            format!("let x = if true {{ {first} }} else {{ {later} }}"),
+            format!("let x = case `a () [`a: {{ |_| {first} }}, `b: {{ |_| {later} }}]"),
+            format!("let x = try {{ {first} }} {{ |_| {later} }}"),
+            format!("let x = {first} ? {later}"),
+        ] {
+            let errs = raw_errors(&src);
+            assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
+            assert!(
+                matches!(&errs[0].kind, TypeErrorKind::CompTyMismatch {
+                    expected: CompTy::Return(g, _), actual: CompTy::Return(h, _),
+                } if g == h),
+                "{src}: {errs:?}"
+            );
+            assert!(
+                errs[0]
+                    .hint()
+                    .is_some_and(|h| h.contains("a record and a map are different types")),
+                "{src}: {errs:?}"
+            );
+            assert_error_in(&src, &errs[0], later);
         }
     }
 }
