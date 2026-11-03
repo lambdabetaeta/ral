@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: d56977ff
 ---
 
 # Builtins: the structured primitive set
@@ -47,9 +47,10 @@ library; see the [[decisions/261102_the-checked-ir-is-the-calculus|correspondenc
 The core entries group by what they compute:
 
 - **List & higher-order** — `each` `map` `filter` `fold` `sort-list` `sort-list-by`
-  `range`. Each takes a thunk. `each` and `fold` absorb a command callback (run it, stream
-  its output, keep its value), while `map`, `filter` and `sort-list-by` demand a
-  value: `map { |x| echo $x } $xs` captures each call's output as a `String`.
+  `range`. `each`, `fold` and `map` accept either callback grade: they run
+  it, stream its output and keep its value. `map { |x| echo $x } $xs` returns
+  unit elements; use `{ |x| return !{echo $x} }` to collect text. `filter`
+  demands a returned Bool, and `sort-list-by` a returned comparable key.
 - **String & regex** — `upper` `lower` `dedent` `slice` `intercalate`
   `re-match` `re-split` `re-find-match` `re-find-matches` `re-replace`
   `re-replace-all` `string-replace` `ral-quote` `posix-quote` `posix-split`.
@@ -78,8 +79,8 @@ The core entries group by what they compute:
   coexist because the argv boundary renders each element before the list is
   formed.
 - **Diagnostics** — `warn`: one `String` and a newline to standard error,
-  typed `String -> Returns Unit`, a row that *returns* and does not write, so a
-  bind capturing it never picks the message up. ral has no redirect pointing
+  typed `∀ν. String → Command[ν] Unit`, with a fresh unit-result grade;
+  binding it fixes the grade to `p` and never captures the message. ral has no redirect pointing
   standard output at standard error, and this verb is what stands where the
   bash idiom did
   ([[decisions/260819_diagnostics-are-a-builtin|diagnostics-are-a-builtin]]).
@@ -110,7 +111,12 @@ Nullary and divergent are shapes a scheme writes, not a second rule:
   than of its type.
 - **Writing** — every encoder, `help`, `explain` and the terminal controls are
   `… → Command` rows: the type tells a bind or a pipeline that the command
-  writes ([[decisions/260930_graded-f|graded-f]]).
+  writes ([[design/capture|grades and capture]]).
+
+Ordinary builtin results get a fresh grade from `Decl::scheme`; commands,
+already graded results and boundary results keep their declared grades.
+Boundary results are `p`, since the run supplies data that a command join must
+not erase. See [[design/capture|grades and capture]] for the complete rule.
 
 One scheme closes a computation variable, which a written quantifier list
 cannot bind, so it generalises against the empty environment instead: `alias`,

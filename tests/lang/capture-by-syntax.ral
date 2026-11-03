@@ -1,5 +1,5 @@
-# Test: a command's value is its output. Where a value is wanted, a command
-# is captured; where a command is wanted, a command runs.
+# Test: only `let` captures a command's output; other positions need
+# explicit capture to turn that output into a value.
 
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {
@@ -29,10 +29,9 @@ assert_eq 'function called' "1\ndone" $z
 let w = f 2 | from-line
 assert_eq 'function piped' "2\ndone" $w
 
-# A wrapper that binds what it is given demands a value, so a command block
-# handed to it is captured
+# Plan §1.10 row let-binding wrapper: its argument captures explicitly.
 let time = { |t| let r = !$t; $r }
-assert_eq 'wrapper of a command' hi !{time { echo hi }}
+assert_eq 'wrapper of explicitly captured output' hi !{time { return !{echo hi} }}
 assert_eq 'wrapper of a value' hi !{time { return hi }}
 
 # A block in hand is the command it holds, as a literal one is
@@ -66,10 +65,11 @@ let enc = to-json
 let ej = enc 7
 assert_eq 'encoder held' '7' $ej
 
-# A branching form whose arms are commands is one command, captured once
+# Plan §1.10 row Command/String join: return captured output in the arm.
 let c = true
-let either = if $c { echo yes } else { return none }
-assert_eq 'command or value' yes $either
+let either = if $c { return !{echo yes} } else { return none }
+assert_eq 'explicitly captured output or value' yes $either
+# A branching form whose arms are commands is captured once at `let`.
 let recovered = try { ^false } { |e| echo failed }
 assert_eq 'try handler' failed $recovered
 let okay = try { echo fine } { |e| echo failed }
@@ -116,10 +116,11 @@ let cmd_a = { echo a }
 let cmd_b = { echo b }
 let picked = if true $cmd_a else $cmd_b
 assert_eq 'command arms in hand' a $picked
-let mixed = if false $cmd_a else { return b }
-assert_eq 'command arm in hand joined with a value' b $mixed
-let mixed_taken = if true $cmd_a else { return b }
-assert_eq 'command arm in hand, taken' a $mixed_taken
+# Plan §1.10 row Command/String join: capture the in-hand command explicitly.
+let mixed = if false { return !{!$cmd_a} } else { return b }
+assert_eq 'captured command arm in hand joined with a value' b $mixed
+let mixed_taken = if true { return !{!$cmd_a} } else { return b }
+assert_eq 'captured command arm in hand, taken' a $mixed_taken
 
 # A stand-in writes as the command it stands in for does, all of it
 within [handlers: [curl: { |a| echo note; echo body }]] {
@@ -135,14 +136,13 @@ within [handlers: [curl: { |a| return () }]] {
     assert_eq 'a () stub stands in for a command' '' $stub
 }
 
-# A collection callback that is a command is captured per element where a
-# value is demanded, and streams where it is not
-let mapped_each = map { |e| echo $e } [a, b]
-assert_eq 'map of commands' 2 !{length $mapped_each}
-assert_eq 'first result' a $mapped_each[0]
+# Plan §1.10 rows bound `map` and `map $g`: collect output explicitly.
+let mapped_each = map { |e| return !{echo $e} } [a, b]
+assert_eq 'map of captured commands' 2 !{length $mapped_each}
+assert_eq 'first captured result' a $mapped_each[0]
 let shout = { |e| echo $e }
-let mapped_held = map $shout [c, d]
-assert_eq 'map of a command function in hand' d $mapped_held[1]
+let mapped_held = map { |e| return !{!$shout $e} } [c, d]
+assert_eq 'map of captured output from a command in hand' d $mapped_held[1]
 each { |e| echo $e } [e, f]
 let folded = fold { |acc e| echo $e; return $[$acc + 1] } 0 [g, h]
 assert_eq 'fold streams' 2 $folded

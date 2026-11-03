@@ -82,7 +82,7 @@ multi-stage pipeline shares one process group:
   no wire, crosses back. A captured final stage (`let x = a | b`) is a
   `Capture` node, so it runs as a thread stage whose stdin is the pipe and
   whose buffer takes what `b` writes
-  ([[decisions/260930_graded-f|graded-f]]).
+  ([[design/capture|grades and capture]]).
 
 Only an external is ever isolated by a process boundary. A stage thread's panic
 is caught at the pipeline boundary and folded as that stage's own failure,

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -19,8 +19,9 @@ type rule and caches it with the settle-at-`Unit` fact in one `Spine`, a `usize`
 for every entry in the table. What a row does with stdout is
 in its scheme: a writing row (the encoders, `echo`, `help`, `explain`, `clear`,
 `reset`, `ints-to-bytes`) ends in `Command`, `F^w Unit`, and there is no
-separate declaration
-([[decisions/260930_graded-f|graded-f]]). Settling at `Unit` is enforced at the
+separate output facet. `Decl::scheme` gives ordinary results fresh grades,
+while boundaries retain `p` and already graded results retain their grade
+([[design/capture|grades and capture]]). Settling at `Unit` is enforced at the
 same door as arity:
 `Decl::settles_at_unit` reads the declared result off that curry spine,
 and a row whose scheme says `Unit` answers unit from `call_body`
@@ -89,15 +90,15 @@ reads the same records' `Typed` declarations.
 
 The read and CSV schemes live in `typecheck/builtins.rs`:
 
-- `env : ∀α. F α` admits the effective environment against its site's record
+- `env : ∀α. Returns α` admits the effective environment against its site's record
   or map shape (`ambient.rs`); values remain text.
-- `from-csv : ∀α. F [α]` parses text cells and admits the rows against the
+- `from-csv : ∀α. Returns [α]` parses text cells and admits the rows against the
   site's type (`codecs.rs`). Written field reads use records; computed reads
   use maps. The row stays a decoder for misuse diagnostics.
-- `to-csv : ∀α:data. [α] → writes` accepts record or map rows, requiring the
+- `to-csv : ∀α:data. [α] → Command` accepts record or map rows, requiring the
   first row's keys and scalar cells at runtime. Strings, numbers and booleans
   render as `str` renders them; other cells name their row index and key.
-- `nth : ∀α. Int → [α] → F α` (`collections.rs`) refuses a negative Int and
+- `nth : ∀α ν. Integer → [α] → Command[ν] α` (`collections.rs`) refuses a negative Int and
   then reads through `evaluator::expr::position`, the read a written position
   uses; field reads and map lookups are `expr::field` and `expr::lookup`.
 

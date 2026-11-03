@@ -27,13 +27,14 @@ install.
 stands in for the head it is installed under: its type is that of the base
 frame or arm already in force there, and `List String → Command` for any other
 command. So an arm for `curl`, per-name or under the catch-all, has a command's
-value, its output, and a `()`-returning stub is admitted and captures `""`; an
+value, its output, and a fresh-grade `()`-returning stub is admitted and captures `""`
+when called under `let`; an
 arm for `detach` returns what `detach` returns. The command
 world is argv in, bytes out, uniformly. A value-returning, variable-arity
 command is therefore not expressible; that capability belongs to the value
 world instead, as a binding of fixed arity taking a list —
 `let f = { |xs| … }; f [a, b, c]`. A name is a value or it is handled; if it is handled, it is a command, and a command's value is its output
-([[decisions/260930_graded-f|graded-f]]).
+([[design/capture|grades and capture]]).
 
 ral's handlers are the **tail-resumptive fragment** of algebraic-effect handlers,
 along three axes — the first two recorded in

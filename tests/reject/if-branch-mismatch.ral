@@ -1,6 +1,7 @@
-# codes: T0010
+# codes: T0011
 # status: 1
-# at: 6:36
-# contains: couldn't match
-# contains: Help:
+# at: 7:36
+# contains: couldn't match type Integer with type String
+# contains: exactly one branch happens
+# Plan §1.4 direct joins: value-only mismatch, not a capture change.
 if true { return 1 } else { return hello }

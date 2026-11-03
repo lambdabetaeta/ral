@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
 
@@ -49,8 +49,7 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   to its handler by the same push-then-force rule.
 - `Capture` swaps stdout for a buffer. Success restores the sink and returns
   exact `Bytes`; overflow refuses a prefix. Failure flushes to the displaced
-  sink before propagating. `Upcast` enters its body in tail position without
-  a frame.
+  sink before propagating.
 - `Rec` unfolds the selected member of a shared `GroupNode`. Every sibling
   closes over one environment restricted to the group's occurrence set;
   recursive references re-enter through force without rewriting bodies.

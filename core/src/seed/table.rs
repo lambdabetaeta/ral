@@ -376,7 +376,7 @@ mod tests {
             }
             CompKind::Force(crate::ir::Val::Thunk(node))
             | CompKind::Return(crate::ir::Val::Thunk(node)) => find_lam_node(node.shape()),
-            CompKind::Capture(c) | CompKind::Upcast(c) => find_lam_node(c),
+            CompKind::Capture(c) => find_lam_node(c),
             _ => None,
         }
     }
@@ -413,7 +413,7 @@ mod tests {
             }
             CompKind::Force(crate::ir::Val::Thunk(node))
             | CompKind::Return(crate::ir::Val::Thunk(node)) => walk_comp(node.shape(), visit),
-            CompKind::Capture(c) | CompKind::Upcast(c) => walk_comp(c, visit),
+            CompKind::Capture(c) => walk_comp(c, visit),
             _ => {}
         }
     }

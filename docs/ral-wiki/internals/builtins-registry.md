@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1776d222
-verified_at_date: 2026-09-03
+verified_at_commit: d56977ff
+verified_at_date: 2026-11-03
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke]
 ---
 
@@ -35,7 +35,9 @@ call *means* for this verb, which no polytype can state — that an argument
 written to a decoder is a misreading of where the bytes come from, or that
 a zero `status` on `fail` wants `return`. Everything a type can state is in the
 scheme — including whether a row writes, which is its result grade (`Command`),
-not a facet ([[decisions/260930_graded-f|graded-f]]). Bodies are grouped by concern
+not a facet ([[design/capture|grades and capture]]). `Decl::scheme` freshens
+ordinary result grades; command, boundary and already graded results retain
+their declared grades. Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
 `concurrency/` for the eliminators, `first-settled`, `workers`, `worker` and
 `watch` (`spawn` and `gather` are control operators, `par` prelude code), `modules.rs` for `use`, `misc.rs` for

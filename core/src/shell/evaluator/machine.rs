@@ -608,11 +608,6 @@ impl Machine {
                 pipeline::PipeNode::run(stages, &env, STAGE_EVAL, mooring, shell)?,
             )),
 
-            CompKind::Upcast(body) => Focus::Eval {
-                comp: Arc::clone(body),
-                env,
-            },
-
             CompKind::Capture(body) => {
                 let slot = self.reserve(shell)?;
                 let (sink, buf) = io::new_buffer();

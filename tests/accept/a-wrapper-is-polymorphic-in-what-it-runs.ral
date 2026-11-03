@@ -1,4 +1,0 @@
-let time = { |t| let r = !$t; $r }
-time { echo hi }
-let n = time { return 3 }
-echo "n: $n"

@@ -487,7 +487,6 @@ impl Mentions for Comp {
         match &self.item {
             CompKind::Lam { param: _, body }
             | CompKind::Capture(body)
-            | CompKind::Upcast(body)
             | CompKind::Protect { body, .. } => body.mentions(out),
             CompKind::Bind {
                 comp,
@@ -689,8 +688,6 @@ pub enum CompKind {
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
     /// lossless. No surface syntax.
     Capture(Arc<Comp>),
-    /// Checker-inserted command boundary for a `()` producer.
-    Upcast(Arc<Comp>),
     Prim(Prim),
     // Shell layer.
     /// Shell command invocation, and the effect boundary — nothing outside

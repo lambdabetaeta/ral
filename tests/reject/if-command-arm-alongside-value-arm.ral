@@ -1,0 +1,7 @@
+# codes: T0011
+# status: 1
+# at: 7:35
+# contains: couldn't match type Command with type Returns String
+# contains: this branch returns a value and an earlier one is a command; a branch's output is not captured: make that one return it, `{ return !{…} }`
+# Plan §1.10 row Command/String join: only `let` captures.
+if true { echo hi } else { return 's' }

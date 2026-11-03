@@ -1,16 +1,16 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: d56977ff
 ---
 
 # The checked IR is pure CBPV
 
 **The checked IR has three layers: control, primitives on values, and shell.**
-The core corresponds constructor for constructor to `dev/agda/Extrinsic/`;
+The core is read against `dev/agda/Extrinsic/`;
 the evaluator is a CEK machine for [[design/cbpv|call-by-push-value]], and the
 Agda machine its substitution-based CK counterpart.
 
 - **Control:** `Return`, `Force`, `Lam`, `App`, `Bind`, `Seq`, `Rec`, `If`,
-  `Case`, `Try`, `Guard`, `Capture`, `Upcast`. A lambda binds one name;
+  `Case`, `Try`, `Guard`, `Capture`. A lambda binds one name;
   `Bind` takes a pattern, generalising its binders over one shared set of
   variables. Failure is a machine register, not a computation constructor.
 - **Primitives:** `CompKind::Prim` contains `Binary`, `Negate`, `Not`,
@@ -42,8 +42,8 @@ Agda machine its substitution-based CK counterpart.
   elaboration refuses it for written value heads and lexically bound heads;
   checking refuses it when a bare head resolves to a builtin or session binding.
 - The checker writes returned-thunk application as `M to h. force h · V`;
-  capture as `Capture(M) to d. Prim::Decode(d)`; and a command boundary for
-  a unit producer as `Upcast(M)`. No runtime rule forces implicitly.
+  binding capture as `Capture(M) to d. Prim::Decode(d)`.
+  No runtime rule forces implicitly or converts a value producer to a command.
 - A variant always has a payload: a bare tag carries `()`.
 - A form's options are spread-free record nodes; handler labels remain syntax.
 

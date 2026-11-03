@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -16,8 +16,8 @@ fact data are reached through their owning modules.
   `handler.rs` (the user handler stack: `HandlerFrame`, `HandlerStack`,
   `FrameHandle`), `builtin.rs` (`BuiltinEntry` — a checker-owned `Decl` plus the body — and
   `BuiltinTable`, which projects each set into the checker's `Manifest`; kept
-  separate from the handler stack — a `Returns` row whose declared scheme settles
-  at `Unit` has its answer coerced to `Unit` regardless of what the body returns,
+  separate from the handler stack — a row whose result settles at `Unit`
+  has its answer coerced to `Unit`, independent of grade,
   `Decl::settles_at_unit` reading the curry spine to decide and
   debug-asserting the body agrees), and `handle.rs` (the concurrency
   substrate behind `Value::Handle`: `HandleInner`, which carries its
@@ -25,6 +25,10 @@ fact data are reached through their owning modules.
   each one instant on a monotonic and a wall clock — and one lock over its
   `HandleState` (`Running`, `Stopping`, `Ready`, `Consumed`), beside `CompletedHandle`,
   the worker's `CompletionPermit` and its `DeferredSurface`).
+  `Value::Native(Arc<BuiltinEntry>)` holds only the entry: forcing builds its
+  lambda code, and partial applications live as thunk closures over received
+  arguments. It displays as `<native NAME>`; lambda display recovers lowered
+  parameter patterns. `Value::variant` normalises a unit payload to absence.
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* or alias arm is a block whose type takes its slot's parameters:
@@ -169,8 +173,9 @@ checkpoint, since a run never writes it.
   `comparable` variables were fixed to: the session's threads share it, a new
   session snapshots it, [[map/core/ty|ty]]), the host-installed
   `builtins` with the session's `library_docs`, the session's
-  `terminal_lease`, `stack_limit`, and `child_limits` (soft resource ceilings
-  for launched children, leaving ral's own limits unchanged), and
+  `terminal_lease`, `stack_limit` (no machine push exceeds that frame count),
+  and `child_limits` (soft resource ceilings for launched children, leaving
+  ral's own limits unchanged), and
   the `hooks` table (a worker or a stage dispatches none; a hook registered by a run that then panics is not rolled back with the `(env, context)` checkpoint).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
@@ -247,7 +252,7 @@ checkpoint, since a run never writes it.
   check: `BindingLease` also carries `large_binding_bytes`, and an install
   whose value's `Value::shallow_size` (a structural estimate — `String`/
   `Bytes` byte lengths, `List`/`Map`/`Variant` recursing into elements,
-  `Lambda`/`Block`/`Handle` a small fixed constant, never descended) meets it
+  `Lambda`/`Block`/`Native`/`Handle` a small fixed constant, never descended) meets it
   queues a `LargeBindingNotice` regardless of baseline status or idle age —
   residency and lifetime are independent axes.
   `Shell::leased_binding_count` rounds out the accessor surface — a probe

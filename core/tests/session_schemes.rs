@@ -54,7 +54,7 @@ fn value_producer_into_decoder_is_refused_cross_run() {
 // ─── (2) byte producer into byte consumer typechecks via harvested scheme ────
 
 /// `let f = { echo hi }` then `f | wc -l`: the harvested scheme for `f`
-/// is `{Returns Unit}`, a command, so it may feed `wc`'s input.
+/// is `Command`, so it may feed `wc`'s input.
 #[test]
 fn byte_producer_into_byte_consumer_typechecks() {
     let mut sh = shell();
@@ -381,7 +381,8 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
     let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
     assert!(scheme_is_closed(scheme));
     assert!(!has_weak_residuals(scheme));
-    assert_eq!(scheme.to_string(), "∀ν. ν Unit");
+    // Capture-at-let plan §1.7: the quantified grade can still become a command.
+    assert_eq!(scheme.to_string(), "∀ν. Command[ν] Unit");
 
     let next = compile_and_typecheck(
         "if true { y } else { echo a }; let result = y",
@@ -504,7 +505,9 @@ fn a_sized_kind_does_not_change_the_key_forms_read_rule() {
     top_level(&mut sh, "let before = { |m k| length $m; $m[$k] }").unwrap();
     top_level(&mut sh, "let after = { |m k| $m[$k]; length $m }").unwrap();
     let shown = |name: &str| scheme_of(&sh, name).expect("a scheme").to_string();
-    assert_eq!(shown("before"), "∀α. Map α → String → Returns α");
+    // Capture-at-let plan §1.7: the generic read's fresh grade is visible,
+    // unlike the grade paired with `length`'s concrete Integer below.
+    assert_eq!(shown("before"), "∀α ν. Map α → String → Command[ν] α");
     assert_eq!(shown("after"), "∀α. Map α → String → Returns Integer");
 }
 

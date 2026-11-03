@@ -6,7 +6,7 @@
 //! are about to render: it mints Greek letters in first-appearance order.
 
 use super::scheme::{Scheme, WeakVars};
-use super::{CompTy, CompTyVar, Grade, GradeVar, Row, RowVar, Term, Ty, TyVar};
+use super::{CompTy, CompTyVar, Grade, GradeVar, Head, Kind, Row, RowVar, Term, Ty, TyVar};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -37,6 +37,7 @@ pub struct FmtCtx {
     pub(crate) comp_names: HashMap<CompTyVar, String>,
     pub(crate) row_names: HashMap<RowVar, String>,
     pub(crate) grade_names: HashMap<GradeVar, String>,
+    ty_kinds: HashMap<TyVar, Kind>,
     cycles: Cycles,
 }
 
@@ -188,9 +189,61 @@ impl FmtCtx {
         ctx
     }
 
+    fn excludes_unit(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Unit => false,
+            Ty::Var(v) => match self.cycles.ty_binding(*v) {
+                Some(binding) => !matches!(binding, Ty::Unit | Ty::Var(_)),
+                None => self.ty_kinds.get(v).is_some_and(|k| !k.admits(Head::Unit)),
+            },
+            _ => true,
+        }
+    }
+
+    fn visible_grade(&self, term: Term<'_>) -> Option<GradeVar> {
+        match term {
+            Term::Ty(Ty::Handle(Grade::Var(v), ty))
+            | Term::Comp(CompTy::Return(Grade::Var(v), ty))
+                if !self.excludes_unit(ty) =>
+            {
+                Some(*v)
+            }
+            _ => None,
+        }
+    }
+
+    /// Follow each cyclic root once when finding printed grades.
+    fn visible_grades(&self, term: Term<'_>, seen: &mut Vec<Open>, grades: &mut HashSet<GradeVar>) {
+        let rooted = match term {
+            Term::Ty(ty) => self
+                .cycles
+                .ty_root(ty)
+                .map(|(v, binding)| (Open::Ty(*v), Term::Ty(binding))),
+            Term::Comp(cty) => self
+                .cycles
+                .comp_root(cty)
+                .map(|(v, binding)| (Open::Comp(*v), Term::Comp(binding))),
+            Term::Row(_) => None,
+        };
+        let term = if let Some((root, binding)) = rooted {
+            if seen.contains(&root) {
+                return;
+            }
+            seen.push(root);
+            binding
+        } else {
+            term
+        };
+        if let Some(v) = self.visible_grade(term) {
+            grades.insert(v);
+        }
+        term.children()
+            .for_each(|child| self.visible_grades(child, seen, grades));
+    }
+
     /// Name every variable under `term` not yet named, pre-order.
     fn absorb(&mut self, term: Term<'_>) {
-        if let Some(Grade::Var(v)) = term.grade() {
+        if let Some(v) = self.visible_grade(term) {
             let idx = self.grade_names.len();
             self.grade_names
                 .entry(v)
@@ -348,7 +401,8 @@ fn fmt_producer(grade: Grade, a: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> Str
     match grade {
         Grade::Output => "Command".into(),
         Grade::Value => format!("Returns {}", fmt_ty_in(a, ctx, open)),
-        Grade::Var(v) => format!("{} {}", ctx.grade_name(v), fmt_ty_in(a, ctx, open)),
+        Grade::Var(_) if ctx.excludes_unit(a) => format!("Returns {}", fmt_ty_in(a, ctx, open)),
+        Grade::Var(v) => format!("Command[{}] {}", ctx.grade_name(v), fmt_ty_in(a, ctx, open)),
     }
 }
 
@@ -395,12 +449,22 @@ fn render_scheme(scheme: &Scheme) -> String {
             &scheme.row_vars.iter().map(|&(v, _)| v).collect::<Vec<_>>(),
             ROW_LETTERS,
         ),
-        grade_names: names_in_order(&scheme.grade_vars, GRADE_LETTERS),
+        ty_kinds: scheme.ty_vars.iter().copied().collect(),
+        grade_names: HashMap::new(),
         cycles: Cycles {
             tys: scheme.ty_bindings.clone(),
             comps: scheme.comp_ty_bindings.clone(),
         },
     };
+    let mut visible = HashSet::new();
+    ctx.visible_grades(Term::Ty(&scheme.ty), &mut Vec::new(), &mut visible);
+    let grade_order: Vec<_> = scheme
+        .grade_vars
+        .iter()
+        .copied()
+        .filter(|v| visible.contains(v))
+        .collect();
+    ctx.grade_names = names_in_order(&grade_order, GRADE_LETTERS);
     ctx.name_weak(&scheme.weak);
 
     let quant_parts: Vec<String> = scheme
@@ -420,7 +484,7 @@ fn render_scheme(scheme: &Scheme) -> String {
                 .iter()
                 .map(|v| ctx.comp_names[v].clone()),
         )
-        .chain(scheme.grade_vars.iter().map(|v| ctx.grade_names[v].clone()))
+        .chain(grade_order.iter().map(|v| ctx.grade_names[v].clone()))
         .chain(scheme.row_vars.iter().map(|(v, deep)| {
             let name = &ctx.row_names[v];
             if *deep {

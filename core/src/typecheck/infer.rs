@@ -6,16 +6,16 @@ use super::contract::catch_all_shape;
 use super::env::{BoundaryValue, HandlerBinding, HandlerOrigin, InferCtx, Node, TyEnv};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::generalize;
-use super::grade::{Adaptation, JoinArm};
+use super::grade::{Bound, JoinArm};
 use crate::ir::{
     Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, GroupNode, Key,
-    MapEntryV, Name, Pattern, Phrase, Prim, Val, ValListElem, is_synthetic,
+    MapEntryV, Name, Pattern, Phrase, Prim, ThunkNode, Val, ValListElem, is_synthetic,
 };
 use crate::ir::{ArithOp, BinaryOp, StdinSource};
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
-use crate::ty::{CompTy, Grade, Kind, Label, Producer, RefusedArg, Row, Scheme, Site, Ty};
+use crate::ty::{CompTy, Kind, Label, Producer, RefusedArg, Row, Scheme, Site, Ty};
 use std::sync::Arc;
 
 /// Which slot an arm fills.  The slot, never the arm's spelling, fixes its
@@ -474,18 +474,18 @@ impl Inferencer<'_> {
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
             cty = self.with_span(arg.span, |this| {
-                if let Val::Thunk(_) = arg.item {
+                if let Val::Thunk(body) = &arg.item {
                     let wanted = this.ctx.unifier.fresh_comp_ty();
-                    deferred.push((arg, wanted.clone()));
+                    deferred.push((arg.span, body, wanted.clone()));
                     this.apply_to(&cty, Ty::Thunk(Box::new(wanted)))
                 } else {
                     let ty = this.infer_val(&arg.item);
-                    this.apply_in_hand(&cty, &arg.item, ty)
+                    this.apply_to(&cty, ty)
                 }
             });
         }
-        for (arg, wanted) in deferred {
-            self.demand_block(arg, wanted);
+        for (span, body, wanted) in deferred {
+            self.demand_block(span, body, &wanted);
         }
         if !splits.is_empty() {
             self.ctx.splits.insert(node, splits);
@@ -493,24 +493,11 @@ impl Inferencer<'_> {
         cty
     }
 
-    /// `arg` demanded as a block running as `wanted`, as an argument is: a
-    /// block written out is checked against it, one in hand adapted to it.
-    fn demand_block(&mut self, arg: &Spanned<Val>, wanted: CompTy) {
-        self.with_span(arg.span, |this| match &arg.item {
-            Val::Thunk(body) => {
-                let given = this.with_scope(|this| this.check_comp(body.shape(), &wanted));
-                match this.adapt(&given, &wanted) {
-                    Some(how) => this.coerce(&arg.item, &given, how, &wanted, &Reason::Argument),
-                    None => this.ctx.unify_comp_ty(&given, &wanted, Reason::Argument),
-                }
-            }
-            held => {
-                let ty = this.infer_val(held);
-                if !this.adapt_in_hand(held, &ty, &wanted) {
-                    this.ctx
-                        .unify_ty(&ty, &Ty::Thunk(Box::new(wanted)), Reason::Argument);
-                }
-            }
+    /// A literal block meets its parameter without adaptation.
+    fn demand_block(&mut self, span: Option<Span>, body: &ThunkNode, wanted: &CompTy) {
+        self.with_span(span, |this| {
+            let given = this.with_scope(|this| this.check_comp(body.shape(), wanted));
+            this.ctx.unify_comp_ty(wanted, &given, Reason::Argument);
         });
     }
 
@@ -520,31 +507,6 @@ impl Inferencer<'_> {
         let expected = CompTy::Fun(Box::new(ty), Box::new(result.clone()));
         self.ctx.unify_comp_ty(callee, &expected, Reason::Argument);
         result
-    }
-
-    /// [`Self::apply_to`] for an argument in hand: a block adapted to the
-    /// parameter's demand meets it there, η-wrapped at its arity if captured.
-    fn apply_in_hand(&mut self, callee: &CompTy, arg: &Val, ty: Ty) -> CompTy {
-        if let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(callee)
-            && let Ty::Thunk(wanted) = self.ctx.unifier.resolve_ty(&param)
-            && self.adapt_in_hand(arg, &ty, &wanted)
-        {
-            return *body;
-        }
-        self.apply_to(callee, ty)
-    }
-
-    /// Coerce `arg : ty`, a block in hand, to run as `wanted`, when it must
-    /// adapt to; false when it is no block or need not.
-    fn adapt_in_hand(&mut self, arg: &Val, ty: &Ty, wanted: &CompTy) -> bool {
-        let Ty::Thunk(given) = self.ctx.unifier.resolve_ty(ty) else {
-            return false;
-        };
-        let Some(how) = self.adapt(&given, wanted) else {
-            return false;
-        };
-        self.coerce(arg, &given, how, wanted, &Reason::Argument);
-        true
     }
 
     /// One application path for every registered builtin, `Scheme` and `Sig`
@@ -606,7 +568,7 @@ impl Inferencer<'_> {
             self.ctx.diagnose(TypeErrorKind::FailStatusZero);
         }
 
-        let scheme = (entry.type_rule)(&mut self.ctx.unifier);
+        let scheme = entry.scheme(&mut self.ctx.unifier);
         let head_cty = self.instantiate_comp(name, &scheme);
         self.apply_args_capped(node, head_cty, positional, fixed_arity)
     }
@@ -623,7 +585,7 @@ impl Inferencer<'_> {
     /// of it is (hypothetically) applied — what a refused spread into a
     /// builtin's type is.
     fn saturated_result(&mut self, name: &str, entry: &Decl) -> CompTy {
-        let scheme = (entry.type_rule)(&mut self.ctx.unifier);
+        let scheme = entry.scheme(&mut self.ctx.unifier);
         let cty = self.instantiate_comp(name, &scheme);
         self.peel_curry_spine(&cty)
     }
@@ -690,7 +652,7 @@ impl Inferencer<'_> {
             }
         };
         let (head, standing) = self.stands_for(arm);
-        let stands = self.arm_stands_in(block, &wanted, &head, standing);
+        let stands = self.arm_stands_in(&wanted, &head, standing);
         match met {
             Ok(()) => stands,
             Err((kind, why)) => {
@@ -732,28 +694,11 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Unify what `arm` and `head` produce, each past its parameters.  A `()`
-    /// producer stands in for a command: its output is whatever it wrote.
-    fn arm_stands_in(
-        &mut self,
-        block: &Val,
-        arm: &CompTy,
-        head: &CompTy,
-        standing: Standing,
-    ) -> ArmVerdict {
+    /// Unify the arm and head producers.
+    fn arm_stands_in(&mut self, arm: &CompTy, head: &CompTy, standing: Standing) -> ArmVerdict {
         let wanted = self.producer_of(head);
         let found = self.producer_of(arm);
-        let upcast = matches!(
-            (&wanted, &found),
-            (CompTy::Return(Grade::Output, _), CompTy::Return(Grade::Value, unit))
-                if self.is_unit(unit)
-        );
-        let verdict = if upcast {
-            self.adapt_block(block, self.spine(arm).arity(), Adaptation::Upcast);
-            Ok(())
-        } else {
-            self.ctx.try_unify_comp_ty(&wanted, &found)
-        };
+        let verdict = self.ctx.try_unify_comp_ty(&wanted, &found);
         // Installed at the head's producer either way, so a refused arm is
         // refused once, not again at every call.
         let wanted = self.ctx.unifier.apply_comp_ty(&wanted);
@@ -1068,7 +1013,10 @@ impl Inferencer<'_> {
     /// Infer, bind and generalise a `let` right-hand side.
     fn infer_let(&mut self, pattern: &Pattern, rhs: &Comp) {
         let cty = self.infer_comp(rhs);
-        let bound_ty = self.rhs_bound_ty(rhs, cty);
+        let (bound_ty, bound) = self.rhs_bound_ty(cty);
+        if bound != Bound::Ran {
+            self.ctx.bound.insert(Node::comp(rhs), bound);
+        }
         let concrete = self.ctx.unifier.apply_ty_keeping_weak(&bound_ty);
         self.bind_pattern(pattern, &concrete);
         self.note_called(pattern, rhs);
@@ -1096,7 +1044,7 @@ impl Inferencer<'_> {
             }
         };
         let cty = if handled {
-            CompTy::pure(Ty::Unit)
+            self.produces(Ty::Unit)
         } else {
             self.infer_comp(comp)
         };
@@ -1293,7 +1241,7 @@ impl Inferencer<'_> {
     /// `annotate` rebuilds the reference into the block holding its checked
     /// call, so a value is admitted like any call.
     fn builtin_value(&mut self, val: &Val, entry: &Decl) -> Ty {
-        let scheme = (entry.type_rule)(&mut self.ctx.unifier);
+        let scheme = entry.scheme(&mut self.ctx.unifier);
         let ty = self.ctx.instantiate(&scheme);
         if entry.is_boundary()
             && let Ty::Thunk(body) = &ty
@@ -1755,7 +1703,10 @@ impl Inferencer<'_> {
 
         match &comp.item {
             CompKind::Protect { body, site } => self.infer_protected_comp(body, site),
-            CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
+            CompKind::Return(value) => {
+                let ty = self.infer_val(value);
+                self.produces(ty)
+            }
             CompKind::Lam { param, body } => {
                 let param_ty = self.ctx.unifier.fresh_ty();
                 let body_ty = self.with_scope(|this| {
@@ -1836,9 +1787,12 @@ impl Inferencer<'_> {
                 unreachable!("a native's code is built by forcing it, never checked")
             }
             CompKind::Pipeline { stages } => self.infer_pipeline(stages),
-            CompKind::Prim(prim) => CompTy::pure(self.infer_prim(prim)),
+            CompKind::Prim(prim) => {
+                let ty = self.infer_prim(prim);
+                self.produces(ty)
+            }
             CompKind::Rec { group, index } => self.infer_rec(group, *index),
-            CompKind::Tilde(_) => CompTy::pure(Ty::String),
+            CompKind::Tilde(_) => self.produces(Ty::String),
             CompKind::If { cond, then, else_ } => {
                 let cond_ty = self.infer_val(&cond.item);
                 // Underline just the cond, not the whole `if … else …` form.
@@ -1862,8 +1816,7 @@ impl Inferencer<'_> {
             CompKind::Gather { body } => self.infer_gather(body),
             // Installs fds, not its own type; carries the body as an
             // `Arc<Comp>` rather than a thunk-shaped `Val` like the scope
-            // forms above, so infer it directly.  A stdout redirect takes a
-            // command's output, leaving a value producer.
+            // forms above, so infer it directly.
             CompKind::Redirect { body, redirects } => {
                 for operand in redirects.operands() {
                     self.infer_val(operand);
@@ -1879,13 +1832,7 @@ impl Inferencer<'_> {
                 let body_ty = self.infer_comp(body);
                 self.ctx
                     .unify_comp_ty(&body_ty, &CompTy::command(), Reason::Capture);
-                CompTy::pure(Ty::Bytes)
-            }
-            CompKind::Upcast(body) => {
-                let body_ty = self.infer_comp(body);
-                self.ctx
-                    .unify_comp_ty(&body_ty, &CompTy::pure(Ty::Unit), Reason::Upcast);
-                CompTy::command()
+                self.produces(Ty::Bytes)
             }
         }
     }

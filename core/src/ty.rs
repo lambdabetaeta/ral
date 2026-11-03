@@ -291,10 +291,6 @@ pub(crate) struct Spine {
 }
 
 impl Spine {
-    pub(crate) fn arity(&self) -> usize {
-        self.params.len()
-    }
-
     /// What is produced once every parameter is supplied, if that is settled.
     pub(crate) fn producer(&self) -> Option<Producer> {
         Producer::of(&self.tail)

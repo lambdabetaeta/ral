@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_date: 2026-11-02
+generated_at_commit: d56977ff
+verified_at_commit: d56977ff
+verified_at_date: 2026-11-03
 anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, ScopeOwner, exit_brood]
 ---
 
@@ -81,7 +81,6 @@ snapshots.
   before propagating. Buffer overflow refuses a prefix. The surrounding
   bind feeds `Prim::Decode`, which drops one trailing terminator and checks
   UTF-8, with the environment dropped before taking over the byte buffer.
-- `Upcast(M)` enters `M` in tail position with no frame.
 - Shell frames restore their own dynamic state: redirects settle writes,
   `Within` restores env overrides, cwd and handlers, `Grant` pops its layer,
   `Unmask` restores a handler, and `Audit` closes its trail scope.

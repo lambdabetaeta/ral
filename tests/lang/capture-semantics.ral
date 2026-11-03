@@ -43,12 +43,10 @@ alias __decode-captured { |_| echo "" }
 let greeting = echo hello
 assert_eq 'alias cannot blank a capture' hello $greeting
 
-# A block whose arrow is not written, `{ !$say }`, is captured as a whole —
-# η-expanded around the forced call — so the element the callee applies it
-# to still reaches `say` under the capture.
+# Plan §1.10 row bound `map`: capture each applied command explicitly.
 let say = { |x| echo $x }
-let said = map { !$say } [1, 2]
-assert_eq 'capture under an unwritten arrow' '1' $said[0]
-assert_eq 'capture under an unwritten arrow, again' '2' $said[1]
+let said = map { |x| return !{!$say $x} } [1, 2]
+assert_eq 'capture around the applied command' '1' $said[0]
+assert_eq 'capture around the applied command, again' '2' $said[1]
 
 echo 'capture semantics done'

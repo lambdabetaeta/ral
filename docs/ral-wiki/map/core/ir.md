@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -62,8 +62,8 @@ Values, computations and shared nodes:
 
 **Computations partition into control, primitives and shell.** The core
 constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
-`Seq`, `Rec`, `If`, `Case`, `Try`, `Guard`, `Capture`, `Upcast`, each an
-`Extrinsic/Syntax/Term` constructor, and `Prim`, each of whose variants is an
+`Seq`, `Rec`, `If`, `Case`, `Try`, `Guard`, `Capture`, corresponding to
+`Extrinsic/Syntax/Term` constructors, and `Prim`, each of whose variants is an
 `Extrinsic.Prims.Op`.
 `Prim::operands` and `map_operands` are the common operand traversals.
 
@@ -121,15 +121,13 @@ representable state.
   and a strict UTF-8 decode, which is the partial step — the kernel's `decode`
   takes a value, so it reads a bound variable rather than nesting a `Comp`.
   [[map/core/typecheck|typecheck]]'s `annotate` composes capture and decode
-  as `Capture(body) to x. Prim::Decode(x)` around each computation
-  a value demand recorded, and `Mentions`' walk descends into the `Capture`
+  as `Capture(body) to x. Prim::Decode(x)` around each command RHS
+  a binding recorded, and `Mentions`' walk descends into the `Capture`
   and the `Bind`. The reading is a node and not a command so that its meaning
   is fixed where the checker writes it
-  ([[decisions/260930_graded-f|graded-f]],
+  ([[design/capture|grades and capture]],
   [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]). Neither has surface syntax.
-- `CompKind::Upcast(M)` explicitly marks a unit producer standing as a
-  command, stepped in tail position. It has no surface syntax.
 
 - `Val::Protected { value, site }` marks an imported weak value occurrence whose
   solved contract reaches a thunk or handle (`Site::has_delayed`). Forming it
@@ -149,7 +147,7 @@ representable state.
   memoizing its rebuild per source `Arc`'s identity.
 
 Every verdict
-the evaluator needs from the checker is explicit: capture/decode, upcasts,
+the evaluator needs from the checker is explicit: capture/decode,
 returned-thunk splits, protection nodes, sites and schemes.
 
 `CommandName` is the structured head for external dispatch (`Bare` / `Path` /

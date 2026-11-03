@@ -104,7 +104,7 @@ fn seed_env(
     let frames: Vec<(String, Scheme)> = env
         .builtins
         .base_frames()
-        .map(|decl| (decl.name.as_ref().to_string(), (decl.type_rule)(u)))
+        .map(|decl| (decl.name.as_ref().to_string(), decl.scheme(u)))
         .collect();
     for (name, scheme) in frames {
         env.bind_handler(name, scheme, HandlerOrigin::Within);

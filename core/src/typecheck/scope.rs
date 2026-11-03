@@ -154,7 +154,7 @@ impl Inferencer<'_> {
     pub(super) fn infer_audit(&mut self, body: &Val) -> CompTy {
         let body_cty = self.scope_body(body);
         let alpha = self.extract_return(&body_cty);
-        CompTy::pure(audit_record(alpha))
+        self.produces(audit_record(alpha))
     }
 
     /// `spawn [T] B : F (Handle^ε α)` for `B : U(F^ε α)`; `T : String`.
@@ -167,7 +167,7 @@ impl Inferencer<'_> {
         }
         let body_cty = self.scope_body(body);
         let Producer { grade, ty } = self.force_return_shape(&body_cty, Reason::ReturnShape);
-        CompTy::pure(Ty::Handle(grade, Box::new(ty)))
+        self.produces(Ty::Handle(grade, Box::new(ty)))
     }
 
     /// `gather BODY : F^ε α` for `BODY : U(F^ε α)`: the body's type passes

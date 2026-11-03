@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [exarch/src/port.rs, exarch/src/record.rs, exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -282,12 +282,18 @@ own surface.
   work under a title, binding its handle, and `await`ing that handle when the result is needed.
 - **`Ral`** (`data/ral.md`) is the language and tool reference. The CBPV
   introduction leads into values, computations, capture, and forcing, followed
-  by help and exploration. String arguments remain intact; list spreading and
-  glob expansion are explicit. Blocks retain their lexical bindings when a
-  helper is shadowed. Examples collect multiple reads into one returned value
+  by help and exploration. Only `let` implicitly captures; `map`/`par`
+  command callbacks stream output, and collecting their text requires an
+  explicit capture.
+  `Returns`, `Command` and `Command[ν]` distinguish producer types.
+  String arguments remain intact; list spreading and glob expansion are
+  explicit. Blocks retain their lexical bindings when a helper is shadowed. Examples collect multiple reads into one returned value
   and force computations inside homogeneous lists and heterogeneous records;
   string guidance distinguishes variable delimiters from command capture and
   teaches hash-delimited raw strings as the spelling for literal text.
+  Reads distinguish written record labels, literal list positions and
+  computed map keys; `nth` reads computed list positions. JSON/CSV and `env`
+  boundaries admit the shape the script uses.
   Specialist details live in `explain redirects`,
   `explain within`, `explain return`, `explain grant`, `explain try`,
   `explain await`, `explain poll`, and `explain detach`; the prompt keeps
@@ -363,8 +369,8 @@ own surface.
   **`Agents`** (`data/agents.md`) iff `fuel > 0`, then **`Spawned`**
   (`data/spawned.md`) iff its parent is an agent, then **`Reply`**
   (`data/reply.md`) iff it returns at all. `Reply` says only what is true of
-  any receiver; `Spawned` carries the spawner's snapshot, its binding the
-  reply, and the idle wait for follow-ups. A headless child of the human
+  any receiver; a bare `` `reply `` replies with `()`. `Spawned` carries the
+  spawner's snapshot, its binding the reply, and the idle wait for follow-ups. A headless child of the human
   therefore gets `Reply` but never `Spawned`. `Agents` uses point/call examples: pass bindings,
   request a reply shape, assign disjoint write grants, wait without polling,
   read, follow up, stop an exchange, and dismiss an own helper. **`Roles`** (`data/roles.md` plus one

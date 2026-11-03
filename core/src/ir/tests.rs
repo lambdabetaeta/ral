@@ -211,7 +211,6 @@ fn every_variant() -> Vec<Arc<Comp>> {
         CompKind::Return(var("r_thunk_body")),
     )))));
     let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
-    let upcast = Spanned::synthetic(CompKind::Upcast(ret("r_upcast_body")));
     let decode = Spanned::synthetic(CompKind::Prim(Prim::Decode(var("r_decode_body"))));
 
     // No single `CompKind` holds an arbitrary list of sub-`Comp`s to
@@ -257,7 +256,6 @@ fn every_variant() -> Vec<Arc<Comp>> {
         Arc::new(val_variant_empty),
         Arc::new(val_thunk),
         Arc::new(capture),
-        Arc::new(upcast),
         Arc::new(decode),
     ]
 }
@@ -346,7 +344,6 @@ fn referenced_names_walks_every_variant() {
         "r_variant_payload",
         "r_thunk_body",
         "r_capture_body",
-        "r_upcast_body",
         "r_decode_body",
     ];
 

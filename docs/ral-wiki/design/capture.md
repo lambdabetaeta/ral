@@ -1,122 +1,141 @@
----
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
----
+# Grades and capture: values at `let`
 
-# Capture: a command's value is its output
+**Only a `let` implicitly turns a command's output into a value.** The rule reads the
+right-hand side's resolved type, so it works through blocks, calls and names:
+`let f = { hostname }; let host = f` binds the host name.
 
-**A command's value is its output. Where a value is demanded of a command, the
-command is captured and its output decoded as a `String`; the demand is found
-by the type, not by the shape of the syntax.** `F` carries a grade
-([[design/types|types]]): a command is `F^w Unit` (printed `Command`), and
-`let x = hostname` binds the text `hostname` writes because the checker
-resolves the right-hand side to `F^w Unit` and wraps it in the one coercion,
-`cap M to d. decode d`
-([[decisions/260930_graded-f|graded-f]]). So `let f = { hostname }; let x = f`
-binds the host name, as does `let g = { |n| echo $n }; let x = g 5`
-(`"5"`), because `f` and `g` have command types; abstraction and application no
-longer hide the fact.
+## Grades classify producers, not effects
 
-```ral
-let answer = !{ echo first ; echo second }
-# prints nothing; answer is "first\nsecond"
-```
+A *grade* says how a computation produces its result, not whether it writes.
 
-**Three places demand a value, and capture is placed at exactly those.**
+- `F^p A` produces a value; `F^w Unit` is a command and produces output.
+  Unit values are written `()` in programs.
+- **`F^w A ⇒ A = Unit`.** Each grade is paired with one value type; rules
+  introduce `w` only at `Unit`, and copy the pair together.
+- A grade variable can become `w` only beside `Unit`. Before binding either
+  grade, unification refuses an output pair against a type other than `Unit` or
+  a variable whose kind admits it. Returners and handles share this check.
+- A sequence takes its tail's type, not a combination of its effects:
+  `{ echo pre; return 5 }` returns an integer while writing `pre`.
+- There is no grade multiplication or permissiveness order. Grades are
+  producer kinds, not an effect monoid ([[related/cbpve|CBPVE]]).
 
-- *Bind.* The whole right-hand side of a `let` (or `M to x. N`, or a named
-  pattern) that resolves to `F^w Unit` is captured: `let x = M` is
-  `let x = M | from-line` for every `M` that is a command — a block, a call, a
-  variable holding a block, a pipeline, an `if` with command arms. A right-hand
-  side whose grade is still a variable is defaulted to `p`: a `let` is a demand
-  for a value, and this is the only defaulting of a grade.
-- *Argument.* In `apply_args_capped`, an argument whose type ends, after its own
-  parameters, in `F^w Unit`, passed where the callee's parameter ends in
-  `F^p β` at the same arity, sets `β := String` and is coerced: a literal block
-  that writes every one of its arrows has its body wrapped under them; a block
-  in hand, or a literal that does not — `{ !$f }` — is η-wrapped whole, so the
-  argument still reaches the lambda the wrap would otherwise stand between. So
-  `map { |f| echo $f } [1, 2]` is `["1", "2"]` and prints nothing.
-- *Join.* An `F^w Unit` arm of an `if`/`case`/`try` whose join settles on `F^p`
-  is wrapped like an argument ([[design/types|types]]): `try { fetch } { |e|
-  return 'none' }` binds `fetch`'s output.
+## Where grades come from
 
-Anywhere else no coercion is inserted. A command flowing into a bare variable,
-or a demand that resolves only later, is an ordinary mismatch of `Command`
-against `Returns A`, and its hint names the fix.
+- **`w`: commands.** Externals, base frames such as `echo`, and builtin
+  results declared `Command`.
+- **`p`: value demands and boundaries.** A `let` fixes a free grade; builtin
+  parameters such as `filter`'s predicate demand a value. Checked-boundary
+  decoders (JSON/CSV), `use` and other checked boundaries supply data, so
+  their result grade is `p`: joining with a command must not turn that
+  supplied data into `()`.
+- **Fresh grades: other producers.** `return`, primitives, `~`, `capture`,
+  `spawn`, `audit`, and handled `alias`/`unalias` statements; ordinary builtin
+  results, except commands, boundaries and already graded results such as
+  `fail` and `await`; and stdout redirects, `M > f : F^ν A` for `M : F^g A`.
+- Ordinary text/byte decoders (`from-bytes`, `from-string`, `from-line`,
+  `from-lines`) have fresh result grades too; their non-unit payload types
+  hide those grades when printed as `Returns`.
+- Stdin/stderr redirects preserve their input grade. Scope forms such as
+  `within` and `gather` preserve their body's type.
 
-**What does not capture.** A *tail* `Run` is never coerced: a turn's last
-command prints and reports its value. `each`, `fold`, `fold-lines` and `audit`
-absorb a command body: they run it, stream its output and keep its value, which
-for a command is `()`. `spawn` and `watch` do not: the handle keeps the body's
-grade, `Handle^ε α`, and `await` of it is an `F^ε α`, so `let x = await $h`
-binds what a command block wrote, as `let x = { … }` would. `warn` is
-`Returns Unit`, since stderr is not the byte channel. A stdout redirect
-*discharges* the grade, `M > f : F^p A`, so `let x = to-json 1 > f` binds `()`.
-A `()`-producer where a command is demanded is a command by a zero-cost upcast
-`F^p Unit ⇝ F^w Unit` (identity at run time); there is no path from
-`F^p Unit` to `F^p String`, so `let x = f` with `f` returning `()` binds `()`.
+A free unit producer can therefore stand as a command by unification, with no
+runtime conversion. A `let`-fixed `p` producer cannot. The rule reads types:
+`return ()` and `return $u`, for `u : ()`, type alike.
 
-**The whole computation is the buffer.** Capture wraps the whole right-hand
-side, so nothing escapes to the terminal: `let x = !{ echo pre; echo host }`
-binds `"pre\nhost"`. An inner `let` still captures for itself:
+## The bind rule is the one coercion
 
-```ral
-let y = !{ let z = echo a; echo b }   # prints nothing; y is "b" (z is "a")
-```
+The same rule governs local binds, top-level definitions and hoisted `!{…}`.
 
-A captured *stand-in* is the same rule: an arm for `curl` is a command, so
-`curl: { |a| echo note; echo body }` under `let x = curl` binds `"note\nbody"`,
-and a `()`-returning arm is admitted and captures `""`.
+- **Function:** bind unrun as `return (thunk M)` (Let-fun).
+- **`F^w Unit`:** insert `capture M to d. decode d`; bind a `String`.
+- **`F^p A`:** bind `A`.
+- **Free grade or computation:** fix `F^ν A` to `F^p A`, or unify the
+  computation variable with `F^p α`, then bind it. This is the sole default.
 
-**Why the type, not a walk of the syntax.** "This computation's result is its
-output" is a fact about a computation, and a walk of a right-hand side cannot
-see it through abstraction, application or a variable, so β/η would not preserve
-meaning. In the grade it passes through all three. The price is the rule's
-placement: it is decided in checking mode, in program order
-([[decisions/260930_graded-f|graded-f]] records the one order-dependence).
+Nothing else coerces: arguments and handler arms unify with their demands;
+`if`, `case`, `try` and `?` arms each meet a fresh result, then those results
+unify with the join in source order. A failure blames the later arm. A tail
+`Run` is never captured.
 
-**The node returns bytes; the text is composed.** On success, `capture M : F Bytes`
-returns precisely the bytes `M` wrote, nothing stripped and nothing decoded. Reading them as a `String` is a second step the checker composes over
-it, `capture M to d. decode d`, and that step owns the text conversion: one
-trailing terminator is dropped, and output that is not valid UTF-8 fails there,
-naming `| from-bytes` as the way to keep it. Each is its own term in the IR
-(`CompKind::Capture`, `Prim::Decode`), inserted by `annotate` and with no
-surface syntax, so a step the checker writes into a program cannot be a name the
-program's session resolves
-([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
-`InferCtx.adapted` holds the computations a demand adapts, keyed by node
-address with their `Adaptation`, and `adapted_vals` the values adapted in
-hand with their arity; `annotate` reads both.
+## Blocks run as written
 
-**Exactness is kept by refusal.** The buffer behind a capture is capped at
-16 MiB (`SINK_BUFFER_CAP`), and a bounded buffer is what keeps a
-worker from growing without end ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
-Past the cap it appends a truncation marker and drops the rest — bytes the
-program could not tell from the command's own. So a capture that reaches the
-cap *fails*: `Frame::Capture` reads the buffer's overflow flag
-(`capture_overflowed`) once every writer has joined, and refuses rather than bind
-a prefix. The error names the cap and asks whether a file was meant, and is
-catchable by `try`. The human keeps the bytes; the binding does not happen.
+- `map : ∀α β ν. {α → Command[ν] β} → [α] → Returns [β]` accepts either
+  callback grade. `map { |f| echo $f } [1, 2]` writes `1` and `2`, returning
+  `[(), ()]`; it does not collect their output.
+- To collect text, write `map { |f| return !{echo $f} } [1, 2]`.
+- `cross` and `par` also accept command callbacks; parallel workers' output
+  is replayed in input order. `flat-map` never implicitly captures, but its
+  callback must return a list: it maps, then concatenates the returned lists.
+- `filter` requires a returned `Bool`; `sort-list-by` requires a returned
+  comparable key. `both` requires value-returning blocks:
+  `both { return !{curl $a} } { return !{curl $b} }`.
+- `each`, `fold`, `fold-lines` and `audit` run either body grade and keep its
+  value. `spawn`/`watch` keep the body's grade in the handle; `await` restores
+  it, so `let out = await $h` captures a command worker's output.
 
-**Failure flushes.** `Frame::Capture` pushes a fresh buffer as `shell.io.stdout`,
-holding the sink it replaced. On return it restores that sink and yields the
-buffer as `Bytes`; on a halt it writes what the body wrote to the sink it
-replaced (`Shell::write_sink`). Its clause is `raise s ↦ write_out buf ; raise s`: an
-accepted write preserves the body signal; a refused write pre-empts it. Bytes
-delivered before refusal remain visible. Under `!{ … } > f` the file is that
-sink, so the flush lands in `f`.
+## Reading types
 
-A checked-in mechanised model gives `capture` as a finite-behaviour algebra: body
-writes go to an accepting buffer and refusal can arise only at the outer flush. A second,
-independent typed machine routes a failed capture's buffer to the enclosing capture or thread
-output before resuming the same break, and checks byte preservation and nested/worker replay.
-Its writes cannot fail, bytes are text, and no adequacy theorem connects the two models.
+`Command[g] A` names a producer. Constants and impossible command grades have
+short spellings.
 
-The capture is of the whole computation, so everything the body writes is
-retained, a `guard`'s cleanup included: `let x = !{ guard { cmd } { echo clean } }`
-binds `cmd`'s output followed by `clean`.
+- `w` prints `Command`; `p` prints `Returns A`.
+- A free grade prints `Returns A` when its paired type cannot be `Unit`:
+  a concrete non-unit type, or a quantified variable whose kind excludes unit.
+- Otherwise it prints `Command[ν] A`, using `ν ξ ο π`. A scheme quantifies
+  only the grades it prints.
+- `cd : ∀ν. String → Command[ν] Unit`;
+  `length : ∀α:sized. α → Returns Integer`; `echo : [String] → Command`.
+- `{ |x| return $x } : ∀α ν. {α → Command[ν] α}`.
+- `await : ∀α ν. Handle (Command[ν] α) → Command[ν] α`.
 
-See also [[design/types|types]], [[design/cbpv|cbpv]],
-[[design/pipelines|pipelines]], [[design/codecs|codecs]].
+## Programs
 
-Cite: `docs/SPEC.md` §7.2.
+| program | result |
+| --- | --- |
+| `let h = hostname`; `let f = { hostname }; let h = f` | captures |
+| `let x = if $c { echo a } else { warn b }` | captures |
+| `try { mkdir d } { \|e\| warn no }` | one `Command` |
+| `within [handlers: [curl: { \|a\| return () }]] { let x = curl foo }` | captures `""` |
+| `try { curl $u > out } { \|e\| echo failed }` | one `Command` |
+| `try { each-line { \|l\| warn $l } } { \|e\| echo failed }` | one `Command` |
+| `let u = (); if $c { return $u } else { echo a }` | one `Command` |
+| `each { \|b\| !$b } [{ echo hi }, { return () }]` | writes `hi` |
+| `map { \|f\| echo $f } [1, 2]` | writes `1` and `2`; value `[(), ()]`, which the REPL then prints |
+| `let x = map { \|f\| echo $f } [1, 2]`; likewise `map $g` for a command block `$g` | writes `1` and `2`; binds `[(), ()]` |
+| `cross [1, 3] [2] { \|x y\| echo "$x$y" }` | writes `12` and `32`; value `[(), ()]` |
+| `par { \|u\| curl $u } $us 4` | output replayed in order; value `[(), …]` |
+| `let x = try { echo a } { \|e\| return 'none' }` | refused, join hint |
+| `let x = if $c { hostname } else { return 'b' }` | refused, join hint |
+| `both { echo a } { echo b }` | refused, argument hint |
+| `let x = if $c { echo a } else { from-json < f }` | refused, join hint |
+| `sort-list-by { \|f\| echo $f } $xs`; `group-by`, `median-by` with a command key | refused, argument hint |
+| `let g = { \|f\| let y = !$f; return $y }; g { echo hi }` | refused, argument hint |
+| `let twice = { \|f\| let _ = !$f; !$f }`; `if $c { twice { return () } } else { echo a }` | refused, join hint |
+
+For a command where a value is required, return an explicit capture
+(`{ return !{…} }`) or bind it first. Use `succeeds { … }` for a yes/no answer,
+or decode output to the required type. In the `twice` example, end its arm
+with `return ()` to supply a fresh unit producer.
+
+## The whole computation is the buffer
+
+**Capture preserves exactly the bytes written by its body.** An inner `let`
+captures for itself; every other write, including a `guard` cleanup, goes to
+the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
+`let x = !{ let y = echo a; echo b }` binds `"b"` and `y` is `"a"`.
+
+- `CompKind::Capture` returns `Bytes`; `Prim::Decode` drops one trailing LF
+  or CRLF and strictly decodes UTF-8. Invalid text fails; use `from-bytes`
+  to keep binary data. Neither term has surface syntax.
+- `rhs_bound_ty` records `Bound::Captured` or `Bound::Thunked` in
+  `InferCtx.bound`; `annotate` rebuilds the right-hand side accordingly.
+- A stand-in runs whole under its caller's capture. A fresh unit-returning
+  stub for an external is a command and captures `""`.
+- A capture reaching the 16 MiB buffer cap fails rather than bind a prefix.
+  On a halt, `Frame::Capture` restores its previous sink and flushes the
+  buffered bytes before propagating the signal; a refused flush pre-empts it.
+
+See [[design/types|types]], [[design/codecs|codecs]],
+[[internals/output-capture-and-detachment|output capture]],
+[[map/core/typecheck|typecheck]]. Cite: `docs/SPEC.md` §§7.2, 17.3–17.7.

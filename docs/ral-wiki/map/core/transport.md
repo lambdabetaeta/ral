@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -48,9 +48,10 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 - `SerialValue = FOValue<SerialClosure>` (`seed/table.rs`) fills the slot with what this wire
   adds: `SerialClosure::Thunk(SerialThunk)` — the closure's `comp` and a
   `SerialEnvSnapshot` naming its scope's row — and `SerialClosure::Native`,
-  a builtin's name, re-linked against the receiver's own table. A partial
-  application used as a value crosses as a Let-fun thunk capturing the
-  variables the application mentions.
+  a builtin's name (`SerialNative` holds only that name), re-linked against
+  the receiver's own table. A partial application used as a value crosses as
+  a Let-fun thunk capturing the variables the application mentions; its
+  received arguments belong to that thunk's environment, not the native.
 - `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
   keeps each binding's type
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
@@ -79,6 +80,7 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 leaf that is not data to the caller as a borrowed `Leaf`; `unwalk` and
 `for_each_ext` are its converses. `from_runtime`, `try_from` and `scrubbed`
 differ only in that leaf function, and so do `into_runtime` and `From<FOValue>`.
+The reverse walk uses `Value::variant`, normalising a unit payload to absence.
 
 **A leaf that is not data has three treatments, one per seam.** `Value::opacity`
 classifies it — a block, a function, a handle:

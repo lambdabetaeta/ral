@@ -205,7 +205,7 @@ claims it raises. A cancelled parent's halt claims its children, so an outside
 `spawn { echo hi }` is a `Command`, `let x = await $h` binds `"hi"` exactly as
 `let x = { echo hi }` would, and `await` of `spawn { echo pre; return 5 }` is
 `Returns Int` that writes `pre`, as the block inline. No grade is new: under
-[[decisions/260930_graded-f|graded-f]] a grade is a producer kind, not an
+[[design/capture|grades and capture]] a grade is a producer kind, not an
 effect, so replaying bytes changes nothing about `ε`.
 
 **The equation holds** for the value or raise and for the bytes on the two
@@ -416,7 +416,7 @@ code renders anything.
   (`service` deleted; `detach` stands),
   [[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]
   (`worker` replaces `service-handle`),
-  [[decisions/260930_graded-f|graded-f]] (`Handle` carries the grade), and
+  [[design/capture|grades and capture]] (`Handle` carries the grade), and
   [[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]
   (law 9's owner rule; "`par` stays prelude code" retired, and with it that
   page's rejection of `par` in Rust: the nursery it would have rebuilt is the

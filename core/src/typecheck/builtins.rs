@@ -70,7 +70,7 @@ struct Spine {
 }
 
 impl Spine {
-    fn of(rule: BuiltinTypeRule) -> Self {
+    fn of(decl: &Decl) -> Self {
         fn settled(ct: &CompTy) -> (usize, Option<&Ty>) {
             match ct {
                 CompTy::Fun(_, body) => {
@@ -81,7 +81,7 @@ impl Spine {
                 CompTy::Var(_) => (0, None),
             }
         }
-        match rule(&mut Unifier::new()).ty {
+        match decl.scheme(&mut Unifier::new()).ty {
             Ty::Thunk(inner) => {
                 let (arity, ty) = settled(&inner);
                 Self {
@@ -104,7 +104,7 @@ pub struct Decl {
     pub name: Cow<'static, str>,
     pub convention: Convention,
     pub doc: &'static str,
-    pub(crate) type_rule: BuiltinTypeRule,
+    type_rule: BuiltinTypeRule,
     /// Which diagnostic an over-application or a literal misuse earns; `None`
     /// for the overwhelming majority of rows.
     pub(crate) diagnostic: BuiltinDiagnostic,
@@ -137,8 +137,27 @@ impl Decl {
         self.boundary
     }
 
+    /// The row's type, with a fresh grade on ordinary results.
+    pub fn scheme(&self, u: &mut Unifier) -> Scheme {
+        let mut scheme = (self.type_rule)(u);
+        if !self.is_boundary()
+            && let Ty::Thunk(body) = &mut scheme.ty
+        {
+            let mut tail = body.as_mut();
+            while let CompTy::Fun(_, body) = tail {
+                tail = body.as_mut();
+            }
+            if let CompTy::Return(grade @ Grade::Value, _) = tail {
+                let v = u.fresh_grade_var();
+                *grade = Grade::Var(v);
+                scheme.grade_vars.push(v);
+            }
+        }
+        scheme
+    }
+
     fn spine(&self) -> Spine {
-        *self.spine.get_or_init(|| Spine::of(self.type_rule))
+        *self.spine.get_or_init(|| Spine::of(self))
     }
 
     /// The curry depth of the row's type: the argument count a `$name`
@@ -417,11 +436,24 @@ pub mod scheme {
     // has :: ∀α. Map<α> → Str → F Bool
     scheme!(has<av: Kind::ANY>: [Ty::map(Ty::Var(av)), Ty::String] -> Ty::Bool);
 
-    // map :: ∀α β. U(α → F β) → [α] → F [β]
-    scheme!(map_op<av: Kind::ANY, bv: Kind::ANY>: [
-        thunk(fun(Ty::Var(av), pure(Ty::Var(bv)))),
-        Ty::list(Ty::Var(av))
-    ] -> Ty::list(Ty::Var(bv)));
+    pub(crate) fn map_op(u: &mut Unifier) -> Scheme {
+        let (av, bv, ev) = (u.fresh_tyvar(), u.fresh_tyvar(), u.fresh_grade_var());
+        let (a, b) = (Ty::Var(av), Ty::Var(bv));
+        graded(
+            &[ev],
+            mk_plain_scheme(
+                &[av, bv],
+                &[],
+                thunk(fun(
+                    thunk(fun(
+                        a.clone(),
+                        CompTy::Return(Grade::Var(ev), Box::new(b.clone())),
+                    )),
+                    fun(Ty::list(a), pure(Ty::list(b))),
+                )),
+            ),
+        )
+    }
 
     // filter :: ∀α. U(α → F Bool) → [α] → F [α]
     scheme!(filter_op<av: Kind::ANY>: [
@@ -746,7 +778,7 @@ pub mod scheme {
 /// does not carry.
 pub fn builtin_type_hint(manifest: &Manifest, name: &str) -> Option<String> {
     let mut u = Unifier::new();
-    Some((manifest.get(name)?.type_rule)(&mut u).to_string())
+    Some(manifest.get(name)?.scheme(&mut u).to_string())
 }
 
 /// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule

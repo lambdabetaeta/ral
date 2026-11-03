@@ -119,50 +119,75 @@ fn prelude_schemes_carry_their_grades() {
             .unwrap_or_else(|| panic!("the prelude binds {name}"));
         scheme.to_string()
     };
-    assert_eq!(shown("retry"), "∀α ν. Integer → {ν α} → ν α");
-    assert_eq!(shown("attempt"), "∀α ν. {ν α} → Returns Unit");
-    assert_eq!(shown("succeeds"), "∀α ν. {ν α} → Returns Bool");
-    assert_eq!(shown("for"), "∀α β ν. [α] → {α → ν β} → Returns Unit");
+    // Capture-at-let plan §§1.2, 1.7: fresh grades print only where unit is possible.
+    assert_eq!(
+        shown("retry"),
+        "∀α ν. Integer → {Command[ν] α} → Command[ν] α"
+    );
+    assert_eq!(shown("attempt"), "∀α ν ξ. {Command[ν] α} → Command[ξ] Unit");
+    assert_eq!(shown("succeeds"), "∀α ν. {Command[ν] α} → Returns Bool");
+    assert_eq!(
+        shown("for"),
+        "∀α β ν ξ. [α] → {α → Command[ν] β} → Command[ξ] Unit"
+    );
     assert_eq!(
         shown("map-lines"),
-        "∀α. {String → Returns α} → Returns Unit"
+        "∀α ν. {String → Returns α} → Command[ν] Unit"
     );
     assert_eq!(
         shown("filter-lines"),
-        "{String → Returns Bool} → Returns Unit"
+        "∀ν. {String → Returns Bool} → Command[ν] Unit"
     );
-    assert_eq!(shown("each-line"), "∀α ν. {String → ν α} → Returns Unit");
+    assert_eq!(
+        shown("each-line"),
+        "∀α ν ξ. {String → Command[ξ] α} → Command[ν] Unit"
+    );
     assert_eq!(shown("bytes-to-string"), "Bytes → Returns String");
+    // §1.10's `par` row: its callback's output is replayed, not captured.
     assert_eq!(
         shown("par"),
-        "∀α β. {α → Returns β} → [α] → Integer → Returns [β]"
+        "∀α β ν. {α → Command[ν] β} → [α] → Integer → Returns [β]"
     );
     assert_eq!(
         shown("both"),
         "∀α β. {Returns α} → {Returns β} → Returns [fst: α, snd: β]"
     );
-    assert_eq!(shown("first-of"), "∀α ν. [{ν α}] → ν α");
+    assert_eq!(shown("first-of"), "∀α ν. [{Command[ν] α}] → Command[ν] α");
 }
 
 /// The builtin rows the design grades: writers are commands, the runners of
 /// blocks absorb any grade, a handle carries its block's grade and `await`
-/// returns it, `map` demands a value, `fail` inhabits every producer type.
+/// returns it, `map` accepts either grade, `fail` inhabits every producer type.
 #[test]
 fn builtin_schemes_carry_their_grades() {
     let table = ral_core::HostSurface::default().manifest();
     let shown = |name: &str| ral_core::typecheck::builtin_type_hint(&table, name).unwrap();
     assert_eq!(shown("echo"), "[String] → Command");
     assert_eq!(shown("to-json"), "∀α:data. α → Command");
-    assert_eq!(shown("await"), "∀α ν. Handle (ν α) → ν α");
-    assert_eq!(shown("is-done"), "∀α ν. Handle (ν α) → Returns Bool");
-    assert_eq!(shown("each"), "∀α β ν. {α → ν β} → [α] → Returns Unit");
-    assert_eq!(shown("map"), "∀α β. {α → Returns β} → [α] → Returns [β]");
+    // Capture-at-let plan §1.7: visible grade variables use `Command[ν]`.
+    assert_eq!(shown("await"), "∀α ν. Handle (Command[ν] α) → Command[ν] α");
+    assert_eq!(
+        shown("is-done"),
+        "∀α ν. Handle (Command[ν] α) → Returns Bool"
+    );
+    assert_eq!(
+        shown("each"),
+        "∀α β ν ξ. {α → Command[ν] β} → [α] → Command[ξ] Unit"
+    );
+    // §1.10's `map { |f| echo $f }` row requires a grade-polymorphic callback.
+    assert_eq!(
+        shown("map"),
+        "∀α β ν. {α → Command[ν] β} → [α] → Returns [β]"
+    );
     assert_eq!(
         shown("fold-lines"),
-        "∀α ν. {α → String → ν α} → α → Returns α"
+        "∀α ν ξ. {α → String → Command[ν] α} → α → Command[ξ] α"
     );
     assert_eq!(
         shown("fail"),
-        "∀α ν ρ. [status: Integer, message: String, ...ρ] → ν α"
+        "∀α ν ρ. [status: Integer, message: String, ...ρ] → Command[ν] α"
     );
+    // §1.7: no printed quantifier for a grade paired with a non-unit type.
+    assert_eq!(shown("cd"), "∀ν. String → Command[ν] Unit");
+    assert_eq!(shown("length"), "∀α:sized. α → Returns Integer");
 }

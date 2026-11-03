@@ -1280,13 +1280,14 @@ impl Unifier {
                 self.unify_ty_inner(&a1, &b1, pairs, depth)
             }
             (Ty::Handle(ga, a1), Ty::Handle(gb, b1)) => {
-                if !self.unify_grade(ga, gb) {
-                    return Err(TypeErrorKind::TyMismatch {
+                if self.unify_producers((ga, &a1), (gb, &b1), pairs, depth)? {
+                    Ok(())
+                } else {
+                    Err(TypeErrorKind::TyMismatch {
                         expected: Box::new(self.apply_ty(&Ty::Handle(ga, a1))),
                         actual: Box::new(self.apply_ty(&Ty::Handle(gb, b1))),
-                    });
+                    })
                 }
-                self.unify_ty_inner(&a1, &b1, pairs, depth)
             }
             (Ty::Record(r1), Ty::Record(r2)) | (Ty::Variant(r1), Ty::Variant(r2)) => {
                 let r = self.unify_row_inner(&r1, &r2, pairs, depth);
@@ -1605,6 +1606,29 @@ impl Unifier {
         self.unify_comp_ty_inner(a, b, &mut pairs, 0)
     }
 
+    /// Refuse an impossible output pair before binding either grade.
+    fn unify_producers(
+        &mut self,
+        a: (Grade, &Ty),
+        b: (Grade, &Ty),
+        pairs: &mut Pairs,
+        depth: u32,
+    ) -> Result<bool, TypeErrorKind> {
+        let admits_unit = |ty: &Ty| match self.resolve_ty(ty) {
+            Ty::Unit => true,
+            Ty::Var(v) => self.kinded(v).kind.admits(Head::Unit),
+            _ => false,
+        };
+        if (self.resolve_grade(a.0) == Grade::Output && !admits_unit(b.1))
+            || (self.resolve_grade(b.0) == Grade::Output && !admits_unit(a.1))
+            || !self.unify_grade(a.0, b.0)
+        {
+            return Ok(false);
+        }
+        self.unify_ty_inner(a.1, b.1, pairs, depth)?;
+        Ok(true)
+    }
+
     fn unify_comp_ty_inner(
         &mut self,
         a: &CompTy,
@@ -1656,20 +1680,14 @@ impl Unifier {
                     expected: u.apply_comp_ty(&CompTy::Return(ga, ta.clone())),
                     actual: u.apply_comp_ty(&CompTy::Return(gb, tb.clone())),
                 };
-                if !self.unify_grade(ga, gb) {
-                    return Err(mismatch(self));
-                }
-                // A spent depth budget is exhaustion rather than disagreement, and
-                // a kind refusal is not a disagreement between two types at all,
-                // so both propagate verbatim.
-                match self.unify_ty_inner(&ta, &tb, pairs, depth) {
-                    Ok(()) => Ok(()),
+                match self.unify_producers((ga, &ta), (gb, &tb), pairs, depth) {
+                    Ok(true) => Ok(()),
                     Err(
                         e @ (TypeErrorKind::TypeTooDeep
                         | TypeErrorKind::CyclicType { .. }
                         | TypeErrorKind::KindMismatch { .. }),
                     ) => Err(e),
-                    Err(_) => Err(mismatch(self)),
+                    Ok(false) | Err(_) => Err(mismatch(self)),
                 }
             }
             (CompTy::Fun(a1, b1), CompTy::Fun(a2, b2)) => {

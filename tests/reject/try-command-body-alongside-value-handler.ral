@@ -1,0 +1,7 @@
+# codes: T0011
+# status: 1
+# at: 7:30
+# contains: couldn't match type Command with type Returns String
+# contains: this outcome returns a value and an earlier one is a command; a outcome's output is not captured: make that one return it, `{ return !{…} }`
+# Plan §1.10 row mixed `try`: the body is not implicitly captured.
+try { echo hi } { |_| return 's' }

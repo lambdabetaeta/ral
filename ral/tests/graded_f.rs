@@ -1,8 +1,6 @@
 #![allow(clippy::disallowed_methods, reason = "test code")]
-//! A command's value is its output: where a value is wanted, a command is
-//! captured; where a command is wanted, a command runs.  Each case binds
-//! something and renders it with `to-json`, so the value and what escaped to
-//! the terminal are both on stdout, in order.
+//! Only `let` captures a command's output. Elsewhere commands write to stdout;
+//! `to-json` exposes bound values alongside that output.
 
 mod common;
 
@@ -49,18 +47,58 @@ fn a_wrapper_that_runs_a_block_produces_what_the_block_does() {
     assert_eq!(out("let x = attempt { echo hi }\nto-json $x"), "hi\nnull");
 }
 
+// §1.10: bare `map` writes each command's output.
 #[test]
-fn a_value_demanded_of_a_command_block_captures_per_call() {
+fn map_command_blocks_write_in_input_order() {
+    assert_eq!(out("map { |f| echo $f } [1, 2]"), "1\n2");
+}
+
+// §1.10: bound `map` writes output and binds Unit elements.
+#[test]
+fn a_bound_map_of_command_blocks_binds_units() {
     assert_eq!(
         out("let x = map { |f| echo $f } [1, 2]\nto-json $x"),
-        r#"["1","2"]"#
+        "1\n2\n[null,null]"
     );
+}
+
+// §1.10: `map $g` follows the same rule for a command block in hand.
+#[test]
+fn a_bound_map_of_a_command_block_in_hand_binds_units() {
     assert_eq!(
         out("let g = { |f| echo $f }\nlet x = map $g [1, 2]\nto-json $x"),
-        r#"["1","2"]"#
+        "1\n2\n[null,null]"
     );
+}
+
+// §1.10: `par` replays command output in input order and returns Units.
+#[test]
+fn par_command_blocks_replay_output_and_bind_units() {
     assert_eq!(
-        out("let x = { |f| let y = f 5; return $y }\nlet r = x { |n| echo $n }\nto-json $r"),
+        out("let x = par { |u| echo $u } [1, 2] 2\nto-json $x"),
+        "1\n2\n[null,null]"
+    );
+}
+
+// §1.10: `cross`, a wrapper over `map`, writes command output.
+#[test]
+fn cross_command_blocks_write_in_input_order() {
+    assert_eq!(out("cross [1, 3] [2] { |x y| echo \"$x$y\" }"), "12\n32");
+}
+
+// §1.10: heterogeneous `each` joins a command and a free Unit producer.
+#[test]
+fn each_runs_command_and_unit_blocks_from_one_list() {
+    assert_eq!(out("each { |b| !$b } [{ echo hi }, { return () }]"), "hi");
+}
+
+// §1.10: a let-binding wrapper needs its argument to capture explicitly.
+#[test]
+fn a_value_demanding_wrapper_accepts_explicit_capture() {
+    assert_eq!(
+        out(
+            "let x = { |f| let y = f 5; return $y }\nlet r = x { |n| return !{echo $n} }\nto-json $r"
+        ),
         r#""5""#
     );
 }
@@ -73,14 +111,15 @@ fn a_stdout_redirect_leaves_a_value() {
     );
 }
 
+// §1.10: a mixed `try` needs explicit capture in its command body.
 #[test]
-fn a_try_joins_a_command_body_with_a_value_handler() {
+fn a_try_joins_explicitly_captured_output_with_a_value_handler() {
     assert_eq!(
-        out("let x = try { echo a } { |e| return 'none' }\nto-json $x"),
+        out("let x = try { return !{echo a} } { |e| return 'none' }\nto-json $x"),
         r#""a""#
     );
     assert_eq!(
-        out("let x = try { ^false } { |e| return 'none' }\nto-json $x"),
+        out("let x = try { return !{^false} } { |e| return 'none' }\nto-json $x"),
         r#""none""#
     );
 }

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1776d222
-verified_at_date: 2026-09-30
+verified_at_commit: d56977ff
+verified_at_date: 2026-11-03
 against: [design/types, design/cbpv, design/capture]
 ---
 
@@ -15,7 +15,7 @@ types against, and the reading is half negative: **ral's returner is graded, but
 not by an effect monoid.** `F^ε A` carries a two-point *producer kind*, `p` (it
 produces a value) or `w` (it produces output and nothing else, `F^w Unit`, a
 command), and that is all the annotation there is
-([[decisions/260930_graded-f|graded-f]]).
+([[design/capture|grades and capture]]).
 
 ## What ral's grade is, in the paper's own terms
 
@@ -24,20 +24,19 @@ of a computation with no effects, `d·e` grades running `d` then `e`, and `d ≤
 means `e` is more permissive. None of those pieces has a counterpart in ral's
 grade:
 
-- **No `1`.** The grade is not "does this write?". `cd` is `F^p Unit` and
-  `{ echo pre; return 5 }` is `F^p Int`: the grade says whether a computation's
+- **No `1`.** The grade is not "does this write?". `cd` has a fresh unit-result grade and
+  `{ echo pre; return 5 }` is `F^ν Int` with a fresh ν: the grade says whether a computation's
   *result* is its output. What a computation may do to the world is the business
   of the grant that admits it, never of its type ([[design/types|types]]).
 - **No `·`.** A sequence does not multiply its parts' grades; it takes its
-  tail's type, discarding every earlier one. `!{ echo a; return () }` is
-  `F^p Unit` however loudly the head wrote. Union grading would need a lub at
+  tail's type, discarding every earlier one. The body `echo a; return ()`
+  has type `F^ν Unit` for a fresh ν however loudly the head wrote. Union grading would need a lub at
   every `;`, hence constraints, and would reopen "value or output?" for
   `F^w Int`.
-- **No `≤`.** Grades are atomic: a grade variable binds only `p` or `w`. Arms
-  that must agree are joined by a two-pass rule that chooses a target grade and
-  inserts the one coercion `F^w Unit ⇝ F^p String` (or the identity upcast
-  `F^p Unit ⇝ F^w Unit`), not by a permissiveness order carried through the type
-  system.
+- **No `≤`.** Grades are atomic: a grade variable binds only `p` or `w`.
+  Arms meet by ordinary unification, without capture or a permissiveness
+  order. A free unit producer can unify as a command; a `let`-fixed `p`
+  producer cannot.
 
 The grade is what makes the capture coercion a consequence of typing: a `let`
 demands a value, and a command demanded as a value is wrapped in `cap M to x.
@@ -116,9 +115,9 @@ calculus grows:
   choice; it is the first restriction seen at the arrow.
 
 And where CBPVE has a general `coerce_D M` over the whole of `<:`, ral has one
-run-time coercion, `capture`, a term the checker writes where a value is
-demanded of a command ([[design/types|types]]), and an identity upcast from
-`F^p Unit` to `F^w Unit`; neither is a step of a subtyping derivation.
+run-time coercion, `capture`, a term the checker writes only when a `let`
+binds a command ([[design/capture|grades and capture]]). It is not a step
+of a subtyping derivation.
 
 ## What ral could borrow
 

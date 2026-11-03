@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
 
@@ -23,8 +23,11 @@ sites name it, and nothing in it reads a unifier or a runtime value.
   its own fields, and the record and variant types ral shows for a Rust type
   ([[map/core/transport|transport]]).
 - `ty/fmt.rs`: `Display` for `Ty` and `Scheme`; one `FmtCtx` names a shared
-  variable the same in every type a diagnostic prints. Local unit tests build
-  schemes directly to check quantified computation variables and cyclic roots.
+  variable the same in every type a diagnostic prints. Producers print as
+  `Command`, `Returns A` or `Command[ν] A`; a free grade paired with a type
+  excluding unit prints `Returns A`, using quantified kinds where known.
+  Scheme quantifiers list only visible grades. Local unit tests build schemes
+  directly to check quantified computation variables and cyclic roots.
 - `ty/site.rs`: the data of a `Site`, a boundary's checked type frozen as a graph
   of shared nodes (`Arc<[Node]>`, `Shape`, `Fields`, `Tail`) naming its unit by a `UnitId`
   — an OS nonce drawn once per process and a count, so unique in every process

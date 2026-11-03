@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_date: 2026-11-02
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, annotate, Capture, captured_string, thunked]
+generated_at_commit: d56977ff
+verified_at_commit: d56977ff
+verified_at_date: 2026-11-03
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, annotate, Capture, captured_string, Bound]
 ---
 
 # The compilation ladder: source to typed IR
@@ -53,8 +53,6 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
     `cap M to d. decode d` (`CompKind::Capture`, `Prim::Decode`, built by
     `captured_string`)
     ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
-  - A unit producer standing as a command is wrapped in `Upcast`, under its
-    lambdas or in an η-wrapper for a value in hand.
   - An application through a returned thunk is split into explicit
     `M to h. force h · V` segments, once per unwrapped thunk
     ([[invariants/ir-pure-cbpv|the IR invariant]]).
@@ -65,20 +63,18 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   point.
 
   An arrow-typed right-hand side is bound unrun, as its thunk: the bind rule
-  records it (`InferCtx::thunked`) and `annotate` writes it `return (thunk M)`
+  records it (`InferCtx::bound`, `Bound::Thunked`) and `annotate` writes it `return (thunk M)`
   (Let-fun, SPEC §17.5).
 
-  Which computations are recorded is decided *during* inference, by the type:
-  the bind rule (`rhs_bound_ty`) records a right-hand side of grade `Output`,
-  and an argument or a join records the computation it coerces
+  Only a binding records a capture: `rhs_bound_ty` reads the resolved RHS,
+  and `InferCtx.bound` records `Bound::Captured` at its address. `annotate`
+  wraps that RHS; arguments and joins only unify
   ([[internals/type-inference|type-inference]],
-  [[decisions/260930_graded-f|graded-f]]).
-  The rebuild places a `Capture` by looking a node up in that record.
+  [[design/capture|grades and capture]]).
 
-  This rung is the *only* source of `Capture` and `Upcast` nodes, and it runs
-  on every evaluated path: nothing reaches the evaluator that asks whether
-  to capture or upcast. The verdict rides inside the comp.
-  ([[map/core/typecheck|typecheck]])
+  This rung is the only source of inserted `Capture` nodes and runs on every
+  evaluated path. The evaluator executes the explicit capture/decode terms;
+  it does not decide where capture belongs. ([[map/core/typecheck|typecheck]])
 
 A loading form may also hand this rung a `ReturnContract` — one of the
 declared `typecheck::contract::Table`s — and once inference has finished the

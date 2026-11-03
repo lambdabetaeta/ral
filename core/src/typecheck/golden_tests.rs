@@ -532,7 +532,6 @@ impl Stored {
             CompKind::Return(v) | CompKind::Force(v) => self.val(v),
             CompKind::Lam { body, .. }
             | CompKind::Capture(body)
-            | CompKind::Upcast(body)
             | CompKind::Protect { body, .. } => self.comp(body),
             CompKind::App { head, args } => {
                 self.comp(head);

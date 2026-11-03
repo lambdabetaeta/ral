@@ -1,5 +1,6 @@
-# codes: T0010 T0011
+# codes: T0010
 # status: 1
-# at: 5:30
-# contains: type [String]
+# at: 6:30
+# contains: couldn't match type String with type [String]
+# Plan §1.4 removes adaptation; only the primary argv error remains.
 alias f { |a| return !{upper $a} }; f x

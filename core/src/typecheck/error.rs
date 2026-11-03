@@ -102,7 +102,6 @@ pub enum Reason {
     /// The coercion the checker itself inserted, `cap` and `decode`: no user
     /// sentence ever needs it.
     Capture,
-    Upcast,
     NotOperand,
     /// Unary `-`'s operand, which must be a number.
     Negation,

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_commit: 8d868e18
-verified_at_date: 2026-09-30
+generated_at_commit: d56977ff
+verified_at_commit: d56977ff
+verified_at_date: 2026-11-03
 against: [design/cbpv, design/types, design/pipelines, internals/evaluator-machine]
 ---
 
@@ -52,10 +52,11 @@ touches the world ([[design/cbpv|cbpv]],
   builtin that writes, a handler arm standing in for one — is the latter, so
   `{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`. The grade
   says how a result is produced, not whether anything is written, so
-  `{ echo pre; return 5 }` is `F^p Int`. That `let x = hostname` binds the text
+  the body `echo pre; return 5` has type `F^ν Int` for a fresh ν, printed
+  `Returns Integer`. That `let x = hostname` binds the text
   `hostname` writes is the one coercion `cap : F^w Unit ⇝ F^p String`, which the
-  checker inserts where a value is demanded of a command
-  ([[decisions/260930_graded-f|graded-f]], [[design/types|types]]). Levy's
+  checker inserts only where a `let` binds a command
+  ([[design/capture|grades and capture]], [[design/types|types]]). Levy's
   adjunction is unchanged; grades are unified like type variables.
 - **The pipe is a new computation combinator, and it is not a typing fact.**
   CBPV composes computations by sequencing and application only. ral adds `|`,

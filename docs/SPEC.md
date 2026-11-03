@@ -1,5 +1,5 @@
-<!-- generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0 -->
-<!-- verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0 -->
+<!-- verified_at_commit: d56977ff -->
+<!-- generated_at_commit: d56977ff -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -120,8 +120,8 @@ A command can produce two independent things:
 2. A stream of bytes for a terminal, file, or pipeline.
 
 An external command usually writes bytes. A command's value is its output:
-where a value is wanted, as on the right-hand side of `let`, ral captures the
-command and decodes its output as UTF-8 text:
+only on the right-hand side of a `let`, ral captures the command and decodes
+its output as UTF-8 text:
 
 ```ral
 let branch = git branch --show-current
@@ -789,13 +789,13 @@ from zero. Negative and fractional numerals are parse errors, with a hint to
 quote a numeric field name: `$r['1.5']`. Path and tilde words must likewise
 be quoted as field names, as in `$r['a/b']`; tags are not keys.
 
-For a position computed at runtime, use `nth : ∀α. Int → [α] → F α`:
+For a position computed at runtime, use `nth : ∀α ν. Integer → [α] → Command[ν] α`:
 `nth $i $xs`. It has the same bounds checks as a written list position.
 A helper `{ |m k| $m[$k] }` is polymorphic over map element types; indexing
 neither defers a constraint nor makes a type variable weak. The prelude's
 `get $m key default` supplies a map fallback.
 
-`env : ∀α. F α` is a checked boundary (§7.3). `!{env}[HOME]` uses a record
+`env : ∀α. Returns α` is a checked boundary (§7.3). `!{env}[HOME]` uses a record
 field and checks its presence at that call; `keys !{env}` or `has !{env} X`
 uses a map. Each call is checked independently. Environment values are text:
 using `HOME` as a number fails at `env`, rather than converting it.
@@ -1575,18 +1575,21 @@ Every computation produces two independent things:
   surrounding stream otherwise;
 - the **value** it returns to the evaluator.
 
-Neither implies the other. A command's value is its output: where a value is
-wanted the bytes it writes are captured and decoded, and a computation that
-returns a value writes nothing of it. Only the final stage's value can become
-a pipeline's: every earlier stage feeds the next by writing (§7.1).
+Neither implies the other. Only a `let` captures a command's output and
+decodes it as a value. A computation that returns a value writes nothing of
+that value unless it explicitly encodes it. Only the final stage's value can
+become a pipeline's: every earlier stage feeds the next by writing (§7.1).
 
 In statement position, byte output goes to standard output unless a redirect sends it elsewhere.
 
 What `let` binds is decided by type (§6.8). A command that writes — an
 external, a builtin that writes, or a handler arm standing in for one — has type
-`Command`; where a value is demanded of it, namely a `let`'s whole right-hand
-side, an argument to a function that demands a value, or an arm joined with a
-value arm, the checker wraps it in a **capture frame**, with three rules:
+`Command`. Only when it is a `let`'s whole right-hand side does the checker
+wrap it in a **capture frame**. A `!{…}` in a value
+position is hoisted into an ordinary `let` and follows the same rule.
+Arguments and control-flow arms are never implicitly captured.
+
+The capture frame has three rules:
 
 1. On push, the standard-output sink becomes a fresh buffer and the previous
    sink is held.
@@ -1603,9 +1606,9 @@ The bytes are then decoded:
 
 Invalid UTF-8 is an error. Use `from-bytes` when the byte payload is binary.
 
-A command that writes nothing captures `""`. Bytes written by a statement that
-is not the tail of the captured computation go to the surrounding stream and
-take no part in the binding.
+A command that writes nothing captures `""`. Capture wraps the whole
+computation: earlier statements write to its buffer too, unless an inner
+`let` captures them separately.
 
 When the final stage returns a value, the value simply comes back from that
 stage's own thread: a ral-written final stage runs `machine::evaluate` over its
@@ -1624,8 +1627,9 @@ let answer = !{ echo first; echo second }
 # prints nothing; answer is "first\nsecond"
 ```
 
-A redirect of standard output discharges the demand: `let saved = to-json 1 > f`
-binds `()`.
+A stdout redirect gives the result a fresh grade at the same value type:
+`M > f : F_ν A` for `M : F_ε A`. It does not constrain ε. A binding fixes
+that fresh grade to `p`, so `let saved = to-json 1 > f` binds `()`.
 
 Captures nest. Output goes to the nearest enclosing sink, which inside a
 capture is that capture's buffer. A `let` inside a captured block captures its
@@ -1648,13 +1652,13 @@ Codecs make every conversion between values and bytes visible in the source. A d
 | `from-json` | a ral value, checked | Requires valid UTF-8 and JSON. JSON `null` becomes `Unit`, a whole number an `Int`, a number with a fraction a `Float`. |
 | `from-jsonl` | a list of ral values, checked | Splits by the line rule below and decodes each line as `from-json` does. A blank line, holding only spaces, tabs, and carriage returns, holds no value. An error names its line. |
 | `from-json-at tokens` | a ral value, checked | Decodes as `from-json` does, then reads the value at the RFC 6901 reference tokens `tokens`, a list of `String`: an object member by exact key, an array element by canonical decimal. A token that does not resolve is an error naming the pointer prefix and the object's keys or the array's length. |
-| `from-csv` | a list of rows, checked | `∀α. F [α]`: the header names each row's keys. Label reads use records; computed reads use maps. Cells remain strings: a numeric use fails at the decode, naming the column and the line of use. A duplicate header or a ragged row is an error naming it. |
+| `from-csv` | a list of rows, checked | `∀α. Returns [α]`: the header names each row's keys. Label reads use records; computed reads use maps. Cells remain strings: a numeric use fails at the decode, naming the column and the line of use. A duplicate header or a ragged row is an error naming it. |
 
 Decoders are command forms. They read the preceding byte pipe, or standard input when there is no preceding stage; only `from-json-at` takes an argument.
 
 #### Checked boundaries
 
-The shape of a decoded value is the file's, not the program's, so a decoder's result is a *boundary*: the checker gives it one type for the whole unit, `_α`, which every use of the value fixes (§5.1), and the decoder admits the value against that type before the program sees it. `let n = $[$doc[size] + 1]` over `{"size": "12kB"}` fails at the decode, naming where:
+The shape of a JSON/CSV value is the file's, not the program's, so a checked JSON/CSV decoder's result is a *boundary*: the checker gives it one type for the whole unit, `_α`, which every use of the value fixes (§5.1), and the decoder admits the value against that type before the program sees it. `let n = $[$doc[size] + 1]` over `{"size": "12kB"}` fails at the decode, naming where:
 
 ```text
 from-json: the value at `/size` is text (`'12kB'`), but this script uses it as an Int; line 3
@@ -1665,7 +1669,7 @@ A mismatch names an RFC 6901 pointer into the value, what was found, what the sc
 The closed set of checked boundaries is `from-json`, `from-jsonl`,
 `from-json-at`, `from-csv`, `env`, `use` (§10.3), `exarch-agents`,
 `exarch-pins`, `exarch-transcript`, and `_ed-state`. Each call admits its own
-result. `from-csv : ∀α. F [α]` checks rows against their use; `env : ∀α. F α`
+result. `from-csv : ∀α. Returns [α]` checks rows against their use; `env : ∀α. Returns α`
 checks the environment as a record or a map. Neither converts text to numbers.
 
 A decoder is a legal pipeline tail:
@@ -1693,7 +1697,7 @@ An encoder takes its value as an ordinary argument and writes bytes:
 | `to-lines` | a list of values | Each element's textual form followed by a newline. |
 | `to-json` | a JSON-representable value | UTF-8 JSON. `Bytes` become an array of integers; variants become tagged objects. |
 | `to-jsonl` | a list of JSON-representable values | Each element as `to-json` encodes it, followed by a newline. |
-| `to-csv` | a list of records or a list of maps, with scalar cells and the same keys | `∀α:data. [α] → writes`: UTF-8 CSV, keys in sorted order as the header, then one row per record or map. Cells are `String`, `Int`, `Float` or `Bool`, rendered as `str` renders them. |
+| `to-csv` | a list of records or a list of maps, with scalar cells and the same keys | `∀α:data. [α] → Command`: UTF-8 CSV, keys in sorted order as the header, then one row per record or map. Cells are `String`, `Int`, `Float` or `Bool`, rendered as `str` renders them. |
 
 `to-json` rejects values with no faithful JSON representation, including blocks, lambdas, and handles. `to-jsonl` rejects a list holding one, names its index, and writes nothing.
 `to-csv` requires every row to use the string-keyed record/map carrier with
@@ -1771,6 +1775,10 @@ arguments. This holds for every redirect, including stdin, stderr and `2>&1`:
 `to-json > f` is refused; `to-json $value > f` is ready. Redirect operands are
 checked whether the redirects are fused into a command call or scope another
 computation.
+
+A stdout redirect has a fresh result grade at the body's value type (§17.3).
+Stdin/stderr redirects and `2>&1` preserve the body's grade. This affects
+result typing, not which bytes are written or where they go.
 
 These nine spellings are the whole redirect vocabulary: `< path`, `<< value`, `> path`, `>> path`, `>~ path`, `2> path`, `2>> path`, `2>~ path` and `2>&1`. The digit `2` names standard error and is the only fd prefix; `1>` is refused with advice to put a space before the `>` to pass `1` as an argument (`echo 1>file` would otherwise write an empty file). A redirect list binds streams: each of standard input, output, and error is bound at most once, and a second binding is a parse error with a caret on the second redirect. `cmd > a > b`, `cmd 2> e 2>&1`, `cmd 2>&1 2> e`, and `cmd < a << b` are all refused with "standard output is redirected twice; which one do you mean?" or its input and error counterpart. Position carries no meaning: `2>&1` sends standard error wherever standard output ends up, so `cmd 2>&1 > f` and `cmd > f 2>&1` are one command. Redirect targets are evaluated before their files are opened, and the files open in one fixed order: standard input, output, error. Relative paths use the scoped logical working directory.
 
@@ -1890,14 +1898,13 @@ Any other atom would run before `if` chose, so it is a parse error: an arm is a
 block, or a name holding one. To compute the block first, bind it with
 `let arm = $arms[a]`.
 
-With `else`, both bodies produce one kind of result. A command's value is its
-output, so a body that prints joins another that prints, and joins an empty one
-(`()`); joined with a body that returns text, the command's output is captured
-as text, so `if $c { hostname } else { 'none' }` is a `String`. A body that
-returns any other value does not join a command, and `if $c { echo big } else
-{ return 5 }` is refused. Print in both with `echo` to keep the result a
-command. Without `else`, the conditional is for effects: its result is
-always `()`, whether the body runs or not.
+With `else`, the bodies must unify to one result type and grade. Commands
+join commands; value-returning bodies join values of the same type. No arm's
+output is captured. `if $c { hostname } else { return 'none' }` is refused:
+write `{ return !{hostname} }` to return the command's output explicitly.
+A fresh unit producer, such as `return ()`, can join either grade; a unit
+producer whose grade a `let` fixed to `p` cannot join a command. Without
+`else`, the form runs for effects and returns `()` at a fresh grade.
 
 `false` chooses another branch; it does not cause `?` to continue and does not
 invoke a `try` handler.
@@ -1925,10 +1932,10 @@ with one binder writes the branch out, and a name holds one, so `` `ok: $handle 
 runs exactly what `` `ok: { |p| $handle $p } `` runs. As for `if`, an arm is a
 block or a name; any other atom is a parse error.
 
-Arm result types must agree, exactly as for `if` branches and `?`
-alternatives: the arms join as one kind of result. An arm that prints joins one
-that ends silently at `()`; a command arm joined with one that returns text is
-captured as text, and it does not join one that returns another value.
+Arm result types and grades must agree, exactly as for `if` branches and
+`?` alternatives. Each arm is checked against a fresh result, then the
+results unify with the join in source order. No arm is captured or reordered;
+a disagreement blames the later arm. A fresh unit producer can join a command.
 
 Because the alternatives are syntax, exhaustiveness is decided statically and
 always. The typechecker closes the scrutinee's variant row to exactly the arms'
@@ -1950,8 +1957,9 @@ The first successful alternative supplies the chain's result. An ordinary
 failure continues with the next alternative. If every alternative fails, the
 chain propagates the final failure. Alternatives must return values of one
 type, and each runs in a fresh lexical scope. Alternatives join
-as the arms of `if` do: alternatives that are commands join each other, and
-joined with an alternative that returns text they are captured.
+as the arms of `if` do: commands join commands, and returned values must
+agree. A command alternative is never implicitly captured; return an explicit
+capture to join it with text.
 
 Control escapes are not alternatives. In particular, `exit` and internal
 tail-call control pass through a fallback chain rather than selecting its
@@ -1991,7 +1999,7 @@ handler:
 
 ```ral
 let value = try {
-  read-config
+  return !{read-config}
 } { |error|
   log $error[message]
   return default-config
@@ -2037,8 +2045,9 @@ is `<runtime>` when the failure came from no command. The dispatch stamps its
 own name on the error as the error passes through, so the innermost failing
 dispatch wins, exactly as the innermost source span does. `site` is the
 failure's source position, `` `none `` when it has none. The body and handler
-join as the arms of `if` do; in the example, `read-config` is a command whose
-output is captured, so the handler's `return` gives text as well.
+join as the arms of `if` do, without capture or coercion. In the example,
+the body's explicit `return !{read-config}` returns text, and the handler
+must return text too.
 
 `try` is control flow, not output capture, and it observes nothing: it reads no
 audit trail, retains no bytes, and costs no more than its own frame. Bytes
@@ -2356,7 +2365,7 @@ Every value in `handlers` must be a function of one parameter, such as `{ |args|
 
 The singular `handler` field is a catch-all and must be a function of two parameters, such as `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
 
-The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed. A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm that returns `()` is admitted and captures `""`. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
+The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed. A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm returning `()` at a free grade unifies as a command and captures `""` under a `let`; an arm whose grade is already fixed to `p` does not stand as a command. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
 
 `detach` refuses a handled head: a handler runs inside this session, so nothing can be detached. To stub `detach`, stand in for `detach` itself; to run the real program, write `^name`.
 
@@ -2461,12 +2470,12 @@ The live shell is read by six nullary builtins:
 
 | Name | Type | Value |
 |---|---|---|
-| `env` | `∀α. F α` | Checked boundary: environment variables as the record or map the script uses; values remain text. |
-| `cwd` | `F String` | The logical working directory, absolute, `/`-separated on Windows (§14.4). |
-| `home` | `F String` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment, `/`-separated on Windows; the directory `~` abbreviates. |
-| `user` | `F String` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
-| `nproc` | `F Int` | Available processor parallelism, never less than 1. |
-| `args` | `F [String]` | The current program's argument strings. |
+| `env` | `∀α. Returns α` | Checked boundary: environment variables as the record or map the script uses; values remain text. |
+| `cwd` | `Returns String` | The logical working directory, absolute, `/`-separated on Windows (§14.4). |
+| `home` | `Returns String` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment, `/`-separated on Windows; the directory `~` abbreviates. |
+| `user` | `Returns String` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
+| `nproc` | `Returns Integer` | Available processor parallelism, never less than 1. |
+| `args` | `Returns [String]` | The current program's argument strings. |
 
 Each is a computation: a `let` of one binds what it returns, and `!{…}` splices it. Each is also an ordinary native: a lexical binding of the same name shadows it, and `^env` runs the program of that name.
 
@@ -2745,7 +2754,7 @@ try { await $build } { |error|
 
 A handle carries its block's type, grade included (§17.3): `spawn` of a block
 of type `F_ε A` returns a `Handle_ε A`, printed `Handle (Returns A)`,
-`Handle Command`, or, with the grade a variable, `Handle (ν A)`; and
+`Handle Command`, or, with a visible grade variable, `Handle (Command[ν] A)`; and
 `await : Handle_ε A -> F_ε A`. So `await` of `spawn { echo hi }` is a command,
 and `let x = await $h` binds `"hi"` as `let x = { echo hi }` would; `await` of
 `spawn { echo pre; return 5 }` writes `pre` and returns `5`, as the block
@@ -2782,7 +2791,7 @@ the handle may be awaited later.
 
 #### `poll` and `is-done`
 
-`poll handle` (`forall ε A. Handle_ε A -> F_p …`) never waits, never writes, and
+`poll handle` (`forall ε ν A. Handle_ε A -> F_ν …`) never waits, never writes, and
 never claims. It samples the handle's lifecycle, elapsed time, and available
 result under one lock and returns one of four variants:
 
@@ -2826,7 +2835,7 @@ that failure, and leaves status zero. Special non-value endings in `` `ready ``
 preserve the `await` rule: a worker's `exit`, a foreign stop, or a worker panic
 is re-raised when polled in `` `ready ``.
 
-`is-done handle` (`forall ε A. Handle_ε A -> F_p Bool`) is a core builtin that
+`is-done handle` (`forall ε ν A. Handle_ε A -> F_ν Bool`) is a core builtin that
 tests only whether the worker's execution has ended: it returns `false` for
 `` `running `` and `` `stopping `` and `true` for `` `ready `` and
 `` `consumed ``. Unlike `poll`, `is-done` never copies stream buffers, never
@@ -2982,7 +2991,7 @@ Three standard-prelude functions are written over `gather`:
 
 ```ral
 let converted = par { |path| convert-one $path } $paths 4
-let checks = both { cargo build -q } { cargo clippy -q }
+let checks = both { return !{cargo build -q} } { return !{cargo clippy -q} }
 let data = first-of [{ fetch 'https://a.example/data' }, { fetch 'https://b.example/data' }]
 ```
 
@@ -2992,9 +3001,11 @@ let data = first-of [{ fetch 'https://a.example/data' }, { fetch 'https://b.exam
   observed is raised at once, and the other workers are cancelled and
   drained. The items are awaited in input order, so each item's output is
   written in input order and the result is the list of their values in input
-  order, whatever order the workers finished in.
-- `both first second` runs two blocks at once and returns the record of their
-  values, `[fst: …, snd: …]`, the fixed-arity form of fan-out into a record.
+  order, whatever order the workers finished in. A command callback's value
+  is `()`: `par { |u| curl $u } $urls 4` replays output and returns unit
+  elements; use `{ |u| return !{curl $u} }` to collect text instead.
+- `both first second` runs two value-returning blocks at once and returns
+  the record of their values, `[fst: …, snd: …]`, the fixed-arity form of fan-out into a record.
   It awaits `fst`, then `snd`, so it does not fail fast: a failure in either
   is the call's, and the other is cancelled and drained at the gather's exit.
 - `first-of blocks` is `race` over a fresh spawn of each block, inside a
@@ -4193,6 +4204,23 @@ the refused candidate. Every other place that holds the name is listed under
 case-insensitively. Regex search is used when regex support is compiled in;
 otherwise the search is a substring match.
 
+Producer types print as `Command[g] A`: `Command` abbreviates stdout grade
+`w`, and `Returns A` abbreviates value grade `p`. A free grade also prints
+`Returns A` when its paired type excludes `Unit`; otherwise it prints
+`Command[ν] A`, using `ν ξ ο π`. Scheme quantifiers list only visible grades.
+For example:
+
+```text
+cd     : ∀ν. String → Command[ν] Unit
+length : ∀α:sized. α → Returns Integer
+map    : ∀α β ν. {α → Command[ν] β} → [α] → Returns [β]
+both   : ∀α β. {Returns α} → {Returns β} → Returns [fst: α, snd: β]
+await  : ∀α ν. Handle (Command[ν] α) → Command[ν] α
+```
+
+`Returns` means a value, never a command; `Command[ν]` permits either producer
+kind, as ν is chosen. Unit values are written `()` in programs.
+
 `help` is the canonical catalogue of documented standard and host-library
 entries, not a list of every command that might be reachable. Arbitrary aliases,
 plugin bindings, and programs found on `PATH` are dynamic. Use `explain name`
@@ -4237,6 +4265,15 @@ The prelude builds the familiar derived operations from these primitives:
 `first-where`, `option-or`, `elem`, `contains`, `nub`, `zip`, `flat-map`, `enumerate`,
 `concat`, `sum`, `max`, `min`, `maximum`, `minimum`, `cross`,
 `group-by`, `median`, and `median-by`.
+
+`map` accepts a block of either grade. `map { |f| echo $f } [1, 2]`
+writes `1` and `2` and returns `[(), ()]`. To collect output, return it:
+`map { |f| return !{echo $f} } [1, 2]`. A `let` around `map` binds its list;
+it does not capture individual callbacks. `cross` and `par` also accept
+command callbacks. `flat-map` never implicitly captures either, but requires
+list-valued callbacks: it maps, then concatenates the returned lists.
+`filter` demands a returned Bool, and `sort-list-by` a returned comparable
+key; command blocks are refused there.
 
 ### 14.3. Strings, numbers, and shell text
 
@@ -4419,8 +4456,8 @@ a recoverable failure.
 
 `warn message` takes one `String` and writes it, followed by one newline, to
 standard error. It returns `Unit` and puts nothing on the byte channel, so a
-`let` capturing the computation never sees it. This is the whole of
-ral's diagnostic surface: there is no redirect that sends standard output to
+`let` binding the computation gets `()` and never captures the message.
+This is the whole of ral's diagnostic surface: there is no redirect that sends standard output to
 standard error.
 
 `surface value` sends a first-order structured event to a host that installed a
@@ -4892,7 +4929,7 @@ Cursor and span offsets count Unicode characters, not UTF-8 bytes.
 running a generated command. Ghost text and highlights are display state; they
 do not become part of the input buffer.
 
-`_ed-tui : ∀ν α. {ν α} -> Returns [output: String, status: Int]` runs the body with its
+`_ed-tui : ∀α ν. {Command[ν] α} -> Returns [output: String, status: Integer]` runs the body with its
 standard output captured while allowing an interactive child to use the
 terminal. The body's value is ignored; the captured bytes are decoded as text,
 lossily after removing exactly one trailing LF or CRLF, and supply `output`.
@@ -4969,7 +5006,7 @@ Script arguments are returned by `args`. Arguments are text: one that is not UTF
 
 ### 16.2. Batch processing
 
-A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed because it also annotates the program: each computation a value demand captures is wrapped in its capture, and each pipeline stage records its type.
+A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed because it also annotates the program: each command right-hand side captured by a binding is wrapped in capture/decode, and each pipeline stage records its type.
 
 The batch-only inspection flags are:
 
@@ -5315,7 +5352,6 @@ M ::= return v
     | letrec {xi = vi}
     | scope op
     | capture M
-    | upcast M
     | prim o [v1, ..., vn]
 
 op ::= try v1 v2 | guard v1 v2 | within v1 v2 | grant v1 v2 | audit v
@@ -5330,7 +5366,7 @@ is what can be held unrun. `redirect`
 takes the computation itself: its body is an application or a nested scope,
 neither of which can fuse its own redirects the way `exec` does.
 
-`capture` and `upcast` are checker-written control forms (§17.5).
+`capture` is a checker-written control form (§17.5).
 `decode v` abbreviates `prim decode [v]`, a primitive on a byte value.
 Other primitives include arithmetic, rendering, concatenation, indexing,
 record update, and list/map assembly; all operands are values. Operand
@@ -5375,21 +5411,48 @@ C, D ::= F_ε A | A -> C | β       ε ::= p | w | ε̂
 and tag labels occupy distinct alphabets and do not unify. A nullary variant
 has payload type `Unit`.
 
-`U C` classifies a suspended computation. `F_ε A` classifies a computation that
-produces an `A`, and carries a *grade* ε saying how: `F_p A` produces the value
-`A`, and `F_w Unit` produces output and nothing else. A **command** — an
-external, a builtin that writes, or a handler arm standing in for one — has type
-`F_w Unit`, printed `Command`; `F_p A` is printed `Returns A`, and a grade
-variable prints from the alphabet `ν ξ ο π`, so `retry` reads
-`∀α ν. Integer -> {ν α} -> ν α`. So `{ echo hi }` is `{Command}` and `{ 'hi' }`
-is `{Returns String}`, and `{ echo pre; return 5 }` is `{Returns Integer}`: a
-grade says whether a computation's result is its output, not whether it writes.
-A computation of grade `w` has value type `Unit`. A grade is atomic: a grade
-variable is bound to `p` or `w` and to nothing else, so grades are quantified
-like any variable but are never weak and need no occurs check. A type `Command A`
-does not exist. `Handle_ε A` is a suspended producer: `await` of it is an
-`F_ε A`, and it prints as the producer it suspends, `Handle (Returns A)` or
-`Handle Command` (§11.2).
+`U C` classifies a suspended computation. `F_ε A` pairs a *grade* with the
+value type it produces: `p` produces a value, `w` produces output and has
+value type `Unit`. A command is `F_w Unit`: an external, a base frame such as
+`echo`, a builtin declared `Command`, or an arm standing in for one.
+
+**The inferred invariant is `F_w A ⇒ A = Unit`.** Every introduction of `w`
+is at unit, and every copied grade keeps its paired value type. When meeting
+two returners or two handles, if either grade resolves to `w`, the other
+value type must resolve to unit or a variable whose kind admits unit.
+Otherwise unification fails before binding either grade. It then unifies
+grades followed by value types. Grades are atomic and never weak.
+
+**Only commands, boundaries and value demands fix a grade.**
+
+- Commands introduce `w`.
+- A `let` fixes a free grade to `p` (§17.5); a builtin parameter demanding a
+  value, such as `filter`'s block, also requires `p`.
+- Boundary results are `p`: checked-boundary JSON/CSV decoders, `use` and
+  other checked doors supply data. A free boundary grade would let a command
+  join type that data `Unit` and admit a program whose supplied value then
+  fails admission.
+- Other producers get fresh grades: `return`, primitives, `~`, `capture`,
+  `spawn`, `audit`, handled alias/unalias statements, ordinary builtin
+  results and stdout redirects. Command declarations, boundary results and
+  already graded builtin results such as `fail` and `await` are exceptions.
+  The ordinary decoders `from-bytes`, `from-string`, `from-line` and
+  `from-lines` have fresh result grades; their non-unit payloads hide those
+  grades when printed as `Returns`.
+
+The grade says how the result is produced, not whether anything is written:
+`{ echo pre; return 5 }` prints `pre` and returns an integer. A free unit
+producer can unify with `w` without conversion. Once a `let` fixes it to
+`p`, it cannot stand as a command. `return ()` and `return $u` for `u : Unit`
+obey the same rule.
+
+Printing (§14.1) uses `Command` for `w`, `Returns A` for `p`, and
+`Command[ν] A` for an unresolved grade. A free grade whose paired type
+excludes unit prints `Returns A` too: a concrete non-unit type, or a
+quantified variable whose kind excludes unit. Only visible grades appear in
+`∀`, named from `ν ξ ο π`. Thus `{ |x| return $x }` has type
+`∀α ν. {α → Command[ν] α}`. `Handle_ε A` keeps a suspended producer's grade;
+`await : Handle_ε A -> F_ε A`, printed with the same producer notation.
 
 The checker is Hindley-Milner with value-, computation-, and row-level
 unification variables. Let-bound names are generalized against the current
@@ -5399,8 +5462,8 @@ inherited by any variable unified with a weak one, and is never quantified, so
 every use of the name shares one type for it. There is no value restriction. A
 scheme that leaves a weak variable unquantified keeps it weak in later runs, where
 it is re-seeded as a fresh weak variable. A *boundary* — a place where a
-value of a shape the program did not decide enters typed code: the decoders,
-`env`, `use`, the exarch host's answers, `_ed-state` — makes the
+value of a shape the program did not decide enters typed code: the checked
+JSON/CSV decoders, `env`, `use`, the exarch host's answers, `_ed-state` — makes the
 variables of its result weak and records the result type on the call. Once the
 unit is solved that type is frozen as a *site* on the call, which the boundary
 admits the value against: each position's head, each free variable's kind, and
@@ -5443,7 +5506,7 @@ unification rule (§4.7): a written label requires `[label: α | ρ]`, a written
 position requires `[α]`, and a computed key requires `Map α` with a `String`
 key. These are the core's `proj`, `index` and `lookup`, respectively.
 There is no deferred read constraint, shape default or index-made weak
-variable. `nth : ∀α. Int → [α] → F α` reads a computed list position without
+variable. `nth : ∀α ν. Integer → [α] → Command[ν] α` reads a computed list position without
 sacrificing polymorphism.
 
 A stored scheme is closed over its whole graph: body and recursive equations.
@@ -5482,7 +5545,7 @@ Representative rules are:
 ```text
 Γ ⊢v v : A
 ---------------------------- Return
-Γ ⊢c return v : F_p A
+Γ ⊢c return v : F_ν A       ν fresh
 
 Γ ⊢v v : U C
 ---------------------------- Force
@@ -5516,9 +5579,10 @@ A row's scheme says what it produces. The rows that write — the encoders
 `to-bytes`, `ints-to-bytes`), `echo`, `help`, `explain`, `clear` and `reset` —
 end in `Command`, and a row that writes only when applied at its full arity:
 `to-json` alone is a function, and `to-json $x` is a command. The rest end in
-`Returns A`, with `warn` among them, since standard error is not the byte
-channel. A few rows are polymorphic in the grade: `each`, `fold`, `fold-lines`
+freshly graded returners, with `warn` among them: stderr is not the byte
+channel. Boundary results remain `p`. `map`, `each`, `fold`, `fold-lines`
 and `audit` run a body of either grade, stream its output and keep its value;
+`filter` and `sort-list-by` demand value-returning callbacks.
 `watch`, like the `spawn` form, keeps the body's grade in the `Handle_ε A` it
 returns, and `await` and `race` give it back (§11.2); `fail`, `exit` and `diverges` inhabit
 every grade. A
@@ -5543,10 +5607,9 @@ Every nonempty redirect list requires `Γ ⊢c M : F_ε A` at the outermost
 computation: a function still awaiting arguments is refused, rather than
 redirecting its eventual result. Redirect operands are checked in both fused
 calls and redirect scopes. An unresolved computation opens with a fresh input
-grade. A redirect of standard output discharges the result grade: `M > f` has
-type `F_p A`, because the bytes have gone to the file and the computation's
-value is what remains. This does not constrain ε; other uses of `M` retain its
-original grade. Stdin and stderr redirects, and `2>&1`, leave the grade alone.
+grade. A redirect of standard output has type `F_ν A` for a fresh ν:
+its bytes go to the file, and the payload type is preserved. This does not
+constrain ε; other uses of `M` retain its original grade. Stdin and stderr redirects, and `2>&1`, leave the grade alone.
 
 ### 17.4. Pipe composition and sequences
 
@@ -5565,7 +5628,7 @@ Mi binds no stdin at its root, for 1 < i ≤ n
 A decoder (`from-bytes`, `from-string`, `from-line`, `from-lines`, `from-json`,
 `from-jsonl`, `from-csv`, `from-json-at`) returns a value and writes nothing,
 so it ends the byte pipeline. It is refused as a non-final stage by its own
-mark, before its type is read: for a boundary `∀α. F α` unification would
+mark, before its type is read: for a boundary `∀α. Returns α` unification would
 otherwise set `α := Unit` and let `cat data.json | from-json | wc -l` through to
 fail at the decode. `'3' | cat` and `[1, 2, 3] | f` are refused because a value
 in stage position writes nothing to the pipe; `each { |x| echo $x } $xs | cat`
@@ -5614,50 +5677,35 @@ stage's pipe. A sequence whose final element is a function is that function.
 
 The diverging forms are `fail` and `exit`/`quit`. Neither returns, so each takes
 whatever type and grade its context asks of it: in `if c { exit 1 } else { return 'hello' }`
-the conditional is `F_p String`, decided by the arm that returns. Divergence is a
+the conditional is `F_ν String` for a fresh ν, printed `Returns String`. Divergence is a
 typing fact only; `exit` remains a control escape that `?` and `try` do not
 catch (§8.8).
 
 ### 17.5. Capture at a binding boundary
 
-A command's value is its output. Whether a `let` binds what a command writes is
-decided by the type of its right-hand side, not by how it is spelled. Two forms,
-written by the checker and nameable by no program, turn a command into text:
+**Only a binding implicitly turns output into a value.** The right-hand side's resolved
+type decides capture, through abstraction and application as well as inline
+commands. The checker inserts these terms, which no program can name:
 
 ```text
 Γ ⊢c M : F_w Unit                      Γ ⊢v v : Bytes
 ------------------------- Cap          -------------------------------- Decode
-Γ ⊢c capture M : F_p Bytes             Γ ⊢c decode v : F_p String
+Γ ⊢c capture M : F_ν Bytes             Γ ⊢c decode v : F_ξ String
+                  ν fresh                                ξ fresh
 
-⌈M⌉  =  capture M to d . decode d      : F_p String      the capture of a command
+⌈M⌉ = capture M to d . decode d        the capture and decoding of a command
 ```
 
-`capture M` runs `M` with its standard output replaced by a buffer and returns
-the buffer's bytes. `decode` drops one trailing `LF` or `CRLF` and decodes
-strict UTF-8, as `from-line` does to its input; invalid UTF-8 is an error, with
-the hint to use `from-bytes`. `⌈·⌉` is the one coercion the checker inserts; its
-companion is a zero-cost upcast from `F_p Unit` to `F_w Unit`, which a `()`-
-producer takes where a command is demanded and which does nothing at run time.
-There is no path from `F_p Unit` to `F_p String`, so a `let` of a `()`-producer
-binds `()`.
+`capture M` returns the exact bytes written by `M`, ignoring its unit value.
+`decode` drops one trailing LF or CRLF and strictly decodes UTF-8, as
+`from-line` does; invalid UTF-8 is an error naming `from-bytes` as the way to
+keep binary data. The enclosing binding fixes the result grade to `p`.
 
-`⌈·⌉` is placed where a value is demanded of a command, and only there:
-
-1. **Bind.** The whole right-hand side of a `let`, a named pattern or `M to x . N`
-   has type `F_w Unit`: it is captured, so `let x = M` is `let x = M | from-line`
-   for every `M` that is a command, whatever its form — a block, a call, a
-   variable holding a block, a pipeline, an `if` with command arms.
-2. **Argument.** An argument whose type ends, after its own parameters, in
-   `F_w Unit`, handed to a function parameter that ends in `F_p β` at the same
-   arity, is coerced and `β` is `String`. A literal block has its innermost
-   body captured; a block in hand is wrapped in a lambda that captures its call.
-   This is how `map { |f| echo $f } [1, 2]` is `["1", "2"]`.
-3. **Join.** An arm of type `F_w Unit` whose join settles on a value (§17.6) is
-   captured like an argument.
-
-Nowhere else is a coercion inserted: a command flowing into a bare variable, or
-a demand that resolves only later, leaves an ordinary mismatch whose hint names
-the fix. A tail `Run` is never coerced.
+This is the sole coercion: `let x = M` captures the whole RHS exactly when it
+resolves to `F_w Unit`. Arguments, control-flow arms and handler arms only
+unify with their demands. They are not wrapped or implicitly captured.
+A tail `Run` is never coerced. A value-position `!{…}` is a hoisted `let`,
+so it follows the binding rule too.
 
 The bind rule:
 
@@ -5675,10 +5723,11 @@ The bind rule:
 Γ ⊢c let p = M ; N : C'        elaborated  return (thunk M) to p . N
 
 Γ ⊢c M : F_ε̂ A      ε̂ := p, then Let
+Γ ⊢c M : β          β ~ F_p α, then Let
 ```
 
 A `let` is a demand for a value, which is the only place a grade variable is
-defaulted: `let k = { |g| g 1 }` is `∀α ν. {{Integer -> ν α} -> ν α}` and
+defaulted: `let k = { |g| g 1 }` is `∀α ν. {{Integer -> Command[ν] α} -> Command[ν] α}` and
 defaults nothing, while `let v = g 1` with `g` of that parameter type fixes
 `ν := p`. A grade disagreement elsewhere is a mismatch of `Command` against
 `Returns A`.
@@ -5708,8 +5757,8 @@ command runs whole under the capture: under `let x = curl`, the arm `curl: { |a|
 echo note; echo body }` binds `"note\nbody"`.
 
 `audit` absorbs its body: `audit { grep -c ERROR app.log }` has type
-`F_p Report(Unit)` and outcome `` `ok () ``, while the bytes its body wrote sit
-in the trail's observations. `each`, `fold` and `fold-lines` absorb a command
+`F_ν Report(Unit)` for a fresh ν and outcome `` `ok () ``, while the bytes its
+body wrote sit in the trail's observations. `map`, `each`, `fold` and `fold-lines` absorb a command
 body likewise: they run it, stream its output, and keep its value, which for a
 command is `()`. `spawn` and `watch` do not absorb: the handle keeps the body's
 grade, so `let x = await $h` binds what a command block wrote, as
@@ -5736,42 +5785,33 @@ atom is refused at elaboration (§17.1). The arms are joined by the rule below:
 Γ ⊢c try T H : C
 ```
 
-Here `C` is the **join** of the arms' result types `R1 ... Rn`, each taken after
-the arm's own parameters. A `case` constrains each arm parameter with the
-scrutinee's known payload type before inferring the body and joining grades;
-a forwarded command payload therefore participates as a command. Every arm is
-inferred first, against a fresh result; then, in program order:
-
-- if some arm is `F_p A` with `A` not `Unit` (or not yet known), the join is
-  `F_p A` and every `F_w Unit` arm is captured (§17.5), so
-  `try { fetch } { |e| return 'none' }` is `F_p String`;
-- otherwise, if some arm is `F_w Unit`, the join is `F_w Unit`, every `F_p Unit`
-  arm is upcast, and grade variables become `w`, so `if $c { echo $x } else
-  { warn skip }` is a `Command`;
-- otherwise the arms unify.
+Here `C` is the **join** of arm result types `R1 ... Rn`, after the arm's
+parameters. Each arm is checked against its own fresh result. A `case`
+supplies known scrutinee payload types before checking the body. The results
+then unify with the join as expected, in source order. There is no coercion,
+verdict selection or reordering; a failure blames the later arm.
 
 `if $c { hostname } else { echo b }` is one `Command`, captured once by an
-enclosing `let`. The join is decided in program order and holds no pending
-constraint, so it is principal for the rule as stated but not independent of
-statement order: `{ |t| if c { echo hi } else { !$t }; let w = !$t; $w }`
-gives `t` the type `{Command}`, where the same block with the `let` first gives
-`{Returns String}`.
+enclosing `let`. A command and a returned value do not join, even if that
+value is text: `try { fetch } { |e| return 'none' }` is refused. Write
+`try { return !{fetch} } { |e| return 'none' }` to return text in both outcomes.
+For Bool, use `succeeds { … }`; for other data, decode or return the required
+value, or write values out with `echo` so all arms are commands.
 
-`guard`, `within` and `grant` are typed likewise (§17.7). Additional `elsif`
-arms nest, each `else` holding a thunk whose body is the next `if`. A
-conditional without `else` wraps its lone arm as `{ body; () }`, so the whole
-form is a `()`-producer, and whatever the body writes goes to the current
-output. A fallback chain `M ? N` is `try M { |_| N }`, so its arms join in the
-same way.
+A fresh unit producer can join either grade. Thus
+`if $c { echo hi } else { return () }` is a command; a unit producer whose
+grade was fixed to `p` by a `let` cannot join the command. For example,
+`let twice = { |f| let _ = !$f; !$f }` fixes its callback to `p`, so
+`if $c { twice { return () } } else { echo a }` is refused. End the first
+arm with `return ()` to give it a fresh unit producer.
 
-`if $c { echo hi } else { () }` and `try { rm $f } { |_| () }` type as they
-stand, as commands. `if $c { echo big } else { 'small' }` is a `String`, the
-command's output captured. `if $c { echo big } else { return 5 }` is refused,
-`String` against `Integer`, and the hint names the command arm: one arm is a
-command, whose value is its output; return a string there, or end the command
-arm with `; return ()`. The empty arm of a captured conditional is written
-`{ '' }` or `{ () }`: `let x = if $c { echo hi } else { () }` binds `""` when the
-empty arm runs.
+`guard`, `within` and `grant` preserve their body's type (§17.7). Additional
+`elsif` arms nest, each `else` holding the next `if` as a thunk. A conditional
+without `else` wraps its arm as `{ body; () }`, returning unit at a fresh
+grade; the body's output goes to the current sink. `M ? N` is
+`try M { |_| N }` and follows the same join rule. In
+`let x = if $c { echo hi } else { () }`, the else arm unifies as a command
+and the enclosing binding captures `""` when it runs.
 
 The `Case` rule closes the scrutinee's row to exactly the arms' tags, which the
 syntax fixes: coverage is therefore decided wherever the rule fires, and both a
@@ -5802,17 +5842,18 @@ guard body cleanup : F_ε A
 
 body : U (F_ε A)
 ------------------------------ Audit
-audit body : F_p {outcome : <`ok A | `err Error>, trail : List Observation}
+audit body : F_ν {outcome : <`ok A | `err Error>, trail : List Observation}
 
 title : String    body : U (F_ε A)
 ------------------------------ Spawn
-spawn [title] body : F_p (Handle_ε A)
+spawn [title] body : F_ν (Handle_ε A)
 
 body : U (F_ε A)
 ------------------------------ Gather
 gather body : F_ε A
 ```
 
+`audit` and `spawn` have fresh result grades ν, independent of the body's ε.
 `spawn`'s title is optional; the handle keeps the body's grade (§11.2).
 `gather` passes its body's type through, grade included: joining its workers
 is a run-time effect that changes no type (§11.3).
@@ -5845,8 +5886,9 @@ standsFor(c) = σ                      c is a base frame, or already has an arm,
 So an arm for an external stands in at `[String] -> Command`, and its value is
 its output: `curl: { |args| echo '{"ok":1}' }` is an arm, and
 `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it
-should write. An arm that returns `()` is admitted as a `()`-producer upcast to
-a command, and under `let x = curl` it captures `""`. An arm for `echo`, a base
+should write. An arm returning `()` at a free grade unifies as a command,
+and under `let x = curl` captures `""`. A unit producer already fixed to `p`
+is refused; handler arms do not coerce. An arm for `echo`, a base
 frame that writes, has `echo`'s own scheme. An arm for `detach`, a base frame
 that returns, has `detach`'s scheme and returns a receipt. A call through an arm
 types as its head does. The catch-all stands in for every command in its block,
@@ -5992,7 +6034,7 @@ children are torn down and reaped before their cancelled computation returns.
 Successful checking is followed by annotation, a structural rebuild of the IR.
 All remaining type, row and computation substitutions are applied; quantified
 schemes are closed; each pipeline node records the value type of each stage; and
-each computation the checker captured (§17.5) is wrapped in `capture` under `decode`.
+each command right-hand side captured by a binding (§17.5) is wrapped in `capture` under `decode`.
 
 The machine decides nothing about capture: it runs the `capture` the checker
 wrote. The capture frame has three rules, with `buf` a fresh buffer and `prev`

@@ -47,8 +47,8 @@ cat "$d/log"
 rm -rf $d
 # Expected: 0 1 2 / 1 / 2 / 0
 
-# both runs two blocks at once and returns their values as `fst` and `snd`.
-let p = both { echo hi } { return 42 }
+# Plan §1.10 row `both`: capture explicitly to return output as `fst`.
+let p = both { return !{echo hi} } { return 42 }
 echo $p[fst] $p[snd]
 # Expected: hi 42
 

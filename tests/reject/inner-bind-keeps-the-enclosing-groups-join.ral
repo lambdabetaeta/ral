@@ -1,7 +1,9 @@
-# codes: T0011 T0011
+# codes: T0011
 # status: 1
-# at: 6:9
-# contains: couldn't match type Integer with type Unit
+# at: 9:9
+# contains: couldn't match type Returns Integer with type Command
+# contains: a definition that calls itself is checked at one single type throughout its own body
+# Plan §1.10 row Unit beside command: the Unit arm no longer fixes a value grade.
 let h = { |v| case $v [ `a: { |_| return () }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }
 let f = { |n| return $h; echo done }
 let g = { |n| return $h; return $[$n + 1] }

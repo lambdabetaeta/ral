@@ -411,13 +411,13 @@ fn value_sides(kind: &TypeErrorKind) -> Option<(&Ty, &Ty)> {
 fn command_against_value(kind: &TypeErrorKind) -> Option<(&Ty, bool)> {
     match kind {
         TypeErrorKind::CompTyMismatch {
-            expected: CompTy::Return(Grade::Value, value),
+            expected: CompTy::Return(grade, value),
             actual: CompTy::Return(Grade::Output, _),
-        } => Some((value, true)),
+        } if *grade != Grade::Output => Some((value, true)),
         TypeErrorKind::CompTyMismatch {
             expected: CompTy::Return(Grade::Output, _),
-            actual: CompTy::Return(Grade::Value, value),
-        } => Some((value, false)),
+            actual: CompTy::Return(grade, value),
+        } if *grade != Grade::Output => Some((value, false)),
         _ => None,
     }
 }
@@ -434,23 +434,36 @@ fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         _ => return None,
     };
     Some(match (form, command_found, value) {
-        (Some(form), _, _) => format!(
-            "one {form} is a command, whose value is its output (a String); the other gives \
-             {}; give the command {form} a value of that type too (`… | from-json`, or \
-             `return` one), or write the other {form}'s value out with `echo`",
+        (Some(form), true, Ty::String | Ty::Var(_)) => format!(
+            "this {form} is a command and an earlier one returns a value; a {form}'s output is not captured: return it, `{{ return !{{…}} }}`"
+        ),
+        (Some(form), false, Ty::String | Ty::Var(_)) => format!(
+            "this {form} returns a value and an earlier one is a command; a {form}'s output is not captured: make that one return it, `{{ return !{{…}} }}`"
+        ),
+        (Some(form), true, Ty::Bool) => format!(
+            "this {form} is a command and an earlier one returns a Bool; for a yes/no answer from a command, `succeeds {{ … }}`"
+        ),
+        (Some(form), false, Ty::Bool) => format!(
+            "this {form} returns a Bool and an earlier one is a command; for a yes/no answer from that command, `succeeds {{ … }}`"
+        ),
+        (Some(form), true, _) => format!(
+            "this {form} is a command and an earlier one returns {}; give this {form} a value of that type too (`… | from-json`, or `return` one), or write the earlier one's value out with `echo`",
             describe(value)
         ),
-        (None, true, Ty::Bool) => "this is a command, so its value is its output: text, not \
-             a Bool; for a yes/no answer, `succeeds { … }`"
-            .to_string(),
+        (Some(form), false, _) => format!(
+            "this {form} returns {} and an earlier one is a command; give that one a value of that type too (`… | from-json`, or `return` one), or write this {form}'s value out with `echo`",
+            describe(value)
+        ),
+        (None, true, Ty::String | Ty::Var(_)) =>
+            "this block is a command, but a block that returns a value is wanted here: return its output, `{ |…| return !{…} }`".into(),
+        (None, true, Ty::Bool) =>
+            "this block is a command, but a block that returns a Bool is wanted here; for a yes/no answer, `succeeds { … }`".into(),
         (None, true, _) => format!(
-            "this is a command, so its value is its output, a String; where {} is needed, \
-             decode it (`… | from-json`) or `return` one",
+            "this block is a command, but a block that returns {} is wanted here: decode its output (`return !{{… | from-json}}`) or `return` one",
             describe(value)
         ),
         (None, false, _) => format!(
-            "a command is wanted here, and this returns {}: write it out: `echo …`, \
-             `to-json …`",
+            "a command is wanted here, and this returns {}: write it out: `echo …`, `to-json …`",
             describe(value)
         ),
     })
@@ -984,8 +997,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         | Reason::AutoderefHead
         | Reason::ProtectContract
         | Reason::Vocabulary(_)
-        | Reason::Capture
-        | Reason::Upcast => None,
+        | Reason::Capture => None,
     }
 }
 

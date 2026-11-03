@@ -136,7 +136,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         // unified, so a quantified `Ty::Var` stays unbound and is treated as
         // a polymorphic (any-value) position.
         let mut u = Unifier::new();
-        let scheme = (entry.decl.type_rule)(&mut u);
+        let scheme = entry.decl.scheme(&mut u);
         let Some((arg_tys, ret_ty)) = arg_and_return_types(&u, &scheme.ty) else {
             continue;
         };
@@ -205,7 +205,7 @@ fn every_scheme_pairs_a_grade_with_one_value_type() {
     for entry in rows {
         let name = entry.decl.name.as_ref();
         let mut u = Unifier::new();
-        let scheme = (entry.decl.type_rule)(&mut u);
+        let scheme = entry.decl.scheme(&mut u);
         let mut found = Vec::new();
         producers(&scheme.ty, &mut found);
         let mut paired: std::collections::HashMap<Grade, Ty> = std::collections::HashMap::new();

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 9c8aa5d9
+generated_at_commit: d56977ff
 ---
 
 # Codecs: the typed crossing between bytes and values
@@ -22,7 +22,7 @@ output. An encoder is a command with an argument, a builtin row ending in
 that returns a value and writes nothing, so it ends the byte pipeline. A bind
 sees what a command wrote because the command's type says so:
 `let x = cat f` binds captured text
-([[decisions/260930_graded-f|graded-f]], [[design/capture|capture]]), while
+([[design/capture|grades and capture]]), while
 `let x = cat f | from-bytes` binds the bytes exactly, because the decoder is
 where the pipeline's value comes from. A
 program crosses between bytes and values only when it names a codec. A
@@ -53,7 +53,7 @@ for a `Bytes` value (for example `$s[stdout]` from a `poll` result). The decoder
   object member by exact key, an array element by decimal), decoded and
   checked like `from-json`; a path given as tokens, never as a pointer string,
   so no key needs escaping;
-- `from-csv : ∀α. F [α]` → a list of header-keyed rows, a boundary like
+- `from-csv : ∀α. Returns [α]` → a list of header-keyed rows, a boundary like
   `from-jsonl`. Label reads use records and computed reads maps. Every cell
   is a `String`; use `int` / `float` to parse a number. Numeric use without
   parsing fails at decode, naming the column and line of use. Quoted fields,
@@ -90,9 +90,10 @@ distinguishes the second writer, as in `bytes-to-string`. In a pipeline, the wri
 `to-json $x | cmd` gives `cmd` the encoded bytes. At a bind, the
 [[design/capture|capture]] coercion applies, the encoder being a command:
 `let e = to-json $x` binds the encoded text as a `String`, and
-`let e = to-json $x > f` binds `()`, the redirect having discharged the output.
+`let e = to-json $x > f` binds `()`: stdout goes to the file, and the
+redirect's fresh result grade is fixed to `p` by the binding.
 
-`to-csv : ∀α:data. [α] → writes` accepts record or map rows, the same runtime
+`to-csv : ∀α:data. [α] → Command` accepts record or map rows, the same runtime
 carrier. Columns are the keys in sorted order; every row must have the first
 row's keys and at least one column. A missing or extra key is refused by name.
 Cells must be `String`, `Int`, `Float` or `Bool`, rendered as `str` renders
@@ -125,7 +126,7 @@ while the pipe is open, and it is the way to process unbounded input without
 holding it:
 
 - `fold-lines <fn> <init>` folds over stdin line by line:
-  `fold-lines : ∀ε α. U (α → String → F^ε α) → α → F^p α`
+  `fold-lines : ∀ε ν α. U (α → String → F^ε α) → α → F^ν α`
   (`scheme::fold_lines` in `core/src/typecheck/builtins.rs`).
   It returns its accumulator; a callback of either grade is absorbed — its
   output streams, its value is kept. A fold is not a decoder, so it may end a

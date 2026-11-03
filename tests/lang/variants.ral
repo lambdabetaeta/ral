@@ -14,10 +14,11 @@ echo !{case $res [`ok: { |x| return $x }, `err: { |_| return -1 }]}
 let none = `none
 echo !{case $none [`none: { |_| return absent }, `some: { |_| return present }]}
 
-# An arm naming a handler binds the payload as surely as an inline one
+# An arm naming a handler binds the payload as surely as an inline one.
+# Plan §1.10 row Command/String join: `case` also needs explicit capture.
 let h = { |p| return b }
-let named = case `some () [`some: $h, `none: { |p| echo z }]
-let inline = case `some () [`some: { |p| $h $p }, `none: { |p| echo z }]
+let named = case `some () [`some: $h, `none: { |p| return !{echo z} }]
+let inline = case `some () [`some: { |p| $h $p }, `none: { |p| return !{echo z} }]
 echo "got [$named] [$inline]"
 
 # A lazy list: the tail is a thunk, so a producer runs only as far as demand

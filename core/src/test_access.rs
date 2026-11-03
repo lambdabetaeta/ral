@@ -59,7 +59,7 @@ pub fn exec_has_redirects(exec: &Exec) -> bool {
 /// The scheme a builtin's type rule mints against `unifier` — the rule
 /// itself is core's, so a caller runs it rather than holding it.
 pub fn builtin_scheme(entry: &BuiltinEntry, unifier: &mut Unifier) -> Scheme {
-    (entry.decl.type_rule)(unifier)
+    entry.decl.scheme(unifier)
 }
 
 /// The real paths the fs projection reads, baseline, run places and support

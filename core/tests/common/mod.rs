@@ -108,7 +108,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         CompKind::Force(Val::Thunk(node)) | CompKind::Return(Val::Thunk(node)) => {
             walk_comp(node.shape(), visit);
         }
-        CompKind::Capture(c) | CompKind::Upcast(c) | CompKind::Redirect { body: c, .. } => {
+        CompKind::Capture(c) | CompKind::Redirect { body: c, .. } => {
             walk_comp(c, visit);
         }
         CompKind::Try {

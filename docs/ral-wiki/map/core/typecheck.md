@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
+generated_at_commit: d56977ff
+generated_at_date: 2026-11-03
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -20,8 +20,8 @@ Entry points (`typecheck.rs`):
   `Phrase::Define` binds — landed on its own phrase, not a shared spine —
   resolved against the final unifier and closed by quantifying its
   residuals, that is, generalised against the empty environment; and a
-  `Capture`/`Prim::Decode` pair around each computation a value demand captured,
-  `Upcast` at command boundaries for unit producers, and explicit
+  `Capture`/`Prim::Decode` pair around each command right-hand side a binding captured,
+  and explicit
   bind/force segments for returned-thunk application
   ([[map/core/ir|ir]]). A pipeline's value is its final stage's, so
   there is nothing per-pipeline to annotate
@@ -84,15 +84,12 @@ Internals:
   `Key::{Label, Position, Data}` and immediately requires a record row, a list,
   or a map with a `String` key, respectively. No read constraint is deferred
   and no read makes variables weak;
-- `grade.rs` — the grade rules, as one `impl Inferencer`: the bind rule
-  (`rhs_bound_ty`), a block meeting a demand of the other producer kind
-  (`adapt` to an `Adaptation`, `coerce`), the join of a form's arms
-  (`join_arms`; `join_target` takes the greatest `Verdict`), and `redirected`,
-  which requires outer `Return` shape for every nonempty redirect list and
-  discharges stdout without constraining the input grade. `map_producer`
-  rebuilds a producer past its parameters for the handler-arm rule, not redirects. `spine` reads a `CompTy` as a `Spine` (`ty.rs`, [[map/core/ty|ty]]:
-  parameters and tail; `producer()` the `Producer` past them, `over` the
-  same parameters on another tail; `CompTy::arrows` is the constructor);
+- `grade.rs` — the bind rule (`rhs_bound_ty`, `Bound::{Ran, Thunked, Captured}`),
+  fresh producers (`produces`), source-order joins (`join_arms`), and
+  `redirected`, which requires outer `Return` shape and gives stdout a fresh
+  result grade without constraining its input grade. `spine` reads parameters
+  and tail; `map_producer` rebuilds a producer past its parameters for arms;
+
 - `unify.rs` — `Unifier`; binding refuses a cycle that crosses no data (`CyclicType`, T0073)
   and a head its variable's kind does not admit (`KindMismatch`, T0074);
   the weak set (`mark_weak`, inherited through `unite`), which `generalize.rs` subtracts,
@@ -121,7 +118,7 @@ Internals:
   side is fresh, or the error kind is already its own diagnosis;
 - `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
   IR with schemes, boundary sites, stage types, `Capture`/`Prim::Decode`,
-  `Upcast`, returned-thunk application splits, and `Val::Protected` membranes
+  returned-thunk application splits, and `Val::Protected` membranes
   for imported weak values, attached per occurrence only where the contract
   reaches a thunk or handle;
   its side tables in `InferCtx` are keyed by `Node`, a node address tagged
@@ -229,56 +226,39 @@ nothing inspects an `Ast` node to decide whether a pipeline is well formed — s
 an unforced block literal in stage position is an ordinary value-returning
 stage, accepted, and a read nested inside a stage is left alone.
 
-## Capture by type
+## Capture at a binding
 
-A command is a computation of type `F^w Unit`, printed `Command`; its value is
-its output ([[decisions/260930_graded-f|graded-f]]). `CompTy::Return(Grade,
-Ty)` carries `Grade::{Value, Output, Var}`; the grade store lives in `unify.rs`
-beside the type, computation and row stores, `Scheme.grade_vars` quantifies it,
-and `force_return_shape` opens a computation variable into a fresh grade.
+**Only `Bind` and `Phrase::Define` capture.** `CompTy::Return(Grade, Ty)`
+pairs `Grade::{Value, Output, Var}` with one value type. `Scheme.grade_vars`
+quantifies grades, and `force_return_shape` opens a computation variable with
+a fresh grade ([[design/capture|grades and capture]]).
 
-`HeadClass` and `head_class` live in `infer.rs`, beside `exec_comp_ty`: they give
-a bare head the class the runtime's lookup order gives it: `Binding`,
-`Value(entry)` (a builtin row), `Arm` (a handler or base frame standing in for
-a head), or `External`. No separate pass decides capture.
+- `rhs_bound_ty` reads the resolved RHS: `Fun` binds a thunk;
+  `Return(Output, Unit)` captures and binds `String`; `Return(Value, a)`
+  binds `a`; a free grade fixes to `Value`; a computation variable unifies
+  with `Return(Value, fresh)`. This is the sole default.
+- `infer_let` records non-running cases in `InferCtx.bound`, keyed by RHS
+  address: `Bound::Captured` or `Bound::Thunked`.
+- `Annotate::rhs` reads that map: `captured_string` builds
+  `Capture(body) to x. Prim::Decode(x)` with the RHS span on both nodes;
+  Let-fun writes `return (thunk M)`. No argument or arm is wrapped.
+- `CompKind::Capture` checks a command body and returns bytes at a fresh
+  grade; `Prim::Decode` checks bytes and returns text at a fresh grade.
+  Re-inference preserves those explicit boundaries.
+- `produces` gives term producers fresh grades. `Decl::scheme`
+  (`builtins.rs`) freshens ordinary builtin results, leaving commands,
+  boundaries and already graded results alone. Boundary results stay `p`.
+  `map` accepts either callback grade; `filter`/`sort-list-by` demand values.
+- `Unifier::unify_producers` is shared by returners and handles: if either
+  grade resolves to output, it refuses before binding grades unless the
+  other type is unit or a variable whose kind admits unit. It then unifies
+  grades followed by types, preserving the pairing and mismatch diagnosis.
+- `redirected` forces outer return shape under `Reason::RedirectShape`;
+  a partial application is refused. Stdout produces at a fresh grade with
+  the input payload type; stdin/stderr and `2>&1` preserve the input grade.
 
-`grade.rs` holds the grade rules. `rhs_bound_ty` (the `Bind` and
-`Phrase::Define` right-hand side, including hoisted operands) is the bind rule:
-`Return(Output, _)` records
-the right-hand side's address in `InferCtx::adapted` as `Adaptation::Capture`
-and binds `String`,
-`Return(Value, a)` binds `a`, and `Return(Var(g), a)` binds `g := Value` and
-`a`. `adapt` says how a block meets a demand of the other producer kind — a
-command where a value is wanted is `Adaptation::Capture`, a `()` producer
-where a command is wanted is `Adaptation::Upcast`; `coerce` records either
-boundary and unifies the type it is read at with the demand, reporting
-a failure between what the two produce past their parameters
-(`InferCtx::unify_comp_ty_as`). `adapt_block` records a literal block by
-its body under *exactly* its arity of written lambdas in `adapted`; anything
-else, a value in hand or a literal whose arrows are not all written, `map {
-!$f } $xs`, goes in `InferCtx::adapted_vals` with its arity and adaptation and
-is η-wrapped whole, since a `Capture` frame between a lambda and its pending
-argument would drop the lambda. Both adaptations share these tables; a node's
-producer grade fixes which it gets.
-`apply_args_capped` applies the two to a block argument, and
-`join_arms` to each arm against the join. Both fused `Exec` redirects and
-`CompKind::Redirect` check their operands. For every nonempty list, `redirected`
-uses `force_return_shape` under `Reason::RedirectShape`: a partial application
-is refused with advice to supply its remaining arguments. An unresolved
-computation opens to a fresh input grade; stdout returns `Value` at the same
-payload type without binding that grade, while other redirects preserve it.
-
-`annotate.rs` is a plain structural rebuild, the methods of `Annotate { ctx }`.
-It wraps each node recorded as `Adaptation::Capture` through `captured_string`,
-which builds `Capture(body) to x. Prim::Decode(x)` — `x` a fresh name from
-`InferCtx::fresh_name` — with the captured node's span on both the bind and
-the decode; a recorded value in hand becomes a lambda whose body captures the
-forced call. `CompKind::Capture(body)` types as `F Bytes` with `body` unified
-to `F^w Unit`; `Prim::Decode(val)` types as `F String` with `val` unified to
-`Bytes`. `CompKind::Upcast(body)` checks `F^p Unit` and yields `F^w Unit`.
-These rules retain the boundaries when re-inferring a stored handler or thunk.
-A right-hand side the bind rule recorded in `InferCtx::thunked`, one
-of function type, is rebuilt as `return (thunk M)`: bound unrun (Let-fun).
+`HeadClass`/`head_class` (`infer.rs`, beside `exec_comp_ty`) share the
+runtime's lookup order: `Binding`, `Value(entry)`, `Arm`, `External`.
 
 ## Application and binders
 
@@ -286,8 +266,12 @@ of function type, is rebuilt as `return (thunk M)`: bound unrun (Let-fun).
 thunk must be forced, once per unwrapped thunk, in `InferCtx.splits`.
 `Annotate::split` writes the `App` or binding-resolved `Exec` as explicit
 bind/force segments; repeated indices give repeated forces before one argument.
-Redirects and other adaptations wrap the whole split call. Re-inference is
+Redirects and binding capture wrap the whole split call. Re-inference is
 idempotent ([[invariants/ir-pure-cbpv|the IR invariant]]).
+
+`apply_args_capped` applies arguments without coercion. `demand_block` checks
+a literal block against its parameter, then unifies with the parameter as
+expected; values in hand meet the parameter directly. No η-wrapper is added.
 
 An `App` head shaped as `Force(v)` is checked directly under
 `Reason::AutoderefHead`, including an unsolved bare-name head, preserving
@@ -305,26 +289,24 @@ inference without generalisation.
 ## Arms and joins
 
 `{ … }` is a thunk in every position: `if` and `case` carry `Spanned<Val>`
-arms ([[map/core/ir|ir]]), and `check_arm` types the one it is handed against
-the type its form's arms share. `join_arms` (`grade.rs`; `if`, `infer_case`
-and `infer_try` all route through it) joins arms in two passes: each arm is
-inferred against a fresh result, then `join_target` settles the join on the
-greatest of the arms' `Verdict`s — `Value` (`F^p τ`), `Command` (`F^w Unit`)
-or `Open` (plain unification) — and each arm meets it as a block meets a
-demand (`adapt`, `coerce`), command arms last so a disagreement is reported
-against the value the other arms fixed; a `()` arm stands as a command only
-where the join is one. A disagreement
-is `T0010` / `T0020` between two values; `T0011` is a disagreement of shape or
-grade. The join reasons — `IfBranches`, `CaseArms`, `TryArms` (shared by `try`
-and `?`, which elaborates to nested `try`) — carry no writer: `explain.rs`
-derives the hint from the two types, saying that one arm is a command, whose
-value is its output.
+arms ([[map/core/ir|ir]]). `join_arms` (`grade.rs`, used by `if`, `infer_case`
+and `infer_try`) checks each arm against its own fresh result, then unifies
+those results with the join as expected, in source order. A `case` supplies
+known payload types before body checking. No verdict selection, coercion or
+arm reordering occurs; a disagreement blames the later arm.
+
+The reasons `IfBranches`, `CaseArms`, `TryArms` retain provenance. In
+`explain.rs`, `command_against_value` identifies the output side even when
+the other grade is free. `grade_hint` distinguishes the blamed arm from an
+earlier one and suggests explicit capture for text, `succeeds` for Bool, or
+a returned/decoded value of the required type. Argument hints use the same
+type distinction.
 
 `Inferencer::arm(block, Arm)` is the one arm rule: the block meets the
 parameters its slot hands it (`Arm::Named`, the argv, under
 `Reason::AliasParam`; `Arm::CatchAll`, the name and the argv, under
-`Reason::CatchAllParams`), and what it produces is held to what its head
-produces. `stands_for` is the scheme of the base frame or arm already in force
+`Reason::CatchAllParams`), and its producer unifies directly with its head
+producer. `stands_for` is the scheme of the base frame or arm already in force
 under the name, else `[String] → Command`; `Reason::StandsIn(Standing)` names
 which (`Standing::{Command, Own, EveryCommand}`). The checker raises a refusal
 where the arm is written (`checked_arm`, `install_arm`); `alias_arm_scheme`
@@ -334,11 +316,13 @@ site, and `HandlerEntry::vet` / `parse_catch_all` render the error through
 
 ## Display and diagnostics
 
-`fmt_comp_ty_ctx` (`fmt.rs`) renders `Return(Value, A)` as `Returns A`,
-`Return(Output, Unit)` as `Command`, and `Return(Var, A)` as `ν A` with the
-grade drawn from `ν ξ ο π` (`FmtCtx::grade_names`); a block that prints is
-`{Command}`, one that returns text `{Returns String}`. Open
-variant rows mark their tail with the same backtick as their arms
+`fmt_comp_ty_ctx` (`ty/fmt.rs`) renders `Return(Value, A)` as `Returns A`,
+`Return(Output, Unit)` as `Command`, and a free grade as `Command[ν] A`, with
+names from `ν ξ ο π`. If the paired type excludes unit, a free grade prints
+`Returns A`: concrete non-unit types, and quantified variables whose kinds
+exclude unit. `FmtCtx` names and quantifies only visible grades. Handles
+print their suspended producer, such as `Handle (Command[ν] α)`.
+Open variant rows mark their tail with the same backtick as their arms
 (``[`...]`` / ``[`...ρ]``), while record tails stay `[...]` / `[...ρ]`.
 
 `TypeErrorKind::CompTyMismatch { expected, actual }` is T0011, with

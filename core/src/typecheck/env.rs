@@ -2,13 +2,13 @@
 
 use super::contract::NestedCheck;
 use super::error::{Clash, Reason, TypeError, TypeErrorKind, UnitCall};
-use super::grade::Adaptation;
+use super::grade::Bound;
 use super::unify::{Unifier, WeakSource};
 use crate::ir::{Comp, GroupNode, Name, Val, synthetic};
 use crate::source::Span;
 use crate::ty::{CompTy, Kind, Scheme, Ty};
 use crate::ty::{Site, UnitId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,13 +210,8 @@ pub struct InferCtx {
     pub(crate) errors: Vec<TypeError>,
     /// Source position for newly emitted [`TypeError`]s, narrowed by `with_span`.
     pub pos: Option<Span>,
-    /// Grade adaptations; a node's producer grade fixes the direction.
-    pub(super) adapted: HashMap<Node, Adaptation>,
-    /// The right-hand sides the bind rule found of function type, keyed by
-    /// node address: `annotate` binds each unrun, as `return (thunk M)`.
-    pub(super) thunked: HashSet<Node>,
-    /// Values in hand η-wrapped at this arity with this adaptation.
-    pub(super) adapted_vals: HashMap<Node, (usize, Adaptation)>,
+    /// Nontrivial bind decisions, keyed by right-hand side.
+    pub(super) bound: HashMap<Node, Bound>,
     /// Each read of a name bound to what a call returned, which was `()`, at the
     /// span it was read at: an error raised there says why the name is `()`.
     pub(super) unit_reads: Vec<(Span, UnitCall)>,
@@ -275,9 +270,7 @@ impl InferCtx {
             unifier: Unifier::new(),
             errors: Vec::new(),
             pos: None,
-            adapted: HashMap::new(),
-            thunked: HashSet::new(),
-            adapted_vals: HashMap::new(),
+            bound: HashMap::new(),
             unit_reads: Vec::new(),
             nested: Vec::new(),
             rec_groups: HashMap::new(),
@@ -456,26 +449,6 @@ impl InferCtx {
     ) -> Result<(), TypeErrorKind> {
         self.unifier.at = self.pos;
         self.unifier.unify_comp_ty(a, b)
-    }
-
-    /// [`Self::unify_comp_ty`], a mismatch reported between `shown` —
-    /// `(expected, actual)`, the two the reader wrote — rather than the two
-    /// unified.
-    pub(crate) fn unify_comp_ty_as(
-        &mut self,
-        a: &CompTy,
-        b: &CompTy,
-        shown: (CompTy, CompTy),
-        why: Reason,
-    ) {
-        if self.try_unify_comp_ty(a, b).is_err() {
-            let (expected, actual) = shown;
-            let kind = TypeErrorKind::CompTyMismatch {
-                expected: self.unifier.apply_comp_ty(&expected),
-                actual: self.unifier.apply_comp_ty(&actual),
-            };
-            self.report(kind, why);
-        }
     }
 
     /// Unify two computation types, reporting a mismatch under `why`.

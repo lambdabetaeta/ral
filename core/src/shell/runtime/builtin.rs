@@ -307,7 +307,7 @@ mod tests {
         let detach: &[BuiltinEntry] = &[];
         for entry in sets.into_iter().flatten().chain(detach) {
             let name = entry.decl.name.as_ref();
-            let scheme = (entry.decl.type_rule)(&mut Unifier::new());
+            let scheme = entry.decl.scheme(&mut Unifier::new());
             let casts = crate::typecheck::has_result_only_var(&scheme);
             let allowed = entry.decl.is_boundary() || DIVERGENT.contains(&name);
             assert!(

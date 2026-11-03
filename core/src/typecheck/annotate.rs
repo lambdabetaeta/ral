@@ -1,16 +1,7 @@
-//! Write-back pass: rebuild a checked comp with the inferencer's verdicts —
-//! generalised schemes, boundary sites, and grade coercions — over the
-//! tree that was inferred, using [`InferCtx`]'s node-address-keyed side maps.
-//!
-//! The walk is a plain structural rebuild: the commands inference recorded
-//! as captured are wrapped in [`captured_string`] where they stand, and a
-//! captured value in hand is η-wrapped into a block that captures its call.
-//! A right-hand side of function type is bound unrun, as its thunk, and a
-//! call whose head returned a thunk is split to force it ([`Annotate::split`]).
-//! Its state is [`Annotate`], the context.
+//! Rebuild checked IR with bind decisions, schemes, sites, and splits.
 
 use super::env::{InferCtx, Node};
-use super::grade::Adaptation;
+use super::grade::Bound;
 use crate::ir::Redirects;
 use crate::ir::{
     Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, FieldsNode,
@@ -79,24 +70,6 @@ fn redirected(body: Comp, redirects: Redirects<Val>) -> CompKind {
             redirects,
         }
     }
-}
-
-/// Adapt a value in hand under exactly `arity` fresh lambdas.
-fn adapted_block(
-    value: Val,
-    arity: usize,
-    how: Adaptation,
-    span: Option<Span>,
-    ctx: &mut InferCtx,
-) -> Val {
-    let (params, args) = eta(ctx, arity);
-    let forced = Spanned::with_span(span, CompKind::Force(value));
-    let call = applied(span, forced, args);
-    let body = match how {
-        Adaptation::Capture => captured_string(call, ctx),
-        Adaptation::Upcast => CompKind::Upcast(Arc::new(call)),
-    };
-    lambda(span, params, body)
 }
 
 /// `{ |x₁| … |xₙ| body }`.
@@ -168,10 +141,14 @@ impl Annotate<'_> {
     /// bound name.
     fn rhs(&mut self, rhs: &Arc<Comp>) -> Arc<Comp> {
         let annotated = self.comp(rhs);
-        Arc::new(if self.ctx.thunked.contains(&Node::comp(rhs)) {
-            Spanned::with_span(rhs.span, CompKind::Return(Val::thunk(Arc::new(annotated))))
-        } else {
-            annotated
+        Arc::new(match self.ctx.bound.get(&Node::comp(rhs)) {
+            Some(Bound::Thunked) => {
+                Spanned::with_span(rhs.span, CompKind::Return(Val::thunk(Arc::new(annotated))))
+            }
+            Some(Bound::Captured) => {
+                Spanned::with_span(rhs.span, captured_string(annotated, self.ctx))
+            }
+            Some(Bound::Ran) | None => annotated,
         })
     }
 
@@ -281,16 +258,6 @@ impl Annotate<'_> {
                 redirects: redirects.map(|v| self.val(v)),
             },
             CompKind::Capture(body) => CompKind::Capture(Arc::new(self.comp(body))),
-            CompKind::Upcast(body) => CompKind::Upcast(Arc::new(self.comp(body))),
-        };
-        let item = match self.ctx.adapted.get(&Node::comp(comp)) {
-            Some(Adaptation::Capture) => {
-                captured_string(Spanned::with_span(comp.span, item), self.ctx)
-            }
-            Some(Adaptation::Upcast) => {
-                CompKind::Upcast(Arc::new(Spanned::with_span(comp.span, item)))
-            }
-            None => item,
         };
         Spanned::with_span(comp.span, item)
     }
@@ -399,7 +366,7 @@ impl Annotate<'_> {
     }
 
     /// [`Self::val`] for a value written at `span`, which the block a boundary
-    /// reference or an adapted value becomes is given, so its errors point where
+    /// reference becomes is given, so its errors point where
     /// the value is.
     fn val_at(&mut self, val: &Val, span: Option<Span>) -> Val {
         if let Some(value) = self.ctx.boundary_values.get(&Node::val(val))
@@ -410,16 +377,12 @@ impl Annotate<'_> {
         }
         let rebuilt = self.rebuild_val(val);
         // Pure data was admitted whole by `readmits`; only delayed parts need a membrane.
-        let rebuilt = match self.ctx.imported_sites.get(&Node::val(val)) {
+        match self.ctx.imported_sites.get(&Node::val(val)) {
             Some(site) if site.has_delayed() => Val::Protected {
                 value: Box::new(rebuilt),
                 site: Arc::clone(site),
             },
             _ => rebuilt,
-        };
-        match self.ctx.adapted_vals.get(&Node::val(val)) {
-            Some(&(arity, how)) => adapted_block(rebuilt, arity, how, span, self.ctx),
-            None => rebuilt,
         }
     }
 
@@ -531,38 +494,6 @@ mod tests {
     use crate::source::FileId;
 
     #[test]
-    fn upcast_nodes_take_the_bodys_span_under_the_lambda_chain() {
-        let span = Span::new(FileId::DUMMY, 3, 9);
-        let mut ctx = InferCtx::new();
-        let Val::Thunk(block) = adapted_block(
-            Val::Variable("f".into()),
-            2,
-            Adaptation::Upcast,
-            Some(span),
-            &mut ctx,
-        ) else {
-            panic!("an adapted value is a block");
-        };
-        let mut body = block.shape();
-        for _ in 0..2 {
-            assert_eq!(body.span, Some(span));
-            let CompKind::Lam { body: inner, .. } = &body.item else {
-                panic!("the adaptation belongs under both lambdas");
-            };
-            body = inner;
-        }
-        let CompKind::Upcast(call) = &body.item else {
-            panic!("the call is upcast");
-        };
-        let CompKind::App { head, args } = &call.item else {
-            panic!("the value receives both arguments");
-        };
-        assert_eq!(args.len(), 2);
-        assert!(matches!(head.item, CompKind::Force(_)));
-        assert_eq!([body.span, call.span, head.span], [Some(span); 3]);
-    }
-
-    #[test]
     fn capture_nodes_take_the_bodys_span() {
         let span = Span::new(FileId::DUMMY, 3, 9);
         let mut ctx = InferCtx::new();
@@ -574,23 +505,5 @@ mod tests {
         assert!(matches!(comp.item, CompKind::Capture(_)));
         assert!(matches!(rest.item, CompKind::Prim(Prim::Decode(_))));
         assert_eq!([comp.span, rest.span], [Some(span); 2]);
-
-        let Val::Thunk(block) =
-            adapted_block(Val::Unit, 1, Adaptation::Capture, Some(span), &mut ctx)
-        else {
-            panic!("a captured value is wrapped in a block");
-        };
-        let lam = block.shape();
-        let CompKind::Lam { body, .. } = &lam.item else {
-            panic!("the block takes its parameter");
-        };
-        let CompKind::Bind { comp, rest, .. } = &body.item else {
-            panic!("the block's body is a capture and its decode");
-        };
-        let CompKind::Capture(call) = &comp.item else {
-            panic!("the bound computation is the capture");
-        };
-        let spans = [lam.span, body.span, comp.span, rest.span, call.span];
-        assert_eq!(spans, [Some(span); 5]);
     }
 }

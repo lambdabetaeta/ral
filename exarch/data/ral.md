@@ -4,7 +4,7 @@ Like every shell, `ral` runs commands:
     cat foo.txt | wc -l
     echo "hello" > "!{env}[TMPDIR]/out"
 
-Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#`. `&&` and `||` are Boolean operators, used inside `$[…]`. There is no trailing `&` either: background work is `spawn "title" { … }`, below.
+Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? echo #'unversioned'#`. `&&` and `||` are Boolean operators, used inside `$[…]`. There is no trailing `&` either: background work is `spawn "title" { … }`, below.
 
 A string argument stays one argument: its contents are never implicitly split, globbed, or interpreted as source. Spread a list explicitly with `...$args`; expand a glob with `...!{glob #'*.txt'#}`. A `&` inside a word is ordinary, so `curl https://h/?a=1&b=2` needs no quotes. Outside double quotes, `\` is ordinary too: `C:\Users\me` is one word.
 
@@ -28,6 +28,10 @@ A computation can return a value and can write bytes to stdout. `let` binds the 
     echo "notes.txt ($n lines) as of $today"
 
 This also works through blocks and functions: `let f = { hostname }; let host = f` captures the host name. A final decoder such as `| from-lines` or `| from-json` returns another value instead.
+
+Only `let` captures; `!{…}` in a value position is hoisted into a `let`. Elsewhere a command runs and writes: in `if`, `case` and `try` arms, and in blocks run by `map`, `each` or `par`. `map { |f| echo $f } [1, 2]` prints `1` and `2` and returns `[(), ()]`. To collect output as values, return it: `map { |f| return !{echo $f} } [1, 2]`. Arms are all commands or all return values; an arm ending in `return ()` can join either. A block passed where a value is wanted must return one.
+
+In `explain`, `Returns a` returns a value, `Command` produces output, and `Command[ν] a` is either, as `ν` is chosen.
 
 Use forcing to put a computation in a value position:
 
@@ -334,7 +338,7 @@ Fan-out that must leave nothing behind is a `gather`, not a set of loose spawns:
         return [build: !{await $b}, lint: !{await $l}]
     }
 
-Every worker spawned inside a `gather` is its own: when the block returns, each one not yet awaited is awaited in birth order, and on a failure or a stop they are all cancelled. The prelude builds on it: `par f items jobs` maps in parallel and keeps input order; `both { … } { … }` runs two blocks at once and returns `[fst: …, snd: …]`, awaiting `fst` then `snd`, so a failure in either is raised only in its turn and the other is then cancelled; `first-of [{ … }, { … }]` behaves as the first block to finish and cancels the rest; `race [$a, $b]` does the same for handles you already hold. In `par`, `first-of` and `race`, the first failure cancels the others and is raised. A `gather` is synchronous, so it finishes within this call: work that should outlive the turn is a loose `spawn` outside any `gather`.
+Every worker spawned inside a `gather` is its own: when the block returns, each one not yet awaited is awaited in birth order, and on a failure or a stop they are all cancelled. The prelude builds on it: `par f items jobs` maps in parallel and keeps input order; `both { return !{curl $a} } { return !{curl $b} }` runs two value-returning blocks at once and returns `[fst: …, snd: …]`, awaiting `fst` then `snd`, so a failure in either is raised only in its turn and the other is then cancelled; `first-of [{ … }, { … }]` behaves as the first block to finish and cancels the rest; `race [$a, $b]` does the same for handles you already hold. In `par`, `first-of` and `race`, the first failure cancels the others and is raised. A `gather` is synchronous, so it finishes within this call: work that should outlive the turn is a loose `spawn` outside any `gather`.
 
 <CRITICAL>A loose `spawn`, outside any `gather`, lives as long as this session: nothing but its own completion, `cancel`, or the session's end stops it. One inside a `gather` ends with it.</CRITICAL>
 

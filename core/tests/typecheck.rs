@@ -2,8 +2,8 @@
 //! computes and annotates, read off the checker's own data.
 //!
 //! Every test parses + elaborates a small ral program and runs `typecheck()`.
-//! What the checker *refuses*, and the words it refuses in, lives in the
-//! corpus of programs under `tests/reject/` and `tests/accept/`, run by
+//! The capture-at-let plan's pinned refusals and hints are checked here too;
+//! the broader corpus lives under `tests/reject/` and `tests/accept/`, run by
 //! `ral/tests/corpus.rs`.
 
 #![allow(clippy::disallowed_methods, reason = "test code")]
@@ -11,9 +11,9 @@
 mod common;
 
 use ral_core::ir::{Comp, CompKind, Phrase, Toplevel, Unchecked, Val};
-use ral_core::ty::Ty;
-use ral_core::typecheck::Form;
+use ral_core::ty::{CompTy, Grade, Ty};
 use ral_core::typecheck::contract::declared;
+use ral_core::typecheck::{Form, TypeErrorKind};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
@@ -170,12 +170,18 @@ fn gather_passes_its_bodys_type() {
     assert_eq!(scheme_at(&top, 1), "Returns Integer");
 }
 
-/// `par` demands a value of its callback, so a command's output is what each
-/// item maps to.
+/// Capture-at-let plan §1.10's `par` row: command callbacks replay output;
+/// the list holds their unit values, not captured strings.
 #[test]
-fn par_demands_a_value_and_returns_a_list() {
-    let top = toplevel_ok("let xs = par { |x| echo $x } [1, 2] 2\nreturn ()");
-    assert_eq!(scheme_at(&top, 0), "[String]");
+fn par_accepts_a_command_callback_and_returns_its_unit_values() {
+    let src = "let xs = par { |x| echo $x } [1, 2] 2\nreturn ()";
+    let top = toplevel_ok(src);
+    assert_eq!(scheme_at(&top, 0), "[Unit]");
+    assert_eq!(captures(src), 0);
+
+    let repaired = "let xs = par { |x| return !{echo $x} } [1, 2] 2\nreturn ()";
+    assert_eq!(scheme_at(&toplevel_ok(repaired), 0), "[String]");
+    assert_eq!(captures(repaired), 1);
 }
 
 /// A base frame takes an argv, and `...` is exactly its notation.  `detach` is
@@ -376,7 +382,8 @@ fn a_computed_key_helper_generalises_over_map_element_types() {
          let b = pick [:, y: true] 'y'\n\
          return ()",
     );
-    assert_eq!(scheme_at(&top, 0), "∀α. Map α → String → Returns α");
+    // Capture-at-let plan §1.7: α admits unit, so its fresh grade stays visible.
+    assert_eq!(scheme_at(&top, 0), "∀α ν. Map α → String → Command[ν] α");
     assert_eq!(scheme_at(&top, 1), "Integer");
     assert_eq!(scheme_at(&top, 2), "Bool");
 }
@@ -389,7 +396,8 @@ fn a_written_position_is_the_list_rule_and_stays_generic() {
          let b = first ['x']\n\
          return ()",
     );
-    assert_eq!(scheme_at(&top, 0), "∀α. [α] → Returns α");
+    // Capture-at-let plan §1.7: the generic read keeps its fresh grade.
+    assert_eq!(scheme_at(&top, 0), "∀α ν. [α] → Command[ν] α");
 }
 
 #[test]
@@ -411,7 +419,8 @@ fn nth_helpers_generalise_over_list_element_types() {
              let b = pick ['x', 'y'] 0\n\
              return ()"
         ));
-        assert_eq!(scheme_at(&top, 0), "∀α. [α] → Integer → Returns α");
+        // Capture-at-let plan §1.7: the result's α admits unit.
+        assert_eq!(scheme_at(&top, 0), "∀α ν. [α] → Integer → Command[ν] α");
         assert_eq!(scheme_at(&top, 1), "Integer");
         assert_eq!(scheme_at(&top, 2), "String");
     }
@@ -516,6 +525,25 @@ fn contract_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec
 
 fn codes_of(errs: &[TypeError]) -> Vec<&'static str> {
     errs.iter().map(|e| e.kind.code()).collect()
+}
+
+fn one_error_with_hint(src: &str, code: &str, hint: &str) -> TypeError {
+    let mut errs = raw_errors(src);
+    assert_eq!(codes_of(&errs), [code], "{src}: {errs:?}");
+    let err = errs.remove(0);
+    assert_eq!(err.hint().as_deref(), Some(hint), "{src}: {err:?}");
+    err
+}
+
+fn assert_error_in(src: &str, err: &TypeError, fragment: &str) {
+    let start = src
+        .rfind(fragment)
+        .expect("the source contains the blamed result");
+    let span = err.pos.expect("a located error");
+    assert!(
+        span.start as usize >= start && span.end as usize <= start + fragment.len(),
+        "expected the error in {fragment:?}: {src}: {err:?}"
+    );
 }
 
 fn schema_errors(src: &str) -> Vec<TypeError> {
@@ -1045,51 +1073,6 @@ fn a_let_captures_the_command_that_produces_its_value() {
 }
 
 #[test]
-fn unit_producers_have_explicit_upcasts_that_survive_reinference() {
-    for src in [
-        "let x = if true { return () } else { echo hi }",
-        "case `a () [`a: { |_| return () }, `b: { |_| echo hi }]",
-        "within [handlers: [foo: { |args| return () }]] { foo }",
-        "let f = { |args| return () }; within [handlers: [foo: $f]] { foo }",
-        "let f = { |args| return () }; within [handlers: [foo: { !$f }]] { foo }",
-    ] {
-        let top = toplevel_ok(src);
-        let count = |top: &Toplevel| {
-            let mut found = 0;
-            walk_toplevel(top, &mut |comp| {
-                if matches!(comp.item, CompKind::Upcast(_)) {
-                    found += 1;
-                }
-            });
-            found
-        };
-        assert_eq!(count(&top), 1, "{src}");
-        let unchecked: Unchecked = top
-            .phrases
-            .iter()
-            .map(|phrase| ral_core::source::Spanned {
-                span: phrase.span,
-                item: match phrase.item.clone() {
-                    Phrase::Define { pattern, comp, .. } => Phrase::Define {
-                        pattern,
-                        comp,
-                        schemes: (),
-                    },
-                    Phrase::Run(comp) => Phrase::Run(comp),
-                },
-            })
-            .collect();
-        let checked = typecheck(
-            &unchecked,
-            common::schemes_for(&ral_core::HostSurface::default()),
-            None,
-        )
-        .unwrap_or_else(|errors| panic!("re-inference of {src}: {errors:?}"));
-        assert_eq!(count(&checked), 1, "{src}");
-    }
-}
-
-#[test]
 fn redirect_operands_are_inferred_without_a_string_requirement() {
     for head in ["echo hi", "!{ return () }"] {
         for redirect in ["<", "<<", ">", ">>", ">~", "2>", "2>>", "2>~"] {
@@ -1105,19 +1088,40 @@ fn redirect_operands_are_inferred_without_a_string_requirement() {
 }
 
 #[test]
-fn case_joins_use_known_payloads_before_deciding_capture() {
-    for (payload, body, expected) in [
-        ("()", "return $p", "Command"),
-        ("hello", "return $p", "Returns String"),
-        ("{ echo hi }", "!$p", "Command"),
-    ] {
+fn case_joins_use_known_payloads_without_capturing_arms() {
+    // §1.10's `return $u` beside a command row applies to `case` too.
+    for (payload, body) in [("()", "return $p"), ("{ echo hi }", "!$p")] {
         for arms in [
             format!("`a: {{ |p| {body} }}, `b: {{ |_| echo bye }}"),
             format!("`b: {{ |_| echo bye }}, `a: {{ |p| {body} }}"),
         ] {
-            let top = toplevel_ok(&format!("let f = {{ case `a {payload} [{arms}] }}"));
-            assert_eq!(scheme_at(&top, 0), expected);
+            let src = format!("let f = {{ case `a {payload} [{arms}] }}");
+            assert_eq!(scheme_at(&toplevel_ok(&src), 0), "Command");
+            assert_eq!(captures(&src), 0);
         }
+    }
+
+    // §1.10's command/String join row: `case` cannot capture its command arm.
+    // §1.4: source order blames the later arm, even with a known payload.
+    for (arms, hint, later) in [
+        (
+            "`a: { |p| return $p }, `b: { |_| echo bye }",
+            "this arm is a command and an earlier one returns a value; a arm's output is not captured: return it, `{ return !{…} }`",
+            "echo bye",
+        ),
+        (
+            "`b: { |_| echo bye }, `a: { |p| return $p }",
+            "this arm returns a value and an earlier one is a command; a arm's output is not captured: make that one return it, `{ return !{…} }`",
+            "return $p",
+        ),
+    ] {
+        let src = format!("let f = {{ case `a hello [{arms}] }}");
+        let err = one_error_with_hint(&src, "T0011", hint);
+        assert_error_in(&src, &err, later);
+
+        let repaired = src.replace("echo bye", "return !{echo bye}");
+        assert_eq!(scheme_at(&toplevel_ok(&repaired), 0), "Returns String");
+        assert_eq!(captures(&repaired), 1);
     }
 }
 
@@ -1139,9 +1143,12 @@ fn redirects_scope_ready_computations_not_partial_applications() {
 }
 
 #[test]
-fn abstract_stdout_discharge_preserves_the_input_grade() {
+fn abstract_stdout_discharge_has_a_fresh_result_grade() {
     let top =
         toplevel_ok("let f = { |t| !$t > out }; let x = f { echo hi }; let n = f { return 42 }");
+    // Capture-at-let plan §§1.2, 1.7: redirecting preserves the value type,
+    // but its result grade is independent of the input's.
+    assert_eq!(scheme_at(&top, 0), "∀α ν ξ. {Command[ν] α} → Command[ξ] α");
     assert_eq!(scheme_at(&top, 1), "Unit");
     assert_eq!(scheme_at(&top, 2), "Integer");
     assert_eq!(
@@ -1173,15 +1180,312 @@ fn a_let_captures_a_pipeline_and_a_join_whole() {
     );
 }
 
-/// A value demanded of a command block captures the block's innermost body,
-/// or η-wraps a block in hand around a captured call.
+/// §1.10's literal and in-hand `map` rows: neither callback is adapted.
 #[test]
-fn a_value_demand_captures_a_block_argument_or_arm() {
-    assert_eq!(captures("map { |f| echo $f } [1, 2]"), 1);
-    assert_eq!(captures("let g = { |n| echo $n }; map $g [1, 2]"), 1);
-    assert_eq!(
-        captures("let t = { echo a }; let x = if true $t else { return b }"),
-        1
+fn map_command_callbacks_are_not_implicitly_captured() {
+    for (src, index) in [
+        ("let xs = map { |f| echo $f } [1, 2]", 0),
+        ("let g = { |n| echo $n }; let xs = map $g [1, 2]", 1),
+    ] {
+        assert_eq!(scheme_at(&toplevel_ok(src), index), "[Unit]");
+        assert_eq!(captures(src), 0);
+    }
+}
+
+#[test]
+fn map_callbacks_capture_only_with_an_explicit_let() {
+    // §1.10's `map` rows: return a hoisted capture to request strings per item.
+    for (src, index) in [
+        ("let xs = map { |f| return !{echo $f} } [1, 2]", 0),
+        (
+            "let g = { |n| echo $n }; let xs = map { |n| return !{g $n} } [1, 2]",
+            1,
+        ),
+    ] {
+        assert_eq!(scheme_at(&toplevel_ok(src), index), "[String]");
+        assert_eq!(captures(src), 1);
+    }
+}
+
+#[test]
+fn in_hand_command_arms_are_not_implicitly_captured() {
+    // §1.10's command/String `if` row, with the command block already in hand.
+    let src = "let t = { echo a }; let x = if true $t else { return b }";
+    let err = one_error_with_hint(
+        src,
+        "T0011",
+        "this branch returns a value and an earlier one is a command; a branch's output is not captured: make that one return it, `{ return !{…} }`",
     );
-    assert_eq!(captures("let x = try { hostname } { |e| return none }"), 1);
+    assert_error_in(src, &err, "return b");
+    let repaired = "let t = { echo a }; let x = if true { return !{!$t} } else { return b }";
+    assert_eq!(scheme_at(&toplevel_ok(repaired), 1), "String");
+    assert_eq!(captures(repaired), 1);
+}
+
+#[test]
+fn try_command_and_string_outcomes_require_explicit_capture() {
+    // §1.10's `try { echo a } { |e| return 'none' }` row.
+    // §1.4: the later outcome is blamed in either order.
+    for (src, hint, later) in [
+        (
+            "let x = try { hostname } { |e| return none }",
+            "this outcome returns a value and an earlier one is a command; a outcome's output is not captured: make that one return it, `{ return !{…} }`",
+            "return none",
+        ),
+        (
+            "let x = try { return none } { |e| hostname }",
+            "this outcome is a command and an earlier one returns a value; a outcome's output is not captured: return it, `{ return !{…} }`",
+            "hostname",
+        ),
+    ] {
+        let err = one_error_with_hint(src, "T0011", hint);
+        assert_error_in(src, &err, later);
+        let repaired = src.replace("hostname", "return !{hostname}");
+        assert_eq!(scheme_at(&toplevel_ok(&repaired), 0), "String");
+        assert_eq!(captures(&repaired), 1);
+    }
+}
+
+// ─── Capture-at-let plan §7 typing pins ───────────────────────────────────────
+
+const COMMAND_AFTER_VALUE_BRANCH_HINT: &str = "this branch is a command and an earlier one returns a value; a branch's output is not captured: return it, `{ return !{…} }`";
+const VALUE_AFTER_COMMAND_BRANCH_HINT: &str = "this branch returns a value and an earlier one is a command; a branch's output is not captured: make that one return it, `{ return !{…} }`";
+const COMMAND_AFTER_INT_BRANCH_HINT: &str = "this branch is a command and an earlier one returns an Int; give this branch a value of that type too (`… | from-json`, or `return` one), or write the earlier one's value out with `echo`";
+const INT_AFTER_COMMAND_BRANCH_HINT: &str = "this branch returns an Int and an earlier one is a command; give that one a value of that type too (`… | from-json`, or `return` one), or write this branch's value out with `echo`";
+const COMMAND_VALUE_ARGUMENT_HINT: &str = "this block is a command, but a block that returns a value is wanted here: return its output, `{ |…| return !{…} }`";
+
+#[test]
+fn command_compatible_unit_producers_join_without_capture() {
+    // §1.10's `try { each-line … }` and `let u = (); return $u` rows.
+    for src in [
+        "let f = { try { each-line { |l| warn $l } } { |e| echo failed } }",
+        "let f = { let u = (); let c = true; if $c { return $u } else { echo a } }",
+        "let f = { let u = (); let c = true; if $c { echo a } else { return $u } }",
+    ] {
+        assert_eq!(scheme_at(&toplevel_ok(src), 0), "Command");
+        assert_eq!(captures(src), 0);
+    }
+    // §1.10's heterogeneous block-list row: a free unit grade can be a command.
+    assert_eq!(captures("each { |b| !$b } [{ echo hi }, { return () }]"), 0);
+}
+
+#[test]
+fn command_and_string_joins_require_explicit_capture_in_both_orders() {
+    // §1.10's hostname/String `if` row; §1.4 blames the later branch.
+    for (first, later, hint) in [
+        ("hostname", "return 'b'", VALUE_AFTER_COMMAND_BRANCH_HINT),
+        ("return 'b'", "hostname", COMMAND_AFTER_VALUE_BRANCH_HINT),
+    ] {
+        let src = format!("let c = true; let x = if $c {{ {first} }} else {{ {later} }}");
+        let err = one_error_with_hint(&src, "T0011", hint);
+        assert_error_in(&src, &err, later);
+
+        let repaired = src.replace("hostname", "return !{hostname}");
+        assert_eq!(scheme_at(&toplevel_ok(&repaired), 1), "String");
+        assert_eq!(captures(&repaired), 1);
+    }
+}
+
+#[test]
+fn command_and_int_joins_keep_directional_hints_in_both_orders() {
+    // §1.10's refused mixed-join row, with the Int-specific §1.8 advice.
+    // §1.4: later branches are actual, not reordered to prefer commands.
+    for (first, later, hint) in [
+        ("echo a", "return 1", INT_AFTER_COMMAND_BRANCH_HINT),
+        ("return 1", "echo a", COMMAND_AFTER_INT_BRANCH_HINT),
+    ] {
+        let src = format!("let c = true; let x = if $c {{ {first} }} else {{ {later} }}");
+        let err = one_error_with_hint(&src, "T0011", hint);
+        assert_error_in(&src, &err, later);
+        let repaired = src.replace("echo a", "return !{echo a | from-json}");
+        assert_eq!(scheme_at(&toplevel_ok(&repaired), 1), "Integer");
+        assert_eq!(
+            captures(&repaired),
+            0,
+            "the decoder returns data, not output"
+        );
+    }
+}
+
+#[test]
+fn subtraction_by_one_joins_keep_int_hints_in_both_orders() {
+    // §7's exact n-1 case, extending §1.10's refused mixed-join row.
+    // Here `1` fixes n to Int; the next test retains a genuine NUMBER variable.
+    for (first, later, hint) in [
+        (
+            "return $[$n - 1]",
+            "echo done",
+            COMMAND_AFTER_INT_BRANCH_HINT,
+        ),
+        (
+            "echo done",
+            "return $[$n - 1]",
+            INT_AFTER_COMMAND_BRANCH_HINT,
+        ),
+    ] {
+        for bind_result in [false, true] {
+            let join = format!("if $c {{ {first} }} else {{ {later} }}");
+            let body = if bind_result {
+                format!("let result = {join}; return $result")
+            } else {
+                join
+            };
+            let src = format!("let c = true; let f = {{ |n| {body} }}");
+            let err = one_error_with_hint(&src, "T0011", hint);
+            assert_error_in(&src, &err, later);
+            toplevel_ok(&src.replace("echo done", "return 0"));
+        }
+    }
+}
+
+#[test]
+fn number_kind_joins_keep_the_value_grade_in_both_orders() {
+    // §1.6's kind guard and §1.10's refused mixed-join row: n-n leaves NUMBER
+    // free, unlike §7's literal n-1. §1.8 treats that variable as a value.
+    for (first, later, hint) in [
+        (
+            "return $[$n - $n]",
+            "echo done",
+            COMMAND_AFTER_VALUE_BRANCH_HINT,
+        ),
+        (
+            "echo done",
+            "return $[$n - $n]",
+            VALUE_AFTER_COMMAND_BRANCH_HINT,
+        ),
+    ] {
+        for bind_result in [false, true] {
+            let join = format!("if $c {{ {first} }} else {{ {later} }}");
+            let body = if bind_result {
+                format!("let result = {join}; return $result")
+            } else {
+                join
+            };
+            let src = format!("let c = true; let f = {{ |n| {body} }}");
+            let err = one_error_with_hint(&src, "T0011", hint);
+            assert_error_in(&src, &err, later);
+            let TypeErrorKind::CompTyMismatch { expected, actual } = &err.kind else {
+                panic!("expected a producer mismatch: {err:?}");
+            };
+            let (command, value) = if matches!(expected, CompTy::Return(Grade::Output, _)) {
+                (expected, actual)
+            } else {
+                (actual, expected)
+            };
+            assert!(matches!(command, CompTy::Return(Grade::Output, ty) if **ty == Ty::Unit));
+            assert!(
+                matches!(value, CompTy::Return(grade, ty) if *grade != Grade::Output && matches!(**ty, Ty::Var(_)))
+            );
+            toplevel_ok(&src.replace("echo done", "return 0"));
+        }
+    }
+}
+
+#[test]
+fn numeric_spawn_handle_lists_keep_grade_type_pairing_in_both_orders() {
+    // §7's handle pairing pin extends §1.10's refused command/value join row.
+    // §1.6's same guard protects Handle; unlike a join, this uses ListElem's hint.
+    let hint = "a list holds one type, and this element's differs from its neighbours': to keep different things side by side, write a record, as in `[name: $n, status: $s]`; for alternatives, tag each element and `case` on it downstream";
+    for (expression, variable) in [("$[$n - 1]", false), ("$[$n - $n]", true)] {
+        for handles in ["[$value, $command]", "[$command, $value]"] {
+            let src = format!(
+                "let f = {{ |n| let value = spawn {{ return {expression} }}; \
+                 let command = spawn {{ echo done }}; return {handles} }}"
+            );
+            let err = one_error_with_hint(&src, "T0010", hint);
+            let TypeErrorKind::TyMismatch { expected, actual } = &err.kind else {
+                panic!("expected a handle mismatch: {err:?}");
+            };
+            let (command, value) = if matches!(expected.as_ref(), Ty::Handle(Grade::Output, _)) {
+                (expected.as_ref(), actual.as_ref())
+            } else {
+                (actual.as_ref(), expected.as_ref())
+            };
+            assert!(matches!(command, Ty::Handle(Grade::Output, ty) if **ty == Ty::Unit));
+            let Ty::Handle(grade, ty) = value else {
+                panic!("expected a value-producing handle: {err:?}");
+            };
+            assert_ne!(*grade, Grade::Output);
+            if variable {
+                assert!(matches!(**ty, Ty::Var(_)), "{err:?}");
+            } else {
+                assert_eq!(**ty, Ty::Int);
+            }
+            toplevel_ok(&src.replace("echo done", "return 0"));
+        }
+    }
+}
+
+#[test]
+fn twice_fixes_its_callbacks_grade_until_an_explicit_unit_return() {
+    // §1.10's `twice` row: its inner let fixes p, even when its value is unit.
+    let src = "let twice = { |f| let _ = !$f; !$f }; let c = true; \
+               if $c { twice { return () } } else { echo a }";
+    let err = one_error_with_hint(
+        src,
+        "T0011",
+        "this branch is a command and an earlier one returns nothing (`()`); give this branch a value of that type too (`… | from-json`, or `return` one), or write the earlier one's value out with `echo`",
+    );
+    assert_error_in(src, &err, "echo a");
+    let repaired = src.replace("twice { return () }", "twice { return () }; return ()");
+    toplevel_ok(&repaired);
+    assert_eq!(captures(&repaired), 0);
+}
+
+#[test]
+fn both_demands_value_blocks_without_implicit_capture() {
+    // §1.10's `both { echo a } { echo b }` row, with each argument pinned too.
+    for (args, errors) in [
+        ("{ echo a } { return b }", 1),
+        ("{ return a } { echo b }", 1),
+        ("{ echo a } { echo b }", 2),
+    ] {
+        let src = format!("let pair = both {args}");
+        let errs = raw_errors(&src);
+        assert_eq!(codes_of(&errs), vec!["T0011"; errors], "{src}: {errs:?}");
+        for err in errs {
+            assert_eq!(err.hint().as_deref(), Some(COMMAND_VALUE_ARGUMENT_HINT));
+        }
+        let repaired = src
+            .replace("{ echo a }", "{ return !{echo a} }")
+            .replace("{ echo b }", "{ return !{echo b} }");
+        assert_eq!(
+            scheme_at(&toplevel_ok(&repaired), 0),
+            "[fst: String, snd: String]"
+        );
+        assert_eq!(captures(&repaired), errors);
+    }
+}
+
+#[test]
+fn filter_demands_a_bool_block_without_implicit_capture() {
+    // §1.5/§7's filter pin, alongside §1.10's refused value-block arguments.
+    let hint = "this block is a command, but a block that returns a Bool is wanted here; for a yes/no answer, `succeeds { … }`";
+    for src in [
+        "filter { |x| echo $x } [1, 2]",
+        "let pred = { |x| echo $x }; filter $pred [1, 2]",
+    ] {
+        one_error_with_hint(src, "T0011", hint);
+    }
+    let repaired = "let xs = filter { |x| succeeds { echo $x } } [1, 2]";
+    assert_eq!(scheme_at(&toplevel_ok(repaired), 0), "[Integer]");
+    assert_eq!(captures(repaired), 0);
+}
+
+#[test]
+fn decoder_results_cannot_join_commands_in_either_order() {
+    // §1.10's `echo`/`from-json` row: a boundary result is p, never a command.
+    // §1.4 still blames the later arm; the existing weak-boundary note remains.
+    let weak_note = "this type is shared by every use in its unit, and another use fixed it: what `from-json` reads has one type for the whole unit, which its door checks every use of. Write one function per shape, or decode once and bind the result";
+    for (first, later, hint) in [
+        ("echo a", "from-json < f", VALUE_AFTER_COMMAND_BRANCH_HINT),
+        ("from-json < f", "echo a", COMMAND_AFTER_VALUE_BRANCH_HINT),
+    ] {
+        let src = format!("let c = true; let x = if $c {{ {first} }} else {{ {later} }}");
+        let err = one_error_with_hint(&src, "T0011", &format!("{hint}\n{weak_note}"));
+        assert_error_in(&src, &err, later);
+        let repaired = src.replace("echo a", "return !{echo a}");
+        assert_eq!(scheme_at(&toplevel_ok(&repaired), 1), "String");
+        assert_eq!(captures(&repaired), 1);
+    }
 }

@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_date: 2026-11-02
-anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_update, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
+generated_at_commit: d56977ff
+verified_at_commit: d56977ff
+verified_at_date: 2026-11-03
+anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_update, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, rhs_bound_ty, unify_producers, stage_writes]
 ---
 
 # Type inference: the algorithm
@@ -100,7 +100,7 @@ Indexing matches the IR's `Key`, never the shape of a `Val`:
 
 `infer_index_step` applies each rule immediately. There is no deferred read
 constraint, shape default, special generalisation parameter or index-made weak
-variable. `nth : ∀α. Int → [α] → F α` handles computed list positions, so
+variable. `nth : ∀α ν. Integer → [α] → Command[ν] α` handles computed list positions, so
 both map and list helpers retain their element polymorphism. The surface is
 one to one with the formal core's primitive `index (fld ℓ)`, `index (pos k)`
 and `index key`
@@ -112,45 +112,36 @@ type, computation and row stores, quantified by `generalize` (`Scheme.grade_vars
 and never weak. A *command* — an external, `^name`, a path head, a value row that
 writes, or a handler arm standing in for one — is `Return(Output, Unit)`,
 printed `Command`; `CompTy::command()` builds it and `CompTy::pure` is
-`Return(Value, _)`. `unify` unifies the grades, then the values; a grade
-disagreement is a `CompTyMismatch` reading `Command` against `Returns A`. The
-invariant `F^w A ⇒ A = Unit` is a property of *inferred* types, not of
-well-formed ones (it fails under instantiation: `∀ν α. U(F^ν α) → F^ν α` at
-`ν := w`, `α := Int`). It holds because a grade variable is only ever unified
-with the one value type it is paired with, every rule introducing `w` does so
-at `Unit`, and the builtin schemes and the error type are paired alike; it is
-asserted in `generalize` and the annotate walk
-([[decisions/260930_graded-f|graded-f]]). `CompKind::Capture` types its body at
-`Return(Output, Unit)`; `CompKind::Upcast` checks a body at
-`Return(Value, Unit)` and produces `Return(Output, Unit)`.
+`Return(Value, _)`. `Unifier::unify_producers` meets the grade/type pair for returners and handles.
+If either grade is `Output`, the other type must be `Unit` or a variable whose
+kind admits it; otherwise it refuses before binding either grade. It then
+unifies grades and values. The inferred invariant is `F^w A ⇒ A = Unit`:
+all rules introduce output at unit and preserve the pairing
+([[design/capture|grades and capture]]). `CompKind::Capture` checks its body
+as a command and produces bytes at a fresh grade.
 
 - `head_class` (`infer.rs`, beside `exec_comp_ty`) resolves a bare head by the
   order checker and runtime share: `Binding`, `Value(entry)`, `Arm`, `External`.
-- `rhs_bound_ty`, shared by `Bind` and `Define`, is the bind rule: a `Fun` right-hand
-  side binds a thunk; `Return(Output, _)` inserts the node's address in
-  `InferCtx.adapted` as `Adaptation::Capture` and binds `String`; `Return(Value, a)` binds `a`;
-  `Return(Var(g), a)` binds `g := Value` and `a`; a computation variable opens
-  into `Return(Value, fresh)`. `force_return_shape` opens a variable into a fresh
-  *grade*, never `Value`: only the bind rule decides `p`.
-- `apply_args_capped` coerces an argument ending in `Return(Output, Unit)` where
-  the callee's parameter ends in `Return(Value, β)` at the same arity (`spine`
-  reads the parameters and the `Producer` past them), recording a literal
-  block's body address through `adapt_block` in `adapted` as
-  `Adaptation::Capture` when the block writes every lambda of that arity,
-  else the block itself in `InferCtx.adapted_vals` with its arity and
-  adaptation, as a value in hand.
-- Both `Exec` and `Redirect` check redirect operands. Every nonempty redirect
-  list calls `redirected`, which forces the **outer** computation to `Return`
-  under `Reason::RedirectShape`; a partial application is refused with advice
-  to supply the remaining arguments. An unresolved computation opens with a
-  fresh grade. Stdout returns `Return(Value, a)` without binding the original
-  grade; stdin, stderr and `2>&1` preserve it. `map_producer` still rebuilds
-  producers past parameters for handler arms, never for redirects.
-- `annotate` is a structural rebuild (the methods of `Annotate { ctx }`) that
-  wraps each capture-recorded node in `cap M to d. decode d` (`CompKind::Capture` and
-  `Prim::Decode`, both checker-inserted); a value in hand becomes a lambda
-  whose body captures the forced call; a right-hand side of function type is
-  written `return (thunk M)`, bound unrun (Let-fun).
+- `rhs_bound_ty`, shared by `Bind` and `Define`, reads the resolved RHS:
+  `Fun` binds a thunk; `Return(Output, Unit)` captures and binds `String`;
+  `Return(Value, a)` binds `a`; a free grade fixes to `Value`, and a
+  computation variable opens to `Return(Value, fresh)`. The last case is
+  the sole default. `InferCtx.bound` records `Bound::Thunked` or
+  `Bound::Captured`, keyed by RHS address; `Bound::Ran` needs no entry.
+- `produces` pairs a fresh grade with a value type for `return`, primitives,
+  `~`, capture and handled alias statements. `Decl::scheme` freshens ordinary
+  builtin result grades; boundaries keep `p`, commands `w`, and already
+  graded results keep their grade. `spawn` and `audit` also produce at fresh
+  grades. A free unit producer can unify with `w` without a runtime term.
+- `apply_args_capped` checks a literal block against its parameter through
+  `demand_block`, then unifies with the parameter as expected. A block in
+  hand meets the parameter directly; neither gets a capture wrapper.
+- `redirected` forces an outer return shape under `Reason::RedirectShape`.
+  Stdout gets a fresh result grade at the same payload type, leaving the
+  input grade alone; stdin, stderr and `2>&1` preserve it.
+- `annotate` structurally rebuilds the tree. `Annotate::rhs` reads `bound`:
+  captured RHSs become `cap M to d. decode d`, and function RHSs become
+  `return (thunk M)` (Let-fun).
 
 **Returned-thunk application is explicit in the checked tree.**
 `autoderef_thunk_return` records every argument position before which a
@@ -158,44 +149,27 @@ returned thunk must be forced. Positions may repeat when several thunks are
 unwrapped before one argument. `InferCtx.splits` records them for `App` and
 binding-resolved `Exec`; `Annotate::split` writes
 `App(head, prefix) to h. App(Force h, suffix)`, repeated as needed. Redirects
-wrap the whole split call; other node adaptations also wrap the whole. A
+wrap the whole split call; binding capture also wraps the whole. A
 re-inferred checked tree records no further split
 ([[invariants/ir-pure-cbpv|the IR invariant]]).
 
-**Adaptations and binding rules are explicit.**
+**Bind and statement rules remain distinct.** `Seq` uses statement inference
+without generalisation; `Bind` uses the let rule. Lambdas bind monomorphic
+names; destructuring binds follow the whole lambda chain. Options are record
+nodes whose entries are checked in written span order.
 
-- `coerce` records `Adaptation::Upcast` in `adapted` or `adapted_vals`, the
-  tables a capture uses. `annotate` places `Upcast` under a literal's lambda
-  chain or η-wraps a value in hand. A unit producer standing in for a command
-  receives the same explicit boundary.
-- `Seq` uses statement inference without generalisation; `Bind` always uses
-  the let rule.
-- Lambdas bind monomorphic names, with destructuring binds after the whole
-  chain, so their binders cannot generalise parameter types. A destructuring
-  mismatch points at the parameter, both during checking and at runtime.
-- Options are record nodes; `check_options` reads their entries in written
-  span order before consulting the declared table.
+`let x = f` with `f = { hostname }`, `let x = !$t` and `let x = g 5` capture
+when their resolved RHS is a command. `let x = map { |f| echo $f } $xs`
+instead streams each callback's output and binds unit elements.
 
-So `let x = f` with `f = { hostname }`, `let x = !$t`, `let x = g 5` and
-`let x = map { |f| echo $f } xs` all capture: β and η preserve meaning.
-
-**Arms join by two passes.** Every form that suspends a command — `if`,
-`case`, `try`, `?` — takes a thunk `U C` and forces the one it chooses;
-`CompKind::If` and `CaseArm` carry a `Spanned<Val>`. `join_arms` infers every arm
-against `Fun(params…, ρᵢ)` with a fresh result (`check_arm` pushing the
-parameter types inward as before), resolves each `ρᵢ`, and decides the target:
-`F^p τ` if some arm is `F^p A` with `A` not `Unit` or unresolved, capturing every
-`Output` arm; else `F^w Unit` if some arm is `Output`, upcasting the `F^p Unit`
-arms and binding grade variables to `w`; else unify. `infer_case` and
-`infer_try` route through it. A `case` supplies known scrutinee payload types
-before inferring its arms and joining their grades, so forwarding a command
-payload is already known to produce output when the join is chosen. A disagreement
-is `T0010` or `T0020` between two values, and `T0011` between shapes or grades; its hint is derived from the two
-types (one arm is a command, whose value is its output). An `else`-less `if`
-wraps its lone arm as `{ body; () }`. The join decides in program order with no
-pending constraint, so `{ |t| if c { echo hi } else { !$t }; let w = !$t; $w }`
-types `t : {Command}` while the same block with the `let` first types
-`t : {Returns String}`.
+**Arms meet fresh results, then unify in source order.** `join_arms` checks
+each arm against `Fun(params…, ρᵢ)`, with a fresh result and the parameter
+types supplied by the form. It then unifies each `ρᵢ` with the join as the
+expected side, in source order. `infer_case` supplies known payload types;
+`infer_try` uses the same join, as does `?`. There is no coercion, target
+verdict or reordering. A failure blames the later arm; its hint distinguishes
+that arm from the earlier command or value. An `else`-less `if` wraps its
+body as `{ body; () }`, whose fresh unit grade can join either producer kind.
 
 **One shape rule, `force_return_shape`, does the work an adjacency rule used to.**
 `extract_return` (`infer.rs`) resolves a `CompTy` to its return type, unifying
@@ -218,7 +192,7 @@ checks a handler or alias arm: it takes the parameters its slot hands it, read
 off its type, and produces what `standsFor(name)` produces — the scheme of the
 base frame or arm already in force under `name`, else `[String] → Command`. An
 arm for `curl` therefore has a command's value, its output (a `()`-returning stub
-is admitted by the upcast and captures `""`), and one for `detach` returns
+is admitted when its grade is free and captures `""`), and one for `detach` returns
 what `detach` returns; the installed scheme has the head's producer kind. A refusal is `Reason::StandsIn(Standing)`, with
 `Standing::{Command, Own, EveryCommand}` for a command, a head's own scheme and
 the catch-all handler. The run-time install doors apply the same rule, over
@@ -241,17 +215,14 @@ empty meet and binding a one-head meet (`{ |x| $[$x + 1]; length $x }` is refuse
 at the meet, though it is bound and never used), and which holds of the schemes
 in the environment and the builtins. Failures are data: a failure escaping a
 generalised right-hand side carries a closed error type, so no generalised
-variable escapes with it. Two rules read the order of statements. The join, which resolves its arms as they are met and holds
-no pending constraint, so a grade it could have learned later is not waited for
-(the `t : {Command}` against `{Returns String}` case above); and argument
-adaptation in `apply_args_capped`, where a block in hand adapts at its position
-to the parameter grade then known and a literal block only once every argument
-has unified (`demand_block`). Where a `let` captures
-is decided by the type at three syntax-directed sites, and every other rule is
-unification, so typing verdicts do not otherwise depend on the order the solver emits
-constraints. Reads impose ordinary equalities immediately; no read constraint
+variable escapes with it. Only the bind rule defaults a free grade. Arguments, handler producers and
+join results unify without adaptation; joins retain source-order blame.
+
+Reads impose ordinary equalities immediately; no read constraint
 is drained at the unit's end. Shape verdicts — the
-pipeline stage forcing, the sequence tail — are introduction-rule choices, not joins.**The row algebra is textbook.** A slot is a label and a type, so the Rémy
+pipeline stage forcing, the sequence tail — are introduction-rule choices, not joins.
+
+**The row algebra is textbook.** A slot is a label and a type, so the Rémy
 rewrite is unitary and principality over rows is the standard Hindley–Milner
 result. The two rules that build a row from a program — the closed literal and
 the update — mint every payload fresh or as written, and nothing else writes
@@ -294,8 +265,10 @@ follows the SCC
 structure the elaborator found — a non-recursive group generalises at its binding
 point, a mutually recursive group stays monomorphic until its fixed point — which
 is what keeps generalisation sound. A type error aborts with a positioned
-expected-vs-inferred message (`fmt.rs`), where a computation reads `Returns A`, `Command`, or `ν A` for a grade
-variable: `{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`.
+expected-vs-inferred message (`ty/fmt.rs`), where a computation reads
+`Returns A`, `Command`, or `Command[ν] A`. A free grade is hidden as
+`Returns A` when its paired type excludes unit; schemes quantify only visible
+grades. `{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`.
 
 **Deep types are checked without a guard, and checking them is superlinear.**
 The shape that reaches the structural walks without ever charging `deeper()`

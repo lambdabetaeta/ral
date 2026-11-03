@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_date: 2026-11-02
+generated_at_commit: d56977ff
+verified_at_commit: d56977ff
+verified_at_date: 2026-11-03
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
@@ -19,12 +19,10 @@ instantly and survives until it completes, is cancelled, or the session ends.
 
 **This section names a different mechanism from the drain-to-EOF story
 below, though both swap in a `Sink::Buffer`.** The evaluator's `Capture` node
-is written by the checker, and only by it: where a value is demanded of a
-computation of type `F^w Unit` (a `let`'s right-hand side, an argument to a
-value-demanding function, an arm joined with a value arm) it wraps the
-computation in `cap M to d. decode d` (`let v = echo hi`; see
+is inserted only at a binding: when a `let`'s right-hand side resolves to
+`F^w Unit`, the checker wraps that computation in `cap M to d. decode d` (`let v = echo hi`; see
 [[internals/type-inference|type-inference]] and
-[[decisions/260930_graded-f|graded-f]]). A command's value is its output, so the
+[[design/capture|grades and capture]]). A command's value is its output, so the
 frame inspects no produced value: `capture : F^w Unit → F Bytes`.
 
 - `CompKind::Capture` pushes `Frame::Capture` (`core/src/shell/evaluator/machine.rs`,
