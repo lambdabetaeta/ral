@@ -15,9 +15,9 @@ pub(in crate::process) enum Silent {
     /// raises no card: an anonymous socketpair names no object.
     #[cfg(unix)]
     CloexecSocketpair,
-    /// The one fork of a child: `Command::spawn` under the spawn lock's
-    /// exclusive side.  Every other production fork goes through this or the
-    /// `output` and `status` helpers beside it.  It raises no card: this is
+    /// Standard child creation: `Command::spawn` under the platform's spawn
+    /// lock (Apple's exclusive fork side or Windows' inheritance mutex).
+    /// `output` and `status` also spawn here. It raises no card: this is
     /// the lock, not the exec, and what is run is surfaced where its caller
     /// built it.
     ForkSpawn,

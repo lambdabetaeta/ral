@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: fea8d9f0
+generated_at_date: 2026-11-03
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -499,8 +499,9 @@ against the effective uid — never `env`'s target
 Windows has no path-exec filter, so there the in-process guard stands alone (the deny-by-default fs projection still bounds
 which images a child can *read*, and so load, at all). Exec-deny ACEs and
 directory execute/traverse semantics remain unimplemented. Native Windows
-verification of stored-case walks, verbatim image launch, and launch refusals
-is outstanding; cross-compilation alone does not establish them.
+verification of stored-case walks, verbatim image launch, launch refusals and
+handle-inheritance serialization is outstanding; cross-compilation alone does
+not establish them.
 
 Pathname Unix sockets outside a host envelope follow stated fs writes:
 `linux/landlock.rs` handles `REFER | RESOLVE_UNIX` on every ABI >= 9 launch,
@@ -739,7 +740,12 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   an empty record means bwrap died before reporting its payload. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
-  spawn is the confinement point — never a re-exec child; a bundled tool there
+  spawn is the confinement point — never a re-exec child. The process module's
+  `spawn_lock::lock_inheritance` serializes raw `Launch` creation and temporary
+  inherit-flag restoration with helper-backed `Command::spawn`, releasing before
+  Job Object placement/resume and waits. The raw child's explicit handle list
+  restricts only that child; unrelated dependency spawns remain outside ral's
+  mutex and may still inherit temporarily exposed handles. A bundled tool there
   is a plain `ral --ral-bundled-tool <tool>` carrying no warrant, and
   `serve_warrant` refuses `--warrant` outright. The launcher also takes an
   `Ownership` (`Kept` / `Surrendered`, the second variant `cfg(unix)` since only there does the verb that makes the

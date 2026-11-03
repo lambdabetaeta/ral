@@ -1,4 +1,4 @@
-//! Closes Apple's pipe/socketpair-vs-fork race.
+//! Serializes platform-specific descriptor and handle inheritance windows.
 //!
 //! Apple has neither `pipe2` nor `SOCK_CLOEXEC`: `os_pipe::pipe()` and std's
 //! `UnixStream::pair()` create the fd and only *afterwards* `fcntl(FD_CLOEXEC)`
@@ -8,23 +8,37 @@
 //!
 //! A process-wide `RwLock` closes the window: every `fork(2)` takes the
 //! exclusive side, every non-atomic fd creation takes the shared side.
-//! Identity on every other target, where the kernel's own atomic flag makes
-//! the race impossible.
+//!
+//! Windows uses one mutex for raw launches' temporary inheritable handles
+//! and helper-backed `Command::spawn`: an explicit handle list constrains
+//! only the raw child, not an unrelated inheriting child. Dependency spawns
+//! outside these entries do not participate. Linux needs neither lock.
 //!
 //! Never hold the exclusive side across anything but the `spawn()` call
 //! itself — it is process-wide and every stage thread may want the shared
 //! side at once.
 //!
-//! The lock guards an `RwLock<()>`: poison carries no information, since there
-//! is no state to tear, so it goes through the workspace's poison policy.
+//! Both locks protect admission, not child lifetimes. Poison carries no
+//! information, since there is no state to tear; use the workspace policy.
 
 use crate::process::site::Silent;
 use crate::site::site;
+#[cfg(windows)]
+use crate::sync::LockExt as _;
 #[cfg(target_vendor = "apple")]
 use crate::sync::RwLockExt as _;
 
 #[cfg(target_vendor = "apple")]
 static LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+#[cfg(windows)]
+static INHERITANCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold through process creation and restoration of temporary inherit flags.
+#[cfg(windows)]
+pub(crate) fn lock_inheritance() -> std::sync::MutexGuard<'static, ()> {
+    INHERITANCE_LOCK.lock_ignore_poison()
+}
 
 /// A pipe whose reader and writer are never open across an unsynchronised
 /// fork on another thread.
@@ -55,7 +69,7 @@ pub fn cloexec_socketpair() -> std::io::Result<(
     )
 }
 
-/// The one fork: the lock is held around `Command::spawn` and nothing else.
+/// The standard spawn door: locks cover `Command::spawn` and nothing else.
 ///
 /// `.output()`/`.status()` are fork *plus wait-for-exit*, so a caller needing
 /// either must call this and wait outside it — see [`output`] and [`status`].
@@ -65,6 +79,10 @@ pub fn cloexec_socketpair() -> std::io::Result<(
 pub fn spawn(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     #[cfg(target_vendor = "apple")]
     let _guard = LOCK.write_ignore_poison();
+    #[cfg(all(test, windows))]
+    test_phase::pause();
+    #[cfg(windows)]
+    let _guard = lock_inheritance();
     site!(Silent::ForkSpawn, cmd => spawn())
 }
 
@@ -88,6 +106,30 @@ pub fn output(cmd: &mut std::process::Command) -> std::io::Result<std::process::
 pub fn status(cmd: &mut std::process::Command) -> std::io::Result<std::process::ExitStatus> {
     let mut child = spawn(cmd)?;
     site!(Silent::StatusWait, &mut child => wait())
+}
+
+/// A thread-local, one-shot barrier at the two real inheritance entries.
+#[cfg(all(test, windows))]
+pub(crate) mod test_phase {
+    use std::cell::RefCell;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    thread_local! {
+        static PHASE: RefCell<Option<(Sender<()>, Receiver<()>)>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn install(reached: Sender<()>, release: Receiver<()>) {
+        PHASE.with(|phase| *phase.borrow_mut() = Some((reached, release)));
+    }
+
+    pub(crate) fn pause() {
+        if let Some((reached, release)) = PHASE.with(|phase| phase.borrow_mut().take()) {
+            reached.send(()).expect("phase observer alive");
+            release
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("release inheritance phase");
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

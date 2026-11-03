@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
-verified_at_commit: 646bff0a
-verified_at_date: 2026-10-13
-anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name]
+generated_at_commit: fea8d9f0
+verified_at_commit: fea8d9f0
+verified_at_date: 2026-11-03
+anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -33,7 +33,12 @@ resource limits never change.
 - **Windows** attaches the projection's AppContainer LowBox
   `SECURITY_CAPABILITIES` to the child's own `CreateProcessW`
   (`authority::sandbox::windows::session::confine`). The parent's spawn is the confinement point;
-  there is no re-exec.
+  there is no re-exec. One process-wide inheritance mutex covers ral's raw
+  launches and helper-backed standard spawns through creation and restoration
+  of temporary inherit flags, not Job Object placement/resume or child waits.
+  The explicit handle list restricts the intended raw child only; it cannot
+  constrain another inheriting child. Unrelated dependency spawns do not take
+  ral's mutex and remain outside this serialization.
 
 ## The child is handed its confinement on a descriptor
 

@@ -615,13 +615,11 @@ mod windows {
     use super::{EnvEdit, Launch, StdioSpec, windows_args};
     use crate::process::outcome::KILL_EXIT_CODE;
     use crate::process::{ChildHandle, Pgid, PgidPolicy};
-    use crate::sync::LockExt as _;
     use std::ffi::{OsStr, OsString};
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::ptr::{null, null_mut};
-    use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
         HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
     };
@@ -634,10 +632,6 @@ mod windows {
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
         STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
-
-    /// Marking a handle inheritable is process-global state, so only one
-    /// spawn at a time may hold that window open across `CreateProcessW`.
-    static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
     /// `STARTUPINFOEXW`'s own byte count, as the `u32` its `cb` field wants.
     #[allow(
@@ -751,8 +745,10 @@ mod windows {
             flags |= CREATE_SUSPENDED;
         }
 
-        let _guard = LAUNCH_LOCK.lock_ignore_poison();
+        let guard = crate::process::spawn_lock::lock_inheritance();
         let inheritable = InheritableHandles::set(&inherited)?;
+        #[cfg(test)]
+        crate::process::spawn_lock::test_phase::pause();
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let ok = unsafe {
             CreateProcessW(
@@ -768,9 +764,12 @@ mod windows {
                 &raw mut pi,
             )
         };
+        // Capture before flag restoration (or unlocking) can change last-error.
+        let error = (ok == 0).then(io::Error::last_os_error);
         drop(inheritable);
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
+        drop(guard);
+        if let Some(error) = error {
+            return Err(error);
         }
 
         // SAFETY: CreateProcessW returned two fresh owning handles.
@@ -1042,12 +1041,13 @@ mod windows {
                     SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
                 };
                 if ok == 0 {
+                    let error = io::Error::last_os_error();
                     for &done in handles.iter().take_while(|h| **h != handle) {
                         unsafe {
                             SetHandleInformation(done, HANDLE_FLAG_INHERIT, 0);
                         }
                     }
-                    return Err(io::Error::last_os_error());
+                    return Err(error);
                 }
             }
             Ok(Self(handles.to_vec()))

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: fea8d9f0
+generated_at_date: 2026-11-03
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -124,8 +124,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   the kill precedes the wait and cannot rewrite a recorded status
   ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]],
   [[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]).
-- `spawn_lock.rs` (`target_vendor = "apple"`) — the process-wide `RwLock`
-  closing Apple's fork/`CLOEXEC` race: neither `pipe2` nor `SOCK_CLOEXEC` is
+- `spawn_lock.rs` — platform-specific process-wide spawn locks. Apple's `RwLock`
+  closes the fork/`CLOEXEC` race: neither `pipe2` nor `SOCK_CLOEXEC` is
   atomic there, so a `fork` racing a pipe's create-then-`fcntl` window can hand
   an exec'd child a fd it should never have inherited. `cloexec_pipe` /
   `cloexec_socketpair` take the shared side; `spawn(cmd)` is the *only* fork
@@ -133,7 +133,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   a `.output()`/`.status()` caller must spawn through it and wait outside the
   lock, or a child's whole lifetime would block every other thread's fd
   creation. `clippy.toml`'s `disallowed-methods` enforces both doors on this
-  target. Every other target is the identity: no lock, no cost.
+  target. Windows' `lock_inheritance` mutex covers raw `Launch` creation and
+  temporary inherit-flag restoration alongside helper-backed `Command::spawn`;
+  it ends before Job Object placement/resume and waits. An explicit handle list
+  restricts the raw child only, not another inheriting child; dependency spawns
+  outside ral's helpers remain outside this lock. Linux has no lock.
 - `lease.rs` — `TerminalLease`, the unforgeable authority to hand the
   controlling terminal to a child via `tcsetpgrp`. No public constructor,
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at
@@ -282,7 +286,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
   attribute a confined spawn attaches (its projection's AppContainer SID and
   the per-path fs and network capability SIDs —
-  [[map/core/capabilities|capabilities]]), the launch mutex,
+  [[map/core/capabilities|capabilities]]), the shared inheritance mutex above,
   suspended create → Job Object assignment → resume, and the widened
   `ChildHandle` raw process wrapper
   ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).

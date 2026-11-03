@@ -1,5 +1,7 @@
 use super::*;
 
+mod inheritance;
+
 fn decode_wide_null(v: &[u16]) -> String {
     let (last, body) = v.split_last().expect("non-empty");
     assert_eq!(*last, 0, "wide_null must NUL-terminate");
