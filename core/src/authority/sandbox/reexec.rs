@@ -13,7 +13,7 @@
 //! behind; Windows, confining at the parent's spawn, has no self re-exec to
 //! guard.
 //!
-//! [`Pinned::command`] hands every exec it builds the on-disk path as
+//! `Pinned::command` hands every exec it builds the on-disk path as
 //! `argv[0]`; bwrap execs the trampoline as `/proc/self/fd/<slot>`.
 
 use crate::Role;
@@ -72,7 +72,7 @@ impl Pinned {
     }
 
     /// The on-disk path the pin was taken from: `argv[0]` of every exec
-    /// [`Self::command`] builds.
+    /// `Self::command` builds.
     pub(super) fn arg0(&self) -> &Path {
         &self.arg0
     }
@@ -234,7 +234,7 @@ pub(crate) fn launch(role: Role) -> std::io::Result<crate::process::Launch> {
 ///
 /// Idempotent, and silent on failure: unpinned, the unconfined helpers still
 /// run, since [`launch`] falls back to the live `current_exe`, but
-/// a sandboxed launch is refused ([`own`]).
+/// a sandboxed launch is refused (`own`).
 pub(super) fn pin_self() {
     if OWN.get().is_some() {
         return;

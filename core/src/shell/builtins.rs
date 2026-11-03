@@ -395,7 +395,7 @@ builtin_registry! {
 /// The argv half of core's manifest: names that take an argv rather than
 /// arguments, and so install as base handler frames instead of natives.
 ///
-/// `echo` is core's only one.  [`DETACH_BUILTIN`] is the other frame core
+/// `echo` is core's only one.  `DETACH_BUILTIN` is the other frame core
 /// publishes, withheld from here for a host that also arms a birth budget.
 static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("echo"),

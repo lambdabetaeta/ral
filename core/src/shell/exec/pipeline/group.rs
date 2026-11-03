@@ -4,7 +4,7 @@
 //! outliving every stage so the pgid stays joinable; a group joining
 //! an enclosing stage's pgid has no anchor.  The shell is not a member, so a
 //! signal the tty delivers to the group reaches it only as the anchor's
-//! [`Event::Heard`] — the kernel having already given that signal to every
+//! `Event::Heard` — the kernel having already given that signal to every
 //! other member — which only the pipeline's
 //! [`TerminalLoan`](crate::process::TerminalLoan) reads as a key.
 

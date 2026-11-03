@@ -1573,7 +1573,8 @@ mod tests {
     /// fabricates `/.gitconfig`.
     #[test]
     fn freeze_rejects_home_relative_places_without_home() {
-        crate::host::env::test_support::with_vars_cleared(&crate::host::HOME_VARS, || {
+        let unbound = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"];
+        crate::host::env::test_support::with_vars_cleared(&unbound, || {
             for place in [
                 Place::Home(".gitconfig".into()),
                 xdg(XdgKind::Config, "git"),

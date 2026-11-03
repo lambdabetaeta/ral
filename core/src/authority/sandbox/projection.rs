@@ -33,7 +33,7 @@ use std::collections::BTreeSet;
 /// Allowances and exclusions stay as the guard judges them, up to rendering:
 /// an exclusion with the objects its walk held.  `A` names an allowance and
 /// `X` an exclusion: [`FsAllow`] and [`GrantPath<Excluded>`] as folded,
-/// [`Object`] and [`Rendered`] as rendered.
+/// `Object` and `Rendered` as rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsRules<A = FsAllow, X = GrantPath<Excluded>> {
     /// The live read region: authored reads and writes, the run places, the
@@ -98,7 +98,7 @@ impl<A, X> FsProjection<A, X> {
 /// sandboxed child re-execs binaries the guard never sees.  An empty
 /// `Restricted` admits nothing.  Its paths are [`RealPath`]s, frozen at grant,
 /// and stay so until the backend that needs other spellings renders them with
-/// [`render_real`](crate::path::render_real), which never re-resolves one.
+/// `path::render_real`, which never re-resolves one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum ExecProjection {
     #[default]

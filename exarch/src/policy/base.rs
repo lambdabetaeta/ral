@@ -475,7 +475,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_narrow_bases_withhold_the_gpu() {
-        let ctx = ctx_at("/h", "/work/proj");
+        let ctx = ctx_at(&host_home(), "/work/proj");
         for (name, text, withheld) in [
             ("confined", CONFINED_RAL, true),
             ("minimal", MINIMAL_RAL, true),

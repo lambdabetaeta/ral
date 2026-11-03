@@ -778,6 +778,7 @@ mod tests {
         let baseline = |pairs: &[(&str, &str)]| system_reads_of(env(pairs), &home);
         let prefixes = [
             "/opt/homebrew",
+            "/home/linuxbrew/.linuxbrew",
             "/opt/local",
             "/nix/store",
             "/usr/pkg",

@@ -50,7 +50,7 @@ use super::appcontainer::{
 };
 use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 
-/// One fs projection's identity, as [`FsRules`](crate::authority::sandbox::FsRules)
+/// One fs projection's identity, as [`FsRules`]
 /// carries it, which names the profile its launches run under: launches the
 /// fs grants tell apart never share a named-object namespace. It decides no
 /// capability, since a token names its own launch's grants alone, network
