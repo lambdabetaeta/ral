@@ -25,10 +25,10 @@ mod write;
 pub(super) mod resolve;
 
 pub(crate) use read::open_discard;
-pub(crate) use resolve::walk_dir_made;
 pub use resolve::{LeafMode, exists, is_dir, kind_of, walk, walk_dir, walk_lenient};
 #[cfg(unix)]
 pub(crate) use resolve::{Vetted, walk_with};
+pub(crate) use resolve::{walk_dir_made, walk_dir_made_synced};
 pub(crate) use write::{Access, Streaming};
 pub use write::{ScopedDir, Visibility};
 
@@ -53,6 +53,21 @@ use macos as host;
 mod windows;
 #[cfg(windows)]
 use windows as host;
+
+/// Sync the held directory, never its spelling.
+pub(crate) fn sync_dir<A: Authority>(dir: &Dir<A>) -> io::Result<()> {
+    host::sync_dir(&dir.node.held.file)
+}
+
+/// Sync the directory and every held ancestor, including an XDG cache winner.
+pub(crate) fn sync_dir_chain<A: Authority>(dir: &Dir<A>) -> io::Result<()> {
+    let mut node = Some(&dir.node);
+    while let Some(held) = node {
+        host::sync_dir(&held.held.file)?;
+        node = held.above.as_ref();
+    }
+    Ok(())
+}
 
 #[cfg(unix)]
 pub(super) fn current_path(file: &File) -> io::Result<PathBuf> {

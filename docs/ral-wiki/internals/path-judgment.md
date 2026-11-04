@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
-verified_at_date: 2026-10-28
+verified_at_date: 2026-11-03
 anchors: [walk, walk_excluded, failure_trace, Shell::walk_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
@@ -143,7 +143,11 @@ function of its layers.**
 
 - **`shell::grant::decode_capability_map` walks each spelling as it freezes it**
   through `authority::grant`, runs the physical refusals (`xdg` within home,
-  `refuse_the_world`, the toolchain floor) on that trace, and keeps it. A `Capabilities` that arrives already decoded is
+  `refuse_the_world`, the toolchain floor) on that trace, and keeps it. Every
+  kept selector directory, default or override, meets the same root/home/ancestor
+  refusal on its followed trace before polarity converts it; an exclusion still
+  keeps its held objects. System-read discovery drops unsafe prefixes instead
+  of refusing them. A `Capabilities` that arrives already decoded is
   resolved by `GrantLayer::from_capabilities`, the same walk. A `GrantLayer`
   keeps its rules and nothing beside them; each spelling is a `GrantPath`:
   as written, and what its walk made of it.

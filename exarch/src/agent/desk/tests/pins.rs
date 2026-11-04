@@ -201,7 +201,7 @@ fn live_surfaces_record_their_seam_twins() {
                     Transient::Unpin { key } if key == "tasks" => "unpin",
                     _ => continue,
                 }),
-                Signal::Born(..) => {}
+                Signal::Born(..) | Signal::Synced { .. } => {}
             }
         }
         assert_eq!(

@@ -623,6 +623,7 @@ fn win32_path(nt: &[u16]) -> Vec<u16> {
 fn rights(access: Access) -> u32 {
     match access {
         Access::Read => GENERIC_READ,
+        Access::Update => GENERIC_READ | GENERIC_WRITE,
         Access::Append => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
         Access::Write => GENERIC_WRITE,
     }
@@ -1514,4 +1515,10 @@ pub(super) mod owner_only {
             }
         }
     }
+}
+
+/// Windows has no directory flush.
+#[allow(clippy::unnecessary_wraps, reason = "same host primitive as Unix")]
+pub(super) fn sync_dir(_dir: &File) -> io::Result<()> {
+    Ok(())
 }

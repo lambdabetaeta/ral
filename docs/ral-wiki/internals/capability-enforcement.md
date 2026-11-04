@@ -1,14 +1,15 @@
 ---
-generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
-verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
-verified_at_date: 2026-10-28
-anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable]
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-04
+anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable, GuestJail::plan, Launch::apply_guest_jail, install_pre_exec, net_veto]
 ---
 
 # Capability enforcement: one model, two enforcers
 
 **A grant is data, and two enforcers read it: an in-process guard for what ral
 does itself, and an OS sandbox for what a spawned program does on its own.**
+Host projections and the [[#Guest jail|guest jail]] enforce different boundaries.
 Each is the authority exactly where the other is blind
 ([[design/two-enforcers|two enforcers]]). [[design/grant|The grant design]]
 states the lattice; this page says how a check runs. The domain lives in
@@ -126,37 +127,39 @@ and exarch's credential layer all read `GrantStack::is_restrictive`.
 
 Exec is judged over a target and never its arguments, in two parts: the table
 (`ExecDenial::Run`) and what running reads (`ExecDenial::Read`). The bundled
-coreutils and the structured primitives go through the same chokepoint
-([[internals/builtins-registry|builtins]]). That closes the bypass, and lets ral
-stay a [[invariants/single-binary|single binary]].
+coreutils are admitted as command heads, then re-executed in children; structured
+primitives perform ral-owned effects through the evaluator's guard doors
+([[internals/builtins-registry|builtins]]). Bundling preserves a
+[[invariants/single-binary|single binary]], not execution in the evaluator.
 
 ## Who enforces what
 
-**The guard covers what ral dispatches. The OS sandbox covers what a spawned
-process does on its own.**
+**The guard covers what ral dispatches. Host sandbox projections cover what a
+spawned process does on its own, within the platform's declared limits.**
+The [[#Guest jail|guest jail]] is a separate launch branch.
 
 - **Exec.** The guard checks every platform. `authority::guard::check_exec`
   judges the program *before* the spawn and returns `Admitted`. `build_launch`
   takes the caller's argv separately. The kernel then holds the same rules
   against programs the child starts itself (`sh -c`, `find -exec`): Seatbelt on
-  macOS, Landlock on Linux. Windows has no kernel exec filter
+  macOS, Landlock on Linux hosts. Windows has no kernel exec filter
   ([[internals/exec-judgment|exec-judgment]]).
 - **Filesystem.** The guard checks ral's own reads and writes
   (`authority::guard::check_fs_exact`). An OS sandbox confines the child's: Seatbelt on macOS,
-  bwrap on Linux, an AppContainer LowBox token on Windows.
+  bwrap on Linux hosts, an AppContainer LowBox token on Windows.
 - **Network.** There is no guard, because ral performs no network operation
   itself. The OS sandbox is the only enforcer. On Windows it is the withheld
   network capability SIDs: a LowBox token without them cannot open a socket.
 - **GPU.** No guard, as for the network: the OS sandbox is the only enforcer.
-  Seatbelt on macOS, by absent IOKit, Metal and cache rules; on Linux what the
+  Seatbelt on macOS, by absent IOKit, Metal and cache rules; on Linux hosts what the
   bwrap mounts show, since the Landlock ruleset handles only `Execute` and
   `Refer` and so governs no device node
   ([[internals/linux-envelope|linux-envelope]]). Windows cannot withhold it: an
   AppContainer reaches Direct3D regardless, so a withheld GPU projects as left
   on there (`WITHHOLDS_GPU`) and the grant summary says so.
 
-**For the filesystem, guard and sandbox read one fold and judge it on different
-evidence.** Both read one fold (`authority/policy/fs.rs`). `region` meets each layer's table
+**For host filesystem projections, guard and sandbox read one fold and judge
+it on different evidence.** Both read one fold (`authority/policy/fs.rs`). `region` meets each layer's table
 for the operation: the allows meet and the exclusions join. A read then joins
 the system reads in `Baseline`, the platform's system paths, after the meet:
 only a `deny` removes them. They are host state, resolved once by
@@ -185,23 +188,56 @@ is stamped.
 
 ## Confinement is per command
 
-**The sandbox wraps each external command. It never re-runs the grant body.**
+**Confinement is applied to each external command, never by re-running the grant body.**
 A `grant` is a *local* dynamic effect scope: its body evaluates in process, and
 `transport::dispatch` runs it locally. Nested grants compose by intersection on
 the `GrantStack`, which is not a process boundary ([[design/grant|grant]]).
 Confinement happens one level down: when `build_launch` spawns an admitted
-external or bundled child under a restrictive projection, it calls
+external or bundled child on a host under a restrictive projection, it calls
 `sandboxed_command`, which confines that one child
 ([[internals/confined-launch|confined-launch]]).
 
 Two consequences follow:
 
-- Each command is its own *launch*. Two commands in one grant body run in two
-  envelopes, each rendered afresh from the filesystem as it then stands.
+- Each command is its own *launch*. On a host, two commands under an active
+  projection run in two envelopes, each rendered afresh from the filesystem as
+  it then stands.
 - Confinement engages only when a child is actually spawned. A
   ``grant [net: `offline] { … }`` that runs no external command does not fail
   closed. An offline request on a backend that cannot enforce it fails closed at
   the spawn (`projection_enforceable`).
+
+## Guest jail
+
+**A Linux guest engine checks ral-owned effects and direct command admission,
+but does not project per-grant fs or exec rules into its children.**
+`build_launch` selects the process-global `GuestJail` instead of
+`SandboxProjection::of` and `sandboxed_command`, for host-file and bundled-tool
+heads alike.
+
+- The admitted utility's own reads, writes and internal execs, as well as its
+  descendants', are not checked by the evaluator. A narrowed `fs` or `exec`
+  grant supplies no additional kernel boundary for those operations.
+- Guest-visible mounts and topology, read-only mounts and Unix ownership/modes
+  remain the filesystem perimeter, not arbitrary access to the host tree.
+- `GuestJail::plan` assigns a fresh uid/gid and resource-limited cgroup
+  membership: kept commands own transient `engine-<pid>/exec-<seq>` leaves;
+  all survivors share `detached` and one command's allowance. Only kept
+  launches acquire a teardown guard, so failed preparation, failed exec and
+  abandoned launches never kill shared survivors. Engine teardown spares the
+  shared leaf; machine halt reaches it.
+  `Launch::apply_guest_jail` prepares the envelope's seccomp deny-set;
+  the pre-exec hook enters the cgroup, isolates an offline network, drops
+  supplementary groups and credentials, sets `NO_NEW_PRIVS`, marks descriptors
+  above stderr close-on-exec, then installs seccomp. Setup failure refuses launch.
+- The stack's `net_veto` does reach the jail: ``net: `offline`` creates a fresh
+  network namespace with loopback up. IP egress and outside abstract Unix
+  sockets are isolated; local loopback and pathname Unix sockets remain, and a
+  reachable pathname socket can relay outside the command. The host
+  [[design/egress|NetPolicy destination gate]] still governs guest egress.
+
+See `docs/SPEC.md` §12.11 and [[map/core/io-process|IO & process]] for the jail's
+implementation.
 
 [[design/exarch-architecture|exarch]] reuses this boundary unchanged: an agent's
 engine holds host-installed session layers on the same stack.

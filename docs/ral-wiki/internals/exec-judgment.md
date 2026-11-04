@@ -1,15 +1,16 @@
 ---
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
-verified_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
-verified_at_date: 2026-10-28
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-03
 anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, command_candidates, failure_trace, ReadRegion::judge_file, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
 
 **A head is judged before it is looked at; ral runs exactly the program that
-judgment admits.** One table decides, `ExecRules`, and both the guard and the kernel
-read it ([[design/authority-tables#Two instances|authority-tables]]). This page is the exec half
+judgment admits.** One table decides direct admission, `ExecRules`; macOS and
+Linux host kernel projections also read it
+([[design/authority-tables#Two instances|authority-tables]]). This page is the exec half
 of [[internals/capability-enforcement|capability-enforcement]].
 
 ## The head is judged before it is looked at
@@ -63,6 +64,10 @@ launch for a direct pipeline stage and `detach`.
   containment. Specificity decides nothing: **an exclusion beats every
   allowance**, so an exact file or a deeper directory never reopens an excluded
   directory ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
+- **A link under an admitted directory to a file outside it admits nothing**,
+  in the guard and both host kernel projections. Where a distribution links
+  commands from `/usr/bin` to another root, `` `system `` names that root
+  (`authority/grant/toolchains.rs`).
 - **`every` is a flag, not a key.** It resolves to `ExecAllow::Any`, positive
   for every program, bundled tools included, and has no negative form.
 - **A bare key** means the file the decoding env's `PATH` finds. So a planted
@@ -92,7 +97,7 @@ judgments at a failed walk's transcript, without minting a handle.
   exclusion of ral's binary therefore refuses every bundled tool; an exec
   exclusion of ral leaves them alone.
 - **ral's binary is an ordinary host file.** It runs exactly where a grant
-  admits it, by path, directory or name, in the guard and the kernel alike;
+  admits it, by path, directory or name, in the guard and host kernel projections;
   `exec: [allow: []]` runs nothing, ral included. A nested ral is bound by the
   kernel alone and boots with no stack.
 
@@ -103,8 +108,8 @@ judgments at a failed walk's transcript, without minting a handle.
 retargeted between judgment and `execve` (by an earlier pipeline stage, say)
 cannot run another program.
 
-- **A renamed ancestor, or a rewrite at the real path, between judgment and
-  `execve` runs the new file** wherever the policy admits that path, and
+- **On a confined macOS or Linux host, a renamed ancestor or a rewrite at the
+  real path between judgment and `execve` runs the new file** wherever the policy admits that path, and
   nowhere else: inside the envelope the kernel judges the inode `execve`
   meets. This is a declared limit, since a writer of the path could have
   placed the file before judgment
@@ -114,20 +119,21 @@ cannot run another program.
 
 ## The kernel holds the same evidence
 
-**A launch runs under the stack that admitted it.** `build_launch` projects the
-live stack beside the `Admitted`'s table; each path admits and launches within
-one machine step, and the stack changes only at `Frame::Grant` and
+**Direct admission reads the live stack on every seat.** On hosts, `build_launch`
+projects that stack beside the `Admitted`'s table; each path admits and launches
+within one machine step, and the stack changes only at `Frame::Grant` and
 `Shell::with_pushed`.
 
 **`authority::guard::check_exec` judges the program before the spawn. The kernel then
-holds the same table against programs the child starts itself.**
+holds the same table against programs the child starts itself on macOS and
+Linux hosts, within the declared limits.**
 
-- **The kernel's rules are `ExecRules::for_kernel` of the table inside the
+- **The host kernel projection's rules are `ExecRules::for_kernel` of the table inside the
   `Admitted`, joined with live support.** Support is what a launch needs beyond
   the policy: carriers
   ([[decisions/261004_exec-carriers|exec-carriers]]) and the Linux dynamic
   linker. It yields to every exclusion on either axis, grants running and
-  reading and never writing, and is computed for every confined launch.
+  reading and never writing, and is computed for every projected host launch.
   Bundled-tool scopes are dropped.
 - **macOS:** the Seatbelt profile renders every positive `process-exec`
   clause, then every negative one, and its fs section refuses running whatever
@@ -135,7 +141,7 @@ holds the same table against programs the child starts itself.**
   group is for stable output; depth grants no exception, so an exclusion wins
   as it does in the guard. The kernel sees no argv, and no bundled tool's name
   ([[internals/seatbelt-profile|seatbelt-profile]]).
-- **Linux:** the parent builds a Landlock ruleset, and the payload enters it
+- **Linux hosts:** the parent builds a Landlock ruleset, and the payload enters it
   inside the bwrap envelope
   ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]). Landlock only
   allows, so each admitted directory is rendered *less* what the table
@@ -147,7 +153,13 @@ holds the same table against programs the child starts itself.**
   on every bind root; the bind plan exists before the ruleset
   ([[internals/linux-envelope|linux-envelope]]).
 - **Windows:** the AppContainer has no path-exec filter. The guard stands
-  alone, and the gap between check and exec stays open.
+  alone, and the gap between check and exec stays open. An admitted program may
+  execute another visible image; any active AppContainer fs/net restrictions
+  still hold. An exec-only restriction need not create an AppContainer.
+- **Linux guest engines:** the [[internals/capability-enforcement#Guest jail|guest jail]]
+  replaces projection. The admitted utility and its descendants have no
+  per-grant fs/exec kernel rules; direct admission still holds, as do the jail,
+  its offline network namespace and seccomp, and the VM perimeter.
 
 **A refused `execve` of a script says why.** The child used to advise allowing
 the interpreter, which is wrong when an exclusion covers it, and it holds no
@@ -167,8 +179,9 @@ is true in the guard, and in the macOS profile too, since Seatbelt's
 written into a writable, runnable folder, or a script fed to an admitted
 interpreter, is the same.
 
-- **What holds is the projection, not the name.** The copy runs under the same
-  confinement as the process that wrote it, so it reaches nothing new.
+- **What holds is the containing OS boundary, not the name.** On a host the
+  copy inherits the writer's projection; in a guest it inherits the jail and VM
+  perimeter, not per-grant fs/exec rules.
 - **There is no write freeze.** A broad write that covers a run-admitted
   directory lets a child author programs there; where that directory is on the
   user's own `PATH`, the program later runs outside any sandbox. `edit-only`

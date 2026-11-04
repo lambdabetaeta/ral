@@ -46,7 +46,11 @@ impl fmt::Debug for Reader {
 }
 
 impl Reader {
-    /// A mirror's catch-up: where `after` stands, and the commits past it.
+    pub(crate) fn snapshot(&self) -> io::Result<super::Snapshot> {
+        self.log.snapshot()
+    }
+
+    /// Catch-up: where `after` stands, the synced commit watermark, and later commits.
     /// See [`super::log::Log::since`].
     ///
     /// # Errors
@@ -54,7 +58,11 @@ impl Reader {
     pub(crate) fn since(
         &self,
         after: Option<Cursor>,
-    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Commit>> + use<>)> {
+    ) -> io::Result<(
+        Cursor,
+        u64,
+        impl Iterator<Item = io::Result<Commit>> + use<>,
+    )> {
         self.log.since(after)
     }
 }
@@ -112,6 +120,21 @@ impl Emitter {
     /// Returns the writer's first failure.
     pub fn check_available(&self) -> Result<(), Unavailable> {
         self.log.check_available()
+    }
+
+    /// Persist every commit preceding this call, or end the bound life.
+    pub(crate) fn sync(&self) -> Result<(), Unavailable> {
+        self.log.sync()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_synced_through(&self, commit: u64) {
+        self.log.assert_synced_through(commit);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn before_sync(&self, before: impl FnOnce() -> io::Result<()> + Send + 'static) {
+        self.log.before_sync(before);
     }
 
     /// End `life` when this writer fails, at once if it has.

@@ -25,7 +25,7 @@ struct Terminal {
 }
 impl Terminal {
     fn complete(&mut self, mut teardown: Teardown) -> Teardown {
-        if let Err(failure) = self.recorder.check_available() {
+        if let Err(failure) = self.recorder.sync() {
             announce(&failure, &self.emit);
             teardown.failures.push(failure.to_string());
         }
@@ -91,7 +91,7 @@ impl Agent {
         let recorder = self.recorder();
         let mut failures = self.teardown().failures;
         drop(self);
-        failures.extend(recorder.check_available().err().map(|f| f.to_string()));
+        failures.extend(recorder.sync().err().map(|f| f.to_string()));
         failures
     }
 }

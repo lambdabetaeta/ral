@@ -1,8 +1,8 @@
 ---
-generated_at_commit: d56977ff
-verified_at_commit: d56977ff
-verified_at_date: 2026-11-03
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-04
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
 # Output capture and detachment
@@ -249,15 +249,13 @@ of the child's pgid.
   the session never waited and cannot. The survivor is *mute*: a program worth
   outliving a session keeps its own log, and the only way to learn whether it is
   still alive is to probe what it serves.
-- **A birth spends a budget slot iff a survivor runs.** Once the spawn returns,
-  the grandchild has certainly exec'd, so every later failure (the reap, the pid
-  handshake) is `Survivor::Unnamed`: the slot is spent and the user is told a
-  program runs that nothing can stop by pid. Only a failed spawn refunds.
-- The verb is **absent, not vetoed**, wherever it has no meaning. A host arms a
-  `DetachPolicy` — a birth budget — in the same act that installs the builtin,
-  and does so only off Windows, where the double fork exists. That is now the
-  whole of the absence question: whether a given *call* may spend the verb is
-  asked of the live grant stack (`GrantStack::permits(Flag::Detach)`) and answered as
+- **A successful spawn means the grandchild exec'd.** A later failure to reap
+  the intermediate or recover the pid is `Survivor::Unnamed`: the user is told
+  a program runs that nothing can stop by pid.
+- The verb is **absent, not vetoed**, wherever the host omits it. Installation
+  is Unix-only, where the double fork exists. Whether a given *call* may use
+  the verb is asked of the live grant stack
+  (`GrantStack::permits(Flag::Shell(ShellVerb::Detach))`) and answered as
   a refusal, a `shell` list without `` `detach ``
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
 - A survivor born under a projection **keeps it for life**. `build_launch`
@@ -271,6 +269,11 @@ of the child's pgid.
   invisible from inside any later grant. Nothing later can widen what it may
   touch, because nothing later can name it
   ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
+- In a guest, all survivors join **one shared `ral-exec/detached` leaf**,
+  limited as one command is, while each keeps its own uid/gid. A launch holds
+  no teardown authority over that leaf, even if preparation or exec fails.
+  Engine teardown reaches only its kept commands; machine halt reaches both
+  ([[map/core/io-process|io-process]]).
 - A detached row has no place in a resident fold even if one wanted the
   ledger's uniformity, because that fold demands `cancel()` and every answer is
   wrong — a no-op lies about the edge, a `kill` re-asserts the ownership the

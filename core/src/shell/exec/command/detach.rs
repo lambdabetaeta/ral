@@ -31,8 +31,8 @@ use super::vet::{SpawnPlan, vet};
 /// is refused: nothing could be detached.  A stub stands in for `detach`
 /// itself.
 ///
-/// Three judgments follow resolution: that refusal, then [`Head::admit`] and
-/// [`vet`], then the session's remaining births.
+/// Two judgments follow resolution: that refusal, then [`Head::admit`] and
+/// [`vet`].
 pub(crate) fn detach(
     desc: &str,
     head: &Value,
@@ -74,29 +74,8 @@ pub(crate) fn detach(
         argv,
     )?;
 
-    let Some(policy) = shell.detach_policy() else {
-        return Err(sig(
-            "detach: this host installed the builtin but armed no detach policy; \
-             installing and arming are one act, so this is an internal inconsistency."
-                .to_string(),
-        ));
-    };
-    let reservation = match policy.admit() {
-        Ok(reservation) => reservation,
-        Err(budget) => {
-            return Err(sig(format!(
-                "detach: this session has already birthed {budget} processes it no longer owns; \
-                 that is the budget, and nothing gives a birth back. Is one of them finished, so \
-                 you can stop it by pid and do without another?"
-            )));
-        }
-    };
-
     // The survivor outlives this run, but confining it happens here, under this
-    // run's scope: a cancel during the stamp abandons the birth, which is the
-    // one moment it still can — and the abandoned launch's reservation, still
-    // uncommitted, gives the slot straight back. A failed spawn refunds it too;
-    // only a born survivor, named or not, spends one.
+    // run's scope: a cancel during the stamp abandons the birth.
     let mut launch = build_launch(
         admitted,
         &args,
@@ -110,7 +89,6 @@ pub(crate) fn detach(
     let survivor = launch
         .spawn_detached()
         .map_err(|e| sig(format!("detach: cannot launch '{shown}': {e}")))?;
-    reservation.commit();
     shell.observe(
         mooring,
         Observed::Command(Command::new(

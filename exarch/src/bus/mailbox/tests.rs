@@ -11,6 +11,7 @@ mod integration;
 mod jobs;
 mod queue;
 mod reports;
+mod sync;
 mod wakeups;
 
 const QUIET: Rest = Rest { pending: false };

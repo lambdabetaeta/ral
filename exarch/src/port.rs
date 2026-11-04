@@ -1,7 +1,7 @@
 //! A frontend's whole reach into a host's agents.
 
 pub use crate::agent::Ended;
-pub use crate::bus::{BusReceiver, Command, Read, Rewrite, Signal, Sink};
+pub use crate::bus::{BusReceiver, Command, Read, Refused, Rewrite, Signal, Sink};
 #[cfg(any(test, feature = "test-util"))]
 pub use crate::bus::{BusSender, channel};
 pub(crate) use crate::bus::{MERGE_TEXT_CAP, WORKER_PANIC_PREFIX};
@@ -10,7 +10,7 @@ use crate::agent::AgentHandle;
 use crate::agent::fleet::Registry;
 use crate::bus::UsageMeter;
 use crate::provider::{Selected, Usage};
-use crate::record::{AgentId, JobId};
+use crate::record::{AgentId, JobId, Unavailable};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,6 +31,26 @@ pub struct AgentRow {
     pub idle: Duration,
     pub selected: Selected,
 }
+
+/// Withdrawal may already have happened, even when its recording or sync failed.
+#[derive(Debug)]
+pub enum WithdrawalFailed {
+    Ended(Ended),
+    Unavailable(Unavailable),
+}
+
+impl std::fmt::Display for WithdrawalFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ended(ended) => ended.fmt(f),
+            Self::Unavailable(why) => write!(
+                f,
+                "withdrawal could not be certified: {why}; cancellation or withdrawal may already have happened; inspect or resume the run before retrying"
+            ),
+        }
+    }
+}
+impl std::error::Error for WithdrawalFailed {}
 
 impl Port {
     pub(crate) fn new(registry: Arc<Registry>, meter: UsageMeter) -> Self {
@@ -54,8 +74,8 @@ impl Port {
 
     /// # Errors
     /// Returns `Ended` once the agent has ended.
-    pub fn submit(&self, agent: AgentId, text: String) -> Result<(), Ended> {
-        self.live(agent)?.steer(text)
+    pub fn submit(&self, agent: AgentId, text: String) -> Result<(), Refused> {
+        self.live(agent).map_err(|_| Refused::Ended)?.steer(text)
     }
 
     /// # Errors
@@ -66,22 +86,34 @@ impl Port {
 
     /// # Errors
     /// Returns `Ended` once the agent has ended.
-    pub fn recall(&self, agent: AgentId) -> Result<Vec<String>, Ended> {
-        Ok(self.live(agent)?.recall())
+    pub fn recall(&self, agent: AgentId) -> Result<Vec<String>, WithdrawalFailed> {
+        self.live(agent)
+            .map_err(WithdrawalFailed::Ended)?
+            .recall()
+            .map_err(WithdrawalFailed::Unavailable)
     }
 
     /// Stop `job` if it is open, taking back its queued human prompts.
     ///
     /// # Errors
     /// Returns `Ended` once the agent has ended.
-    pub fn stop(&self, agent: AgentId, job: JobId) -> Result<Option<Vec<String>>, Ended> {
-        Ok(self.live(agent)?.stop(job))
+    pub fn stop(
+        &self,
+        agent: AgentId,
+        job: JobId,
+    ) -> Result<Option<Vec<String>>, WithdrawalFailed> {
+        self.live(agent)
+            .map_err(WithdrawalFailed::Ended)?
+            .stop(job)
+            .map_err(WithdrawalFailed::Unavailable)
     }
 
     /// # Errors
     /// Returns `Ended` once the agent has ended.
-    pub fn command(&self, agent: AgentId, command: Command) -> Result<(), Ended> {
-        self.live(agent)?.command(command)
+    pub fn command(&self, agent: AgentId, command: Command) -> Result<(), Refused> {
+        self.live(agent)
+            .map_err(|_| Refused::Ended)?
+            .command(command)
     }
 
     /// End `agent` and its descendants; their owners still join them.

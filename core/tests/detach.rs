@@ -49,11 +49,9 @@ const MARKER: &str = "survivor-8fb1";
 /// from under the birth still waiting for it.  One at a time.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// A shell holding `detach` exactly as exarch's seat hands it over: the name
-/// installed and the budget armed in one act, so a shell that has the verb
-/// always has births to spend.
-fn armed() -> Shell {
-    let mut shell = ral_core::shell::boot::boot_shell(
+/// A shell holding `detach` as exarch's runtime installs it.
+fn with_detach() -> Shell {
+    ral_core::shell::boot::boot_shell(
         ral_core::io::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::shell::boot::HostSurface {
@@ -62,9 +60,7 @@ fn armed() -> Shell {
         },
         ral_core::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its baseline");
-    shell.arm_detach(16);
-    shell
+    .expect("a test host resolves its baseline")
 }
 
 /// Birth one process through `call` and return the receipt as JSON — via
@@ -143,7 +139,7 @@ fn detach_host() {
         return;
     };
     let receipt = birth(
-        &mut armed(),
+        &mut with_detach(),
         &format!(
             "detach #'the survivor a test outlives'# /bin/sh -c 'while :; do \
              echo {MARKER}; echo {MARKER} >&2; echo {MARKER} >> {}; sleep 0.05; done'",
@@ -194,7 +190,7 @@ impl Drop for Survivor {
 #[test]
 fn a_birth_hands_back_a_pid_and_a_desc_and_leaves_nothing_else() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
+    let mut shell = with_detach();
     let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
     let survivor = Survivor::of(&receipt);
 
@@ -219,7 +215,7 @@ fn a_birth_hands_back_a_pid_and_a_desc_and_leaves_nothing_else() {
 #[test]
 fn a_birth_leaves_no_zombie_because_the_intermediate_is_reaped_inside_it() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
+    let mut shell = with_detach();
     let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
     let survivor = Survivor::of(&receipt);
 
@@ -244,7 +240,7 @@ fn a_birth_leaves_no_zombie_because_the_intermediate_is_reaped_inside_it() {
 #[test]
 fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
+    let mut shell = with_detach();
     let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
     let survivor = Survivor::of(&receipt);
     assert!(
@@ -266,18 +262,11 @@ fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
     }
 }
 
-/// A frame that withholds the verb refuses the call and births nothing —
-/// and, because the refusal comes before admission, spends no birth either.
-/// The budget is monotone, so a refusal that quietly counted would be
-/// unrecoverable.
+/// A frame that withholds the verb refuses the call and births nothing.
 #[test]
-fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
+fn a_frame_that_withholds_detach_refuses_the_call() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
-    // One birth in the whole session, so the surviving process itself is the
-    // evidence: had the refusal counted, this budget would be gone and the
-    // birth below would be refused for exhaustion instead.
-    shell.arm_detach(1);
+    let mut shell = with_detach();
     let message = refusal(
         &mut shell,
         "grant [shell: [`chdir]] { detach #'a long sleep'# /bin/sleep 300 }",
@@ -286,27 +275,14 @@ fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
         message.contains("withholds"),
         "the refusal must say the grant withheld the verb, got {message:?}"
     );
-
-    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
-    let survivor = Survivor::of(&receipt);
-    assert!(
-        survivor.alive(),
-        "the one birth the session had must still be spendable after a refusal"
-    );
 }
 
-/// A launch that is admitted and then fails — the path head names an
-/// executable script whose `#!` interpreter does not exist, so it passes vet
-/// and `execve` refuses it with ENOENT, which `execvp` does not retry — must
-/// give its reservation back.  The budget is whole-life and monotone for
-/// births; a failed launch birthed nothing, so it spends nothing.
+/// A script whose `#!` interpreter does not exist passes vet and fails at
+/// `execve`; the error names the failed launch.
 #[test]
-fn a_launch_that_fails_after_admission_gives_the_slot_back() {
+fn a_launch_that_fails_says_it_cannot_launch() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
-    // One birth in the whole session: had the failed launch counted, the
-    // real birth below would be refused for exhaustion instead.
-    shell.arm_detach(1);
+    let mut shell = with_detach();
     let dir = tempfile::tempdir().unwrap();
     let no_interpreter = dir.path().join("no-interpreter");
     std::fs::write(&no_interpreter, "#!/nonexistent/ral-test-interpreter\n").unwrap();
@@ -317,14 +293,7 @@ fn a_launch_that_fails_after_admission_gives_the_slot_back() {
     );
     assert!(
         message.contains("cannot launch"),
-        "the refusal must come from the failed spawn, not from vet or exhaustion, got {message:?}"
-    );
-
-    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
-    let survivor = Survivor::of(&receipt);
-    assert!(
-        survivor.alive(),
-        "the one birth the session had must still be spendable after a failed launch"
+        "the refusal must come from the failed spawn, not from vet, got {message:?}"
     );
 }
 
@@ -367,7 +336,7 @@ fn the_survivor_writes_to_dev_null_because_std_dup2s_stdio_before_pre_exec_runs(
 #[test]
 fn stacked_detach_handler_forwards_to_base_frame_under_self_masking() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
+    let mut shell = with_detach();
     let receipt = birth(
         &mut shell,
         "within [handlers: [detach: { |args| detach ...$args }]] \
@@ -386,7 +355,7 @@ fn stacked_detach_handler_forwards_to_base_frame_under_self_masking() {
 #[test]
 fn unalias_detach_refuses_because_no_run_frame_holds_it() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
+    let mut shell = with_detach();
     let message = refusal(&mut shell, "unalias detach");
     assert!(
         message.contains("no alias named"),
@@ -428,7 +397,7 @@ fn a_detached_process_outlives_the_full_exit_of_the_host_that_birthed_it() {
 fn a_denied_program_is_refused_before_its_arguments_are_shaped() {
     let source = "let go = { |v| detach #'a sleep'# /bin/sleep $v }; \
                   grant [exec: [allow: []]] { go [a: 1] }";
-    let (result, events) = common::run_recorded(&mut armed(), source, true);
+    let (result, events) = common::run_recorded(&mut with_detach(), source, true);
     match result {
         Err(Break::Error(e)) => assert!(
             e.message.contains("denied by active grant"),

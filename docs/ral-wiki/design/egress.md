@@ -120,18 +120,20 @@ in host mode. The JSON record shape and rotation bound are the gate's.
 
 ral's own `net` capability is a veto
 ([[design/two-enforcers|two-enforcers]]): it has no in-process guard, since
-ral dispatches no network operation. In the guest, `net: offline` gives each
-command a fresh network namespace with loopback up (`docs/SPEC.md` §12.5,
-§12.11). IP egress and abstract Unix sockets outside that namespace are out
-of reach; pathname Unix sockets remain reachable through the shared
-filesystem and can relay for an offline command. It cannot express
-"reachable, but only this host"; nothing in the grant vocabulary names an
-endpoint. The real narrowing this page describes happens one layer outside
-the grant, in the host policy `NetPolicy` enforces: `synod/src/folder/grant.rs` leaves
-`net` unvetoed to preserve the guest's wire, a correctness choice rather
-than a promise about what the network admits. `grant` says *whether* a
-command may reach the wire; egress says *which destinations* it may reach
-once it does.
+ral dispatches no network operation. In the
+[[internals/capability-enforcement#Guest jail|guest jail]], the stack's
+`net_veto` (`Some(Net::Offline)`) gives each command a fresh network namespace
+with loopback up (`docs/SPEC.md` §12.11). IP egress and abstract Unix sockets
+outside that namespace are out of reach; local loopback and pathname Unix
+sockets remain, and a reachable pathname socket can relay for an offline
+command. Thus offline is network-namespace isolation, not a prohibition on
+all relays. The jail installs seccomp but no per-grant fs/exec projection.
+
+Nothing in the grant vocabulary names an endpoint. The destination narrowing
+this page describes happens outside the guest, in the host's `NetPolicy`
+gate. `synod/src/folder/grant.rs` leaves `net` unvetoed to preserve the guest's
+wire, not to admit arbitrary destinations. A guest command that can reach
+that wire still meets the host gate.
 
 ## See also
 

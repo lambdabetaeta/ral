@@ -52,6 +52,12 @@ impl Agent {
     ) -> Evaluated {
         self.couple(emit);
         let recorder = self.recorder();
+        if let Err(failure) = recorder.sync() {
+            return Evaluated {
+                text: failure.to_string(),
+                failed: true,
+            };
+        }
         // Recorded before its results, so this is the turn this result closes.
         let turn = self.body.log.context().current_turn();
         let source = turn.map_or_else(|| "tool call".to_string(), |turn| format!("turn {turn}"));

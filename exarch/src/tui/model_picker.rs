@@ -181,11 +181,8 @@ pub fn choose(
 
 /// Ask the agent to switch; only a landed record persists the selection.
 fn apply_model_switch(app: &mut App, tab: AgentId, pick: Pick) {
-    if app.tabs.port().command(tab, Command::Model(pick)).is_err() {
-        app.push_error(
-            app.tabs.focused(),
-            "the agent you picked a model for has ended",
-        );
+    if let Err(error) = app.tabs.port().command(tab, Command::Model(pick)) {
+        app.push_error(app.tabs.focused(), &error.to_string());
     }
 }
 

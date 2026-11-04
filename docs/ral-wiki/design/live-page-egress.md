@@ -8,9 +8,9 @@ generated_at_commit: 3b76d0db9bb6a50452bb643af0beb67f8b11c26c
 
 A *live page* is a block fenced as `live-html` in an assistant message. Synod shows it as a page in a sandboxed iframe (a frame embedded in the transcript, with the browser's sandbox restrictions on) and runs it on the host, the user's own machine. [[decisions/261027_live-pages-run-sealed|live-pages-run-sealed]] holds the frame's design: scheme, CSP, inert shell. This page holds what that design cannot guarantee by itself, and the audit that measures it.
 
-The promise is that nothing in the folder can be sent anywhere. `synod/data/network.md` tells the model that "nothing in this folder can be sent anywhere by any route", and `synod/data/live.md` tells it that a page "cannot reach the network"; the model repeats both to the user.
+`synod/data/network.md` describes a destination gate, not an information-flow boundary: a permitted host can receive whatever the guest sends, and disclosing folder content requires the user's authority. The page-network promise is in `synod/data/live.md`, which tells the model that a page "cannot reach the network".
 
-The promise is at risk because the model's commands run in a VM (the guest), whose network egress is a destination policy at one door ([[design/egress|egress]]). A live page does not run there. It runs in the host's *webview*, the browser engine embedded in the app (WKWebView on macOS, WebView2 on Windows), which is past that door.
+That promise needs its own enforcement because the model's commands run in a VM (the guest), whose network egress is a destination policy at one door ([[design/egress|egress]]). A live page does not run there. It runs in the host's *webview*, the browser engine embedded in the app (WKWebView on macOS, WebView2 on Windows), which is past that door.
 
 A hostname is itself a message. DNS turns a name into an address, and a *resolver* is the server that answers the lookup. A lookup of a name the page chose carries the page's bytes to the resolver, with no connection to the named host and no answer needed. Egress is therefore not "a connection was made" but "a datum the page chose left the machine".
 
@@ -84,7 +84,7 @@ The `target=_blank` channel needs its own closure. A script-made `target=_blank`
 
 ## Windows
 
-**Live pages are enabled on Windows and the frame is not sealed, so the sentences in `synod/data/network.md` and `synod/data/live.md` that call a page sealed are false there.** On Windows `may_serve_shell` in `live.rs` returns true unconditionally: there is no token to wait on.
+**Live pages are enabled on Windows and the frame is not sealed, so `synod/data/live.md`'s claim that a page is sealed and cannot reach the network is false there.** On Windows `may_serve_shell` in `live.rs` returns true unconditionally: there is no token to wait on.
 
 - What carries over. The frame's design is the same: opaque origin, CSP, closed server, inert shell, no bridge. None of it has been measured on Windows.
 - Open channels. DNS names through link hints; WebRTC and its STUN lookups; the script-made `target=_blank` connection; and anything peculiar to one engine. No Windows run exists to measure them, and the macOS table measures WebKit only.
@@ -104,7 +104,7 @@ The `target=_blank` channel needs its own closure. A script-made `target=_blank`
 | macOS, seal not in force | nothing about pages: none runs |
 | Windows | no more than that the frame's CSP names no network source; whether names or packets leave is open (Windows, above) |
 
-The two data files carry the sealed claim without a platform split, so as written they overstate Windows. This page does not reword them.
+`synod/data/live.md` carries the sealed claim without a platform split, so as written it overstates Windows. This page does not reword it.
 
 ## How the seal is tested
 
@@ -287,7 +287,7 @@ click("spin", () => { const t = Date.now() + 10000; while (Date.now() < t) {} })
 ## Where
 
 - `synod/src/window/seal.rs` (macOS only): the three settings and `Sealed`. `synod/src/window/live.rs` serves the shell only once `Sealed` exists. The main window is built in `setup`. [[map/synod|synod]] locates the code.
-- `synod/data/network.md` and `synod/data/live.md`: the promises this page audits.
+- `synod/data/live.md`: the page-network promise this page audits. `synod/data/network.md` describes the separate guest destination gate and its disclosure limits.
 
 ## See also
 

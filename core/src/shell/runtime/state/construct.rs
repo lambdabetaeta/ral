@@ -3,7 +3,6 @@
 //! itself, made inside [`Shell::construct`].
 
 use super::bindings::{BindingLease, BindingLedger};
-use super::detached::DetachPolicy;
 use super::hooks::HookTable;
 use super::modules::Modules;
 use super::workers::Roster;
@@ -126,7 +125,6 @@ pub(crate) struct Terms {
     pub(crate) scratch: Option<String>,
     pub(crate) lease: Option<BindingLease>,
     pub(crate) retention: Option<u64>,
-    pub(crate) detach_budget: Option<u64>,
 }
 
 impl Terms {
@@ -140,7 +138,6 @@ impl Terms {
             scratch: None,
             lease: None,
             retention: None,
-            detach_budget: None,
         }
     }
 
@@ -153,7 +150,6 @@ impl Terms {
             scratch: shell.session.scratch.clone(),
             lease: shell.local.bindings.lease(),
             retention: shell.local.workers.retention(),
-            detach_budget: shell.local.detach.as_deref().map(|policy| policy.budget),
         }
     }
 }
@@ -234,7 +230,6 @@ impl Shell {
             scratch,
             lease,
             retention,
-            detach_budget,
         } = terms;
         let (stdin, hooks, terminal_lease) = match root {
             Some(RootOnly {
@@ -285,7 +280,6 @@ impl Shell {
                 workers,
                 cradle,
                 bindings,
-                detach: detach_budget.map(|budget| Arc::new(DetachPolicy::new(budget))),
                 machine_depth: 0,
             },
         }
@@ -345,7 +339,6 @@ mod tests {
         assert!(matches!(shell.io.stdin, Source::Terminal));
         assert!(!shell.local.bindings.armed());
         assert_eq!(shell.local.workers.retention(), None);
-        assert!(shell.local.detach.is_none());
         assert_eq!(shell.session.stack_limit, DEFAULT_STACK_LIMIT);
     }
 }

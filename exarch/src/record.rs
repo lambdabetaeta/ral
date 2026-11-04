@@ -36,6 +36,7 @@ mod tests;
 pub use crate::provider::Selected;
 pub use context::{Eviction, ItemKind, Linked, Location, Pointer, Span, SpanRow, TurnRow};
 pub(crate) use control::{Folds, Replay};
+pub(crate) use log::Snapshot;
 pub use log::Unavailable;
 #[cfg(test)]
 pub(crate) use log::{commit_line, parse_line};
@@ -175,6 +176,7 @@ impl AgentState {
 /// transients that ride beside it.
 pub(crate) trait Publish: Send {
     fn commit(&self, commit: Commit);
+    fn synced(&self, through: u64);
     fn transient(&self, t: Transient);
 }
 
@@ -584,8 +586,8 @@ pub enum Forensic {
     HarnessResult {
         text: String,
     },
-    /// The history informs the resume note; the live register follows the
-    /// shell boundary and is not restored.
+    /// Key-only pin history, not a register checkpoint. Card contents are
+    /// transient; resume restores neither the mirror nor the UI register.
     Pin {
         key: String,
     },

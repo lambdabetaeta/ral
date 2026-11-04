@@ -487,10 +487,8 @@ impl Blocks {
                 self.push(seq, BlockKind::HarnessResult { text: text.clone() })
             }
             Forensic::TurnStarted { turn, .. } => self.push(seq, BlockKind::Turn { id: *turn }),
-            // The history informs a resume note; the live register follows the
-            // shell boundary and is not restored — so neither is a scrollback
-            // block this fold draws.  The tail bookend draws none either.
-            // Core's housekeeping is the log's alone.
+            // Pin keys do not restore live cards or draw scrollback blocks.
+            // Housekeeping and session bookends are also forensic only.
             Forensic::Pin { .. }
             | Forensic::Reap { .. }
             | Forensic::Prune { .. }

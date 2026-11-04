@@ -55,7 +55,8 @@ pub struct Headless<'a> {
     panicked: bool,
     ended_with_newline: bool,
     fold: Blocks,
-    status: Option<ChildStatus>,
+    status: Option<(u64, ChildStatus)>,
+    synced: u64,
     ended: bool,
     fault: Option<String>,
     terminal_failures: Vec<String>,
@@ -80,6 +81,7 @@ impl<'a> Headless<'a> {
             ended_with_newline: false,
             fold: Blocks::default(),
             status: None,
+            synced: 0,
             ended: false,
             fault: None,
             terminal_failures: Vec::new(),
@@ -87,14 +89,22 @@ impl<'a> Headless<'a> {
     }
 
     fn finished(&self) -> bool {
-        self.status.is_some() || self.ended
+        self.status
+            .as_ref()
+            .is_some_and(|(commit, _)| *commit <= self.synced)
+            || self.ended
     }
 
     fn verdict(&mut self) -> Result<(), String> {
         if !self.terminal_failures.is_empty() {
             return Err(self.terminal_failures.join("\n"));
         }
-        match self.status.take() {
+        match self
+            .status
+            .take()
+            .filter(|(commit, _)| *commit <= self.synced)
+            .map(|(_, status)| status)
+        {
             Some(ChildStatus::Replied(value)) => {
                 self.reply = Some(value);
                 Ok(())
@@ -217,7 +227,13 @@ impl Sink for Headless<'_> {
         }
         self.step(rec);
         if let Record::Control(Control::Status { status }) = rec.value() {
-            self.status = Some(status.clone());
+            self.status = Some((rec.locus().seq().commit(), status.clone()));
+        }
+    }
+
+    fn synced(&mut self, id: AgentId, through: u64) {
+        if id == self.root_id {
+            self.synced = self.synced.max(through);
         }
     }
 
@@ -503,9 +519,15 @@ fn run_to(
     };
     let port = host.port();
     let mut headless = Headless::new(root, stdout, stderr);
-    let refused = port.submit(root, prompt).is_err();
+    let refused = port.submit(root, prompt).err();
     // A refused submit awaits the end, which reports the real fault.
-    let done = |h: &Headless<'_>| if refused { h.ended } else { h.finished() };
+    let done = |h: &Headless<'_>| {
+        if refused.is_some() {
+            h.ended
+        } else {
+            h.finished()
+        }
+    };
     while !done(&headless) {
         match host.feed().recv_timeout(POLL) {
             Ok(sig) => headless.accept(sig),
@@ -513,12 +535,12 @@ fn run_to(
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-    if refused
+    if let Some(refused) = refused
         && headless.status.is_none()
         && headless.fault.is_none()
         && headless.terminal_failures.is_empty()
     {
-        headless.fault = Some("the agent ended before it could take the prompt".into());
+        headless.fault = Some(refused.to_string());
     }
     let mut r = headless.verdict();
     headless.usage = port.usage();

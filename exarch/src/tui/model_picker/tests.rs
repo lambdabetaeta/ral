@@ -102,6 +102,7 @@ fn status_tracks_publication_while_persistence_tracks_each_live_record_including
     assert!(!project.path().join("state.json").exists());
 
     app.commit(id, &first_commit);
+    app.synced(id, first_commit.number());
     assert_eq!(
         state::load(&project),
         Some(state::State {
@@ -115,6 +116,7 @@ fn status_tracks_publication_while_persistence_tracks_each_live_record_including
     assert_eq!(status_model(&app, bureau), "deepseek/live-second (auto)");
 
     app.commit(id, &second_commit);
+    app.synced(id, second_commit.number());
     assert_eq!(
         state::load(&project),
         Some(state::State {
@@ -125,6 +127,95 @@ fn status_tracks_publication_while_persistence_tracks_each_live_record_including
         })
     );
     assert_eq!(host.end(), [] as [String; 0]);
+}
+
+#[test]
+fn live_model_persistence_waits_for_the_exact_record_watermark() {
+    let (mut app, _, _) = crate::tui::app::tests::app();
+    let project = OwnDir::for_test("model-watermark").unwrap();
+    app.project = Ok((*project).clone());
+    let id = app.tabs.focused();
+    let head = crate::record::Started {
+        session_id: id,
+        name: "main".into(),
+        parent: None,
+        returns: false,
+        selected: crate::provider::Selected::for_test("initial"),
+        log_dir: project.path().to_path_buf(),
+        at_unix_ms: 0,
+    };
+    app.commit(
+        id,
+        &Commit::placeholder(
+            1,
+            crate::record::NonEmpty::one(Record::Control(Control::SessionStarted(head))),
+        ),
+    );
+    let selected = crate::provider::Selected::for_test("exact-live-selection");
+    let commit = Commit::placeholder(
+        2,
+        crate::record::NonEmpty::one(Record::Control(Control::ModelChanged { selected })),
+    );
+    app.commit(id, &commit);
+    app.synced(id, 1);
+    assert_eq!(state::load(&project), None);
+    app.synced(id, 2);
+    assert_eq!(state::load(&project).unwrap().model, "exact-live-selection");
+}
+
+#[test]
+fn catching_up_a_synced_model_change_never_persists_it_as_a_live_choice() {
+    use crate::record::{AgentLog, Born, Folds, NonEmpty};
+    let project = OwnDir::for_test("model-catchup-no-save").unwrap();
+    let (mut app, _, _) = crate::tui::app::tests::app();
+    app.project = Ok((*project).clone());
+    let id = app.tabs.focused();
+    let sessions = OwnDir::for_test("model-catchup-sessions").unwrap();
+    let selected = crate::provider::Selected::for_test("initial");
+    let (log, mut mail, mut schedules, mut model) = AgentLog::create(
+        &sessions,
+        id,
+        crate::record::Opening {
+            parent: None,
+            name: "main",
+            returns: false,
+            selected: &selected,
+            system: "system",
+            inherited: None,
+        },
+    )
+    .unwrap();
+    let recorder = log.record_emitter();
+    let changed = recorder
+        .commit_to(
+            Folds {
+                mail: &mut mail,
+                schedules: &mut schedules,
+                model: &mut model,
+            },
+            NonEmpty::one(Control::ModelChanged {
+                selected: crate::provider::Selected::for_test("replayed"),
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+    recorder.sync().unwrap();
+    app.born(
+        id,
+        &Born {
+            reader: recorder.reader(),
+            log_dir: log.dir().clone(),
+            name: "main".into(),
+            parent: None,
+            resumed: None,
+        },
+    );
+    app.synced(id, changed.number());
+    assert_eq!(
+        state::load(&project),
+        None,
+        "replay and its watermark are not a live choice"
+    );
 }
 
 #[test]
@@ -189,7 +280,7 @@ fn births_and_reopens_do_not_persist_a_next_launch_selection() {
         reader: log.record_emitter().reader(),
     };
     app.born(id, &born);
-    for commit in born.reader.since(None).unwrap().1 {
+    for commit in born.reader.since(None).unwrap().2 {
         app.commit(id, &commit.unwrap());
     }
     assert!(
@@ -220,7 +311,7 @@ fn births_and_reopens_do_not_persist_a_next_launch_selection() {
         .reader()
         .since(None)
         .unwrap()
-        .1
+        .2
         .map(Result::unwrap)
         .collect();
     assert!(commits.iter().any(|commit| commit.records().iter().any(|record| matches!(record.value(), Record::Control(Control::SessionResumed { selected, .. }) if selected.model == "reopened-model"))));

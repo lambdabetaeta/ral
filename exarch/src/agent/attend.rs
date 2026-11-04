@@ -32,6 +32,10 @@ impl Agent {
                     AgentState::Ready
                 }));
             }
+            // Certify this boundary; concurrent submitters certify their own posts.
+            if self.recorder().sync().is_err() {
+                break;
+            }
             match self.mailbox.next(rest) {
                 Next::Ended => break,
                 Next::Rung => {
@@ -40,7 +44,12 @@ impl Agent {
                     }
                 }
                 Next::Gone(id) => self.gone(id),
-                Next::Settled { stopped, owes } => self.settled(stopped, owes, last.take()),
+                Next::Settled { stopped, owes } => {
+                    if self.recorder().sync().is_err() {
+                        break;
+                    }
+                    self.settled(stopped, owes, last.take());
+                }
                 Next::Command(command) => {
                     if self.command(command, emit).is_break() {
                         break;

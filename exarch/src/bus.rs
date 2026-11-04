@@ -18,7 +18,7 @@ pub use channel::BusReceiver;
 #[cfg(any(test, feature = "test-util"))]
 pub use channel::{BusSender, channel};
 pub use emitter::Emitter;
-pub use mailbox::{Admission, Command};
+pub use mailbox::{Admission, Command, Refused};
 pub use post::{AgentOutcome, ScheduleId};
 pub use post::{Read, Rewrite};
 pub use signal::Signal;
@@ -28,7 +28,7 @@ pub(crate) use channel::MERGE_TEXT_CAP;
 pub(crate) use emitter::{FleetBus, UsageMeter};
 pub(crate) use lease::Lease;
 pub(crate) use mailbox::{
-    AgentAddress, AgentMailbox, Drained, Input, Next, Refused, Rest, Status, Txn, WeakAgentAddress,
+    AgentAddress, AgentMailbox, Drained, Input, Next, Rest, Status, Txn, WeakAgentAddress,
 };
 #[cfg(test)]
 pub(crate) use post::Source;

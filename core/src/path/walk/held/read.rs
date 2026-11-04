@@ -110,12 +110,24 @@ impl<A: Reads> Located<A> {
     /// identity its step recorded, and to be a special file still.  Any
     /// other stated leaf: `PermissionDenied`, the walk's; nothing is opened.
     /// Absent: created exclusively with `visibility` for `Append` and `Write`,
-    /// `NotFound` for `Read`.
+    /// `NotFound` for `Read` and `Update`. `Update` requires a held regular file.
     ///
     /// # Errors
     /// The open's; `IsADirectory` for a directory leaf, `InvalidInput` for a
     /// link, which has no data.
     pub(super) fn open(&self, access: Access, visibility: Visibility) -> io::Result<File> {
+        if access == Access::Update {
+            match &self.leaf {
+                Leaf::Held { stat, .. } if stat.kind == Kind::File => {}
+                Leaf::Absent { .. } => return Err(io::ErrorKind::NotFound.into()),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "updating requires an existing held regular file",
+                    ));
+                }
+            }
+        }
         let named = || {
             self.leaf_name()
                 .expect("a leaf that is not a directory has a name")
@@ -131,7 +143,7 @@ impl<A: Reads> Located<A> {
                 io::ErrorKind::PermissionDenied,
                 "the object could not be held, so nothing is opened through it",
             )),
-            (Data::Absent, Access::Read) => Err(io::ErrorKind::NotFound.into()),
+            (Data::Absent, Access::Read | Access::Update) => Err(io::ErrorKind::NotFound.into()),
             (Data::Absent, _) => host::create(self.dir(), self.absent_name()?, access, visibility),
         }
     }

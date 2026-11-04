@@ -1067,7 +1067,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
     BuiltinEntry::new(
         Cow::Borrowed("exarch-surface"),
         ral_core::typecheck::builtins::scheme::surface_op,
-        "exarch-surface <event>  — forward a tagged variant onto the rail: `card renders a card there, `pin`/`unpin` write straight to your register (exarch-pins is the tag-based way to reach those same slots), and any other tag is dropped, unrendered.",
+        "exarch-surface <event>  — surface a card or event onto the rail: `card renders a card there. Register writes use only exarch-pins `set / `clear, not surface tags. Unrecognised values are dropped unrendered with a forensic diagnostic, not a model-facing runtime error.",
         BuiltinBody::Static(ral_core::shell::builtins::builtin_surface),
     ),
     BuiltinEntry::new(

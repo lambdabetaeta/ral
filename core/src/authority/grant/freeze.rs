@@ -7,7 +7,7 @@
 //! read here, once, so a later `chdir` or `TMPDIR` change cannot
 //! retroactively widen a grant.  A selector names directories the environment chooses, and is
 //! exec-only: its expansion is held under no `home`, but a toolchain
-//! override or `$PATH` entry may not name the world.  XDG uses the Linux
+//! directory or `$PATH` entry may not name the world.  XDG uses the Linux
 //! defaults on every platform, macOS included ([`crate::host`]).
 //!
 //! An `absolute` payload is classified on the raw string, before any folding,
@@ -496,7 +496,7 @@ impl FreezeCtx {
     ///
     /// # Errors
     /// `path` over a `$PATH` with no absolute entry, or a `$PATH` entry or
-    /// toolchain override that names the filesystem root or the home.
+    /// toolchain directory that names a filesystem root, the home or its ancestor.
     pub(crate) fn selector<W: Polar>(
         &self,
         selector: Selector,
@@ -835,14 +835,14 @@ pub(super) fn the_world(dir: &RealPath, home: Option<&RealPath>) -> Option<&'sta
 }
 
 /// A directory chosen for `selector` that is [`the_world`], judged where its
-/// walk landed.  `subject` says what chose it; `var` is what to check.
+/// walk landed.  `subject` says what chose it; `advice` says what to check.
 ///
 /// # Errors
 /// `dir` is a filesystem root, the home or an ancestor of it.
 pub(super) fn refuse_the_world(
     selector: Selector,
     subject: &str,
-    var: &str,
+    advice: &str,
     dir: &Trace,
     home: Option<&Home>,
 ) -> Result<(), PolicyError> {
@@ -851,7 +851,7 @@ pub(super) fn refuse_the_world(
     };
     let selector = code(&format!("`dir `{}", selector.name()));
     Err(PolicyError::new(format!(
-        "{subject}, {what}, so {selector} would run and read all of it. Is {var} set correctly?"
+        "{subject}, {what}, so {selector} would run and read all of it. {advice}"
     )))
 }
 
@@ -885,7 +885,13 @@ fn path_dirs_in<W: Polar>(
                 ))
             })?;
             let dir = GrantPath::<W>::walked(held)?;
-            refuse_the_world(Selector::Path, &subject, "PATH", dir.real.followed(), home)?;
+            refuse_the_world(
+                Selector::Path,
+                &subject,
+                "Is PATH set correctly?",
+                dir.real.followed(),
+                home,
+            )?;
             W::grant(dir)
         })
         .collect::<Result<_, _>>()?;
@@ -1006,6 +1012,20 @@ mod tests {
         let drive = RealPath::unwalked_for_test(r"D:\");
         for home in [None, Some(&home)] {
             assert_eq!(the_world(&drive, home), Some("the filesystem root"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn share_roots_are_the_world_without_being_universal() {
+        let home = RealPath::unwalked_for_test(r"C:\Users\h");
+        for root in [r"\\srv\share\", r"\\?\UNC\srv\share\"] {
+            let share = RealPath::unwalked_for_test(root);
+            assert!(share.is_root());
+            assert!(!share.is_universal());
+            for home in [None, Some(&home)] {
+                assert_eq!(the_world(&share, home), Some("the filesystem root"));
+            }
         }
     }
 

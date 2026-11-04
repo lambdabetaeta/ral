@@ -40,6 +40,17 @@ $report` and `commands $report`, the latter handing back the `` `command ``
 payloads in order. A `case` on `what` is for the reader who cares about the
 other six tags.
 
+**A command observation is one ral-dispatched invocation, not a process or
+syscall census.** `env /bin/echo hello` records `env`, not a second command
+for the image it executes. `rg --hostname-bin helper pattern file` records
+`rg`, not its supplied helper; `RIPGREP_CONFIG_PATH` can configure that helper
+too, while ordinary `rg` obtains the platform hostname without spawning one.
+The outer status and captured stdio remain observed, including descendant
+bytes reaching those streams. Descendant image names, configuration reads,
+private output and individual statuses need not appear independently. The
+[[internals/capability-enforcement|applicable OS boundary]], not audit,
+contains those operations.
+
 **A builtin application is not an observation.** The trail records facts where
 the world is reached — an external or detached process, a redirect's read
 or write, a worker's birth, a capability check, a host's report of its own
@@ -81,11 +92,12 @@ gate. Ordinary value capture and worker buffers retain their independent
   all: nothing it does needs one.
 - Source nesting decides which collection an observation lands in, regardless
   of which process or thread produced it.
-- A boundary — the OS-sandbox child a `grant` re-execs into
-  ([[design/grant|grant]]), or a pipeline stage's thread
-  ([[decisions/260902_stages-are-threads|stages-are-threads]]) — only
-  *transports* its fragment back to the owning evaluator, which merges it into the surrounding
-  trail; the boundary never decides structure.
+- A `grant` body evaluates locally, not in a re-exec child
+  ([[design/grant|grant]]). Pipeline threads
+  ([[decisions/260902_stages-are-threads|stages-are-threads]]) and engine
+  transports carry observations or trail fragments to their owner; transport
+  never decides lexical structure. Utility children emit no evaluator fragment
+  for their internal work.
 - A pipeline thread publishes each observation live. Its collector merges
   that observation into the enclosing trail without publishing it again;
   a direct external stage's observation is first published by the collector.
@@ -98,15 +110,16 @@ gate. Ordinary value capture and worker buffers retain their independent
   opener closes — that discipline is what keeps a nested `audit { }` from
   leaving the trail standing open for the rest of the session.
 
-So a sandboxed `grant { … }` merges its body's commands into the nearest open
-trail rather than losing them at the process boundary, and a transported
-fragment stays self-describing without needing a parent to interpret it.
+A local `grant { … }` therefore contributes its body's ral observations to the
+nearest open trail. A transported evaluator fragment stays self-describing;
+it does not turn utility-internal work into observations.
 
 **Within a trail, position is settlement, and nesting is containment.** An
 observation is appended when the fact it records becomes *true*, not when the
 construct that produced it began: a command's own observation therefore lands
-after those of everything it ran, and a redirect's `` `write `` lands when the
-write settles (a streaming write when its file opens). The order is a post-order traversal of what happened, and it is
+after any observations produced within its extent, and a redirect's `` `write ``
+lands when the write settles (a streaming write when its file opens). The order
+is a post-order traversal of observed facts, and it is
 the one order a flat list can carry without lying — an in-order list would have
 to claim a command was finished before the work inside it was.
 

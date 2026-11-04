@@ -3,6 +3,9 @@
 # Builds the Unix release matrix locally, as build-binaries.yml does on Actions.
 # Publishing is Actions' alone: push a `v*` tag.  Windows and synod are built
 # only by Actions.
+# For a stable release, the `v<version>` tag must match [workspace.package].version
+# in Cargo.toml. Update both HomebrewFormula URLs together, with the same SHA-256
+# computed from the actual GitHub tag archive, not a local archive.
 #
 # Flags:
 #   --linux          include the Linux musl matrix (docker)

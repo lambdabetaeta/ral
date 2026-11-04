@@ -103,6 +103,7 @@ impl Agent {
         let system = self.body.log.context().system().clone();
         recorder.transient(Transient::State(AgentState::AwaitingModel));
         let mut stream = Stream::default();
+        recorder.sync()?;
         let taken = provider.complete(
             crate::provider::Request {
                 system: &system,
@@ -131,8 +132,10 @@ impl Agent {
                     });
                 }
             },
+            &mut || recorder.sync().map_err(|failure| failure.to_string()),
             exchange,
         );
+        recorder.check_available()?;
         let cancelled =
             exchange.is_cancelled() || matches!(taken, Err(ProviderError::Cancelled(_)));
         stream.close(&recorder);

@@ -4,13 +4,6 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "lambdabetaeta/ral"
 
-# github.com/$Repo/releases/latest redirects to the newest release's tag.
-$latestResponse = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest"
-$Tag = ($latestResponse.BaseResponse.ResponseUri.ToString() -split "/tag/")[1]
-if (-not $Tag) {
-    Write-Error "Could not resolve the latest release tag for $Repo."
-}
-
 # ── Platform detection ────────────────────────────────────────────────────────
 
 $arch = $env:PROCESSOR_ARCHITECTURE
@@ -27,15 +20,15 @@ switch ($arch) {
 
 # ── Download ───────────────────────────────────────────────────────────────────
 
-$url = "https://github.com/$Repo/releases/download/$Tag/$Artifact"
+$url = "https://github.com/$Repo/releases/latest/download/$Artifact"
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
-    Write-Host "Downloading $Artifact from $Repo ($Tag)"
+    Write-Host "Downloading $Artifact from $Repo (latest release)"
     try {
-        Invoke-WebRequest -Uri $url          -OutFile (Join-Path $tmp $Artifact)
-        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmp "$Artifact.sha256")
+        Invoke-WebRequest -UseBasicParsing -Uri $url          -OutFile (Join-Path $tmp $Artifact)
+        Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile (Join-Path $tmp "$Artifact.sha256")
     }
     catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {

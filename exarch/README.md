@@ -29,6 +29,9 @@ On Windows, in PowerShell:
 irm https://lambdabetaeta.github.io/ral/scripts/exarch-install.ps1 | iex
 ```
 
+Both installers select the latest release. To select a tag on macOS or Linux,
+replace `sh -s exarch` with `sh -s exarch v0.10.0`.
+
 For a manual install, download the matching archive from the
 [latest release](https://github.com/lambdabetaeta/ral/releases/latest) and extract
 it into a dedicated directory. For example, on Linux x86_64:

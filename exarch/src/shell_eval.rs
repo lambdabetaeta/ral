@@ -25,15 +25,6 @@ use std::time::Duration;
 /// at the spawn. A settled entry lingering under retention holds no slot.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
-/// Birth budget on `detach` per session shell.
-///
-/// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no slot, so a cap
-/// counting live work cannot bound it, and it needs a bound of its own
-/// precisely because nothing later reclaims it.  Reset by `/clear`, which
-/// reboots the shell.
-#[cfg(unix)]
-pub(crate) const DETACH_BIRTH_BUDGET: u64 = 16;
-
 /// Retention bound, in ral calls, on a settled worker's unclaimed result,
 /// counted from the per-call sweep in `Agent::ral` that first
 /// observes it settled.
@@ -71,8 +62,8 @@ pub struct ToolResult {
     pub exit: i32,
 }
 
-/// One mirrored pin.  The bus and scrollback carry `Forensic::Pin` and
-/// `Transient::Pin`; this exists only inside the agent's session mirror.
+/// One card in the agent's session mirror, read by the desk and nudge.
+/// The record keeps only its key; a transient updates the live UI register.
 #[derive(Clone, Debug)]
 pub struct PinDigest {
     pub(crate) card: crate::card::Card,

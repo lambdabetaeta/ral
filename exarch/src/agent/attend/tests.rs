@@ -232,7 +232,7 @@ fn stop_after_a_mid_job_pop_records_the_prompt_without_running_a_turn() {
     };
     let prompt = session.admit(input).unwrap();
     let job = session.handle().status().unwrap().job.unwrap();
-    assert_eq!(session.handle().stop(job), Some(vec![]));
+    assert_eq!(session.handle().stop(job).unwrap(), Some(vec![]));
     session.handle().steer("fresh".into()).unwrap();
     assert!(matches!(
         session.exchange(&exchange, prompt, &emit),

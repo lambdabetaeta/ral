@@ -12,7 +12,7 @@ use std::path::PathBuf;
 /// Where a torn tail goes: beside the record it was cut from.
 const CRASH: &str = "record.jsonl.crash";
 
-/// Quarantine a torn tail: an unterminated write, or a last line whose sum fails.
+/// Quarantine a torn tail: every byte from the first damaged line.
 fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
     let mut file = session.open(RECORD)?;
     let complete = Log::complete_len(&mut file)?;
@@ -26,12 +26,13 @@ fn quarantine_tail(session: &OwnDir) -> io::Result<()> {
     sidecar.write_all(&tail)?;
     sidecar.flush()?;
     sidecar.sync_all()?;
+    session.sync()?;
 
     let live = session.open_write(RECORD)?;
     live.set_len(complete)?;
     live.sync_all()?;
     ral_core::errln!(
-        "exarch: quarantined a torn last line ({} bytes) from {} in {}, and trimmed the live log to its last whole commit",
+        "exarch: quarantined a torn tail ({} bytes) from {} in {}, and trimmed the live log to its last whole commit",
         tail.len(),
         ral_core::path::shown(session.path().join(RECORD)),
         ral_core::path::shown(session.path().join(CRASH))

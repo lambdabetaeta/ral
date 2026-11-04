@@ -958,7 +958,7 @@ fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
             String::from_utf8_lossy(&out.stderr),
         );
         assert!(
-            !stdout.contains("INTERP-RAN") && !out.status.success(),
+            !stdout.contains("INTERP-RAN") && trampoline_refused(&out, &script),
             "{axis}: an excluded interpreter ran: {stdout} {stderr}"
         );
         assert!(
@@ -970,7 +970,8 @@ fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
 }
 
 /// A trusted script starts under a restricted fs whose reads name neither
-/// it nor its interpreter, with exec supplied and omitted.
+/// it nor its interpreter, with exec supplied and omitted. Helpers may be
+/// refused where `/usr/bin` links elsewhere: that is the folder rule.
 #[test]
 fn a_trusted_script_starts_through_live_supports_reads() {
     if !landlock_at_least(Abi::EXEC) {
@@ -986,9 +987,6 @@ fn a_trusted_script_starts_through_live_supports_reads() {
         write_prefixes: Vec::new(),
         deny_paths: Vec::new(),
     };
-    // The trampoline's refusal of the launch, the script's or its
-    // interpreter's, unread or unadmitted; the script's children are its own.
-    let refused = format!("ral: {script}:");
     for (label, exec) in [
         ("exec supplied", Some((&[script.as_path()][..], &[][..]))),
         ("exec omitted", None),
@@ -999,7 +997,10 @@ fn a_trusted_script_starts_through_live_supports_reads() {
         };
         let out = run_admitted(&env, &policy, &admitted, &["--help".into()]).expect("spawn");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(!stderr.contains(&refused), "{label}: {stderr}");
+        assert!(
+            !stderr.contains(&format!("ral: {script}:")),
+            "{label}: {stderr}"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1052,6 +1053,43 @@ fn a_descendant_cannot_start_ral() {
         assert!(!emitted(&stdout, "PROC-RAN"), "{label}: {stdout}");
     }
     let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn a_link_under_an_admitted_folder_to_a_file_outside_it_does_not_run() {
+    if !landlock_at_least(Abi::EXEC) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let (tools, elsewhere) = (work.join("tools"), work.join("elsewhere"));
+    for dir in [&tools, &elsewhere] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    let target = elsewhere.join("prog");
+    std::fs::copy("/bin/sh", &target).unwrap();
+    std::fs::copy("/bin/sh", tools.join("control")).unwrap();
+    std::os::unix::fs::symlink(&target, tools.join("prog")).unwrap();
+    let (policy, _) = folded(
+        Some((&[tools.as_path()], &[])),
+        None,
+        std::path::Path::new("/bin/sh"),
+    );
+    let Some(env) = envelope_launches(&policy) else {
+        return;
+    };
+    let script = format!(
+        "cd '{}' || exit 1\n\
+         tools/prog -c 'echo RAN'\n\
+         tools/control -c 'echo ADMITTED-RAN'\n",
+        work.display(),
+    );
+    let (stdout, stderr) = confined(&env, &policy, &script);
+    assert!(!emitted(&stdout, "RAN"), "an outside target ran: {stdout}");
+    assert!(
+        emitted(&stdout, "ADMITTED-RAN"),
+        "the admitted folder ran nothing, so the link proves nothing: {stdout} {stderr}"
+    );
 }
 
 /// Under the same policies a bundled tool, run by the launcher, still runs.

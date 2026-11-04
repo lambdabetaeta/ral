@@ -32,7 +32,9 @@ use strum::IntoStaticStr;
 use self::site::Silent;
 use crate::authority::policy::Ungoverned;
 use crate::host::{self, EnvVars};
-use crate::path::walk::{Access, dangling, walk_dir_made};
+use crate::path::walk::{
+    Access, dangling, sync_dir, sync_dir_chain, walk_dir_made, walk_dir_made_synced,
+};
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
     Visibility, Writing, XdgKind, app_dir, shown, spelled_parent, walk, walk_dir,
@@ -52,6 +54,11 @@ const MAKE_TRIES: usize = 3;
 /// The roots resolved so far, by the spelling of the base each was resolved
 /// for: [`OwnDir::xdg`] walks a base once and hands the handle out after.
 static ROOTS: Mutex<BTreeMap<PathBuf, OwnDir>> = Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_WITHIN_DESCENT: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
 
 // ── The minting points ────────────────────────────────────────────────
 
@@ -80,6 +87,7 @@ pub enum Act {
     Make,
     Read,
     Write,
+    Sync,
     Rename,
     Remove,
     List,
@@ -332,19 +340,52 @@ impl OwnDir {
     /// database no home; [`OwnError::Dangling`] where a link on the way leads
     /// nowhere; the walk's, or a make's.
     pub fn xdg(app: &'static str, kind: XdgKind) -> Result<Self, OwnError> {
+        Self::xdg_with(app, kind, false)
+    }
+
+    /// [`Self::xdg`], syncing created entries and the cached directory's held ancestry.
+    ///
+    /// # Errors
+    /// The walk's, a make's, or an ancestor directory's sync failure.
+    pub fn xdg_synced(app: &'static str, kind: XdgKind) -> Result<Self, OwnError> {
+        Self::xdg_with(app, kind, true)
+    }
+
+    fn xdg_with(app: &'static str, kind: XdgKind, synced: bool) -> Result<Self, OwnError> {
         let path = app_dir(kind, app).ok_or(OwnError::NoBase(kind))?;
         let known = ROOTS.lock_ignore_poison().get(&path).cloned();
-        if let Some(resolved) = known {
-            return Ok(resolved);
+        let resolved = if let Some(resolved) = known {
+            resolved
+        } else {
+            // Walk outside the cache lock, then retain the actual winner.
+            let resolved = if synced {
+                let spelling = anchored(&path)?;
+                let dir = walk_dir_made_synced(&spelling)
+                    .map(writing_dir)
+                    .map_err(|error| walked(Act::Make, &path, error))?;
+                Self::new(dir, spelling)
+            } else {
+                root(&path)?
+            };
+            ROOTS
+                .lock_ignore_poison()
+                .entry(path)
+                .or_insert(resolved)
+                .clone()
+        };
+        if synced {
+            sync_dir_chain(&resolved.0.dir)
+                .map_err(|error| io_at(Act::Sync, resolved.path(), error))?;
         }
-        // Walked outside the lock.  Where another call walked the same base
-        // meanwhile, its handle was stored first, and is the one handed out.
-        let resolved = root(&path)?;
-        Ok(ROOTS
-            .lock_ignore_poison()
-            .entry(path)
-            .or_insert(resolved)
-            .clone())
+        Ok(resolved)
+    }
+
+    /// Persist entries in this held directory; a no-op on Windows.
+    ///
+    /// # Errors
+    /// The host's directory sync failure.
+    pub fn sync(&self) -> io::Result<()> {
+        sync_dir(&self.0.dir)
     }
 
     /// Where it is, for a consumer that takes names: a child's argv or
@@ -353,6 +394,11 @@ impl OwnDir {
     /// consumer does with it is resolved again, by the consumer.
     pub fn path(&self) -> &Path {
         self.0.path.as_path()
+    }
+
+    /// Whether both handles hold the same directory, independently of spelling.
+    pub fn same_directory(&self, other: &Self) -> bool {
+        self.0.dir.trace().last_id() == other.0.dir.trace().last_id()
     }
 
     /// The directory beneath this one that `path` names, reached again from
@@ -373,9 +419,25 @@ impl OwnDir {
         };
         let at = walk_dir(&anchored(path)?).map_err(|e| walked(Act::Open, path, e))?;
         let names = (at.real().relative_to(self.0.dir.real())).ok_or_else(outside)?;
-        names
+        #[cfg(test)]
+        BEFORE_WITHIN_DESCENT.with(|hook| {
+            if let Some(hook) = hook.take() {
+                hook();
+            }
+        });
+        let reached = names
             .iter()
-            .try_fold(self.clone(), |dir, name| dir.descend(name))
+            .try_fold(self.clone(), |dir, name| dir.descend(name))?;
+        if reached.0.dir.trace().last_id() != at.trace().last_id() {
+            return Err(io_at(
+                Act::Open,
+                path,
+                io::Error::other(
+                    "the directory changed during resolution; refused the replacement; retry",
+                ),
+            ));
+        }
+        Ok(reached)
     }
 
     /// The directory `name`.
@@ -500,6 +562,19 @@ impl OwnDir {
     /// `NotFound`; [`OwnError::Linked`]; the open's.
     pub fn open(&self, name: &str) -> Result<File, OwnError> {
         self.opened(Act::Open, &self.entry(Act::Open, name)?)
+    }
+
+    /// An existing regular file for reading, writing in place and syncing.
+    /// Never creates, truncates, appends or follows a link.
+    ///
+    /// # Errors
+    /// `NotFound`; [`OwnError::Linked`]; `InvalidInput` for a nonregular file;
+    /// the open's, including missing read/write permission.
+    pub fn open_update(&self, name: &str) -> Result<File, OwnError> {
+        let name = self.entry(Act::Open, name)?;
+        self.unlinked(Act::Open, &name)?
+            .open_data(Access::Update, Visibility::Public)
+            .map_err(|error| self.failed(Act::Open, &name, error))
     }
 
     /// `name` for appending, made where absent: each write lands whole at the

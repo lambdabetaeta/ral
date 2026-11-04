@@ -1,54 +1,33 @@
 # pins: a read/write noticeboard, the matrix's dual
 
-**A pin is *state* a kit publishes to a keyed slot on a persistent register, the
-in-place dual of an event appended to scrollback.** The transcript is an
-append-only log of things that *happened*, sealed once written; a pin is *what is
+**A pin is *state* a kit publishes to a keyed slot on a session-owned register,
+the in-place dual of an event appended to scrollback.** A pin is *what is
 currently true* — a task rollup, a build's status, the file under edit — and
-state changes by being **overwritten**, not appended. exarch already redraws
-*host*-authored state in place (the agent matrix, the `ctx%` gauge, the phase
-bar — fixed marks, never streamed, never logged); a pin is the missing fourth
-cell, the **same graphic grammar authored by the kit instead of the host**. The
-register started write-only — a kit could publish state but never read it
-back — and is now read/write: `` exarch-pins `read `` and `` exarch-pins
-`list `` answer from the same mirror the nudge already kept, so the model
-(and a kit) can survey the board it writes to. The full reasoning for the wire
-and its taxonomy is
-[[decisions/260622_surface-pins-state|surface-pins-state]]; the read side is
+state changes by being **overwritten**, not appended. It uses the same graphic
+grammar as host-authored state such as the agent matrix. The register survives
+exchanges, is emptied by `/clear`, and is not restored on resume.
+`` exarch-pins `read `` and `` exarch-pins `list `` answer from the same
+agent-local mirror the nudge reads, so the model and a kit can survey the board
+they write to. The taxonomy is explained in
+[[decisions/260622_surface-pins-state|surface-pins-state]]; the read side in
 [[decisions/260803_register-is-read-write|register-is-read-write]].
 
 ## The vocabulary
 
-A pin rides the same `exarch-surface` channel as everything else, as a *disposition
-wrapper* around an ordinary [[map/exarch/cards|`` `card ``]] — the wrapper carries
-only **placement**, the card vocabulary and its decoder reused verbatim, and
-this wire is unchanged by the read side:
+**`exarch-pins` is the register's only model-facing door**
+([[map/exarch/builtins|builtins]]):
 
-- `` `pin [key, body] `` — write `body` to register slot `key`, **overwriting in
-  place** on re-pin. The `key` is model-chosen and *is the datum's identity* —
-  the thing the host cannot guess. No key is reserved: the write side has no
-  guard at all, and every slot in the register is model-authored.
-- `` `unpin [key] `` — drop the slot (a finished plan clears its gauge). An
-  **absent body** is the same as `` `unpin ``.
+- `` `set [key: Str, body: Card] `` overwrites one slot with an ordinary
+  [[map/exarch/cards|card]]. Every key is model-chosen; none is reserved.
+- `` `clear <key> `` empties the slot, a no-op if it is already empty.
+- `` `read <key> `` and `` `list `` make the same register legible back.
 
-The register once carried one host-owned exception, a `services` slot the
-host reconciled and ordinary `exarch-surface` writes could not touch
-(`reject_protected_pin`); that mechanism is deleted outright, on no
-technical rationale beyond the operator's own — protected pins should not
-exist. Workers are legible without it: every birth shows a trail card
-(`errand #id started · title`), `workers` lists them as data
-([[map/exarch/builtins|builtins]]), and `/resources` counts the running
-ones.
-See [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
-2026-08-27 amendment.
-
-On top of that wire sits one model-facing enquiry family, `exarch-pins`, and
-it is the register's only door: `` `set ``/`` `clear `` write it,
-`` `read ``/`` `list `` make it legible back
-([[map/exarch/builtins|builtins]]).
-"Set" says a pin overwrites a slot, "clear" says it empties — not
-"add"/"remove", which would say the register is a collection rather than one
-card per key. The family is foreground-only, like `exarch-agents` and `exarch-context`: a
+The family is foreground-only, like `exarch-agents` and `exarch-context`: a
 call inside `spawn "…" { … }` errors rather than degrading.
+`Surface::Pin` and `Surface::Unpin` are host recording vocabulary, not
+source-level `exarch-surface` tags. Direct surface pin/unpin values are unknown:
+they are dropped unrendered with a forensic diagnostic, not a model-facing
+runtime error.
 
 So a kit holding evolving state pins one rollup and overwrites it, rather than
 marching `tasks 0/3`, `tasks 1/3`, … down the scrollback — the streaming the rail
@@ -59,27 +38,23 @@ appends nothing to a bound list either.
 
 ## How it flows
 
-One decoder, one new arm, one scrollback field, and one enquiry class over the
-same mirror — no new concurrency invariant, because a pin is still emitted
-**in-run** through the live foreground sink, the exact place a card is
-already safe:
+**The desk mutates the mirror synchronously before publishing the live UI
+update.** The flow is `exarch-pins` → typed `Request::Pins` → desk mirror
+mutation → `surface::record` → key-only forensic breadcrumb plus transient →
+live `Status` ([[map/exarch/shell-eval|shell-eval]]).
 
-- **Decode.** `value_to_pin` is tried first on the surface channel, ahead of the
-  `io` and `card` arms ([[map/exarch/shell-eval|shell-eval]]); they cannot collide
-  — `io` is a `Map`, the rest distinct `Variant` labels. It resolves to
-  `Surface::Pin { key, card }` or `Surface::Unpin { key }`; the applier records
-  a forensic breadcrumb and publishes the corresponding live `Transient`.
-- **Register.** The slots live on the [[map/exarch/frontend|`Scrollback`]] as an
-  *ordered* `key → Card` map; a pin is `set_pin` (overwrite or insert, first-seen
-  order), an unpin is `drop_pin` — the in-place analogue of a scrollback block,
-  touching neither the screen nor the log. `reset` clears it on `/clear`, so pins are
-  generation-bounded exactly as scrollback is.
-- **Mirror.** The session keeps its own copy alongside the scrollback's, per
-  agent: a `key → PinDigest` map (`PinDigests`, [[map/exarch/shell-eval|shell-eval]])
-  holding the full decoded `Card`, written on every accepted pin/unpin. It was
-  born to let the nudge name what is pinned without parsing rendered text; the
-  read side reuses the same store rather than adding a second one — `` `read ``
-  and `` `list `` are enquiries answered straight from it.
+- **Enquiry.** The builtin decodes the family request. The desk's
+  `apply_pin` borrows `Body.pins` through its foreground loan and inserts or
+  removes a `PinDigest` holding the decoded `Card`. Read, list and nudge use
+  this same agent-local mirror.
+- **Record.** The desk constructs `Surface::Pin { key, card }` or
+  `Surface::Unpin { key }`. `surface::record` emits key-only `Forensic::Pin` /
+  `Unpin` and a live `Transient::Pin` carrying the card, or `Transient::Unpin`
+  carrying the key. The surface decoder has no register arm.
+- **Register.** The frontend's [[map/exarch/frontend|`tabs::Status`]] owns
+  the live `key → Card` slots in first-seen insertion order. `set_pin`
+  overwrites or inserts; `drop_pin` removes. These slots are not scrollback
+  blocks. `/clear` empties both this register and the agent's mirror.
 - **Render.** The register is a **reserved right-hand column** for the *focused*
   session — a flat strip glued to the right edge, never a floating overlay that
   would occlude the yank-able scrollback. It claims only dead margin past the
@@ -87,19 +62,20 @@ already safe:
   it collapses to a one-row **pin band** beside the matrix. The frame reads
   symmetrically: the **rail owns the left edge** (what happened), the **register
   the right** (what is).
-- **Headless.** There is no drawn register to overwrite, so a pin renders nothing.
-  The record log retains `Pin`/`Unpin` as forensic breadcrumbs
-  ([[decisions/260814_one-seam-one-log|one-seam-one-log]]) that no fold
-  draws — the live register follows the shell boundary and is not restored
-  on resume. Pinned state is ambient, like the
-  matrix. `` exarch-pins `read ``/`` `list `` still answer headless, since they
-  read the mirror, not the drawn column.
+- **Lifetime.** Card contents and live slots are not persisted. The log keeps
+  only forensic pin/unpin keys
+  ([[decisions/260814_one-seam-one-log|one-seam-one-log]]); control replay
+  excludes forensic records, and view replay leaves these rows quiet. Resume
+  starts with an empty mirror and UI register; its fixed note says pinned
+  state is gone, not what pin history contained.
+- **Headless.** A pin renders nothing, but `` exarch-pins `read `` / `` `list ``
+  still answer from the mirror, not the drawn column.
 
 ## Reading the register back
 
-`` exarch-pins `read <key>` `` answers the card stored under `key`,
-**canonically re-encoded**, or `()` on a miss; `` `list `` answers the
-occupied keys. The
+`` exarch-pins `read <key> `` answers `` `some `` of the card stored under
+`key`, **canonically re-encoded**, or `` `none `` on a miss; `` `list `` answers
+the occupied keys in sorted key order. The
 encoder (`encode_card`, [[map/exarch/cards|cards]]) is `value_to_card`'s
 inverse on the decoder's image, so what comes back is never the authored
 bytes — a bare-string span or a bare mark, sugar the decoder accepts, comes
@@ -112,14 +88,11 @@ construction — the **WYSIWYG invariant**: only what the card renders can be
 read back, and two states that render identically are the same state to
 `` `read ``.
 
-Read-after-write within one run is sound for free: under the identity
-binding `IdentityDesk::enquire` drains queued surface frames before answering
-a request (`core/src/carrier/identity.rs`), and under the wire frame order does the
-same, so a pin written earlier in the same script is
-already in the mirror when the read is answered. Both enquiries are per-agent,
-same as the mirror they read — a sub-agent's register is its own, and
-`` `read `` never crosses that line; a foreign-key read is deliberately out of
-scope (see the ADR's open questions).
+Read-after-write within one run follows from synchronous desk mutation:
+`set` / `clear` updates `Body.pins` before returning, and a subsequent `read` /
+`list` borrows that same mirror. It does not depend on draining surface frames,
+on either carrier. Every enquiry is per-agent: a sub-agent's register is its
+own, and `` `read `` never crosses that line.
 
 ## The model is the register's default mutator
 
@@ -144,10 +117,9 @@ price of one keyspace shared between a schemaless mutator and a schema'd one.
 
 Because pinned state is something the *user is watching* on the rail, the
 [[map/exarch/agent|nudge]] facility tells the model when it changes. The
-agent keeps the same small `key → one-line summary` mirror `` exarch-pins
-`read `` answers from, while the session is otherwise pin-blind and the
-events go straight to the frontend. There is **one** pinned-state nudge,
-uniform for every pin kind (a task, a goal, any other pinned state alike) and
+agent derives a one-line digest from the same `key → PinDigest` mirror
+`` exarch-pins `read `` answers from; each `PinDigest` holds the full card.
+There is **one** pinned-state nudge, uniform for every pin kind (a task, a goal, any other pinned state alike) and
 every agent role (the interactive trunk and a returning sub-agent alike):
 **edge-triggered** and budget-free, it fires once, on the first quiet
 completion after the register's one-line digest differs from the one last
@@ -206,11 +178,10 @@ this is the model-authored dual of, and the encode-don't-stream doctrine),
 [[map/exarch/cards|cards]] (the render document the body decodes through, and
 the encoder that inverts it), [[map/exarch/builtins|builtins]] (the
 `exarch-pins` `` `set ``/`` `clear ``/`` `read ``/`` `list `` family and the
-tasks kit built over it), [[map/exarch/frontend|frontend]] (the scrollback
+tasks kit built over it), [[map/exarch/frontend|frontend]] (the live `Status`
 register and the draw layout), [[map/exarch/shell-eval|shell-eval]] (the host
-sink, the pin-first decode, and the mirror `` exarch-pins `read `` answers
-from), [[map/exarch/agent|agent]]
-(the nudge that reminds the model of its pins, from the same mirror
+recording vocabulary and the mirror `` exarch-pins `read `` answers from),
+[[map/exarch/agent|agent]] (the nudge that reminds the model of its pins, from the same mirror
 `` exarch-pins `read `` reads), [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
 (the commitment keyspace retired, and its 2026-08-27 amendment records the
 later removal of `services`, the one protected slot that survived it),

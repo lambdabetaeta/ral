@@ -56,6 +56,9 @@ both live at <https://lambdabetaeta.github.io/ral/>.
 curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh
 ```
 
+This installs the latest release. To select a tag, replace `sh` with
+`sh -s ral v0.10.0`.
+
 ```sh
 brew tap lambdabetaeta/ral https://github.com/lambdabetaeta/ral
 brew install ral exarch

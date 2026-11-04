@@ -164,34 +164,232 @@ fn drain_observes_the_queued_second_resumed_root_before_idle_and_settlement() {
     host.port().end(first).unwrap();
     let mut saw_second = false;
     let mut saw_death = false;
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let pass = drain_signals(host.feed(), None, |signal| {
-            if let Signal::Born(id, born) = &signal
-                && *id == second
-            {
-                assert!(born.resumed.is_some(), "this is an actual resumed root");
-                saw_second = true;
-            }
-            saw_death |= died(&signal, first);
-            apply_signal(&mut app, host.feed(), signal);
-            Ok(())
-        })
-        .unwrap();
-        assert!(matches!(pass, Pass::Idle));
-        assert!(
-            saw_second,
-            "Idle cannot leave the queued second Born undispatched"
-        );
-        assert!(
-            !app.tabs.settled(),
-            "the second resumed root keeps the loop alive"
-        );
-        if saw_death {
-            break;
+    let mut second_certified = false;
+    let pass = drain_signals(host.feed(), None, |signal| {
+        if let Signal::Born(id, born) = &signal
+            && *id == second
+        {
+            assert!(born.resumed.is_some(), "this is an actual resumed root");
+            saw_second = true;
         }
-        assert!(Instant::now() < deadline, "the first root publishes Died");
-        std::thread::sleep(Duration::from_millis(2));
+        second_certified |= matches!(&signal, Signal::Synced { agent, through } if *agent == second && *through > 0);
+        saw_death |= died(&signal, first);
+        apply_signal(&mut app, host.feed(), signal);
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(pass, Pass::Idle));
+    assert!(
+        saw_second,
+        "Idle cannot leave the queued second Born undispatched"
+    );
+    assert!(
+        !app.tabs.settled(),
+        "the second resumed root keeps the loop alive"
+    );
+    if !saw_death {
+        until(&mut app, &host, |_, signal| {
+            second_certified |= matches!(signal, Signal::Synced { agent, through } if *agent == second && *through > 0);
+            died(signal, first)
+        });
     }
+    if !second_certified {
+        until(
+            &mut app,
+            &host,
+            |_, signal| matches!(signal, Signal::Synced { agent, through } if *agent == second && *through > 0),
+        );
+    }
+    let sb = app.tabs.scrollback_mut(second).unwrap();
+    sb.catch_up();
+    assert!(
+        sb.copy_ready(),
+        "resumed history is copyable without a prompt"
+    );
+    assert!(sb.reader().snapshot().is_ok());
+    let (_, _, mut commits) = sb.reader().since(None).unwrap();
+    assert!(
+        !commits.any(
+            |commit| commit.unwrap().records().iter().any(|record| matches!(
+                record.value(),
+                crate::record::Record::Forensic(crate::record::Forensic::TurnStarted { .. })
+            ))
+        ),
+        "resume did not start a provider turn"
+    );
+    assert_eq!(host.end(), [] as [String; 0]);
+}
+
+#[test]
+fn idle_context_and_terminal_suffix_are_certified_before_copy_or_death() {
+    use crate::record::{Forensic, Record};
+
+    let host = testkit::host(testkit::trunk(false));
+    let mut app = app_for_host(&host);
+    let root = app.tabs.focused();
+    until(
+        &mut app,
+        &host,
+        |_, signal| matches!(signal, Signal::Synced { agent, through } if *agent == root && *through > 0),
+    );
+    submit(&mut app, "/context");
+    let mut context = None;
+    until(&mut app, &host, |_, signal| match signal {
+        Signal::Commit(id, commit) if *id == root => {
+            for record in commit.records() {
+                assert!(
+                    !matches!(
+                        record.value(),
+                        Record::Forensic(Forensic::TurnStarted { .. })
+                    ),
+                    "a command needs no provider turn"
+                );
+                if matches!(
+                    record.value(),
+                    Record::Display(crate::record::Display::Context { .. })
+                ) {
+                    context = Some(commit.number());
+                }
+            }
+            false
+        }
+        Signal::Synced { agent, through } if *agent == root => {
+            context.is_some_and(|commit| *through >= commit)
+        }
+        _ => false,
+    });
+    let sb = app.tabs.focused_scrollback().unwrap();
+    assert!(
+        sb.copy_ready(),
+        "the idle command is certified before termination or a prompt"
+    );
+    assert!(sb.reader().snapshot().is_ok());
+    assert!(host.port().is_live(root));
+
+    submit(&mut app, "/close");
+    let (mut closed, mut ended, mut synced) = (false, None, 0);
+    until(&mut app, &host, |_, signal| {
+        match signal {
+            Signal::Commit(id, commit) if *id == root => {
+                for record in commit.records() {
+                    closed |= matches!(record.value(), Record::Forensic(Forensic::SessionClosed));
+                    if matches!(record.value(), Record::Forensic(Forensic::SessionEnded)) {
+                        ended = Some(commit.number());
+                    }
+                }
+            }
+            Signal::Synced { agent, through } if *agent == root => synced = *through,
+            signal if died(signal, root) => {
+                assert!(closed);
+                assert!(
+                    ended.is_some_and(|commit| synced >= commit),
+                    "SessionEnded is certified before Died"
+                );
+                return true;
+            }
+            _ => {}
+        }
+        false
+    });
+    assert!(
+        app.tabs
+            .focused_scrollback()
+            .unwrap()
+            .reader()
+            .snapshot()
+            .is_ok()
+    );
+    assert_eq!(host.end(), [] as [String; 0]);
+}
+
+#[test]
+fn parent_prose_is_copyable_while_its_helper_still_owes_a_report() {
+    use crate::agent::testkit::{dressed, launch_child, ral_call, set_provider};
+    use crate::provider::scripted::Reply;
+    use crate::record::{Control, Display, Record};
+    use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
+    use std::borrow::Cow;
+    use std::sync::{Mutex, mpsc};
+
+    let (entered, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let held = Mutex::new(held);
+    let builtins: Arc<[BuiltinEntry]> = Arc::new([BuiltinEntry::new(
+        Cow::Borrowed("test-held-helper"),
+        testkit::scheme_test_clear_block_forever,
+        "test-only: hold a helper until released.",
+        BuiltinBody::Captured(Arc::new(move |_, _, shell| {
+            entered.send(()).unwrap();
+            held.lock()
+                .unwrap()
+                .recv_timeout(WAIT)
+                .expect("release helper");
+            shell.poll()?;
+            Ok(ral_core::Value::Unit)
+        })),
+    )]);
+    let mut parent = crate::agent::Agent::for_test_with(crate::agent::TestLaunch {
+        returns: false,
+        installers: dressed(move |runtime| runtime.install_captured_builtins(&builtins)),
+        ..crate::agent::TestLaunch::new("system")
+    })
+    .unwrap();
+    set_provider(
+        &mut parent,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::text("waiting for help")),
+        ),
+    );
+    // The conversing parent may finish prose without replying or settling.
+    let mut helper = testkit::forked_child(&parent, "held-helper", "`inherit");
+    set_provider(
+        &mut helper,
+        scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "hold",
+                "test-held-helper",
+            )])),
+        ),
+    );
+    let (emit, _feed) = crate::bus::dummy_emitter();
+    let helper = launch_child(&mut parent, helper, Some("work".into()), &emit);
+    ready
+        .recv_timeout(WAIT)
+        .expect("helper entered its real dispatch");
+    let host = testkit::host(parent);
+    let mut app = app_for_host(&host);
+    let root = app.tabs.focused();
+    submit(&mut app, "please help");
+    let mut answer = None;
+    until(&mut app, &host, |_, signal| match signal {
+        Signal::Commit(id, commit) if *id == root => {
+            for record in commit.records() {
+                assert!(
+                    !matches!(record.value(), Record::Control(Control::JobSettled { .. })),
+                    "helper debt prevents settlement"
+                );
+                if matches!(record.value(), Record::Display(Display::Answer { text }) if text == "waiting for help")
+                {
+                    answer = Some(commit.number());
+                }
+            }
+            false
+        }
+        Signal::Synced { agent, through } if *agent == root => {
+            answer.is_some_and(|commit| *through >= commit)
+        }
+        _ => false,
+    });
+    assert!(
+        helper.status().unwrap().owes,
+        "helper is still held, not reported"
+    );
+    assert!(host.port().is_live(root));
+    let sb = app.tabs.focused_scrollback().unwrap();
+    assert!(sb.copy_ready());
+    assert!(sb.reader().snapshot().is_ok());
+    release.send(()).unwrap();
     assert_eq!(host.end(), [] as [String; 0]);
 }

@@ -7,10 +7,9 @@ use super::dial::Detail;
 use super::mirror::Mirror;
 use super::palette::AgentSlot;
 use super::text::is_blank;
-use crate::record::{Fold, Record, Recorded, Refusal, replay};
+use crate::record::{Fold, Record, Recorded, Refusal, Snapshot};
 use crate::site::{Silent, site};
 use ral_core::own::create_named;
-use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -73,37 +72,41 @@ impl Fold for Export<'_> {
     }
 }
 
-/// Render `record` (a `record.jsonl` open for reading, named `name` in
-/// messages) to `out` as the scrollback reads.
+/// Render a certified, bounded transcript to `out` as the scrollback reads.
 ///
 /// # Errors
 /// If the log will not read back, or `out` will not take the text.
-pub fn export(record: File, name: &Path, out: &mut dyn Write, format: Format) -> io::Result<()> {
+pub(crate) fn export(snapshot: &Snapshot, out: &mut dyn Write, format: Format) -> io::Result<()> {
     let mut out = io::BufWriter::new(out);
-    let render: Box<dyn Render + '_> = match format {
-        Format::Plain => Box::new(Plain {
-            out: &mut out,
-            prev_blank: true,
-        }),
-    };
-    let memo = Export {
-        mirror: Mirror::new(AgentSlot::default(), Detail::Summary),
-        render,
-        failed: None,
-    };
-    let Export {
-        mirror,
-        mut render,
-        failed,
-    } = replay::<Export>(record, name, memo).map_err(io::Error::other)?;
-    if let Some(error) = failed {
-        return Err(error);
+    {
+        let render: Box<dyn Render + '_> = match format {
+            Format::Plain => Box::new(Plain {
+                out: &mut out,
+                prev_blank: true,
+            }),
+        };
+        let mut memo = Export {
+            mirror: Mirror::new(AgentSlot::default(), Detail::Summary),
+            render,
+            failed: None,
+        };
+        for record in snapshot.records()? {
+            Export::step(&mut memo, record?).map_err(io::Error::other)?;
+        }
+        let Export {
+            mirror,
+            mut render,
+            failed,
+        } = memo;
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        let agent = mirror.agent;
+        for block in mirror.finish() {
+            render.block(&block, agent)?;
+        }
+        drop(render);
     }
-    let agent = mirror.agent;
-    for block in mirror.finish() {
-        render.block(&block, agent)?;
-    }
-    drop(render);
     out.flush()
 }
 
@@ -111,13 +114,111 @@ pub fn export(record: File, name: &Path, out: &mut dyn Write, format: Format) ->
 ///
 /// # Errors
 /// As [`export`], or if `dest` exists or cannot be created.
-pub fn export_to(record: File, name: &Path, dest: &Path, format: Format) -> io::Result<()> {
+pub(crate) fn export_to(snapshot: &Snapshot, dest: &Path, format: Format) -> io::Result<()> {
     export(
-        record,
-        name,
+        snapshot,
         &mut site!(Silent::ExportDestination, create_named(dest))?,
         format,
     )
+}
+
+/// Resolve beneath a known application root, then lock before opening the source.
+pub(crate) fn inactive_snapshot(target: &Path) -> io::Result<(Snapshot, crate::app::RunLock)> {
+    use crate::app::APPS;
+    use ral_core::path::XdgKind;
+    let session_path = session_target(target)?;
+    for app in APPS {
+        let root = app.own(XdgKind::State)?;
+        match root.within(session_path) {
+            Ok(session) => return inactive_under(&root, &session),
+            Err(ral_core::own::OwnError::Outside { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(io::Error::other(UNMANAGED))
+}
+
+fn session_target(target: &Path) -> io::Result<&Path> {
+    if target
+        .file_name()
+        .is_some_and(|name| name == crate::app::RECORD)
+    {
+        ral_core::path::spelled_parent(target).ok_or_else(|| io::Error::other(UNMANAGED))
+    } else {
+        Ok(target)
+    }
+}
+
+fn inactive_under(
+    root: &ral_core::own::OwnDir,
+    held: &ral_core::own::OwnDir,
+) -> io::Result<(Snapshot, crate::app::RunLock)> {
+    use crate::app::{RECORD, RunLock};
+    use crate::record::AgentId;
+    let relative = ral_core::path::relative_key(
+        &ral_core::path::spelled(held.path()).map_err(io::Error::other)?,
+        &ral_core::path::spelled(root.path()).map_err(io::Error::other)?,
+    )
+    .ok_or_else(|| io::Error::other(UNMANAGED))?;
+    let parts: Vec<_> = relative.split('/').collect();
+    let [project_name, run_name, "sessions", session_name] = parts.as_slice() else {
+        return Err(io::Error::other(UNMANAGED));
+    };
+    let id = session_name
+        .parse::<u64>()
+        .map_err(|_| io::Error::other(UNMANAGED))?;
+    if id.to_string() != *session_name {
+        return Err(io::Error::other(UNMANAGED));
+    }
+    let project = root.dir(project_name)?;
+    let run = project.dir(run_name)?;
+    let lock = RunLock::try_existing(&run).map_err(|error| {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            io::Error::new(
+                error.kind(),
+                "this run is active; use /export in its running TUI, or end the run and retry",
+            )
+        } else {
+            io::Error::new(
+                error.kind(),
+                format!("cannot establish the owning run's existing lock: {error}; {UNMANAGED}"),
+            )
+        }
+    })?;
+    #[cfg(test)]
+    AFTER_EXPORT_LOCK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
+    let sessions = run.dir("sessions")?;
+    let session = sessions.dir(session_name)?;
+    if !session.same_directory(held) {
+        return Err(io::Error::other(
+            "the requested directory changed during resolution; export refused; retry",
+        ));
+    }
+    let source = session.path().join(RECORD);
+    let file = session.open_update(RECORD).map_err(|error| {
+        io::Error::new(error.kind(), format!(
+            "cannot establish durability for {}: {error}; inactive export requires an existing regular file with read/write permission",
+            ral_core::path::shown(&source),
+        ))
+    })?;
+    let snapshot = Snapshot::inactive(file, &source, AgentId::new(id))?;
+    session.sync()?;
+    sessions.sync()?;
+    run.sync()?;
+    project.sync()?;
+    root.sync()?;
+    Ok((snapshot, lock))
+}
+
+const UNMANAGED: &str = "standalone export requires a verified inactive managed session: no owning-run lock and durability witness could be established; use a session directory or record.jsonl under the application's state directory, or /export in its running TUI";
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_EXPORT_LOCK: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

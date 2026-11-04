@@ -500,7 +500,9 @@ fn heard(rx: &crate::bus::BusReceiver) -> Vec<Commit> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
             crate::bus::Signal::Commit(_, rec) => Some(rec),
-            crate::bus::Signal::Born(..) | crate::bus::Signal::Transient(..) => None,
+            crate::bus::Signal::Born(..)
+            | crate::bus::Signal::Transient(..)
+            | crate::bus::Signal::Synced { .. } => None,
         })
         .collect()
 }

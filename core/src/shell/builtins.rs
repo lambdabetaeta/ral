@@ -396,7 +396,7 @@ builtin_registry! {
 /// arguments, and so install as base handler frames instead of natives.
 ///
 /// `echo` is core's only one.  `DETACH_BUILTIN` is the other frame core
-/// publishes, withheld from here for a host that also arms a birth budget.
+/// publishes, withheld from here for a host to install.
 static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("echo"),
     scheme::echo,
@@ -494,8 +494,7 @@ pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 
 /// `detach` — a birth this session renounces: the process reparents to init.
 ///
-/// Carried only by a host that also arms a detach policy
-/// ([`crate::shell::runtime::Shell::arm_detach`]) — one act, so absence is an unknown-name
+/// Carried only by a host that installs it, so absence is an unknown-name
 /// diagnostic and never a veto.  Whether
 /// a call that does resolve may *spend* the verb is the separate capability
 /// question, asked of the live grant stack

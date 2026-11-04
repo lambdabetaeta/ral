@@ -235,6 +235,110 @@ fn final_session_end_writer_failure_is_in_died_and_the_join_result() {
 }
 
 #[test]
+fn failed_pre_attendance_sync_prevents_a_queued_resources_command() {
+    let agent = trunk(false);
+    let recorder = agent.recorder();
+    agent
+        .handle()
+        .0
+        .address
+        .command(crate::bus::Command::Read(crate::bus::Read::Resources))
+        .unwrap();
+    let _recorded = recorder
+        .emit(Forensic::SystemNote {
+            text: "uncertified suffix".into(),
+        })
+        .unwrap();
+    recorder.before_sync(|| Err(std::io::Error::other("attendance sync failed")));
+    let host = host(agent);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let failures = loop {
+        let signal = host
+            .feed()
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("failed owner terminates");
+        assert!(
+            !matches!(signal, Signal::Transient(_, Transient::Resources { .. })),
+            "the queued command was not executed"
+        );
+        if let Signal::Transient(_, Transient::Died { failures }) = signal {
+            break failures;
+        }
+    };
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("attendance sync failed"));
+    assert_eq!(host.end(), failures);
+}
+
+#[test]
+fn final_sync_failure_keeps_the_old_watermark_and_reaches_died_and_join() {
+    let agent = trunk(false);
+    let recorder = agent.recorder();
+    agent
+        .handle()
+        .0
+        .address
+        .command(crate::bus::Command::Rewrite(crate::bus::Rewrite::Close))
+        .unwrap();
+    let before = recorder.reader().since(None).unwrap().1;
+    assert!(before > 0);
+    recorder.before_sync(|| Err(std::io::Error::other("terminal sync failed")));
+    let host = host(agent);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut announced = false;
+    let failures = loop {
+        let signal = host
+            .feed()
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("terminal sync failure is published");
+        match signal {
+            Signal::Synced { through, .. } => assert!(through <= before),
+            Signal::Transient(_, Transient::Fault { text }) => {
+                assert!(text.contains("terminal sync failed"));
+                announced = true;
+            }
+            Signal::Transient(_, Transient::Died { failures }) => break failures,
+            _ => {}
+        }
+    };
+    assert!(announced);
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("terminal sync failed"));
+    let (_, synced, commits) = recorder.reader().since(None).unwrap();
+    assert_eq!(synced, before, "failed certification advances nothing");
+    let commits = commits.collect::<Result<Vec<_>, _>>().unwrap();
+    assert!(commits.last().unwrap().number() > before);
+    assert!(
+        commits
+            .last()
+            .unwrap()
+            .records()
+            .iter()
+            .any(|record| matches!(record.value(), Record::Forensic(Forensic::SessionEnded)))
+    );
+    assert_eq!(host.end(), failures);
+}
+
+#[test]
+fn discard_certifies_session_ended_after_destruction() {
+    let agent = trunk(false);
+    let fleet = agent.fleet.clone();
+    let recorder = agent.recorder();
+    assert_eq!(agent.discard(), [] as [String; 0]);
+    let (_, synced, commits) = recorder.reader().since(None).unwrap();
+    let commits = commits.collect::<Result<Vec<_>, _>>().unwrap();
+    let last = commits.last().unwrap();
+    assert!(
+        last.records()
+            .iter()
+            .any(|record| matches!(record.value(), Record::Forensic(Forensic::SessionEnded)))
+    );
+    assert_eq!(synced, last.number());
+    assert!(recorder.reader().snapshot().is_ok());
+    drop(fleet);
+}
+
+#[test]
 fn an_uncompleted_terminal_cannot_publish_success() {
     let agent = trunk(false);
     let (tx, rx) = crate::bus::channel();

@@ -1,5 +1,5 @@
 use crate::wire::WindowReport;
-use exarch::port::Port;
+use exarch::port::{Port, Refused, WithdrawalFailed};
 use exarch::provider::Holdings;
 use exarch::record::AgentId;
 use ral_core::sync::LockExt;
@@ -101,9 +101,7 @@ impl Inlet {
                 messages.push(text);
                 Ok(())
             }
-            Self::Live { port, agent } => port
-                .submit(*agent, text)
-                .map_err(|_| "The assistant has already finished; nothing was sent.".to_string()),
+            Self::Live { port, agent } => port.submit(*agent, text).map_err(refused_message),
         }
     }
 
@@ -114,10 +112,10 @@ impl Inlet {
         }
     }
 
-    pub(crate) fn recall(&mut self) -> Vec<String> {
+    pub(crate) fn recall(&mut self) -> Result<Vec<String>, String> {
         match self {
-            Self::Booting(messages) => std::mem::take(messages),
-            Self::Live { port, agent } => port.recall(*agent).unwrap_or_default(),
+            Self::Booting(messages) => Ok(std::mem::take(messages)),
+            Self::Live { port, agent } => port.recall(*agent).map_err(withdrawal_message),
         }
     }
 
@@ -133,6 +131,23 @@ impl Inlet {
             let _ended = port.end(agent);
         }
     }
+}
+
+pub(super) fn refused_message(why: Refused) -> String {
+    match why {
+        Refused::Ended => "The assistant has finished; this message was not sent.",
+        Refused::Resting => "The assistant cannot accept this message now; this message was not sent.",
+        Refused::Unsynced(_) => "This message was queued and may already have been read, but saving the conversation failed. Do not send it again automatically; review what happened before continuing.",
+    }
+    .to_string()
+}
+
+pub(super) fn withdrawal_message(why: WithdrawalFailed) -> String {
+    match why {
+        WithdrawalFailed::Ended(_) => "The assistant has finished; this request could not take back its queued messages.",
+        WithdrawalFailed::Unavailable(_) => "Saving the conversation failed; stopping or taking messages back may already have happened. This operation cannot be confirmed; do not automatically repeat it or resend messages.",
+    }
+    .to_string()
 }
 
 /// Generation gates publication; the window's attempt gates incoming messages.
@@ -236,7 +251,7 @@ mod tests {
         inlet.steer("first".into()).expect("held");
         inlet.steer("second".into()).expect("held");
         assert_eq!(inlet.queued(), ["first", "second"]);
-        assert_eq!(inlet.recall(), ["first", "second"]);
+        assert_eq!(inlet.recall().unwrap(), ["first", "second"]);
         assert_eq!(inlet.queued(), Vec::<String>::new());
 
         inlet.steer("held".into()).expect("held");
@@ -267,12 +282,20 @@ mod tests {
         inlet.steer("go".into()).expect("a live root accepts input");
         assert_eq!(port.queued(root).unwrap(), ["go"]);
         assert_eq!(inlet.queued(), ["go"]);
-        assert_eq!(inlet.recall(), ["go"]);
+        assert_eq!(inlet.recall().unwrap(), ["go"]);
         assert_eq!(port.queued(root).unwrap(), Vec::<String>::new());
 
         assert_eq!(host.end(), Vec::<String>::new());
-        assert!(inlet.steer("late".into()).is_err());
+        assert_eq!(
+            inlet.steer("late".into()),
+            Err(refused_message(Refused::Ended))
+        );
         assert_eq!(inlet.queued(), Vec::<String>::new());
-        assert_eq!(inlet.recall(), Vec::<String>::new());
+        assert_eq!(
+            inlet.recall(),
+            Err(withdrawal_message(WithdrawalFailed::Ended(
+                exarch::port::Ended(root)
+            )))
+        );
     }
 }

@@ -1,6 +1,7 @@
 pub const WORK: &str = "/work";
 pub const SCRATCH: &str = "/tmp";
 pub const WORKSPACE_NAME: &str = "workspace";
+/// Kept commands live in `engine-<pid>/exec-<seq>`; survivors share `detached`.
 pub const EXEC_CGROUP: &str = "/sys/fs/cgroup/ral-exec";
 pub const EXEC_CONTROLLERS: &str = "+memory +pids +cpu";
 pub const ENGINE_FLAG: &str = "--guest-engine";

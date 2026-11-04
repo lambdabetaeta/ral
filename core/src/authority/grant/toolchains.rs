@@ -9,8 +9,8 @@
 //! §Selectors; the table is the data.
 //!
 //! [`chosen`] is pure over an injected environment and home; [`expand_in`]
-//! walks what it chose, refusing an override that names the world and keeping
-//! a directory that is one, and [`expand`] is its live wrapper, which the
+//! walks what it chose, refusing every directory that names the world, and
+//! [`expand`] is its live wrapper, which the
 //! freeze and host discovery consume.
 
 use super::Polar;
@@ -125,6 +125,7 @@ impl Toolchain {
                         Abs("/usr/libexec"),
                         Abs("/usr/lib/git-core"),
                         Abs("/usr/lib/gcc"),
+                        Abs("/usr/lib/cargo/bin"),
                         Abs("/Library/Developer/CommandLineTools"),
                         Abs("/Applications/Xcode.app/Contents/Developer")
                     ]
@@ -442,13 +443,13 @@ fn walked<W: Polar>(
 }
 
 /// The directories `toolchain` expands to over an injected environment and
-/// home, each walked as polarity `W` walks: an override that names the
+/// home, each walked as polarity `W` walks: any directory that names a
 /// filesystem root, the home or an ancestor of it is refused, and a directory
 /// that is absent or no directory is dropped.  A toolchain that is absent
 /// expands to nothing.
 ///
 /// # Errors
-/// An override that names the world; a directory whose walk fails, or that no
+/// A selected directory that names the world; a directory whose walk fails, or that no
 /// grant can hold.
 pub(crate) fn expand_in<W: Polar>(
     toolchain: Toolchain,
@@ -458,16 +459,31 @@ pub(crate) fn expand_in<W: Polar>(
     walked::<W>(toolchain, env, home.map(|h| h.spelled.as_str()))?
         .into_iter()
         .map(|(dir, via)| {
-            if let Some((var, value)) = via {
-                let subject = format!("{var} is {}", shown(&value));
-                refuse_the_world(
-                    Selector::Toolchain(toolchain),
-                    &subject,
-                    var,
-                    dir.real.followed(),
-                    home,
-                )?;
-            }
+            let (subject, advice) = if let Some((var, value)) = via {
+                (
+                    format!("{var} is {}", shown(&value)),
+                    format!("Is {var} set correctly?"),
+                )
+            } else {
+                let written = dir.written.shown();
+                let real = dir.real.followed().real().to_string();
+                let subject = if written == real {
+                    format!("default directory {written}")
+                } else {
+                    format!("default directory {written} resolves to {real}")
+                };
+                (
+                    subject,
+                    "Check the default directory or symlink and its HOME/XDG base.".into(),
+                )
+            };
+            refuse_the_world(
+                Selector::Toolchain(toolchain),
+                &subject,
+                &advice,
+                dir.real.followed(),
+                home,
+            )?;
             W::grant(dir)
         })
         .collect()
@@ -517,8 +533,7 @@ pub(crate) fn system_reads_in(
 mod tests {
     use super::*;
     use crate::authority::grant::freeze::Anchor;
-    #[cfg(unix)]
-    use crate::path::Subject;
+    use crate::path::{Depth, Excluded, Subject};
     use std::path::Path;
 
     /// A directory as the fixtures spell it.
@@ -573,6 +588,223 @@ mod tests {
             pairs
                 .iter()
                 .find_map(|&(var, v)| (var == k).then(|| v.to_owned()))
+        }
+    }
+
+    fn link_dir(target: &Path, at: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, at).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(target, at).unwrap();
+    }
+
+    fn default_refusal<W: Polar>(
+        toolchain: Toolchain,
+        pairs: &[(&str, &str)],
+        home: &Home,
+        default: &Path,
+        target: &Path,
+        what: &str,
+    ) {
+        let err = expand_in::<W>(toolchain, env(pairs), Some(home))
+            .err()
+            .expect("a world-sized default must refuse the selector");
+        for part in [
+            format!("`dir `{}", <&str>::from(toolchain)),
+            format!("default directory {}", shown(default)),
+            format!("resolves to {}", crate::test_helper::real(target)),
+            what.to_owned(),
+            "default directory or symlink".to_owned(),
+            "HOME/XDG base".to_owned(),
+        ] {
+            assert!(err.message.contains(&part), "{part}: {}", err.message);
+        }
+        assert!(!err.message.contains("set correctly"), "{}", err.message);
+    }
+
+    #[test]
+    fn rustup_defaults_naming_a_root_home_or_ancestor_refuse_both_polarities() {
+        for what in [
+            "the filesystem root",
+            "the home directory itself",
+            "an ancestor of the home directory",
+        ] {
+            let (tmp, _) = tree(&["h"]);
+            let home_path = tmp.path().join("h");
+            let home = Home::of(spelled(&home_path)).unwrap();
+            let target = match what {
+                "the filesystem root" => tmp.path().ancestors().last().unwrap(),
+                "the home directory itself" => home_path.as_path(),
+                _ => tmp.path(),
+            };
+            let default = home_path.join(".rustup");
+            link_dir(target, &default);
+            default_refusal::<Trace>(Toolchain::Rustup, &[], &home, &default, target, what);
+            default_refusal::<Excluded>(Toolchain::Rustup, &[], &home, &default, target, what);
+        }
+    }
+
+    #[test]
+    fn xdg_config_data_and_cache_defaults_refuse_the_world_with_or_without_host_bases() {
+        for (toolchain, var, fallback, sub) in [
+            (Toolchain::Nvm, "XDG_CONFIG_HOME", ".config", "nvm"),
+            (Toolchain::Fnm, "XDG_DATA_HOME", ".local/share", "fnm"),
+            (
+                Toolchain::Poetry,
+                "XDG_CACHE_HOME",
+                ".cache",
+                "pypoetry/virtualenvs",
+            ),
+        ] {
+            for injected in [false, true] {
+                for at_root in [false, true] {
+                    let (tmp, _) = tree(&["h/.nvm", "h/.local/share/pypoetry", "xdg"]);
+                    let home_path = tmp.path().join("h");
+                    let home = Home::of(spelled(&home_path)).unwrap();
+                    let base = if injected {
+                        tmp.path().join("xdg")
+                    } else {
+                        home_path.join(fallback)
+                    };
+                    let default = base.join(sub);
+                    std::fs::create_dir_all(default.parent().unwrap()).unwrap();
+                    let target = if at_root {
+                        tmp.path().ancestors().last().unwrap()
+                    } else {
+                        home_path.as_path()
+                    };
+                    link_dir(target, &default);
+                    let pairs = if injected {
+                        vec![(var, spelled(&base))]
+                    } else {
+                        vec![]
+                    };
+                    let what = if at_root {
+                        "the filesystem root"
+                    } else {
+                        "the home directory itself"
+                    };
+                    default_refusal::<Trace>(toolchain, &pairs, &home, &default, target, what);
+                    default_refusal::<Excluded>(toolchain, &pairs, &home, &default, target, what);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fnm_checks_an_unsafe_later_default_after_a_safe_data_default() {
+        let (tmp, _) = tree(&["h/.local/share/fnm"]);
+        let home_path = tmp.path().join("h");
+        let home = Home::of(spelled(&home_path)).unwrap();
+        let default = home_path.join(".fnm");
+        link_dir(&home_path, &default);
+        default_refusal::<Trace>(
+            Toolchain::Fnm,
+            &[],
+            &home,
+            &default,
+            &home_path,
+            "the home directory itself",
+        );
+        default_refusal::<Excluded>(
+            Toolchain::Fnm,
+            &[],
+            &home,
+            &default,
+            &home_path,
+            "the home directory itself",
+        );
+    }
+
+    #[test]
+    fn a_safe_external_default_grants_only_its_position_and_keeps_exclusion_objects() {
+        let (tmp, _) = tree(&["h", "tools", "neighbor"]);
+        let home_path = tmp.path().join("h");
+        let home = Home::of(spelled(&home_path)).unwrap();
+        let default = home_path.join(".rustup");
+        let target = tmp.path().join("tools");
+        link_dir(&target, &default);
+        let allowed = expand_in::<Trace>(Toolchain::Rustup, env(&[]), Some(&home)).unwrap();
+        let excluded = expand_in::<Excluded>(Toolchain::Rustup, env(&[]), Some(&home)).unwrap();
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(
+            allowed[0].real.real(),
+            Some(&crate::test_helper::real(&target))
+        );
+        assert_eq!(excluded[0].real.named().kind(), Some(Kind::Symlink));
+        assert_eq!(
+            excluded[0].real.target().unwrap().real(),
+            &crate::test_helper::real(&target)
+        );
+        #[cfg(unix)]
+        {
+            let ids = excluded[0].real.held_ids();
+            assert_eq!(ids.len(), 2);
+            assert!(ids.iter().all(Option::is_some), "{ids:?}");
+        }
+        for (path, covered) in [
+            (target.join("cargo"), true),
+            (default.join("cargo"), true),
+            (tmp.path().join("neighbor/cargo"), false),
+        ] {
+            let access = crate::test_helper::trace(path);
+            assert_eq!(allowed[0].real.contains(Subject::Access(&access)), covered);
+            assert_eq!(
+                excluded[0]
+                    .real
+                    .matches(Subject::Access(&access), Depth::Within)
+                    .is_some(),
+                covered
+            );
+        }
+    }
+
+    #[test]
+    fn missing_and_non_directory_defaults_yield_nothing_for_both_polarities() {
+        let (tmp, _) = tree(&["h"]);
+        let home_path = tmp.path().join("h");
+        let home = Home::of(spelled(&home_path)).unwrap();
+        let empty = || {
+            assert_eq!(
+                expand_in::<Trace>(Toolchain::Rustup, env(&[]), Some(&home)).unwrap(),
+                vec![]
+            );
+            assert_eq!(
+                expand_in::<Excluded>(Toolchain::Rustup, env(&[]), Some(&home)).unwrap(),
+                vec![]
+            );
+        };
+        empty();
+        std::fs::write(home_path.join(".rustup"), "not a directory").unwrap();
+        empty();
+    }
+
+    #[test]
+    fn empty_or_relative_overrides_still_judge_the_default() {
+        let (tmp, _) = tree(&["h"]);
+        let home_path = tmp.path().join("h");
+        let home = Home::of(spelled(&home_path)).unwrap();
+        let default = home_path.join(".rustup");
+        link_dir(&home_path, &default);
+        for value in ["", "relative"] {
+            let pairs = [("RUSTUP_HOME", value)];
+            default_refusal::<Trace>(
+                Toolchain::Rustup,
+                &pairs,
+                &home,
+                &default,
+                &home_path,
+                "the home directory itself",
+            );
+            default_refusal::<Excluded>(
+                Toolchain::Rustup,
+                &pairs,
+                &home,
+                &default,
+                &home_path,
+                "the home directory itself",
+            );
         }
     }
 
@@ -867,6 +1099,13 @@ mod tests {
         for dir in [&home, &inside, &top] {
             assert!(!keeps_system_read(dir, Some(&home)), "{dir:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_defaults_include_distribution_tool_roots() {
+        let system = chosen_in(Toolchain::System, env(&[]), None);
+        assert!(system.iter().any(|dir| dir == "/usr/lib/cargo/bin"));
     }
 
     #[cfg(unix)]

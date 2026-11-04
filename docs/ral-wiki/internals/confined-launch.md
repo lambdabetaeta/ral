@@ -1,16 +1,20 @@
 ---
 generated_at_commit: fea8d9f0
-verified_at_commit: fea8d9f0
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-03
 anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
 
-**ral confines one external command at a time, at the moment it spawns it, and
-nothing in that path can run a program unconfined.** When `build_launch`
-(`shell/exec/command/process.rs`) spawns an admitted external or bundled child
-under a restrictive projection, it calls `sandboxed_command`
+**A host projection confines one external command at its spawn boundary.**
+Linux guest engines use the [[internals/capability-enforcement#Guest jail|guest jail]]
+instead: the utility and its descendants keep the jail and VM perimeter, but
+receive no per-grant fs/exec projection. Seccomp and, when requested, offline
+network namespaces still apply there.
+
+When `build_launch` (`shell/exec/command/process.rs`) spawns an admitted external or bundled child
+on a host under a restrictive projection, it calls `sandboxed_command`
 (`authority/sandbox/launch.rs`), which confines that one child. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
 
@@ -22,7 +26,7 @@ resource limits never change.
 
 ## One confinement point per platform
 
-- **Linux** wraps the child in bwrap ([[internals/linux-envelope|linux-envelope]]).
+- **Linux hosts** wrap the child in bwrap ([[internals/linux-envelope|linux-envelope]]).
   The trampoline `execve`s the host file by the real path the guard judged, as
   macOS does; a `#!` script therefore sees that path as `$0`.
 - **macOS** re-execs a small launcher, `ral --warrant`. The warrant carries the
@@ -42,7 +46,7 @@ resource limits never change.
 
 ## The child is handed its confinement on a descriptor
 
-**Both Unix backends re-exec ral as `ral --warrant <fd>`, and that argv
+**Both Unix host backends re-exec ral as `ral --warrant <fd>`, and that argv
 names only a descriptor.** The confinement and the program arrive in a
 `Warrant` the parent compiled, on that descriptor.
 
@@ -76,8 +80,8 @@ names only a descriptor.** The confinement and the program arrive in a
 
 ## Failing closed is the whole stance
 
-**`Warrant::confine` is the only road to the program, and it runs only after the
-confinement is entered and the handoff closed.** The warrant's `Confinement` is
+**For a Unix host projection, `Warrant::confine` is the only road to the program;
+it runs only after confinement is entered and the handoff closed.** The warrant's `Confinement` is
 the one thing the child enters: `Seatbelt(profile)` on macOS; on Linux
 `unconfined`, `landlock@<fd>` or `landlock+refer@<fd>`, a `Landlocked` promise naming the ruleset's descriptor, or none.
 
@@ -160,8 +164,7 @@ APPLICATION PACKAGES`) can satisfy that shortcut.
   tree as it stands included, so nothing one launch was granted reaches another
   launch under the same projection. The projection key, its whole fs lists,
   picks only the profile: the package SID and its named-object namespace. Every
-  run place is stamped as a read prefix is, frozen. The guest-jail launch branch
-  still bypasses per-command projection and installs no kernel exec policy.
+  run place is stamped as a read prefix is, frozen.
 - **An exclusion is never stamped.** The AppContainer pass ignores a deny ACE
   naming a capability, so nothing can take back what a grant's ACE admits.
   `session::confine` carves an exclusion out of the allowances around it,
@@ -188,8 +191,8 @@ APPLICATION PACKAGES`) can satisfy that shortcut.
 
 ## When confinement is unavailable
 
-**A launch that cannot be confined is refused, and the refusal says the sandbox
-is why** (`authority::sandbox::Refusal::Unavailable`).
+**A host launch whose required projection cannot be installed is refused, and
+the refusal says the sandbox is why** (`authority::sandbox::Refusal::Unavailable`).
 
 - **Some causes show only at spawn.** On Linux the envelope is bwrap, a host
   package, and a host without it fails at the spawn with `ENOENT`.
@@ -208,10 +211,10 @@ is why** (`authority::sandbox::Refusal::Unavailable`).
 
 ## Related rules
 
-- **A bundled coreutil is never inlined under a restrictive grant.** Its
-  filesystem access has no in-process guard, so it is spawned as a re-exec child
-  of ral (`--ral-bundled-tool <tool>`, or a warrant naming the tool) and gets the
-  same per-command sandbox as any external
+- **Bundled coreutils and rg run in re-exec children, not the evaluator.**
+  Their filesystem access has no in-process guard. The child of ral
+  (`--ral-bundled-tool <tool>`, or a warrant naming the tool) takes the same
+  host-projection or guest-jail branch as an external file
   ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]];
   [[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - **A ral-written pipeline stage is not a launch.** It runs on its own thread of

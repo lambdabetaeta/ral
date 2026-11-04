@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-03
 covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/transaction.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
@@ -51,6 +51,8 @@ authority.
   reports, wakeups or deferred surface batches. Commands are posts too; `Gone` is separate join plumbing.
   `Txn::post` commits `Posted` before queuing its payload. Every other
   commit prunes payloads to `Mail::pending`, the equality at every live unlock.
+  Addressed posts and commands sync after unlocking before acknowledgement;
+  `Refused::Unsynced` preserves queued/possibly-read delivery on failed sync.
   `next` and `drain` commit `Taken` before handing payloads over. Human runs
   are maximal over posts; `Gone` does not split one.
 - `AgentAddress::transact` and `AgentMailbox::transact` expose closure-scoped
@@ -70,7 +72,8 @@ authority.
   hears input through the first rewrite only while the exchange is live. Human uptake records before polling cancellation.
 - `next` commits `JobSettled` and clears the job under the same lock that
   finds the queue empty, no helper pending and no returning-agent schedule
-  armed. `Next::Settled` carries the debt read in that same transaction, so
+  armed. The owner syncs `Next::Settled` outside the cell before acting.
+  `Next::Settled` carries the debt read in that same transaction, so
   a post accepted afterwards is never taken for the ended job's. A post
   either joins that job or sees rest.
 - `Admission::Free` admits any input at rest. `Gated` requires a release,
@@ -102,10 +105,11 @@ authority.
   unread debt, uptake keeps it.
 - `AgentHandle::report` calls `Txn::report(status, notice)`, where `notice` builds the `Input` from a `ChildStatus`: commit
   `Control::Status`, schedule retirements and queued-wakeup withdrawals, then
-  post `Input::Child` to the fixed parent iff owed, still under the helper
-  lock. After life ends, every pending post is withdrawn. A poisoned helper
-  reports `Failed` directly to its parent. A failed append notifies iff the
-  pre-append mail owed, leaving the folds unchanged. `AgentAddress::report`
+  sync the helper and post `Input::Child` to the fixed parent iff owed, still
+  under the helper lock. The parent's post unlocks its cell before syncing. After life ends, every pending post is withdrawn. A poisoned helper
+  reports `Failed` directly to its parent. A failed append or sync notifies iff
+  the captured pre-commit mail owed; failed append leaves the folds unchanged,
+  while a successful `Status` fold already cleared debt before a failed sync. `AgentAddress::report`
   owns both fallback paths, guarded by `Shared.failure_noticed`:
   at most one `Failed` reaches the parent, however often teardown retries.
   `AgentAddress::try_transact` is `transact` for closures returning
@@ -149,6 +153,10 @@ authority.
 - `Engine::install` stamps deferred batches with generation. `inherit`
   transfers the outgoing transport's life binding to its replacement before
   retiring it. Loose ral workers belong to the engine and survive Stop/reply.
+- `App::{own, project, new_run}` persist layout entries in their held parents;
+  `Fleet::found` syncs the run after making `sessions/`, and `AgentLog::open_fresh`
+  syncs the sessions directory after making a session. `Log::create` syncs
+  the session after making `record.jsonl`.
 - `agent/build.rs::Agent::born` mints the id, computes `Parent::terms`,
   resolves the prompt and opens `AgentLog::create` with `Opening`. Born and
   reopen share private `hatch` and `assemble`, binding writer failure and
@@ -191,7 +199,10 @@ authority.
   `Ready`. Nudges are exchange-local continuations; no nudge enters the queue.
 - `agent/deliberate.rs` streams provider output, records the assistant turn
   and executes complete ordered tool batches. Provider/tool effects follow
-  their records; a failed append prevents the effect. Reply is harvested
+  their synced records; failed append or sync prevents the effect. The outer
+  request sync precedes allowance polling, and every attempt/retry callback
+  precedes transport preparation. `Agent::ral` syncs before dispatch;
+  `ExarchDesk::handle` syncs before both success and error answers. Reply is harvested
   after its batch only while the exchange remains live, then quiesced and
   reported. Failed mandatory protocol repair ends the session.
 - `desk/agents.rs` checks log availability, forks through `fork_engine`,
@@ -214,7 +225,8 @@ authority.
 - `agent/command.rs::Agent::switch_model` handles `Command::Model(Pick)`
   at rest or a mid-exchange drain. It builds through `Bureau` with launch
   `max_tokens`, commits `Txn::change_model(built.selected())`, then swaps
-  `Body.client`. Build failure changes nothing; append failure ends life.
+  `Body.client` after syncing outside the cell. Build failure changes nothing;
+  append or sync failure ends life.
   The next request uses the new client, even in the same deliberation.
 - `/rewind` withdraws context and rebirths nudges, not shell effects.
   `/close` records `SessionClosed` and ends life; `/quit` returns from the TUI

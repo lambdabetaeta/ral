@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d56977ff
-generated_at_date: 2026-11-03
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-04
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -179,7 +179,7 @@ checkpoint, since a run never writes it.
   the `hooks` table (a worker or a stage dispatches none; a hook registered by a run that then panics is not rolled back with the `(env, context)` checkpoint).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
-  `detach` budget, the `cradle`); the
+  `cradle`); the
   residue once run and session state are named. The `cradle`
   (`shell/runtime/handle/brood.rs`) says where a loose birth hangs and who settles
   it: loose under the root, answering for nothing, for a run and an aside
@@ -260,20 +260,6 @@ checkpoint, since a run never writes it.
   `largest_binding_shallow_size`; large-binding notices ride the same
   ready-boundary `` `notice `` push as the reap ledger's
   (`take_large_binding_notices` is crate-private).
-
-  The `detach` budget (`shell/runtime/state/detached.rs`) is the one member meant to
-  outlive the session: `None` until `Shell::arm_detach`, which a host calls
-  in the same act that installs `detach`'s base frame
-  ([[map/core/builtins|builtins]]), so the verb and the budget it spends
-  cannot drift apart. `DetachPolicy::admit` counts *births*, not occupancy —
-  a survivor's death is unobservable from here, so a release would be a
-  number nobody can compute — and the policy is `Arc`-shared into a spawned
-  worker's shell like the registry, so a `detach` inside a `spawn { }` spends
-  the owning session's budget. The bound is per session: a sub-agent fork
-  gets the same budget unspent, armed by `construct` from its terms, with no recipe. It is
-  equally deliberately absent from
-  `LocalState`'s `Drop`: the surviving processes are the one thing a teardown
-  must leave alone.
 
 Every `Shell` field — `env`, `sig`, and `context` included — is `pub(crate)`: the
 partition encodes run safety, capability attenuation, and wire framing, and
@@ -405,8 +391,8 @@ Methods on `Shell` live by concern, one submodule each:
   half: Σ, the builtin table with its base handler layer, library docs, the
   terminal state; from the installer, shared through its `Arc`s), `Image`
   (what a child can inherit: env, context, sources, `Terms`, fixings), `Terms`
-  (the session's policy: stack limit, child limits, exit hints, lease, retention, detach
-  budget — one type in memory and on the wire), and `Bequest` (`Image` and the
+  (the session's policy: stack limit, child limits, exit hints, lease, retention —
+  one type in memory and on the wire), and `Bequest` (`Image` and the
   `SpawnGrant`). `Shell::construct(runtime, image, root)` is the one session
   literal, with a root's hooks and terminal lease passed beside the image so a
   bequest cannot express either; `Shell::root(runtime)` and
@@ -424,8 +410,7 @@ Methods on `Shell` live by concern, one submodule each:
   `seed_cwd` lets an in-process front end whose working directory is not the
   process cwd state it directly), `inherit.rs` (the
   flow matrix, below), `scrub.rs` (`Shell::bequeath` and its `Scrub`,
-  the one snapshot law's whole mechanism, below), `modules.rs`, `detached.rs`
-  (the `detach` budget), `hooks.rs` (the session-lived hook table of named
+  the one snapshot law's whole mechanism, below), `modules.rs`, `hooks.rs` (the session-lived hook table of named
   run-entry points — prompt render, startup, plugin hooks — each a block, a
   lambda or a builtin, resolved by the `Program::Hook` arm of `Shell::run` under the hook's
   registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
@@ -463,8 +448,7 @@ carries `TerminalAccess::Denied` — the safe default for a store that is not
 the session's. Each also starts with stdin `Empty`, no hooks and no control
 counters; what rides along is the scope, context, Σ, builtin table, source
 registry, root file, call site and exit hints. The kinds differ only in their
-`Holding` — cancel root and anchor, roster, lease ledger, detach budget,
-fixings:
+`Holding` — cancel root and anchor, roster, lease ledger, fixings:
 
 - `spawn_thread` — a spawned worker (`spawn`, `watch`) *and* a ral-written pipeline stage
   ([[map/core/runtime|shell/exec]]'s `shell/exec/pipeline/thread.rs`) — a pipeline never
@@ -481,14 +465,14 @@ fixings:
   gather; a stage thread's `home` is a child of the *node's own* cancel scope,
   so a pipeline-wide cancel reaches every stage transitively, and its `surface`
   is the pipeline's own. It shares the session's root, roster,
-  detach budget and fixings; its lease ledger is unarmed.
+  and fixings; its lease ledger is unarmed.
 - `join_session` — an aside: an independent sibling that clones the parent's
   `context`, source cursor, builtin table, and Σ (`sig`, by `Arc` clone)
   without touching its IO / audit / REPL scratch; no flow-back. It shares the
   parent's cancel root, so code there is interruptible while it runs and older
   interrupts stay out of its reach; the `Program::Hook` arm of `Shell::run` runs a hook there when its
   registered `DefaultPolicy` says `aside` (the REPL's buffer-change hooks).
-  It shares the detach budget and fixings too, but holds a roster of its own
+  It shares the fixings too, but holds a roster of its own
   and an unarmed ledger.
 - `bequeath` / `child_of` — the host session fork (the sub-agent case): a new
   session, holding its parent's policy and none of its state.
@@ -497,9 +481,8 @@ fixings:
   through `Shell::construct`. The child's durable root is its own, and its
   roster carries the parent's retention. Its lease ledger runs on the parent's
   terms and seals everything inherited as baseline
-  ([[internals/binding-leases|binding-leases]]). It gets an unspent detach
-  budget of the same size, the parent's `SourceDb`, and a snapshot of the
-  fixings. A sealed child takes the same path: its `EngineSeed` is the
+  ([[internals/binding-leases|binding-leases]]). It gets the parent's `SourceDb`
+  and a snapshot of the fixings. A sealed child takes the same path: its `EngineSeed` is the
   bequest in wire form ([[map/core/transport|transport]]), and no recipe runs.
   The round-trip test is a codec test and a constructor test.
   `bequeath` is the function every sub-agent fork passes through: one

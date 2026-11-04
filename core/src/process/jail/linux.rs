@@ -1,6 +1,7 @@
 //! The jail's Linux edge: cgroups, network isolation, identity and seccomp.
 
 use super::{Count, JailCgroup, JailPlan, Seq, exhausted};
+use crate::authority::sandbox::Ownership;
 #[cfg(seccomp)]
 use crate::authority::{policy::Net, sandbox::Programs};
 use crate::process::site::Silent;
@@ -132,17 +133,18 @@ fn make_delegated(cgroup: &Path) -> io::Result<()> {
     mkdir_if_missing(cgroup)
 }
 
-/// Create the per-exec cgroup (and every level above it, lazily), write its
-/// limits, and hand back `cgroup.procs` still open: the pre-exec closure may
-/// not allocate, so it cannot build that path and open it itself.  The cgroup
-/// is owned from its `mkdir`, so a failure after it finishes it.
+/// Prepare membership and limits, opening `cgroup.procs` before pre-exec.
+/// Only kept execs acquire teardown authority, before any fallible setup.
 ///
 /// # Errors
 /// Returns the kernel's error for any mkdir/write/open along the way.
-pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
+pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(Option<JailCgroup>, OwnedFd)> {
     make_delegated(&plan.cgroup)?;
-    let cgroup = JailCgroup {
-        path: plan.cgroup.clone(),
+    let cgroup = match plan.ownership {
+        Ownership::Kept => Some(JailCgroup {
+            path: plan.cgroup.clone(),
+        }),
+        Ownership::Surrendered => None,
     };
     write_control(
         &plan.cgroup,
@@ -453,6 +455,148 @@ mod tests {
             .unwrap();
         }
 
+        /// Opt in with an empty cgroup2 directory delegated memory, pids and
+        /// cpu to this root process. No guest-global jail or counter is used.
+        #[test]
+        fn failed_and_abandoned_launches_spare_shared_members_but_clean_kept_jails() {
+            use crate::process::jail::JailLimits;
+            use std::io::{Read, Write};
+            use std::path::PathBuf;
+            use std::process::{Command, Stdio};
+
+            let Some(root) = std::env::var_os("RAL_TEST_CGROUP_ROOT").map(PathBuf::from) else {
+                eprintln!(
+                    "skipping delegated cgroup regression: set RAL_TEST_CGROUP_ROOT to an empty \
+                     delegated cgroup2 directory and run as root"
+                );
+                return;
+            };
+            // SAFETY: geteuid has no preconditions.
+            assert_eq!(
+                unsafe { libc::geteuid() },
+                0,
+                "the guest jail requires root"
+            );
+            let path = root.join(format!("ral-jail-test-{}", std::process::id()));
+            std::fs::create_dir(&path).unwrap();
+            let _tree = JailCgroup::at(path.clone());
+            let mut shared = JailPlan {
+                ownership: Ownership::Surrendered,
+                seq: Seq::new(0).unwrap(),
+                net: None,
+                cgroup: path.join("detached"),
+                limits: JailLimits::default(),
+            };
+            drop(prepare(&shared).unwrap());
+            let _shared_cleanup = JailCgroup::at(shared.cgroup.clone());
+
+            struct Member(std::process::Child);
+            impl Drop for Member {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let mut member = Member(
+                Command::new("/bin/cat")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+            std::fs::write(
+                shared.cgroup.join("cgroup.procs"),
+                member.0.id().to_string(),
+            )
+            .unwrap();
+            let mut round_trip = || {
+                member
+                    .0
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(b"alive\n")
+                    .unwrap();
+                let mut reply = [0; 6];
+                member
+                    .0
+                    .stdout
+                    .as_mut()
+                    .unwrap()
+                    .read_exact(&mut reply)
+                    .unwrap();
+                assert_eq!(&reply, b"alive\n");
+            };
+
+            shared.limits.cpu_quota_pct = 0;
+            assert_eq!(
+                prepare(&shared).err().unwrap().raw_os_error(),
+                Some(libc::EINVAL),
+                "zero CPU quota must fail after earlier setup succeeds"
+            );
+            round_trip();
+            shared.limits = JailLimits::default();
+            let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
+            failed.apply_guest_jail(&shared).unwrap();
+            assert_eq!(
+                failed.spawn_detached().unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+            drop(failed);
+            round_trip();
+            let mut abandoned = crate::process::Launch::new("/bin/true");
+            abandoned.apply_guest_jail(&shared).unwrap();
+            drop(abandoned);
+            round_trip();
+            assert!(
+                shared.cgroup.is_dir(),
+                "shared membership must not remove the leaf"
+            );
+
+            let mut kept = JailPlan {
+                ownership: Ownership::Kept,
+                cgroup: path.join("exec-kept"),
+                ..shared
+            };
+            kept.limits.cpu_quota_pct = 0;
+            assert_eq!(
+                prepare(&kept).err().unwrap().raw_os_error(),
+                Some(libc::EINVAL)
+            );
+            assert!(
+                !kept.cgroup.exists(),
+                "failed kept preparation must remove its leaf"
+            );
+            kept.limits = JailLimits::default();
+            let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
+            failed.apply_guest_jail(&kept).unwrap();
+            assert_eq!(
+                failed
+                    .spawn(crate::process::PgidPolicy::NewLeader)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::NotFound
+            );
+            drop(failed);
+            assert!(
+                !kept.cgroup.exists(),
+                "failed kept spawn must remove its leaf"
+            );
+            let mut abandoned = crate::process::Launch::new("/bin/true");
+            abandoned.apply_guest_jail(&kept).unwrap();
+            std::fs::write(kept.cgroup.join("cgroup.procs"), member.0.id().to_string()).unwrap();
+            drop(abandoned);
+            assert!(
+                !kept.cgroup.exists(),
+                "abandoned kept launch must remove its leaf"
+            );
+            assert!(
+                !member.0.wait().unwrap().success(),
+                "kept teardown must kill its member"
+            );
+        }
+
         #[test]
         fn the_whole_jail_drops_identity_and_installs_the_deny_set() {
             use crate::process::jail::{BASE_UID, JailLimits};
@@ -480,6 +624,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("cgroup.procs"), b"").unwrap();
             let plan = JailPlan {
+                ownership: Ownership::Kept,
                 seq: Seq::new(0).unwrap(),
                 net: None,
                 cgroup: root.path().to_owned(),

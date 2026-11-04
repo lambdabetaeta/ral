@@ -67,7 +67,6 @@ impl Shell {
                 workers,
                 cradle: self.local.cradle.clone(),
                 bindings: BindingLedger::default(),
-                detach: self.local.detach.clone(),
                 machine_depth: 0,
             },
         }
@@ -287,21 +286,15 @@ mod tests {
         );
     }
 
-    /// An aside is the same session: it shares the detach policy and leases
-    /// nothing of its own.
+    /// An aside is the same session: it leases nothing of its own.
     #[test]
-    fn an_aside_shares_the_detach_policy_and_leases_nothing() {
+    fn an_aside_leases_nothing() {
         let mut parent = crate::test_helper::core_shell();
-        parent.arm_detach(4);
         parent.arm_binding_lease(crate::shell::runtime::BindingLease {
             idle_calls: 3,
             large_binding_bytes: 1 << 20,
         });
         let aside = parent.join_session();
-        assert!(Arc::ptr_eq(
-            aside.local.detach.as_ref().expect("armed"),
-            parent.local.detach.as_ref().expect("armed"),
-        ));
         assert!(!aside.local.bindings.armed());
     }
 

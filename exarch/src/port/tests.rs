@@ -17,18 +17,45 @@ fn ended_agents_refuse_every_port_operation_even_while_their_names_remain() {
     port.submit(id, "queued before end".into()).unwrap();
     port.end(id).unwrap();
     assert!(!fleet.registry.is_empty());
-    assert_eq!(port.submit(id, "late".into()), Err(Ended(id)));
+    assert!(matches!(
+        port.submit(id, "late".into()),
+        Err(Refused::Ended)
+    ));
     assert_eq!(port.queued(id), Err(Ended(id)));
-    assert_eq!(port.recall(id), Err(Ended(id)));
-    assert_eq!(port.stop(id, 1.into()), Err(Ended(id)));
-    assert_eq!(
-        port.command(id, Command::Read(Read::Context)),
-        Err(Ended(id))
+    assert!(matches!(port.recall(id), Err(WithdrawalFailed::Ended(Ended(ended))) if ended == id));
+    assert!(
+        matches!(port.stop(id, 1.into()), Err(WithdrawalFailed::Ended(Ended(ended))) if ended == id)
     );
+    assert!(matches!(
+        port.command(id, Command::Read(Read::Context)),
+        Err(Refused::Ended)
+    ));
     assert_eq!(port.end(id), Err(Ended(id)));
     assert!(port.row(id).is_none());
     assert!(!port.is_live(id));
     assert!(port.roster().is_empty());
+}
+
+#[test]
+fn submit_and_command_preserve_post_commit_sync_failures_through_handle_and_port() {
+    for command in [false, true] {
+        let agent = crate::agent::Agent::for_test("system").unwrap();
+        let recorder = agent.recorder();
+        let port = Port::new(agent.fleet.registry.clone(), UsageMeter::default());
+        recorder.before_sync(|| Err(std::io::Error::other("port sync failure")));
+        let result = if command {
+            port.command(agent.id(), Command::Read(Read::Context))
+        } else {
+            port.submit(agent.id(), "queued".into())
+        };
+        assert!(matches!(result, Err(Refused::Unsynced(_))));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("possibly already read")
+        );
+    }
 }
 
 #[test]

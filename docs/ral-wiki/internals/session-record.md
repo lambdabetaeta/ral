@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 96e103a5
-verified_at_date: 2026-11-01
-anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::read, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal, AgentLog::human_children, Mail::owes]
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-03
+anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::sync, Signal::Synced, OwnDir::xdg_synced, Log::read, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal, AgentLog::human_children, Mail::owes]
 ---
 
 # Session record: one seam, one log
@@ -65,9 +65,27 @@ The latch ends the life supplied by agent construction and bound through
 it. After owner drop, terminal finalization announces it once as
 `Transient::Fault` on the independent fleet sink and includes it in
 `Died { failures }` and the join result. This includes failure of the final
-`SessionEnded` append; the recorded prefix remains resumable. Records
-are surrendered to the OS, not `fsync`ed: process-crash durability is not a
-power-loss guarantee.
+`SessionEnded` append; the recorded prefix remains resumable.
+
+**A sync certifies a prefix, independently of provisional publication.**
+`Emitter::sync` notes the last commit under the journal lock, releases it,
+then serializes `File::sync_data` with a separate sync mutex. It rechecks the
+failure latch before disk IO and before publishing `Signal::Synced` under
+the journal lock. The mutex remains held through failure latching and
+publication, so concurrent syncs cannot miss a one-shot write-back error.
+Adjacent syncs coalesce; appends and transients remain free during disk IO.
+No path takes the sync mutex while holding the journal. A reopened writer's
+watermark starts at zero; surviving bytes prove no prior sync.
+
+Directory entries are synced in their held parents: application and project,
+run, `sessions/`, session, record and quarantine sidecar. `OwnDir::make_dir`
+does not sync. `App::own` explicitly requests `OwnDir::xdg_synced`, which
+syncs the actual cached object's held ancestry outside the cache lock and
+syncs newly made entries before descent, including those later left by `..`
+or a symlink restart. Ordinary XDG lookup retains its nonsyncing semantics.
+Linux uses `fdatasync`; the installed Rust 1.99.1 standard library uses
+`F_FULLFSYNC` on Apple targets. Windows uses `FlushFileBuffers` for files;
+directory sync is a no-op. Native Apple latency has not been measured here.
 
 Transcript mutations distinguish `Uncommitted::Refused`, which leaves the
 session usable without recording, from `Uncommitted::Unavailable`, which
@@ -77,8 +95,10 @@ Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
 can catch up. Each agent attaches its log to the host session bus.
 What a log appends with no sink attached reaches no channel; a mirror
-reads it from the file with `Emitter::since`. Redelivery is safe because the
-view fold ignores a `Seq` it has already folded: a resumed memo seeded from
+reads it from the file with `Reader::since`, which returns the synced
+watermark beside its cursor and bounded commits. Attach publishes the current
+watermark under the journal lock before any later commit. Redelivery is safe
+because the view fold ignores a `Seq` it has already folded: a resumed memo seeded from
 the file is not stepped a second time by the same head records.
 
 `Emitter::transient` uses the same log mutex for ordering but never writes a
@@ -86,6 +106,32 @@ line or takes a commit number. It publishes the other channel passenger,
 `Signal::Transient(AgentId, Transient)`. A `Signal::Commit` is the recorded,
 stamped, file-backed half; a `Signal::Transient` is live-only and has no
 replay path.
+
+## Before the outside
+
+**Every external effect follows a sync through the commits it depends on.**
+Drawing is provisional; observing another agent reads its committed cell, not
+its stable-storage watermark.
+
+- The owner syncs `TurnStarted` before provider entry and allowance polling.
+  Every attempt's callback syncs after retry evidence and before credential
+  preparation or transport. Callback failure is unavailable, never retryable.
+- Shell dispatch follows the recorded call's sync. Every enquiry answer,
+  success or error, follows the caller's sync.
+- Posts and commands commit under their cell, then sync after unlocking before
+  acknowledgement. Failed confirmation is `Refused::Unsynced`: queued and
+  possibly read, never safe to resend automatically. Recall and addressed Stop
+  return recalled text only after sync; failure is not an empty success.
+- Reporting captures debt before committing `Status`, syncs the helper while
+  holding its cell, then posts its parent; the parent's post unlocks and syncs.
+  Append or sync failure sends at most one failed fallback using that captured
+  debt, never the unconfirmed successful report. No other sync holds a cell.
+- The owner syncs `ModelChanged` and `JobSettled` after unlocking. Frontends
+  retain the exact record and its inclusive commit number until `Signal::Synced`
+  covers it: headless may then choose and print a reply; the TUI may persist
+  a live model selection; Synod may walk, certify, acknowledge and release.
+  Death never promotes an unsynced success. Replay/catch-up never persists a
+  model choice; streamed tails never supply a durability witness.
 
 ## Four durable classes, one live edge
 
@@ -480,11 +526,13 @@ change.
 read-only pass; `Log::complete_len` answers where whole commits end for reader
 and quarantine.
 
-- An unterminated last line, or one with invalid JSON or a failed sum, is
-  *torn* and never read; resume quarantines it.
-- Earlier damage is refused as *corrupt*.
+- The first unterminated line, invalid JSON or failed sum begins the *torn
+  tail*. Every byte after it, later whole commits included, is never read;
+  resume quarantines it whole. A damaged head is refused.
+- Under the crash-only model, a completed sync preserves its prefix; beyond it
+  the filesystem promises no write order.
 - Well-formed JSON objects of the wrong shape and sealed commits with
-  unreadable records are refused as *foreign* wherever they stand. A shape
+  unreadable records are refused as *foreign* before the first damage. A shape
   error is re-checked for well-formedness: a line that is not well-formed is
   damage, and a well-formed `{sum, commit}` whose sum is not 16 lowercase hex
   digits is a failed seal, also damage. A bit-flipped key stays foreign.
@@ -588,15 +636,30 @@ No fallible boot remains after the commit. The mirror learns from the record,
 retires blocks and resets open lines/scroll state; descendant tabs retire
 through their death signals. The log file and attached bus stay in place.
 
-**A transcript is rendered on demand, not written.** `tui::export_to(record,
-dest, format)` is the one place a transcript file is created, and it never
-overwrites; both `/export` and `exarch export <session> [--out FILE]` call it.
-`export` replays `record.jsonl` through the same `Mirror` the scrollback uses and
-hands each block it lets go to a `Render`er — `Plain` forces every block whole,
-the script and prose the screen reduces — behind a `Format` seam that admits
-HTML later. Because the mirror retires its blocks on a clear, an export keeps the
-transcript from before it, then `[cleared]`, then what follows. A torn tail is
-never read.
+**A transcript is rendered from a certified, fixed prefix.** `tui::export_to`
+creates a new destination only after a `Snapshot` exists; stdout has the same
+barrier. `export` replays that snapshot through the scrollback's `Mirror`;
+`Plain` forces every block whole. A clear preserves the preceding transcript,
+then `[cleared]`, then what follows. A torn tail is never read or mutated.
+
+- Live `/export` obtains its bounded snapshot through `Reader`; the writer's
+  watermark must cover the captured extent. No frontend syncs a live file.
+- Standalone `exarch export <session> [--out FILE]` accepts a session directory
+  or canonical `record.jsonl` only in an associated inactive managed run.
+  It acquires the run's existing lock before opening the source and retains
+  that lock through rendering. Active runs name `/export` as the alternative;
+  unmanaged files have no owning-run durability witness and are refused.
+- `OwnDir::within` checks the walked directory against the held reconstruction.
+  After locking, the run's held `sessions/<id>` must be that same session.
+  Aliases to one object are accepted; a replacement directory is refused.
+- `OwnDir::open_update` opens only an existing held regular source, read+write,
+  without following, creating, truncating or appending. The same file is
+  validated, including its head id and complete prefix, then synced; required
+  held directories sync before any output or destination creation. Rendering
+  retains that file and byte bound, never a fresh pathname or EOF.
+- Record-backed clipboard actions likewise require a covered view and no live
+  streaming tails. Copying an unrelated user-authored draft has no record
+  dependency.
 
 The resulting trust boundary is small: `record.jsonl` is the durable fact
 stream, `Record` classes say which fold may project each fact, `Signal::Commit`

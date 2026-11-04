@@ -1001,8 +1001,8 @@ fn first_settled_refuses_an_empty_list() {
 // ── `detach` ─────────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn detach_test_shell(budget: u64) -> Shell {
-    let mut shell = crate::HostSurface {
+fn detach_test_shell() -> Shell {
+    crate::HostSurface {
         statics: vec![crate::shell::builtins::DETACH_BUILTIN],
         ..crate::HostSurface::default()
     }
@@ -1010,9 +1010,7 @@ fn detach_test_shell(budget: u64) -> Shell {
         crate::io::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its baseline");
-    shell.arm_detach(budget);
-    shell
+    .expect("a test host resolves its baseline")
 }
 
 /// Neither description nor program is optional: a shorter call never
@@ -1020,7 +1018,7 @@ fn detach_test_shell(budget: u64) -> Shell {
 #[cfg(unix)]
 #[test]
 fn detach_requires_a_description_and_a_command() {
-    let mut shell = detach_test_shell(4);
+    let mut shell = detach_test_shell();
     let err = run_captured(&mut shell, r#"detach "a server""#, None)
         .0
         .expect_err("a description alone is not a detach");
@@ -1031,7 +1029,7 @@ fn detach_requires_a_description_and_a_command() {
 #[cfg(unix)]
 #[test]
 fn detach_rejects_an_illegible_description() {
-    let mut shell = detach_test_shell(4);
+    let mut shell = detach_test_shell();
     let empty = run_captured(&mut shell, r#"detach "   " /bin/echo hi"#, None)
         .0
         .expect_err("an empty description must be refused");
@@ -1048,7 +1046,7 @@ fn detach_rejects_an_illegible_description() {
 #[cfg(unix)]
 #[test]
 fn detach_refuses_a_head_a_handler_intercepts() {
-    let mut shell = detach_test_shell(4);
+    let mut shell = detach_test_shell();
     for src in [
         r#"within [handlers: [my-server: { |args| echo ...$args }]] { detach "a server" my-server up now }"#,
         r#"within [handler: { |n _a| echo $n }] { detach "a server" my-server }"#,
@@ -1067,12 +1065,11 @@ fn detach_refuses_a_head_a_handler_intercepts() {
     }
 }
 
-/// A base frame's name is ral's own, and runs inside this session: refused,
-/// the budget untouched.
+/// A base frame's name is ral's own and runs inside this session: refused.
 #[cfg(unix)]
 #[test]
 fn detach_refuses_a_base_frames_name() {
-    let mut shell = detach_test_shell(4);
+    let mut shell = detach_test_shell();
     let err = run_captured(&mut shell, r#"detach "a server" echo hi"#, None)
         .0
         .expect_err("a base frame is no program to detach");
@@ -1086,7 +1083,7 @@ fn detach_refuses_a_base_frames_name() {
 #[cfg(unix)]
 #[test]
 fn detach_reports_an_unknown_command_as_127() {
-    let mut shell = detach_test_shell(4);
+    let mut shell = detach_test_shell();
     let err = run_captured(
         &mut shell,
         r#"detach "a server" definitely-not-a-real-tool-xyz"#,
@@ -1097,23 +1094,12 @@ fn detach_reports_an_unknown_command_as_127() {
     assert_eq!(status(err), 127);
 }
 
-/// The budget is a hard bound, and its refusal claims no remedy inside ral.
-#[cfg(unix)]
-#[test]
-fn detach_refuses_past_its_budget() {
-    let mut shell = detach_test_shell(0);
-    let err = run_captured(&mut shell, r#"detach "a server" /bin/echo hi"#, None)
-        .0
-        .expect_err("a spent budget must refuse");
-    assert!(format!("{err:?}").contains("budget"));
-}
-
 /// The whole of what a birth hands back: the caller's description and the
 /// kernel's pid.  Nothing else — three `/dev/null` streams, no file anywhere.
 #[cfg(unix)]
 #[test]
 fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
-    let mut shell = detach_test_shell(4);
+    let mut shell = detach_test_shell();
     let born = run_captured(&mut shell, r#"detach "the greeter" /bin/echo hello"#, None)
         .0
         .expect("the birth must succeed");

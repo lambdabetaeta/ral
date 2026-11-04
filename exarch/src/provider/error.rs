@@ -49,6 +49,8 @@ impl fmt::Display for CancelSite {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderError {
+    /// The caller could not certify the request's prerequisites. Never retried.
+    Unavailable(String),
     /// Cancelled in flight.
     Cancelled(CancelSite),
     /// Retryable with the same payload: network, stream, or 5xx.  `attempts`
@@ -202,6 +204,7 @@ impl ProviderError {
             Self::Overflow { .. } => "context too long",
             Self::Truncated { .. } => "truncated",
             Self::Other(_) => "provider error",
+            Self::Unavailable(_) => "recording unavailable",
         }
     }
 
@@ -557,7 +560,7 @@ impl ProviderError {
                 format!("context too long{host}{counts}")
             }
             Self::Truncated { cause } => format!("reply cut off: {}", cause.summary()),
-            Self::Other(s) => first_line(s).to_string(),
+            Self::Other(s) | Self::Unavailable(s) => first_line(s).to_string(),
         }
     }
 }

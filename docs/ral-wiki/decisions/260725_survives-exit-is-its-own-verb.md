@@ -1,5 +1,6 @@
 ---
 status: active
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 ---
 
 # Durable inside the process is not durable across it: work you stop owning is `detach`, born by double-fork
@@ -424,6 +425,9 @@ accurate string minutes earlier.
   Naming the verb and arming its budget are deliberately one act, so the name
   and the budget cannot drift apart.
 
+  *Superseded for the budget:* naming the verb is now the whole act; see the
+  resource bound below and `docs/SPEC.md` §11.5.
+
   *Superseded in part by
   [[decisions/260727_detach-under-a-grant|detach-under-a-grant]]:* the
   capability half of this gate is gone, and a sandbox now decides what a
@@ -437,6 +441,12 @@ accurate string minutes earlier.
   to bound and no seat to return. The budget is therefore monotone: a fixed
   allowance of *births* per session (16 on an agent host), counted upward, never
   restored, refused at the door on exhaustion.
+
+  *Superseded for the bound:* the call budget is gone. On a bare host an
+  ordinary command can daemonise and a survivor's tree is uncapped; under a
+  Linux host grant even one survivor's tree is uncapped. In the guest, one
+  shared `detached` cgroup bounds all survivors by one command's resources
+  ([[map/core/io-process|io-process]], `docs/SPEC.md` §11.5).
 
 - **Exit status is unrecoverable, and the documentation says so rather than
   letting it be discovered.** The session never waits for the grandchild and

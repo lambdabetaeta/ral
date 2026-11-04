@@ -42,17 +42,17 @@ impl AgentHandle {
     }
     /// # Errors
     /// Refuses steering once the agent has ended.
-    pub(crate) fn steer(&self, text: String) -> Result<(), Ended> {
-        self.0.address.steer(text).map_err(|_| Ended(self.id()))
+    pub(crate) fn steer(&self, text: String) -> Result<(), Refused> {
+        self.0.address.steer(text)
     }
     pub(crate) fn queued(&self) -> Vec<String> {
         self.0.address.queued()
     }
-    pub(crate) fn recall(&self) -> Vec<String> {
+    pub(crate) fn recall(&self) -> Result<Vec<String>, Unavailable> {
         self.0.address.recall()
     }
     /// Stop `job` if it is open, taking back its queued human prompts.
-    pub(crate) fn stop(&self, job: JobId) -> Option<Vec<String>> {
+    pub(crate) fn stop(&self, job: JobId) -> Result<Option<Vec<String>>, Unavailable> {
         self.0.address.stop(job)
     }
     /// End this life and every descendant; teardown remains the owner's work.
@@ -67,11 +67,8 @@ impl AgentHandle {
     pub(crate) fn stop_current(&self) -> bool {
         self.0.address.stop_current()
     }
-    pub(crate) fn command(&self, command: Command) -> Result<(), Ended> {
-        self.0
-            .address
-            .command(command)
-            .map_err(|_| Ended(self.id()))
+    pub(crate) fn command(&self, command: Command) -> Result<(), Refused> {
+        self.0.address.command(command)
     }
     pub(crate) fn message(&self, from: &Self, text: String) -> Result<(), Refused> {
         let message = AgentMessage {

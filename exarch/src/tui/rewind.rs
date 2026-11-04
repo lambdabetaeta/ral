@@ -161,9 +161,9 @@ pub(super) fn input(r: &mut RewindOverlay, input: &Input, app: &mut App) -> bool
     if let Some(anchor) = anchor {
         app.gesture.clear();
         let rewind = Command::Rewrite(Rewrite::Rewind(anchor));
-        if app.tabs.port().command(r.tab, rewind).is_err() {
+        if let Err(error) = app.tabs.port().command(r.tab, rewind) {
             let focused = app.tabs.focused();
-            app.push_error(focused, "the agent you were rewinding has ended");
+            app.push_error(focused, &error.to_string());
         }
     }
     false

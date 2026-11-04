@@ -1,6 +1,6 @@
 ---
-verified_at_commit: d56977ff
-verified_at_date: 2026-11-03
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-04
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke]
 ---
 
@@ -84,10 +84,10 @@ core and core never inspects them
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]), and
 they seed through the same two installs, so a host contributes natives as well
 as base frames: the REPL's `_ed-*` family and `load-plugin`/`unload-plugin`
-are natives; `detach` is a base frame on a host that arms the policy. Two core-implemented entries
+are natives; `detach` is a base frame where the host installs it. Two core-implemented entries
 register this way too — `WATCH_BUILTIN` and `DETACH_BUILTIN`, each a public
 one-entry wrapper over a private body — so a host whose streams are capture
-buffers, or that arms no detach budget, simply lacks the verb it cannot honour
+buffers can omit `watch`, and a host that offers no survivors can omit `detach`
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]],
 [[map/core/builtins|builtins]]).
 

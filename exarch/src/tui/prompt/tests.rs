@@ -203,7 +203,7 @@ fn queued_recall_preserves_coalesced_text_and_starts_local_undo() {
         agent.steer("two\n\n界\n".into()).unwrap();
         let expected = "one\ntwo\n\n界\n";
         assert_eq!(agent.queued(), [expected]);
-        assert!(prompt.edit_queued_prompt(|| agent.recall()));
+        assert!(prompt.edit_queued_prompt(|| agent.recall().unwrap()));
         assert_eq!(prompt.prompt_text(), expected);
         assert!(prompt.editor.is_insert_mode());
         assert!(prompt.editor.at_end());

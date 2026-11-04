@@ -317,38 +317,51 @@ fn a_torn_last_line_is_never_read() {
 }
 
 #[test]
-fn a_corrupt_interior_line_is_refused_by_file_and_line() {
+fn every_byte_after_the_first_damage_is_torn() {
     let faults = [
-        (
-            changed(terminated(commit_line(&[error("bravo")]))),
-            &["corrupt: its commit hashes to"][..],
-        ),
-        (
-            unsummed(terminated(commit_line(&[error("bravo")]))),
-            &["was sealed as", "gggg"][..],
-        ),
-        (b"garbage\n".to_vec(), &["corrupt: it is not JSON"]),
-        (b"{\"unexpected\":\n".to_vec(), &["corrupt: it is not JSON"]),
-        (b"{\"not\":\"a commit\"}\n".to_vec(), &["older exarch"]),
+        changed(terminated(commit_line(&[error("bravo")]))),
+        unsummed(terminated(commit_line(&[error("bravo")]))),
+        b"garbage\n".to_vec(),
+        b"{\"unexpected\":\n".to_vec(),
+        vec![0; 8192],
     ];
-    for (index, (fault, reason)) in faults.into_iter().enumerate() {
+    for (index, fault) in faults.into_iter().enumerate() {
         let dir = temp_dir(&format!("interior-{index}"));
         let path = dir.path().join(RECORD);
-        let mut bytes = terminated(commit_line(&[error("head")]));
+        let head = terminated(commit_line(&[error("head")]));
+        let mut bytes = head.clone();
         bytes.extend(fault);
         bytes.extend(terminated(commit_line(&[error("last")])));
+        bytes.extend(b"{\"not\":\"a commit\"}\n");
+        bytes.extend(b"more damage\n");
+        bytes.extend(terminated(commit_line(&[error("later")])));
         std::fs::write(&path, &bytes).unwrap();
         assert_eq!(
             Log::complete_len(&mut File::open(&path).unwrap()).unwrap(),
-            bytes.len() as u64
+            head.len() as u64
         );
-        let mut back = read(&path).unwrap();
-        assert!(back.next().unwrap().is_ok());
-        let refusal = back.next().unwrap().unwrap_err();
-        for part in reason {
-            assert_refusal(&refusal, &path, 2, part);
-        }
+        let back = read(&path)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
+}
+
+#[test]
+fn a_foreign_line_before_damage_is_still_refused() {
+    let dir = temp_dir("foreign-before-damage");
+    let path = dir.path().join(RECORD);
+    let mut bytes = terminated(commit_line(&[error("head")]));
+    bytes.extend(b"{\"not\":\"a commit\"}\n");
+    bytes.extend(b"damaged\n");
+    bytes.extend(terminated(commit_line(&[error("last")])));
+    std::fs::write(&path, &bytes).unwrap();
+    let mut back = read(&path).unwrap();
+    assert!(back.next().unwrap().is_ok());
+    assert_refusal(&back.next().unwrap().unwrap_err(), &path, 2, "older exarch");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
 #[test]
@@ -450,7 +463,7 @@ fn reopening_for_append_refuses_a_torn_tail() {
         let refusal = Log::append_to(&dir).err().expect("a torn tail is refused");
         let text = refusal.to_string();
         assert!(text.contains(&ral_core::path::shown(&path)), "{text}");
-        assert!(text.contains("torn last line"), "{text}");
+        assert!(text.contains("torn tail"), "{text}");
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
     let dir = temp_dir("reopen-empty");
@@ -525,4 +538,102 @@ fn a_reader_refuses_a_stale_range_before_parsing_its_records() {
         refusal.to_string().contains("did not hash to the locus"),
         "{refusal}"
     );
+}
+
+#[test]
+fn sync_does_not_hold_the_append_lock_and_certifies_only_its_noted_prefix() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = temp_dir("sync-prefix");
+    let log = Arc::new(Log::create(&dir).unwrap());
+    let first = log.append(NonEmpty::one(error("first"))).unwrap();
+    let (entered, syncing) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    log.before_sync(move || {
+        entered.send(()).unwrap();
+        wait.recv_timeout(Duration::from_secs(5))
+            .expect("append is not blocked by sync");
+        Ok(())
+    });
+    let writer = Arc::clone(&log);
+    let thread = std::thread::spawn(move || writer.sync());
+    syncing.recv_timeout(Duration::from_secs(5)).unwrap();
+    let second = log.append(NonEmpty::one(error("second"))).unwrap();
+    log.publish_transient(Transient::Boundary);
+    assert_eq!(log.inner.lock_strict().unwrap().synced, 0);
+    release.send(()).unwrap();
+    thread.join().unwrap().unwrap();
+    log.assert_synced_through(first.number());
+    assert_eq!(log.inner.lock_strict().unwrap().synced, first.number());
+    log.sync().unwrap();
+    log.assert_synced_through(second.number());
+    log.before_sync(|| panic!("an adjacent sync of the same prefix must coalesce"));
+    log.sync().unwrap();
+}
+
+#[test]
+fn concurrent_syncs_share_the_first_failure_even_while_another_thread_appends() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = temp_dir("concurrent-sync-failure");
+    let log = Arc::new(Log::create(&dir).unwrap());
+    let _first = log.append(NonEmpty::one(error("first"))).unwrap();
+    let (entered, syncing) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    log.before_sync(move || {
+        entered.send(()).unwrap();
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+        Err(io::Error::other("injected one-shot write-back failure"))
+    });
+    let writer = Arc::clone(&log);
+    let first = std::thread::spawn(move || writer.sync());
+    syncing.recv_timeout(Duration::from_secs(5)).unwrap();
+    let writer = Arc::clone(&log);
+    let second = std::thread::spawn(move || writer.sync());
+    let writer = Arc::clone(&log);
+    let append = std::thread::spawn(move || writer.append(NonEmpty::one(error("during sync"))));
+    drop(append.join().unwrap().unwrap());
+    release.send(()).unwrap();
+    let failure = first.join().unwrap().unwrap_err();
+    let concurrent = second.join().unwrap().unwrap_err();
+    assert!(Arc::ptr_eq(&failure.0, &concurrent.0));
+    assert!(failure.to_string().contains("syncing"));
+    assert!(
+        failure
+            .to_string()
+            .contains("injected one-shot write-back failure")
+    );
+    assert_eq!(log.inner.lock_strict().unwrap().synced, 0);
+    assert!(Arc::ptr_eq(&failure.0, &log.sync().unwrap_err().0));
+    assert!(Arc::ptr_eq(
+        &failure.0,
+        &log.append(NonEmpty::one(error("too late"))).unwrap_err().0
+    ));
+}
+
+#[test]
+fn a_write_failure_during_sync_prevents_watermark_publication() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = temp_dir("write-during-sync");
+    let log = Arc::new(Log::create(&dir).unwrap());
+    let _first = log.append(NonEmpty::one(error("first"))).unwrap();
+    let (entered, syncing) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    log.before_sync(move || {
+        entered.send(()).unwrap();
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+        Ok(())
+    });
+    let writer = Arc::clone(&log);
+    let sync = std::thread::spawn(move || writer.sync());
+    syncing.recv_timeout(Duration::from_secs(5)).unwrap();
+    log.fail_after(0);
+    let failed = log.append(NonEmpty::one(error("fails"))).unwrap_err();
+    release.send(()).unwrap();
+    assert!(Arc::ptr_eq(&failed.0, &sync.join().unwrap().unwrap_err().0));
+    assert_eq!(log.inner.lock_strict().unwrap().synced, 0);
 }

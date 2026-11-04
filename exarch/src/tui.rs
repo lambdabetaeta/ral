@@ -49,7 +49,7 @@ use ral_core::own::OwnDir;
 use std::time::Duration;
 
 pub(super) use app::App;
-pub use export::{Format, export, export_to};
+pub(crate) use export::{Format, export, export_to, inactive_snapshot};
 pub use model_picker::choose;
 pub use terminal::TerminalGuard;
 pub(crate) use tui_loop::{Leaving, run};

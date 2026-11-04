@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
-verified_at_commit: fc0c9fbb
-verified_at_date: 2026-10-30
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-04
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-03
 covers_paths: [exarch/src/port.rs, exarch/src/lib.rs, exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/host.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
 
@@ -66,8 +66,9 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
   The owner builds, commits `ModelChanged` through `Txn::change_model`,
   then swaps its immutable client; the next request reads it afresh.
   `model_picker::persist_landed`, called by `App::commit`, saves project
-  selection from live `ModelChanged` records alone, including `via`.
-  Asking and catch-up save nothing; login/provider notes are view chrome.
+  selection from live `ModelChanged` records alone, including `via`, after
+  `App::synced` covers that exact record. The owner syncs before swapping its
+  client. Asking and catch-up save nothing; login/provider notes are view chrome.
 - Other text, including unknown slash-shaped lines, enters through `Port::submit`.
   Queue observation and recall use `Port::{queued, recall}`.
   `PromptState::edit_queued_prompt` checks draft/history state before invoking
@@ -92,10 +93,12 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
   that failure; `check_available` observes it; `emit_or_end` leaves it to the
   owner. Producers never report it. The owner's terminus announces it once
   as `Transient::Fault` on the independent fleet sink and makes it the outcome.
-- `bus/signal.rs::Signal` is `Commit`, `Born`, or `Transient`, addressed by
+- `bus/signal.rs::Signal` is `Commit`, `Synced`, `Born`, or `Transient`, addressed by
   `AgentId`. `Emitter::child` publishes birth before that emitter can send
   any work. `bus/sink.rs::Sink` consumes `fact` per record within one
-  `accept`, and `transient`.
+  `accept`, `synced` for an inclusive stable-storage watermark, and `transient`.
+  Attach and `Reader::since` supply the current watermark too; a reopened
+  writer starts at zero. Screens draw provisionally, outside actions wait.
 - `bus/emitter.rs::FleetBus` owns the session-lived channel and usage meter.
   `host.rs::Host` launches the human's joined children; frontends receive their signals
   without driving agent work. Completion comes from records or terminal
@@ -110,8 +113,8 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
   The record layer knows no bus: it publishes through `Publish`; bus knows
   no agent ([[invariants/exarch-is-a-dag|exarch-is-a-dag]]).
 
-`shell_eval/surface.rs` decodes the shell's surface vocabulary once.
-Observations, notices, cards, pins and worker completions record through the
+`shell_eval/surface.rs` decodes the shell's surface vocabulary once;
+pin writes come from the desk, not that decoder. Both record through the
 same seam; card interpretation is [[map/exarch/cards|cards]]'s.
 The transcript calls workers *errands*: birth and completion carry the same
 worker id/title. `surface_notice` (`bus/post.rs`) words the model notice with
@@ -133,7 +136,9 @@ elapsed time, actual ending and how to use `await` / `workers`.
   and addressed Stop share the mailbox lock.
 - `Port::stop(agent, JobId)` marks the matching open job and cancels its latest
   exchange with `Interrupted`, recalling human text oldest first. Stale job ids
-  and rest are no-ops; an ended agent returns `Ended(agent)`. Helpers keep
+  and rest are no-ops. `WithdrawalFailed` distinguishes an ended agent from
+  recording/sync failure; cancellation or withdrawal may already have happened.
+  Recall likewise returns text only after sync, never empty success on failure. Helpers keep
   working; reports and subsequent input can continue the same job, whose
   stopped mark persists.
 - Settlement requires an empty queue and no pending helper; a helper whose
@@ -173,9 +178,15 @@ elapsed time, actual ending and how to use `await` / `workers`.
   the resumed note there, then catches up the new run. The bus's usage meter
   plus resumed usage supplies totals, independent of views.
 - A held session directory contains `record.jsonl` alone.
-  `tui/export.rs::export_to` replays it through `Mirror` and a `Format`,
-  creating a new destination rather than overwriting. `/export` and
-  `exarch export` share this door.
+  `tui/export.rs::export_to` renders a validated fixed `Snapshot` through `Mirror`,
+  creating a new destination rather than overwriting. Live `/export` uses
+  `Reader::snapshot`, requiring a watermark-covered extent. Standalone
+  `inactive_snapshot` accepts only associated inactive managed sessions,
+  session-directory and canonical record-file forms; it holds the actual
+  existing run lock before source open and through rendering. Held directory
+  identity checks reject replacements. Noncreating `OwnDir::open_update` opens
+  a regular source read+write; that same file and required directories sync
+  before any destination/stdout. Active/unmanaged sources refuse usefully.
 - `Transcript::Cleared` and `Rewound` withdraw context in the same file.
   Resource readings are live diagnostic cards, not pressure histories.
 
@@ -201,6 +212,11 @@ commit yields at most one event it narrates.
 - `tui::run` restores the terminal and returns `Leaving` (log directories
   and recalled usage). `lib::run` ends and joins the host, then reports with
   final `Port::usage`, including exchanges cut short by quitting.
+- `tui/tabs.rs::Status` holds the live pin slots, not `Scrollback`.
+  `tui/app.rs` applies `Transient::Pin` / `Unpin` there in first-seen order.
+  `/clear` empties the slots; resume starts empty. `Forensic::Pin` / `Unpin`
+  persist only keys and remain `Delta::Quiet` in view replay
+  ([[design/pins|pins]]).
 - `tui/tabs.rs::Tabs` is an id-ordered forest of birth facts and
   `Status` / `Life`; there is no special root tab. It holds a `Port`;
   `row` / `focused_row` read published `AgentRow`s and `rows` takes one
@@ -260,7 +276,9 @@ commit yields at most one event it narrates.
   anchor indexes. Terminal ownership is taken only on a shifted left press;
   any shifted event leaves selection to the terminal. Ctrl-C copies an editor
   selection before considering exchange cancellation, and copy errors are
-  reported. Selection clears only after a confirmed clipboard write; failure
+  reported. Record-backed `/copy` and gesture copying require a watermark-covered
+  scrollback without streamed tails; unrelated draft copying is unrestricted.
+  Selection clears only after a confirmed clipboard write; failure
   retains it for retry, while success uses the transient copy toast.
 - `prompt/history.rs::History` owns the entries, their store and the arrow
   browse position; replacing the entries ends the browse. `tui_loop::run` opens it
@@ -283,8 +301,14 @@ commit yields at most one event it narrates.
   exchange. Paste goes to the owning search query, not the draft.
   Paste normalizes CRLF/CR to LF; the large-paste footer is
   only a byte/line summary, never a placeholder that is expanded at submit.
-- `terminal.rs::edit_text_in_editor` runs the external editor over the
-  shared contract in `ral_core::external_editor`: `EditorCommand::select`
+- `terminal.rs::TerminalGuard::edit_text_in_editor` lends terminal modes to
+  the external editor. **Only the child receives the saved pre-TUI stderr;
+  parent diagnostics remain in `stderr.log`.** Unix duplicates the guard's
+  cloexec backup; Windows snapshots a noninheritable owned native handle
+  before opening the log or redirecting CRT stderr, then duplicates it per
+  edit. Absent or closed native stderr becomes explicit child discard.
+  Stdio is prepared before creating the secret draft or suspending modes.
+  The editor follows the shared contract in `ral_core::external_editor`: `EditorCommand::select`
   takes nonblank VISUAL, then EDITOR, then the platform default, splitting
   quoted argv without a shell (`shlex` on Unix, `winsplit` on Windows) and
   refusing NUL; `admit_draft` and `read_draft` cap input and readback at
@@ -369,7 +393,8 @@ See [[internals/cancellation|cancellation]] for scope propagation.
 checks the first `Born` against `host.children()[0]`, retaining that agent's log
 directory for “Agent log:”. It submits the seed and reads usage through a
 port, folds only that agent's records into one `Blocks` memo, and
-finishes on its `Control::Status` or `Died`. Helper facts do not print;
+finishes on a watermark-covered `Control::Status` or terminal `Died`.
+Death/disconnection never promotes an unsynced buffered success. Helper facts do not print;
 helper faults remain visible and usage includes the fleet. `Replied(v)`
 writes faithful ral text or JSON to stdout; Failed, Stopped or death without
 a reply fail honestly. `lib::run` ends the host afterwards and includes

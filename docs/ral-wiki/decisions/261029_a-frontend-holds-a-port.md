@@ -2,8 +2,8 @@
 status: active
 generated_at_commit: fc0c9fbb
 generated_at_date: 2026-10-30
-verified_at_commit: fc0c9fbb
-verified_at_date: 2026-10-30
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-03
 anchors: [Port, AgentRow, Registry, Host, Reader, Selected, Agent::switch_model, Tabs::settled, Leaving]
 amends: [261029_an-agent-is-a-thread]
 ---
@@ -44,13 +44,15 @@ clients, including Synod.
   `policy`, `prompt`, `provider`, `record` and `wallet` remain public launch
   support: hiding them would redesign Synod's construction, not isolate agents.
 - `Command::Model(Pick)` asks the owner to build. Success records
-  `Control::ModelChanged { selected }` **before** replacing the client.
+  `Control::ModelChanged { selected }`, then syncs outside the cell **before**
+  replacing the client.
   The bureau's immutable `Selected` stamp, not the requested `Pick`, is
   installed in the cell's model fold. Plan-billed accounts discard sampling.
   A failed build records an error but changes neither client nor model;
   failed recording ends life and prevents the switch.
 - The TUI persists a selection only from a live commit's `ModelChanged`,
-  using that record's account, label, model and `via`. Asking saves nothing;
+  after its inclusive commit number is covered by `Signal::Synced`, using
+  that record's account, label, model and `via`. Asking saves nothing;
   replay/catch-up does not change project selection. Login/provider notes
   are view chrome and do not appear in record-backed exports.
 - A switch takes effect at the next request, even in the same deliberation.

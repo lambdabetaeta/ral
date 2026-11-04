@@ -22,7 +22,8 @@ pub use exclusion::{Excluded, Hold, Walked};
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use held::steps_taken;
 pub(crate) use held::{
-    Access, Listed, StagedWrite, Streamed, Streaming, open_discard, walk_dir_made,
+    Access, Listed, StagedWrite, Streamed, Streaming, open_discard, sync_dir, sync_dir_chain,
+    walk_dir_made, walk_dir_made_synced,
 };
 pub use held::{
     Authority, Dir, DirEntry, Installing, Judged, LeafMode, Listing, Lists, Located, Op, Peeks,

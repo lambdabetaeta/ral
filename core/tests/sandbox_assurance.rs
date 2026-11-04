@@ -96,7 +96,6 @@ fn fixture() {
             ral_core::test_helper::process_cwd(),
         )
         .expect("the survivor's host boots");
-        shell.arm_detach(1);
         shell.push_session_capabilities(layer(writable(Path::new(&work), &[])));
         let out = Output::from_report(shell.run(Run::captured(
             source,

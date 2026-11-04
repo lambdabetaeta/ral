@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fea8d9f0
-generated_at_date: 2026-11-03
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-04
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -280,7 +280,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   the payload's own — never one it merely joined or inherited, and the
   `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
   to init — its pid comes back but nothing else does, so there is no handle,
-  no wait, and no `JailCgroup` comes back — the launch surrenders it (below). Unix
+  no wait, and no `JailCgroup` comes back — shared membership never owns one (below). Unix
   lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
   Windows owns the raw `CreateProcessW` boundary, including command-line/env
   rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
@@ -296,7 +296,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   [[internals/cancellation|cancellation]].
 - `jail.rs` — the *guest spawn jail*'s decision layer: `GuestJail::plan`
   mints each exec a bounded `Seq` whose uid/gid is `BASE_UID + seq`,
-  from 100000 through `u32::MAX - 1`, and a fresh transient cgroup under
+  from 100000 through `u32::MAX - 1`, and cgroup membership under
   `JailLimits` (memory / pids / CPU), with no syscall in the plan.
   There is one `GuestJail` per guest process, installed once by the
   Linux x86-64/aarch64 `--guest-engine <cgroup-root>` role, named by
@@ -304,7 +304,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   absolute root and euid 0; the root is
   `guest_abi::layout::EXEC_CGROUP`, which the daemon makes and delegates into
   at boot; both use `layout::EXEC_CONTROLLERS`. The jail makes
-  `engine-<pid>/exec-<seq>` below it, or `detached/exec-<seq>` for a `detach`
+  `engine-<pid>/exec-<seq>` below it, or the shared `detached` leaf for every
   survivor, and the daemon removes a dead engine's tree) and read by
   `jail::guest()`; a sealed wire-seat child engine ([[design/agents|agents]]) is
   its own process and installs its own, so the
@@ -325,9 +325,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   engine's tree (the daemon kills a dead engine's commands through `engine-<pid>/cgroup.kill`, since they leave its process group) and pid recycling can at worst hand a later engine a dead
   engine's stale directory name, which its own teardown tolerates.
   `plan` takes the launch's `authority::sandbox::Ownership`: a `Surrendered` (detached)
-  exec goes to `ral-exec/detached/exec-<seq>` instead, out of every engine's
-  tree, so an engine's end spares its survivors as it does on the host, and
-  only the daemon's halt reaches them. Off a
+  exec goes to the one `ral-exec/detached` leaf instead, out of every engine's
+  tree. All survivors together receive `JailLimits::default()` (2 GiB memory,
+  256 tasks, 200% CPU); distinct uids still separate them. An engine's end
+  spares its survivors as it does on the host; the daemon's halt reaches them. Off a
   real Linux guest, where `GuestJail` is never actually installed, `plan`
   falls back to a bounded in-process counter so the module's own tests stay
   portable; `linux.rs` remains the only place a decision reaches the
@@ -355,19 +356,23 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   while the daemon and engine still live in it — and enables on the way back
   down, one level ahead of each mkdir. A parent that will not delegate is
   refused outright rather than tolerated: a jail whose limits cannot be
-  written must not run the command uncapped instead. `JailCgroup`
-  owns its cgroup from the `mkdir`: dropping it kills whatever
-  is left (`cgroup.kill`) and removes it, so every way out finishes it once —
-  a setup, wiring or spawn that fails, a pipeline rolled back part-way, a
-  settled child — and `Launch`, `RunningChild` and a pipeline stage carry it
-  uniformly (`None` off a real guest). A detached birth instead
-  `surrender`s it, since a caller that cannot name the process cannot know
-  when its cgroup is empty — the survivor keeps the transient cgroup's limits
-  and leaves one inert directory until the guest reboots; a birth that fails
-  finishes it like any launch. The jail itself is process-global (a `OnceLock` in `jail.rs`),
+  written must not run the command uncapped instead. `JailPlan` carries
+  `Ownership`: after delegation and before fallible setup, `prepare` constructs
+  `Some(JailCgroup)` only for a kept command. Dropping it kills whatever is left
+  (`cgroup.kill`) and removes its leaf, so a setup, wiring or spawn failure,
+  pipeline rollback or settled child finishes it once. `Launch`, `RunningChild`
+  and a pipeline stage carry that option uniformly (`None` off a real guest).
+  Shared detached membership never constructs a teardown guard: failed
+  preparation, failed spawn and abandoned launch cannot kill existing survivors
+  or remove their leaf. The shared limits are rewritten idempotently without
+  delegating controllers below `detached`; there are no per-survivor cgroups
+  to reclaim. The jail itself is process-global (a `OnceLock` in `jail.rs`),
   so workers, pipeline stages, and forks share one counter; only a guest
-  engine (`--guest-engine`) installs it, and there it replaces the per-command OS projection
-  ([[map/core/runtime|runtime]], `docs/SPEC.md` §12.11).
+  engine (`--guest-engine`) installs it, and there it replaces the per-command
+  fs/exec projection for the admitted utility and its descendants, while
+  preserving offline network isolation and seccomp
+  ([[internals/capability-enforcement#Guest jail|guest jail boundary]],
+  [[map/core/runtime|runtime]], `docs/SPEC.md` §12.11).
 
   The jail refuses `socket(AF_VSOCK)` with `EPERM`; the daemon's factory
   ([[map/synod|synod]]) admits only the kernel-written `VMADDR_CID_HOST`

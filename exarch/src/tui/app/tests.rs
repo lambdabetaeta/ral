@@ -91,6 +91,7 @@ fn open_exchange(app: &mut App, root: &TestAgent) -> crate::bus::Lease {
 
 pub(in crate::tui) fn apply_signal(app: &mut App, rx: &BusReceiver, signal: Signal) {
     match signal {
+        Signal::Synced { agent, through } => app.synced(agent, through),
         Signal::Born(id, born) => app.born(id, &born),
         Signal::Commit(id, commit) => app.commit(id, &commit),
         Signal::Transient(id, transient) => app.transient(id, transient, rx),
@@ -862,6 +863,38 @@ fn external_editor_chords_return_to_the_loop_without_submitting() {
     assert_eq!(app.prompt_state.prompt_text(), "draft");
 }
 
+#[test]
+fn transcript_clipboard_refuses_provisional_records_and_unrecorded_streams() {
+    let (mut app, _, _root) = app();
+    let id = app.tabs.focused();
+    app.commit(
+        id,
+        &Commit::placeholder(
+            1,
+            crate::record::NonEmpty::one(crate::record::Record::Display(
+                crate::record::Display::Answer {
+                    text: "recorded\\n".into(),
+                },
+            )),
+        ),
+    );
+    let copied = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = copied.clone();
+    app.copy_sink = Some(Box::new(move |text| {
+        output.lock().unwrap().push(text.to_string());
+        Ok(clipboard::Copied::Whole)
+    }));
+    app.apply(Effect::Copy("recorded".into()));
+    assert!(copied.lock().unwrap().is_empty());
+    app.synced(id, 1);
+    app.apply(Effect::Copy("recorded".into()));
+    assert_eq!(*copied.lock().unwrap(), ["recorded"]);
+    app.with_scrollback(id, |sb| sb.push_token("unrecorded"));
+    app.apply(Effect::Copy("unrecorded".into()));
+    assert_eq!(*copied.lock().unwrap(), ["recorded"]);
+    assert!(!app.copy_ready(), "/copy shares the same gate");
+}
+
 fn copy_chords() -> Vec<KeyEvent> {
     let mut chords = Vec::new();
     for c in ['c', 'C'] {
@@ -1326,8 +1359,10 @@ fn a_clear_wipes_the_pins_and_the_state() {
         mpsc::channel().0,
     );
     let hear = |app: &mut App| {
-        while let Ok(Signal::Commit(_, rec)) = rx.try_recv() {
-            app.commit(root.id(), &rec);
+        while let Ok(signal) = rx.try_recv() {
+            if let Signal::Commit(_, rec) = signal {
+                app.commit(root.id(), &rec);
+            }
         }
     };
 

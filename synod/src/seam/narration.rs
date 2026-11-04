@@ -27,9 +27,10 @@ fn process_card(card: Card) -> SynodEvent {
 
 fn provider_error_severity(record: &ProviderError) -> Severity {
     match record {
-        ProviderError::Api { .. } | ProviderError::Overflow { .. } | ProviderError::Other(_) => {
-            Severity::Bad
-        }
+        ProviderError::Api { .. }
+        | ProviderError::Overflow { .. }
+        | ProviderError::Other(_)
+        | ProviderError::Unavailable(_) => Severity::Bad,
         ProviderError::Cancelled(_)
         | ProviderError::Transient { .. }
         | ProviderError::Refused(_)

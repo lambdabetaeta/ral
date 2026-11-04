@@ -1,4 +1,4 @@
-Everything named below is already installed. `pip3 install --user` can add more from the package list, but nothing installed survives past this conversation — solve the problem with these first.
+Everything named below is already installed. `pip3 install --user` can add more from permitted package sites, but nothing installed survives past this conversation — solve the problem with these first.
 
 ## Spreadsheets
 

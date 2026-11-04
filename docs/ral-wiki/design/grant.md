@@ -102,17 +102,20 @@ launch hardening.
   because .NET keeps private keys under `~/.dotnet/corefx` wherever it is
   installed and its runnable parts include a file; `reasonable` excludes that
   subtree. Caches and registries stay `fs` entries.
-- **No override names the world.** An override whose chosen directory, after its
-  subpath, is a filesystem root (a drive's under Windows rules), the home or an
-  ancestor of it is a freeze error naming the variable and asking whether it is
-  set correctly: running reads would make the selector a read of everything,
-  `~/.ssh` included. The check is on the directory, not the variable (`GOPATH=~`
-  chooses `~/bin` and is fine), by containment of symlink-followed forms.
-  Defaults are fixed and need no check. `path` has the same hazard and the same
-  guard, one function (`refuse_the_world`, in `freeze.rs`): a `$PATH` entry
-  naming the world is a freeze error naming `PATH`, not a silent skip like a
-  relative entry. What counts as the world is one predicate, `the_world`, which
-  system-read discovery uses too.
+- **No selected directory names the world.** Every kept directory, default or
+  override, is judged on its already-walked position before becoming an allowance
+  or exclusion. A filesystem root (a drive's or share's under Windows rules),
+  the home or an ancestor of it is a freeze error: running reads would make the
+  selector a read of everything, `~/.ssh` included. An override error names the
+  variable and asks whether it is set correctly; a default error names the
+  selector, default spelling and resolved position when different, and points
+  at the default directory or symlink and its HOME/XDG base. The check is on
+  the directory, not its base (`GOPATH=~` chooses `~/bin` and is fine); a narrow
+  tool directory outside HOME remains valid. `path` uses the same guard
+  (`refuse_the_world`, in `freeze.rs`): a `$PATH` entry naming the world is a
+  freeze error naming `PATH`, not a silent skip like a relative entry. What
+  counts as the world is one predicate, `the_world`, which system-read discovery
+  uses too. A Windows root is not universal authority over every drive.
 - **`system` is a row, and `homebrew` is another.** `system` is the platform's
   own tool roots and no longer holds Homebrew. `` `dir `homebrew `` is
   `HOMEBREW_PREFIX` when usable, else `/opt/homebrew` or Linuxbrew's
@@ -129,8 +132,8 @@ launch hardening.
   baseline includes only chosen directories outside the process's home, using
   the host environment rather than a `FreezeCtx`. A home prefix is readable
   only where granted, including by running. A system-read directory whose walk
-  fails prevents boot and is named in the error; an override naming the world
-  or the home is dropped without error. System reads are ordinary allowances,
+  fails prevents boot and is named in the error; any selected directory naming
+  the world or lying in the home is dropped without error, defaults included. System reads are ordinary allowances,
   rendered frozen, so a redirected root shows nothing.
   An exclusion means "not allowed", never "not included": a profile that merely
   leaves something unlisted does not exclude it.

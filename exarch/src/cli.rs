@@ -281,11 +281,12 @@ pub enum Command {
     },
     /// List the accounts signed in to Exarch, across all sign-in services.
     Accounts,
-    /// Render a session's transcript as text.
+    /// Render an inactive managed session's transcript as text.
     ///
-    /// Give a session directory or its `record.jsonl`. Exarch writes the
-    /// transcript as the scrollback showed it, to standard output unless you
-    /// use `--out`.
+    /// Give a session directory or its `record.jsonl` under the application's
+    /// state directory. Exarch locks its existing owning run and establishes
+    /// durability before writing to standard output or `--out`. For an active
+    /// run, use /export in its TUI, or end the run and retry.
     Export {
         /// A session directory, or the `record.jsonl` inside one.
         session: std::path::PathBuf,

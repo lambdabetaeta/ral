@@ -264,3 +264,23 @@ fn drain_pending_includes_generated_overflow_markers_and_leaves_a_finite_snapsho
         matches!(rx.try_recv().unwrap(), Signal::Transient(_, Transient::Died { failures }) if failures.is_empty())
     );
 }
+
+#[test]
+fn synced_is_an_ordered_reserved_signal_between_transient_runs() {
+    let (tx, rx) = channel();
+    tx.send_signal(Signal::Transient(ONE, Transient::Token("before".into())))
+        .unwrap();
+    tx.send_signal(Signal::Synced {
+        agent: ONE,
+        through: 7,
+    })
+    .unwrap();
+    tx.send_signal(Signal::Transient(ONE, Transient::Token("after".into())))
+        .unwrap();
+    let signals = rx.drain_pending();
+    assert!(matches!(signals.as_slice(), [
+        Signal::Transient(ONE, Transient::Token(before)),
+        Signal::Synced { agent: ONE, through: 7 },
+        Signal::Transient(ONE, Transient::Token(after)),
+    ] if before == "before" && after == "after"));
+}

@@ -105,6 +105,39 @@ impl ExarchDesk {
     }
 }
 
+#[test]
+fn enquiry_answers_certify_both_success_and_recorded_error_exits() {
+    with_desk(|desk, _| {
+        let recorder = desk.loan.get().unwrap().log.record_emitter();
+        desk.ask(Request::Agents(Agents::List)).unwrap();
+        let last = || {
+            recorder
+                .reader()
+                .since(None)
+                .unwrap()
+                .2
+                .last()
+                .unwrap()
+                .unwrap()
+                .number()
+        };
+        recorder.assert_synced_through(last());
+        assert!(
+            desk.ask(message_req("no-such-agent", "not delivered"))
+                .is_err()
+        );
+        recorder.assert_synced_through(last());
+        recorder.before_sync(|| Err(std::io::Error::other("answer sync failed")));
+        let _prerequisite = recorder
+            .emit(crate::record::Forensic::SystemNote {
+                text: "new prerequisite".into(),
+            })
+            .unwrap();
+        let error = desk.ask(Request::Agents(Agents::List)).unwrap_err();
+        assert!(error.message.contains("answer sync failed"));
+    });
+}
+
 fn int_field(value: &FOValue, key: &str) -> i64 {
     value
         .field(key)

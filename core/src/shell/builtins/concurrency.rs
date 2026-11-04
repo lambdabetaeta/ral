@@ -132,8 +132,7 @@ pub(super) fn builtin_watch(
 /// program is double-forked away and reparented to init, so no eliminator
 /// applies and no teardown here can reach it.  This builtin is the surface
 /// discipline only; resolution, vetting, and the receipt live at the exec
-/// boundary (`shell::exec::command::detach`).  Installed only by a host that arms a
-/// detach policy ([`Shell::arm_detach`]).
+/// boundary (`shell::exec::command::detach`).
 #[cfg(unix)]
 pub(super) fn builtin_detach(
     args: &[Value],

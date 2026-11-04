@@ -237,20 +237,39 @@ impl ExarchDesk {
             )),
             Some(to) => {
                 let said = Said::new(text.clone(), format!("sent message to agent '{name}'"));
-                to.message(&call.handle, text).map(|()| said).map_err(|why| match why {
-                    Refused::Ended => Said::new(
+                match to.message(&call.handle, text) {
+                    Ok(()) => Ok(said),
+                    Err(Refused::Ended) => Err(Said::new(
                         "refused: the agent ended",
                         format!("agent '{name}' has ended; start a new one"),
-                    ),
-                    Refused::Resting => {
+                    )),
+                    Err(Refused::Unsynced(why)) => {
+                        let message = Refused::Unsynced(why).to_string();
+                        call.commit_act(
+                            &body,
+                            DeskAct::Message,
+                            Some(&name),
+                            message.clone(),
+                            false,
+                        );
+                        body.log.record_emitter().emit_or_end(
+                            crate::record::Forensic::HarnessResult {
+                                text: message.clone(),
+                            },
+                        );
+                        return Err(Error::new(message));
+                    }
+                    Err(Refused::Resting) => {
                         let parent = to.parent().expect("a resting helper has a parent");
                         let parent = &parent.0.name;
-                        Said::new(
+                        Err(Said::new(
                             "refused: the agent rests",
-                            format!("agent '{name}' has answered '{parent}' and rests; only '{parent}' can message it now"),
-                        )
+                            format!(
+                                "agent '{name}' has answered '{parent}' and rests; only '{parent}' can message it now"
+                            ),
+                        ))
                     }
-                })
+                }
             }
         };
         self.conclude(&body, DeskAct::Message, &name, verdict)

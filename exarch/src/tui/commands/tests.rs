@@ -7,7 +7,7 @@ use crate::card::Mark;
 use crate::provider::allowance::{
     Allowance, BudgetKind, BudgetReset, Consumption, Reading, Scope, Unit,
 };
-use crate::record::{Born, RECORD};
+use crate::record::{Born, Emitter as Recorder, Started, Transcript, Voice};
 use crate::tui::app::tests::{app, app_born, ctx, text};
 use ral_core::own::OwnDir;
 use std::path::{Path, PathBuf};
@@ -249,13 +249,41 @@ fn limits_renders_peer_accounts_exact_money_and_explicit_percentages() {
 #[test]
 fn export_refuses_to_overwrite() {
     let dir = OwnDir::for_test("export-overwrite").expect("a test directory");
-    // A record to export, so that it is the destination that refuses.
-    dir.append(RECORD).expect("an empty record");
+    let recorder = Recorder::create(&dir).unwrap();
     let born = Born {
         log_dir: OwnDir::clone(&dir),
-        ..Born::for_test("main", None)
+        name: "main".into(),
+        parent: None,
+        resumed: None,
+        reader: recorder.reader(),
     };
     let (mut app, _rx, root) = app_born(&born);
+    recorder
+        .begin(Started {
+            session_id: root.id(),
+            name: "main".into(),
+            parent: None,
+            returns: false,
+            selected: crate::provider::Selected::for_test("test"),
+            log_dir: dir.path().to_path_buf(),
+            at_unix_ms: 0,
+        })
+        .unwrap();
+    let _ = recorder
+        .emit(Transcript::UserPrompt {
+            turn: 1,
+            text: "exportable prompt".into(),
+            voice: Voice::Human,
+        })
+        .unwrap();
+    recorder.sync().unwrap();
+    let fresh = dir.path().join("fresh.txt");
+    cmd_export(&mut app, &ral_core::path::shown(&fresh), ctx().info);
+    assert!(
+        std::fs::read_to_string(&fresh)
+            .unwrap()
+            .contains("exportable prompt")
+    );
     let dest = dir.path().join("out.txt");
     std::fs::write(&dest, "keep me").expect("a file to protect");
     cmd_export(&mut app, &ral_core::path::shown(&dest), ctx().info);

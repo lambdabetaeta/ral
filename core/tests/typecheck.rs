@@ -34,8 +34,7 @@ fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> 
         .unwrap_or_default()
 }
 
-/// A surface holding `detach`, the base frame core publishes but does not
-/// install: a host takes it together with the birth budget it spends.
+/// A surface holding `detach`, the base frame core publishes for a host to install.
 #[cfg(unix)]
 fn detach_surface() -> ral_core::HostSurface {
     ral_core::HostSurface {

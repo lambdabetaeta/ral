@@ -42,13 +42,12 @@ pub(crate) mod test_helper;
 pub(crate) mod tui;
 pub mod wallet;
 
-use crate::site::{Silent, site};
 use clap::Parser;
 use host::Host;
 use provider::state::{Opening, opening};
 use provider::{Bureau, Choice, Holdings, Pool};
-use ral_core::own::{self, OwnDir};
-use ral_core::path::{Kind, XdgKind};
+use ral_core::own::OwnDir;
+use ral_core::path::XdgKind;
 use std::sync::Arc;
 
 /// The one boot recipe table, for the identity engine and the `--engine` child
@@ -155,24 +154,16 @@ pub fn run() -> Result<(), String> {
                 Ok(())
             }
             cli::Command::Export { session, out } => {
-                // The session directory the user names, or the record itself.
-                let record = match site!(Silent::CliArgument, own::kind_named(&session)) {
-                    Some(Kind::Dir) => session.join(record::RECORD),
-                    _ => session,
-                };
-                let file = site!(Silent::CliArgument, own::open_named(&record)).map_err(|e| {
-                    format!("{e}; is this a session directory under $XDG_STATE_HOME/exarch?")
+                let (snapshot, _lock) = tui::inactive_snapshot(&session).map_err(|e| {
+                    format!("could not export {}: {e}", ral_core::path::shown(&session))
                 })?;
                 match &out {
-                    Some(dest) => tui::export_to(file, &record, dest, tui::Format::Plain),
-                    None => tui::export(
-                        file,
-                        &record,
-                        &mut std::io::stdout().lock(),
-                        tui::Format::Plain,
-                    ),
+                    Some(dest) => tui::export_to(&snapshot, dest, tui::Format::Plain),
+                    None => {
+                        tui::export(&snapshot, &mut std::io::stdout().lock(), tui::Format::Plain)
+                    }
                 }
-                .map_err(|e| format!("could not export {}: {e}", ral_core::path::shown(&record)))
+                .map_err(|e| format!("could not export {}: {e}", ral_core::path::shown(&session)))
             }
         };
     }

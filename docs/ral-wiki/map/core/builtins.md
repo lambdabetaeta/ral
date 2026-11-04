@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d56977ff
-generated_at_date: 2026-11-03
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-04
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -73,11 +73,10 @@ the run — so only a host with a deferred sink installs it, and elsewhere
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]). The second,
 `DETACH_BUILTIN` (`cfg(unix)`, over `concurrency::builtin_detach`), is the
 base-frame manifest's second row — typed `List String -> F Any`, no arity to it
-— and is carried by a host that arms a detach policy: installing the verb and
-arming the budget (`Shell::arm_detach`) are one act, so absence is an
+— and is carried only where a host installs it, so absence is an
 unknown-name diagnostic rather than a veto, while
 whether a given call may spend it is the live grant stack's question
-(`GrantStack::permits(Flag::Detach)`). The third, `SURFACE_BUILTIN`, wraps
+(`GrantStack::permits(Flag::Shell(ShellVerb::Detach))`). The third, `SURFACE_BUILTIN`, wraps
 `misc::builtin_surface` / `scheme::surface_op` under the bare name `surface`;
 exarch declares its own entry over the same body under `exarch-surface`, with
 its own doc, so no host's name enters core's vocabulary. `builtin_surface` is

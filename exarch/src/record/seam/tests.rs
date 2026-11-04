@@ -21,7 +21,7 @@ fn head(emit: &Emitter, dir: &OwnDir, id: AgentId) -> Commit {
     emit.reader()
         .since(None)
         .unwrap()
-        .1
+        .2
         .next()
         .unwrap()
         .unwrap()
@@ -72,6 +72,7 @@ fn a_commit_is_published_as_one_signal() {
             ],
         })
         .unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), Signal::Synced { agent, through: 0 } if agent == id));
     let Signal::Commit(source, published) = rx.try_recv().unwrap() else {
         panic!("one whole commit is published")
     };
@@ -107,6 +108,9 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
             tx: tx.downgrade(),
             meter: UsageMeter::default(),
         }));
+        assert!(
+            matches!(rx.try_recv().unwrap(), Signal::Synced { agent, through: 0 } if agent == id)
+        );
         emit.check_available().unwrap();
         let head = head(&emit, &dir, id);
         let retained = first
@@ -157,7 +161,7 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
         assert_eq!(unavailable.to_string(), detail);
         assert_eq!(fs::read(&path).unwrap(), failed);
 
-        let (from, records) = emit.reader().since(None).unwrap();
+        let (from, _, records) = emit.reader().since(None).unwrap();
         assert_eq!(from, Cursor::start());
         let records = records.collect::<io::Result<Vec<_>>>().unwrap();
         assert_eq!(records.len(), 2);
@@ -168,7 +172,7 @@ fn a_failed_writer_preserves_its_commits_until_explicit_resume() {
             assert_eq!(record.records().first.locus(), expected);
             assert_locus(&failed, record.records().first.locus());
         }
-        let (from, records) = emit.reader().since(Some(cursor)).unwrap();
+        let (from, _, records) = emit.reader().since(Some(cursor)).unwrap();
         assert_eq!(from, cursor);
         assert_eq!(from.next(), 3);
         assert_eq!(records.count(), 0);
@@ -272,49 +276,33 @@ fn a_torn_last_commit_is_quarantined_whole() {
 }
 
 #[test]
-fn a_refused_resume_leaves_the_record_as_it_found_it() {
-    let sessions = OwnDir::for_test("refused-resume-unchanged").unwrap();
-    let id = AgentId::new(7);
-    let dir = sessions.make_dir(&id.to_string()).unwrap();
-    let path = dir.path().join(RECORD);
-    let emit = Emitter::create(&dir).unwrap();
-    let _head = head(&emit, &dir, id).into_records().first;
-    let _a = emit
-        .commit(NonEmpty {
-            first: Forensic::Error {
-                text: "first record".into(),
-            }
-            .into(),
-            rest: vec![
-                Forensic::Error {
-                    text: "second record".into(),
-                }
-                .into(),
-            ],
-        })
-        .unwrap();
-    let b = emit
-        .commit(NonEmpty::one(Forensic::Cancelled.into()))
-        .unwrap();
-    drop(emit);
-    let mut bytes = fs::read(&path).unwrap();
-    let at = bytes
-        .windows(13)
-        .position(|text| text == b"second record")
-        .unwrap();
-    bytes[at] = b'S';
-    let start = usize::try_from(b.bytes().start).unwrap();
-    bytes.truncate(start + (bytes.len() - start) / 2);
-    fs::write(&path, &bytes).unwrap();
-    let refusal = context::resume(&sessions, id)
-        .err()
-        .expect("corrupt interior refused")
-        .to_string();
-    assert!(refusal.contains(&ral_core::path::shown(&path)), "{refusal}");
-    assert!(refusal.contains("line 2"), "{refusal}");
-    assert!(refusal.contains("corrupt"), "{refusal}");
-    assert_eq!(fs::read(&path).unwrap(), bytes);
-    assert!(!dir.path().join("record.jsonl.crash").exists());
+fn a_foreign_line_before_damage_leaves_the_record_as_it_found_it() {
+    for damaged in [false, true] {
+        let sessions = OwnDir::for_test("refused-resume-unchanged").unwrap();
+        let id = AgentId::new(7);
+        let dir = sessions.make_dir(&id.to_string()).unwrap();
+        let path = dir.path().join(RECORD);
+        let emit = Emitter::create(&dir).unwrap();
+        let _head = head(&emit, &dir, id);
+        drop(emit);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend(b"{\"not\":\"a commit\"}\n");
+        if damaged {
+            bytes.extend(b"damage\n");
+            bytes.extend(crate::record::commit_line(&[Forensic::Cancelled.into()]));
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let refusal = context::resume(&sessions, id)
+            .err()
+            .expect("foreign line refused")
+            .to_string();
+        assert!(refusal.contains(&ral_core::path::shown(&path)), "{refusal}");
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("older exarch"), "{refusal}");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(!dir.path().join("record.jsonl.crash").exists());
+    }
 }
 
 #[test]
@@ -363,6 +351,8 @@ fn availability_observation_does_not_wait_for_publication() {
             .check_available()
             .expect("a publisher can also observe availability directly");
         }
+
+        fn synced(&self, _through: u64) {}
 
         fn transient(&self, _: Transient) {
             panic!("this probe expects only a committed fact")
@@ -417,7 +407,7 @@ fn a_serialization_failure_latches_the_writer_without_writing() {
         failure.to_string()
     );
     assert_eq!(fs::read(&path).unwrap(), [] as [u8; 0]);
-    let (_, records) = emit.reader().since(None).unwrap();
+    let (_, _, records) = emit.reader().since(None).unwrap();
     assert_eq!(records.count(), 0);
     let refused = emit.emit(Forensic::Cancelled).unwrap_err();
     assert_eq!(refused.kind(), failure.kind());
@@ -472,4 +462,89 @@ fn a_writer_fault_does_not_disable_an_independent_session() {
         fs::read(broken_dir.path().join(RECORD)).unwrap(),
         [] as [u8; 0]
     );
+}
+
+#[test]
+fn sync_publishes_a_watermark_on_success_attach_and_catch_up_but_not_on_append() {
+    let dir = OwnDir::for_test("sync-watermark").unwrap();
+    let emit = Emitter::create(&dir).unwrap();
+    let id = AgentId::new(7);
+    let (tx, rx) = channel();
+    emit.attach(Box::new(FleetSink {
+        id,
+        tx: tx.downgrade(),
+        meter: UsageMeter::default(),
+    }));
+    assert!(matches!(rx.try_recv().unwrap(), Signal::Synced { agent, through: 0 } if agent == id));
+    let commit = emit
+        .commit(NonEmpty::one(Forensic::Cancelled.into()))
+        .unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), Signal::Commit(agent, _) if agent == id));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(emit.reader().since(None).unwrap().1, 0);
+    emit.sync().unwrap();
+    emit.assert_synced_through(commit.number());
+    assert!(
+        matches!(rx.try_recv().unwrap(), Signal::Synced { agent, through } if agent == id && through == commit.number())
+    );
+    emit.sync().unwrap();
+    assert!(rx.try_recv().is_err());
+    let (late_tx, late_rx) = channel();
+    emit.attach(Box::new(FleetSink {
+        id,
+        tx: late_tx.downgrade(),
+        meter: UsageMeter::default(),
+    }));
+    let _later = emit.emit(Forensic::SessionEnded).unwrap();
+    assert!(
+        matches!(late_rx.try_recv().unwrap(), Signal::Synced { agent, through } if agent == id && through == commit.number())
+    );
+    assert!(matches!(late_rx.try_recv().unwrap(), Signal::Commit(agent, _) if agent == id));
+    let (_, synced, commits) = emit.reader().since(None).unwrap();
+    assert_eq!(synced, commit.number());
+    assert_eq!(commits.count(), 2);
+    drop(emit);
+    let reopened = Emitter::append_to(&dir).unwrap();
+    assert_eq!(
+        reopened.reader().since(None).unwrap().1,
+        0,
+        "surviving bytes are not a sync witness"
+    );
+    reopened.sync().unwrap();
+    reopened.assert_synced_through(2);
+}
+
+#[test]
+fn a_failed_sync_ends_life_and_never_certifies_its_commit() {
+    let dir = OwnDir::for_test("failed-sync-life").unwrap();
+    let emit = Emitter::create(&dir).unwrap();
+    let node = DurableRoot::default().child();
+    emit.bind(node.clone());
+    let id = AgentId::new(7);
+    let (tx, rx) = channel();
+    emit.attach(Box::new(FleetSink {
+        id,
+        tx: tx.downgrade(),
+        meter: UsageMeter::default(),
+    }));
+    let _record = emit.emit(Forensic::Cancelled).unwrap();
+    assert_eq!(
+        rx.drain_pending().len(),
+        2,
+        "attach watermark and provisional commit"
+    );
+    emit.before_sync(|| Err(io::Error::other("injected sync failure")));
+    let failure = emit.sync().unwrap_err();
+    assert!(rx.try_recv().is_err(), "failure publishes no sync witness");
+    assert!(node.is_cancelled());
+    assert_eq!(emit.reader().since(None).unwrap().1, 0);
+    assert_eq!(
+        emit.check_available().unwrap_err().to_string(),
+        failure.to_string()
+    );
+    assert_eq!(
+        emit.emit(Forensic::SessionEnded).unwrap_err().to_string(),
+        failure.to_string()
+    );
+    assert_eq!(emit.sync().unwrap_err().to_string(), failure.to_string());
 }

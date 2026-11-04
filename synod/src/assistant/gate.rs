@@ -47,6 +47,8 @@ pub(crate) fn run(
     }
 
     let root = seat.root();
+    let mut synced = 0;
+    let mut pending = None;
     loop {
         let sig = match seat.feed().recv_timeout(POLL) {
             Ok(sig) => sig,
@@ -73,7 +75,11 @@ pub(crate) fn run(
         }
         let root_died =
             matches!(&sig, Signal::Transient(id, Transient::Died { .. }) if *id == root);
-        let mut settlement = None;
+        if let Signal::Synced { agent, through } = &sig
+            && *agent == root
+        {
+            synced = synced.max(*through);
+        }
         if let Signal::Commit(id, commit) = &sig
             && *id == root
         {
@@ -85,7 +91,7 @@ pub(crate) fn run(
                         }
                     }
                     Record::Control(Control::JobSettled { job, stopped }) => {
-                        settlement = Some((*job, *stopped));
+                        pending = Some((commit.number(), *job, *stopped));
                     }
                     _ => {}
                 }
@@ -95,8 +101,11 @@ pub(crate) fn run(
         if root_died {
             return if stage.current() { Err(false) } else { Ok(()) };
         }
-        if let Some((job, stopped)) = settlement {
-            if let Some(message) = drain_failures(seat, root, sink) {
+        if let Some((commit, job, stopped)) = pending
+            && commit <= synced
+        {
+            pending = None;
+            if let Some(message) = drain_failures(seat, root, sink, &mut synced) {
                 stage.failure(message);
                 seat.invalidate();
                 return Err(true);
@@ -104,7 +113,7 @@ pub(crate) fn run(
             let walk = seat.settled();
             if let Err(message) = finish_walk(
                 walk,
-                || drain_failures(seat, root, sink),
+                || drain_failures(seat, root, sink, &mut synced),
                 |message| stage.failure(message),
                 || stage.job_done(job.into(), stopped, seat.report()),
                 || seat.release(),
@@ -154,8 +163,13 @@ fn terminal_failure(
     }
 }
 
-fn drain_failures(seat: &impl Seat, root: AgentId, sink: &mut impl Sink) -> Option<String> {
-    snapshot_failure(seat.feed().drain_pending(), root, sink, |cause| {
+fn drain_failures(
+    seat: &impl Seat,
+    root: AgentId,
+    sink: &mut impl Sink,
+    synced: &mut u64,
+) -> Option<String> {
+    snapshot_failure(seat.feed().drain_pending(), root, sink, synced, |cause| {
         seat.engine_lost(cause)
     })
 }
@@ -164,10 +178,16 @@ fn snapshot_failure(
     signals: Vec<Signal>,
     root: AgentId,
     sink: &mut impl Sink,
+    synced: &mut u64,
     engine_lost: impl Fn(&Severed) -> String,
 ) -> Option<String> {
     let mut failure = None;
     for signal in signals {
+        if let Signal::Synced { agent, through } = &signal
+            && *agent == root
+        {
+            *synced = (*synced).max(*through);
+        }
         if failure.is_none() {
             failure = terminal_failure(&signal, root, &engine_lost);
             if failure.is_none()
@@ -347,6 +367,110 @@ mod tests {
         assert_eq!(host.end(), Vec::<String>::new());
     }
 
+    fn settlement() -> (AgentId, exarch::record::Commit) {
+        let dir = ral_core::own::OwnDir::for_test("gate-watermark-source").unwrap();
+        let host = scripted_host(&dir, None, Script::new().then(Reply::text("one")));
+        let root = host.children()[0];
+        host.port().submit(root, "work".into()).unwrap();
+        assert!(host.release(root));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let settled = loop {
+            if let Signal::Commit(id, commit) = host
+                .feed()
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap()
+                && id == root
+                && commit.records().iter().any(|record| {
+                    matches!(record.value(), Record::Control(Control::JobSettled { .. }))
+                })
+            {
+                break commit;
+            }
+        };
+        assert_eq!(host.end(), Vec::<String>::new());
+        (root, settled)
+    }
+
+    #[test]
+    fn settlement_waits_for_its_root_watermark_and_failed_sync_never_walks_or_releases() {
+        let (root, settled) = settlement();
+        for certify in [false, true] {
+            let (tx, rx) = exarch::port::channel();
+            let log = Log::default();
+            let mut seat = FakeSeat::new(&rx, &log, || true);
+            seat.root = root;
+            let mut stage = FakeStage::new(&log);
+            let current = stage.current.clone();
+            stage.after_done = Box::new(move |_| current.set(false));
+            tx.send_signal(Signal::Commit(root, settled.clone()))
+                .unwrap();
+            tx.send_signal(Signal::Synced {
+                agent: root,
+                through: settled.number() - 1,
+            })
+            .unwrap();
+            tx.send_signal(Signal::Synced {
+                agent: AgentId::new(root.get() + 1),
+                through: u64::MAX,
+            })
+            .unwrap();
+            if certify {
+                tx.send_signal(Signal::Synced {
+                    agent: root,
+                    through: settled.number(),
+                })
+                .unwrap();
+            } else {
+                tx.send_signal(died(root, &["sync failed"])).unwrap();
+            }
+            drop(tx);
+            let result = run(&mut seat, &stage, &mut Ignore);
+            if certify {
+                assert_eq!(result, Ok(()));
+                assert_eq!(
+                    *log.borrow(),
+                    ["release", "walk", "done stopped=false", "release"]
+                );
+            } else {
+                assert_eq!(result, Err(true));
+                assert_eq!(
+                    *log.borrow(),
+                    ["release", "failure: sync failed", "invalidate"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failure_drains_retain_the_root_watermark_without_confusing_agents_or_regressing() {
+        let root = AgentId::new(1);
+        let mut synced = 3;
+        assert!(
+            snapshot_failure(
+                vec![
+                    Signal::Synced {
+                        agent: root,
+                        through: 9
+                    },
+                    Signal::Synced {
+                        agent: AgentId::new(2),
+                        through: u64::MAX
+                    },
+                    Signal::Synced {
+                        agent: root,
+                        through: 4
+                    },
+                ],
+                root,
+                &mut Ignore,
+                &mut synced,
+                |_| unreachable!(),
+            )
+            .is_none()
+        );
+        assert_eq!(synced, 9);
+    }
+
     #[test]
     fn a_refused_first_release_fails_before_any_job_begins() {
         let (_tx, rx) = exarch::port::channel();
@@ -406,6 +530,7 @@ mod tests {
             rx.drain_pending(),
             AgentId::new(1),
             &mut Ignore,
+            &mut 0,
             |_| unreachable!(),
         );
         assert_eq!(found.as_deref(), Some("uncertified"));
@@ -427,7 +552,8 @@ mod tests {
     #[test]
     fn the_root_dying_invalidates_a_snapshot() {
         let root = AgentId::new(1);
-        let snapshot = |signals| snapshot_failure(signals, root, &mut Ignore, |_| unreachable!());
+        let snapshot =
+            |signals| snapshot_failure(signals, root, &mut Ignore, &mut 0, |_| unreachable!());
         assert!(snapshot(vec![died(root, &[])]).is_some());
         assert_eq!(
             snapshot(vec![died(root, &["boom"])]).as_deref(),
@@ -487,7 +613,9 @@ mod tests {
             ),
             Signal::Transient(helper, Transient::Died { failures: vec![] }),
         ];
-        assert!(snapshot_failure(signals, root, &mut Ignore, |_| "engine".into()).is_none());
+        assert!(
+            snapshot_failure(signals, root, &mut Ignore, &mut 0, |_| "engine".into()).is_none()
+        );
     }
 
     #[test]

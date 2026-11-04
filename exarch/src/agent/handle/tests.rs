@@ -174,7 +174,8 @@ fn human_taken_up_before_stop_is_recorded_once_without_a_provider_turn() {
     assert_eq!(
         owner
             .handle()
-            .stop(owner.handle().status().unwrap().job.unwrap()),
+            .stop(owner.handle().status().unwrap().job.unwrap())
+            .unwrap(),
         Some(Vec::new())
     );
     let (emit, rx) = crate::bus::dummy_emitter();
@@ -309,7 +310,7 @@ fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
         [Record::Control(Control::Status { status: ChildStatus::Failed(reason) }),
          Record::Control(Control::Withdrawn { posts })]
         if reason == "ended" && posts.iter().copied().collect::<Vec<_>>() == pending));
-    let (_, commits) = helper
+    let (_, _, commits) = helper
         .body
         .log
         .record_emitter()
@@ -342,7 +343,7 @@ fn recalling_a_returning_roots_unread_text_leaves_no_teardown_report() {
     let fleet = owner.fleet.clone();
     handle.steer("unread".into()).unwrap();
     assert!(handle.status().unwrap().owes);
-    assert_eq!(handle.recall(), ["unread"]);
+    assert_eq!(handle.recall().unwrap(), ["unread"]);
     assert!(!handle.status().unwrap().owes);
     drop(owner);
     assert!(

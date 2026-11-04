@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-03
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -548,14 +548,17 @@ disk-caches both paths:
   into a `StepOut` (assistant message, tool calls, `Usage`, `StopReason`). One
   callback rather than two because the *order* of the two kinds is the
   caller's whole interest: a reasoning run ends exactly where the prose after
-  it begins, and two independent callbacks cannot say so. It preserves
-  `reasoning_content` on the assistant message so thinking mode round-trips —
-  that is the only route reasoning takes back into context, since the display
-  commit is authored from the deltas.
-  The stream-event match is exhaustive — thought-signature and tool-call chunks
-  are captured in the `End` frame and replayed by `step_out_from_end`, so they
-  are dropped by a *named* arm, never a wildcard, and a new genai stream variant
-  fails the build (X10).
+  it begins, and two independent callbacks cannot say so.
+  **`step_out_from_end` preserves captured structured content as authoritative:**
+  signed reasoning keeps its exact signature bytes, order and pairing, including
+  equal text signed differently. Aggregate reasoning is appended only when
+  `contains_reasoning_content()` is false, not compared or deduplicated by text.
+  This is the model-facing content; display commits are authored from deltas.
+  The stream-event match is exhaustive: any tool chunk and any nonempty
+  signature, reasoning or text chunk are generated-work evidence (`heard`),
+  but only non-whitespace answer text sets `spoke`. Start, heartbeat and empty
+  string deltas prove no generated work. Tool/signature content is admitted
+  whole from `End`, never reconstructed from incomplete chunks (X10).
 - **Liveness is one byte-level clock, owned by genai.** `complete_options` sets
   `stream_header_timeout` (`STREAM_HEADER_TIMEOUT`, 3 min) and
   `stream_read_timeout` (`STREAM_READ_TIMEOUT`, 10 min, per raw body chunk, SSE
@@ -583,7 +586,7 @@ disk-caches both paths:
 
 ## Retry driver
 
-Both paths in `provider/stream.rs` run on a tokio runtime through **one retry
+Streaming in `provider/stream.rs` runs on a tokio runtime through **one retry
 driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
 / `Failed`):
 
@@ -598,12 +601,22 @@ driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
   beside `ProviderError`, whose `Truncated` carries it: one type says why a
   turn was cut short, and each arm carries its own remedy
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).
+- `Provider::complete` passes a record-independent `before_attempt` callback.
+  `before_request` invokes it after retry evidence and before `transport.prepare`
+  or HTTP; scripted completion invokes it before consuming a reply. Failure
+  becomes nonretryable `ProviderError::Unavailable`. The agent's outer sync
+  precedes `Rations::admit` and preserves the original recording failure before
+  cancellation classification.
 - Each attempt is handed the failure it replaces (`None` first), which the stream
   emits as `Delta::Retry { cause, lost }` before the new attempt's deltas
   (`lost`: the usage of an attempt that streamed output the provider never
   reported): the commit producer seals the failed attempt's lanes there and
   `deliberate` records the lost usage and a `Forensic::Retried`, the log's
-  alone, drawn by no renderer.
+  alone, drawn by no renderer. `heard` yields one unknown delta per generated
+  attempt actually retried, not per chunk. The record seam meters that delta
+  once; replay folds the same fact. A successful `End` uses its report, or one
+  missing-report fallback, without also charging `heard`. Terminal failure and
+  cancellation do not acquire new accounting here.
 - Rate limits get a larger budget and a higher backoff ceiling than transient
   failures, and a named wait is honoured. A `Refused` whose
   reset lies past that ceiling (`Recovery::Deferred`) surfaces on its first
@@ -669,12 +682,18 @@ panic (X8).
   on what a turn cost (X9).
 - `Usage::parts` (`UsageParts`) is the single content/layout source for the
   usage line: `Display` joins the pieces as text and the
-  [[map/exarch/frontend|TUI]] styles them. An `unmetered` turn (a flat
-  subscription) renders its cost slot as `subscription` rather than a price;
-  the token counts still render.
-- `Usage::unreported` counts turns whose usage the provider never sent (a
-  stalled stream, an `End` without usage). It adds like every other field, a
-  total with any is a lower bound, and the cost slot says so (`$0.0364 + ?`).
+  [[map/exarch/frontend|TUI]] styles them. Positive known dollars always render
+  to four decimals. `unmetered` ORs subscription participation across turns and
+  agents independently of dollars: a mixed total reads `$0.0364 + subscription`,
+  a pure reported subscription `subscription`. Metered zero/unknown-rate cost
+  remains `—`; absent cache counts remain absent, not reported zeroes.
+- `Usage::unreported` counts attempts whose usage the provider never sent (a
+  retried generated attempt, a stalled stream, an `End` without usage). It adds
+  like every other field, a
+  total with any is incomplete, and the cost slot says so (`$0.0364 + ?` for
+  metered usage, `subscription (usage unknown)` or
+  `$0.0364 + subscription (usage unknown)` when subscription participates).
+  Unknown subscription usage does not prove an additional cash charge.
   `Usage::measured_input()` is the one reading of `input` as a context
   measurement and is `None` for such a usage, so neither the pressure gauge's
   `Measure` nor the view's `last_input` is ever overwritten by a zero.
@@ -691,6 +710,12 @@ panic (X8).
   parameters, and the context window only as the fallback when the serving
   account's listing reports none) for startup and picker decisions. Offline
   starts degrade to `—`.
+
+New completions preserve canonical content; resume does not infer repairs to
+historical malformed signed messages. Those messages remain until withdrawn.
+The `Usage` schema is unchanged: existing mixed-dollar records gain the honest
+shared presentation on replay, but historically omitted retry deltas cannot be
+reconstructed or backfilled.
 
 ## The wire request
 

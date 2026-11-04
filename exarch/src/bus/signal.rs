@@ -16,6 +16,8 @@ pub enum Signal {
     /// A commit, its records stamped with the loci its append gave them;
     /// one signal, so a frontend absorbs it whole.
     Commit(AgentId, Commit),
+    /// Every commit through this number has reached stable storage.
+    Synced { agent: AgentId, through: u64 },
     /// An agent's birth: sent by minting its emitter, so ahead of anything
     /// that emitter carries.
     Born(AgentId, Born),

@@ -55,6 +55,13 @@ impl Publish for FleetSink {
         }
     }
 
+    fn synced(&self, through: u64) {
+        let _ = self.tx.send_signal(Signal::Synced {
+            agent: self.id,
+            through,
+        });
+    }
+
     fn transient(&self, t: Transient) {
         if self.tx.send_signal(Signal::Transient(self.id, t)).is_err() {
             // No live receiver; a transient has no durable form to catch up
@@ -158,6 +165,89 @@ mod tests {
     use ral_core::own::OwnDir;
 
     #[test]
+    fn durable_multiagent_totals_keep_cash_subscription_and_unknown_usage() {
+        use crate::record::{AgentLog, Blocks, View, replay};
+
+        let paid = Usage {
+            input: 100,
+            output: 20,
+            cache_creation: Some(3),
+            cache_read: Some(7),
+            dollars: 0.0364,
+            ..Usage::default()
+        };
+        let subscription = Usage {
+            input: 50,
+            output: 10,
+            unmetered: true,
+            ..Usage::default()
+        };
+        for reversed in [false, true] {
+            let bus = FleetBus::session();
+            let logs = [
+                AgentLog::for_test(AgentId::new(0), "paid").unwrap().0,
+                AgentLog::for_test(AgentId::new(1), "subscription")
+                    .unwrap()
+                    .0,
+            ];
+            for log in &logs {
+                log.record_emitter()
+                    .attach(bus.emitter(log.id()).fleet_sink());
+            }
+            let order = if reversed { [1, 0] } else { [0, 1] };
+            for index in order {
+                let _recorded = logs[index]
+                    .record_emitter()
+                    .emit(Forensic::UsageDelta {
+                        usage: [paid, subscription][index],
+                        generation: None,
+                        provider: None,
+                    })
+                    .unwrap();
+            }
+            let live = bus.meter().total();
+            assert_eq!(live.parts().cost, "$0.0364 + subscription");
+            assert_eq!(live.input, 150);
+            assert_eq!(live.output, 30);
+            assert_eq!(live.cache_creation, Some(3));
+            assert_eq!(live.cache_read, Some(7));
+            let _recorded = logs[1]
+                .record_emitter()
+                .emit(Forensic::UsageDelta {
+                    usage: Usage::unreported(false),
+                    generation: None,
+                    provider: None,
+                })
+                .unwrap();
+            let live = bus.meter().total();
+            assert_eq!(live.unreported, 1);
+            assert!((live.dollars - paid.dollars).abs() < f64::EPSILON);
+            assert_eq!(live.parts().cost, "$0.0364 + subscription (usage unknown)");
+            let replayed = logs.iter().fold(Usage::default(), |total, log| {
+                let path = log.dir().path().join("record.jsonl");
+                total
+                    + replay::<View>(
+                        log.dir().open("record.jsonl").unwrap(),
+                        &path,
+                        Blocks::default(),
+                    )
+                    .unwrap()
+                    .usage()
+            });
+            assert_eq!(
+                serde_json::to_value(replayed).unwrap(),
+                serde_json::to_value(live).unwrap()
+            );
+            assert_eq!(replayed.parts().cost, live.parts().cost);
+            assert!(
+                replayed
+                    .to_string()
+                    .ends_with(" · $0.0364 + subscription (usage unknown)")
+            );
+        }
+    }
+
+    #[test]
     fn session_meters_root_and_child_before_and_after_channel_closure() {
         let root_usage = Usage {
             input: 100,
@@ -207,10 +297,12 @@ mod tests {
 
         let signals: Vec<_> = std::iter::from_fn(|| bus.rx().try_recv().ok()).collect();
         assert!(matches!(signals.as_slice(), [
+            Signal::Synced { agent: attached_root, through: 0 },
             Signal::Born(born_id, born),
+            Signal::Synced { agent: attached_child, through: 0 },
             Signal::Commit(committing_root, _),
             Signal::Commit(committing_child, _),
-        ] if *born_id == child_id && born.name == "helper" && born.parent == Some(root_id)
+        ] if *attached_root == root_id && *attached_child == child_id && *born_id == child_id && born.name == "helper" && born.parent == Some(root_id)
             && *committing_root == root_id && *committing_child == child_id));
         let total = bus.meter().total();
         assert_eq!(total.input, 107);

@@ -44,7 +44,7 @@ use std::{os::fd::AsFd, process::Command};
 /// confinement holds for the survivor's whole life, frozen as the frame that
 /// birthed it left it.  macOS `execve`s the target in place and Windows has no
 /// `detach`, so neither has an envelope to tie to a parent.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ownership {
     Kept,
     #[cfg(unix)]

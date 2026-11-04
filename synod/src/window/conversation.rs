@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::state::{Accounts, Handle, Held, Inlet, Owner, Review, Running};
+use super::state::{
+    Accounts, Handle, Held, Inlet, Owner, Review, Running, refused_message, withdrawal_message,
+};
 use crate::assistant::conversation::Conversation;
 use crate::assistant::gate::{self, Seat, Stage};
 use crate::folder::manifest::Stop;
@@ -137,13 +139,13 @@ impl Emitter {
         clippy::significant_drop_tightening,
         reason = "installation and queue publication must be atomic"
     )]
-    fn install(&self, port: Port, agent: AgentId) -> bool {
+    fn install(&self, port: Port, agent: AgentId) -> Result<bool, String> {
         let mut held = self.slot.lock_ignore_poison();
         let Some(handle) = held.owned_by_mut(self.generation) else {
-            return false;
+            return Ok(false);
         };
         for message in handle.inlet.install(port.clone(), agent) {
-            let _ = port.submit(agent, message);
+            port.submit(agent, message).map_err(refused_message)?;
         }
         publish(
             &self.app,
@@ -152,7 +154,7 @@ impl Emitter {
                 messages: handle.inlet.queued(),
             },
         );
-        true
+        Ok(true)
     }
 
     fn preparing(&self, stage: Preparation) {
@@ -267,7 +269,6 @@ pub(crate) fn send_message(
 }
 
 #[tauri::command]
-#[allow(clippy::unnecessary_wraps, reason = "preserve the IPC result contract")]
 #[allow(
     clippy::significant_drop_tightening,
     reason = "stop and queue publication require generation ownership"
@@ -285,8 +286,7 @@ pub(crate) fn stop_job(
     let recalled = match &handle.inlet {
         Inlet::Live { port, agent } => port
             .stop(*agent, job.into())
-            .ok()
-            .flatten()
+            .map_err(withdrawal_message)?
             .unwrap_or_default(),
         Inlet::Booting(_) => Vec::new(),
     };
@@ -312,7 +312,7 @@ pub(crate) fn recall_queued(
 ) -> Result<Vec<String>, String> {
     let mut held = state.0.lock_ignore_poison();
     let handle = registered(&mut held, &attempt)?;
-    let recalled = handle.inlet.recall();
+    let recalled = handle.inlet.recall()?;
     publish(
         &app,
         handle,
@@ -455,8 +455,14 @@ fn drive(
         };
 
     emitter.opening(opening);
-    if !emitter.install(conversation.port(), Seat::root(&conversation)) {
-        return finish_conversation(emitter, conversation, Ok(()));
+    match emitter.install(conversation.port(), Seat::root(&conversation)) {
+        Ok(true) => {}
+        Ok(false) => return finish_conversation(emitter, conversation, Ok(())),
+        Err(error) => {
+            emitter.failure(error);
+            conversation.invalidate();
+            return finish_conversation(emitter, conversation, Err(true));
+        }
     }
     if let Err(e) = conversation.settle_baseline() {
         if !emitter.current() {

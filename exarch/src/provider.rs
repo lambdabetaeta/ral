@@ -218,6 +218,7 @@ impl Provider {
         &self,
         request: Request<'_>,
         on_delta: &mut F,
+        before_attempt: &mut dyn FnMut() -> Result<(), String>,
         cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
@@ -228,11 +229,18 @@ impl Provider {
                 rations,
             } => {
                 rations.admit(&self.account, self.model(), meters)?;
-                let outcome = engine.complete(transport, &self.selected, request, on_delta, cancel);
+                let outcome = engine.complete(
+                    transport,
+                    &self.selected,
+                    request,
+                    on_delta,
+                    before_attempt,
+                    cancel,
+                );
                 rations.settle(&self.account.id, self.model(), &outcome);
                 outcome
             }
-            Backend::Scripted(script) => script.complete(self.model(), on_delta),
+            Backend::Scripted(script) => script.complete(self.model(), on_delta, before_attempt),
         }
     }
 }

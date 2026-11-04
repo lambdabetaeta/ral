@@ -35,6 +35,44 @@ fn open_for_drain(session: &Agent) -> crate::bus::Lease {
 }
 
 #[test]
+fn the_outer_request_sync_precedes_provider_entry_and_cancellation_handling() {
+    let mut session = Agent::for_test("system").unwrap();
+    set_provider(&mut session, scripted("never consumed", Script::new()));
+    let recorder = session.recorder();
+    let observed = recorder.clone();
+    recorder.before_sync(move || {
+        let records = observed
+            .reader()
+            .since(None)
+            .unwrap()
+            .2
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            records
+                .iter()
+                .flat_map(crate::record::Commit::records)
+                .any(|record| matches!(
+                    record.value(),
+                    Record::Forensic(Forensic::TurnStarted { .. })
+                ))
+        );
+        Err(std::io::Error::other("request sync failed"))
+    });
+    let (emit, _) = crate::bus::dummy_emitter();
+    let result = session.deliberate(
+        &session.mailbox.life().child(),
+        Some(("request".into(), Voice::Human)),
+        None,
+        &emit,
+    );
+    assert!(
+        matches!(result, Err(Fault::Unavailable(ref failure)) if failure.to_string().contains("request sync failed"))
+    );
+    assert!(!session.handle().is_live());
+}
+
+#[test]
 fn public_deliberate_refuses_a_display_first_recording_failure_before_any_request() {
     let mut session = Agent::for_test("system").unwrap();
     set_provider(&mut session, scripted("must not be called", Script::new()));
@@ -282,7 +320,7 @@ fn stop_after_mid_exchange_draw_records_all_removed_humans_without_another_reque
     let stop_handle = handle.clone();
     let stop_exchange = exchange.clone();
     super::AFTER_STEERING.set(Some(Box::new(move || {
-        assert_eq!(stop_handle.stop(job), Some(vec![]));
+        assert_eq!(stop_handle.stop(job).unwrap(), Some(vec![]));
         stop_exchange.cancel(CancelCause::Cancelled);
         stop_handle.steer("fresh".into()).unwrap();
     })));
@@ -1192,6 +1230,8 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
                 self.transport.sever(self.cause.clone());
             }
         }
+        fn synced(&self, _through: u64) {}
+
         fn transient(&self, _transient: Transient) {}
     }
     static ARM_SEVER: std::sync::Mutex<Option<(crate::record::Emitter, SeverOnCard)>> =

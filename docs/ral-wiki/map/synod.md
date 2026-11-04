@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e7
-generated_at_date: 2026-11-01
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-04
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
 
@@ -72,10 +72,18 @@ One PID 1 assembles and supervises the guest without an exec between stages.
   networking, factory and root engine. `reap::mask` blocks signals before
   threads; children unmask before exec. `engine.rs` constructs one closed
   command/environment and hands each engine its stream unread on fd 3.
+- Each guest engine installs core's per-command jail: fresh credentials,
+  cgroup budgets, `NO_NEW_PRIVS`, descriptor marking and seccomp, plus a private
+  network namespace for ``net: `offline``. The admitted utility and descendants
+  have no per-grant fs/exec projection; VM mounts/topology and Unix modes remain
+  the file perimeter, and host `NetPolicy` remains the destination gate
+  ([[internals/capability-enforcement#Guest jail|guest jail boundary]]).
 - `init/fleet.rs` owns admission and the host-CID-only engine factory;
   binding precedes the root spawn. `MachineFactory` dials this listener to
   create one engine per helper. `init/halt.rs` owns reaping, deepest-first
   engine cgroup cleanup and TERM/grace/KILL shutdown with `cgroup.kill`.
+  Engine cleanup spares the shared `ral-exec/detached` survivor leaf; halt
+  kills the whole `ral-exec` tree, including that leaf.
 - `pump::start` owns tun/net descriptors in two threads, one writer per
   direction, with raw `read_exact`. Any I/O end or caught panic records the
   first fatal notification through `reap::fail` and signals PID 1 with TERM.
@@ -303,6 +311,13 @@ is judged; shared machinery stays with exarch and vm-manager.
   optional house rules come from trusted config, and surface guidance then
   live-page guidance come last for recency. The host supplies only time,
   matching the guest's clock.
+- `data/network.md` describes exact destination admission on port 443 to
+  vetted public addresses, not an information-flow boundary
+  ([[design/egress|egress]]). The opaque tunnel carries data both ways;
+  disclosing folder content requires the user's authority. Provider-side
+  search, if offered, is separate from guest routing and its destination list.
+  Asking the user for unavailable web content is task guidance, not a claim
+  that the network cannot send data.
 - `assistant/conversation.rs::Conversation::begin` opens the grant, selects
   a machine and account, opens the network ledger and run log under
   `RunLock`, starts `Baseline`, boots, then starts `Guest`. Provider requests
@@ -405,8 +420,10 @@ Publication and ownership agree at one generation boundary.
   receives the host feed. `Seat` is what the loop needs of the conversation,
   `Stage` what it publishes to the window, so the loop is tested off-window
   (`window/` builds only where tauri does). Root `JobOpened` publishes `JobBegan`;
-  root `JobSettled` drains a finite pending snapshot, walks, drains another,
-  publishes `JobDone`, then releases. Any `TeardownFailed` or nonempty
+  root `JobSettled` is retained with its commit number until the root's inclusive
+  `Signal::Synced` watermark covers it. Only then does it drain a finite pending
+  snapshot, walk, drain another, publish `JobDone`, then release. Failure drains
+  retain the root watermark; failed sync/death never certifies an unsynced job. Any `TeardownFailed` or nonempty
   `Died { failures }` is terminal; root `EngineSevered` captures/reports loss.
   Certification failure clears the conversation report and generation-owned
   backend review before its event withdraws the displayed account. An ordinary

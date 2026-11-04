@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, Stdout, Write as _};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -217,39 +218,68 @@ impl Drop for EditorTerminal {
     }
 }
 
-fn editor_stderr() -> io::Result<File> {
-    #[cfg(unix)]
-    let path = "/dev/tty";
-    #[cfg(windows)]
-    let path = "CONOUT$";
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true);
-    site!(Silent::EditorCompose, options => open(path))
+#[cfg(unix)]
+fn editor_stderr(saved: Option<&std::os::fd::OwnedFd>) -> io::Result<Stdio> {
+    let saved = saved.ok_or_else(|| io::Error::other("pre-TUI stderr backup is unavailable"))?;
+    rustix::io::fcntl_dupfd_cloexec(saved, 0)
+        .map(Stdio::from)
+        .map_err(io::Error::from)
 }
 
-/// Outer errors mean terminal restoration failed. Inner errors leave the input
-/// unchanged and must be displayed by the caller. Successful text is never submitted.
-pub(super) fn edit_text_in_editor(text: &str) -> io::Result<Result<String, String>> {
-    match prepare_edit(text) {
-        Ok((command, stderr, draft)) => draft.edit(|draft| run_editor(&command, stderr, draft)),
-        Err(diagnostic) => Ok(Err(diagnostic)),
+#[cfg(windows)]
+fn editor_stderr(saved: Option<&std::os::windows::io::OwnedHandle>) -> io::Result<Stdio> {
+    saved.map_or_else(
+        || Ok(Stdio::null()),
+        |handle| handle.try_clone().map(Stdio::from),
+    )
+}
+
+/// Capture before opening the log: even that open could reuse a stale handle.
+#[cfg(windows)]
+fn snapshot_editor_stderr() -> io::Result<Option<std::os::windows::io::OwnedHandle>> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_HANDLE, FALSE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // SAFETY: reading the standard-handle slot does not dereference its value.
+    let original = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    if original.is_null() || original == INVALID_HANDLE_VALUE {
+        return Ok(None);
     }
-}
-
-/// Everything fallible before the terminal is suspended.  The draft comes
-/// last: nothing may fail between its creation and [`DraftFile::edit`].
-fn prepare_edit(text: &str) -> Result<(EditorCommand, File, DraftFile), String> {
-    let command = editor_command()?;
-    let drafts = draft_dir()?;
-    let stderr = editor_stderr()
-        .map_err(|e| format!("could not open terminal for editor diagnostics: {e}"))?;
-    let draft = DraftFile::create(drafts, text)?;
-    Ok((command, stderr, draft))
+    let mut duplicate = std::ptr::null_mut();
+    // SAFETY: DuplicateHandle validates even a stale original; only success
+    // creates an owned handle. Neither handle is made inheritable here.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            original,
+            GetCurrentProcess(),
+            &raw mut duplicate,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_INVALID_HANDLE.cast_signed()) {
+            return Ok(None);
+        }
+        return Err(io::Error::new(
+            error.kind(),
+            format!("could not save pre-TUI stderr for the external editor: {error}"),
+        ));
+    }
+    // SAFETY: DuplicateHandle succeeded; this new noninheritable handle is ours.
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(duplicate) }))
 }
 
 fn run_editor(
     command: &EditorCommand,
-    stderr: File,
+    stderr: Stdio,
     draft: &DraftFile,
 ) -> io::Result<Result<String, String>> {
     let terminal = EditorTerminal::suspend();
@@ -257,9 +287,7 @@ fn run_editor(
         Silent::EditorCompose,
         std::process::Command::new(command.program())
     );
-    cmd.args(command.args())
-        .arg(draft.path())
-        .stderr(std::process::Stdio::from(stderr));
+    cmd.args(command.args()).arg(draft.path()).stderr(stderr);
     let status = ral_core::process::status(&mut cmd);
     terminal.resume()?;
     Ok(editor_result(command.program(), status, draft))
@@ -292,15 +320,19 @@ pub struct TerminalGuard {
     stderr_backup: Option<std::os::fd::OwnedFd>,
     #[cfg(windows)]
     stderr_backup: Option<WindowsStderrBackup>,
+    #[cfg(windows)]
+    editor_stderr_snapshot: Option<std::os::windows::io::OwnedHandle>,
 }
 
 impl TerminalGuard {
     /// Redirect fd 2 to `stderr.log` in `run`, then enter the terminal modes.
     ///
     /// # Errors
-    /// If the log cannot be opened or the terminal cannot enter its modes;
-    /// either way nothing is left half-done.
+    /// If saving editor stderr, opening the log, or entering terminal modes fails;
+    /// nothing is left half-done.
     pub fn enter(run: &OwnDir) -> io::Result<Self> {
+        #[cfg(windows)]
+        let editor_stderr_snapshot = snapshot_editor_stderr()?;
         let stderr_log = run.append(STDERR_LOG)?;
         install_panic_restore_hook();
         TUI_ACTIVE.store(true, Ordering::Release);
@@ -325,7 +357,33 @@ impl TerminalGuard {
         Ok(Self {
             term,
             stderr_backup,
+            #[cfg(windows)]
+            editor_stderr_snapshot,
         })
+    }
+
+    /// Outer errors mean terminal restoration failed. Inner errors leave the input
+    /// unchanged and must be displayed by the caller. Successful text is never submitted.
+    pub(super) fn edit_text_in_editor(&self, text: &str) -> io::Result<Result<String, String>> {
+        match self.prepare_edit(text) {
+            Ok((command, stderr, draft)) => draft.edit(|draft| run_editor(&command, stderr, draft)),
+            Err(diagnostic) => Ok(Err(diagnostic)),
+        }
+    }
+
+    /// Prepare stdio before suspending modes, which never restores parent stderr.
+    /// The draft comes last: nothing may fail before [`DraftFile::edit`] owns it.
+    fn prepare_edit(&self, text: &str) -> Result<(EditorCommand, Stdio, DraftFile), String> {
+        let command = editor_command()?;
+        let drafts = draft_dir()?;
+        #[cfg(unix)]
+        let saved = self.stderr_backup.as_ref();
+        #[cfg(windows)]
+        let saved = self.editor_stderr_snapshot.as_ref();
+        let stderr = editor_stderr(saved)
+            .map_err(|e| format!("could not prepare saved stderr for the external editor: {e}"))?;
+        let draft = DraftFile::create(drafts, text)?;
+        Ok((command, stderr, draft))
     }
 
     pub fn term(&mut self) -> &mut Term {
@@ -546,6 +604,8 @@ mod tests {
     use super::{DraftFile, editor_result};
     use ral_core::external_editor::MAX_DRAFT_BYTES;
     use ral_core::own::OwnDir;
+
+    mod stderr;
 
     #[test]
     fn a_draft_is_lossless_secret_and_removed_after_its_edit() {

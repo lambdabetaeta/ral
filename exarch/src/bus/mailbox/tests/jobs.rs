@@ -33,7 +33,7 @@ fn begin_records_one_job_before_its_exchange_records_and_settles_the_same_id() {
         Record::Forensic(Forensic::SystemNote { text }),
         Record::Control(Control::JobSettled { job, stopped: false }),
     ] if text == "first exchange" && *job == id));
-    let (_, commits) = record.reader().since(None).unwrap();
+    let (_, _, commits) = record.reader().since(None).unwrap();
     let opened = commits
         .map(Result::unwrap)
         .find(|commit| {
@@ -57,10 +57,10 @@ fn stop_with_a_stale_id_leaves_the_job_exchange_and_queued_text_unchanged() {
     let id = address.status().unwrap().job.unwrap();
     assert_ne!(id, stale);
     address.steer("keep".into()).unwrap();
-    assert_eq!(address.stop(stale), None);
+    assert_eq!(address.stop(stale).unwrap(), None);
     assert!(!current.is_cancelled());
     assert_eq!(address.queued(), ["keep"]);
-    assert_eq!(address.stop(id), Some(vec!["keep".into()]));
+    assert_eq!(address.stop(id).unwrap(), Some(vec!["keep".into()]));
     settled(&mailbox, true);
 }
 
@@ -73,7 +73,7 @@ fn stop_between_a_mid_job_pop_and_exchange_execution_cancels_the_minted_exchange
     let (input, exchange) = take(&mailbox);
     assert!(matches!(input, Input::Human(text) if text == "next"));
     let id = address.status().unwrap().job.unwrap();
-    assert_eq!(address.stop(id), Some(Vec::new()));
+    assert_eq!(address.stop(id).unwrap(), Some(Vec::new()));
     assert_eq!(exchange.cause(), Some(CancelCause::Interrupted));
     assert!(!first.is_cancelled(), "Stop names the latest exchange only");
     assert!(mailbox.begin());
@@ -112,7 +112,7 @@ fn stop_recalls_only_human_text_and_preserves_helpers_and_the_job() {
     address.post(task("opening task")).unwrap();
     address.post(wakeup(1, "tick")).unwrap();
     assert_eq!(
-        address.stop(id),
+        address.stop(id).unwrap(),
         Some(vec!["first".into(), "second\nthird".into()])
     );
     assert_eq!(exchange.cause(), Some(CancelCause::Interrupted));
@@ -144,7 +144,7 @@ fn queued_input_after_stop_runs_a_live_exchange_but_settlement_stays_stopped() {
     let address = mailbox.address();
     let job = address.status().unwrap().job;
     address.post(message("follow up", true)).unwrap();
-    assert_eq!(address.stop(job.unwrap()), Some(Vec::new()));
+    assert_eq!(address.stop(job.unwrap()).unwrap(), Some(Vec::new()));
     let (input, exchange) = take(&mailbox);
     assert!(matches!(input, Input::Message(message) if message.from == AgentId::new(7)));
     assert!(first.is_cancelled());
@@ -293,7 +293,7 @@ fn stop_racing_settlement_has_the_same_verdict_as_the_settled_record() {
         let (stop, next) = std::thread::scope(|scope| {
             let stop = scope.spawn(|| {
                 barrier.wait();
-                address.stop(id)
+                address.stop(id).unwrap()
             });
             barrier.wait();
             let next = mailbox.next(QUIET);
@@ -301,7 +301,7 @@ fn stop_racing_settlement_has_the_same_verdict_as_the_settled_record() {
         });
         assert!(matches!(next, Next::Settled { stopped, .. } if stopped == stop.is_some()));
         assert!(address.status().unwrap().job.is_none());
-        assert_eq!(address.stop(id), None);
+        assert_eq!(address.stop(id).unwrap(), None);
     }
 }
 

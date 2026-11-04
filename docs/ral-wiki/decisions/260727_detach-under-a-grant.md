@@ -1,5 +1,6 @@
 ---
 status: active
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 ---
 
 # A survivor is confined by the frame that bore it
@@ -96,6 +97,11 @@ is unchanged — one monotone session-wide counter. A per-frame allowance was
 considered and rejected: births inside a frame are unobservable after it exits,
 so a frame-scoped counter would have no honest release point and would be a
 second monotone counter rather than a seat.
+
+*Superseded for the budget:* there is no call counter. In a guest, every
+survivor shares one `detached` cgroup and one command's resource allowance
+([[map/core/io-process|io-process]], `docs/SPEC.md` §11.5). The ordering claim
+stands: a frame's refusal precedes any birth.
 
 ## What is still not tested
 

@@ -69,6 +69,15 @@ Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tag
   calls and continues the loop; only a `MaxTokens` turn with *no* tool call
   raises `Truncated` to nudge.
 
+**Structured provider reasoning is canonical before admission.** The completion
+boundary preserves each captured signature/reasoning pair once, in provider
+order and with exact signature bytes. Aggregate reasoning is a fallback only
+when structured content has no reasoning part; equal text is not a reason to
+merge signed blocks. Unsigned reasoning still enters once through that fallback.
+The record, resume and `Context::rendered` preserve this message, not a repaired
+projection of its display. Historical malformed signed messages are not inferred
+away or rewritten on resume; withdrawal removes them from future requests.
+
 Three adjacent obligations keep the invariant whole:
 
 - **Eviction runs where it can (X1).** It needs only `Context::can_evict`

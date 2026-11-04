@@ -96,6 +96,13 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
             headless.accept(signal);
         }
         let report = headless.status.clone();
+        let through = report.as_ref().unwrap().0;
+        for signal in receive_until(
+            &host,
+            |signal| matches!(signal, Signal::Synced { agent, through: synced } if *agent == root_id && *synced >= through),
+        ) {
+            headless.accept(signal);
+        }
         assert!(headless.finished());
         recorder.fail_after(0);
         let failure = recorder
@@ -207,7 +214,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
         failures[0].contains("1 ral worker thread(s)"),
         "{failures:?}"
     );
-    let (_, commits) = child_recorder.reader().since(None).unwrap();
+    let (_, _, commits) = child_recorder.reader().since(None).unwrap();
     let recorded: Vec<_> = commits
         .map(Result::unwrap)
         .flat_map(Commit::into_records)

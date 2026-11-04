@@ -244,6 +244,74 @@ fn prime_pricing(runtime: &tokio::runtime::Runtime) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod loopback {
+    use super::*;
+
+    impl Pool {
+        pub(crate) fn loopback_for_test(
+            endpoint: String,
+            billing: Billing,
+        ) -> crate::provider::Provider {
+            use crate::provider::credential::Roster;
+            use crate::provider::{Backend, Provider, Rations, Selected};
+            use std::time::Duration;
+
+            let mut account = Account::built_in("anthropic");
+            account.service.billing = billing;
+            account.service.endpoint = Some(endpoint.clone());
+            let endpoint = Endpoint::from_owned(endpoint);
+            let resolver = ServiceTargetResolver::from_resolver_fn(move |target: ServiceTarget| {
+                Ok(ServiceTarget {
+                    endpoint: endpoint.clone(),
+                    auth: AuthData::from_single("loopback-fixture"),
+                    model: ModelIden::new(AdapterKind::Anthropic, target.model.model_name),
+                })
+            });
+            let client = Client::builder()
+                .with_reqwest(
+                    reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(10))
+                        .build()
+                        .unwrap(),
+                )
+                .with_service_target_resolver(resolver)
+                .build()
+                .unwrap();
+            let engine = Arc::new(Self {
+                runtime: make_runtime(),
+                cache_key: fresh_cache_key(),
+                transports: Mutex::default(),
+            });
+            let transport = Arc::new(Transport {
+                client,
+                adapter: AdapterKind::Anthropic,
+                credential: None,
+                billing,
+                live_search: false,
+            });
+            let selected = Selected {
+                label: account.service.name.as_str().into(),
+                service: account.service.name.as_str().into(),
+                account: account.id.as_str().into(),
+                ..Selected::for_test("claude-stream-fixture")
+            };
+            Provider::build(
+                Backend::Live {
+                    engine,
+                    transport,
+                    meters: super::super::allowance::LiveMeters::new(Roster::default()),
+                    rations: Arc::new(Rations::default()),
+                },
+                &account,
+                selected,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

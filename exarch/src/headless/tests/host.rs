@@ -125,7 +125,7 @@ fn headless_stopped_runs_through_the_host_feed_in_both_formats() {
                 .expect("the cell is available")
                 .job
                 .expect("the blocking exchange stays open");
-            assert_eq!(handle.stop(job), Some(Vec::new()));
+            assert_eq!(handle.stop(job).unwrap(), Some(Vec::new()));
         });
         assert_eq!(
             run_frontend(&host, format),
@@ -324,7 +324,7 @@ fn an_ended_root_refuses_the_headless_prompt() {
     root_handle.end();
     assert_eq!(
         run_frontend(&host, OutputFormat::Text),
-        Err("the agent ended before it could take the prompt".into())
+        Err(crate::bus::Refused::Ended.to_string())
     );
     assert_eq!(host.end(), [] as [String; 0]);
 }
@@ -411,7 +411,7 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
         .expect("the cell is available")
         .job
         .expect("pending helper keeps the job open");
-    assert_eq!(root.stop(job), Some(Vec::new()));
+    assert_eq!(root.stop(job).unwrap(), Some(Vec::new()));
     assert!(helper.is_live(), "Stop cancels no helper life");
     helper.steer("finish your task".into()).unwrap();
     let tail = wait_settled(&host);
@@ -445,7 +445,7 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
         Some(ChildStatus::Replied(FOValue::Int { value: 42 }))
     );
     assert_eq!(
-        root.stop(job),
+        root.stop(job).unwrap(),
         None,
         "a settled job cannot be stopped again"
     );
@@ -523,7 +523,7 @@ fn a_stale_stop_leaves_the_next_jobs_queue_untouched() {
         })
         .expect("the first job settled");
     handle.steer("next".into()).unwrap();
-    assert_eq!(handle.stop(job), None);
+    assert_eq!(handle.stop(job).unwrap(), None);
     assert_eq!(handle.queued(), ["next"]);
     assert!(handle.release());
     let next = wait_settled(&host);

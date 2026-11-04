@@ -40,8 +40,8 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
     Ok(runtime)
 }
 
-/// Exarch's root-only recipe: the agent library, hints, the detach budget,
-/// and the root's env seeded as bindings before the ledgers arm.
+/// Exarch's root-only recipe: the agent library, hints, and the root's env
+/// seeded as bindings before the ledgers arm.
 ///
 /// The scratch is the host's, named by the root, and the shell carries its
 /// spelling, so that a `scratch` place in any grant frozen in this session
@@ -82,8 +82,6 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
     shell.set_exit_hints(ral_core::shell::runtime::ExitHints::from_text(
         include_str!("../../data/exit-hints.txt"),
     ));
-    #[cfg(unix)]
-    shell.arm_detach(shell_eval::DETACH_BIRTH_BUDGET);
     for (name, value) in &root.env {
         seed_var(shell, name, value);
     }

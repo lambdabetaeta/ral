@@ -187,7 +187,9 @@ impl Script {
         &self,
         _model: &str,
         on_delta: &mut F,
+        before_attempt: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<StepOut, ProviderError> {
+        before_attempt().map_err(ProviderError::Unavailable)?;
         let reply = self
             .completes
             .lock_ignore_poison()
@@ -207,5 +209,42 @@ impl Script {
 impl Default for Script {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_uncertified_attempt_never_consumes_its_scripted_reply() {
+        let script = Script::new().then(Reply::text("retained"));
+        let refused = script.complete(
+            "m",
+            &mut |_| panic!("no deltas before certification"),
+            &mut || Err("sync failed".into()),
+        );
+        assert!(matches!(refused, Err(ProviderError::Unavailable(_))));
+        let recorder = crate::record::Emitter::none();
+        let commit = recorder
+            .emit(crate::record::Forensic::Cancelled)
+            .unwrap()
+            .locus()
+            .seq()
+            .commit();
+        let mut heard = String::new();
+        script
+            .complete(
+                "m",
+                &mut |delta| {
+                    recorder.assert_synced_through(commit);
+                    if let Delta::Say(text) = delta {
+                        heard.push_str(text);
+                    }
+                },
+                &mut || recorder.sync().map_err(|failure| failure.to_string()),
+            )
+            .unwrap();
+        assert_eq!(heard, "retained");
     }
 }

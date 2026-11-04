@@ -23,7 +23,7 @@ use super::{
     paste_burst::{Input, PasteBurst},
     prompt::{History, PromptState},
     render::{draw, emit_tab_title},
-    terminal::{TerminalGuard, edit_text_in_editor},
+    terminal::TerminalGuard,
 };
 
 /// Terminal and app, kept as two fields so the loop can borrow `guard.term()`
@@ -72,10 +72,9 @@ pub(crate) fn run(
         ),
     };
     if let Some(seed) = seed
-        && tui.app.tabs.port().submit(id, seed).is_err()
+        && let Err(error) = tui.app.tabs.port().submit(id, seed)
     {
-        tui.app
-            .push_error(id, "the agent ended before it could take the prompt");
+        tui.app.push_error(id, &error.to_string());
     }
     if let Some(e) = unshared {
         tui.app.push_error(
@@ -117,6 +116,7 @@ impl Leaving {
 /// Route one `Signal` to its `App` entry point.
 fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
     match sig {
+        Signal::Synced { agent, through } => tui.app.synced(agent, through),
         Signal::Commit(id, commit) => tui.app.commit(id, &commit),
         Signal::Born(id, born) => tui.app.born(id, &born),
         Signal::Transient(id, t) => tui.app.transient(id, t, rx),
@@ -384,7 +384,7 @@ fn deliver(tui: &mut Tui, inputs: Vec<Input>, ctx: &CommandCtx<'_>) -> Result<bo
 fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
     tui.app.suspend_input();
     let draft = tui.app.prompt_state.prompt_text();
-    match edit_text_in_editor(&draft)? {
+    match tui.guard.edit_text_in_editor(&draft)? {
         Ok(edited) => tui.app.prompt_state.adopt_draft(&edited),
         Err(message) => {
             let focused = tui.app.tabs.focused();

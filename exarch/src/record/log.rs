@@ -260,13 +260,18 @@ enum Failure {
         /// `None` for a fileless test log.
         record: Option<PathBuf>,
         cause: io::Error,
+        syncing: bool,
     },
     CellPoisoned(String),
 }
 
 impl Unavailable {
     fn new(record: Option<PathBuf>, cause: io::Error) -> Self {
-        Self(Arc::new(Failure::Recording { record, cause }))
+        Self(Arc::new(Failure::Recording {
+            record,
+            cause,
+            syncing: false,
+        }))
     }
 
     pub fn kind(&self) -> io::ErrorKind {
@@ -279,13 +284,24 @@ impl Unavailable {
 
 impl fmt::Display for Unavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (record, cause) = match &*self.0 {
-            Failure::Recording { record, cause } => (record, cause),
+        let (record, cause, syncing) = match &*self.0 {
+            Failure::Recording {
+                record,
+                cause,
+                syncing,
+            } => (record, cause, *syncing),
             Failure::CellPoisoned(why) => return f.write_str(why),
         };
-        match record {
-            Some(path) => write!(f, "recording to {} failed", ral_core::path::shown(path))?,
-            None => f.write_str("recording failed")?,
+        if syncing {
+            match record {
+                Some(path) => write!(f, "syncing {} to disk failed", ral_core::path::shown(path))?,
+                None => f.write_str("syncing to disk failed")?,
+            }
+        } else {
+            match record {
+                Some(path) => write!(f, "recording to {} failed", ral_core::path::shown(path))?,
+                None => f.write_str("recording failed")?,
+            }
         }
         write!(
             f,
@@ -311,6 +327,7 @@ impl From<Unavailable> for io::Error {
 /// bytes. A poisoned log must stay poisoned.
 pub(crate) struct Log {
     inner: Mutex<Inner>,
+    syncing: Mutex<Sync>,
     /// The writer's first failure: it ends the life bound to it.
     failure: Fatal<Unavailable>,
     /// The record file, as messages name it.
@@ -320,7 +337,7 @@ pub(crate) struct Log {
 /// The session directory a log is kept in, and the writer on its record file.
 struct Writer {
     dir: OwnDir,
-    file: File,
+    file: Arc<File>,
     #[cfg(test)]
     fail_after: Option<usize>,
 }
@@ -331,11 +348,18 @@ impl Writer {
         self.dir.path().join(RECORD)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::needless_pass_by_ref_mut,
+            reason = "test fault injection counts remaining bytes"
+        )
+    )]
     fn append(&mut self, line: &[u8]) -> io::Result<()> {
         #[cfg(test)]
         if let Some(remaining) = self.fail_after.as_mut() {
             let written = line.len().min(*remaining);
-            self.file.write_all(&line[..written])?;
+            (&*self.file).write_all(&line[..written])?;
             *remaining -= written;
             return if written < line.len() {
                 Err(io::Error::new(
@@ -346,8 +370,14 @@ impl Writer {
                 Ok(())
             };
         }
-        self.file.write_all(line)
+        (&*self.file).write_all(line)
     }
+}
+
+#[derive(Default)]
+struct Sync {
+    #[cfg(test)]
+    before: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
 }
 
 struct Inner {
@@ -360,10 +390,9 @@ struct Inner {
     commits: u64,
     /// The committed prefix's end, excluding any failed write's tail.
     pos: u64,
+    /// The last commit covered by a successful sync on this open writer.
+    synced: u64,
 }
-
-/// `complete_len` scans backwards a window at a time.
-const SCAN_WINDOW: u64 = 8 * 1024;
 
 impl Log {
     /// Start a fresh record log in `dir`, removing any prior file.
@@ -372,7 +401,9 @@ impl Log {
     /// Returns `Err` if the file cannot be removed or created.
     pub(crate) fn create(dir: &OwnDir) -> io::Result<Self> {
         dir.remove(RECORD)?;
-        Self::writing(dir, 0, 0)
+        let log = Self::writing(dir, 0, 0)?;
+        dir.sync()?;
+        Ok(log)
     }
 
     /// Reopen `dir`'s record for append — resume — seeding the commit count
@@ -404,7 +435,7 @@ impl Log {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "cannot append to {}: bytes {complete}..{len} are a torn last line (an unterminated write, or a line that is not JSON or fails its sum); a commit appended after it would leave it corrupt mid-log, so it must be quarantined first, as resuming the session does",
+                    "cannot append to {}: bytes {complete}..{len} are a torn tail (from the first unterminated, non-JSON or sum-failing line); a commit appended after it would leave it damaged mid-log, so it must be quarantined first, as resuming the session does",
                     ral_core::path::shown(name)
                 ),
             ));
@@ -423,7 +454,7 @@ impl Log {
     fn writing(dir: &OwnDir, commits: u64, pos: u64) -> io::Result<Self> {
         let writer = Writer {
             dir: dir.clone(),
-            file: dir.append(RECORD)?,
+            file: Arc::new(dir.append(RECORD)?),
             #[cfg(test)]
             fail_after: None,
         };
@@ -444,7 +475,9 @@ impl Log {
                 sink: None,
                 commits,
                 pos,
+                synced: 0,
             }),
+            syncing: Mutex::default(),
             failure: Fatal::default(),
         }
     }
@@ -455,11 +488,12 @@ impl Log {
     /// ordinary way a headless session's next exchange comes back on air.
     pub(super) fn attach(&self, sink: Box<dyn Publish>) {
         if let Ok(mut inner) = self.inner.lock_strict() {
-            inner.sink = Some(sink);
+            let through = inner.synced;
+            inner.sink.insert(sink).synced(through);
         }
     }
 
-    /// Where `after` stands — at the head when none — and the commits past
+    /// Where `after` stands, the synced commit watermark, and the commits past
     /// it.  The lock fixes only the log's extent and a handle on its file:
     /// whatever lands later reaches the channel, so a consumer that reads this
     /// and then drains misses nothing.
@@ -470,7 +504,11 @@ impl Log {
     pub(super) fn since(
         &self,
         after: Option<Cursor>,
-    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Commit>> + use<>)> {
+    ) -> io::Result<(
+        Cursor,
+        u64,
+        impl Iterator<Item = io::Result<Commit>> + use<>,
+    )> {
         let inner = self.inner.lock_strict()?;
         let from = after.unwrap_or_else(Cursor::start);
         let source = inner
@@ -479,8 +517,36 @@ impl Log {
             .map(|writer| Ok::<_, io::Error>((writer.name(), writer.dir.open(RECORD)?)))
             .transpose()?;
         let until = inner.pos;
+        let synced = inner.synced;
         drop(inner);
-        Ok((from, Self::commits(source, from.commit, from.end, until)?))
+        Ok((
+            from,
+            synced,
+            Self::commits(source, from.commit, from.end, until)?,
+        ))
+    }
+
+    pub(super) fn snapshot(&self) -> io::Result<Snapshot> {
+        self.check_available()?;
+        let inner = self.inner.lock_strict()?;
+        self.check_available()?;
+        if inner.synced < inner.commits {
+            return Err(io::Error::other(
+                "the transcript is not synced yet; wait for the agent's next boundary, then retry /export",
+            ));
+        }
+        let writer = inner
+            .writer
+            .as_ref()
+            .ok_or_else(|| io::Error::other("no recorded transcript is available"))?;
+        let snapshot = Snapshot {
+            file: writer.dir.open(RECORD)?,
+            name: writer.name(),
+            until: inner.pos,
+        };
+        drop(inner);
+        snapshot.validate(None)?;
+        Ok(snapshot)
     }
 
     /// Latch `cause` unless a failure stands, ending the bound life.
@@ -528,8 +594,77 @@ impl Log {
         );
     }
 
+    /// Sync a noted prefix without holding the append lock during disk IO.
+    pub(super) fn sync(&self) -> Result<(), Unavailable> {
+        self.check_available()?;
+        let (through, file) = {
+            let inner = self
+                .inner
+                .lock_strict()
+                .map_err(|torn| self.fail(torn.into()))?;
+            if inner.commits == inner.synced {
+                return self.check_available();
+            }
+            (
+                inner.commits,
+                inner.writer.as_ref().map(|writer| Arc::clone(&writer.file)),
+            )
+        };
+        #[cfg_attr(not(test), expect(unused_mut, reason = "test sync hook is consumed"))]
+        let mut syncing = self
+            .syncing
+            .lock_strict()
+            .map_err(|torn| self.sync_failed(torn.into()))?;
+        self.check_available()?;
+        {
+            let inner = self
+                .inner
+                .lock_strict()
+                .map_err(|torn| self.fail(torn.into()))?;
+            if inner.synced >= through {
+                return self.check_available();
+            }
+        }
+        #[cfg(test)]
+        if let Some(before) = syncing.before.take() {
+            before().map_err(|error| self.sync_failed(error))?;
+        }
+        if let Some(file) = file {
+            file.sync_data().map_err(|error| self.sync_failed(error))?;
+        }
+        let mut inner = self
+            .inner
+            .lock_strict()
+            .map_err(|torn| self.fail(torn.into()))?;
+        self.check_available()?;
+        inner.synced = inner.synced.max(through);
+        if let Some(sink) = &inner.sink {
+            sink.synced(inner.synced);
+        }
+        drop(inner);
+        drop(syncing);
+        Ok(())
+    }
+
+    fn sync_failed(&self, cause: io::Error) -> Unavailable {
+        self.failure.latch(Unavailable(Arc::new(Failure::Recording {
+            record: self.record.clone(),
+            cause,
+            syncing: true,
+        })))
+    }
+
+    #[cfg(test)]
+    pub(super) fn before_sync(&self, before: impl FnOnce() -> io::Result<()> + Send + 'static) {
+        self.syncing.lock_strict().expect("sync lock intact").before = Some(Box::new(before));
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_synced_through(&self, commit: u64) {
+        assert!(self.inner.lock_strict().expect("append lock intact").synced >= commit);
+    }
+
     /// Append one sealed line, then publish its records under the lock.
-    /// Never `fsync`: process-crash durable, not power-loss durable.
     pub(super) fn append(&self, records: NonEmpty<Record>) -> Result<Commit, Unavailable> {
         let mut inner = self
             .inner
@@ -569,56 +704,33 @@ impl Log {
         }
     }
 
-    /// The length of `file` through its last complete line, unless that line is
-    /// damaged. What follows is torn and never read: an unterminated write, or a
-    /// terminated last line that is not JSON or fails its sum.
-    ///
-    /// # Errors
-    /// Returns `Err` if the file cannot be read.
+    /// The prefix before the first damaged line; every later byte is torn.
     pub(super) fn complete_len(file: &mut File) -> io::Result<u64> {
         let len = file.metadata()?.len();
         Self::complete_within(file, len)
     }
 
-    /// [`Self::complete_len`] of `file`, whose length is `len`.
     fn complete_within(file: &mut File, len: u64) -> io::Result<u64> {
-        let Some(last) = Self::newline_before(file, len)? else {
-            return Ok(0);
-        };
-        // An unterminated write is the last line, so the line before it is interior.
-        if last + 1 < len {
-            return Ok(last + 1);
-        }
-        let start = Self::newline_before(file, last)?.map_or(0, |newline| newline + 1);
-        let _ = file.seek(SeekFrom::Start(start))?;
+        let _ = file.seek(SeekFrom::Start(0))?;
+        let mut reader = BufReader::new(file.take(len));
+        let mut pos = 0;
         let mut line = Vec::new();
-        let _ = Read::by_ref(file)
-            .take(last - start)
-            .read_to_end(&mut line)?;
-        Ok(match unseal(&line) {
-            Err(fault) if fault.damaged() => start,
-            Ok(_) | Err(_) => last + 1,
-        })
-    }
-
-    /// The last newline before `end`, scanning backwards a window at a time.
-    fn newline_before(file: &mut File, mut end: u64) -> io::Result<Option<u64>> {
-        while end > 0 {
-            let start = end.saturating_sub(SCAN_WINDOW);
-            let mut chunk = vec![0; usize::try_from(end - start).unwrap_or(usize::MAX)];
-            let _ = file.seek(SeekFrom::Start(start))?;
-            file.read_exact(&mut chunk)?;
-            if let Some(last) = chunk.iter().rposition(|byte| *byte == b'\n') {
-                return Ok(Some(start + last as u64));
+        loop {
+            line.clear();
+            let count = reader.read_until(b'\n', &mut line)?;
+            if count == 0 || line.last() != Some(&b'\n') {
+                return Ok(pos);
             }
-            end = start;
+            if matches!(unseal(&line[..line.len() - 1]), Err(fault) if fault.damaged()) {
+                return Ok(pos);
+            }
+            pos += count as u64;
         }
-        Ok(None)
     }
 
     /// Stream every record of `file`, named `name` in messages, back, in file
     /// order, each located by the `Seq` and byte range it occupies — what
-    /// [`super::replay()`] folds.  A torn last line ([`Self::complete_len`]) is
+    /// [`super::replay()`] folds.  A torn tail ([`Self::complete_len`]) is
     /// never parsed.
     ///
     /// One line is in memory at a time, so replaying a session costs the size
@@ -672,6 +784,90 @@ impl Log {
                     .map_err(|fault| fault.at(number, path)),
             )
         }))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_INACTIVE_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A validated, fixed prefix; rendering never remeasures EOF.
+pub(crate) struct Snapshot {
+    file: File,
+    name: PathBuf,
+    until: u64,
+}
+
+impl Snapshot {
+    pub(crate) fn inactive(mut file: File, name: &Path, id: super::AgentId) -> io::Result<Self> {
+        let until = Log::complete_len(&mut file)?;
+        let snapshot = Self {
+            file,
+            name: name.to_path_buf(),
+            until,
+        };
+        snapshot.validate(Some(id))?;
+        snapshot.sync_source().map_err(|error| {
+            io::Error::new(error.kind(), format!(
+                "cannot establish durability for {}: syncing the source failed: {error}; inactive export requires read/write permission and filesystem sync support",
+                ral_core::path::shown(name),
+            ))
+        })?;
+        Ok(snapshot)
+    }
+
+    fn sync_source(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if FAIL_INACTIVE_SYNC.with(|fail| fail.replace(false)) {
+            return Err(io::Error::other("injected inactive source sync failure"));
+        }
+        self.file.sync_data()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_sync() {
+        FAIL_INACTIVE_SYNC.with(|fail| fail.set(true));
+    }
+
+    pub(crate) fn records(
+        &self,
+    ) -> io::Result<impl Iterator<Item = io::Result<Recorded<Record>>> + use<>> {
+        Ok(flatten(Log::commits(
+            Some((self.name.clone(), self.file.try_clone()?)),
+            0,
+            0,
+            self.until,
+        )?))
+    }
+
+    fn validate(&self, id: Option<super::AgentId>) -> io::Result<()> {
+        use super::{Blocks, Control, Replay};
+        let mut records = self.records()?;
+        let head = records.next().transpose()?.ok_or_else(|| {
+            io::Error::other(
+                "no complete session head was found; the record is empty, damaged or truncated",
+            )
+        })?;
+        let Record::Control(Control::SessionStarted(started)) = head.value() else {
+            return Err(io::Error::other(
+                "the record does not start with a session head",
+            ));
+        };
+        if id.is_some_and(|id| id != started.session_id) {
+            return Err(io::Error::other(
+                "the session head's session_id does not match its held sessions/<id> directory",
+            ));
+        }
+        let mut replay = Replay::open(&head).map_err(io::Error::other)?;
+        let mut blocks = Blocks::default();
+        let _delta = blocks.try_step(&head).map_err(io::Error::other)?;
+        for record in records {
+            let record = record?;
+            replay.step(&record).map_err(io::Error::other)?;
+            let _delta = blocks.try_step(&record).map_err(io::Error::other)?;
+        }
+        Ok(())
     }
 }
 

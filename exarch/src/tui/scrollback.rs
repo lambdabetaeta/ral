@@ -67,6 +67,7 @@ pub(super) struct Scrollback {
     log: Reader,
     /// How far the mirror has read its log; `None` until it first does.
     cursor: Option<Cursor>,
+    synced: u64,
     /// The chrome a clear, and the first read, open under: a root's session card.
     opening: Option<Card>,
     /// Top visible absolute row, per-scrollback so each tab keeps its place.
@@ -119,6 +120,7 @@ impl Scrollback {
             thinking_line: String::new(),
             log,
             cursor: None,
+            synced: 0,
             opening,
             offset: 0,
             head: 0,
@@ -143,28 +145,52 @@ impl Scrollback {
     /// [`Self::catch_up`], stopping at the first commit `keep` refuses.
     fn read_log(&mut self, keep: impl Fn(&Commit) -> bool) -> bool {
         let mut cleared = false;
-        let read = self.log.since(self.cursor).and_then(|(from, commits)| {
-            if self.cursor.is_none() {
-                self.cursor = Some(from);
-                if let Some(card) = self.opening.clone() {
-                    self.mirror.push_chrome(Chrome::Opening(card));
+        let read = self
+            .log
+            .since(self.cursor)
+            .and_then(|(from, synced, commits)| {
+                self.synced(synced);
+                if self.cursor.is_none() {
+                    self.cursor = Some(from);
+                    if let Some(card) = self.opening.clone() {
+                        self.mirror.push_chrome(Chrome::Opening(card));
+                    }
                 }
-            }
-            for commit in commits {
-                let commit = commit?;
-                if !keep(&commit) {
-                    break;
+                for commit in commits {
+                    let commit = commit?;
+                    if !keep(&commit) {
+                        break;
+                    }
+                    cleared |= self.try_step(&commit).map_err(std::io::Error::other)?;
                 }
-                cleared |= self.try_step(&commit).map_err(std::io::Error::other)?;
-            }
-            Ok(())
-        });
+                Ok(())
+            });
         if let Err(e) = read {
             self.push_chrome(Chrome::Error(format!(
                 "record.jsonl did not read back: {e}; this view may be missing some of it"
             )));
         }
         cleared
+    }
+
+    pub(super) fn synced(&mut self, through: u64) {
+        self.synced = self.synced.max(through);
+    }
+
+    pub(super) fn covers(&self, commit: u64) -> bool {
+        self.synced >= commit
+    }
+
+    pub(super) fn copy_ready(&self) -> bool {
+        self.answer.is_empty()
+            && self.thinking_line.is_empty()
+            && self
+                .cursor
+                .is_some_and(|cursor| cursor.next().saturating_sub(1) <= self.synced)
+    }
+
+    pub(super) fn reader(&self) -> &Reader {
+        &self.log
     }
 
     pub(super) fn agent(&self) -> AgentSlot {

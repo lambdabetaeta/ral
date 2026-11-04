@@ -251,7 +251,6 @@ mod tests {
             large_binding_bytes: 1 << 20,
         });
         shell.arm_worker_retention(5);
-        shell.arm_detach(4);
         shell
     }
 
@@ -265,8 +264,8 @@ mod tests {
 
     /// A booted parent with a binding of every shape the scrub and the codec
     /// must treat: kept, handle-carrying, block, partial application, a
-    /// frame with a catch-all, a per-name and an alias entry, a hook, an extra source, a fixed unit, and a spent
-    /// birth.
+    /// frame with a catch-all, a per-name and an alias entry, a hook, an extra
+    /// source, and a fixed unit.
     fn parent() -> Shell {
         let mut parent = booted();
         parent.session.stack_limit = 12_345;
@@ -301,12 +300,6 @@ mod tests {
             ),
             "echo extra\n",
         );
-        parent
-            .detach_policy()
-            .expect("armed")
-            .admit()
-            .expect("a birth is left")
-            .commit();
         parent
     }
 
@@ -480,9 +473,6 @@ mod tests {
                 "{arm}: everything inherited is baseline"
             );
             assert_eq!(child.local.workers.retention(), Some(5), "{arm}");
-            let detach = child.detach_policy().expect("armed");
-            assert_eq!(detach.budget, 4, "{arm}");
-            assert_eq!(detach.born(), 0, "{arm}: the budget is unspent");
             assert_eq!(child.session.stack_limit, 12_345, "{arm}");
             let held = child.fixings().fix(unit, var, crate::ty::Side::Text, "/t");
             assert!(held.is_err(), "{arm}: the parent's fixed unit");

@@ -88,6 +88,7 @@ impl Pool {
         selected: &Selected,
         request: Request<'_>,
         on_delta: &mut F,
+        before_attempt: &mut dyn FnMut() -> Result<(), String>,
         cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
         let model = selected.model.as_str();
@@ -100,11 +101,13 @@ impl Pool {
             CancelSite::BeforeRequest,
             cancel,
             async |retrying| {
-                if let Some(cause) = retrying {
-                    on_delta(Delta::Retry {
-                        cause,
-                        lost: heard.then(|| Usage::unreported(transport.metered())),
-                    });
+                if let Err(error) = before_request(
+                    retrying,
+                    heard.then(|| Usage::unreported(transport.metered())),
+                    on_delta,
+                    before_attempt,
+                ) {
+                    return Attempt::Failed(error);
                 }
                 heard = false;
                 if let Err(error) = transport.prepare(cancel).await {
@@ -156,15 +159,11 @@ impl Pool {
                                 streamed_reasoning.push_str(&chunk.content);
                                 on_delta(Delta::Think(&chunk.content));
                             }
-                            // Nothing to add to the turn: signatures and tool calls
-                            // arrive whole in `End`, and liveness is genai's
-                            // byte-level bound, so a heartbeat adds nothing here.
-                            // Named rather than wildcarded so a new event cannot
-                            // slip past.
-                            ChatStreamEvent::Start
-                            | ChatStreamEvent::Heartbeat
-                            | ChatStreamEvent::ThoughtSignatureChunk(_)
-                            | ChatStreamEvent::ToolCallChunk(_) => {}
+                            ChatStreamEvent::ToolCallChunk(_) => heard = true,
+                            ChatStreamEvent::ThoughtSignatureChunk(chunk) => {
+                                heard |= !chunk.content.is_empty();
+                            }
+                            ChatStreamEvent::Start | ChatStreamEvent::Heartbeat => {}
                         }
                     }
                     Err(ProviderError::local_transient(
@@ -199,6 +198,18 @@ impl Pool {
     }
 }
 
+fn before_request(
+    retrying: Option<&ProviderError>,
+    lost: Option<Usage>,
+    on_delta: &mut impl FnMut(Delta<'_>),
+    before_attempt: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), ProviderError> {
+    if let Some(cause) = retrying {
+        on_delta(Delta::Retry { cause, lost });
+    }
+    before_attempt().map_err(ProviderError::Unavailable)
+}
+
 fn step_out_from_end(
     model: &str,
     end: StreamEnd,
@@ -221,8 +232,13 @@ fn step_out_from_end(
         }),
         _ => None,
     };
+    let has_reasoning = content.contains_reasoning_content();
+    let mut assistant_message = ChatMessage::assistant(content);
+    if !has_reasoning {
+        assistant_message = assistant_message.with_reasoning_content(reasoning);
+    }
     StepOut {
-        assistant_message: ChatMessage::assistant(content).with_reasoning_content(reasoning),
+        assistant_message,
         tool_calls,
         usage,
         stop_reason,
@@ -260,6 +276,50 @@ mod tests {
     use genai::chat::{ContentPart, MessageContent};
     use reqwest::StatusCode;
     use reqwest::header::HeaderMap;
+
+    #[test]
+    fn every_request_certifies_after_recording_the_previous_attempt() {
+        let recorder = crate::record::Emitter::none();
+        let first = recorder
+            .emit(crate::record::Forensic::TurnStarted {
+                turn: 1,
+                tuning: super::super::Tuning::default(),
+                via: None,
+            })
+            .unwrap()
+            .locus()
+            .seq()
+            .commit();
+        let through = std::cell::Cell::new(first);
+        let mut delta = |delta: Delta<'_>| {
+            if let Delta::Retry { cause, .. } = delta {
+                through.set(
+                    recorder
+                        .emit(crate::record::Forensic::Retried {
+                            error: cause.clone(),
+                        })
+                        .unwrap()
+                        .locus()
+                        .seq()
+                        .commit(),
+                );
+            }
+        };
+        let mut certify = || {
+            recorder.sync().unwrap();
+            recorder.assert_synced_through(through.get());
+            Ok(())
+        };
+        before_request(None, None, &mut delta, &mut certify).unwrap();
+        let error = ProviderError::local_transient("previous attempt");
+        before_request(Some(&error), None, &mut delta, &mut certify).unwrap();
+        assert!(through.get() > first);
+        recorder.assert_synced_through(through.get());
+        let failure =
+            before_request(None, None, &mut delta, &mut || Err("disk".into())).unwrap_err();
+        assert!(matches!(failure, ProviderError::Unavailable(_)));
+        assert!(!failure.retryable());
+    }
 
     fn web_stream_http(status: StatusCode) -> genai::Error {
         genai::Error::WebStream {
@@ -317,10 +377,51 @@ mod tests {
             true,
             AdapterKind::DeepSeek,
         );
-        assert!(out.assistant_message.content.iter().any(|part| matches!(
-            part,
-            ContentPart::ReasoningContent(reasoning) if reasoning == "let me think"
-        )));
+        let reasoning: Vec<_> = out
+            .assistant_message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::ReasoningContent(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, ["let me think"]);
+    }
+
+    #[test]
+    fn step_out_trusts_structured_reasoning_even_when_the_aggregate_differs() {
+        let parts = vec![
+            ContentPart::ThoughtSignature("signature-1".into()),
+            ContentPart::ReasoningContent("same text".into()),
+            ContentPart::ThoughtSignature("signature-2".into()),
+            ContentPart::ReasoningContent("same text".into()),
+            ContentPart::Text("answer".into()),
+        ];
+        let expected = serde_json::to_value(&parts).unwrap();
+        let end = StreamEnd {
+            captured_content: Some(MessageContent::from(parts)),
+            captured_reasoning_content: Some("a different aggregate".into()),
+            ..Default::default()
+        };
+        let out = step_out_from_end("m", end, Served::default(), true, AdapterKind::Anthropic);
+        assert_eq!(
+            serde_json::to_value(out.assistant_message.content).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn step_out_preserves_explicitly_empty_aggregate_reasoning() {
+        let end = StreamEnd {
+            captured_content: Some(MessageContent::from("answer")),
+            captured_reasoning_content: Some(String::new()),
+            ..Default::default()
+        };
+        let out = step_out_from_end("m", end, Served::default(), true, AdapterKind::DeepSeek);
+        assert!(
+            matches!(out.assistant_message.content.iter().last(), Some(ContentPart::ReasoningContent(text)) if text.is_empty())
+        );
     }
 
     #[test]

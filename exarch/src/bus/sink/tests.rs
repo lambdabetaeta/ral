@@ -17,6 +17,10 @@ impl Sink for Trace {
         self.0.push((id, text.clone()));
     }
 
+    fn synced(&mut self, id: AgentId, through: u64) {
+        self.0.push((id, format!("synced {through}")));
+    }
+
     fn transient(&mut self, id: AgentId, transient: &Transient) {
         assert!(matches!(transient, Transient::Boundary));
         self.0.push((id, "boundary".into()));
@@ -24,7 +28,7 @@ impl Sink for Trace {
 }
 
 #[test]
-fn accept_routes_birth_commit_records_and_transient_in_feed_order() {
+fn accept_routes_birth_sync_commit_records_and_transient_in_feed_order() {
     let bus = FleetBus::session();
     let id = AgentId::new(1);
     let recorder = crate::record::Emitter::none();
@@ -65,6 +69,7 @@ fn accept_routes_birth_commit_records_and_transient_in_feed_order() {
         trace.0,
         [
             (id, "born helper".into()),
+            (id, "synced 0".into()),
             (id, "first".into()),
             (id, "second".into()),
             (id, "boundary".into()),

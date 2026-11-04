@@ -21,9 +21,9 @@ pub(super) struct Status {
     /// Total, never absent: the status line always has a state to name.
     pub(super) state: StateSpan,
     /// Kit-authored *state*: a `key → Card` register drawn as the right-hand
-    /// column.  Never logged, and wiped by `/clear` so a pin is
-    /// generation-bounded like the scrollback.  A `Vec`, not a map, so render
-    /// order is first-seen insertion order.
+    /// column, emptied by `/clear` and not restored on resume. The log keeps
+    /// key-only forensic breadcrumbs, not these cards. A `Vec` keeps
+    /// first-seen insertion order.
     pins: Vec<(String, Card)>,
 }
 
@@ -49,8 +49,7 @@ impl Status {
     }
 
     // ── pinned state (the register) ────────────────────────────────────────
-    // The in-place analogue of a scrollback block: a pin writes a keyed slot,
-    // touching neither screen nor log — pinned state is ambient, not scrollback.
+    // Live keyed slots, not scrollback blocks; forensic keys cannot rebuild them.
 
     /// Overwrite the register slot `key`, or append it, keeping first-seen order.
     pub(super) fn set_pin(&mut self, key: String, card: Card) {
@@ -432,11 +431,6 @@ impl Tabs {
     /// Every session's directory, in id order, stable across runs.
     pub(super) fn log_dirs(&self) -> Vec<OwnDir> {
         self.tabs.iter().map(|t| t.log_dir.clone()).collect()
-    }
-
-    /// The focused session's directory, where its `record.jsonl` lives.
-    pub(super) fn focused_log_dir(&self) -> &OwnDir {
-        &self.focused_tab().log_dir
     }
 
     /// Rows in the bar — not the tab count, which outlives them.

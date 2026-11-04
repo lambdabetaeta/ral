@@ -193,6 +193,7 @@ impl Fleet {
             ));
         }
         let sessions_root = run_dir.make_dir("sessions")?;
+        run_dir.sync()?;
         let lost = |s: Severed| io::Error::other(EngineLost::starting(&s, &run_dir));
         let engine = match root_engine {
             RootEngine::Identity {

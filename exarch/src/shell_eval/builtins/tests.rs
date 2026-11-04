@@ -199,10 +199,7 @@ fn a_result_only_variable_in_the_exarch_tables_is_a_boundary() {
     );
 }
 
-/// The host surface is a bare fn pointer, so a
-/// `detach` it carried would arrive armed on every shell dressed through it,
-/// child shells that never asked for a budget included.  The recipe
-/// installs it per boot instead, in the same act that arms its policy.
+/// The generic host surface omits `detach`; exarch's engine runtime installs it.
 #[test]
 fn detach_is_absent_from_the_host_surface() {
     let shell = dressed_shell(&[]);
@@ -213,27 +210,19 @@ fn detach_is_absent_from_the_host_surface() {
     );
 }
 
-/// Name and budget arrive together, so a shell that can name the verb can
-/// always spend it.
+/// Exarch's engine runtime installs the verb.
 #[cfg(unix)]
 #[test]
-fn the_recipe_gains_detach_and_its_budget() {
+fn the_recipe_gains_detach() {
     let shell = crate::boot::test_shell();
     assert!(
         shell.lookup_builtin("detach").is_some(),
         "the recipe must install the verb"
     );
-    assert_eq!(
-        shell
-            .detach_policy()
-            .expect("installing the name and arming the budget is one act")
-            .budget,
-        crate::shell_eval::DETACH_BIRTH_BUDGET
-    );
 }
 
 /// `/clear` reboots through the same recipe, so the fresh engine re-gains
-/// the verb, and with it the budget the recipe arms in the same act.
+/// the verb.
 #[cfg(unix)]
 #[test]
 fn clear_reboots_a_shell_that_still_carries_detach() {

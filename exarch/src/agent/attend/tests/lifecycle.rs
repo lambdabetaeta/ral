@@ -515,7 +515,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     parent.handle().steer("queued one".into()).unwrap();
     parent.handle().steer("queued two".into()).unwrap();
     assert_eq!(
-        parent.handle().stop(job),
+        parent.handle().stop(job).unwrap(),
         Some(vec!["queued one\nqueued two".into()])
     );
     assert!(exchange.is_cancelled());
@@ -583,7 +583,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
                 .message(&parent.handle(), "queued follow-up".into())
                 .unwrap();
         }
-        assert_eq!(child.handle().stop(job), Some(vec![]));
+        assert_eq!(child.handle().stop(job).unwrap(), Some(vec![]));
         assert!(exchange.is_cancelled());
         let (emit, _rx) = emitter(&child);
         let outcome = if followup {
@@ -1068,7 +1068,7 @@ fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
     let reader = root.recorder().reader();
     let _run_owner = root.fleet.clone();
     drop(root);
-    let commits: Vec<_> = reader.since(None).unwrap().1.map(Result::unwrap).collect();
+    let commits: Vec<_> = reader.since(None).unwrap().2.map(Result::unwrap).collect();
     let reports: Vec<_> = commits
         .iter()
         .filter(|commit| {
@@ -1181,7 +1181,7 @@ fn a_dead_helpers_unread_parent_post_is_paid_before_the_parents_reply_reminder_w
     assert!(!helper.status().unwrap().owes);
     assert!(!parent.rest().pending);
     let records = read_records(&helper.log_dir().path().join(RECORD)).unwrap();
-    let commits: Vec<_> = journal.since(None).unwrap().1.map(Result::unwrap).collect();
+    let commits: Vec<_> = journal.since(None).unwrap().2.map(Result::unwrap).collect();
     let failure_commit = commits.iter().find(|commit| commit.records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == ENDED_BEFORE_REPORTING))).unwrap();
     assert!(failure_commit.records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Withdrawn { posts }) if posts.iter().copied().collect::<Vec<_>>() == pending)));
     assert_eq!(records.iter().filter(|record| matches!(record, Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == ENDED_BEFORE_REPORTING)).count(), 1);

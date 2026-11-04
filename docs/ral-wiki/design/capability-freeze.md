@@ -58,6 +58,10 @@ walk as it freezes it. In doing so it:
   expanded at run time, never in a grant, and the error names the place meant;
 - **rejects** an `xdg-*` place that escapes `home` — defence in depth against an
   attacker-set `XDG_*_HOME=/etc` silently widening a grant;
+- **rejects** every kept selector directory whose walked position is a filesystem
+  root, the home or its ancestor, for allowances and exclusions alike. Defaults
+  and host overrides share this breadth check; narrow external tool directories
+  remain valid ([[design/grant#Selectors, refusals and summaries|selector rules]]);
 - **rejects** an anchored place that freezes relative (a relative `HOME` or
   `TMPDIR`) and a `` `home `` or `xdg-*` place where nothing binds `HOME`: no
   base to resolve against, and the escape guard just above is itself stated in

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fea8d9f0
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 generated_at_date: 2026-11-03
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -195,16 +195,19 @@ spawn adapter live in `shell::grant`.
   the `path` selector (`path_dirs`, over the pure `path_dirs_in`, which
   classifies each absolute `PATH` entry raw, as an `absolute` payload, before
   the freeze folds it), and
-  `refuse_the_world`, the guard both it and the toolchain overrides call, over
+  `refuse_the_world`, the guard both it and every kept toolchain directory call, over
   `the_world`, the one predicate for a root, the home or an ancestor of it,
   which system-read discovery uses too;
   `FrozenPath::freeze` refuses a path that is not Unicode;
 - `toolchains.rs` — every other directory selector as one table: `enum
   Toolchain` (`system` and the package managers), each a few `Location`s of
-  overrides and defaults, from one exhaustive `match`; the pure `expand_in`
-  over an injected environment, home and `exists`, answering native
-  `PathBuf`s (shown only in a refusal), its live wrapper `expand`
-  (what `FreezeCtx::selector` calls), and
+  overrides and defaults, from one exhaustive `match`; `chosen` selects over an
+  injected host environment and home, and `walked` drops absent/non-directories.
+  `expand_in` checks every kept directory's followed trace against the world,
+  naming either its override or its default spelling and resolved position in a
+  refusal, before `W::grant` retains the allowance position or exclusion objects.
+  `FreezeCtx::selector` calls it with the host environment; the public `expand`
+  wrapper returns the surviving spellings as native `PathBuf`s. Also
   `SYSTEM_READS`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
   `pkgsrc`) used by grant's host system-read discovery, keeping only what is
   neither in the process's home nor `the_world` ([[design/grant|grant]]

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-03
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -223,13 +223,14 @@ no `Card` mark tree, since that is built by whoever renders — a printer's fold
 over the recorded `Display` commit ([[map/exarch/frontend|frontend]]) — and
 never by the decoder or by the seam that records it (`surface::record`):
 
-- the register is not decoded here at all: `exarch-pins` reaches it through
-  the desk, which builds `Surface::Pin { key, card }` / `Surface::Unpin
-  { key }` itself. A pin is a rendered card in a slot, so its card is the
-  fact itself, not a copy of one, and no key is reserved. Pins are
-  mirrored as `PinDigest`s so the [[map/exarch/agent|nudge]] layer can name
-  pinned state without parsing rendered text — the read side reuses the same
-  store rather than adding a second one ([[design/pins|pins]]);
+- the register is not decoded here: `exarch-pins` sends typed `Request::Pins`
+  to `agent/desk/pins.rs`. Through its foreground loan the desk synchronously
+  mutates `Body.pins`, the `PinDigest` mirror read/list and the
+  [[map/exarch/agent|nudge]] share, then builds `Surface::Pin { key, card }` /
+  `Surface::Unpin { key }`. `surface::record` emits key-only forensic history
+  and card-bearing pin / key-only unpin transients for the live
+  [[map/exarch/frontend|`tabs::Status`]] register. No key is reserved. `/clear`
+  empties both stores; resume restores neither ([[design/pins|pins]]);
 - an `` `observed `` value core emits at a redirect, exec, or
   capability-check door decodes through `Observation::from_surface` into
   `Surface::Observation`, the raw observation alone
@@ -247,9 +248,10 @@ never by the decoder or by the seam that records it (`surface::record`):
   (`surface_notice`, [[map/exarch/frontend|frontend]]), ending in how the
   bound handle and registry inspect it:
   ``errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed. `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``;
-- a value that is none of these is `Decoded::Unknown`: `decode_loudly` records
-  a `Forensic::SystemNote` naming the shape it dropped, the extension law's
-  loud unknown class.
+- a value that is none of these, including a direct surface pin/unpin, is
+  `Decoded::Unknown`: `decode_loudly` records a `Forensic::SystemNote` naming
+  the dropped shape. It renders nothing and raises no model-facing runtime
+  error, the extension law's loud unknown class.
 
 The producer is a direct `exarch-surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; workers do

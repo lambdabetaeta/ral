@@ -59,7 +59,7 @@ impl DeskAct {
             Self::Spawn => named("started agent"),
             Self::Stop => named("stopped agent"),
             Self::Dismiss => named("dismissed agent"),
-            Self::Message => named("delivered a message to agent"),
+            Self::Message => named("queued a message for agent"),
             Self::Schedule => named("armed the wakeup"),
             Self::Unschedule => named("removed the wakeup"),
             // The one act with no addressee: a returning agent replies to its
@@ -139,7 +139,15 @@ impl ExarchDesk {
     /// # Errors
     /// The decoder's refusal, or the addressed handler's.
     pub(crate) fn handle(&self, req: &FOValue) -> Result<FOValue, Error> {
-        drop(self.loan.get().ok_or_else(no_desk)?);
+        let recorder = self.loan.get().ok_or_else(no_desk)?.log.record_emitter();
+        let answer = self.dispatch(req);
+        recorder
+            .sync()
+            .map_err(|failure| Error::new(failure.to_string()))?;
+        answer
+    }
+
+    fn dispatch(&self, req: &FOValue) -> Result<FOValue, Error> {
         match Request::decode(req).map_err(Error::new)? {
             Request::Agents(Agents::List) => {
                 Ok(listing(&self.call.handle, &self.call.fleet).encode())

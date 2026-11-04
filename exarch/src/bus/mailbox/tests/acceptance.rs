@@ -16,7 +16,7 @@ fn queue_is_mail(mailbox: &AgentMailbox, seed: u64, turn: usize) {
 }
 
 pub(super) fn replay_is_cell(mailbox: &AgentMailbox, journal: &Recorder) {
-    let (_, commits) = journal.reader().since(None).unwrap();
+    let (_, _, commits) = journal.reader().since(None).unwrap();
     let records: Vec<_> = commits
         .map(Result::unwrap)
         .flat_map(|commit| commit.records().iter().cloned().collect::<Vec<_>>())
@@ -177,14 +177,14 @@ fn random_cell_operations_keep_queue_equal_to_mail_and_file_replay_equal_to_cell
                         }
                         14 => {
                             step!(address.steer("recall target".into())).unwrap();
-                            let recalled = step!(address.recall());
+                            let recalled = step!(address.recall()).unwrap();
                             assert!(recalled.last().unwrap().ends_with("recall target"));
                         }
                         15 => {
                             assert!(step!(mailbox.begin()));
                             step!(address.steer("stop target".into())).unwrap();
                             let job = step!(address.status()).unwrap().job.unwrap();
-                            let recalled = step!(address.stop(job)).unwrap();
+                            let recalled = step!(address.stop(job)).unwrap().unwrap();
                             assert!(recalled.last().unwrap().ends_with("stop target"));
                         }
                         16 => {
@@ -470,7 +470,7 @@ fn clear_records_one_combined_withdrawal_and_all_unschedules_preserving_typed_po
     address.gone(AgentId::new(8));
     mailbox.transact(|txn| txn.clear()).unwrap().unwrap();
     assert_eq!(address.queued_posts(), keep);
-    let (_, commits) = journal.reader().since(None).unwrap();
+    let (_, _, commits) = journal.reader().since(None).unwrap();
     let last = commits.map(Result::unwrap).last().unwrap();
     assert!(
         matches!(last.records().iter().map(crate::record::Recorded::value).collect::<Vec<_>>().as_slice(),

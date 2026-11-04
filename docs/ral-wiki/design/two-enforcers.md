@@ -17,16 +17,19 @@ narrates *how* each runs; this page argues *why* both exist.
 
 **Why the sandbox cannot be the only enforcer.**
 
-- *It never sees ral's own operations.* The bundled coreutils and the structured
-  primitives execute in process — they are not subprocesses, and an OS sandbox
-  confines only a child. For everything ral does itself, the in-process guard is
-  the one place a check can live ([[internals/builtins-registry|builtins]]).
+- *It never sees ral's own operations.* Structured primitives and redirects
+  perform evaluator-owned reads and writes; a child's OS sandbox cannot guard
+  them. Bundled coreutils and rg instead run in re-exec children, like external
+  files, and their own operations are outside the evaluator's checks
+  ([[internals/builtins-registry|builtins]]).
 - *It is coarser than the grant model.* The guard judges a launch by its
   target, a bundled tool by name, and a bare-name veto under a trusted write;
   the sandbox renders only a path rule list, and never sees which bundled tool a
   re-exec of ral runs. Delegating exec to the OS silently coarsens the grant.
-- *It is uneven across platforms.* bwrap has no path-aware exec filter, Windows'
-  container is coarse, and `net` is unscopable anywhere. Were the sandbox the
+- *It is uneven across platforms and seats.* Linux hosts need Landlock beside
+  bwrap for exec; Windows has no kernel exec filter, and Linux guest jails
+  install no per-grant fs/exec projection
+  ([[internals/capability-enforcement#Guest jail|guest jail]]). Were the sandbox the
   sole enforcer, `grant` would mean different things on different kernels; the
   in-process guard is the semantic floor that makes `grant` defined by ral, with
   the OS layer tightening further where it can.
@@ -36,8 +39,8 @@ narrates *how* each runs; this page argues *why* both exist.
   about. A sandbox violation is an `EPERM` or a `SIGKILL`, after the fact and
   unattributable. And when no layer restricts fs, net, gpu, or — where a backend
   renders it into the kernel — exec, the projection is empty, so the
-  per-command sandbox launch is skipped entirely: an unrestricted child spawns
-  directly.
+  host per-command sandbox launch is skipped entirely: an unrestricted host
+  child spawns directly. The guest jail applies to every guest command.
 
 **What the in-process enforcer authorises is the object, not the name.** A
 guard that judges a canonicalised string and lets the caller re-walk the
@@ -55,7 +58,7 @@ judged by its real path through the one exec judgment (`GrantStack::admit`), and
 the launcher runs that real path, under the user's spelling as `argv[0]`
 ([[internals/exec-judgment|exec-judgment]]).
 
-**The two enforcers agree on each held object's current position at launch.**
+**Host projections and the guard agree on each held object's current position at launch.**
 An exclusion holds the object its spelling reached when the grant was decoded.
 ral's readers judge by position or identity. Linux and macOS also ask each live
 hold for its current name, walk that name to verify identity, and render both
@@ -89,11 +92,11 @@ See [[internals/path-judgment|path-judgment]] for the hold and its lifetime.
 - *It is blind to what a child does on its own.* Once ral spawns `sh`, the guard's
   work is done; `sh` may read, write, and re-exec freely. Confining that requires
   the OS.
-- *Hence the asymmetry by dimension.* A spawned child's reads and writes are held
-  by the sandbox; `net` has no in-process guard at all, because ral dispatches no
+- *Hence the asymmetry by dimension.* On hosts, a spawned child's reads and
+  writes are held by the sandbox; `net` has no in-process guard at all, because ral dispatches no
   network operation for the guard to see, and neither has `gpu`
   ([[design/grant|grant]]).
-- *Linux exec is a Landlock domain, the denies subtracted.* bwrap cannot
+- *Linux host exec is a Landlock domain, the denies subtracted.* bwrap cannot
   path-filter a child's re-execs, so the payload enters a Landlock layer of its
   own inside the envelope, built by the parent. Landlock is allow-list only, so
   a deny *inside* an allowed directory is rendered as that directory's entries
@@ -122,7 +125,7 @@ See [[internals/path-judgment|path-judgment]] for the hold and its lifetime.
   real path the guard judges by, and a launch whose frozen allowance has since
   been redirected is refused rather than followed.
 
-**What a grant's guarantee means on Linux, row by row.** Rows above the rule
+**What a grant's guarantee means on Linux hosts, row by row.** Rows above the rule
 are *promises*: a grant names them, and a host that cannot hold one refuses
 the launch. Rows below are *invariants* of being under an envelope at all —
 applied where the host can build them and stated (in SPEC and here) where it
@@ -168,8 +171,8 @@ every platform's case in [[design/authority-tables|authority-tables]]).
 
 ## The contract between guard and kernel
 
-**The kernel agrees with the guard on resolved requests at launch, up to
-declared support and declared limits.** The guard's law is exclusion-wins over
+**Host kernel projections agree with the guard on resolved requests at launch,
+up to declared support and declared limits.** The guard's law is exclusion-wins over
 evidence ([[design/authority-tables|authority-tables]]); the kernel is handed
 the same table, the same read region (run places included) and, for exec, the
 policy joined with *support*. No backend adds an exception to an authored
@@ -189,7 +192,7 @@ start:
 
 *Declared limits*, each a place where guard and kernel can differ:
 
-- **On Linux a pin is runnable wherever it is readable.** The pinned bwrap and
+- **On Linux hosts a pin is runnable wherever it is readable.** The pinned bwrap and
   trampoline are bind-mounted read-only at their own names whatever the `fs`
   grant reads, and where `exec` is unrestricted Landlock carries no exec
   ruleset, so a readable pin is also runnable. Under ``grant [fs: [read: [`cwd .]]]``
@@ -239,6 +242,14 @@ start:
 - **fs, as before:** on a case-sensitive volume the Linux and Windows kernels do
   not hold an exclusion under another spelling, and an absent excluded path under
   a writable prefix reaches neither kernel until the next launch.
+- **Linux guest engines.** The admitted utility's own operations and its
+  descendants have no per-grant fs/exec kernel projection. Direct admission and
+  ral-owned effect checks remain; guest topology, mounts and Unix modes bound
+  files, while fresh credentials, cgroups, `NO_NEW_PRIVS`, descriptor marking
+  and seccomp protect each launch. ``net: `offline`` does create a private
+  network namespace with loopback up, but reachable pathname Unix sockets can
+  relay outside it. The host's `NetPolicy` remains the destination gate
+  ([[internals/capability-enforcement#Guest jail|guest jail]]).
 - **Windows.**
   - An unrestricted fs projection asks for no capability and rests on the ambient
     `ALL APPLICATION PACKAGES` grants, so a child can be refused a file the guard

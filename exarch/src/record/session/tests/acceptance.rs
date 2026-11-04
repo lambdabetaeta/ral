@@ -37,7 +37,7 @@ fn commits(log: &AgentLog) -> Vec<Commit> {
         .reader()
         .since(None)
         .unwrap()
-        .1
+        .2
         .collect::<std::io::Result<_>>()
         .unwrap()
 }

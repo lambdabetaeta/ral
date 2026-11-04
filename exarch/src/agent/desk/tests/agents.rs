@@ -911,7 +911,7 @@ fn surface_then_spawn_observes_the_surface_first() {
                     }
                 }
             }
-            Signal::Born(..) | Signal::Transient(..) => {}
+            Signal::Born(..) | Signal::Transient(..) | Signal::Synced { .. } => {}
         }
     }
     assert!(

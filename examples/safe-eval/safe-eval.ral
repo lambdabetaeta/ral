@@ -2,26 +2,31 @@
 # Footgun: bash has no in-language sandbox — you reach for chroot + setuid
 # + seccomp, or bwrap, each a separate process-scoped layer where one wrong
 # bind-mount silently leaves a hole.  Here `grant` attenuates authority
-# in-language: deny-by-default, one expression around the code.
+# in-language, one expression around the code. Baseline system reads for
+# runtime/name-resolution support remain unless explicitly excluded.
 
 let sandbox = temp-dir
+guard {
+    let outside = temp-dir
+    guard {
+        let try-op = { |label body|
+            let outcome = try { !$body ; return 'allowed' } { |_| return 'blocked' }
+            echo "  $outcome  $label"
+        }
 
-let try-op = { |label body|
-    let outcome = try { !$body ; return 'allowed' } { |_| return 'blocked' }
-    echo "  $outcome  $label"
-}
+        to-string 'harmless outside fixture' > "$outside/fixture"
+        echo 'outside the grant block:'
+        try-op 'write inside sandbox' { to-string 'ok' > "$sandbox/scratch" }
+        try-op 'read outside fixture' { let _ = !{from-string < "$outside/fixture"} ; return () }
 
-echo 'outside the grant block:'
-try-op 'write inside  /tmp'      { to-string 'ok' > "$sandbox/scratch" }
-try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return () }
-
-echo ''
-echo 'inside grant [exec: [allow: []], fs: [read+write only the sandbox]]:'
-grant [exec: [allow: []], fs: [read: [`absolute $sandbox], write: [`absolute $sandbox]]] {
-    try-op 'write inside  sandbox'   { to-string 'ok' > "$sandbox/inside"  }
-    try-op 'write outside sandbox'   { to-string 'no' > "/tmp/escape"      }
-    try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return () }
-    try-op 'exec  curl'              { curl http://example.com 2> /dev/null }
-}
-
-rm -rf $sandbox
+        echo ''
+        echo 'inside grant (sandbox user files plus baseline system reads):'
+        grant [exec: [allow: []], fs: [read: [`absolute $sandbox], write: [`absolute $sandbox]]] {
+            try-op 'write inside sandbox'  { to-string 'ok' > "$sandbox/inside" }
+            try-op 'write outside fixture' { to-string 'no' > "$outside/escape" }
+            try-op 'read outside fixture'  { let _ = !{from-string < "$outside/fixture"} ; return () }
+            # Empty exec refuses curl before it can issue a request.
+            try-op 'exec curl' { curl http://example.com 2> /dev/null }
+        }
+    } { rm -rf $outside }
+} { rm -rf $sandbox }

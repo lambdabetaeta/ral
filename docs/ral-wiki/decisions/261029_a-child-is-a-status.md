@@ -3,8 +3,8 @@ status: active
 amended_by: "[[261029_an-agent-is-a-thread|an-agent-is-a-thread]]"
 generated_at_commit: 64ecd691
 generated_at_date: 2026-10-30
-verified_at_commit: 64ecd691
-verified_at_date: 2026-10-30
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-03
 anchors: [ChildStatus, Settlement, Control::Status, Mail::status, Txn::report, AgentHandle::report, Nursery::owing, Status::working, Mail::owes]
 ---
 
@@ -124,10 +124,12 @@ status, not a sum of owed answers.** This reverses the debt mechanism of
 [[design/agents|agents]] makes the latest report
 `Mail::status()`, folded from `Control::Status`. `Txn::report` commits status,
 schedule retirements and queued-wakeup withdrawals (every pending post after
-life ends), then posts the parent notice iff `Mail::owes()` was true, still
-under the helper lock. No reader sees paid debt before delivery. A poisoned
-helper reports `Failed` directly to its parent. A failed report append also
-notifies iff the pre-append mail owed, without changing the child's folds.
+life ends), syncs the helper, then posts the parent notice iff `Mail::owes()`
+was true, still under the helper lock. The parent's post unlocks before syncing. No reader sees paid debt before delivery. A poisoned
+helper reports `Failed` directly to its parent. A failed report append or sync
+notifies iff the captured pre-commit mail owed. Append failure changes no fold;
+a successful `Status` already cleared debt before a failed sync, so the fallback
+uses captured debt and never sends the unconfirmed successful status.
 These fallback paths share `Shared.failure_noticed`, so reporting and
 teardown post at most one `Failed`; the flag stores neither debt nor status.
 The original shared-cell mechanism above remains historical, not a second

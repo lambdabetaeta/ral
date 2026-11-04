@@ -62,7 +62,10 @@ fn recall_extracts_only_human_text_preserving_other_inputs() {
     address.command(Command::Read(Read::Resources)).unwrap();
     address.post(message("peer", false)).unwrap();
     address.steer("fourth".into()).unwrap();
-    assert_eq!(address.recall(), ["first", "second\nthird", "fourth"]);
+    assert_eq!(
+        address.recall().unwrap(),
+        ["first", "second\nthird", "fourth"]
+    );
     assert_eq!(address.queued(), ["/resources"]);
     let inputs = mailbox.drain();
     assert!(matches!(
@@ -73,7 +76,7 @@ fn recall_extracts_only_human_text_preserving_other_inputs() {
             Drained::Input(Input::Message(_))
         ]
     ));
-    assert_eq!(address.recall(), [] as [String; 0]);
+    assert_eq!(address.recall().unwrap(), [] as [String; 0]);
 }
 
 #[test]
@@ -88,7 +91,7 @@ fn recall_preserves_an_untaken_parent_task_and_its_debt() {
     let pending = address.queued_posts();
     assert_eq!(depth(&mailbox, Source::Message), 1);
     assert!(mailbox.has_input());
-    assert_eq!(address.recall(), [] as [String; 0]);
+    assert_eq!(address.recall().unwrap(), [] as [String; 0]);
     assert_eq!(address.queued(), [] as [String; 0]);
     assert_eq!(address.queued_posts(), pending);
     super::acceptance::replay_is_cell(&mailbox, &journal);
@@ -222,7 +225,7 @@ fn human_peer_and_child_inputs_count_as_prompting() {
     assert!(!mailbox.has_input());
     address.steer("human".into()).unwrap();
     assert!(mailbox.has_input());
-    assert_eq!(address.recall(), ["human"]);
+    assert_eq!(address.recall().unwrap(), ["human"]);
     assert!(!mailbox.has_input());
     address.post(message("peer", false)).unwrap();
     assert!(mailbox.has_input());
@@ -241,11 +244,11 @@ fn ending_refuses_posts_and_ignores_queued_work() {
     assert!(matches!(mailbox.next(QUIET), Next::Ended));
     assert!(matches!(address.steer("late".into()), Err(Refused::Ended)));
     assert_eq!(address.queued(), [] as [String; 0]);
-    assert_eq!(address.recall(), [] as [String; 0]);
+    assert_eq!(address.recall().unwrap(), [] as [String; 0]);
     assert!(!address.release());
     assert!(!mailbox.begin());
     let before = mailbox.source_depths();
-    assert_eq!(address.stop(1.into()), None);
+    assert_eq!(address.stop(1.into()).unwrap(), None);
     assert!(address.command(Command::Read(Read::Resources)).is_err());
     assert_eq!(mailbox.source_depths(), before);
 }

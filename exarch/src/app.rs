@@ -42,7 +42,17 @@ impl RunLock {
     /// # Errors
     /// `WouldBlock` while another exarch holds it; the open's.
     pub fn try_acquire(run: &OwnDir) -> io::Result<Self> {
-        let lock = run.open_write(RUN_LOCK)?;
+        Self::acquire(run, run.open_write(RUN_LOCK)?)
+    }
+
+    /// Lock only an existing managed run; never manufacture its witness.
+    /// # Errors
+    /// The existing open's, or `WouldBlock` while a launcher holds it.
+    pub(crate) fn try_existing(run: &OwnDir) -> io::Result<Self> {
+        Self::acquire(run, run.open(RUN_LOCK)?)
+    }
+
+    fn acquire(run: &OwnDir, lock: File) -> io::Result<Self> {
         match lock.try_lock() {
             Ok(()) => Ok(Self { _lock: lock }),
             Err(TryLockError::WouldBlock) => Err(io::Error::new(
@@ -449,9 +459,9 @@ impl App {
     /// `$XDG_<kind>_HOME/<app>/`.
     ///
     /// # Errors
-    /// [`OwnDir::xdg`]'s.
+    /// [`OwnDir::xdg_synced`]'s.
     pub fn own(self, kind: XdgKind) -> Result<OwnDir, OwnError> {
-        OwnDir::xdg(self.0, kind)
+        OwnDir::xdg_synced(self.0, kind)
     }
 
     /// `$XDG_STATE_HOME/<app>/<project>/`, held and made where absent,
@@ -464,7 +474,10 @@ impl App {
     /// # Errors
     /// [`Self::own`]'s, or the make's.
     pub fn project(self, cwd: &Path) -> Result<OwnDir, OwnError> {
-        self.own(XdgKind::State)?.make_dir(&project_slug(cwd))
+        let app = self.own(XdgKind::State)?;
+        let project = app.make_dir(&project_slug(cwd))?;
+        sync_directory(&app)?;
+        Ok(project)
     }
 
     /// A new run of the project at `cwd`, `<project>/<YYYY-MM-DD-HHMMSS>-<pid>/`
@@ -486,8 +499,20 @@ impl App {
     /// [`Self::project`]'s, or the make's.
     pub fn new_run(self, cwd: &Path) -> Result<OwnDir, OwnError> {
         let stamp = format!("{}-{}", stamp_from_secs(now_secs()), std::process::id());
-        self.project(cwd)?.make_dir(&stamp)
+        let project = self.project(cwd)?;
+        let run = project.make_dir(&stamp)?;
+        sync_directory(&project)?;
+        Ok(run)
     }
+}
+
+fn sync_directory(dir: &OwnDir) -> Result<(), OwnError> {
+    dir.sync().map_err(|error| OwnError::Io {
+        act: ral_core::own::Act::Sync,
+        at: dir.path().to_path_buf(),
+        to: None,
+        error,
+    })
 }
 
 /// The names of the runs of `project` that can be resumed, from newest to

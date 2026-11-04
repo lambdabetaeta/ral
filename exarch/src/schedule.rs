@@ -1377,7 +1377,7 @@ mod tests {
     }
 
     fn commit_count(log: &AgentLog) -> usize {
-        let (_, commits) = log.record_emitter().reader().since(None).unwrap();
+        let (_, _, commits) = log.record_emitter().reader().since(None).unwrap();
         commits.map(Result::unwrap).count()
     }
 
@@ -1480,7 +1480,7 @@ mod tests {
                 })]
             ));
             assert_eq!(commit_count(log), before + 1);
-            let (_, commits) = log.record_emitter().reader().since(None).unwrap();
+            let (_, _, commits) = log.record_emitter().reader().since(None).unwrap();
             let last = commits.map(Result::unwrap).last().unwrap();
             assert!(matches!(
                 last.records().first.value(),

@@ -15,6 +15,39 @@ fn value(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
     pairs.iter().map(|&(k, v)| (k.to_owned(), v)).collect()
 }
 
+#[test]
+fn same_directory_compares_independent_held_objects_not_names_or_allocations() {
+    let root = scratch("same-directory");
+    let first = root.make_dir("first").unwrap();
+    let again = root.dir("first").unwrap();
+    let other = root.make_dir("other").unwrap();
+    assert!(!Arc::ptr_eq(&first.0, &again.0));
+    assert!(first.same_directory(&again));
+    assert!(!first.same_directory(&other));
+}
+
+#[test]
+fn open_update_reads_writes_and_syncs_without_creating_truncating_or_appending() {
+    use std::io::{Seek as _, SeekFrom};
+    let dir = scratch("open-update");
+    dir.append("record").unwrap().write_all(b"before").unwrap();
+    let mut file = dir.open_update("record").unwrap();
+    let mut text = String::new();
+    file.read_to_string(&mut text).unwrap();
+    assert_eq!(text, "before");
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(b"B").unwrap();
+    file.sync_data().unwrap();
+    assert_eq!(dir.read("record").unwrap(), b"Before");
+    assert_eq!(
+        dir.open_update("missing").unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(dir.stat("missing").is_none());
+    dir.make_dir("directory").unwrap();
+    assert!(dir.open_update("directory").is_err());
+}
+
 #[cfg(unix)]
 mod unix {
     use super::*;
@@ -50,6 +83,7 @@ mod unix {
         assert!(matches!(dir.open("l"), Err(OwnError::Linked(_))));
         assert!(matches!(dir.append("l"), Err(OwnError::Linked(_))));
         assert!(matches!(dir.open_write("l"), Err(OwnError::Linked(_))));
+        assert!(matches!(dir.open_update("l"), Err(OwnError::Linked(_))));
         assert!(matches!(dir.load::<u8>("l"), Err(OwnError::Linked(_))));
         assert!(matches!(
             dir.store("l", &1u8, Visibility::Public),
@@ -194,6 +228,63 @@ mod unix {
     }
 
     #[test]
+    fn within_refuses_a_stale_root_and_a_replacement_between_walk_and_descent() {
+        let base = scratch("within-replaced");
+        let root = base.make_dir("root").unwrap();
+        std::fs::rename(root.path(), base.path().join("original")).unwrap();
+        base.make_dir("root").unwrap();
+        let error = root.within(root.path()).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("directory changed during resolution")
+        );
+
+        let root = base.make_dir("fresh").unwrap();
+        let session = root.make_dir("session").unwrap();
+        let held_root = root.clone();
+        BEFORE_WITHIN_DESCENT.with(|hook| {
+            hook.set(Some(Box::new(move || {
+                held_root.rename("session", "original-session").unwrap();
+                held_root.make_dir("session").unwrap();
+            })));
+        });
+        let error = root.within(session.path()).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("directory changed during resolution")
+        );
+        assert!(!root.dir("session").unwrap().same_directory(&session));
+    }
+
+    #[test]
+    fn open_update_refuses_special_files_before_data_open() {
+        let dir = scratch("open-update-special");
+        let fifo = dir.path().join("fifo");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        assert_eq!(
+            dir.open_update("fifo").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        // Keep bind short regardless of TMPDIR, and rename on the same filesystem.
+        let short = tempfile::tempdir_in("/tmp").unwrap();
+        let socket_dir = root(short.path()).unwrap().make_dir("tested").unwrap();
+        let socket = short.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::rename(&socket, socket_dir.path().join("socket")).unwrap();
+        assert_eq!(
+            socket_dir.open_update("socket").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
     fn roots_are_resolved_once_for_each_base() {
         let (first, second) = (scratch("roots-a"), scratch("roots-b"));
 
@@ -218,6 +309,58 @@ mod unix {
         assert!(
             !Arc::ptr_eq(&a.0, &moved.0),
             "a host whose base has changed resolves a new root"
+        );
+    }
+
+    #[test]
+    fn xdg_synced_upgrades_the_cached_held_object_without_rewalking_its_spelling() {
+        let base = scratch("roots-synced");
+        with_var("XDG_STATE_HOME", Some(text(base.path())), || {
+            let cached = OwnDir::xdg("own-test-synced", XdgKind::State).unwrap();
+            std::fs::rename(cached.path(), base.path().join("moved")).unwrap();
+            let replacement = base.make_dir("replacement").unwrap();
+            symlink(replacement.path(), cached.path()).unwrap();
+            let steps = path::walk::steps_taken();
+            let synced = OwnDir::xdg_synced("own-test-synced", XdgKind::State).unwrap();
+            assert!(Arc::ptr_eq(&cached.0, &synced.0));
+            assert_eq!(path::walk::steps_taken(), steps, "sync uses held ancestry");
+            synced.append("proof").unwrap();
+            assert!(base.path().join("moved/proof").exists());
+            assert!(!replacement.path().join("proof").exists());
+            let again = OwnDir::xdg_synced("own-test-synced", XdgKind::State).unwrap();
+            assert!(Arc::ptr_eq(&synced.0, &again.0));
+        });
+    }
+
+    #[test]
+    fn xdg_synced_makes_nested_ancestors_and_keeps_dangling_links_refused() {
+        let base = scratch("roots-synced-chain");
+        let nested = base.path().join("one/two/three");
+        with_var("XDG_STATE_HOME", Some(text(&nested)), || {
+            let dir = OwnDir::xdg_synced("own-test-chain", XdgKind::State).unwrap();
+            assert_eq!(dir.path(), nested.join("own-test-chain"));
+            dir.sync().unwrap();
+        });
+        symlink(base.path().join("absent"), base.path().join("dangling")).unwrap();
+        with_var(
+            "XDG_STATE_HOME",
+            Some(text(&base.path().join("dangling"))),
+            || {
+                let error = OwnDir::xdg_synced("own-test-dangling-chain", XdgKind::State)
+                    .err()
+                    .unwrap();
+                assert!(matches!(
+                    error,
+                    OwnError::Io { error, .. } if error.kind() == io::ErrorKind::NotFound
+                ));
+            },
+        );
+        assert!(nested.join("own-test-chain").is_dir());
+        assert!(!base.path().join("absent").exists());
+        assert!(
+            std::fs::symlink_metadata(base.path().join("dangling"))
+                .unwrap()
+                .is_symlink()
         );
     }
 

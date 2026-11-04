@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_date: 2026-11-03
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -448,15 +448,16 @@ and ends itself after its idle interval (five hours by default)
   so each transition is still one act.
 - **`exarch-pins <tag>`** → `∀α. F α`. One family over the caller's own pin
   register: `` `set ``/`` `clear `` write it, `` `read ``/`` `list `` read it
-  back, and it is the register's only door — with the same
-  foreground-only discipline `exarch-agents` and `exarch-context` already have: a call
-  inside `spawn "…" { … }` errors rather than degrading.
+  back, and it is the register's only door. Pins survive exchanges, are emptied
+  by `/clear`, and are not restored on resume ([[design/pins|pins]]).
+  Foreground-only, like `exarch-agents` and `exarch-context`: a call inside
+  `spawn "…" { … }` errors rather than degrading.
   - `` `set [key: Str, body: Card] `` → `Unit`.
   - `` `clear <key> `` → `Unit`.
   - `` `read <key> `` → `∀α. F α`. `` `some `` the card pinned at `key`, canonically
     re-encoded ([[map/exarch/cards|cards]]) so a kit can destructure it
-    whether or not the bytes it wrote match what comes back; `` `none `` on a miss
-    or an absent register. Its answer type is the script's to decide, because the
+    whether or not the bytes it wrote match what comes back; `` `none `` on a
+    miss. Its answer type is the script's to decide, because the
     register is schemaless by design
     ([[decisions/260803_register-is-read-write|register-is-read-write]]): a boundary,
     admitted at the door against how the script uses the card

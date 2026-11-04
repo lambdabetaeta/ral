@@ -310,7 +310,7 @@ impl Launch {
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let (cgroup, procs) = crate::process::jail::linux::prepare(plan)?;
         crate::process::jail::linux::install_pre_exec(&mut self.cmd, plan, procs, deny);
-        self.jail = Some(cgroup);
+        self.jail = cgroup;
         Ok(())
     }
 
@@ -369,19 +369,15 @@ impl Launch {
     ///
     /// So point all three standard streams at something that outlives this
     /// process; an inherited one dies with us, taking the survivor's writes
-    /// with it.  And under a guest jail a birth surrenders the
-    /// `detached/exec-N` cgroup to the survivor, which keeps it and its
-    /// limits for good; a failed one leaves it to this launch to finish.
+    /// with it. Under a guest jail the survivor joins the one `detached`
+    /// cgroup every survivor shares, and its limits. Membership grants this
+    /// launch no teardown authority, even on failure.
     ///
     /// # Errors
     /// A failed fork or `execve`; a survivor whose pid is lost is `Survivor::Unnamed`.
     #[cfg(unix)]
     pub(crate) fn spawn_detached(&mut self) -> std::io::Result<crate::process::group::Survivor> {
-        let survivor = crate::process::group::spawn_detached(&mut self.cmd)?;
-        if let Some(jail) = self.jail.take() {
-            jail.surrender();
-        }
-        Ok(survivor)
+        crate::process::group::spawn_detached(&mut self.cmd)
     }
 }
 

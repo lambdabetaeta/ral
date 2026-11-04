@@ -1,10 +1,10 @@
 //! The guest process jail.
 //!
 //! [`GuestJail::plan`] decides who a spawned command becomes — a fresh
-//! unprivileged uid/gid, a fresh transient cgroup. On a real Linux guest the
+//! unprivileged uid/gid, a kept cgroup or shared survivor membership. On Linux the
 //! sequence number behind both is guest-global, read from the counter file
 //! `linux::next_guest_seq` locks and increments — every booted engine mints
-//! off the one file, since two engines sharing a uid or a cgroup name is
+//! off the one file, since two engines sharing a uid or a kept cgroup name is
 //! exactly the collision a child engine must not risk. Off Linux, where
 //! `GuestJail` is never actually installed, `plan` falls back to a plain
 //! in-process counter so this module's own tests stay portable; the `linux`
@@ -164,15 +164,6 @@ impl JailCgroup {
         #[cfg(target_os = "linux")]
         linux::kill(self);
     }
-
-    /// Leave the cgroup to a detached survivor, unfinished: nobody left can
-    /// tell when it is empty, so it keeps the survivor's limits for good.
-    #[cfg(unix)]
-    pub(crate) fn surrender(self) {
-        // Skips the finish, not the path's memory.
-        let mut kept = std::mem::ManuallyDrop::new(self);
-        drop(std::mem::take(&mut kept.path));
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -187,6 +178,7 @@ impl Drop for JailCgroup {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct JailPlan {
+    pub(crate) ownership: Ownership,
     pub(crate) seq: Seq,
     pub(crate) net: Option<Net>,
     pub(crate) cgroup: PathBuf,
@@ -198,8 +190,8 @@ pub(crate) struct JailPlan {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const GUEST_SEQ_FILE: &str = "/run/ral/jail.seq";
 
-/// The tree a detached survivor lives in: beside every engine's, so no
-/// engine's teardown reaches it and only the machine's halt does.
+/// The one cgroup every guest survivor shares: beside every engine's tree,
+/// beyond its teardown, and limited as one exec is.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DETACHED: &str = "detached";
 
@@ -246,15 +238,19 @@ impl GuestJail {
     /// be opened, locked, read, or written.
     pub(crate) fn plan(&self, ownership: Ownership, net: Option<Net>) -> io::Result<JailPlan> {
         let seq = self.next_seq()?;
-        let tree = match ownership {
-            Ownership::Kept => format!("engine-{}", self.engine_pid),
+        let cgroup = match ownership {
+            Ownership::Kept => self
+                .cgroup_root
+                .join(format!("engine-{}", self.engine_pid))
+                .join(format!("exec-{}", seq.0)),
             #[cfg(unix)]
-            Ownership::Surrendered => DETACHED.to_owned(),
+            Ownership::Surrendered => self.cgroup_root.join(DETACHED),
         };
         Ok(JailPlan {
+            ownership,
             seq,
             net,
-            cgroup: self.cgroup_root.join(tree).join(format!("exec-{}", seq.0)),
+            cgroup,
             limits: self.limits,
         })
     }
@@ -367,50 +363,40 @@ mod tests {
             kept.cgroup
                 .starts_with(root.join(format!("engine-{}", std::process::id())))
         );
-        assert_eq!(gone.cgroup.parent(), Some(root.join(DETACHED).as_path()));
+        assert_eq!(gone.cgroup, root.join(DETACHED));
+        let Some(other) = unwrap_or_skip(jail.plan(Ownership::Surrendered, None)) else {
+            return;
+        };
+        assert_eq!(gone.cgroup, other.cgroup);
+        assert_ne!(gone.seq.uid(), other.seq.uid());
     }
 
-    /// A plain directory stands in for the cgroup: the finish's `cgroup.kill`
-    /// write lands in it as a file, which keeps it there to be seen.
+    /// A missing `cgroup.procs` fails after limit writes. The ordinary
+    /// directory records whether the real teardown consumer wrote `cgroup.kill`.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_dropped_jail_is_finished_and_a_surrendered_one_is_not() {
+    fn partial_preparation_finishes_only_a_kept_cgroup() {
         let root = tempfile::tempdir().unwrap();
-        let leaf = |name: &str| {
-            let path = root.path().join(name);
-            std::fs::create_dir(&path).unwrap();
-            JailCgroup::at(path)
-        };
-        drop(leaf("dropped"));
-        leaf("surrendered").surrender();
-        let killed = |name: &str| root.path().join(name).join("cgroup.kill").exists();
-        assert!(killed("dropped"), "a dropped jail must be finished");
-        assert!(
-            !killed("surrendered"),
-            "a surrendered jail is its survivor's"
-        );
-    }
-
-    /// The cgroup is owned from its `mkdir`: a setup failing after it (here
-    /// at `cgroup.procs`, which a plain directory lacks) finishes it.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_jail_whose_setup_fails_part_way_is_finished() {
-        let root = tempfile::tempdir().unwrap();
-        let plan = JailPlan {
-            seq: Seq::new(0).unwrap(),
-            net: None,
-            cgroup: root.path().join("exec-0"),
-            limits: JailLimits::default(),
-        };
-        assert!(
-            linux::prepare(&plan).is_err(),
-            "a plain directory has no cgroup.procs"
-        );
-        assert!(
-            plan.cgroup.join("cgroup.kill").exists(),
-            "the half-made jail must be finished"
-        );
+        for ownership in [Ownership::Kept, Ownership::Surrendered] {
+            let plan = JailPlan {
+                ownership,
+                seq: Seq::new(0).unwrap(),
+                net: None,
+                cgroup: root.path().join(format!("{ownership:?}")),
+                limits: JailLimits::default(),
+            };
+            assert!(linux::prepare(&plan).is_err());
+            assert_eq!(
+                std::fs::read_to_string(plan.cgroup.join("memory.max")).unwrap(),
+                plan.limits.memory_max.to_string(),
+                "preparation must reach the fallible setup"
+            );
+            assert_eq!(
+                plan.cgroup.join("cgroup.kill").exists(),
+                ownership == Ownership::Kept,
+                "only a kept launch may finish the half-prepared cgroup"
+            );
+        }
     }
 
     #[test]

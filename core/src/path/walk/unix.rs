@@ -119,6 +119,7 @@ fn validate_scoped_acl(file: &File) -> io::Result<()> {
 pub(super) fn oflags(access: Access) -> OFlags {
     match access {
         Access::Read => OFlags::RDONLY,
+        Access::Update => OFlags::RDWR,
         Access::Append => OFlags::WRONLY | OFlags::APPEND,
         Access::Write => OFlags::WRONLY,
     }

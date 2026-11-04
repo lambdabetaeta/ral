@@ -19,7 +19,6 @@ mod checks;
 mod construct;
 mod context;
 pub(crate) mod cwd;
-pub(crate) mod detached;
 pub(crate) mod hooks;
 mod host;
 mod inherit;
@@ -32,7 +31,6 @@ pub(crate) mod workers;
 use self::bindings::BindingLedger;
 pub use self::construct::{Bequest, Runtime};
 pub(crate) use self::construct::{Image, Terms};
-use self::detached::DetachPolicy;
 use self::modules::Modules;
 use self::workers::Roster;
 use super::audit::Audit;
@@ -166,12 +164,6 @@ pub struct LocalState {
     /// install, and prune.  Workers and asides start inert; a fork is armed on
     /// its parent's terms.
     pub(crate) bindings: BindingLedger,
-    /// Authority to birth processes outliving this session.  Armed in the same
-    /// act that installs the `detach` builtin, so an unarmed shell lacks the
-    /// verb rather than owning one it cannot budget.  `Arc`-shared into a
-    /// worker's shell, so a `detach` inside `spawn { }` spends this budget; a
-    /// fork gets its own, unspent.
-    pub(crate) detach: Option<Arc<DetachPolicy>>,
     /// Nested `machine::evaluate`/`machine::apply` re-entries live on this
     /// host stack frame: a native such as `map` applying a user function.
     /// `machine::run` increments before its `catch_unwind` and decrements right

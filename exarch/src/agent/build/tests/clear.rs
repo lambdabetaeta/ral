@@ -383,7 +383,7 @@ fn a_ring_answered_after_clear_posts_no_wakeup() {
     agent.body.schedules.ring("old", &agent.mailbox.address());
     agent.clear().unwrap();
     let commits = |agent: &Agent| {
-        let (_, commits) = agent
+        let (_, _, commits) = agent
             .body
             .log
             .record_emitter()

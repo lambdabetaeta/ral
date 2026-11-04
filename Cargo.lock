@@ -5566,6 +5566,7 @@ version = "0.10.0"
 dependencies = [
  "clap",
  "clipboard",
+ "csv",
  "ctor",
  "libc",
  "ral-core",

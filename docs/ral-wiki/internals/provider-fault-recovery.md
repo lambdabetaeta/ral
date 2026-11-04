@@ -1,6 +1,6 @@
 ---
-verified_at_commit: e5a23909
-verified_at_date: 2026-10-29
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-03
 anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT, budget, retryable, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -341,8 +341,8 @@ transport blip.
 Streaming adds one wrinkle the driver respects. Only answer text survives into
 the transcript: `admit_assistant` treats reasoning alone as non-substantive and
 replaces it with a stub, so a partial that holds only reasoning keeps nothing.
-`complete` therefore tracks whether the answer has spoken (`spoke`, set by
-`Chunk` alone), and when the stream breaks:
+`complete` therefore tracks whether the answer has spoken (`spoke`, set only
+by non-whitespace answer `Chunk` content), and when the stream breaks:
 
 - **no prose streamed** → return `Attempt::Failed` and let the driver re-issue;
   the failed attempt's reasoning stays recorded as what was seen, sealed at the
@@ -356,6 +356,29 @@ replaces it with a stub, so a partial that holds only reasoning keeps nothing.
   refusal) → `Attempt::Failed`: the error surfaces as itself, the streamed text
   staying on screen through the stream's best-effort close, rather than being re-driven by a
   nudge the retry policy would never have granted.
+
+**Generated work is evidence, not committed prose.** Separately, `heard` records
+any tool-call chunk (even id/name or incomplete arguments) and nonempty text,
+reasoning or signature chunks. Start, heartbeat and empty string deltas set
+neither evidence nor prose. Reasoning/tool/signature traffic never suppresses
+retry by pretending to be answer text.
+
+- On an actual retry, `Delta::Retry { lost, .. }` contributes one
+  `Usage::unreported` when the abandoned attempt was heard, irrespective of
+  chunk count. `deliberate` commits it as `Forensic::UsageDelta` before
+  `Forensic::Retried`; the record seam meters it once and the view folds it on
+  replay. No partial tool call enters the transcript or executes.
+- A completed `End` contributes its real report, or one unknown report when
+  absent, never an additional `heard` delta. A committed stall retains its own
+  unreported usage. Terminal failures and cancellations have no expanded
+  accounting rule here.
+- Known dollars, subscription participation and incomplete usage remain
+  independent presentation facts. A mixed total keeps its known price and
+  `subscription`; missing usage adds an explicit unknown marker without
+  implying a subscription attempt incurred an extra cash charge
+  ([[map/exarch/provider|provider]]).
+- Historical omitted retry deltas are not reconstructed on resume: the record
+  contains no reliable evidence from which to backfill them.
 
 This is why `Attempt` needs no third "don't retry" variant: a committed stall is
 simply a `Done` carrying partial work. A stream that ends without an `End` frame

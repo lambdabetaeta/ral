@@ -81,6 +81,7 @@ pub(in crate::path::walk) enum OnMissing {
     Fail,
     Stop,
     Make,
+    MakeSynced,
 }
 
 /// One object the walk opened, offered to a vet before the walk relies on it:
@@ -508,13 +509,16 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         let top = self.cursor.top();
         match step_into(top, name, sharing) {
             Err(e)
-                if self.missing == OnMissing::Make
+                if matches!(self.missing, OnMissing::Make | OnMissing::MakeSynced)
                     && origin == Origin::Spelled
                     && e.kind() == io::ErrorKind::NotFound =>
             {
                 match host::mkdir(&top.file, name, Visibility::Private) {
                     Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
                     _ => {}
+                }
+                if self.missing == OnMissing::MakeSynced {
+                    host::sync_dir(&top.file)?;
                 }
                 step_into(top, name, sharing)
             }
@@ -713,6 +717,11 @@ pub fn walk_dir(rp: &LexicalPath) -> io::Result<Dir> {
 /// [`walk_dir`]'s; a make's.
 pub(crate) fn walk_dir_made(rp: &LexicalPath) -> io::Result<Dir> {
     dir_of(rp, OnMissing::Make)
+}
+
+/// Making walk with each created entry synced in its held parent before descent.
+pub(crate) fn walk_dir_made_synced(rp: &LexicalPath) -> io::Result<Dir> {
+    dir_of(rp, OnMissing::MakeSynced)
 }
 
 /// `rp` entered as a directory, a name that cannot be entered treated as

@@ -32,6 +32,65 @@ static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
 static PANIC_BUILTINS: &[BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
 #[test]
+fn dispatch_certifies_the_tool_call_and_refuses_on_sync_failure() {
+    let mut session = Agent::for_test("system").unwrap();
+    let dir = ral_core::own::OwnDir::for_test("dispatch-certification").unwrap();
+    let effect = dir.path().join("certified");
+    let command = format!(
+        "to-string dispatched > {}",
+        ral_core::syntax::quote_word(&ral_core::path::shown(&effect))
+    );
+    let recorder = session.recorder();
+    let call = recorder
+        .emit(crate::record::Display::ToolCall {
+            tool: "ral".into(),
+            cmd: command.clone(),
+            summary: None,
+        })
+        .unwrap();
+    let observing = ral_core::own::OwnDir::clone(&dir);
+    recorder.before_sync(move || {
+        assert!(
+            observing.stat("certified").is_none(),
+            "tool dispatched before certification"
+        );
+        Ok(())
+    });
+    let (emit, _) = crate::bus::dummy_emitter();
+    let result = session.ral(&DurableRoot::default().child(), &command, 5, &emit);
+    assert!(!result.failed, "{}", result.text);
+    recorder.assert_synced_through(call.locus().seq().commit());
+    assert_eq!(dir.read("certified").unwrap(), b"dispatched");
+    let effect = dir.path().join("uncertified");
+    let command = format!(
+        "to-string dispatched > {}",
+        ral_core::syntax::quote_word(&ral_core::path::shown(&effect))
+    );
+    let _call = recorder
+        .emit(crate::record::Display::ToolCall {
+            tool: "ral".into(),
+            cmd: command.clone(),
+            summary: None,
+        })
+        .unwrap();
+    let observing = ral_core::own::OwnDir::clone(&dir);
+    recorder.before_sync(move || {
+        assert!(
+            observing.stat("uncertified").is_none(),
+            "tool dispatched before failed certification"
+        );
+        Err(std::io::Error::other("dispatch sync failed"))
+    });
+    let result = session.ral(&DurableRoot::default().child(), &command, 5, &emit);
+    assert!(result.failed);
+    assert!(result.text.contains("dispatch sync failed"));
+    assert!(
+        dir.stat("uncertified").is_none(),
+        "failed certification must not dispatch"
+    );
+}
+
+#[test]
 fn let_bound_context_read_does_not_echo_the_transcript() {
     let mut session = Agent::for_test("system").unwrap();
     {

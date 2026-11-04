@@ -15,7 +15,7 @@ pub struct Usage {
     pub cache_read: Option<u64>,
     pub dollars: f64,
     pub unmetered: bool,
-    /// Turns whose usage the provider never reported (a stream cut short, an
+    /// Attempts whose usage the provider never reported (a stream cut short, an
     /// `End` without usage); the other fields cover only the rest, so a total
     /// with any is a lower bound.
     pub unreported: u32,
@@ -39,8 +39,7 @@ impl std::ops::AddAssign for Usage {
         self.cache_creation = add_opt_u64(self.cache_creation, rhs.cache_creation);
         self.cache_read = add_opt_u64(self.cache_read, rhs.cache_read);
         self.dollars += rhs.dollars;
-        // A total spanning a provider switch reads unmetered if any turn was,
-        // so `parts` says "subscription" over real dollars from the metered ones.
+        // Subscription participation is independent of known cash spend.
         self.unmetered = self.unmetered || rhs.unmetered;
         self.unreported += rhs.unreported;
     }
@@ -90,7 +89,7 @@ pub struct UsageParts {
 }
 
 impl Usage {
-    /// A turn whose usage never arrived.
+    /// An attempt whose usage never arrived.
     pub(crate) fn unreported(metered: bool) -> Self {
         Self {
             unmetered: !metered,
@@ -112,22 +111,24 @@ impl Usage {
         // A reported zero hides the segment too: no cache traffic, nothing to say.
         let show_cache = matches!(self.cache_creation, Some(n) if n > 0)
             || matches!(self.cache_read, Some(n) if n > 0);
-        let cost = if self.unmetered {
+        let mut cost = if self.dollars > 0.0 {
+            format!("${:.4}", self.dollars)
+        } else if self.unmetered {
             "subscription".into()
         } else {
-            let known = if self.dollars > 0.0 {
-                format!("${:.4}", self.dollars)
-            } else {
-                // Metered yet costing nothing means `pricing::lookup_for` found
-                // no rate for the model, not that the turn was free.
-                "—".into()
-            };
-            if self.unreported > 0 {
-                format!("{known} + ?")
-            } else {
-                known
-            }
+            // No known rate is not evidence that a metered turn was free.
+            "—".into()
         };
+        if self.unmetered && self.dollars > 0.0 {
+            cost.push_str(" + subscription");
+        }
+        if self.unreported > 0 {
+            cost.push_str(if self.unmetered {
+                " (usage unknown)"
+            } else {
+                " + ?"
+            });
+        }
         UsageParts {
             input: humanize_tokens(self.input),
             output: humanize_tokens(self.output),
@@ -209,6 +210,58 @@ mod tests {
     }
 
     #[test]
+    fn paid_and_subscription_totals_preserve_independent_facts_in_both_orders() {
+        let paid = Usage {
+            input: 100,
+            output: 20,
+            dollars: 0.0364,
+            cache_creation: Some(3),
+            cache_read: Some(7),
+            ..Usage::default()
+        };
+        let subscription = Usage {
+            input: 50,
+            output: 10,
+            unmetered: true,
+            ..Usage::default()
+        };
+        for mut total in [paid + subscription, subscription + paid] {
+            assert_eq!(total.input, 150);
+            assert_eq!(total.output, 30);
+            assert_eq!(total.cache_creation, Some(3));
+            assert_eq!(total.cache_read, Some(7));
+            assert!((total.dollars - paid.dollars).abs() < f64::EPSILON);
+            assert_eq!(total.parts().cost, "$0.0364 + subscription");
+            assert!(total.to_string().ends_with(" · $0.0364 + subscription"));
+            total += Usage::unreported(false);
+            assert_eq!(total.parts().cost, "$0.0364 + subscription (usage unknown)");
+            assert_eq!(total.unreported, 1);
+        }
+        assert_eq!((paid + paid).parts().cost, "$0.0728");
+        assert_eq!((subscription + subscription).parts().cost, "subscription");
+    }
+
+    #[test]
+    fn zero_and_unknown_rate_usage_preserve_cache_optionality() {
+        let unknown_rate = usage_from(
+            "unpriced-fixture-model",
+            &genai::chat::Usage {
+                prompt_tokens: Some(100),
+                completion_tokens: Some(20),
+                ..Default::default()
+            },
+            true,
+            AdapterKind::Anthropic,
+        );
+        for usage in [Usage::default(), unknown_rate] {
+            assert_eq!(usage.parts().cost, "—");
+            assert_eq!(usage.parts().cache, None);
+            assert_eq!(usage.cache_creation, None);
+            assert_eq!(usage.cache_read, None);
+        }
+    }
+
+    #[test]
     fn usage_display_omits_empty_cache_suffix() {
         assert_eq!(Usage::default().to_string(), "total 0 in / 0 out · —");
         let measured_zero = Usage {
@@ -272,6 +325,9 @@ mod tests {
         };
         assert_eq!(priced.parts().cost, "$0.0364 + ?");
         assert_eq!(Usage::unreported(true).parts().cost, "— + ?");
-        assert_eq!(Usage::unreported(false).parts().cost, "subscription");
+        assert_eq!(
+            Usage::unreported(false).parts().cost,
+            "subscription (usage unknown)"
+        );
     }
 }

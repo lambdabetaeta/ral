@@ -157,6 +157,7 @@ pub(crate) struct App {
     pub(super) project: Result<OwnDir, String>,
     /// What the resumed sessions' histories had spent.
     recalled: Usage,
+    pending_models: Vec<(AgentId, Commit)>,
     /// Modal in behaviour — [`Self::key`] hands it every key — and in
     /// rendering: drawn last, over the dimmed session.
     pub(super) overlay: Option<Overlay>,
@@ -202,6 +203,7 @@ impl App {
             tabs: Tabs::new(first, born, port, Some(opening.clone())),
             project,
             recalled: Usage::default(),
+            pending_models: Vec::new(),
             prompt_state: prompt,
             opening,
             overlay: None,
@@ -335,7 +337,14 @@ impl App {
     /// tab in the linger window is frozen: it still renders its final frame
     /// and ages out, but no further event belongs in it.
     pub fn commit(&mut self, id: AgentId, commit: &Commit) {
-        model_picker::persist_landed(self, commit);
+        if commit.records().iter().any(|record| {
+            matches!(
+                record.value(),
+                crate::record::Record::Control(crate::record::Control::ModelChanged { .. })
+            )
+        }) {
+            self.pending_models.push((id, commit.clone()));
+        }
         if self.tabs.lingering(id) {
             return;
         }
@@ -347,6 +356,33 @@ impl App {
             self.tabs.retire_subtree(id);
             self.gesture.clear();
         }
+        self.persist_synced_models();
+    }
+
+    pub(super) fn synced(&mut self, id: AgentId, through: u64) {
+        self.with_scrollback(id, |sb| sb.synced(through));
+        self.persist_synced_models();
+    }
+
+    fn persist_synced_models(&mut self) {
+        let pending = std::mem::take(&mut self.pending_models);
+        for (id, commit) in pending {
+            if self
+                .tabs
+                .scrollback(id)
+                .is_some_and(|sb| sb.covers(commit.number()))
+            {
+                model_picker::persist_landed(self, &commit);
+            } else {
+                self.pending_models.push((id, commit));
+            }
+        }
+    }
+
+    pub(super) fn copy_ready(&self) -> bool {
+        self.tabs
+            .focused_scrollback()
+            .is_some_and(Scrollback::copy_ready)
     }
 
     /// Open the newborn's tab — a root's under the session card — and mirror
@@ -486,8 +522,8 @@ impl App {
 
     pub(super) fn post(&mut self, command: Command) {
         let focused = self.tabs.focused();
-        if self.tabs.port().command(focused, command).is_err() {
-            self.push_error(focused, "this tab's agent has ended");
+        if let Err(error) = self.tabs.port().command(focused, command) {
+            self.push_error(focused, &error.to_string());
         }
     }
 
@@ -539,12 +575,16 @@ impl App {
         }
         match action {
             KeyAction::Stop | KeyAction::Cancel => {
-                if let Some(job) = self.tabs.focused_job()
-                    && let Ok(Some(prompts)) = self.tabs.port().stop(self.tabs.focused(), job)
-                {
-                    self.prompt_state.restore_stopped_prompts(prompts);
-                } else if action == KeyAction::Cancel && can_edit {
-                    self.prompt_state.edit_input(k);
+                let stopped = self.tabs.focused_job().map_or(Ok(None), |job| {
+                    self.tabs.port().stop(self.tabs.focused(), job)
+                });
+                match stopped {
+                    Ok(Some(prompts)) => self.prompt_state.restore_stopped_prompts(prompts),
+                    Ok(None) if action == KeyAction::Cancel && can_edit => {
+                        self.prompt_state.edit_input(k);
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.push_error(self.tabs.focused(), &error.to_string()),
                 }
             }
             KeyAction::Submit => {
@@ -597,9 +637,20 @@ impl App {
             // move the cursor. Up on an empty prompt dequeues the queued run.
             KeyCode::Up if can_edit && k.modifiers.is_empty() => {
                 let (port, focused) = (self.tabs.port(), self.tabs.focused());
-                let recalled = self
-                    .prompt_state
-                    .edit_queued_prompt(|| port.recall(focused).unwrap_or_default());
+                let mut failure = None;
+                let recalled =
+                    self.prompt_state
+                        .edit_queued_prompt(|| match port.recall(focused) {
+                            Ok(texts) => texts,
+                            Err(error) => {
+                                failure = Some(error);
+                                Vec::new()
+                            }
+                        });
+                if let Some(error) = failure {
+                    self.push_error(focused, &error.to_string());
+                    return;
+                }
                 if !recalled && !self.prompt_state.history_prev() {
                     self.prompt_state.edit_input(k);
                 }
@@ -753,7 +804,7 @@ impl App {
         }
     }
 
-    fn copy_text(&mut self, text: &str) -> std::io::Result<clipboard::Copied> {
+    pub(super) fn copy_text(&mut self, text: &str) -> std::io::Result<clipboard::Copied> {
         #[cfg(test)]
         if let Some(sink) = &mut self.copy_sink {
             return sink(text);
@@ -803,6 +854,10 @@ impl App {
                 }
             }
             Effect::Copy(text) => {
+                if !self.copy_ready() {
+                    self.push_error(f, "transcript is not synced yet; wait for the agent's next boundary before copying");
+                    return;
+                }
                 let sent = match self.copy_text(&text) {
                     Ok(sent) => Some(sent),
                     Err(error) => {

@@ -346,4 +346,4 @@ Should you wish for a process that runs *after* the session is over, use `detach
 
     let d = within [dir: #'/data'#] { detach #'background export job'# python3 export.py }
 
-`detach` takes a task description, a binary (not a block!), and arguments. It returns a receipt; `await`, `poll`, and `cancel` do not apply. Stdin, stdout and stderr are `/dev/null`, so you will not receive updates. Call `explain detach` for monitoring and grant restrictions.
+`detach` takes a task description, a binary (not a block!), and arguments. It returns a receipt; `await`, `poll`, and `cancel` do not apply. Stdin, stdout and stderr are `/dev/null`, so you will not receive updates. Call `explain detach` for monitoring and grant restrictions. In a VM, everything you detach shares one command's memory and process allowance.

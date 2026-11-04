@@ -7,7 +7,6 @@ use super::Mooring;
 use super::Shell;
 use super::TerminalAccess;
 use super::bindings::BindingLease;
-use super::detached::DetachPolicy;
 use crate::fact::unix_secs;
 use crate::io::Sink;
 use crate::io::terminal::TerminalState;
@@ -136,17 +135,6 @@ impl Shell {
             settled: snap.ended.map(|s| unix_secs(s.wall)),
             retention_left,
         })
-    }
-
-    /// Arm the `detach` authority: processes this session may birth over its
-    /// whole life, armed in the same act that installs the `detach` builtin.
-    /// Re-arming replaces the budget and forgets the births spent on the old.
-    pub fn arm_detach(&mut self, budget: u64) {
-        self.local.detach = Some(Arc::new(DetachPolicy::new(budget)));
-    }
-
-    pub fn detach_policy(&self) -> Option<&DetachPolicy> {
-        self.local.detach.as_deref()
     }
 
     pub fn worker_count(&self) -> usize {

@@ -510,7 +510,7 @@ only the binding changes. After both completion notices, collect the replies:
     BuiltinEntry::boundary(
         Cow::Borrowed("exarch-pins"),
         scheme_pins,
-        "exarch-pins <tag>  — your register: named slots of pinned state that outlive any one exchange. Foreground only: inside spawn { … } every tag errors.\n\nexarch-pins `set [key: <Str>, body: <card>]  — overwrite slot `key` with `body`, a `card [...] or one bare mark, e.g. `text [...].\nexarch-pins `clear <key>  — empty a slot; a no-op when it is already empty.\nexarch-pins `read <key>  — `some the card in slot `key`, or `none when it is empty.\nexarch-pins `list  — the occupied keys, as [String].",
+        "exarch-pins <tag>  — your session-owned register: named slots of pinned state that outlive an exchange, are emptied by /clear, and are not restored on resume. Foreground only: inside spawn { … } every tag errors.\n\nexarch-pins `set [key: <Str>, body: <card>]  — overwrite slot `key` with `body`, a `card [...] or one bare mark, e.g. `text [...].\nexarch-pins `clear <key>  — empty a slot; a no-op when it is already empty.\nexarch-pins `read <key>  — `some the card in slot `key`, or `none when it is empty.\nexarch-pins `list  — the occupied keys, as [String].",
         boundary_family::<Pins>,
     ),
     BuiltinEntry::new(

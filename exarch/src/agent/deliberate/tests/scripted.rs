@@ -59,7 +59,7 @@ fn drive_deliberate(session: &mut Agent, prompt: Option<&str>) -> Drive {
                 facts.extend(commit.into_records().into_iter().map(Recorded::into_value));
             }
             crate::bus::Signal::Transient(_, transient) => transients.push(transient),
-            crate::bus::Signal::Born(..) => {}
+            crate::bus::Signal::Born(..) | crate::bus::Signal::Synced { .. } => {}
         }
     }
     Drive {

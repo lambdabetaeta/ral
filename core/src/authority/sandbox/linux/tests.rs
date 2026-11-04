@@ -166,6 +166,50 @@ fn run_admitted(
     run_after(env, policy, admitted, args, || ())
 }
 
+/// The admitted program's own `execve` was refused, not one of its helpers.
+fn trampoline_refused(out: &std::process::Output, real: &std::path::Path) -> bool {
+    let refused = format!("ral: {}: Permission denied", crate::path::shown(real));
+    out.status.code() == Some(126)
+        && String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .any(|line| line.starts_with(&refused) || line.starts_with("hint: its interpreter"))
+}
+
+#[test]
+fn trampoline_refused_requires_its_status_and_own_diagnostic() {
+    use std::os::unix::process::ExitStatusExt;
+    let real = std::path::Path::new("/usr/bin/script");
+    for (code, stderr, refused) in [
+        (
+            126,
+            "ral: /usr/bin/script: Permission denied (os error 13)\n",
+            true,
+        ),
+        (126, "hint: its interpreter /bin/sh is not admitted\n", true),
+        (
+            0,
+            "ral: /usr/bin/script: Permission denied (os error 13)\n",
+            false,
+        ),
+        (1, "hint: its interpreter /bin/sh is not admitted\n", false),
+        (126, "/usr/bin/script: 1: date: Permission denied\n", false),
+        (
+            126,
+            "ral: /other/script: Permission denied (os error 13)\n",
+            false,
+        ),
+        (126, "hint: usage\n", false),
+        (126, "", false),
+    ] {
+        let out = std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        assert_eq!(trampoline_refused(&out, real), refused, "{code}: {stderr}");
+    }
+}
+
 /// [`run_admitted`], built now and spawned after `between`: the window in
 /// which a same-uid writer races the launch.
 fn run_after(

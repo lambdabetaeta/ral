@@ -718,6 +718,15 @@ mod tests {
         assert!(g.allows().count() >= 1);
         assert!(g.allows().all(|a| matches!(a, ExecAllow::Dir(_))));
         assert_eq!(g.denies().count(), 0);
+        #[cfg(unix)]
+        {
+            let root = "/usr/lib/cargo/bin";
+            assert_eq!(
+                written(&g).contains(&format!("dir {root}")),
+                std::path::Path::new(root).is_dir(),
+                "the distribution tool root is kept exactly where it exists"
+            );
+        }
     }
 
     /// A list is a set: a repeat adds nothing, and refuses nothing.

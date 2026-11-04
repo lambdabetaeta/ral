@@ -18,7 +18,7 @@ use crate::SessionInfo;
 use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::port::{Read, Rewrite};
 use crate::provider::allowance::{Allowance, Consumption, Reading, Scope};
-use crate::record::{Memory, RECORD};
+use crate::record::Memory;
 use jiff::Timestamp;
 
 /// A command's trailing argument.
@@ -332,12 +332,19 @@ pub(super) fn cmd_thinking(app: &mut App) {
 /// not an event in it.
 pub(super) fn cmd_copy(app: &mut App) {
     let id = app.tabs.focused();
+    if !app.copy_ready() {
+        app.push_error(
+            id,
+            "transcript is not synced yet; wait for the agent's next boundary before copying",
+        );
+        return;
+    }
     let reply = app.latest_reply();
     if reply.is_empty() {
         app.push_error(id, "no reply to copy yet");
         return;
     }
-    let sent = app.clipboard.copy(&reply, true).ok();
+    let sent = app.copy_text(&reply).ok();
     app.gesture
         .note_copy(sent, Toast::Reply(reply.lines().count()));
 }
@@ -347,11 +354,12 @@ pub(super) fn cmd_copy(app: &mut App) {
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.focused();
     let dest = resolve_export_path(arg, info.cwd);
-    let log_dir = app.tabs.focused_log_dir();
-    let exported = log_dir
-        .open(RECORD)
-        .map_err(std::io::Error::from)
-        .and_then(|record| export_to(record, &log_dir.path().join(RECORD), &dest, Format::Plain));
+    let exported = app
+        .tabs
+        .focused_scrollback()
+        .ok_or_else(|| std::io::Error::other("no recorded transcript is available"))
+        .and_then(|sb| sb.reader().snapshot())
+        .and_then(|snapshot| export_to(&snapshot, &dest, Format::Plain));
     match exported {
         Ok(()) => app.push_note(
             id,
@@ -487,8 +495,8 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) ->
             Some(head) => app.push_error(focused, &format!("unknown command: {head} (see /help)")),
             // A line is refused if its focused agent has ended.
             None => {
-                if app.tabs.port().submit(focused, text).is_err() {
-                    app.push_error(focused, "this tab's agent has ended");
+                if let Err(error) = app.tabs.port().submit(focused, text) {
+                    app.push_error(focused, &error.to_string());
                 }
             }
         },

@@ -285,6 +285,48 @@ mod words {
         assert!(!denial.check.fields.contains_key("args"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_link_under_an_admitted_folder_refuses_its_outside_target_without_disclosing_it() {
+        use crate::authority::policy::{ExecDenial, Withheld};
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = Tree::lay(tmp.path(), &["/tools/", "/elsewhere/prog"]);
+        let link = tree.at("/tools/prog");
+        let target = tree.at("/elsewhere/prog");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let only = exec([dir(&tree.at("/tools"))], []);
+        let outer = exec([dir(&tree.at("/elsewhere"))], []);
+        for layers in [vec![only.clone()], vec![outer, only]] {
+            let grants = grants(layers);
+            let baseline = Baseline::default();
+            let refused = grants
+                .admit(&baseline, file(&link))
+                .expect_err("a link inside an admitted folder admits no outside object");
+            assert!(matches!(
+                refused.why,
+                ExecDenial::Run(Withheld::MissingAllowance)
+            ));
+            let Err(denial) = check_exec(&grants, &baseline, &link, refused.program) else {
+                panic!("the guard must refuse the same object");
+            };
+            assert_eq!(denial.check.resource, Resource::Exec);
+            assert_eq!(
+                denial.check.fields,
+                std::collections::BTreeMap::from([("name".into(), link.clone())])
+            );
+            let Err(plain) = check_exec(&grants, &baseline, &link, file(&target)) else {
+                panic!("the target is outside the admitted folder");
+            };
+            assert_eq!(denial.error, plain.error);
+            for text in std::iter::once(&denial.error.message)
+                .chain(denial.error.hint.iter())
+                .chain(denial.check.fields.values())
+            {
+                assert!(!text.contains(&tree.at("/elsewhere")), "{text}");
+            }
+        }
+    }
+
     /// A name deny is cited as the author wrote it.  The program is a native
     /// binary named `sh` that the file `sh` resolved to cannot reach, so only
     /// the name veto fires.

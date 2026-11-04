@@ -92,7 +92,8 @@ fn remedies(e: &ProviderError) -> Vec<Remedy> {
         | ProviderError::Transient { .. }
         | ProviderError::Refused(_)
         | ProviderError::Api { .. }
-        | ProviderError::Other(_) => vec![],
+        | ProviderError::Other(_)
+        | ProviderError::Unavailable(_) => vec![],
     }
 }
 
@@ -179,7 +180,9 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
             }
             CutShort::Stalled(error) => error_fields(error),
         },
-        ProviderError::Other(cause) => vec![text_field("cause", prettify(cause))],
+        ProviderError::Other(cause) | ProviderError::Unavailable(cause) => {
+            vec![text_field("cause", prettify(cause))]
+        }
     }
 }
 

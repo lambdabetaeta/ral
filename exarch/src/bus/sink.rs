@@ -28,6 +28,9 @@ pub trait Sink {
     /// has a use for one.
     fn transient(&mut self, _id: AgentId, _t: &Transient) {}
 
+    /// A stable-storage watermark for this agent.
+    fn synced(&mut self, _id: AgentId, _through: u64) {}
+
     /// Route one raw signal to `fact`, `born` or `transient`.
     fn accept(&mut self, sig: Signal) {
         match sig {
@@ -36,6 +39,7 @@ pub trait Sink {
                     self.fact(id, rec);
                 }
             }
+            Signal::Synced { agent, through } => self.synced(agent, through),
             Signal::Born(id, born) => self.born(id, &born),
             Signal::Transient(id, t) => self.transient(id, &t),
         }
@@ -49,7 +53,7 @@ pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
             Signal::Commit(_, commit) => Some(commit.into_records()),
-            Signal::Born(..) | Signal::Transient(..) => None,
+            Signal::Born(..) | Signal::Transient(..) | Signal::Synced { .. } => None,
         })
         .flatten()
         .map(Recorded::into_value)

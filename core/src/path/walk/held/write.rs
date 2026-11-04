@@ -16,6 +16,7 @@ use super::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Access {
     Read,
+    Update,
     Append,
     Write,
 }

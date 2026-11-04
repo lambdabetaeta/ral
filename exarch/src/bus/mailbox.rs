@@ -176,10 +176,27 @@ pub enum Admission {
 }
 
 #[derive(Debug)]
-pub(crate) enum Refused {
+pub enum Refused {
     Ended,
     Resting,
+    /// Committed and queued, but stable storage failed; it may already have been read.
+    Unsynced(Unavailable),
 }
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ended => f.write_str("the agent has ended; nothing was queued"),
+            Self::Resting => f.write_str("the agent is resting; nothing was queued"),
+            Self::Unsynced(why) => write!(
+                f,
+                "queued and possibly already read, but not synced: {why}; do not automatically resend; inspect or resume the run first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
 
 impl Queued {
     pub(crate) fn posted(&self) -> Post {
@@ -457,12 +474,15 @@ impl Txn<'_> {
         if let Some(posts) = NonEmpty::collect(withdrawn) {
             rest.push(Control::Withdrawn { posts });
         }
-        if let Err(failure) = self.commit(NonEmpty {
-            first: Control::Status {
-                status: status.clone(),
-            },
-            rest,
-        }) {
+        if let Err(failure) = self
+            .commit(NonEmpty {
+                first: Control::Status {
+                    status: status.clone(),
+                },
+                rest,
+            })
+            .and_then(|_| self.shared.journal.sync())
+        {
             if owed {
                 self.shared
                     .report_failure(notice(ChildStatus::Failed(failure.to_string())));
@@ -1008,14 +1028,14 @@ impl AgentAddress {
 
     pub(crate) fn post(&self, input: Input) -> Result<(), Refused> {
         self.transact(|txn| txn.post(Queued::Input(input)))
-            .map_err(|_| Refused::Ended)?
-            .map(|_| ())
+            .map_err(|_| Refused::Ended)??;
+        self.0.journal.sync().map_err(Refused::Unsynced)
     }
 
     pub(crate) fn command(&self, command: Command) -> Result<(), Refused> {
         self.transact(|txn| txn.post(Queued::Command(command)))
-            .map_err(|_| Refused::Ended)?
-            .map(|_| ())
+            .map_err(|_| Refused::Ended)??;
+        self.0.journal.sync().map_err(Refused::Unsynced)
     }
 
     pub(crate) fn steer(&self, text: String) -> Result<(), Refused> {
@@ -1038,27 +1058,31 @@ impl AgentAddress {
         .unwrap_or_default()
     }
 
-    pub(crate) fn recall(&self) -> Vec<String> {
-        self.try_transact(|txn| {
+    pub(crate) fn recall(&self) -> Result<Vec<String>, Unavailable> {
+        let texts = self.try_transact(|txn| {
+            self.0.journal.check_available()?;
             if txn.is_live() {
                 txn.recall()
             } else {
                 Ok(Vec::new())
             }
-        })
-        .unwrap_or_default()
+        })?;
+        self.0.journal.sync()?;
+        Ok(texts)
     }
 
     pub(crate) fn stop_current(&self) -> bool {
         self.transact(|txn| txn.stop(None)).unwrap_or(false)
     }
-    pub(crate) fn stop(&self, job: JobId) -> Option<Vec<String>> {
-        self.transact(|txn| {
-            txn.stop(Some(job))
-                .then(|| txn.recall().unwrap_or_default())
-        })
-        .ok()
-        .flatten()
+    pub(crate) fn stop(&self, job: JobId) -> Result<Option<Vec<String>>, Unavailable> {
+        let texts = self.try_transact(|txn| {
+            self.0.journal.check_available()?;
+            txn.stop(Some(job)).then(|| txn.recall()).transpose()
+        })?;
+        if texts.is_some() {
+            self.0.journal.sync()?;
+        }
+        Ok(texts)
     }
 
     pub(crate) fn release(&self) -> bool {

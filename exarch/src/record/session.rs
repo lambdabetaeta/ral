@@ -641,6 +641,7 @@ impl AgentLog {
         let name = session_id.to_string();
         sessions_root.remove(&name)?;
         let dir = sessions_root.make_dir(&name)?;
+        sessions_root.sync()?;
         let seam = crate::record::Emitter::create(&dir)?;
         Ok(Self {
             id: session_id,
@@ -736,9 +737,16 @@ fn human_child(sessions: &OwnDir, id: AgentId) -> io::Result<Option<String>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         opened => opened?,
     };
+    let len = file.metadata()?.len();
     let mut records = super::log::Log::read(file, &session.path().join(RECORD))?;
     let Some(head) = records.next().transpose()? else {
-        return Ok(None);
+        return if len == 0 {
+            Ok(None)
+        } else {
+            Err(io::Error::other(
+                "no complete session head was found; the record is damaged or truncated",
+            ))
+        };
     };
     let Record::Control(Control::SessionStarted(Started {
         parent: None, name, ..

@@ -1868,7 +1868,7 @@ fn a_data_open_makes_an_absent_leaf_as_asked_and_leaves_a_present_one_alone() {
     let at = dir.join("present");
     std::fs::write(&at, b"body").unwrap();
     std::fs::set_permissions(&at, PermissionsExt::from_mode(0o644)).unwrap();
-    for access in [Access::Read, Access::Append, Access::Write] {
+    for access in [Access::Read, Access::Update, Access::Append, Access::Write] {
         located(&at)
             .unwrap()
             .open_data(access, Visibility::Secret)
@@ -1884,6 +1884,48 @@ fn a_data_open_makes_an_absent_leaf_as_asked_and_leaves_a_present_one_alone() {
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(std::fs::read(dir.join("raced")).unwrap(), b"first");
+}
+
+#[test]
+fn update_never_creates_a_leaf_observed_absent_even_if_a_file_later_appears() {
+    let tmp = tempfile::tempdir().unwrap();
+    let at = root(&tmp).join("missing");
+    let absent = located(&at).unwrap();
+    assert_eq!(
+        absent
+            .open_data(Access::Update, Visibility::Public)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(!at.exists());
+    let absent = located(&at).unwrap();
+    std::fs::write(&at, b"replacement").unwrap();
+    assert_eq!(
+        absent
+            .open_data(Access::Update, Visibility::Public)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(std::fs::read(&at).unwrap(), b"replacement");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn update_derives_the_held_regular_file_not_a_replacement_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let at = dir.join("source");
+    std::fs::write(&at, b"source").unwrap();
+    let held = located(&at).unwrap();
+    std::fs::rename(&at, dir.join("original")).unwrap();
+    std::fs::write(&at, b"replacement").unwrap();
+    let mut file = held.open_data(Access::Update, Visibility::Public).unwrap();
+    file.write_all(b"S").unwrap();
+    file.sync_data().unwrap();
+    assert_eq!(std::fs::read(dir.join("original")).unwrap(), b"Source");
+    assert_eq!(std::fs::read(&at).unwrap(), b"replacement");
 }
 
 /// A file made by `create_file` is made as it is told, and never over a

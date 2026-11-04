@@ -1428,7 +1428,7 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
 }
 
 #[test]
-fn resume_refuses_a_corrupt_interior_line_without_mutating_the_file() {
+fn resume_quarantines_every_line_from_the_first_damage_and_discovery_reads_the_prefix() {
     let sessions = sessions_root("resume-garbage");
     let live = AgentLog::create(
         &sessions,
@@ -1446,18 +1446,26 @@ fn resume_refuses_a_corrupt_interior_line_without_mutating_the_file() {
     .0;
     let path = sessions.path().join("0/record.jsonl");
     drop(live);
-    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(b"garbage\n").unwrap();
-    let after = Record::from(Forensic::Error {
-        text: "a sealed line after the garbage".into(),
-    });
-    file.write_all(&crate::record::commit_line(std::slice::from_ref(&after)))
-        .unwrap();
-    file.write_all(b"\n").unwrap();
-    file.flush().unwrap();
-    let before = fs::read(&path).unwrap();
-
-    let error = AgentLog::reopen(
+    let prefix = fs::read(&path).unwrap();
+    let mut tail = Vec::new();
+    for index in 0..3 {
+        tail.extend(b"garbage\n");
+        tail.extend(crate::record::commit_line(&[Forensic::Error {
+            text: format!("whole unsynced line {index}"),
+        }
+        .into()]));
+        tail.push(b'\n');
+    }
+    tail.extend(b"{\"not\":\"a commit\"}\n");
+    let mut before = prefix.clone();
+    before.extend(&tail);
+    fs::write(&path, &before).unwrap();
+    assert_eq!(
+        AgentLog::human_children(&sessions).unwrap(),
+        vec![(AgentId::new(0), "main".into())]
+    );
+    assert_eq!(fs::read(&path).unwrap(), before, "discovery is read-only");
+    let _resumed = AgentLog::reopen(
         &sessions,
         AgentId::new(0),
         &Selected::for_test("model"),
@@ -1465,18 +1473,33 @@ fn resume_refuses_a_corrupt_interior_line_without_mutating_the_file() {
         "",
         0,
     )
-    .err()
-    .expect("garbage before a sealed line is not a crash tail");
-    let text = error.to_string();
+    .expect("the entire unsynced tail is recoverable");
+    assert_eq!(fs::read(path.with_extension("jsonl.crash")).unwrap(), tail);
+    let after = fs::read(&path).unwrap();
+    assert!(after.starts_with(&prefix));
+    assert!(!String::from_utf8(after).unwrap().contains("whole unsynced"));
+}
+
+#[test]
+fn a_damaged_head_refuses_resume_and_discovery_without_quarantine() {
+    let sessions = sessions_root("damaged-head");
+    let dir = sessions.make_dir("0").unwrap();
+    let bytes = b"damage\n";
+    fs::write(dir.path().join(RECORD), bytes).unwrap();
+    assert!(AgentLog::human_children(&sessions).is_err());
     assert!(
-        text.contains("corrupt") && text.contains("not JSON"),
-        "{text}"
+        AgentLog::reopen(
+            &sessions,
+            AgentId::new(0),
+            &Selected::for_test("model"),
+            false,
+            "",
+            0
+        )
+        .is_err()
     );
-    assert!(
-        AgentLog::human_children(&sessions).is_err(),
-        "a session that does not parse is named, not hidden"
-    );
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::read(dir.path().join(RECORD)).unwrap(), bytes);
+    assert!(!dir.path().join("record.jsonl.crash").exists());
 }
 
 #[test]

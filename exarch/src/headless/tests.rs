@@ -7,6 +7,7 @@ use std::time::Duration;
 
 mod host;
 mod late_failure;
+mod provider_stream;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -408,8 +409,16 @@ fn helper_signals_never_finish_the_frontend() {
         assert_eq!(headless.last_stop, None);
         assert!(headless.fold.blocks().is_empty());
         headless.accept(status_signal(root, ChildStatus::Replied(FOValue::Unit)));
+        assert!(!headless.finished());
+        headless.accept(Signal::Synced {
+            agent: root,
+            through: 1,
+        });
         assert!(headless.finished());
-        assert_eq!(headless.status, Some(ChildStatus::Replied(FOValue::Unit)));
+        assert_eq!(
+            headless.status,
+            Some((1, ChildStatus::Replied(FOValue::Unit)))
+        );
         if !panicked && fault.is_none() {
             assert!(
                 err.is_empty(),
@@ -417,6 +426,48 @@ fn helper_signals_never_finish_the_frontend() {
             );
         }
     }
+}
+
+#[test]
+fn a_status_waits_for_its_watermark_and_death_never_promotes_buffered_success() {
+    let root = AgentId::new(1);
+    for died in [false, true] {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut headless = Headless::new(root, &mut out, &mut err);
+        headless.accept(status_signal(
+            root,
+            ChildStatus::Replied(FOValue::String {
+                value: "not durable".into(),
+            }),
+        ));
+        headless.accept(Signal::Synced {
+            agent: AgentId::new(2),
+            through: 100,
+        });
+        assert!(!headless.finished());
+        if died {
+            headless.accept(Signal::Transient(
+                root,
+                Transient::Died {
+                    failures: vec!["sync failed".into()],
+                },
+            ));
+        }
+        assert!(
+            headless.verdict().is_err(),
+            "death or disconnection cannot certify the buffered reply"
+        );
+        assert!(headless.reply.is_none());
+    }
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut late = Headless::new(root, &mut out, &mut err);
+    late.accept(Signal::Synced {
+        agent: root,
+        through: 1,
+    });
+    late.accept(status_signal(root, ChildStatus::Replied(FOValue::Unit)));
+    assert!(late.finished(), "a late attach's watermark suffices");
+    assert_eq!(late.verdict(), Ok(()));
 }
 
 #[test]
@@ -453,6 +504,10 @@ fn bus_elision_is_visible_but_never_a_headless_failure() {
         },
     ));
     headless.accept(status_signal(root, ChildStatus::Replied(FOValue::Unit)));
+    headless.accept(Signal::Synced {
+        agent: root,
+        through: 1,
+    });
     assert_eq!(headless.verdict(), Ok(()));
     assert!(!headless.panicked);
     drop(headless);

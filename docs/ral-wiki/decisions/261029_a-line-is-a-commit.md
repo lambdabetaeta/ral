@@ -2,16 +2,17 @@
 status: active
 generated_at_commit: fc0c9fbb
 generated_at_date: 2026-10-30
-verified_at_commit: 96e103a5
-verified_at_date: 2026-11-01
-anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, context::resume]
+verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+verified_at_date: 2026-11-03
+anchors: [Commit, NonEmpty, Seq, Locus, Sum, Cursor, Log::append, Log::sync, Signal::Synced, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Emitter::commit, Emitter::emit, Publish::commit, Signal::Commit, Scrollback::commit, context::resume]
 ---
 
 # A line is a commit
 
 **One line of `record.jsonl` is one commit: a non-empty list of records
 appended together or not at all.** A line is the log's unit of atomicity: a
-torn last line is never read. A transition can put several facts on one line;
+damaged line and everything after it are never read. A transition can put
+several facts on one line;
 readers receive its records only after the whole line is validated, while
 folds still step them individually. This is the unit of a write-ahead log
 ([SQLite WAL](https://www.sqlite.org/wal.html),
@@ -53,16 +54,19 @@ folds still step them individually. This is the unit of a write-ahead log
 
 **Damage is not a foreign shape.**
 
-- A last unterminated line, or a last line that is not JSON or fails its sum,
-  is *torn*: it is never read and resume quarantines it whole.
-- Such damage on an earlier line is *corrupt* and refused by file and line.
+- The first unterminated, non-JSON or sum-failing line begins the *torn tail*:
+  everything from it to EOF is never read, including any later whole commits.
+  Resume quarantines that tail whole.
+- The storage model is crash-only: a completed sync preserves its prefix;
+  bytes beyond it have no promised write order. A damaged head cannot supply a
+  session and is refused.
 - A shape error is re-checked for well-formedness: a line that is not
   well-formed JSON is damage, not foreign. A well-formed `{sum, commit}` whose
   sum is not 16 lowercase hex digits is a failed seal, also damage.
 - A line and its body must be JSON objects; an array is foreign.
 - Well-formed JSON of the wrong line shape, or a sealed commit whose records
   cannot be parsed (including an empty list), is *foreign* and refused
-  wherever it stands. Damage may coincidentally produce valid JSON of another
+  before the first damage. Damage may coincidentally produce valid JSON of another
   shape, such as a bit-flipped key (`"sun"`); refusing it rather than
   quarantining it fails closed.
 - Resume folds context and all three control folds before quarantine, so a refused resume
@@ -94,12 +98,40 @@ folds still step them individually. This is the unit of a write-ahead log
   step records, not commit boundaries; their intermediate states are not
   indivisible.
 
+## Stable storage
+
+**Append publication is provisional; `Signal::Synced` certifies a prefix.**
+
+- `Log::sync` notes the last commit under the journal lock, calls
+  `File::sync_data` under a separate sync mutex, then publishes its watermark
+  under the journal lock. Appends and transients do not wait for disk IO.
+- Syncs serialize through failure latching and publication: a one-shot
+  write-back error cannot be missed by another sync. The first failure ends
+  the bound life; a failed sync certifies nothing new.
+- Attach publishes the current watermark before any subsequent commit;
+  `Reader::since` returns it beside the cursor and bounded commits. A reopened
+  writer starts at zero: surviving bytes alone are not a sync witness.
+- Every provider attempt, shell dispatch, enquiry answer and addressed post,
+  command, recall or Stop return follows the relevant prefix's sync. A report
+  syncs the helper's `Status` before posting its parent. Failed post confirmation
+  is queued/possibly-read `Refused::Unsynced`, not nondelivery.
+- Before re-entering mailbox attendance, the owner certifies the preceding
+  commits; concurrent submitters retain their acknowledgement barriers. Terminal
+  completion certifies teardown and `SessionEnded` before publishing `Died`/`Gone`.
+- Frontend outside actions require the relevant watermark: headless results,
+  live model-selection persistence, Synod job certification/acknowledgement/release,
+  and record-backed clipboard/export. Clipboard/export refuse an uncovered suffix
+  until the owner certifies it. Drawing remains provisional. A frontend never
+  promotes buffered success on death or writes/syncs a live log.
+- Created directory entries are synced in their held parents, including the
+  application's held ancestor chain. Quarantine syncs its evidence and
+  directory entry before trimming the live file.
+
 ## Concessions
 
 **The seal is not a durability or presentation barrier everywhere.**
 
-- Appends do not `fsync`: process-crash recovery is not power-loss durability.
-  Several damaged tail lines are refused rather than recovered.
+- The seal alone proves no stable storage; only a successful sync supplies that witness.
 - A hand-edited last line that breaks its sum is quarantined, not refused;
   damage leaving well-formed JSON of the wrong shape is refused, not
   quarantined.

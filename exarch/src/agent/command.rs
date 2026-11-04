@@ -39,6 +39,7 @@ impl Agent {
         if self
             .mailbox
             .try_transact(|txn| txn.change_model(built.selected().clone()))
+            .and_then(|()| self.recorder().sync())
             .is_ok()
         {
             self.body.client = built;

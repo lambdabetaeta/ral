@@ -2,23 +2,16 @@
 # Footgun: `join -t,` demands both inputs pre-sorted on the key and
 # silently drops matches when they are not, keyed by column position.
 # Here one table is indexed by the named key into a map, so the join is
-# a hash lookup — no pre-sort, no lost rows.
+# a hash lookup — no pre-sort, no lost rows. from-csv decodes quoted cells
+# and refuses duplicate headers/ragged rows; to-csv encodes the joined rows.
 
 let [lpath, rpath, key] = args
 
-let parse = { |p|
-    let [hdr, ...rows] = from-lines < $p
-    let header = re-split ',' $hdr
-    map { |line|
-        fold { |m c| let k = $c[0]; return [...$m, $k: $c[1]] } [:] !{zip $header !{re-split ',' $line}}
-    } $rows
-}
-
-let index = fold { |m r| let k = $r[$key]; return [...$m, $k: $r] } [:] !{parse $rpath}
+let index = fold { |m r| let k = $r[$key]; return [...$m, $k: $r] } [:] !{from-csv < $rpath}
 
 let joined = flat-map { |l|
     let k = $l[$key]
     if !{has $index $k} { return [!{union $l $index[$k]}] } else { return [] }
-} !{parse $lpath}
+} !{from-csv < $lpath}
 
 to-csv $joined
