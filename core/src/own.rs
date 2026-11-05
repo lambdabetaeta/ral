@@ -343,10 +343,12 @@ impl OwnDir {
         Self::xdg_with(app, kind, false)
     }
 
-    /// [`Self::xdg`], syncing created entries and the cached directory's held ancestry.
+    /// [`Self::xdg`], syncing created entries and writable held directories up to
+    /// the first nonwritable ancestor. A nonwritable cached leaf is skipped, but
+    /// its parent is still examined. Directory syncing is a no-op on Windows.
     ///
     /// # Errors
-    /// The walk's, a make's, or an ancestor directory's sync failure.
+    /// The walk's, a make's, an effective-access probe's, or a required directory sync's.
     pub fn xdg_synced(app: &'static str, kind: XdgKind) -> Result<Self, OwnError> {
         Self::xdg_with(app, kind, true)
     }

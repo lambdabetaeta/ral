@@ -6027,9 +6027,9 @@ they pass through (§13.3). User-function application, control scopes, and
 iteration machinery are transparent: they record no observation of their own,
 while the commands, reads, and writes reached inside them remain visible.
 
-Observations are appended in settlement order, so a command's own observation
-follows those of everything it ran; the `start`–`end` intervals, not the list
-structure, recover which extent contained which.
+Observations are appended in settlement order, so a command's observation lands
+after any observations produced within its extent; the `start`–`end` intervals,
+not the list structure, recover which extent contained which.
 
 A `` `check `` observation is a distinct tag from a `` `command ``. The
 in-process guards record every filesystem and execution *denial* while a trail

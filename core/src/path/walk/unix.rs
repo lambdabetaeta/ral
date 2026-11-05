@@ -266,6 +266,21 @@ pub(super) fn sync_dir(dir: &File) -> io::Result<()> {
     Ok(rustix::fs::fsync(reopen(dir)?)?)
 }
 
+/// Whether effective credentials may write the held directory, including ACLs
+/// and read-only mounts. Only denied access identifies a certification boundary.
+pub(super) fn effective_write_access(dir: &File) -> io::Result<bool> {
+    match site!(
+        Silent::WalkAccess,
+        rustix::fs::accessat(dir, ".", Amode::WRITE_OK, AtFlags::EACCESS)
+    ) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM | rustix::io::Errno::ROFS) => {
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// A read handle on the directory `dir` holds, the one a listing, a sync and
 /// macOS's stored-name lookup need.
 pub(super) fn reopen(dir: &File) -> io::Result<File> {

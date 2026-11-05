@@ -80,9 +80,14 @@ watermark starts at zero; surviving bytes prove no prior sync.
 Directory entries are synced in their held parents: application and project,
 run, `sessions/`, session, record and quarantine sidecar. `OwnDir::make_dir`
 does not sync. `App::own` explicitly requests `OwnDir::xdg_synced`, which
-syncs the actual cached object's held ancestry outside the cache lock and
-syncs newly made entries before descent, including those later left by `..`
-or a symlink restart. Ordinary XDG lookup retains its nonsyncing semantics.
+syncs writable directories in the actual cached object's held ancestry outside
+the cache lock. On Unix, effective write access (including ACLs and read-only
+mounts) bounds this certification: a nonwritable leaf is skipped but its parent
+is still examined; the first nonwritable ancestor ends it. Unexpected probe
+errors and required sync failures propagate. This assumes stable namespace and
+permissions. Newly made entries are unconditionally synced in their parents
+before descent, including those later left by `..` or a symlink restart.
+Ordinary XDG lookup retains its nonsyncing semantics.
 Linux uses `fdatasync`; the installed Rust 1.99.1 standard library uses
 `F_FULLFSYNC` on Apple targets. Windows uses `FlushFileBuffers` for files;
 directory sync is a no-op. Native Apple latency has not been measured here.

@@ -566,8 +566,9 @@ The prelude contains common policies:
 `trail` is the flat list of what happened during the body, each entry an
 envelope — source location, timing, principal — around one `what`, a variant
 tagged `` `command ``, `` `write ``, `` `read ``, `` `check ``, or one of
-their kin. Entries arrive in settlement order, so a command lands after
-everything it ran; their `start`/`end` intervals say which contained which.
+their kin. Entries arrive in settlement order, so a command's observation lands
+after any observations produced within its extent; their `start`/`end` intervals
+say which contained which.
 `commands $report` picks out the `` `command `` payloads — `argv`, status,
 origin, stdout, stderr, error — and is what you want whenever only commands
 matter.

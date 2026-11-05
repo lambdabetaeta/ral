@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn settlement_waits_for_its_root_watermark_and_failed_sync_never_walks_or_releases() {
         let (root, settled) = settlement();
-        for certify in [false, true] {
+        for certify in [None, Some(false), Some(true)] {
             let (tx, rx) = exarch::port::channel();
             let log = Log::default();
             let mut seat = FakeSeat::new(&rx, &log, || true);
@@ -414,29 +414,44 @@ mod tests {
                 through: u64::MAX,
             })
             .unwrap();
-            if certify {
-                tx.send_signal(Signal::Synced {
-                    agent: root,
-                    through: settled.number(),
-                })
-                .unwrap();
-            } else {
-                tx.send_signal(died(root, &["sync failed"])).unwrap();
+            match certify {
+                Some(true) => tx
+                    .send_signal(Signal::Synced {
+                        agent: root,
+                        through: settled.number(),
+                    })
+                    .unwrap(),
+                Some(false) => tx.send_signal(died(root, &["sync failed"])).unwrap(),
+                None => {}
             }
             drop(tx);
             let result = run(&mut seat, &stage, &mut Ignore);
-            if certify {
-                assert_eq!(result, Ok(()));
-                assert_eq!(
-                    *log.borrow(),
-                    ["release", "walk", "done stopped=false", "release"]
-                );
-            } else {
-                assert_eq!(result, Err(true));
-                assert_eq!(
-                    *log.borrow(),
-                    ["release", "failure: sync failed", "invalidate"]
-                );
+            match certify {
+                Some(true) => {
+                    assert_eq!(result, Ok(()));
+                    assert_eq!(
+                        *log.borrow(),
+                        ["release", "walk", "done stopped=false", "release"]
+                    );
+                }
+                Some(false) => {
+                    assert_eq!(result, Err(true));
+                    assert_eq!(
+                        *log.borrow(),
+                        ["release", "failure: sync failed", "invalidate"]
+                    );
+                }
+                None => {
+                    assert_eq!(result, Err(true));
+                    assert_eq!(
+                        *log.borrow(),
+                        [
+                            "release",
+                            "failure: The assistant's event feed disconnected.",
+                            "invalidate"
+                        ]
+                    );
+                }
             }
         }
     }

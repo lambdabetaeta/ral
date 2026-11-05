@@ -59,14 +59,29 @@ pub(crate) fn sync_dir<A: Authority>(dir: &Dir<A>) -> io::Result<()> {
     host::sync_dir(&dir.node.held.file)
 }
 
-/// Sync the directory and every held ancestor, including an XDG cache winner.
+/// Sync writable held directories, including an XDG cache winner, stopping at
+/// the first nonwritable ancestor. A nonwritable leaf is skipped, not a boundary:
+/// its writable parent may still owe persistence of the leaf's entry.
 pub(crate) fn sync_dir_chain<A: Authority>(dir: &Dir<A>) -> io::Result<()> {
-    let mut node = Some(&dir.node);
-    while let Some(held) = node {
-        host::sync_dir(&held.held.file)?;
-        node = held.above.as_ref();
+    #[cfg(windows)]
+    {
+        host::sync_dir(&dir.node.held.file)
     }
-    Ok(())
+    #[cfg(unix)]
+    {
+        let mut node = Some(&dir.node);
+        let mut is_leaf = true;
+        while let Some(held) = node {
+            if unix::effective_write_access(&held.held.file)? {
+                host::sync_dir(&held.held.file)?;
+            } else if !is_leaf {
+                break;
+            }
+            is_leaf = false;
+            node = held.above.as_ref();
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]

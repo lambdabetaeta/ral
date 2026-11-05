@@ -69,6 +69,29 @@ mod unix {
             & 0o777
     }
 
+    /// Restore traversal and cleanup permissions even when an assertion unwinds.
+    struct RestorePermissions {
+        path: PathBuf,
+        permissions: std::fs::Permissions,
+    }
+
+    impl RestorePermissions {
+        fn restrict(path: &Path, mode: u32) -> Self {
+            let restore = Self {
+                path: path.to_owned(),
+                permissions: std::fs::metadata(path).unwrap().permissions(),
+            };
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+            restore
+        }
+    }
+
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.path, self.permissions.clone());
+        }
+    }
+
     /// `body`, run while `base` is the host's config base.
     fn under_config<R>(base: &Path, body: impl FnOnce() -> R) -> R {
         with_var("XDG_CONFIG_HOME", Some(text(base)), body)
@@ -330,6 +353,99 @@ mod unix {
             let again = OwnDir::xdg_synced("own-test-synced", XdgKind::State).unwrap();
             assert!(Arc::ptr_eq(&synced.0, &again.0));
         });
+    }
+
+    #[test]
+    fn xdg_synced_fresh_and_cached_succeed_below_a_search_only_ancestor() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!(
+                "skip: requires non-root credentials that cannot read or write a mode0111 gate"
+            );
+            return;
+        }
+        let base = scratch("roots-synced-search-only");
+        let gate = base.make_dir("gate").unwrap();
+        let state = gate.make_dir("state").unwrap();
+        let _restore = RestorePermissions::restrict(gate.path(), 0o111);
+        with_var("XDG_STATE_HOME", Some(text(state.path())), || {
+            let fresh = OwnDir::xdg_synced("own-test-search-fresh", XdgKind::State).unwrap();
+            assert_eq!(fresh.path(), state.path().join("own-test-search-fresh"));
+            fresh.append("proof").unwrap().write_all(b"fresh").unwrap();
+            assert_eq!(std::fs::read(fresh.path().join("proof")).unwrap(), b"fresh");
+
+            let cached = OwnDir::xdg("own-test-search-cached", XdgKind::State).unwrap();
+            let synced = OwnDir::xdg_synced("own-test-search-cached", XdgKind::State).unwrap();
+            assert!(Arc::ptr_eq(&cached.0, &synced.0));
+            assert_eq!(synced.path(), state.path().join("own-test-search-cached"));
+            synced
+                .append("proof")
+                .unwrap()
+                .write_all(b"cached")
+                .unwrap();
+            assert_eq!(
+                std::fs::read(synced.path().join("proof")).unwrap(),
+                b"cached"
+            );
+        });
+    }
+
+    #[test]
+    fn xdg_synced_upgrade_fails_to_sync_a_writable_but_unreadable_ancestor() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skip: requires non-root credentials denied read access to a mode0300 gate");
+            return;
+        }
+        let base = scratch("roots-synced-unreadable");
+        let gate = base.make_dir("gate").unwrap();
+        let state = gate.make_dir("state").unwrap();
+        let _restore = RestorePermissions::restrict(gate.path(), 0o300);
+        with_var("XDG_STATE_HOME", Some(text(state.path())), || {
+            let plain = OwnDir::xdg("own-test-unreadable", XdgKind::State).unwrap();
+            plain.append("proof").unwrap().write_all(b"plain").unwrap();
+            assert_eq!(std::fs::read(plain.path().join("proof")).unwrap(), b"plain");
+            let error = OwnDir::xdg_synced("own-test-unreadable", XdgKind::State)
+                .err()
+                .unwrap();
+            assert!(matches!(
+                error,
+                OwnError::Io { act: Act::Sync, error, .. }
+                    if error.kind() == io::ErrorKind::PermissionDenied
+            ));
+        });
+    }
+
+    #[test]
+    fn xdg_synced_skips_a_search_only_leaf_but_still_syncs_its_writable_parent() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!(
+                "skip: requires non-root credentials subject to directory read/write permissions"
+            );
+            return;
+        }
+        let base = scratch("roots-synced-leaf");
+        for parent_mode in [0o700, 0o300] {
+            let parent = base.make_dir(&format!("parent-{parent_mode:o}")).unwrap();
+            let leaf = parent.make_dir("own-test-leaf").unwrap();
+            leaf.append("proof").unwrap().write_all(b"leaf").unwrap();
+            let _restore_leaf = RestorePermissions::restrict(leaf.path(), 0o111);
+            let _restore_parent = RestorePermissions::restrict(parent.path(), parent_mode);
+            with_var("XDG_STATE_HOME", Some(text(parent.path())), || {
+                let plain = OwnDir::xdg("own-test-leaf", XdgKind::State).unwrap();
+                let result = OwnDir::xdg_synced("own-test-leaf", XdgKind::State);
+                if parent_mode == 0o700 {
+                    let synced = result.unwrap();
+                    assert!(Arc::ptr_eq(&plain.0, &synced.0));
+                    assert_eq!(synced.path(), leaf.path());
+                    assert_eq!(synced.read("proof").unwrap(), b"leaf");
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(OwnError::Io { act: Act::Sync, error, .. })
+                            if error.kind() == io::ErrorKind::PermissionDenied
+                    ));
+                }
+            });
+        }
     }
 
     #[test]
