@@ -48,8 +48,8 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   the variant payload. Bare tags carry `Unit`. `Try` passes an error record
   to its handler by the same push-then-force rule.
 - `Capture` swaps stdout for a buffer. Success restores the sink and returns
-  exact `Bytes`; overflow refuses a prefix. Failure flushes to the displaced
-  sink before propagating.
+  exact `Bytes`; overflow refuses a prefix. A halt restores the sink and
+  drops the buffer.
 - `Rec` unfolds the selected member of a shared `GroupNode`. Every sibling
   closes over one environment restricted to the group's occurrence set;
   recursive references re-enter through force without rewriting bodies.

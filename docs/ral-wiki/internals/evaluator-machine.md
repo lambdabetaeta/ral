@@ -77,8 +77,8 @@ snapshots.
   and restores it unless cleanup fails. The shield is restored on pop and
   abandonment.
 - `Capture` swaps stdout for a fresh buffer and holds the replaced sink.
-  Success yields exact `Bytes`; failure flushes the bytes to that sink
-  before propagating. Buffer overflow refuses a prefix. The surrounding
+  Success yields exact `Bytes`; a halt restores that sink and drops the
+  buffer. Buffer overflow refuses a prefix. The surrounding
   bind feeds `Prim::Decode`, which drops one trailing terminator and checks
   UTF-8, with the environment dropped before taking over the byte buffer.
 - Shell frames restore their own dynamic state: redirects settle writes,

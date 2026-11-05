@@ -133,8 +133,11 @@ the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
 - A stand-in runs whole under its caller's capture. A fresh unit-returning
   stub for an external is a command and captures `""`.
 - A capture reaching the 16 MiB buffer cap fails rather than bind a prefix.
-  On a halt, `Frame::Capture` restores its previous sink and flushes the
-  buffered bytes before propagating the signal; a refused flush pre-empts it.
+  On a halt, `Frame::Capture` restores its previous sink and drops the buffer:
+  a capture that does not become its value commits nothing, so
+  `let x = try { return !{ cmd } } { |_| return 'x' }` writes nothing to
+  stdout. A failure's report says once that bytes were discarded; `audit`
+  keeps a command's output.
 
 See [[design/types|types]], [[design/codecs|codecs]],
 [[internals/output-capture-and-detachment|output capture]],

@@ -1595,8 +1595,8 @@ The capture frame has three rules:
    sink is held.
 2. On return, the sink is restored and the buffer is yielded as `Bytes`. The
    body's value is ignored. A buffer that grows past the cap is an error.
-3. On halt, the sink is restored, what the body wrote is flushed to it, and the
-   halt propagates.
+3. On halt, the sink is restored, the buffer is dropped, and the halt
+   propagates: a capture that does not become its value writes nothing.
 
 The bytes are then decoded:
 
@@ -1634,10 +1634,12 @@ that fresh grade to `p`, so `let saved = to-json 1 > f` binds `()`.
 Captures nest. Output goes to the nearest enclosing sink, which inside a
 capture is that capture's buffer. A `let` inside a captured block captures its
 own command: `let x = !{ let y = echo a; echo b }` prints nothing and binds `b`.
-If a captured computation fails, the bytes it wrote are flushed to the sink the
-capture replaced rather than silently lost.
+If a captured computation fails or escapes, the bytes it wrote are dropped with
+the value, so a `try` handler's value is all a failed capture leaves behind. A
+failure's report says that bytes were discarded; `audit` keeps a command's
+output.
 
-An in-memory capture keeps at most 16 MiB. A capture that reaches the cap fails rather than bind a truncated value — the bytes captured *are* the value, so a prefix would be the wrong one. The failure is ordinary: the buffered bytes are flushed by the third rule above, and `try` catches the error. Redirect output to a file when it may be larger.
+An in-memory capture keeps at most 16 MiB. A capture that reaches the cap fails rather than bind a truncated value — the bytes captured *are* the value, so a prefix would be the wrong one. The failure is ordinary: nothing the capture held is kept, and `try` catches the error. Redirect output to a file when it may be larger.
 
 ### 7.3. Explicit codecs
 
@@ -1862,7 +1864,8 @@ publish $result
 Execution stops at the first failure. If every computation succeeds, the
 sequence returns the value of its final computation; an empty sequence returns
 `()`. Bytes written by earlier computations remain observable even when a
-later computation fails or when the sequence is evaluated under capture.
+later computation fails or when the sequence is evaluated under capture, unless
+that capture itself fails (§7.2).
 
 `return value` is the primitive successful computation. With no value,
 `return` returns `()`:

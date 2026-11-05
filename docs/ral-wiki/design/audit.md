@@ -78,6 +78,12 @@ ordinary destination, since auditing is observational and a tee is not a
 gate. Ordinary value capture and worker buffers retain their independent
 16 MiB limit.
 
+**`audit` is where a failed capture's bytes survive.** A capture that does
+not become its value drops its buffer ([[design/capture|capture]]), and the
+error record carries no bytes, so the trail is the one place they remain:
+every external's streams are teed, pipeline stages included, at most 1 MiB
+each; a builtin's writes are not kept.
+
 **Collection is lexical, not temporal, and the trail itself is flat.**
 
 - Two sites delimit a trail, and only two: an `audit { }` and a run that asks

@@ -116,8 +116,8 @@ with a command; a `let`-fixed `p` producer cannot.
 
 `capture M` returns exactly the bytes its command body writes. `decode` drops
 one trailing LF or CRLF and strictly decodes UTF-8; a failure names
-`from-bytes` as the way to keep binary output. On a halt, capture flushes to
-the sink it replaced. Both terms have no surface syntax: a translation's
+`from-bytes` as the way to keep binary output. On a halt, capture drops its
+buffer and writes nothing. Both terms have no surface syntax: a translation's
 meaning cannot be redefined by the session
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
 

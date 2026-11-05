@@ -38,6 +38,12 @@ pub struct Error {
 const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
                                    `attempt` if its failure should not stop the rest";
 
+/// Said once however many captures an error unwinds: a running count would
+/// need a field `Error` has no room for.
+const DISCARDED_NOTE: &str = "bytes written to stdout before the failure were discarded with \
+                              the value; run the command without `let` to see them, or use \
+                              `audit` to keep its output";
+
 const _: () = assert!(
     std::mem::size_of::<Error>() < 128,
     "Error must stay under clippy's result_large_err threshold"
@@ -159,6 +165,15 @@ impl Error {
             Status::Process(CommandFailure::Spawn(_)) => self,
             _ if self.hint.is_some() => self,
             _ => self.with_hint(ABANDONED_TAIL_HINT),
+        }
+    }
+
+    /// The error of a capture that dropped what its body wrote, below any
+    /// hint already carried.
+    pub(crate) fn discarding(self) -> Self {
+        match &self.hint {
+            Some(hint) if hint.contains(DISCARDED_NOTE) => self,
+            _ => self.append_hint(DISCARDED_NOTE),
         }
     }
 

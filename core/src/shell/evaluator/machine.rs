@@ -76,6 +76,8 @@ enum Frame {
         value: Value,
         span: Option<Span>,
     },
+    /// A halt drops `buf`: a capture that does not become its value commits
+    /// nothing.
     Capture {
         prev: Sink,
         buf: io::ByteBuffer,
@@ -185,28 +187,9 @@ fn as_value(t: Terminal) -> Result<Value, Break> {
     }
 }
 
-/// A capture that cannot become the value it promised: what the body already
-/// wrote is an effect that happened, so it goes to the sink the capture
-/// replaced before the halt rather than dying in the abandoned buffer.
-fn abandon_capture(
-    prev: &mut Sink,
-    scope: &Scope,
-    bytes: &[u8],
-    error: Error,
-    span: Option<Span>,
-) -> Break {
-    if !bytes.is_empty()
-        && let Err(br) = Shell::write_sink(prev, scope, bytes, "the surrounding stream")
-    {
-        return br;
-    }
-    stamp(Break::Error(error), span)
-}
-
 fn capture_overflowed() -> Error {
     Error::new(format!(
-        "capture exceeded {} MiB: the bytes that fit went out to the visible stream rather \
-             than into the value, because a prefix is not what the command wrote",
+        "capture exceeded {} MiB and nothing was kept: a prefix is not what the command wrote",
         io::SINK_BUFFER_CAP / (1024 * 1024)
     ))
     .with_hint("did you mean to write this to a file? `cmd > out.txt` keeps every byte")
@@ -847,25 +830,13 @@ impl Machine {
                 Terminal::Value(v) => Err(stamp(not_a_function(&v), span)),
             },
 
-            Frame::Capture {
-                mut prev,
-                buf,
-                span,
-            } => {
-                let bytes = buf.take();
-                let focus = if buf.overflowed() {
-                    Err(abandon_capture(
-                        &mut prev,
-                        &shell.scope,
-                        &bytes,
-                        capture_overflowed(),
-                        span,
-                    ))
-                } else {
-                    Ok(Focus::Return(Terminal::Value(Value::bytes(bytes))))
-                };
+            Frame::Capture { prev, buf, span } => {
                 shell.io.stdout = prev;
-                focus
+                if buf.overflowed() {
+                    Err(stamp(Break::Error(capture_overflowed()), span))
+                } else {
+                    Ok(Focus::Return(Terminal::Value(Value::bytes(buf.take()))))
+                }
             }
 
             Frame::Redirect(state) => {
@@ -936,15 +907,12 @@ impl Machine {
                 s @ Break::Escape(_) => s,
             }),
 
-            Frame::Capture { mut prev, buf, .. } => {
-                let flushed = Shell::write_sink(
-                    &mut prev,
-                    &shell.scope,
-                    &buf.take(),
-                    "the surrounding stream",
-                );
+            Frame::Capture { prev, buf, .. } => {
                 shell.io.stdout = prev;
-                Err(flushed.err().unwrap_or(s))
+                Err(match s {
+                    Break::Error(e) if buf.total() > 0 => Break::Error(e.discarding()),
+                    s => s,
+                })
             }
 
             Frame::Arg { .. } | Frame::Protect(_) => Err(s),
@@ -1210,10 +1178,10 @@ mod tests {
         assert!(bytes.is_empty(), "nothing escaped the capture");
     }
 
-    /// A capture that fails flushes what it wrote to the sink it replaced,
-    /// then fails.
+    /// A capture that does not become its value commits nothing: what it
+    /// wrote before failing is dropped, not written to the sink it replaced.
     #[test]
-    fn a_failing_capture_flushes_what_it_wrote_before_it_fails() {
+    fn a_failing_capture_writes_nothing_to_the_sink_it_replaced() {
         let mut shell = new_shell();
         let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
             run_source(
@@ -1223,7 +1191,61 @@ mod tests {
             )
         });
         assert!(result.is_err(), "the stand-in fails");
-        assert_eq!(bytes, b"partial\n");
+        assert!(bytes.is_empty(), "the failed capture wrote {bytes:?}");
+    }
+
+    /// A `try` around a failing captured pipeline binds the handler's value,
+    /// and what the pipeline wrote never reaches the stream.
+    #[test]
+    fn a_try_around_a_failing_capture_yields_only_the_handlers_value() {
+        let mut shell = new_shell();
+        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+            run_source(
+                "alias boom { |a| echo partial; fail [status: 1, message: 'x'] }\n\
+                 let x = try { return !{ echo in | boom } } { |_| return 'handled' }\n\
+                 return $x",
+                shell,
+            )
+        });
+        assert!(matches!(result, Ok(Value::String(ref s)) if s.as_str() == "handled"));
+        assert!(bytes.is_empty(), "the failed capture wrote {bytes:?}");
+    }
+
+    /// Nested captures that both fail write nothing, and the report says
+    /// once that they dropped bytes.
+    #[test]
+    fn nested_failing_captures_write_nothing_and_note_it_once() {
+        let mut shell = new_shell();
+        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+            run_source(
+                "alias boom { |a| echo cde; fail [status: 1, message: 'x'] }\n\
+                 let x = !{ echo ab; let y = boom; echo z }\nreturn $x",
+                shell,
+            )
+        });
+        assert!(bytes.is_empty(), "the failed captures wrote {bytes:?}");
+        let Err(Break::Error(e)) = result else {
+            panic!("expected the inner failure, got {result:?}")
+        };
+        let hint = e.hint.expect("the report notes the dropped bytes");
+        assert_eq!(hint.matches("discarded").count(), 1, "{hint}");
+    }
+
+    /// An escape out of a capture drops what it wrote, like a failure.
+    #[test]
+    fn an_exit_inside_a_capture_writes_nothing() {
+        let mut shell = new_shell();
+        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+            run_source(
+                "alias boom { |a| echo partial; exit 3 }\nlet x = boom\nreturn $x",
+                shell,
+            )
+        });
+        assert!(
+            matches!(result, Err(Break::Escape(Escape::Exit(3)))),
+            "expected the exit to propagate, got {result:?}"
+        );
+        assert!(bytes.is_empty(), "the abandoned capture wrote {bytes:?}");
     }
 
     /// `a ? b ? c`: an `Error` arm falls through to the next; an `Escape`

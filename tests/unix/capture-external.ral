@@ -33,4 +33,9 @@ assert_eq 'hoisted stage' entry $found
 let starred = printf 'a\n*b\n' | grep '*'
 assert_eq 'plain stage' '*b' $starred
 
+# A capture that fails commits nothing: `wc` wrote before `grep`'s failure
+# reached the capture, and the handler's value is all that remains
+let missed = try { return !{grep zzz /nonexistent 2> /dev/null | wc -l} } { |_| return 'x' }
+assert_eq 'failed capture' x $missed
+
 echo 'unix capture done'

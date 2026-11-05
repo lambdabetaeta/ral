@@ -111,12 +111,12 @@ from the truncation leaf `undef`, and `_≐_` grew the two fields that preserve
 it; `≉-abort-loop` proves a failing decode is not observationally a hang, which
 is what ral's behaviour demands and what makes the leaf more than decoration.
 
-One gap is owned rather than modelled: ral flushes a non-empty capture buffer
-to the nearest visible stream when the body of a capture fails, and the frozen
-machine reports none of it, so an aborting observation is faithful only up to
-that flush. No theorem depends on the difference — every conclusion about
-escaping bytes asks for a `Terminal` first — and modelling it needs a drain of
-the buffers above the failure at the instant it happens.
+One gap was owned rather than modelled: ral flushed a non-empty capture buffer
+to the nearest visible stream when the body of a capture failed, and the frozen
+machine reports none of it, so an aborting observation was faithful only up to
+that flush. No theorem depended on the difference — every conclusion about
+escaping bytes asks for a `Terminal` first. ral now drops the buffer
+([[design/capture|capture]]), which closes the gap.
 
 ## The alternative that was refused
 

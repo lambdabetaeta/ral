@@ -74,7 +74,8 @@ An older, monomorphic, intrinsically typed model still covers threads and author
 - workers inherit ambient grants; external requests carry admission evidence;
 - cancellation ancestry is separate from handle visibility and result claiming; await/join poll,
   cleanup shields, and gathers drain all accepted children;
-- failed captures flush their output before resuming the break; worker output replays on await/join.
+- failed captures flush their output before resuming the break (ral now drops it,
+  [[design/capture|capture]]); worker output replays on await/join.
 
 Cleanup grace is unbounded, stop causes are collapsed, and bytes are text. Its big-step semantics
 has no general adequacy proof. A separate trace semantics gives finite behaviours, capture and

@@ -2,7 +2,7 @@
 generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-04
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, CapturedBytes::overflowed]
 ---
 
 # Output capture and detachment
@@ -37,9 +37,11 @@ frame inspects no produced value: `capture : F^w Unit → F Bytes`.
   `decode_utf8_strict`, the bind's scope dropped first so the buffer moves into
   the string rather than being copied. A decode failure names `| from-bytes` as
   the route for output that is not valid UTF-8.
-- On a halt, `Frame::Capture`'s halt rule flushes whatever bytes the operand
-  already wrote to the sink it replaced (`Shell::write_sink`), then propagates
-  the halt. A failed operand's partial output is therefore not silently lost.
+- On a halt, `Frame::Capture`'s halt rule restores the sink it replaced and
+  drops the buffer, as a `Redirect` aborts its staged writes: a capture that
+  does not become its value commits nothing. An `Error` that dropped bytes
+  says so once in its hint, never in the record `try` reads; `audit` is where
+  a command's output survives.
 - An operand may contain an external child. That child's stdout still drains
   through the ordinary pump-to-EOF machinery below. It lands in the
   `Capture` buffer rather than in the terminal.
@@ -126,7 +128,7 @@ another worker hangs under that worker): the *handle* is its evidence
   `await` hands on a prefix that says where it stopped. Where the bytes *are*
   the value — `capture` — the buffer is drained by the very step that would
   bind them, so `Frame::Capture`'s return rule reads `CapturedBytes::overflowed` once
-  the writers have joined and fails, flushing the prefix visibly rather than binding it
+  the writers have joined and fails, keeping none of it rather than binding a prefix
   ([[design/capture|capture]]). One overflow predicate, two readings of it.
 - Audit tees have their own 1 MiB retention cap. They keep exact prefixes
   without a marker and count every observed byte. Each stream

@@ -4,14 +4,13 @@
 # is not a smaller answer but a wrong one, and the truncation marker would be
 # bytes the program could not tell from the command's own: the capture fails
 # instead of binding either, and `try` catches that like any other failure.
-# The refusal flushes what it holds to the visible stream — 16 MiB of it,
-# which is why the visible stream here is `/dev/null` and not this file.
+# Nothing it held is kept, so none of it reaches this file.
 let refusal = try {
     let big = yes ral | head -c 20000000
     return "bound"
 } { |e|
     return $e[message]
-} > /dev/null
+}
 echo $refusal
 
 # The control below the cap: nothing is dropped and nothing is refused, so the

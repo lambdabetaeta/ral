@@ -61,7 +61,8 @@ There is no payload route, no writer type, and no run-time frame that decides.
   ambient tee of `audit`, and `bytes_promise_broken` are deleted. The capture
   frame keeps its buffer, its flush on failure (to the sink it replaced, where
   it used to be the ambient one) and its 16 MiB cap, and ignores its body's
-  value.
+  value. (Amended: a capture that halts now drops its buffer and writes
+  nothing; see [[design/capture|capture]].)
 - **Two hints keep the cost visible.** An arm join of `()` against another type,
   where the `()` arm's tail is a command, says to capture it (`ls | from-line`)
   or to print in both. A name that `let` bound to what a call returned, when it

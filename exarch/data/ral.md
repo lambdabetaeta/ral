@@ -27,7 +27,7 @@ A computation can return a value and can write bytes to stdout. `let` binds the 
     let n     = line-count notes.txt     # returned value: Int
     echo "notes.txt ($n lines) as of $today"
 
-This also works through blocks and functions: `let f = { hostname }; let host = f` captures the host name. A final decoder such as `| from-lines` or `| from-json` returns another value instead.
+This also works through blocks and functions: `let f = { hostname }; let host = f` captures the host name. A final decoder such as `| from-lines` or `| from-json` returns another value instead. A captured `let` that fails discards what it wrote to stdout; `audit` keeps a command's output.
 
 Only `let` captures; `!{…}` in a value position is hoisted into a `let`. Elsewhere a command runs and writes: in `if`, `case` and `try` arms, and in blocks run by `map`, `each` or `par`. `map { |f| echo $f } [1, 2]` prints `1` and `2` and returns `[(), ()]`. To collect output as values, return it: `map { |f| return !{echo $f} } [1, 2]`. Arms are all commands or all return values; an arm ending in `return ()` can join either. A block passed where a value is wanted must return one.
 
