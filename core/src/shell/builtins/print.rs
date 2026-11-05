@@ -17,6 +17,7 @@
 //! that would break across lines leaves the list to the ordinary layout.
 
 use crate::shell::runtime::{List, Value};
+use crate::syntax::lexer::fence_admits;
 use std::borrow::Cow;
 use std::cell::Cell;
 
@@ -213,8 +214,11 @@ fn budgeted<T, P>(
 }
 
 fn quote_string(body: &str, params: &PrintParams) -> String {
-    let level = quote_bump_level(body).max(params.min_quote_hashes);
-    let hashes: String = "#".repeat(level);
+    let mut level = params.min_quote_hashes;
+    while !fence_admits(body, level) {
+        level += 1;
+    }
+    let hashes = "#".repeat(level);
     format!("{hashes}'{body}'{hashes}")
 }
 
@@ -272,17 +276,6 @@ fn stacked(parts: &[String], indent: usize) -> String {
     format!("[\n{pad}{}\n{end_pad}]", parts.join(&format!(",\n{pad}")))
 }
 
-/// Smallest `n` for which `body` round-trips inside `n*'#' + "'" + body + "'" +
-/// n*'#'`: zero when `body` has no `'`, else one past the longest run of `#`s
-/// following a `'`.
-fn quote_bump_level(body: &str) -> usize {
-    body.split('\'')
-        .skip(1)
-        .map(|after| after.bytes().take_while(|&b| b == b'#').count() + 1)
-        .max()
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +291,30 @@ mod tests {
 
     fn print(v: &Value) -> String {
         pretty_print(v, 0, &REPL_PRINT_PARAMS)
+    }
+
+    #[test]
+    fn raw_strings_round_trip_at_the_smallest_admitted_fence() {
+        use crate::syntax::lexer::{Lexeme, Token, lex};
+
+        for body in ["", "plain", "it's", "a#'b", "a'#b#'c", "#'", "'#"] {
+            for floor in 0..=4 {
+                let params = PrintParams {
+                    min_quote_hashes: floor,
+                    ..REPL_PRINT_PARAMS
+                };
+                let spelling = quote_string(body, &params);
+                let level = spelling.bytes().take_while(|&b| b == b'#').count();
+                assert!(level >= floor);
+                assert!((floor..level).all(|n| !fence_admits(body, n)));
+                let tokens = lex(&spelling).expect("printed string must lex");
+                assert!(
+                    matches!(tokens.as_slice(), [Lexeme { token: Token::SingleQuoted(s), .. }, Lexeme { token: Token::Eof, .. }] if s == body),
+                    "{spelling:?}: {tokens:?}"
+                );
+            }
+        }
+        assert_eq!(quote_string("a#'b", &REPL_PRINT_PARAMS), "##'a#'b'##");
     }
 
     #[test]

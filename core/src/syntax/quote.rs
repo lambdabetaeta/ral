@@ -3,8 +3,9 @@
 //!
 //! Ral's single-quoted strings have no escapes, so a body containing `'`
 //! is written hash-bumped: `n` `#`s then `'`, closing only on `'` then
-//! `n` `#`s.  These are ral's rules, not POSIX's: `ral-quote` is this
-//! module, while `posix-quote` keeps POSIX semantics so it round-trips with
+//! `n` `#`s, with neither fence admitted inside the body. These are ral's
+//! rules, not POSIX's: `ral-quote` is this module, while `posix-quote` keeps
+//! POSIX semantics so it round-trips with
 //! `posix-split`.  A body holding a character the lexer refuses even in
 //! quotes (a bidi control) has no raw spelling, so it is double-quoted with
 //! that character as a `\u{…}` escape.
@@ -13,7 +14,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::syntax::ast::{Word, WordLiteral};
-use crate::syntax::lexer::{Lexeme, Token, is_bidi_control, lex};
+use crate::syntax::lexer::{Lexeme, Token, fence_admits, is_bidi_control, lex};
 
 /// True when `s` lexes as one bare word *and* reads back as the string `s`.
 ///
@@ -51,11 +52,13 @@ pub fn quote_word(s: &str) -> Cow<'_, str> {
     Cow::Owned(if s.chars().any(is_bidi_control) {
         let home = if s.starts_with('~') { "\\" } else { "" };
         format!("\"{home}{}\"", escape_for_interpolation(s))
-    } else if s.contains('\'') {
-        let hashes = "#".repeat(min_bump_level(s));
-        format!("{hashes}'{s}'{hashes}")
     } else {
-        format!("'{s}'")
+        let mut level = 0;
+        while !fence_admits(s, level) {
+            level += 1;
+        }
+        let hashes = "#".repeat(level);
+        format!("{hashes}'{s}'{hashes}")
     })
 }
 
@@ -119,19 +122,6 @@ pub(crate) fn one_word(run: &str) -> Option<String> {
         }
     }
     Some(format!("\"{body}\""))
-}
-
-/// Smallest `n ≥ 1` whose closer, `'` followed by `n` `#`s, is absent
-/// from `s`.
-fn min_bump_level(s: &str) -> usize {
-    let mut level = 1;
-    loop {
-        let closer = format!("'{}", "#".repeat(level));
-        if !s.contains(&closer) {
-            return level;
-        }
-        level += 1;
-    }
 }
 
 #[cfg(test)]
@@ -270,6 +260,11 @@ mod tests {
     }
 
     #[test]
+    fn quote_word_open_run_in_body_bumps_further() {
+        assert_eq!(quote_word("a#'b"), "##'a#'b'##");
+    }
+
+    #[test]
     fn quote_word_empty_is_empty_quotes() {
         assert_eq!(quote_word(""), "''");
     }
@@ -365,6 +360,10 @@ mod tests {
             "~foo",
             "it's.txt",
             "a'#b",
+            "a#'b",
+            "a'#b#'c",
+            "#'",
+            "'#",
             "日本語",
             "",
             // Raw bodies keep line breaks and C0/DEL bytes verbatim.

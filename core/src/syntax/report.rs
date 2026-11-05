@@ -132,15 +132,15 @@ fn describe_inner(src: &Source, kind: &LexErrorKind) -> String {
                 None => head,
             }
         }
-        LexErrorKind::Mismatched { .. } | LexErrorKind::Other(_) => {
-            "an unrelated lexer error".into()
-        }
+        LexErrorKind::Mismatched { .. }
+        | LexErrorKind::OpenerInRaw { .. }
+        | LexErrorKind::Other(_) => "an unrelated lexer error".into(),
     }
 }
 
 /// `None` for `Other(_)`, so the caller falls back to the single-label form.
 /// `at` is where the lexer stopped.  Codes are never reused: the next lex
-/// diagnostic takes L0007.
+/// diagnostic takes L0008.
 fn lex_report(src: &Source, kind: &LexErrorKind, at: Option<Span>) -> Option<Report> {
     let report = |code, opened: &Span, text, also, hint| Report {
         code: Some(code),
@@ -198,6 +198,24 @@ fn lex_report(src: &Source, kind: &LexErrorKind, at: Option<Span>) -> Option<Rep
             also: Some(label(Some(*opened), format!("`{open}` opened here"))),
             hint: None,
         },
+        LexErrorKind::OpenerInRaw { level, opened } => {
+            let hashes = "#".repeat(*level);
+            Report {
+                code: Some("L0007"),
+                message: kind.headline(),
+                at: Some(label(at, format!("`{hashes}'` inside the string"))),
+                also: Some(label(
+                    Some(*opened),
+                    format!(
+                        "raw string opened here; expected `'{hashes}` before the marked `{hashes}'`"
+                    ),
+                )),
+                hint: Some(format!(
+                    "a literal `{hashes}'` needs a fence of `{}` `#`s",
+                    level + 1
+                )),
+            }
+        }
         LexErrorKind::Other(_) => return None,
     })
 }
@@ -412,6 +430,46 @@ mod tests {
         assert_eq!(report.code, Some("L0006"));
         assert_eq!(report.at.and_then(|l| l.span).map(Span::range), Some(2..3));
         assert_eq!(report.also.and_then(|l| l.span), Some(opened));
+    }
+
+    #[test]
+    fn an_inner_raw_opener_is_l0007_labelled_with_its_enclosing_opener() {
+        for (text, level, inner) in [("#'a #'b'#", 1, 4..6), ("##'a ##'b'##", 2, 5..8)] {
+            let (kind, report) = lex_report_of(text);
+            let LexErrorKind::OpenerInRaw {
+                level: actual,
+                opened,
+            } = kind
+            else {
+                panic!("expected OpenerInRaw, got {kind:?}");
+            };
+            assert_eq!(actual, level);
+            assert_eq!(opened.range(), 0..level + 1);
+            assert_eq!(report.code, Some("L0007"));
+            assert_eq!(report.at.and_then(|l| l.span).map(Span::range), Some(inner));
+            assert_eq!(report.also.and_then(|l| l.span), Some(opened));
+            let err = crate::syntax::parser::parse(text).unwrap_err();
+            let output = drawn("test.ral", text, &err);
+            let hashes = "#".repeat(level);
+            assert!(output.contains("L0007"), "{output}");
+            assert!(
+                output.contains(&format!("`{hashes}'` inside the string")),
+                "{output}"
+            );
+            assert!(
+                output.contains(&format!(
+                    "raw string opened here; expected `'{hashes}` before the marked `{hashes}'`"
+                )),
+                "{output}"
+            );
+            assert!(
+                output.contains(&format!(
+                    "a literal `{hashes}'` needs a fence of `{}` `#`s",
+                    level + 1
+                )),
+                "{output}"
+            );
+        }
     }
 
     #[test]

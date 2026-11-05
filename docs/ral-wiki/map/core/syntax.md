@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
+generated_at_commit: af1be8d60b959119f0ccc371d356d3afc0a4abf5
+generated_at_date: 2026-11-05
 covers_paths: [core/src/syntax/, editors/]
 ---
 
@@ -17,7 +17,11 @@ sees raw bytes and bare words.
   `Token::Op(Operator)` (a closed enum over `ir::BinaryOp` plus `And`, `Or`,
   `Assign`) rather than a redirect, refused punctuation or word characters. A
   closer that is not the innermost opener's is `LexErrorKind::Mismatched`
-  (L0006), a definite error. The bash reflexes `${…}` and `$(cmd args)` are
+  (L0006), a definite error. In a level-`n ≥ 1` raw body, a non-closing `'`
+  preceded by at least `n` body `#`s is `LexErrorKind::OpenerInRaw` (L0007),
+  also definite. `fence_admits` defines admissible fences for both printers
+  (`quote_word` and `print.rs`'s `quote_string`): neither opener nor closer
+  may occur in the body. The bash reflexes `${…}` and `$(cmd args)` are
   refused at `scan_dollar`. Outside `$[…]` a word starting with `&`
   is refused naming `spawn { … }`, one starting `&&` naming `;`, while a `&`
   inside a word is ordinary (`?a=1&b=2`); a bare `$` is refused naming

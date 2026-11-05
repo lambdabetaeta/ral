@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 30a5e059
-verified_at_date: 2026-10-24
-anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, WordLiteral::classify, is_bare_word, parse_entry_value, signed_numeral]
+verified_at_commit: af1be8d60b959119f0ccc371d356d3afc0a4abf5
+verified_at_date: 2026-11-05
+anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, LexErrorKind::OpenerInRaw, fence_admits, WordLiteral::classify, is_bare_word, parse_entry_value, signed_numeral]
 ---
 
 # Surface syntax: lexing and parsing
@@ -37,7 +37,12 @@ boundary and keeps such a dash.
 `close_delim` meeting a closer that is not the innermost opener's returns
 `LexErrorKind::Mismatched` (L0006, labelled at the closer with the opener as
 its `also`), so the REPL never waits for a line that cannot repair it; a closer
-at depth 0 still lexes and the parser reports it as unmatched. A leading BOM is
+at depth 0 still lexes and the parser reports it as unmatched. In a level-`n ≥ 1`
+raw body, a non-closing `'` preceded by at least `n` body `#`s is likewise a
+definite error, `LexErrorKind::OpenerInRaw` (L0007), labelled at the inner opener
+with the enclosing opener as its `also`. The lexer's `fence_admits` is the
+single definition shared by both printers: neither fence may occur in the body,
+so literal fence text needs more hashes on both sides. A leading BOM is
 stripped when a source is loaded (`normalize_source_text`), before the line
 endings fold. The lexer also refuses bash's reflexes by name: `${…}` at the
 `$`, and `$(cmd args)`, which holds one name, pointing at `!{…}`.

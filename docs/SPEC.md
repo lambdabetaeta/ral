@@ -592,12 +592,16 @@ return 'literal $name and \n'
 ```
 
 Add matching `#` fences when the text contains a single quote. Add more `#`
-characters when the text contains a possible closing fence:
+characters when the text contains a possible opening or closing fence:
 
 ```ral
 return #'it's literal'#
-return ##'body with '# inside'##
+return ##'body with '# and #' inside'##
 ```
+
+In a raw string with `n ≥ 1` fence hashes, a non-closing `'` preceded by at
+least `n` body `#`s is a lexical error (L0007); use one more `#` on each side
+if that opener is literal text.
 
 Literal strings may span lines. Their contents are exact after source-text
 normalization. A line ending written as `CRLF` or a lone `CR` in loaded source

@@ -43,6 +43,12 @@ pub(crate) fn is_ident(s: &str) -> bool {
     chars.all(is_ident_cont)
 }
 
+/// Whether a raw fence of `level` hashes admits `body` without either fence inside it.
+pub(crate) fn fence_admits(body: &str, level: usize) -> bool {
+    let hashes = "#".repeat(level);
+    !body.contains(&format!("{hashes}'")) && !body.contains(&format!("'{hashes}"))
+}
+
 /// The word-*continuation* predicate: true when `ch` may appear after the
 /// first char of a bare word; the rest are metacharacters that always need
 /// quoting.
@@ -323,6 +329,8 @@ pub enum LexErrorKind {
         opened: Span,
         close: char,
     },
+    /// A non-closing quote preceded by its own raw fence's hash run.
+    OpenerInRaw { level: usize, opened: Span },
     /// Everything unstructured: bad escapes, unexpected characters,
     /// expected-X-found-Y, redirect faults.
     Other(String),
@@ -356,6 +364,14 @@ impl LexErrorKind {
             Self::Mismatched { open, close, .. } => {
                 format!("mismatched `{close}`: the innermost open delimiter is `{open}`")
             }
+            Self::OpenerInRaw { level, .. } => {
+                let hashes = "#".repeat(*level);
+                format!(
+                    "`{hashes}'` inside a raw string opened with `{hashes}'`: \
+                     close that string with `'{hashes}` first, or write it with one more `#` \
+                     on each side if `{hashes}'` is text"
+                )
+            }
             Self::Other(s) => s.clone(),
         }
     }
@@ -375,7 +391,7 @@ impl LexErrorKind {
 pub struct LexError {
     pub kind: LexErrorKind,
     /// The opening delimiter for the "unterminated" kinds, the offending
-    /// position for free-form ones and a mismatched closer.
+    /// position for definite errors.
     pub span: Span,
 }
 
@@ -1046,7 +1062,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Push each body char and consume the closing `'` with its `level`
-    /// `#`s.  A `'` trailed by fewer than `level` `#`s is body text.
+    /// `#`s. A non-closing `'` must not follow `level` body `#`s.
     fn scan_quoted_body(
         &mut self,
         span: Span,
@@ -1074,6 +1090,18 @@ impl<'a> Lexer<'a> {
                             self.bump();
                         }
                         return Ok(());
+                    }
+                    if body.bytes().rev().take_while(|&b| b == b'#').count() >= level {
+                        let width =
+                            u32::try_from(level).expect("raw fence fits in its source span");
+                        let quote = self.byte_pos();
+                        return Err(Self::typed_error(
+                            Span::new(span.file, quote - width, quote + 1),
+                            LexErrorKind::OpenerInRaw {
+                                level,
+                                opened: Span::new(span.file, span.start, span.start + width + 1),
+                            },
+                        ));
                     }
                     body.push('\'');
                     self.bump();
@@ -3042,6 +3070,65 @@ mod tests {
     }
 
     // ── hash-bumped single-quoted strings ────────────────────────────────────
+
+    #[test]
+    fn raw_fence_admission_is_monotone_and_relexes() {
+        for body in [
+            "", "plain", "日本", "it's", "a#'b", "a'#b#'c", "#'", "'#", "###'", "'###",
+        ] {
+            let mut admitted = false;
+            for level in 0..=4 {
+                let admits = fence_admits(body, level);
+                assert!(!admitted || admits, "{body:?} at level {level}");
+                admitted = admits;
+                let hashes = "#".repeat(level);
+                let spelling = format!("{hashes}'{body}'{hashes}");
+                let round_trips = lex(&spelling).is_ok_and(|tokens| {
+                    matches!(tokens.as_slice(), [Lexeme { token: Token::SingleQuoted(s), .. }, Lexeme { token: Token::Eof, .. }] if s == body)
+                });
+                assert_eq!(admits, round_trips, "{spelling:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bumped_string_rejects_its_opener_before_a_closer() {
+        for (src, offending, level) in [
+            ("$[$a == #'-s' || $a == #'--scripts'#]", "#'", 1),
+            ("#'a ##'b'#", "#'", 1),
+            ("##'日本 ###'b'##", "##'", 2),
+        ] {
+            let err = lex(src).expect_err("inner opener must be refused");
+            let LexErrorKind::OpenerInRaw {
+                level: actual,
+                opened,
+            } = err.kind
+            else {
+                panic!("{src:?}: expected OpenerInRaw, got {err:?}");
+            };
+            assert_eq!(actual, level);
+            assert_eq!(&src[err.span.range()], offending);
+            let start = src.rfind(offending).unwrap();
+            assert_eq!(err.span.range(), start..start + offending.len());
+            assert_eq!(&src[opened.range()], format!("{}'", "#".repeat(level)));
+            assert!(!err.kind.is_incomplete());
+            assert!(!crate::syntax::parser::needs_continuation(src));
+        }
+    }
+
+    #[test]
+    fn bumped_string_allows_lower_openers_and_prioritizes_its_closer() {
+        for (src, body) in [
+            ("##'a #'b'##", "a #'b"),
+            ("#'a#'#", "a#"),
+            ("#'it's'#", "it's"),
+        ] {
+            assert_eq!(
+                tok_types(src),
+                vec![Token::SingleQuoted(body.into()), Token::Eof]
+            );
+        }
+    }
 
     #[test]
     fn bumped_string_level1_empty() {
