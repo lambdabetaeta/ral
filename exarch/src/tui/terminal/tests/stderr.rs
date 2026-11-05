@@ -1,6 +1,6 @@
 //! Real child stdio; process-wide redirection runs only in an isolated child.
 
-use super::super::{editor_stderr, redirect_stderr_to_file, restore_stderr};
+use super::super::{StderrRedirect, redirect_stderr_to_file};
 use std::fs::File;
 use std::io::Write as _;
 use std::path::Path;
@@ -49,7 +49,7 @@ fn check_routing(scenario: &str) {
     // Actual bytes also prove the exact child tests were selected and ran.
     assert_eq!(
         std::fs::read(dir.path().join("saved")).unwrap(),
-        CHILD_MARKER.repeat(2)
+        [CHILD_MARKER.repeat(2), PARENT_MARKER.to_vec()].concat()
     );
     assert_eq!(
         std::fs::read(dir.path().join("log")).unwrap(),
@@ -64,7 +64,7 @@ fn saved_stderr_routing_child() {
     let dir = Path::new(&dir);
     let original = File::create(dir.join("saved")).unwrap();
     #[cfg(unix)]
-    let initial = redirect_stderr_to_file(original.try_clone().unwrap()).unwrap();
+    let _initial = redirect_stderr_to_file(|| original.try_clone()).unwrap();
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle as _;
@@ -76,48 +76,34 @@ fn saved_stderr_routing_child() {
             set_native_stderr(original.as_raw_handle());
         }
     }
-    #[cfg(windows)]
-    let saved = super::super::snapshot_editor_stderr().unwrap().unwrap();
-    let log = File::create(dir.join("log")).unwrap();
-    #[cfg(unix)]
-    let saved = redirect_stderr_to_file(log).unwrap();
-    #[cfg(windows)]
-    let backup = redirect_stderr_to_file(log).unwrap();
+    let redirect = redirect_stderr_to_file(|| File::create(dir.join("log"))).unwrap();
 
-    assert_not_inheritable(&saved);
+    assert_not_inheritable(&redirect);
     for _ in 0..2 {
         let mut command = child("tui::terminal::tests::stderr::editor_stderr_writer");
-        command.stderr(editor_stderr(Some(&saved)).unwrap());
+        command.stderr(redirect.editor_stderr().unwrap());
         assert!(ral_core::process::status(&mut command).unwrap().success());
         std::io::stderr().write_all(PARENT_MARKER).unwrap();
-        assert_not_inheritable(&saved);
+        assert_not_inheritable(&redirect);
     }
-    #[cfg(unix)]
-    {
-        restore_stderr(saved);
-        restore_stderr(initial);
-    }
-    #[cfg(windows)]
-    {
-        restore_stderr(backup);
-        // Do not leave the preexisting restoration ordering's raw handle installed.
-        set_native_stderr(std::ptr::null_mut());
-    }
+    drop(redirect);
+    std::io::stderr().write_all(PARENT_MARKER).unwrap();
 }
 
 #[cfg(unix)]
-fn assert_not_inheritable(saved: &std::os::fd::OwnedFd) {
+fn assert_not_inheritable(redirect: &StderrRedirect) {
     assert!(
-        rustix::io::fcntl_getfd(saved)
+        rustix::io::fcntl_getfd(&redirect.saved)
             .unwrap()
             .contains(rustix::io::FdFlags::CLOEXEC)
     );
 }
 
 #[cfg(windows)]
-fn assert_not_inheritable(saved: &std::os::windows::io::OwnedHandle) {
+fn assert_not_inheritable(redirect: &StderrRedirect) {
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+    let saved = redirect.saved_std.as_ref().expect("a present original");
     let mut flags = 0;
     // SAFETY: saved owns a live handle and flags is an out-parameter.
     assert_ne!(
@@ -163,7 +149,7 @@ fn absent_native_stderr_never_inherits_the_log() {
 #[test]
 #[ignore = "owns process-wide native stderr"]
 fn absent_native_stderr_child() {
-    use std::os::windows::io::{AsRawHandle as _, IntoRawHandle as _};
+    use std::os::windows::io::IntoRawHandle as _;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     let dir = std::env::var_os(DIRECTORY).expect("isolated child directory");
     let dir = Path::new(&dir);
@@ -174,30 +160,18 @@ fn absent_native_stderr_child() {
     }
     let stale = File::create(dir.join("closed")).unwrap().into_raw_handle();
     set_native_stderr(stale);
-    // SAFETY: this handle is owned here. Snapshot immediately, before any open
-    // could reuse its value; it must never become a BorrowedHandle.
+    // SAFETY: this handle is owned here. The redirect captures before its log
+    // open could reuse the value; it must never become a BorrowedHandle.
     assert_ne!(unsafe { CloseHandle(stale) }, 0);
-    let saved = super::super::snapshot_editor_stderr().unwrap();
-    assert!(saved.is_none());
-    set_native_stderr(log.as_raw_handle());
-    discard_child_stderr(saved.as_ref());
-    std::io::stderr().write_all(PARENT_MARKER).unwrap();
-    set_native_stderr(std::ptr::null_mut());
+    check_absent(&log);
 }
 
 #[cfg(windows)]
 fn check_absent(log: &File) {
-    use std::os::windows::io::AsRawHandle as _;
-    let saved = super::super::snapshot_editor_stderr().unwrap();
-    assert!(saved.is_none());
-    set_native_stderr(log.as_raw_handle());
-    discard_child_stderr(saved.as_ref());
-    std::io::stderr().write_all(PARENT_MARKER).unwrap();
-}
-
-#[cfg(windows)]
-fn discard_child_stderr(saved: Option<&std::os::windows::io::OwnedHandle>) {
+    let redirect = redirect_stderr_to_file(|| log.try_clone()).unwrap();
+    assert!(redirect.saved_std.is_none());
     let mut command = child("tui::terminal::tests::stderr::editor_stderr_writer");
-    command.stderr(editor_stderr(saved).unwrap());
+    command.stderr(redirect.editor_stderr().unwrap());
     assert!(ral_core::process::status(&mut command).unwrap().success());
+    std::io::stderr().write_all(PARENT_MARKER).unwrap();
 }

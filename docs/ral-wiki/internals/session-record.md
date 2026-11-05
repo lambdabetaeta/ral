@@ -87,7 +87,10 @@ is still examined; the first nonwritable ancestor ends it. Unexpected probe
 errors and required sync failures propagate. This assumes stable namespace and
 permissions. Newly made entries are unconditionally synced in their parents
 before descent, including those later left by `..` or a symlink restart.
-Ordinary XDG lookup retains its nonsyncing semantics.
+Ordinary XDG lookup retains its nonsyncing semantics. Every directory-sync
+failure, including `OwnDir::sync`'s, is `OwnError::Io` with `Act::Sync` at the
+held directory's trace position, never the leaf's spelling, and keeps the OS
+error as its source; converted to `io::Error`, the `OwnError` is the payload.
 Linux uses `fdatasync`; the installed Rust 1.99.1 standard library uses
 `F_FULLFSYNC` on Apple targets. Windows uses `FlushFileBuffers` for files;
 directory sync is a no-op. Native Apple latency has not been measured here.

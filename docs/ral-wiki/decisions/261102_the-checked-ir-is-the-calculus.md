@@ -2,8 +2,8 @@
 status: active
 generated_at_commit: b1ba0713
 generated_at_date: 2026-11-03
-verified_at_commit: b1ba0713
-verified_at_date: 2026-11-03
+verified_at_commit: f2a121e8
+verified_at_date: 2026-11-05
 anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, native_code, captured_string, Inferencer::split, rhs_bound_ty, freeze_toplevel]
 ---
 
@@ -16,7 +16,7 @@ separate layer.
 ## Decision
 
 - **Control:** `return`, `force`, lambda, application, pattern bind, sequence,
-  recursion, `if`, `case`, `try`, `guard`, `capture`, `upcast`. Rust's CEK
+  recursion, `if`, `case`, `try`, `guard`, `capture`. Rust's CEK
   machine and Agda's substitution-based CK machine have corresponding rules;
   failure is a register in both. Application pushes one argument frame per
   argument, then forces; only a lambda terminal consumes an argument.
@@ -40,7 +40,7 @@ modelling boundary.
 Hoisting makes collection assembly pure. Repeated computed map keys fail
 only after all operands have run; this reverses the operand-ordering invariant
 of ral `0cd41dbc`. Interpolation becomes render binds followed by concatenation.
-The checker writes returned-thunk forces and upcasts explicitly. These
+The checker writes returned-thunk forces and binding captures explicitly. These
 translations remove evaluator mechanisms that would otherwise sit outside
 the calculus. [[invariants/ir-pure-cbpv|The IR invariant]] states the resulting
 partition and elaboration rules.
@@ -67,7 +67,6 @@ and the application and sequencing rules of
 - **Substitution vs environments.** Agda's `Val` represents both `ir::Val`
   and runtime `Value`, hence `bytes`; a native is
   `thunk (ƛⁿ prim (builtin b) x̄)`. Rust builds the lambda chain when forced.
-- **Upcast:** Rust's tail step fuses Agda's frame push and identity pop.
 - **Higher-order natives** (`map`, `each`, …) run their function arguments
   through a nested machine (`machine::apply`), a host function rather than
   a machine rule. Not modelled.

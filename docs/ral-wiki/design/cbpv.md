@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: f2a121e8
 ---
 
 # Call-by-push-value: values and commands
@@ -55,11 +55,13 @@ permutation, and Hindley–Milner let-polymorphism generalising at `bind` with n
 (proper kinds only). Its CK machine, with an output sink, `capture` and failure, is deterministic
 and type-safe (preservation and progress). Unification terminates and is most general; inference
 is sound, complete and principal relative to proper kinds, and refuses only untypable terms.
-Inferred types pair `output` only with `Unit`, the grade invariant, as a theorem
-([[design/types|types]], [[internals/type-inference|type-inference]]).
+The grade invariant (inferred types pair `output` only with `Unit`) is stated and proved in
+`Extrinsic/Infer/Grades`, but that module's bounded check currently exhausts the heap, so it is
+not yet validated; `Core.agda` checks that successful inference yields target typing and machine
+safety ([[design/types|types]], [[internals/type-inference|type-inference]]).
 
-The calculus contains the checked coercions and returned-thunk splits; their
-insertion algorithm is not mechanised. Equi-recursive types through data,
+The calculus contains binding capture and returned-thunk splits; their
+insertion is mechanised in components, not yet end-to-end. Equi-recursive types through data,
 concurrency and authority are not covered by this core. The correspondence's
 standing gaps are listed in
 [[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].

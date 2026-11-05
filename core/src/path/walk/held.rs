@@ -11,6 +11,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::error::unsynced_error;
 use super::exclusion::Hold;
 use super::names::{EntryName, RootName};
 use super::trace::{Kind, ObjectId, RealPath, Seen, Stat, Step, Trace};
@@ -65,23 +66,34 @@ pub(crate) fn sync_dir<A: Authority>(dir: &Dir<A>) -> io::Result<()> {
 pub(crate) fn sync_dir_chain<A: Authority>(dir: &Dir<A>) -> io::Result<()> {
     #[cfg(windows)]
     {
-        host::sync_dir(&dir.node.held.file)
+        host::sync_dir(&dir.node.held.file).map_err(|e| unsynced_error(e, dir.real().clone()))
     }
     #[cfg(unix)]
     {
         let mut node = Some(&dir.node);
-        let mut is_leaf = true;
+        let mut hops = 0;
         while let Some(held) = node {
-            if unix::effective_write_access(&held.held.file)? {
-                host::sync_dir(&held.held.file)?;
-            } else if !is_leaf {
+            let failed = |e| unsynced_error(e, above(dir.real(), hops));
+            if unix::effective_write_access(&held.held.file).map_err(failed)? {
+                host::sync_dir(&held.held.file).map_err(failed)?;
+            } else if hops > 0 {
                 break;
             }
-            is_leaf = false;
+            hops += 1;
             node = held.above.as_ref();
         }
         Ok(())
     }
+}
+
+/// The position `hops` held directories above `real`: one node per name of
+/// the trace, so the walk's chain and `real`'s ancestry climb together.
+#[cfg(unix)]
+fn above(real: &RealPath, hops: usize) -> RealPath {
+    std::iter::once(real.clone())
+        .chain(real.ancestors_within(&RealPath::universal()))
+        .nth(hops)
+        .unwrap_or_else(RealPath::universal)
 }
 
 #[cfg(unix)]

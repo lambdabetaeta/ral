@@ -10,8 +10,8 @@
 //!
 //! [`chosen`] is pure over an injected environment and home; [`expand_in`]
 //! walks what it chose, refusing every directory that names the world, and
-//! [`expand`] is its live wrapper, which the
-//! freeze and host discovery consume.
+//! [`expand`] is its live wrapper, which the freeze and host discovery
+//! consume.
 
 use super::Polar;
 use super::freeze::{Home, PolicyError, Selector, refuse_the_world, the_world};
@@ -449,8 +449,8 @@ fn walked<W: Polar>(
 /// expands to nothing.
 ///
 /// # Errors
-/// A selected directory that names the world; a directory whose walk fails, or that no
-/// grant can hold.
+/// A selected directory that names the world; a directory whose walk fails,
+/// or that no grant can hold.
 pub(crate) fn expand_in<W: Polar>(
     toolchain: Toolchain,
     env: impl Fn(&str) -> Option<String>,
@@ -459,24 +459,7 @@ pub(crate) fn expand_in<W: Polar>(
     walked::<W>(toolchain, env, home.map(|h| h.spelled.as_str()))?
         .into_iter()
         .map(|(dir, via)| {
-            let (subject, advice) = if let Some((var, value)) = via {
-                (
-                    format!("{var} is {}", shown(&value)),
-                    format!("Is {var} set correctly?"),
-                )
-            } else {
-                let written = dir.written.shown();
-                let real = dir.real.followed().real().to_string();
-                let subject = if written == real {
-                    format!("default directory {written}")
-                } else {
-                    format!("default directory {written} resolves to {real}")
-                };
-                (
-                    subject,
-                    "Check the default directory or symlink and its HOME/XDG base.".into(),
-                )
-            };
+            let (subject, advice) = provenance(&dir, via);
             refuse_the_world(
                 Selector::Toolchain(toolchain),
                 &subject,
@@ -487,6 +470,28 @@ pub(crate) fn expand_in<W: Polar>(
             W::grant(dir)
         })
         .collect()
+}
+
+/// What chose `dir`, and what to check, for a refusal.
+fn provenance<W: Polar>(dir: &GrantPath<W>, via: Option<Via>) -> (String, String) {
+    if let Some((var, value)) = via {
+        (
+            format!("{var} is {}", shown(&value)),
+            format!("Is {var} set correctly?"),
+        )
+    } else {
+        let written = dir.written.shown();
+        let real = dir.real.followed().real().to_string();
+        let subject = if written == real {
+            format!("default directory {written}")
+        } else {
+            format!("default directory {written} resolves to {real}")
+        };
+        (
+            subject,
+            "Check the default directory or symlink and its HOME/XDG base.".into(),
+        )
+    }
 }
 
 /// [`expand_in`] over the host environment and filesystem, as the spellings
@@ -624,23 +629,23 @@ mod tests {
 
     #[test]
     fn rustup_defaults_naming_a_root_home_or_ancestor_refuse_both_polarities() {
-        for what in [
-            "the filesystem root",
-            "the home directory itself",
-            "an ancestor of the home directory",
-        ] {
+        type Pick = fn(&Path, &Path) -> PathBuf;
+        let pickers: [(&str, Pick); 3] = [
+            ("the filesystem root", |tmp, _| {
+                tmp.ancestors().last().unwrap().to_owned()
+            }),
+            ("the home directory itself", |_, h| h.to_owned()),
+            ("an ancestor of the home directory", |tmp, _| tmp.to_owned()),
+        ];
+        for (what, pick) in pickers {
             let (tmp, _) = tree(&["h"]);
             let home_path = tmp.path().join("h");
             let home = Home::of(spelled(&home_path)).unwrap();
-            let target = match what {
-                "the filesystem root" => tmp.path().ancestors().last().unwrap(),
-                "the home directory itself" => home_path.as_path(),
-                _ => tmp.path(),
-            };
+            let target = pick(tmp.path(), &home_path);
             let default = home_path.join(".rustup");
-            link_dir(target, &default);
-            default_refusal::<Trace>(Toolchain::Rustup, &[], &home, &default, target, what);
-            default_refusal::<Excluded>(Toolchain::Rustup, &[], &home, &default, target, what);
+            link_dir(&target, &default);
+            default_refusal::<Trace>(Toolchain::Rustup, &[], &home, &default, &target, what);
+            default_refusal::<Excluded>(Toolchain::Rustup, &[], &home, &default, &target, what);
         }
     }
 

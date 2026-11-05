@@ -463,12 +463,11 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
     if let Token::SingleQuoted(s) = tok {
         return s.clone();
     }
-    let start = span.start as usize;
-    // A `$[` that `lex_open` closed ends past `text`.
-    let end = (span.end as usize).min(text.len());
+    let (start, end) = (span.start as usize, span.end as usize);
+    // Any closer `lex_open` supplied ends past `text`.
     match tok {
-        Token::DoubleQuoted(_) => text[start + 1..end.saturating_sub(1).max(start + 1)].to_string(),
-        _ => text[start..end].to_string(),
+        Token::DoubleQuoted(_) => text[start + 1..(end - 1).min(text.len())].to_string(),
+        _ => text[start..end.min(text.len())].to_string(),
     }
 }
 
@@ -1043,6 +1042,19 @@ mod tests {
         );
         assert_eq!(parse("echo $[1 +▮"), Some((w(&["echo", "$[1 +"]), 1, 5)));
         assert_eq!(parse("echo 'open▮"), Some((w(&["echo", "open"]), 1, 5)));
+    }
+
+    /// `lex_open`'s synthetic `"` is not in the buffer, so no body char is cut.
+    #[test]
+    fn parse_at_keeps_every_char_of_an_open_double_quote() {
+        for body in ["abc", "é", "漢字", "🦀", ""] {
+            assert_eq!(
+                parse(&format!("echo \"{body}▮")),
+                Some((w(&["echo", body]), 1, 5)),
+                "open body {body:?}"
+            );
+        }
+        assert_eq!(parse("echo \"ab\"▮"), Some((w(&["echo", "ab"]), 1, 5)));
     }
 
     #[test]

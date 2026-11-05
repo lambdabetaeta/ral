@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-04
+generated_at_commit: f2a121e88af273984c3777093eded870b1fe0070
+generated_at_date: 2026-11-05
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-03
 covers_paths: [exarch/src/port.rs, exarch/src/lib.rs, exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/host.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
@@ -303,10 +303,11 @@ commit yields at most one event it narrates.
   only a byte/line summary, never a placeholder that is expanded at submit.
 - `terminal.rs::TerminalGuard::edit_text_in_editor` lends terminal modes to
   the external editor. **Only the child receives the saved pre-TUI stderr;
-  parent diagnostics remain in `stderr.log`.** Unix duplicates the guard's
-  cloexec backup; Windows snapshots a noninheritable owned native handle
-  before opening the log or redirecting CRT stderr, then duplicates it per
-  edit. Absent or closed native stderr becomes explicit child discard.
+  parent diagnostics remain in `stderr.log`.** The guard's `StderrRedirect`
+  holds one owned saved destination that serves both the editor, duplicated
+  per edit, and restoration on drop; Windows captures it as a noninheritable
+  native handle before the log opens. Absent or closed native stderr becomes
+  explicit child discard.
   Stdio is prepared before creating the secret draft or suspending modes.
   The editor follows the shared contract in `ral_core::external_editor`: `EditorCommand::select`
   takes nonblank VISUAL, then EDITOR, then the platform default, splitting

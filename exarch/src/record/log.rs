@@ -327,7 +327,7 @@ impl From<Unavailable> for io::Error {
 /// bytes. A poisoned log must stay poisoned.
 pub(crate) struct Log {
     inner: Mutex<Inner>,
-    syncing: Mutex<Sync>,
+    syncing: Mutex<Syncing>,
     /// The writer's first failure: it ends the life bound to it.
     failure: Fatal<Unavailable>,
     /// The record file, as messages name it.
@@ -375,7 +375,7 @@ impl Writer {
 }
 
 #[derive(Default)]
-struct Sync {
+struct Syncing {
     #[cfg(test)]
     before: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
 }

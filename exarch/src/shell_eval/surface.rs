@@ -175,9 +175,7 @@ pub(crate) fn replay(recorder: &Emitter, values: &[FOValue]) {
 /// belongs to the frontend, which derives them online and so needs no
 /// coalesced log to rebuild from.
 ///
-/// A pin publishes twice: [`Forensic::Pin`]/`Unpin` records only the key;
-/// [`Transient::Pin`]/`Unpin` updates the live UI register. Card contents are
-/// not persisted, and resume restores neither the mirror nor the UI register.
+/// A pin publishes a key-only forensic row and a card-bearing transient.
 pub(crate) fn record(recorder: &Emitter, surface: &Surface) {
     match surface {
         Surface::Observation(event) => recorder.emit_or_end(Display::Observation {
@@ -206,7 +204,6 @@ pub(crate) fn record(recorder: &Emitter, surface: &Surface) {
             names: pruned.iter().map(|p| p.name.clone()).collect(),
             idle_calls: pruned.iter().map(|p| p.idle_calls).collect(),
         }),
-        // Key-only history; card contents belong only to the live register.
         Surface::Pin { key, card } => {
             recorder.emit_or_end(Forensic::Pin { key: key.clone() });
             recorder.transient(Transient::Pin {

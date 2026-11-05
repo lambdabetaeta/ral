@@ -41,7 +41,7 @@ fn slot(answer: FOValue) -> Option<FOValue> {
     }
 }
 
-/// `` `set ``/`` `clear `` write and empty the register mirror
+/// `` `set ``/`` `clear `` write and empty the register
 /// `` `read ``/`` `list `` answer from.
 #[test]
 fn pin_set_and_clear_round_trip_through_the_desk() {

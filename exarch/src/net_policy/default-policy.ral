@@ -1,7 +1,8 @@
 # What a fresh install reaches with nobody having configured anything. Most
 # installs are unmanaged and stay on this list, so it has to be useful on day
-# one; a managed fleet widens or narrows it by installing its own
-# `/etc/exarch/net-policy.ral`, never by editing this one.
+# one; a managed Unix fleet widens or narrows it by installing its own
+# `/etc/exarch/net-policy.ral`, never by editing this one; Windows has no
+# override yet.
 #
 # `hosts` is a destination allowlist: the exact public DNS names a guest's
 # CONNECT tunnel may reach on port 443, and nothing else. It does not judge

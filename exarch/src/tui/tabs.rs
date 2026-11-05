@@ -20,10 +20,7 @@ use super::{DEMOTE_IDLE, LINGER};
 pub(super) struct Status {
     /// Total, never absent: the status line always has a state to name.
     pub(super) state: StateSpan,
-    /// Kit-authored *state*: a `key → Card` register drawn as the right-hand
-    /// column, emptied by `/clear` and not restored on resume. The log keeps
-    /// key-only forensic breadcrumbs, not these cards. A `Vec` keeps
-    /// first-seen insertion order.
+    /// Kit-authored `key → Card` state drawn as the right-hand column; a `Vec` keeps first-seen order.
     pins: Vec<(String, Card)>,
 }
 
@@ -48,10 +45,9 @@ impl Status {
         self.state.note_streamed(chars);
     }
 
-    // ── pinned state (the register) ────────────────────────────────────────
-    // Live keyed slots, not scrollback blocks; forensic keys cannot rebuild them.
+    // ── pinned state (the column) ──────────────────────────────────────────
 
-    /// Overwrite the register slot `key`, or append it, keeping first-seen order.
+    /// Overwrite the slot `key`, or append it, keeping first-seen order.
     pub(super) fn set_pin(&mut self, key: String, card: Card) {
         match self.pins.iter_mut().find(|(k, _)| *k == key) {
             Some((_, slot)) => *slot = card,

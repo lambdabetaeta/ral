@@ -3180,13 +3180,12 @@ supposed to provide.
 
 On Unix the implementation double-forks, reparents the grandchild, and creates
 a new session. It preserves the logical working directory, environment, and
-the sandbox projection active at birth. Inside a synod guest every survivor
-joins one shared `ral-exec/detached` cgroup: together they have one command's
-allowance (2 GiB memory, 256 tasks, 200% CPU). Each keeps a distinct uid/gid
-and outlives the engine that birthed it; machine halt kills them all.
-Later grants cannot widen it. An
-active grant may refuse the operation by omitting `` `detach `` from `shell` before any process
-is born.
+the sandbox projection active at birth. Later grants cannot widen it. Inside a
+synod guest every survivor joins one shared `ral-exec/detached` cgroup:
+together they have one command's allowance (2 GiB memory, 256 tasks, 200% CPU).
+Each keeps a distinct uid/gid and outlives the engine that birthed it; machine
+halt kills them all. An active grant may refuse the operation by omitting
+`` `detach `` from `shell` before any process is born.
 
 `detach` is Unix-only and present where the host installs it, with no call
 budget. Neither interactive nor batch `ral` installs `detach`; Windows has no

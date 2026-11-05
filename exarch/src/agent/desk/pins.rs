@@ -1,7 +1,7 @@
 //! The pins family of the desk.
 
 use crate::card::{Card, encode_card};
-use crate::shell_eval::{self, surface, surface::Surface};
+use crate::shell_eval::{surface, surface::Surface};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::shell::runtime::Error;
@@ -13,8 +13,7 @@ impl ExarchDesk {
         let mut body = self.loan.get().ok_or_else(super::no_desk)?;
         match &card {
             Some(card) => {
-                body.pins
-                    .insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
+                body.pins.insert(key.clone(), card.clone());
             }
             None => {
                 body.pins.remove(&key);
@@ -31,9 +30,9 @@ impl ExarchDesk {
     pub(super) fn pin_read(&self, key: &str) -> Result<FOValue, Error> {
         let body = self.loan.get().ok_or_else(super::no_desk)?;
         Ok(match body.pins.get(key) {
-            Some(digest) => FOValue::Variant {
+            Some(card) => FOValue::Variant {
                 label: "some".into(),
-                payload: Some(Box::new(encode_card(&digest.card))),
+                payload: Some(Box::new(encode_card(card))),
             },
             None => FOValue::Variant {
                 label: "none".into(),

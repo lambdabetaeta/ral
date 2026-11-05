@@ -43,6 +43,7 @@ impl Sse {
                         Err(error) => panic!("loopback accept: {error}"),
                     }
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(WAIT)).unwrap();
                 stream.set_write_timeout(Some(WAIT)).unwrap();
                 requests.push(read_request(&mut stream));

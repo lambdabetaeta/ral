@@ -255,7 +255,8 @@ authority.
   probes; the frontend contributes only its own accumulators.
 - `digest.rs` bounds model-visible results; `Agent::ral` appends `TURN: <id>`
   outside those caps. Replies remain faithful values, checked by `read`.
-- `net_policy::load` reads host policy; only search rides agent launch.
+- `net_policy::load` reads `/etc/exarch/net-policy.ral` on Unix; Windows uses
+  the embedded policy only. Only search rides agent launch.
   The network ledger belongs to netgate.
 
 [[map/exarch|exarch]], [[map/exarch/frontend|frontend]],

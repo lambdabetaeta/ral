@@ -62,19 +62,6 @@ pub struct ToolResult {
     pub exit: i32,
 }
 
-/// One card in the agent's session mirror, read by the desk and nudge.
-/// The record keeps only its key; a transient updates the live UI register.
-#[derive(Clone, Debug)]
-pub struct PinDigest {
-    pub(crate) card: crate::card::Card,
-}
-
-impl PinDigest {
-    pub(crate) fn new(card: crate::card::Card) -> Self {
-        Self { card }
-    }
-}
-
 /// Deferred worker batches carry the engine generation that produced them.
 struct SurfacePoster {
     address: AgentAddress,

@@ -33,7 +33,7 @@ use self::site::Silent;
 use crate::authority::policy::Ungoverned;
 use crate::host::{self, EnvVars};
 use crate::path::walk::{
-    Access, dangling, sync_dir, sync_dir_chain, walk_dir_made, walk_dir_made_synced,
+    Access, dangling, sync_dir, sync_dir_chain, unsynced, walk_dir_made, walk_dir_made_synced,
 };
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
@@ -222,12 +222,24 @@ impl fmt::Display for OwnError {
     }
 }
 
-impl std::error::Error for OwnError {}
+impl std::error::Error for OwnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { error, .. } => Some(error),
+            Self::Json { error, .. } => Some(error),
+            Self::NoBase(_)
+            | Self::NoCwd(_)
+            | Self::Linked(_)
+            | Self::Dangling { .. }
+            | Self::Outside { .. } => None,
+        }
+    }
+}
 
 impl From<OwnError> for io::Error {
-    /// The kind kept, the sentence the payload.
+    /// The kind kept, the error itself the payload.
     fn from(e: OwnError) -> Self {
-        Self::new(e.kind(), e.to_string())
+        Self::new(e.kind(), e)
     }
 }
 
@@ -248,9 +260,14 @@ fn io_at(act: Act, at: &Path, error: io::Error) -> OwnError {
     }
 }
 
-/// A walk's refusal `error` of `act` at `at`, said as what to do: a link at
-/// `at` that leads nowhere is [`OwnError::Dangling`].
+/// A walk's refusal `error` of `act` at `at`, said as what to do: a failed
+/// directory sync is [`Act::Sync`] at the directory it failed at, and a link
+/// at `at` that leads nowhere is [`OwnError::Dangling`].
 fn walked(act: Act, at: &Path, error: io::Error) -> OwnError {
+    let error = match unsynced(error) {
+        Ok((synced, error)) => return io_at(Act::Sync, synced.as_path(), error),
+        Err(error) => error,
+    };
     if let Some(to) = dangling(&error) {
         return OwnError::Dangling {
             at: at.to_path_buf(),
@@ -377,7 +394,7 @@ impl OwnDir {
         };
         if synced {
             sync_dir_chain(&resolved.0.dir)
-                .map_err(|error| io_at(Act::Sync, resolved.path(), error))?;
+                .map_err(|error| walked(Act::Sync, resolved.path(), error))?;
         }
         Ok(resolved)
     }
@@ -385,9 +402,9 @@ impl OwnDir {
     /// Persist entries in this held directory; a no-op on Windows.
     ///
     /// # Errors
-    /// The host's directory sync failure.
-    pub fn sync(&self) -> io::Result<()> {
-        sync_dir(&self.0.dir)
+    /// [`OwnError::Io`] with [`Act::Sync`] at the held directory's position.
+    pub fn sync(&self) -> Result<(), OwnError> {
+        sync_dir(&self.0.dir).map_err(|error| io_at(Act::Sync, self.0.dir.real().as_path(), error))
     }
 
     /// Where it is, for a consumer that takes names: a child's argv or

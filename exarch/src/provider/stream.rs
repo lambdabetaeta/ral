@@ -222,8 +222,11 @@ fn step_out_from_end(
         |raw| usage_from(model, raw, metered, adapter),
     );
     let stop_reason = end.captured_stop_reason.clone();
-    let reasoning = end.captured_reasoning_content.clone();
     let content = end.captured_content.clone().unwrap_or_default();
+    let reasoning = end
+        .captured_reasoning_content
+        .clone()
+        .filter(|_| !content.contains_reasoning_content());
     let response_id = end.captured_response_id.clone();
     let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
     let cut_short = match &stop_reason {
@@ -232,13 +235,8 @@ fn step_out_from_end(
         }),
         _ => None,
     };
-    let has_reasoning = content.contains_reasoning_content();
-    let mut assistant_message = ChatMessage::assistant(content);
-    if !has_reasoning {
-        assistant_message = assistant_message.with_reasoning_content(reasoning);
-    }
     StepOut {
-        assistant_message,
+        assistant_message: ChatMessage::assistant(content).with_reasoning_content(reasoning),
         tool_calls,
         usage,
         stop_reason,

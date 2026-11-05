@@ -785,7 +785,7 @@ mod tests {
         })
     }
 
-    /// The exit code and stderr of the system script under a restricted fs,
+    /// The stderr of the system script under a restricted fs,
     /// beside `exec` as given: it starts, through the live support alone.
     #[cfg(target_os = "macos")]
     fn start_system_script(
@@ -833,10 +833,14 @@ mod tests {
             crate::path::utf8(script.parent().expect("a directory")).expect("a Unicode path"),
         );
         let supplied = ExecGrant::of([ExecKey::Dir(dir)], []);
+        let refused = format!(
+            "ral: {}:",
+            crate::path::shown(crate::test_helper::real(&script).as_path())
+        );
         for exec in [Some(supplied), None] {
             let stderr = start_system_script(&script, exec.clone());
             assert!(
-                !stderr.contains(&format!("{}:", script.display())),
+                !stderr.contains(&refused),
                 "exec {exec:?}: the script did not start: {stderr}"
             );
         }

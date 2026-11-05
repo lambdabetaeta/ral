@@ -377,6 +377,10 @@ impl Launch {
     /// A failed fork or `execve`; a survivor whose pid is lost is `Survivor::Unnamed`.
     #[cfg(unix)]
     pub(crate) fn spawn_detached(&mut self) -> std::io::Result<crate::process::group::Survivor> {
+        assert!(
+            self.jail.is_none(),
+            "a detached launch must not own a kept jail cgroup: its drop would kill the survivor"
+        );
         crate::process::group::spawn_detached(&mut self.cmd)
     }
 }
@@ -774,24 +778,29 @@ mod windows {
         if let Some(job) = crate::process::group::prepared_job(prepared) {
             let assigned = unsafe { AssignProcessToJobObject(job, process.as_raw_handle()) };
             if assigned == 0 {
+                let error = io::Error::last_os_error();
                 unsafe {
                     windows_sys::Win32::System::Threading::TerminateProcess(
                         process.as_raw_handle(),
                         1,
                     );
                 }
-                return Err(io::Error::other(
-                    "could not place pipeline child in its Job Object before start; is ral already running in a restrictive Windows Job Object?",
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not place pipeline child in its Job Object before start: {error}; is ral already running in a restrictive Windows Job Object?"
+                    ),
                 ));
             }
             if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+                let error = io::Error::last_os_error();
                 unsafe {
                     windows_sys::Win32::System::Threading::TerminateProcess(
                         process.as_raw_handle(),
                         1,
                     );
                 }
-                return Err(io::Error::last_os_error());
+                return Err(error);
             }
         }
 

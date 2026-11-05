@@ -42,18 +42,21 @@ under that spelling. From most reserved to most peripheral:
   wrapping the layers below for convenience (`for` calls `each`, `map-lines`
   folds with `fold-lines`). They curry and shadow like any binding
   (`docs/SPEC.md` §14).
-- **Bundled coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, … : Rust, in-process, but
-  *not* registry entries. The [[map/core/runtime|runtime command layer]]
-  dispatches a bare invocation through `coreutils_invoke`, riding the same
-  capability chokepoint and wait/signal/exit boundary as a system binary.
+- **Bundled coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, … : Rust compiled into
+  ral's binary, but *not* registry entries. The
+  [[map/core/runtime|runtime command layer]] launches a bare invocation as a
+  `ral --ral-bundled-tool <tool>` re-exec child
+  ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]),
+  so it shares a system binary's admission, wait/signal/exit, and
+  host-projection or guest-jail boundary.
 - **Host builtins** — registered *above* core by the embedder (the REPL's `_ed-*`,
   exarch's edit/search atoms); core never inspects them
   ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]).
 - **External commands** — resolved on `PATH`; their captured stdout decodes as a
   `String` (one trailing newline stripped), never re-lexed.
 
-Coreutils running in-process beside the structured primitives is what lets ral be
-a [[invariants/single-binary|single binary]] with no sibling helpers.
+Coreutils compiled into ral and re-exec'd as children is what lets ral be a
+[[invariants/single-binary|single binary]] with no sibling helpers.
 
 A binding shadows a command of the same name, at any scope, and resolution
 reads no host state to decide it; `^name` reaches the external command

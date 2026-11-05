@@ -586,8 +586,7 @@ pub enum Forensic {
     HarnessResult {
         text: String,
     },
-    /// Key-only pin history, not a register checkpoint. Card contents are
-    /// transient; resume restores neither the mirror nor the UI register.
+    /// Key-only history; resume never rebuilds the register from it.
     Pin {
         key: String,
     },
@@ -649,9 +648,7 @@ pub enum Transient {
     Resources {
         card: Card,
     },
-    /// The live register's copy of a pin — [`Forensic::Pin`] is the durable
-    /// breadcrumb, this is the rendered card the process is holding, which a
-    /// resume does not restore.
+    /// The live card; never recorded or restored.
     Pin {
         key: String,
         card: Card,

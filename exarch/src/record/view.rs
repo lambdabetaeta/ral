@@ -487,8 +487,7 @@ impl Blocks {
                 self.push(seq, BlockKind::HarnessResult { text: text.clone() })
             }
             Forensic::TurnStarted { turn, .. } => self.push(seq, BlockKind::Turn { id: *turn }),
-            // Pin keys do not restore live cards or draw scrollback blocks.
-            // Housekeeping and session bookends are also forensic only.
+            // Forensic only.
             Forensic::Pin { .. }
             | Forensic::Reap { .. }
             | Forensic::Prune { .. }

@@ -9,14 +9,14 @@
 //! A process-wide `RwLock` closes the window: every `fork(2)` takes the
 //! exclusive side, every non-atomic fd creation takes the shared side.
 //!
+//! Never hold the exclusive side across anything but the `spawn()` call
+//! itself — it is process-wide and every stage thread may want the shared
+//! side at once.
+//!
 //! Windows uses one mutex for raw launches' temporary inheritable handles
 //! and helper-backed `Command::spawn`: an explicit handle list constrains
 //! only the raw child, not an unrelated inheriting child. Dependency spawns
 //! outside these entries do not participate. Linux needs neither lock.
-//!
-//! Never hold the exclusive side across anything but the `spawn()` call
-//! itself — it is process-wide and every stage thread may want the shared
-//! side at once.
 //!
 //! Both locks protect admission, not child lifetimes. Poison carries no
 //! information, since there is no state to tear; use the workspace policy.

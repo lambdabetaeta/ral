@@ -3,42 +3,32 @@
 //! says what it is.
 //!
 //! A destination allowlist, not an information-flow policy: an admitted host
-//! receives whatever the guest sends once the tunnel is open. Read from a
-//! fixed system path, never a per-user one, and evaluated under the same
+//! receives whatever the guest sends once the tunnel is open. On Unix, read
+//! from the fixed system path `/etc/exarch`, never a per-user one; Windows has
+//! no override and uses the embedded policy. Evaluated under the same
 //! no-authority grant as [`crate::config::load_declared`].
 
 use ral_core::egress::{Host, NetPolicy};
-use ral_core::own::UserFile;
 use ral_core::shell::runtime::Value;
-use ral_core::source::{SourceFile, SourceOrigin};
-
-/// A system place, deliberately: the sandboxed guest writes only cwd and scratch.
-const POLICY_DIR: &str = "/etc/exarch";
-const POLICY_FILE: &str = "net-policy.ral";
+use ral_core::source::SourceOrigin;
 
 const DEFAULT_POLICY_RAL: &str = include_str!("net_policy/default-policy.ral");
 
 /// Error-message prefix, handed to `crate::config`'s shared load helpers.
 const LABEL: &str = "network policy";
 
-/// Load the policy: the file [`POLICY_FILE`] in [`POLICY_DIR`] if present, else
-/// the embedded default.
+/// Load the policy: the machine policy if present, else the embedded default.
 ///
 /// # Errors
-/// Returns `Err` if the file is present but unreadable, if evaluating it
-/// raises, or if its terminal map fails to decode.
+/// Returns `Err` if the machine policy is present but unreadable, if
+/// evaluating it raises, or if its terminal map fails to decode.
 pub fn load() -> Result<NetPolicy, String> {
-    let file = UserFile::fixed(POLICY_DIR, POLICY_FILE);
-    let (source, origin) = match crate::config::read_optional_file(&file, LABEL)? {
-        Some(text) => (
-            text,
-            SourceOrigin::File(SourceFile::new(file.path()).map_err(|e| format!("{LABEL} {e}"))?),
-        ),
-        None => (
+    let (source, origin) = machine_policy()?.unwrap_or_else(|| {
+        (
             DEFAULT_POLICY_RAL.to_string(),
             SourceOrigin::named("<built-in:net-policy>"),
-        ),
-    };
+        )
+    });
     let source = ral_core::source::normalize_source_text(source);
     let cwd = ral_core::host::cwd()
         .ok_or_else(|| format!("{LABEL} cannot load: the working directory is unavailable"))?;
@@ -49,6 +39,32 @@ pub fn load() -> Result<NetPolicy, String> {
         crate::config::evaluate_no_authority(&mut shell, &source, &origin, LABEL)?,
         &origin.to_string(),
     )
+}
+
+/// `/etc/exarch/net-policy.ral`, if present.
+#[cfg(unix)]
+fn machine_policy() -> Result<Option<(String, SourceOrigin)>, String> {
+    use ral_core::own::UserFile;
+    use ral_core::source::SourceFile;
+
+    /// A system place, deliberately: the sandboxed guest writes only cwd and scratch.
+    const POLICY_DIR: &str = "/etc/exarch";
+    const POLICY_FILE: &str = "net-policy.ral";
+
+    let file = UserFile::fixed(POLICY_DIR, POLICY_FILE);
+    crate::config::read_optional_file(&file, LABEL)?
+        .map(|text| {
+            SourceFile::new(file.path())
+                .map(|f| (text, SourceOrigin::File(f)))
+                .map_err(|e| format!("{LABEL} {e}"))
+        })
+        .transpose()
+}
+
+/// No trusted machine path yet: `/etc/exarch` is drive-relative and unowned here.
+#[cfg(not(unix))]
+fn machine_policy() -> Result<Option<(String, SourceOrigin)>, String> {
+    Ok(None)
 }
 
 /// Decode the policy's terminal map into a [`NetPolicy`]. An unrecognised key

@@ -210,7 +210,6 @@ fn inactive_under(
     sessions.sync()?;
     run.sync()?;
     project.sync()?;
-    root.sync()?;
     Ok((snapshot, lock))
 }
 

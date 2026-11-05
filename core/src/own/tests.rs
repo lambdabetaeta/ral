@@ -92,6 +92,21 @@ mod unix {
         }
     }
 
+    /// Whether `error` is the OS's `EACCES`, kept whole.
+    fn is_eacces(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::PermissionDenied
+            && error.raw_os_error() == Some(libc::EACCES)
+    }
+
+    /// Whether `error` is a sync refused at `at` with the OS's `EACCES`.
+    fn sync_refused_at(error: &OwnError, at: &Path) -> bool {
+        matches!(
+            error,
+            OwnError::Io { act: Act::Sync, at: found, error, .. }
+                if found == at && is_eacces(error)
+        )
+    }
+
     /// `body`, run while `base` is the host's config base.
     fn under_config<R>(base: &Path, body: impl FnOnce() -> R) -> R {
         with_var("XDG_CONFIG_HOME", Some(text(base)), body)
@@ -397,20 +412,22 @@ mod unix {
         }
         let base = scratch("roots-synced-unreadable");
         let gate = base.make_dir("gate").unwrap();
-        let state = gate.make_dir("state").unwrap();
+        gate.make_dir("state").unwrap();
+        let physical = std::fs::canonicalize(gate.path()).unwrap();
+        let alias = base.path().join("alias");
+        symlink(gate.path().join("state"), &alias).unwrap();
         let _restore = RestorePermissions::restrict(gate.path(), 0o300);
-        with_var("XDG_STATE_HOME", Some(text(state.path())), || {
+        with_var("XDG_STATE_HOME", Some(text(&alias)), || {
             let plain = OwnDir::xdg("own-test-unreadable", XdgKind::State).unwrap();
             plain.append("proof").unwrap().write_all(b"plain").unwrap();
             assert_eq!(std::fs::read(plain.path().join("proof")).unwrap(), b"plain");
             let error = OwnDir::xdg_synced("own-test-unreadable", XdgKind::State)
                 .err()
                 .unwrap();
-            assert!(matches!(
-                error,
-                OwnError::Io { act: Act::Sync, error, .. }
-                    if error.kind() == io::ErrorKind::PermissionDenied
-            ));
+            assert!(
+                sync_refused_at(&error, &physical),
+                "the sync names the gate it failed at, not a lexical parent: {error:?}"
+            );
         });
     }
 
@@ -425,6 +442,7 @@ mod unix {
         let base = scratch("roots-synced-leaf");
         for parent_mode in [0o700, 0o300] {
             let parent = base.make_dir(&format!("parent-{parent_mode:o}")).unwrap();
+            let physical = std::fs::canonicalize(parent.path()).unwrap();
             let leaf = parent.make_dir("own-test-leaf").unwrap();
             leaf.append("proof").unwrap().write_all(b"leaf").unwrap();
             let _restore_leaf = RestorePermissions::restrict(leaf.path(), 0o111);
@@ -438,14 +456,86 @@ mod unix {
                     assert_eq!(synced.path(), leaf.path());
                     assert_eq!(synced.read("proof").unwrap(), b"leaf");
                 } else {
-                    assert!(matches!(
-                        result,
-                        Err(OwnError::Io { act: Act::Sync, error, .. })
-                            if error.kind() == io::ErrorKind::PermissionDenied
-                    ));
+                    let error = result.err().unwrap();
+                    assert!(
+                        sync_refused_at(&error, &physical),
+                        "the sync names the parent, not the skipped leaf: {error:?}"
+                    );
                 }
             });
         }
+    }
+
+    #[test]
+    fn a_held_directory_sync_names_its_position_and_keeps_the_os_error_whole() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skip: requires non-root credentials denied read access to a mode0300 gate");
+            return;
+        }
+        let base = scratch("own-sync-unreadable");
+        let gate = base.make_dir("gate").unwrap();
+        let physical = std::fs::canonicalize(gate.path()).unwrap();
+        let _restore = RestorePermissions::restrict(gate.path(), 0o300);
+        let error = io::Error::from(gate.sync().unwrap_err());
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let own = error
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<OwnError>())
+            .expect("the payload is the OwnError itself");
+        assert!(sync_refused_at(own, &physical), "{own:?}");
+        let source = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<io::Error>())
+            .expect("the OS's error is the source");
+        assert!(is_eacces(source), "{source:?}");
+    }
+
+    #[test]
+    fn xdg_synced_names_the_gate_whose_sync_failed_after_making_an_entry_in_it() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!(
+                "skip: requires non-root credentials subject to directory read/write permissions"
+            );
+            return;
+        }
+        let base = scratch("roots-synced-creation");
+        let gate = base.make_dir("gate").unwrap();
+        let physical = std::fs::canonicalize(gate.path()).unwrap();
+        symlink(gate.path(), base.path().join("alias")).unwrap();
+        let state = base.path().join("alias/missing-state");
+        let made = gate.path().join("missing-state");
+        with_var("XDG_STATE_HOME", Some(text(&state)), || {
+            {
+                let _restore = RestorePermissions::restrict(gate.path(), 0o111);
+                let error = OwnDir::xdg_synced("own-test-creation", XdgKind::State)
+                    .err()
+                    .unwrap();
+                assert!(
+                    matches!(&error, OwnError::Io { act: Act::Make, error, .. } if is_eacces(error)),
+                    "{error:?}"
+                );
+            }
+            assert!(!made.exists(), "a refused make makes nothing");
+
+            {
+                let _restore = RestorePermissions::restrict(gate.path(), 0o300);
+                let error = OwnDir::xdg_synced("own-test-creation", XdgKind::State)
+                    .err()
+                    .unwrap();
+                assert!(
+                    sync_refused_at(&error, &physical),
+                    "the made entry's parent sync names the gate: {error:?}"
+                );
+            }
+            assert!(made.is_dir(), "the entry was made before its sync failed");
+            assert!(
+                !made.join("own-test-creation").exists(),
+                "no descent past it"
+            );
+
+            let dir = OwnDir::xdg_synced("own-test-creation", XdgKind::State).unwrap();
+            assert_eq!(dir.path(), state.join("own-test-creation"));
+            assert!(made.join("own-test-creation").is_dir());
+        });
     }
 
     #[test]

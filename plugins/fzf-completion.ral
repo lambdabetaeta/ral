@@ -15,6 +15,7 @@ let _complete = { |ours src args render tail lbuf|
 ## `dir` split at its longest existing directory, as [root, query].
 let _split = { |dir q|
     if !{re-match '^[^/]*$' $dir} { ['', "$dir$q"] }
+    elsif !{re-match '^/+$' $dir} { [$dir, $q] }
     elsif !{is-dir $dir} { [$dir, $q] }
     else { _split !{re-replace-all '[^/]+/*$' '' $dir} "!{re-find-match '[^/]+/*$' $dir}$q" }
 }

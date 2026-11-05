@@ -226,7 +226,7 @@ impl Agent {
             .body
             .pins
             .values()
-            .map(|pin| crate::card::summary_line(&pin.card))
+            .map(crate::card::summary_line)
             .collect();
         (!lines.is_empty()).then(|| lines.join("; "))
     }

@@ -14,6 +14,7 @@ pub struct Usage {
     pub cache_creation: Option<u64>,
     pub cache_read: Option<u64>,
     pub dollars: f64,
+    /// Some contribution was subscription; independent of known dollars.
     pub unmetered: bool,
     /// Attempts whose usage the provider never reported (a stream cut short, an
     /// `End` without usage); the other fields cover only the rest, so a total
@@ -39,7 +40,6 @@ impl std::ops::AddAssign for Usage {
         self.cache_creation = add_opt_u64(self.cache_creation, rhs.cache_creation);
         self.cache_read = add_opt_u64(self.cache_read, rhs.cache_read);
         self.dollars += rhs.dollars;
-        // Subscription participation is independent of known cash spend.
         self.unmetered = self.unmetered || rhs.unmetered;
         self.unreported += rhs.unreported;
     }
@@ -111,24 +111,18 @@ impl Usage {
         // A reported zero hides the segment too: no cache traffic, nothing to say.
         let show_cache = matches!(self.cache_creation, Some(n) if n > 0)
             || matches!(self.cache_read, Some(n) if n > 0);
-        let mut cost = if self.dollars > 0.0 {
-            format!("${:.4}", self.dollars)
-        } else if self.unmetered {
-            "subscription".into()
-        } else {
+        let known = match (self.dollars > 0.0, self.unmetered) {
+            (true, false) => format!("${:.4}", self.dollars),
+            (true, true) => format!("${:.4} + subscription", self.dollars),
+            (false, true) => "subscription".into(),
             // No known rate is not evidence that a metered turn was free.
-            "—".into()
+            (false, false) => "—".into(),
         };
-        if self.unmetered && self.dollars > 0.0 {
-            cost.push_str(" + subscription");
-        }
-        if self.unreported > 0 {
-            cost.push_str(if self.unmetered {
-                " (usage unknown)"
-            } else {
-                " + ?"
-            });
-        }
+        let cost = match self.unreported {
+            0 => known,
+            _ if self.unmetered => format!("{known} (usage unknown)"),
+            _ => format!("{known} + ?"),
+        };
         UsageParts {
             input: humanize_tokens(self.input),
             output: humanize_tokens(self.output),

@@ -44,12 +44,12 @@ use crate::agent::fleet::{Fleet, Name};
 use crate::agent::loan::Loanable;
 use crate::agent::nursery::Nursery;
 use crate::bus::AgentMailbox;
+use crate::card::Card;
 use crate::provider::Provider;
 #[cfg(test)]
 use crate::record::Unavailable;
 use crate::record::{AgentId, AgentLog};
 use crate::schedule::ScheduleRegistry;
-use crate::shell_eval::PinDigest;
 use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
 use std::collections::BTreeMap;
@@ -78,7 +78,7 @@ pub(crate) struct Body {
     pub(crate) readings: Readings,
 }
 
-pub(crate) type Pins = BTreeMap<String, PinDigest>;
+pub(crate) type Pins = BTreeMap<String, Card>;
 
 pub(crate) struct Readings {
     measure: Option<gauge::Measure>,

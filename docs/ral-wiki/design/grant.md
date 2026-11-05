@@ -133,8 +133,9 @@ launch hardening.
   the host environment rather than a `FreezeCtx`. A home prefix is readable
   only where granted, including by running. A system-read directory whose walk
   fails prevents boot and is named in the error; any selected directory naming
-  the world or lying in the home is dropped without error, defaults included. System reads are ordinary allowances,
-  rendered frozen, so a redirected root shows nothing.
+  the world or lying in the home is dropped without error, defaults included.
+  System reads are ordinary allowances, rendered frozen, so a redirected root
+  shows nothing.
   An exclusion means "not allowed", never "not included": a profile that merely
   leaves something unlisted does not exclude it.
 - **A refusal says why, in one of a few shapes.** *Missing allowance* names the

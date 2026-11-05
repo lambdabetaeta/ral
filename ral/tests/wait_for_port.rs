@@ -133,7 +133,7 @@ fi
 exec /bin/sleep "$@"
 "#,
     );
-    // A lexical handler reaches the alarm mock even with bundled coreutils.
+    // A handler reaches the alarm mock even with bundled coreutils.
     let example =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/wait-for-port/wait-for-port.ral");
     let wrapper = dir.path().join("run.ral");
@@ -211,7 +211,10 @@ exec /bin/sleep "$@"
         );
     }
     (
-        run.status.unwrap().code().unwrap_or(1),
+        run.status
+            .unwrap()
+            .code()
+            .expect("wait-for-port killed by a signal"),
         stdout,
         stderr,
         words.len() / expected.len(),

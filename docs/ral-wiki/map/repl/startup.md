@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: f2a121e88af273984c3777093eded870b1fe0070
+generated_at_date: 2026-11-05
 covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -80,10 +80,11 @@ dispositions. Then, per role:
     (`no_seeded_children`), because the shell spawns no child engines and has
     no base-tag lexicon to resolve a grant against.
   - **Bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool> …`) —
-    then runs the bundled coreutils/ripgrep image in-process, under whatever
-    sandbox the process already inherited. A bundled tool runs as an external
-    child whenever process semantics are required
-    ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]),
+    then runs the bundled coreutils/ripgrep image in this child process
+    (`uutils::run`), under whatever sandbox the process inherited. Every bundled
+    head launches as such a child
+    ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
+    [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]),
     and each external child launches under the effective policy
     ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
   - **Shell** — `None`, and `identify` answers `Shell(Mode)`.

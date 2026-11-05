@@ -27,5 +27,8 @@ let pick = { |ours theirs src args k|
             ]
         }
     }
-    if $[$s == 0] { k !{re-find-matches '[^\x00]+' $out} } elsif $[$s != 1 && $s != 130] { fail [status: $s, message: "fzf: $out"] }
+    if $[$s == 0] {
+        let ps = re-find-matches '[^\x00]+' $out
+        if $[not !{is-empty $ps}] { k $ps }
+    } elsif $[$s != 1 && $s != 130] { fail [status: $s, message: "fzf: $out"] }
 }

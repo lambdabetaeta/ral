@@ -1,9 +1,9 @@
 #!/usr/bin/env ral
-# Footgun: a retry loop checks its deadline only after the probe returns.
-# Requires macOS/OpenBSD or traditional Linux netcat (`nc -z -w 1`). The
-# probe timeout is best-effort; the outer race cancels and drains even a
-# blocked probe, bounding the whole wait plus cancellation grace. Other nc
-# dialects are not covered; an unsupported option is not a firewall timeout.
+# Footgun: `until nc -z -w 1 …; do <deadline check>; sleep 1; done` gives up on
+# time only if the probe returns, and `-w` need not bound connect (macOS wants
+# `-G`), so a host that drops the SYN overruns the budget.  Here the alarm races
+# the probes and cancels a blocked one; `-w` only paces them.  Needs an nc that
+# takes `-z -w` (macOS, OpenBSD or traditional Linux netcat).
 
 let [target, port, secs] = args
 
@@ -18,7 +18,7 @@ let alarm = spawn { sleep !{int $secs} ; return `late }
 case !{race [$waiter, $alarm]} [
     `up:   { |_| echo "$target:$port is up" },
     `late: { |_|
-        warn "$target:$port never came up within !{str $secs}s"
+        warn "$target:$port never came up within $(secs)s"
         exit 1
     },
 ]

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-03
+generated_at_commit: f2a121e88af273984c3777093eded870b1fe0070
+generated_at_date: 2026-11-05
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -225,11 +225,11 @@ never by the decoder or by the seam that records it (`surface::record`):
 
 - the register is not decoded here: `exarch-pins` sends typed `Request::Pins`
   to `agent/desk/pins.rs`. Through its foreground loan the desk synchronously
-  mutates `Body.pins`, the `PinDigest` mirror read/list and the
+  mutates `Body.pins`, the `key → Card` register read/list and the
   [[map/exarch/agent|nudge]] share, then builds `Surface::Pin { key, card }` /
   `Surface::Unpin { key }`. `surface::record` emits key-only forensic history
   and card-bearing pin / key-only unpin transients for the live
-  [[map/exarch/frontend|`tabs::Status`]] register. No key is reserved. `/clear`
+  [[map/exarch/frontend|`Status`]] column. No key is reserved. `/clear`
   empties both stores; resume restores neither ([[design/pins|pins]]);
 - an `` `observed `` value core emits at a redirect, exec, or
   capability-check door decodes through `Observation::from_surface` into

@@ -476,7 +476,7 @@ impl App {
     pub fn project(self, cwd: &Path) -> Result<OwnDir, OwnError> {
         let app = self.own(XdgKind::State)?;
         let project = app.make_dir(&project_slug(cwd))?;
-        sync_directory(&app)?;
+        app.sync()?;
         Ok(project)
     }
 
@@ -501,18 +501,9 @@ impl App {
         let stamp = format!("{}-{}", stamp_from_secs(now_secs()), std::process::id());
         let project = self.project(cwd)?;
         let run = project.make_dir(&stamp)?;
-        sync_directory(&project)?;
+        project.sync()?;
         Ok(run)
     }
-}
-
-fn sync_directory(dir: &OwnDir) -> Result<(), OwnError> {
-    dir.sync().map_err(|error| OwnError::Io {
-        act: ral_core::own::Act::Sync,
-        at: dir.path().to_path_buf(),
-        to: None,
-        error,
-    })
 }
 
 /// The names of the runs of `project` that can be resumed, from newest to

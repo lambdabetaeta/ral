@@ -218,65 +218,6 @@ impl Drop for EditorTerminal {
     }
 }
 
-#[cfg(unix)]
-fn editor_stderr(saved: Option<&std::os::fd::OwnedFd>) -> io::Result<Stdio> {
-    let saved = saved.ok_or_else(|| io::Error::other("pre-TUI stderr backup is unavailable"))?;
-    rustix::io::fcntl_dupfd_cloexec(saved, 0)
-        .map(Stdio::from)
-        .map_err(io::Error::from)
-}
-
-#[cfg(windows)]
-fn editor_stderr(saved: Option<&std::os::windows::io::OwnedHandle>) -> io::Result<Stdio> {
-    saved.map_or_else(
-        || Ok(Stdio::null()),
-        |handle| handle.try_clone().map(Stdio::from),
-    )
-}
-
-/// Capture before opening the log: even that open could reuse a stale handle.
-#[cfg(windows)]
-fn snapshot_editor_stderr() -> io::Result<Option<std::os::windows::io::OwnedHandle>> {
-    use std::os::windows::io::{FromRawHandle, OwnedHandle};
-    use windows_sys::Win32::Foundation::{
-        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_HANDLE, FALSE, INVALID_HANDLE_VALUE,
-    };
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-    // SAFETY: reading the standard-handle slot does not dereference its value.
-    let original = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
-    if original.is_null() || original == INVALID_HANDLE_VALUE {
-        return Ok(None);
-    }
-    let mut duplicate = std::ptr::null_mut();
-    // SAFETY: DuplicateHandle validates even a stale original; only success
-    // creates an owned handle. Neither handle is made inheritable here.
-    let ok = unsafe {
-        DuplicateHandle(
-            GetCurrentProcess(),
-            original,
-            GetCurrentProcess(),
-            &raw mut duplicate,
-            0,
-            FALSE,
-            DUPLICATE_SAME_ACCESS,
-        )
-    };
-    if ok == 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(ERROR_INVALID_HANDLE.cast_signed()) {
-            return Ok(None);
-        }
-        return Err(io::Error::new(
-            error.kind(),
-            format!("could not save pre-TUI stderr for the external editor: {error}"),
-        ));
-    }
-    // SAFETY: DuplicateHandle succeeded; this new noninheritable handle is ours.
-    Ok(Some(unsafe { OwnedHandle::from_raw_handle(duplicate) }))
-}
-
 fn run_editor(
     command: &EditorCommand,
     stderr: Stdio,
@@ -316,50 +257,25 @@ fn editor_result(
 /// skip the cleanup.
 pub struct TerminalGuard {
     term: Term,
-    #[cfg(unix)]
-    stderr_backup: Option<std::os::fd::OwnedFd>,
-    #[cfg(windows)]
-    stderr_backup: Option<WindowsStderrBackup>,
-    #[cfg(windows)]
-    editor_stderr_snapshot: Option<std::os::windows::io::OwnedHandle>,
+    // After `term`: field order restores stderr last.
+    stderr: StderrRedirect,
 }
 
 impl TerminalGuard {
     /// Redirect fd 2 to `stderr.log` in `run`, then enter the terminal modes.
     ///
     /// # Errors
-    /// If saving editor stderr, opening the log, or entering terminal modes fails;
-    /// nothing is left half-done.
+    /// If saving stderr, opening the log, redirecting to it, or entering
+    /// terminal modes fails; nothing is left half-done.
     pub fn enter(run: &OwnDir) -> io::Result<Self> {
-        #[cfg(windows)]
-        let editor_stderr_snapshot = snapshot_editor_stderr()?;
-        let stderr_log = run.append(STDERR_LOG)?;
+        let stderr = redirect_stderr_to_file(|| run.append(STDERR_LOG).map_err(io::Error::from))?;
         install_panic_restore_hook();
         TUI_ACTIVE.store(true, Ordering::Release);
-        let mut stderr_backup = Some(match redirect_stderr_to_file(stderr_log) {
-            Ok(backup) => backup,
-            Err(e) => {
-                TUI_ACTIVE.store(false, Ordering::Release);
-                return Err(e);
-            }
-        });
-        let term = match enter_terminal_modes() {
-            Ok(term) => term,
-            Err(e) => {
-                restore_terminal_modes();
-                TUI_ACTIVE.store(false, Ordering::Release);
-                if let Some(backup) = stderr_backup.take() {
-                    restore_stderr(backup);
-                }
-                return Err(e);
-            }
-        };
-        Ok(Self {
-            term,
-            stderr_backup,
-            #[cfg(windows)]
-            editor_stderr_snapshot,
-        })
+        let term = enter_terminal_modes().inspect_err(|_| {
+            restore_terminal_modes();
+            TUI_ACTIVE.store(false, Ordering::Release);
+        })?;
+        Ok(Self { term, stderr })
     }
 
     /// Outer errors mean terminal restoration failed. Inner errors leave the input
@@ -376,11 +292,9 @@ impl TerminalGuard {
     fn prepare_edit(&self, text: &str) -> Result<(EditorCommand, Stdio, DraftFile), String> {
         let command = editor_command()?;
         let drafts = draft_dir()?;
-        #[cfg(unix)]
-        let saved = self.stderr_backup.as_ref();
-        #[cfg(windows)]
-        let saved = self.editor_stderr_snapshot.as_ref();
-        let stderr = editor_stderr(saved)
+        let stderr = self
+            .stderr
+            .editor_stderr()
             .map_err(|e| format!("could not prepare saved stderr for the external editor: {e}"))?;
         let draft = DraftFile::create(drafts, text)?;
         Ok((command, stderr, draft))
@@ -395,206 +309,203 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         restore_terminal_modes();
         TUI_ACTIVE.store(false, Ordering::Release);
-        // stderr last: teardown's own stray diagnostics still belong in the
-        // log, not on the freshly-restored prompt row.
-        if let Some(backup) = self.stderr_backup.take() {
-            restore_stderr(backup);
-        }
     }
 }
 
-/// Alias `file` onto fd 2, returning a cloexec backup of the original.  The
-/// backup must not leak into a child; the redirect itself is inherited on
-/// purpose, so a re-execed sandbox helper's traces join the same log.
+/// fd 2 aliased to a log until drop restores the saved original.  The saved
+/// original is cloexec so it never leaks into a child; the redirect itself is
+/// inherited on purpose, so a re-execed sandbox helper's traces join the log.
 #[cfg(unix)]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "the redirect takes the file whole on every host: Windows hands its handle on, and Unix closes it here once fd 2 holds the log"
-)]
-pub(super) fn redirect_stderr_to_file(file: File) -> io::Result<std::os::fd::OwnedFd> {
-    use std::os::fd::AsFd;
+struct StderrRedirect {
+    saved: std::os::fd::OwnedFd,
+}
 
-    let backup =
+/// Capture fd 2, then open the log with `open_log` and alias it onto fd 2.
+#[cfg(unix)]
+fn redirect_stderr_to_file(
+    open_log: impl FnOnce() -> io::Result<File>,
+) -> io::Result<StderrRedirect> {
+    use std::os::fd::AsFd as _;
+
+    let saved =
         rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stderr(), 0).map_err(io::Error::from)?;
+    let log = open_log()?;
     // SAFETY: fd 2 is a live process-global slot, all `clobber_slot` asks.
-    unsafe { ral_core::process::clobber_slot(file.as_fd(), rustix::stdio::raw_stderr()) }?;
-    Ok(backup)
+    unsafe { ral_core::process::clobber_slot(log.as_fd(), rustix::stdio::raw_stderr()) }?;
+    Ok(StderrRedirect { saved })
 }
 
-/// Restore fd 2 from the backup [`redirect_stderr_to_file`] saved.  Best-effort:
-/// a failure inside the TUI's drop has nowhere useful to surface.
 #[cfg(unix)]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "consuming the backup is the contract: fd 2 is restored from it, then it closes here"
-)]
-pub(super) fn restore_stderr(backup: std::os::fd::OwnedFd) {
-    use std::os::fd::AsFd;
-
-    let target = rustix::stdio::raw_stderr();
-    // SAFETY: fd 2 is a live process-global slot, all `clobber_slot` asks.
-    let _ = unsafe { ral_core::process::clobber_slot(backup.as_fd(), target) };
+impl StderrRedirect {
+    /// A fresh cloexec duplicate of the saved original, for one child.
+    fn editor_stderr(&self) -> io::Result<Stdio> {
+        rustix::io::fcntl_dupfd_cloexec(&self.saved, 0)
+            .map(Stdio::from)
+            .map_err(io::Error::from)
+    }
 }
 
-/// Everything [`restore_stderr`] needs to undo [`redirect_stderr_to_file`]'s
-/// two redirections on Windows.
+/// Best-effort: a failure inside the TUI's drop has nowhere useful to surface.
+#[cfg(unix)]
+impl Drop for StderrRedirect {
+    fn drop(&mut self) {
+        use std::os::fd::AsFd as _;
+
+        // SAFETY: fd 2 is a live process-global slot, all `clobber_slot` asks.
+        let _ = unsafe {
+            ral_core::process::clobber_slot(self.saved.as_fd(), rustix::stdio::raw_stderr())
+        };
+    }
+}
+
+/// Windows has no single fd table to `dup2` onto, so both stderr slots are
+/// redirected: `STD_ERROR_HANDLE`, which `std::io::stderr` reads on every write
+/// and `Stdio::inherit()` children receive, and CRT fd 2, which linked C uses.
 ///
-/// `SetStdHandle` stores the pointer it is given rather than duplicating it, so
-/// `log_handle` must stay open and owned for the life of the redirect or
-/// `STD_ERROR_HANDLE` dangles.  It is closed exactly once, in `restore_stderr`.
+/// `SetStdHandle` stores `log` without owning it, so the redirect owns `log`
+/// until its drop has restored the slot.
 #[cfg(windows)]
-pub(super) struct WindowsStderrBackup {
-    /// `STD_ERROR_HANDLE` before the redirect; may be null, which `SetStdHandle`
-    /// tolerates on restore as it did on entry.
-    backup_std_handle: windows_sys::Win32::Foundation::HANDLE,
-    backup_crt_fd: libc::c_int,
-    /// The log file, installed as `STD_ERROR_HANDLE`; closed on restore.
-    log_handle: windows_sys::Win32::Foundation::HANDLE,
+struct StderrRedirect {
+    /// `None` when the original slot was absent or stale.
+    saved_std: Option<std::os::windows::io::OwnedHandle>,
+    saved_crt_fd: libc::c_int,
+    log: std::os::windows::io::OwnedHandle,
 }
 
-// SAFETY: `HANDLE` is a raw pointer with no thread affinity, and this backup
-// only ever moves from the thread that opens the TUI to the one that tears it
-// down, never shared — as `GroupState` in `core/src/process/signal/windows.rs`.
+/// Capture both slots, then open the log with `open_log` and redirect them.
+/// Capture comes first: even the log's open could reuse a stale handle value.
 #[cfg(windows)]
-unsafe impl Send for WindowsStderrBackup {}
+fn redirect_stderr_to_file(
+    open_log: impl FnOnce() -> io::Result<File>,
+) -> io::Result<StderrRedirect> {
+    use std::os::windows::io::{AsRawHandle as _, IntoRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
 
-/// Windows counterpart of the Unix `redirect_stderr_to_file`: with no single
-/// kernel fd table to `dup2` onto, two independent redirections are needed,
-/// both undone by [`restore_stderr`].  `std::io::stderr` calls `GetStdHandle`
-/// fresh on every write, so `SetStdHandle` alone catches every `eprintln!`
-/// exarch writes and every child spawned with `Stdio::inherit()`; it leaves the
-/// CRT fd table alone, which linked C code uses — hence the `_dup2` too.
-#[cfg(windows)]
-pub(super) fn redirect_stderr_to_file(file: File) -> io::Result<WindowsStderrBackup> {
-    use std::os::windows::io::IntoRawHandle;
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, FALSE, HANDLE,
+    let saved_std = snapshot_std_stderr()?;
+    let log = OwnedHandle::from(open_log()?);
+    // `_open_osfhandle` gives its handle to the fd it creates; closing that fd
+    // must not close the handle `SetStdHandle` holds.
+    let crt_handle = log.try_clone()?;
+    // SAFETY: `crt_handle` is live; the CRT adopts it only on success.
+    // `O_BINARY` stops the CRT rewriting `\n` against Rust's raw writes.
+    let crt_fd = unsafe {
+        libc::open_osfhandle(
+            crt_handle.as_raw_handle() as isize,
+            libc::O_APPEND | libc::O_BINARY,
+        )
     };
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle};
+    if crt_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _adopted_by_crt = crt_handle.into_raw_handle();
+
+    // SAFETY: fd 2 is always a valid CRT fd in a normal process.
+    let saved_crt_fd = unsafe { libc::dup(2) };
+    if saved_crt_fd < 0 {
+        let e = io::Error::last_os_error();
+        // SAFETY: `crt_fd` is this call's own.
+        unsafe { libc::close(crt_fd) };
+        return Err(e);
+    }
+    // SAFETY: both fds are live; the CRT analogue of the Unix `clobber_slot`.
+    let r = unsafe { libc::dup2(crt_fd, 2) };
+    let e = (r < 0).then(io::Error::last_os_error);
+    // SAFETY: `crt_fd` is this call's own; on success fd 2 holds a duplicate.
+    unsafe { libc::close(crt_fd) };
+    if let Some(e) = e {
+        // SAFETY: `saved_crt_fd` is this call's own.
+        unsafe { libc::close(saved_crt_fd) };
+        return Err(e);
+    }
+
+    let redirect = StderrRedirect {
+        saved_std,
+        saved_crt_fd,
+        log,
+    };
+    // SAFETY: `redirect.log` stays open until the slot is restored.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, redirect.log.as_raw_handle()) } == 0 {
+        // Dropping `redirect` undoes the CRT redirect.
+        return Err(io::Error::last_os_error());
+    }
+    Ok(redirect)
+}
+
+/// An owned noninheritable duplicate of `STD_ERROR_HANDLE`, or `None` when the
+/// slot is absent or stale.
+#[cfg(windows)]
+fn snapshot_std_stderr() -> io::Result<Option<std::os::windows::io::OwnedHandle>> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_HANDLE, FALSE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-    // Handed out without running `File`'s `Drop`; ownership passes to the
-    // `WindowsStderrBackup`, whose doc says why it must stay open.
-    let log_handle = file.into_raw_handle() as HANDLE;
-
-    // A second, independent handle for the CRT path: `_open_osfhandle` gives its
-    // handle to the fd it creates, and closing that temporary fd would close the
-    // very handle `SetStdHandle` holds.
-    let mut crt_handle: HANDLE = std::ptr::null_mut();
-    // SAFETY: `log_handle` is open; `crt_handle` is an out-param filled on success.
+    // SAFETY: reading the standard-handle slot does not dereference its value.
+    let original = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    if original.is_null() || original == INVALID_HANDLE_VALUE {
+        return Ok(None);
+    }
+    let mut duplicate = std::ptr::null_mut();
+    // SAFETY: DuplicateHandle validates even a stale original; only success
+    // creates an owned handle. Neither handle is made inheritable here.
     let ok = unsafe {
         DuplicateHandle(
             GetCurrentProcess(),
-            log_handle,
+            original,
             GetCurrentProcess(),
-            &raw mut crt_handle,
+            &raw mut duplicate,
             0,
             FALSE,
             DUPLICATE_SAME_ACCESS,
         )
     };
     if ok == 0 {
-        let e = io::Error::last_os_error();
-        // SAFETY: `log_handle` is this call's, not yet handed off.
-        unsafe {
-            CloseHandle(log_handle);
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_INVALID_HANDLE.cast_signed()) {
+            return Ok(None);
         }
-        return Err(e);
+        return Err(io::Error::new(
+            error.kind(),
+            format!("could not save pre-TUI stderr: {error}"),
+        ));
     }
-
-    // SAFETY: `crt_handle` is freshly duplicated and owned here; the CRT adopts
-    // it, so it must not be `CloseHandle`d once this succeeds.  `O_BINARY` stops
-    // the CRT rewriting `\n`, which would disagree with Rust's untranslated
-    // writes straight to the handle.
-    let crt_fd =
-        unsafe { libc::open_osfhandle(crt_handle as isize, libc::O_APPEND | libc::O_BINARY) };
-    if crt_fd < 0 {
-        let e = io::Error::last_os_error();
-        // SAFETY: the adoption failed, so `crt_handle` is still this call's to
-        // close, as is `log_handle`.
-        unsafe {
-            CloseHandle(crt_handle);
-            CloseHandle(log_handle);
-        }
-        return Err(e);
-    }
-
-    // SAFETY: fd 2 is always a valid CRT fd in a normal process.
-    let backup_crt_fd = unsafe { libc::dup(2) };
-    if backup_crt_fd < 0 {
-        let e = io::Error::last_os_error();
-        // SAFETY: closing `crt_fd` also closes the `crt_handle` it adopted;
-        // `log_handle` is still ours.
-        unsafe {
-            libc::close(crt_fd);
-            CloseHandle(log_handle);
-        }
-        return Err(e);
-    }
-    // SAFETY: `crt_fd` is open here; `_dup2` closes fd 2's CRT entry and
-    // duplicates onto it — the CRT analogue of the Unix path's `clobber_slot`.
-    let r = unsafe { libc::dup2(crt_fd, 2) };
-    if r < 0 {
-        let e = io::Error::last_os_error();
-        // SAFETY: `_dup2` took ownership of nothing on failure, so both fds
-        // and `log_handle` are still this call's to close.
-        unsafe {
-            libc::close(backup_crt_fd);
-            libc::close(crt_fd);
-            CloseHandle(log_handle);
-        }
-        return Err(e);
-    }
-    // SAFETY: fd 2 holds its own duplicate now, unaffected by this close.
-    unsafe {
-        libc::close(crt_fd);
-    }
-
-    // SAFETY: these take no invariant beyond the named constant; a null reading
-    // is a legitimate "nothing was set" that `restore_stderr` hands straight back.
-    let backup_std_handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
-    if unsafe { SetStdHandle(STD_ERROR_HANDLE, log_handle) } == 0 {
-        let e = io::Error::last_os_error();
-        // SAFETY: `SetStdHandle` failed, so it never adopted `log_handle`;
-        // undo the CRT-fd redirect and release it.
-        unsafe {
-            libc::dup2(backup_crt_fd, 2);
-            libc::close(backup_crt_fd);
-            CloseHandle(log_handle);
-        }
-        return Err(e);
-    }
-
-    Ok(WindowsStderrBackup {
-        backup_std_handle,
-        backup_crt_fd,
-        log_handle,
-    })
+    // SAFETY: DuplicateHandle succeeded; this new noninheritable handle is ours.
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(duplicate) }))
 }
 
-/// Undo both of [`redirect_stderr_to_file`]'s redirections, then close the log
-/// handle this backup owned.  Best-effort: a failure inside the TUI's drop has
-/// nowhere useful to surface.
 #[cfg(windows)]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "consuming the backup is the contract: both redirections are undone from it, and the log handle it owns is closed here"
-)]
-pub(super) fn restore_stderr(backup: WindowsStderrBackup) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
-
-    // SAFETY: `backup_crt_fd` is a live fd from `_dup`, duplicated back onto
-    // fd 2 and then released.
-    unsafe {
-        libc::dup2(backup.backup_crt_fd, 2);
-        libc::close(backup.backup_crt_fd);
+impl StderrRedirect {
+    /// A fresh duplicate of the saved original for one child, or discard when
+    /// there was none.
+    fn editor_stderr(&self) -> io::Result<Stdio> {
+        self.saved_std
+            .as_ref()
+            .map_or_else(|| Ok(Stdio::null()), |h| h.try_clone().map(Stdio::from))
     }
-    // SAFETY: `backup_std_handle` is whatever `GetStdHandle` held, possibly null;
-    // `log_handle` is this backup's own, valid until the `CloseHandle` below.
-    unsafe {
-        SetStdHandle(STD_ERROR_HANDLE, backup.backup_std_handle);
-        CloseHandle(backup.log_handle);
+}
+
+/// Best-effort: a failure inside the TUI's drop has nowhere useful to surface.
+#[cfg(windows)]
+impl Drop for StderrRedirect {
+    fn drop(&mut self) {
+        use std::os::windows::io::IntoRawHandle;
+        use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+
+        // SAFETY: `saved_crt_fd` is this redirect's own `_dup` of fd 2.
+        unsafe {
+            libc::dup2(self.saved_crt_fd, 2);
+            libc::close(self.saved_crt_fd);
+        }
+        // After `_dup2`, which also rewrites the slot. `SetStdHandle` does not
+        // take ownership, so the snapshot is leaked into the slot.
+        let saved = self
+            .saved_std
+            .take()
+            .map_or(std::ptr::null_mut(), IntoRawHandle::into_raw_handle);
+        // SAFETY: `saved` is null or a live handle nothing else owns.
+        unsafe { SetStdHandle(STD_ERROR_HANDLE, saved) };
     }
 }
 

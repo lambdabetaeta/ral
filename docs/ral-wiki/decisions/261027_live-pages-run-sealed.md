@@ -57,10 +57,10 @@ either reopens them.
 - **`srcdoc`, `blob:` and `data:` frames inherit the parent's CSP**, so
   `script-src 'self'` blocks their inline scripts, and the guard refuses
   `about:` URLs.
-- **The no-egress promise.** `synod/data/network.md` tells the model that
-  nothing in the folder can be sent anywhere by any route. A page runs on the
-  host, outside netgate ([[design/egress|egress]]), so any network channel from
-  it breaks that promise. The web platform has channels CSP does not govern
+- **The no-egress promise.** `synod/data/live.md` tells the model that a page
+  cannot reach the network. A page runs on the host, outside netgate
+  ([[design/egress|egress]]), so any network channel from it breaks that
+  promise and bypasses the destination gate. The web platform has channels CSP does not govern
   (WebRTC ICE, `dns-prefetch` and `preconnect`), so an empirical audit, not the
   CSP, is the evidence.
 
@@ -204,7 +204,7 @@ run unsealed.
 
 - **The Windows seal.** Windows pages run unsealed: no switch for WebRTC in
   WebView2 is known and no closure for link-hint names is measured, so the
-  sealed claim in `synod/data/network.md` and `synod/data/live.md` is false
+  sealed claim in `synod/data/live.md` is false
   there until one is found ([[design/live-page-egress|live-page-egress]]).
 - **A runaway page.** Whether a page that spins freezes the window is
   unknown; the probe page's spin button records it. Pages auto-run.

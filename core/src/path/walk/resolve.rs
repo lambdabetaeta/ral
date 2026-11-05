@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::super::error::{dangling_error, loop_at, loop_error};
+use super::super::error::{dangling_error, loop_at, loop_error, unsynced_error};
 use super::super::exclusion::{Excluded, Hold};
 use super::super::names::{EntryName, Name, Origin, RootName, Spelling, rooted, split};
 use super::super::trace::{Kind, ObjectId, RealPath, Step, Trace};
@@ -518,7 +518,8 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                     _ => {}
                 }
                 if self.missing == OnMissing::MakeSynced {
-                    host::sync_dir(&top.file)?;
+                    host::sync_dir(&top.file)
+                        .map_err(|e| unsynced_error(e, self.cursor.position()))?;
                 }
                 step_into(top, name, sharing)
             }

@@ -1085,7 +1085,10 @@ fn a_link_under_an_admitted_folder_to_a_file_outside_it_does_not_run() {
         work.display(),
     );
     let (stdout, stderr) = confined(&env, &policy, &script);
-    assert!(!emitted(&stdout, "RAN"), "an outside target ran: {stdout}");
+    assert!(
+        !emitted(&stdout, "RAN"),
+        "an outside target ran: {stdout} {stderr}"
+    );
     assert!(
         emitted(&stdout, "ADMITTED-RAN"),
         "the admitted folder ran nothing, so the link proves nothing: {stdout} {stderr}"

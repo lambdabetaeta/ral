@@ -1,4 +1,4 @@
-use super::{LeafMode, Trace, walk_lenient};
+use super::{LeafMode, RealPath, Trace, walk_lenient};
 use crate::path::LexicalPath;
 use std::fmt;
 use std::io;
@@ -92,6 +92,40 @@ pub(crate) fn dangling(e: &io::Error) -> Option<&Path> {
     e.get_ref()?
         .downcast_ref::<Dangling>()
         .map(|d| d.target.as_path())
+}
+
+/// A directory sync's refusal: the position of the held directory whose sync,
+/// or the probe deciding it, failed, as the walk's trace records it, and the
+/// OS's error.  Shows as that error.
+#[derive(Debug)]
+struct Unsynced {
+    at: RealPath,
+    error: io::Error,
+}
+
+impl fmt::Display for Unsynced {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for Unsynced {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+pub(super) fn unsynced_error(source: io::Error, at: RealPath) -> io::Error {
+    io::Error::new(source.kind(), Unsynced { at, error: source })
+}
+
+/// The held directory a sync failed at and the OS's error, taken out of `e`;
+/// any other error handed back unchanged.
+///
+/// # Errors
+/// `e` itself, where it is no directory sync's refusal.
+pub(crate) fn unsynced(e: io::Error) -> Result<(RealPath, io::Error), io::Error> {
+    e.downcast::<Unsynced>().map(|u| (u.at, u.error))
 }
 
 /// A staged write's refusal where the sibling's create was refused: the
