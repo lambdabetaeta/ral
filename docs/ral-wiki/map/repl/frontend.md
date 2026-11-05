@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: 69c49a2f50f38693bb3057d7825a5daa88df3512
+generated_at_date: 2026-11-05
 covers_paths: [ral/src/repl/external_editor.rs, core/src/external_editor.rs, ral/src/startup.rs, ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/cursor.rs, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, core/src/text.rs]
 ---
 
@@ -141,9 +141,11 @@ The minimal frontend has no corresponding raw-key bindings.
 
 The completion *engine* is frontend-neutral: `completion.rs` classifies the
 atom under the cursor by the lexer's own tokens (`lex_open` over the line up to
-the cursor, which also closes an open string or block): the last lexeme
-touching the cursor, at command position iff the lexeme before it is absent or
-`separates`. A path candidate replaces the *whole* atom from its start, as one
+the cursor, admitting open strings and groups without inventing closers): the
+last lexeme touching the cursor, at command position iff the lexeme before it
+is absent or `completion.rs`'s `separates`. `OpenLexemes::unclosed_string`
+tells `word_text` whether a double-quoted token has a closing quote to strip;
+raw escapes and every byte of an unfinished body are preserved. A path candidate replaces the *whole* atom from its start, as one
 `quote_word`-rendered atom (`dir/'a b'` would not parse; `'dir/a b'`
 does), tilde-expanded first when it needs quoting. It then gathers
 candidates from a `Sources` view the engine's readings answer — the cheap

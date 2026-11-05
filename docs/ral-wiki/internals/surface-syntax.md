@@ -1,5 +1,5 @@
 ---
-verified_at_commit: af1be8d60b959119f0ccc371d356d3afc0a4abf5
+verified_at_commit: 69c49a2f50f38693bb3057d7825a5daa88df3512
 verified_at_date: 2026-11-05
 anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, LexErrorKind::OpenerInRaw, fence_admits, WordLiteral::classify, is_bare_word, parse_entry_value, signed_numeral]
 ---
@@ -47,6 +47,13 @@ stripped when a source is loaded (`normalize_source_text`), before the line
 endings fold. The lexer also refuses bash's reflexes by name: `${…}` at the
 `$`, and `$(cmd args)`, which holds one name, pointing at `!{…}`.
 
+**Editor EOF admits unfinished forms, not invented source.** The same scanner
+reads an editor buffer once, leaving open groups without closing tokens and
+marking the outermost unfinished string explicitly. Spans refer only to bytes
+actually written. A comment ending at EOF therefore ends scanning even inside
+an open block. Strict lexing instead reports the missing closer; EOF after a
+string's backslash is incomplete because the next newline can continue it.
+
 **A splice in `"…"` is the tokens it would be outside the string.**
 `scan_splice` lexes `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name` in place and
 stores the stream in `StringPart::Splice`; the parser reads it with the
@@ -93,9 +100,8 @@ parser (skipping the `Call` wrapper for a value head) and elaboration (through
 `is_bare_word`: whatever the numeral grammar claims cannot be emitted bare, or
 printed text would come back as a value. `is_bare_word` *lexes* rather than
 scanning characters, so it inherits `continues_bare_word` and the positional splits
-together — which is why a metacharacter added to `continues_bare_word` also starts
-being quoted on the way out, and why `&` (added when `echo hi&` was found to
-lex as one word ending in `&`) makes `http://h/?a=1&b=2` an emitted `'…'`.
+together. A mid-word `&` remains literal, so a query URL can be emitted bare;
+a comma forces quoting because it punctuates inside collections.
 The ASCII control characters are not bare-word characters and are refused
 outside strings; the nine Unicode bidirectional controls are refused anywhere in
 the source, before lexing begins. In a double-quoted string `\u{…}` is the
@@ -133,8 +139,10 @@ newline *before* `?` is allowed too, so `cmd\n? fallback` and `cmd ?\nfallback`
 both parse. A `;` never continues anything.
 
 **Redirects are the three standard streams.** The lexer refuses every fd-prefixed
-spelling but `2>`, `2>>`, `2>~` and `2>&1`, so its `Redirect { stderr, op }` and
-`StderrToStdout` tokens carry no fd number; `parse_redirect_into` eliminates them
+spelling but `2>`, `2>>`, `2>~` and `2>&1`, matched exactly without leading
+zeros. Its `Redirect(RedirectOp)` and `StderrToStdout` tokens carry no fd number;
+`RedirectOp` distinguishes stdin reads from stdout and stderr writes by variant.
+`parse_redirect_into` eliminates them
 into the sum `Redirect<Ast>` through the total `redirect_word` — so no fd number
 exists anywhere downstream
 ([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]). Each is then bound into `Redirects<Ast>` by `Redirects::bind`, which refuses a second binding of a stream with a caret on the second redirect

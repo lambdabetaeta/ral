@@ -36,11 +36,7 @@ fn is_ident_cont(ch: char) -> bool {
 /// Validate a whole candidate string against the identifier alphabet.
 pub(crate) fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if is_ident_start(c) => {}
-        _ => return false,
-    }
-    chars.all(is_ident_cont)
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_cont)
 }
 
 /// Whether a raw fence of `level` hashes admits `body` without either fence inside it.
@@ -64,10 +60,7 @@ fn continues_bare_word(ch: char) -> bool {
     !(ch.is_ascii_control()
         || matches!(
             ch,
-            ' ' | '\t'
-                | '\r'
-                | '\n'
-                | '|'
+            ' ' | '|'
                 | '{'
                 | '}'
                 | '['
@@ -109,19 +102,26 @@ pub(crate) fn is_bidi_control(ch: char) -> bool {
     bidi_control_name(ch).is_some()
 }
 
-/// The bare-word characters that are operators inside `$[…]`, where they end
-/// a word instead: `1+1` is a sum there and a word everywhere else.  `=` is
-/// `Assign` until a second `=` makes it `==`; `&` takes its own arms, for
-/// `&&`; `<` `>` `!` `|` are not bare anywhere.
-fn operator_char(ch: char) -> Option<Operator> {
+/// Expression operators, longest spelling first; widths are ASCII bytes.
+fn operator_prefix(source: &str) -> Option<(Operator, usize)> {
     let arith = |op| Operator::Binary(BinaryOp::Arith(op));
-    Some(match ch {
-        '+' => arith(ArithOp::Add),
-        '-' => arith(ArithOp::Sub),
-        '*' => arith(ArithOp::Mul),
-        '/' => arith(ArithOp::Div),
-        '%' => arith(ArithOp::Mod),
-        '=' => Operator::Assign,
+    let compare = |op| Operator::Binary(BinaryOp::Compare(op));
+    let eq = |op| Operator::Binary(BinaryOp::Eq(op));
+    Some(match source.as_bytes() {
+        [b'&', b'&', ..] => (Operator::And, 2),
+        [b'|', b'|', ..] => (Operator::Or, 2),
+        [b'=', b'=', ..] => (eq(EqOp::Eq), 2),
+        [b'!', b'=', ..] => (eq(EqOp::Ne), 2),
+        [b'<', b'=', ..] => (compare(CompareOp::Le), 2),
+        [b'>', b'=', ..] => (compare(CompareOp::Ge), 2),
+        [b'<', ..] => (compare(CompareOp::Lt), 1),
+        [b'>', ..] => (compare(CompareOp::Gt), 1),
+        [b'+', ..] => (arith(ArithOp::Add), 1),
+        [b'-', ..] => (arith(ArithOp::Sub), 1),
+        [b'*', ..] => (arith(ArithOp::Mul), 1),
+        [b'/', ..] => (arith(ArithOp::Div), 1),
+        [b'%', ..] => (arith(ArithOp::Mod), 1),
+        [b'=', ..] => (Operator::Assign, 1),
         _ => return None,
     })
 }
@@ -179,12 +179,8 @@ pub enum Token {
     Newline,
     /// Separator run containing a `;` — never crossed by continuation.
     Semi,
-    /// A redirect operator that takes a word; `stderr` is set only for
-    /// `2>`, `2>>`, `2>~`, so it implies `op` is a write.
-    Redirect {
-        stderr: bool,
-        op: RedirectOp,
-    },
+    /// A redirect operator that takes a word.
+    Redirect(RedirectOp),
     /// `2>&1`.
     StderrToStdout,
     Eof,
@@ -212,13 +208,13 @@ impl fmt::Display for Operator {
     }
 }
 
-/// The operator of a word-taking redirect, as spelled; the parser's
-/// `parser::redirect_word` assigns its stream.
+/// Word-taking redirects; only output streams admit a write mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectOp {
     Read,
     HereString,
-    Write(WriteMode),
+    Stdout(WriteMode),
+    Stderr(WriteMode),
 }
 
 impl fmt::Display for Token {
@@ -248,7 +244,7 @@ impl fmt::Display for Token {
             Self::Op(op) => write!(f, "{op}"),
             Self::Newline => write!(f, "newline"),
             Self::Semi => write!(f, "';'"),
-            Self::Redirect { .. } | Self::StderrToStdout => write!(f, "redirect"),
+            Self::Redirect(_) | Self::StderrToStdout => write!(f, "redirect"),
             Self::Eof => write!(f, "end of input"),
         }
     }
@@ -267,10 +263,9 @@ impl Token {
 /// diagnostic can name the shape that wasn't closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringForm {
-    SingleQuoted,
+    /// The fence's hash count; zero is an ordinary single quote.
+    SingleQuoted(usize),
     DoubleQuoted,
-    /// `n` extra `#`s on each side: `#'…'#` is 1, `##'…'##` is 2.
-    BumpedSingle(usize),
 }
 
 impl StringForm {
@@ -279,9 +274,8 @@ impl StringForm {
     /// of a bare `'` leaves it open however often it is tried.
     pub(crate) fn closing(&self) -> String {
         match self {
-            Self::SingleQuoted => "'".into(),
+            Self::SingleQuoted(n) => format!("'{}", "#".repeat(*n)),
             Self::DoubleQuoted => "\"".into(),
-            Self::BumpedSingle(n) => format!("'{}", "#".repeat(*n)),
         }
     }
 }
@@ -289,11 +283,9 @@ impl StringForm {
 impl fmt::Display for StringForm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SingleQuoted => f.write_str("single-quoted string"),
+            Self::SingleQuoted(0) => f.write_str("single-quoted string"),
+            Self::SingleQuoted(_) => f.write_str("bumped single-quoted string"),
             Self::DoubleQuoted => f.write_str("double-quoted string"),
-            // The `#` level is not spelled out here: every diagnostic that
-            // names a form also quotes its `closing()`, which shows the run.
-            Self::BumpedSingle(_) => f.write_str("bumped single-quoted string"),
         }
     }
 }
@@ -417,41 +409,18 @@ pub fn lex(source: &str) -> Result<Vec<Lexeme>, LexError> {
     lex_with(source, FileId::DUMMY)
 }
 
-/// `text`'s tokens, closing each string, `{` or `[` still open at the end — an
-/// editor's buffer is routinely mid-block.  `None` for any other lex failure.
-pub fn lex_open(text: &str) -> Option<Vec<Lexeme>> {
-    let mut source = text.to_owned();
-    loop {
-        match lex(&source) {
-            Ok(tokens) => return Some(tokens),
-            Err(LexError {
-                kind: LexErrorKind::UnterminatedBalanced { close, .. },
-                ..
-            }) => source.push(close),
-            // A nested open form (`inner`) is not closed by the string's delimiter.
-            Err(LexError {
-                kind:
-                    LexErrorKind::UnterminatedString {
-                        form, inner: None, ..
-                    },
-                ..
-            }) => source.push_str(&form.closing()),
-            Err(_) => return None,
-        }
-    }
+/// Editor tokens refer only to written bytes; no closing tokens are invented.
+#[derive(Debug, PartialEq)]
+pub struct OpenLexemes {
+    pub tokens: Vec<Lexeme>,
+    /// The outermost unclosed string, whose span has no closing quote to strip.
+    pub unclosed_string: Option<Span>,
 }
 
-/// Tokens that end one simple command and begin the next.
-pub fn separates(tok: &Token) -> bool {
-    matches!(
-        tok,
-        Token::Pipe
-            | Token::Question
-            | Token::Semi
-            | Token::Newline
-            | Token::LBrace
-            | Token::RBrace
-    )
+/// Lex an editor buffer, admitting open strings and groups at EOF.
+/// Definite lexical faults and unfinished `$(…)` return `None`.
+pub fn lex_open(text: &str) -> Option<OpenLexemes> {
+    tokenize(text, FileId::DUMMY, PathRules::HOST, EofPolicy::AllowOpen).ok()
 }
 
 /// Tokenise `source`, attributing every token's byte range to `file`.
@@ -466,11 +435,26 @@ pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<Lexeme>, LexErr
 /// [`lex_with`] under given path rules, which decide what makes a bare word
 /// a path: a `\` separates only under Windows.
 fn lex_for(source: &str, file: FileId, rules: PathRules) -> Result<Vec<Lexeme>, LexError> {
+    tokenize(source, file, rules, EofPolicy::RequireClosed).map(|lexed| lexed.tokens)
+}
+
+fn tokenize(
+    source: &str,
+    file: FileId,
+    rules: PathRules,
+    eof: EofPolicy,
+) -> Result<OpenLexemes, LexError> {
+    u32::try_from(source.len()).map_err(|_| {
+        Lexer::error(
+            Span::point(file, 0),
+            "source exceeds the 4 GiB span limit: split it into smaller modules",
+        )
+    })?;
     if let Some((at, ch, name)) = source
         .char_indices()
         .find_map(|(i, ch)| bidi_control_name(ch).map(|n| (i, ch, n)))
     {
-        let byte = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let byte = |n| u32::try_from(n).expect("source length checked");
         let (at, end) = (byte(at), byte(at + ch.len_utf8()));
         return Err(Lexer::error(
             Span::new(file, at, end),
@@ -482,7 +466,7 @@ fn lex_for(source: &str, file: FileId, rules: PathRules) -> Result<Vec<Lexeme>, 
             ),
         ));
     }
-    let mut lexer = Lexer::new(source, file, rules);
+    let mut lexer = Lexer::new(source, file, rules, eof);
     let mut tokens = Vec::new();
     loop {
         let lexeme = lexer.next_token()?;
@@ -492,29 +476,24 @@ fn lex_for(source: &str, file: FileId, rules: PathRules) -> Result<Vec<Lexeme>, 
             break;
         }
     }
-    Ok(tokens)
+    Ok(OpenLexemes {
+        tokens,
+        unclosed_string: lexer.unclosed_string,
+    })
 }
 
-/// The literal text buffered inside a double-quoted string, anchored at the
-/// offset of its first char; `start` is `Some` exactly when `text` is
-/// non-empty, so a `\<newline>` continuation, which pushes nothing, anchors
-/// nothing.
+/// A nonempty literal run and its first source byte.
 #[derive(Default)]
-struct LiteralRun {
-    start: Option<u32>,
-    text: String,
-}
+struct LiteralRun(Option<(u32, String)>);
 
 impl LiteralRun {
     fn push(&mut self, at: u32, ch: char) {
-        self.start.get_or_insert(at);
-        self.text.push(ch);
+        self.0.get_or_insert_with(|| (at, String::new())).1.push(ch);
     }
 
     /// Emit the run as a `Literal` spanning `start..end`, if non-empty.
     fn flush(&mut self, parts: &mut Vec<Spanned<StringPart>>, end: u32, file: FileId) {
-        let text = std::mem::take(&mut self.text);
-        if let Some(start) = self.start.take() {
+        if let Some((start, text)) = self.0.take() {
             parts.push(Spanned::new(
                 Span::new(file, start, end),
                 StringPart::Literal(text),
@@ -523,13 +502,19 @@ impl LiteralRun {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EofPolicy {
+    RequireClosed,
+    AllowOpen,
+}
+
 struct Lexer<'a> {
-    /// (`byte_offset`, char) per char: the offsets stamp byte-range spans,
-    /// the vector keeps peek-by-char-index at O(1).
-    chars: Vec<(usize, char)>,
     source: &'a str,
+    /// Always a UTF-8 boundary within `source`.
     pos: usize,
     file: FileId,
+    eof: EofPolicy,
+    unclosed_string: Option<Span>,
     /// What makes a bare word a path ([`Word::Path`], [`Word::Tilde`]).
     rules: PathRules,
     /// Open delimiters, innermost last.  The innermost decides newline
@@ -556,6 +541,13 @@ impl DelimKind {
             Self::Bracket | Self::Expr => ('[', ']'),
         }
     }
+
+    fn tokens(self) -> (Token, Token) {
+        match self {
+            Self::Brace => (Token::LBrace, Token::RBrace),
+            Self::Bracket | Self::Expr => (Token::LBracket, Token::RBracket),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -565,12 +557,13 @@ struct OpenDelim {
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str, file: FileId, rules: PathRules) -> Self {
+    fn new(source: &'a str, file: FileId, rules: PathRules, eof: EofPolicy) -> Self {
         Self {
-            chars: source.char_indices().collect(),
             source,
             pos: 0,
             file,
+            eof,
+            unclosed_string: None,
             rules,
             delim_stack: Vec::new(),
         }
@@ -578,17 +571,7 @@ impl<'a> Lexer<'a> {
 
     /// Byte offset of the next char, i.e. one past the last consumed.
     fn byte_pos(&self) -> u32 {
-        let byte = self
-            .chars
-            .get(self.pos)
-            .map_or(self.source.len(), |(b, _)| *b);
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "byte offset in a source in the u32 span system (< 4 GiB)"
-        )]
-        {
-            byte as u32
-        }
+        u32::try_from(self.pos).expect("source length checked")
     }
 
     /// Zero-width span at the cursor; [`Self::finish`] stretches it over the
@@ -638,17 +621,26 @@ impl<'a> Lexer<'a> {
     }
 
     fn peek(&self) -> Option<char> {
-        self.peek_n(0)
+        self.rest().chars().next()
     }
 
+    /// Only fixed-width lookahead; runs scan `rest()` directly.
     fn peek_n(&self, offset: usize) -> Option<char> {
-        self.chars.get(self.pos + offset).map(|(_, c)| *c)
+        self.rest().chars().nth(offset)
     }
 
     fn bump(&mut self) -> Option<char> {
         let ch = self.peek()?;
-        self.pos += 1;
+        self.pos += ch.len_utf8();
         Some(ch)
+    }
+
+    fn eat(&mut self, ch: char) -> bool {
+        if self.peek() != Some(ch) {
+            return false;
+        }
+        self.bump();
+        true
     }
 
     /// Consume one char; the span covers exactly it.
@@ -658,16 +650,13 @@ impl<'a> Lexer<'a> {
         self.finish(start)
     }
 
-    fn take_while(&mut self, mut pred: impl FnMut(char) -> bool) -> String {
-        let mut out = String::new();
-        while let Some(ch) = self.peek() {
-            if !pred(ch) {
-                break;
-            }
-            out.push(ch);
-            self.bump();
-        }
-        out
+    fn take_while(&mut self, mut pred: impl FnMut(char) -> bool) -> &'a str {
+        let start = self.pos;
+        self.pos += self
+            .rest()
+            .find(|ch| !pred(ch))
+            .unwrap_or_else(|| self.rest().len());
+        &self.source[start..self.pos]
     }
 
     fn innermost(&self) -> Option<DelimKind> {
@@ -708,12 +697,10 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// End of input — unless a `{` or `[` is still open, which is an
-    /// unterminated delimiter anchored at the innermost opener rather than a
-    /// clean EOF, and is what lets the REPL prompt for the rest.  `span` is
-    /// where a clean `Eof` token sits.
-    fn eof_or_unterminated(&self, span: Span) -> Result<Lexeme, LexError> {
-        if let Some(open) = self.delim_stack.last().copied() {
+    fn eof_or_unterminated(&self) -> Result<Token, LexError> {
+        if self.eof == EofPolicy::RequireClosed
+            && let Some(open) = self.delim_stack.last().copied()
+        {
             let (o, c) = open.kind.chars();
             return Err(Self::typed_error(
                 open.opened,
@@ -724,222 +711,138 @@ impl<'a> Lexer<'a> {
                 },
             ));
         }
-        Ok(Lexeme {
-            token: Token::Eof,
-            span,
-        })
+        Ok(Token::Eof)
     }
 
     fn next_token(&mut self) -> Result<Lexeme, LexError> {
         self.skip_inline_whitespace();
 
         let span = self.span();
-        let Some(ch) = self.peek() else {
-            return self.eof_or_unterminated(span);
-        };
-
-        match ch {
-            '#' if self.hash_opens_quoted() => {
+        let token = match self.peek() {
+            None => self.eof_or_unterminated()?,
+            Some(_)
+                if self.in_expr()
+                    && let Some((op, width)) = operator_prefix(self.rest()) =>
+            {
+                self.pos += width;
+                Token::Op(op)
+            }
+            Some('#') if self.hash_opens_quoted() => {
                 let level = self.count_hash_run();
-                for _ in 0..level {
-                    self.bump();
-                }
-                self.scan_quoted(span, level)
+                self.pos += level;
+                self.scan_quoted(span, level)?
             }
-            '\n' | ';' => Ok(self.scan_separator(span)),
-            '{' => Ok(self.open_delim(Token::LBrace, DelimKind::Brace)),
-            '}' => self.close_delim(Token::RBrace),
-            '[' => Ok(self.open_delim(Token::LBracket, DelimKind::Bracket)),
-            ']' => self.close_delim(Token::RBracket),
-            '(' => Ok(self.bump_simple(Token::LParen, span)),
-            ')' => Ok(self.bump_simple(Token::RParen, span)),
-            '|' if self.in_expr() && self.peek_n(1) == Some('|') => {
-                Ok(self.two_char_op(Operator::Or, span))
-            }
-            '|' => Ok(self.bump_simple(Token::Pipe, span)),
-            '&' if self.in_expr() && self.peek_n(1) == Some('&') => {
-                Ok(self.two_char_op(Operator::And, span))
-            }
-            '&' if self.peek_n(1) == Some('&') => Err(Self::error(
-                Span::new(span.file, span.start, span.start + 2),
-                "ral has no `&&`: a newline or `;` sequences commands, and an \
-                     uncaught failure already stops the script. Inside `$[…]`, \
-                     `&&` is the Boolean connective",
-            )),
-            '&' if self.in_expr() => Err(Self::error(
-                Span::new(span.file, span.start, span.start + 1),
-                "`&` is not an operator: the Boolean connective is `&&`",
-            )),
-            '&' => Err(Self::error(
-                Span::new(span.file, span.start, span.start + 1),
-                "`&` does not background a command in ral: wrap it in \
-                     `spawn { … }`, which returns a handle you `await`",
-            )),
-            ',' if self.suppress_newline() => Ok(self.bump_simple(Token::Comma, span)),
-            ',' => Ok(self.scan_bare_word(span)),
-            '$' => {
+            Some('\n' | ';') => self.scan_separator(),
+            Some('{') => self.open_delim(Token::LBrace, DelimKind::Brace),
+            Some('}') => self.close_delim(Token::RBrace)?,
+            Some('[') => self.open_delim(Token::LBracket, DelimKind::Bracket),
+            Some(']') => self.close_delim(Token::RBracket)?,
+            Some('(') => self.bump_simple(Token::LParen),
+            Some(')') => self.bump_simple(Token::RParen),
+            Some('|') => self.bump_simple(Token::Pipe),
+            Some('&') => {
                 self.bump();
-                match self.scan_dollar()? {
-                    Some(token) => Ok(Lexeme {
-                        token,
-                        span: self.finish(span),
-                    }),
-                    None => Err(Self::error(
+                let message = if self.eat('&') {
+                    "ral has no `&&`: a newline or `;` sequences commands, and an \
+                     uncaught failure already stops the script. Inside `$[…]`, \
+                     `&&` is the Boolean connective"
+                } else if self.in_expr() {
+                    "`&` is not an operator: the Boolean connective is `&&`"
+                } else {
+                    "`&` does not background a command in ral: wrap it in \
+                     `spawn { … }`, which returns a handle you `await`"
+                };
+                return Err(Self::error(self.finish(span), message));
+            }
+            Some(',') if self.suppress_newline() => self.bump_simple(Token::Comma),
+            Some('$') => {
+                self.bump();
+                self.scan_dollar()?.ok_or_else(|| {
+                    Self::error(
                         self.finish(span),
                         "expected a name after `$`: write `$name`, `$(name)`, or `$[…]`",
-                    )),
-                }
+                    )
+                })?
             }
-            '^' => Ok(self.bump_simple(Token::Caret, span)),
-            '!' if self.in_expr() && self.peek_n(1) == Some('=') => {
-                Ok(self.two_char_op(Operator::Binary(BinaryOp::Eq(EqOp::Ne)), span))
+            Some('^') => self.bump_simple(Token::Caret),
+            Some('!') => self.bump_simple(Token::Bang),
+            Some('?') => self.bump_simple(Token::Question),
+            Some('\'') => self.scan_quoted(span, 0)?,
+            Some('"') => self.scan_double_quoted(span)?,
+            Some('>') => self.scan_redirect_gt(None, span)?,
+            Some('<') => self.scan_redirect_lt(None, span)?,
+            Some(ch) if !self.in_expr() && ch.is_ascii_digit() && self.is_fd_redirect_start() => {
+                self.scan_fd_redirect(span)?
             }
-            '!' => Ok(self.bump_simple(Token::Bang, span)),
-            '?' => Ok(self.bump_simple(Token::Question, span)),
-            '\'' => self.scan_quoted(span, 0),
-            '"' => self.scan_double_quoted(span),
-            '<' | '>' if self.in_expr() => Ok(self.scan_comparison(span)),
-            '>' => self.scan_redirect_gt(None, span),
-            '<' => self.scan_redirect_lt(None, span),
-            _ if !self.in_expr() && ch.is_ascii_digit() && self.is_fd_redirect_start() => {
-                self.scan_fd_redirect(span)
+            Some('.') if self.rest().starts_with("...") => {
+                self.pos += 3;
+                Token::Spread
             }
-            '.' if self.peek_n(1) == Some('.') && self.peek_n(2) == Some('.') => {
-                self.bump();
-                self.bump();
-                self.bump();
-                Ok(Lexeme {
-                    token: Token::Spread,
-                    span: self.finish(span),
-                })
-            }
-            '`' => {
+            Some('`') => {
                 self.bump();
                 let label = self.scan_ident();
                 if label.is_empty() {
-                    Err(Self::error(
+                    return Err(Self::error(
                         self.finish(span),
                         "expected a tag label after the backtick, as in `` `ok ``: \
-                             a backtick never runs a command here; write `!{cmd}` for that",
-                    ))
-                } else {
-                    Ok(Lexeme {
-                        token: Token::Tag(label),
-                        span: self.finish(span),
-                    })
+                         a backtick never runs a command here; write `!{cmd}` for that",
+                    ));
                 }
+                Token::Tag(label.into())
             }
-            _ if let Some(op) = operator_char(ch).filter(|_| self.in_expr()) => {
-                Ok(self.scan_operator(op, span))
+            Some(_)
+                if self.in_expr()
+                    && let Some((len, _)) = numeral::prefix(self.rest()) =>
+            {
+                self.scan_numeral_word(len)
             }
-            _ if self.in_expr() && self.at_numeral() => Ok(self.scan_numeral_word(span)),
-            // Every metacharacter `continues_bare_word` rejects is matched above;
-            // what is left over is exactly the ASCII controls.
-            _ if continues_bare_word(ch) => Ok(self.scan_bare_word(span)),
-            _ => {
-                let span = self.bump_spanned();
-                Err(Self::error(
-                    span,
+            Some(ch) if continues_bare_word(ch) => self.scan_bare_word(),
+            Some(ch) => {
+                return Err(Self::error(
+                    self.bump_spanned(),
                     format!(
                         "control character U+{:04X} cannot appear bare in ral source: \
                          inside a double-quoted string it is written `\\u{{{:X}}}`",
                         ch as u32, ch as u32
                     ),
-                ))
+                ));
             }
-        }
-    }
-
-    fn bump_simple(&mut self, token: Token, span: Span) -> Lexeme {
-        self.bump();
-        Lexeme {
+        };
+        Ok(Lexeme {
             token,
             span: self.finish(span),
-        }
+        })
     }
 
-    fn two_char_op(&mut self, op: Operator, span: Span) -> Lexeme {
+    fn bump_simple(&mut self, token: Token) -> Token {
         self.bump();
-        self.bump();
-        Lexeme {
-            token: Token::Op(op),
-            span: self.finish(span),
-        }
-    }
-
-    /// `<`, `>`, `<=`, `>=` inside `$[…]`.
-    fn scan_comparison(&mut self, span: Span) -> Lexeme {
-        let lt = self.bump() == Some('<');
-        let or_eq = self.peek() == Some('=');
-        if or_eq {
-            self.bump();
-        }
-        let op = match (lt, or_eq) {
-            (true, false) => CompareOp::Lt,
-            (true, true) => CompareOp::Le,
-            (false, false) => CompareOp::Gt,
-            (false, true) => CompareOp::Ge,
-        };
-        Lexeme {
-            token: Token::Op(Operator::Binary(BinaryOp::Compare(op))),
-            span: self.finish(span),
-        }
-    }
-
-    /// `op` is the operator under the cursor; a second `=` after `Assign`
-    /// makes it `==`.
-    fn scan_operator(&mut self, op: Operator, span: Span) -> Lexeme {
-        self.bump();
-        let op = if op == Operator::Assign && self.peek() == Some('=') {
-            self.bump();
-            Operator::Binary(BinaryOp::Eq(EqOp::Eq))
-        } else {
-            op
-        };
-        Lexeme {
-            token: Token::Op(op),
-            span: self.finish(span),
-        }
+        token
     }
 
     /// The unscanned source.
-    fn rest(&self) -> &str {
-        &self.source[self.byte_pos() as usize..]
-    }
-
-    fn at_numeral(&self) -> bool {
-        numeral::prefix(self.rest()).is_some()
+    fn rest(&self) -> &'a str {
+        &self.source[self.pos..]
     }
 
     /// In `$[…]` `+` and `-` are operators, so the word is the numeral prefix
     /// plus any bare text glued to it; the parser rejoins a numeral's sign.
-    fn scan_numeral_word(&mut self, span: Span) -> Lexeme {
-        let (len, _) = numeral::prefix(self.rest()).expect("caller saw a numeral");
-        let mut word: String = (0..len)
-            .map(|_| self.bump().expect("prefix is in range"))
-            .collect();
-        word.push_str(&self.scan_bare_fragment());
-        Lexeme {
-            token: Token::Word(Word::Plain(word)),
-            span: self.finish(span),
-        }
+    fn scan_numeral_word(&mut self, len: usize) -> Token {
+        let start = self.pos;
+        self.pos += len;
+        self.scan_bare_fragment();
+        Token::Word(Word::Plain(self.source[start..self.pos].into()))
     }
 
-    fn open_delim(&mut self, token: Token, kind: DelimKind) -> Lexeme {
-        let span = self.span();
-        self.bump();
-        let opened = self.finish(span);
+    fn open_delim(&mut self, token: Token, kind: DelimKind) -> Token {
+        let opened = self.bump_spanned();
         self.delim_stack.push(OpenDelim { kind, opened });
-        Lexeme {
-            token,
-            span: opened,
-        }
+        token
     }
 
     /// Emit the closing token under the cursor, popping the innermost opener
     /// it closes.  A closer that closes something else is an error; one at
     /// depth 0 is a token, which the parser reports as unmatched.
-    fn close_delim(&mut self, token: Token) -> Result<Lexeme, LexError> {
+    fn close_delim(&mut self, token: Token) -> Result<Token, LexError> {
         let start = self.span();
         let close = self.bump().expect("caller peeked a closer");
         let span = self.finish(start);
@@ -957,13 +860,13 @@ impl<'a> Lexer<'a> {
             }
             None => {}
         }
-        Ok(Lexeme { token, span })
+        Ok(token)
     }
 
     /// Merge a maximal run of newlines, semicolons, whitespace, and comments
     /// into one separator token: [`Token::Semi`] if the run contains a `;`,
     /// soft [`Token::Newline`] otherwise.
-    fn scan_separator(&mut self, span: Span) -> Lexeme {
+    fn scan_separator(&mut self) -> Token {
         let mut hard = self.peek() == Some(';');
         self.bump();
         loop {
@@ -979,11 +882,7 @@ impl<'a> Lexer<'a> {
                 _ => break,
             }
         }
-        let token = if hard { Token::Semi } else { Token::Newline };
-        Lexeme {
-            token,
-            span: self.finish(span),
-        }
+        if hard { Token::Semi } else { Token::Newline }
     }
 
     /// Does the `:` under `peek()` break the bare word?  Only when whitespace,
@@ -994,31 +893,22 @@ impl<'a> Lexer<'a> {
             .is_none_or(|next| matches!(next, ' ' | '\t' | '\r' | '\n' | ']' | '}' | ')' | ','))
     }
 
-    fn scan_bare_word(&mut self, span: Span) -> Lexeme {
+    fn scan_bare_word(&mut self) -> Token {
         if self.peek() == Some(':') && self.colon_splits_here() {
-            self.bump();
-            return Lexeme {
-                token: Token::Colon,
-                span: self.finish(span),
-            };
+            return self.bump_simple(Token::Colon);
         }
-
         let word = self.scan_bare_fragment();
-        let word = if let Some(path) = TildePath::parse_for(&word, self.rules) {
+        Token::Word(if let Some(path) = TildePath::parse_for(word, self.rules) {
             Word::Tilde(path)
-        } else if names_a_path_for(&word, self.rules) {
-            Word::Path(word)
+        } else if names_a_path_for(word, self.rules) {
+            Word::Path(word.into())
         } else {
-            Word::Plain(word)
-        };
-        Lexeme {
-            token: Token::Word(word),
-            span: self.finish(span),
-        }
+            Word::Plain(word.into())
+        })
     }
 
-    fn scan_bare_fragment(&mut self) -> String {
-        let mut word = String::new();
+    fn scan_bare_fragment(&mut self) -> &'a str {
+        let start = self.pos;
         while let Some(ch) = self.peek() {
             if !continues_bare_word(ch) {
                 break;
@@ -1031,7 +921,7 @@ impl<'a> Lexer<'a> {
             }
 
             // `&` ends a word here because `&&` is a connective.
-            if self.in_expr() && (operator_char(ch).is_some() || ch == '&') {
+            if self.in_expr() && (operator_prefix(self.rest()).is_some() || ch == '&') {
                 break;
             }
 
@@ -1039,95 +929,82 @@ impl<'a> Lexer<'a> {
                 break;
             }
 
-            word.push(ch);
             self.bump();
         }
-        word
+        &self.source[start..self.pos]
     }
 
     /// Length of the `#` run at the cursor, consuming nothing.
     fn count_hash_run(&self) -> usize {
-        let mut n = 0;
-        while self.peek_n(n) == Some('#') {
-            n += 1;
-        }
-        n
+        self.rest().bytes().take_while(|&b| b == b'#').count()
     }
 
     /// A `#` run followed by `'` opens `#'…'#`; anything else is a comment.
     /// Shared by `next_token` and `skip_inline_whitespace` so they cannot
     /// disagree.
     fn hash_opens_quoted(&self) -> bool {
-        self.peek_n(self.count_hash_run()) == Some('\'')
+        self.rest().as_bytes().get(self.count_hash_run()) == Some(&b'\'')
     }
 
-    /// Push each body char and consume the closing `'` with its `level`
-    /// `#`s. A non-closing `'` must not follow `level` body `#`s.
-    fn scan_quoted_body(
-        &mut self,
-        span: Span,
-        level: usize,
-        body: &mut String,
-    ) -> Result<(), LexError> {
-        loop {
-            match self.peek() {
-                None => {
-                    let form = if level == 0 {
-                        StringForm::SingleQuoted
-                    } else {
-                        StringForm::BumpedSingle(level)
-                    };
-                    return Err(Self::err_unterminated_string(span, form, None));
-                }
-                Some('\'') => {
-                    let mut hashes = 0usize;
-                    while self.peek_n(1 + hashes) == Some('#') {
-                        hashes += 1;
-                    }
-                    if hashes >= level {
-                        self.bump();
-                        for _ in 0..level {
-                            self.bump();
-                        }
-                        return Ok(());
-                    }
-                    if body.bytes().rev().take_while(|&b| b == b'#').count() >= level {
-                        let width =
-                            u32::try_from(level).expect("raw fence fits in its source span");
-                        let quote = self.byte_pos();
-                        return Err(Self::typed_error(
-                            Span::new(span.file, quote - width, quote + 1),
-                            LexErrorKind::OpenerInRaw {
-                                level,
-                                opened: Span::new(span.file, span.start, span.start + width + 1),
-                            },
-                        ));
-                    }
-                    body.push('\'');
-                    self.bump();
-                }
-                Some(ch) => {
-                    body.push(ch);
-                    self.bump();
-                }
+    fn unclosed_string(&mut self, opened: Span, form: StringForm) -> Result<(), LexError> {
+        match self.eof {
+            EofPolicy::RequireClosed => Err(Self::err_unterminated_string(opened, form, None)),
+            EofPolicy::AllowOpen => {
+                self.unclosed_string = Some(self.finish(opened));
+                Ok(())
             }
         }
     }
 
-    /// The leading `#`s are already consumed; the opening `'` is not.  Body
-    /// bytes are verbatim — no escapes, no interpolation.
-    fn scan_quoted(&mut self, span: Span, level: usize) -> Result<Lexeme, LexError> {
+    /// Hashes are consumed, the opening quote is not. A closer takes precedence.
+    fn scan_quoted(&mut self, span: Span, level: usize) -> Result<Token, LexError> {
         self.bump();
-        let mut body = String::new();
-        self.scan_quoted_body(span, level, &mut body)?;
-        Ok(Lexeme {
-            token: Token::SingleQuoted(body),
-            span: self.finish(span),
-        })
+        let opened = self.finish(span);
+        let start = self.pos;
+        let end = loop {
+            match self.peek() {
+                None => {
+                    self.unclosed_string(opened, StringForm::SingleQuoted(level))?;
+                    break self.pos;
+                }
+                Some('\'') => {
+                    let hashes = self.rest()[1..]
+                        .bytes()
+                        .take(level)
+                        .take_while(|&b| b == b'#')
+                        .count();
+                    if hashes == level {
+                        let end = self.pos;
+                        self.pos += 1 + level;
+                        break end;
+                    }
+                    let preceding = self.source[start..self.pos]
+                        .bytes()
+                        .rev()
+                        .take(level)
+                        .take_while(|&b| b == b'#')
+                        .count();
+                    if preceding == level {
+                        let width = u32::try_from(level).expect("source length checked");
+                        let quote = self.byte_pos();
+                        return Err(Self::typed_error(
+                            Span::new(span.file, quote - width, quote + 1),
+                            LexErrorKind::OpenerInRaw { level, opened },
+                        ));
+                    }
+                    self.bump();
+                }
+                Some(_) => {
+                    self.bump();
+                }
+            }
+        };
+        Ok(Token::SingleQuoted(self.source[start..end].into()))
     }
 
-    fn scan_double_quoted(&mut self, span: Span) -> Result<Lexeme, LexError> {
+    fn scan_double_quoted(&mut self, span: Span) -> Result<Token, LexError> {
         self.bump();
+        let opened = self.finish(span);
         let file = span.file;
         let mut parts: Vec<Spanned<StringPart>> = Vec::new();
         let mut run = LiteralRun::default();
@@ -1139,7 +1016,9 @@ impl<'a> Lexer<'a> {
             let cursor = self.byte_pos();
             match self.peek() {
                 None => {
-                    return Err(Self::err_unterminated_string(span, form, None));
+                    self.unclosed_string(opened, form)?;
+                    run.flush(&mut parts, cursor, file);
+                    break;
                 }
                 Some('"') => {
                     run.flush(&mut parts, cursor, file);
@@ -1147,13 +1026,15 @@ impl<'a> Lexer<'a> {
                     break;
                 }
                 Some('\\') => {
-                    self.bump();
-                    self.scan_double_quoted_escape(cursor, &mut run)?;
+                    let escape = self.bump_spanned();
+                    if let Some(ch) = self.scan_double_quoted_escape(escape, opened)? {
+                        run.push(cursor, ch);
+                    }
                 }
                 Some(sigil @ ('$' | '!')) => {
                     let splice = self
                         .scan_splice()
-                        .map_err(|inner| Self::rewrap_inner_into_string(span, form, inner))?;
+                        .map_err(|inner| Self::rewrap_inner_into_string(opened, form, inner))?;
                     if let Some(tokens) = splice {
                         run.flush(&mut parts, cursor, file);
                         let part_end = self.byte_pos();
@@ -1187,154 +1068,96 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        Ok(Lexeme {
-            token: Token::DoubleQuoted(parts),
-            span: self.finish(span),
-        })
+        Ok(Token::DoubleQuoted(parts))
     }
 
-    /// Consume one escape after the `\`, which the caller has bumped.
-    /// `escape_start` is that `\`'s offset, so a malformed escape underlines
-    /// `\q` itself rather than the string's opening quote.
+    /// Decode after `\`; a line continuation contributes no character.
     fn scan_double_quoted_escape(
         &mut self,
-        escape_start: u32,
-        run: &mut LiteralRun,
-    ) -> Result<(), LexError> {
-        // The escape so far, from the `\` to the cursor; built at each error
-        // site once the offending char is consumed.
-        macro_rules! span {
-            () => {
-                Span::new(self.file, escape_start, self.byte_pos())
-            };
-        }
-        match self.peek() {
-            Some('n') => {
-                self.bump();
-                run.push(escape_start, '\n');
-            }
-            Some('r') => {
-                self.bump();
-                run.push(escape_start, '\r');
-            }
-            Some('t') => {
-                self.bump();
-                run.push(escape_start, '\t');
-            }
-            Some('\\') => {
-                self.bump();
-                run.push(escape_start, '\\');
-            }
-            Some('0') => {
-                self.bump();
-                run.push(escape_start, '\0');
-            }
-            Some('e') => {
-                self.bump();
-                run.push(escape_start, '\x1b');
-            }
-            Some('"') => {
-                self.bump();
-                run.push(escape_start, '"');
-            }
-            Some('$') => {
-                self.bump();
-                run.push(escape_start, '$');
-            }
-            Some('!') => {
-                self.bump();
-                run.push(escape_start, '!');
-            }
-            Some('~') => {
-                self.bump();
-                run.push(escape_start, '~');
-            }
-            Some('\n') => {
-                self.bump();
-            }
+        escape: Span,
+        opened: Span,
+    ) -> Result<Option<char>, LexError> {
+        let ch = match self.bump() {
+            Some('n') => '\n',
+            Some('r') => '\r',
+            Some('t') => '\t',
+            Some('0') => '\0',
+            Some('e') => '\x1b',
+            Some(ch @ ('\\' | '"' | '$' | '!' | '~')) => ch,
+            Some('\n') => return Ok(None),
             Some('\r') => {
-                self.bump();
-                if self.peek() == Some('\n') {
-                    self.bump();
-                }
+                self.eat('\n');
+                return Ok(None);
             }
             Some('x') => {
-                self.bump();
-                let h1 = self
-                    .peek()
-                    .and_then(|c| c.to_digit(16))
-                    .ok_or_else(|| Self::error(span!(), "\\x escape needs two hex digits"))?;
-                self.bump();
-                let h2 = self
-                    .peek()
-                    .and_then(|c| c.to_digit(16))
-                    .ok_or_else(|| Self::error(span!(), "\\x escape needs two hex digits"))?;
-                self.bump();
-                let n = (h1 << 4) | h2;
-                if n >= 0x80 {
+                let digits = self.take_hex(2);
+                if digits.len() != 2 {
                     return Err(Self::error(
-                        span!(),
+                        self.finish(escape),
+                        "\\x escape needs two hex digits",
+                    ));
+                }
+                let byte = u8::from_str_radix(digits, 16).expect("two hex digits");
+                if !byte.is_ascii() {
+                    return Err(Self::error(
+                        self.finish(escape),
                         "\\xNN is limited to \\x00 through \\x7F; write non-ASCII characters \
                          directly or as \\u{…}",
                     ));
                 }
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "the `n >= 0x80` guard above has already returned; fits u8"
-                )]
-                run.push(escape_start, n as u8 as char);
+                char::from(byte)
             }
             Some('u') => {
-                self.bump();
-                if self.peek() != Some('{') {
-                    return Err(Self::error(span!(), "\\u escape is written \\u{…}"));
+                if !self.eat('{') {
+                    return Err(Self::error(
+                        self.finish(escape),
+                        "\\u escape is written \\u{…}",
+                    ));
                 }
-                self.bump();
-                let mut digits = String::new();
-                loop {
-                    match self.peek() {
-                        Some('}') => break,
-                        Some(c) if c.is_ascii_hexdigit() && digits.len() < 6 => {
-                            digits.push(c);
-                            self.bump();
-                        }
-                        _ => {
-                            return Err(Self::error(span!(), "\\u{…} takes one to six hex digits"));
-                        }
-                    }
+                let digits = self.take_hex(6);
+                if digits.is_empty() || !self.eat('}') {
+                    return Err(Self::error(
+                        self.finish(escape),
+                        "\\u{…} takes one to six hex digits",
+                    ));
                 }
-                if digits.is_empty() {
-                    return Err(Self::error(span!(), "\\u{…} takes one to six hex digits"));
-                }
-                self.bump();
-                let cp = u32::from_str_radix(&digits, 16).unwrap();
-                let ch = char::from_u32(cp).ok_or_else(|| {
-                    Self::error(span!(), format!("\\u{{{digits}}} is not a Unicode scalar"))
-                })?;
-                run.push(escape_start, ch);
+                let cp = u32::from_str_radix(digits, 16).expect("one to six hex digits");
+                char::from_u32(cp).ok_or_else(|| {
+                    Self::error(
+                        self.finish(escape),
+                        format!("\\u{{{digits}}} is not a Unicode scalar"),
+                    )
+                })?
             }
             Some('\'') => {
-                self.bump();
                 return Err(Self::error(
-                    span!(),
+                    self.finish(escape),
                     "`'` needs no escape inside a double-quoted string: write it directly",
                 ));
             }
             Some(ch) => {
-                self.bump();
                 return Err(Self::error(
-                    span!(),
+                    self.finish(escape),
                     format!("unknown escape `\\{ch}` in double-quoted string"),
                 ));
             }
             None => {
-                return Err(Self::error(
-                    span!(),
-                    "unterminated double-quoted string after `\\`",
-                ));
+                self.unclosed_string(opened, StringForm::DoubleQuoted)?;
+                return Ok(None);
             }
-        }
-        Ok(())
+        };
+        Ok(Some(ch))
+    }
+
+    fn take_hex(&mut self, max: usize) -> &'a str {
+        let start = self.pos;
+        self.pos += self
+            .rest()
+            .bytes()
+            .take(max)
+            .take_while(u8::is_ascii_hexdigit)
+            .count();
+        &self.source[start..self.pos]
     }
 
     /// A splice inside `"…"`, at its `$` or `!`: the tokens of `$name`,
@@ -1354,17 +1177,7 @@ impl<'a> Lexer<'a> {
                         token: Token::Bang,
                         span: self.finish(start),
                     });
-                    let open = self.bump_spanned();
-                    let (body, close) = self.scan_token_group(open, DelimKind::Brace)?;
-                    tokens.push(Lexeme {
-                        token: Token::LBrace,
-                        span: open,
-                    });
-                    tokens.extend(body);
-                    tokens.push(Lexeme {
-                        token: Token::RBrace,
-                        span: close,
-                    });
+                    self.scan_splice_group(DelimKind::Brace, &mut tokens)?;
                 }
                 // `{` is kept so the `${…}` diagnostic still fires.
                 Some('$')
@@ -1407,19 +1220,28 @@ impl<'a> Lexer<'a> {
             })
         );
         while !delimited && self.peek() == Some('[') {
-            let open = self.bump_spanned();
-            let (body, close) = self.scan_token_group(open, DelimKind::Bracket)?;
-            tokens.push(Lexeme {
-                token: Token::LBracket,
-                span: open,
-            });
-            tokens.extend(body);
-            tokens.push(Lexeme {
-                token: Token::RBracket,
-                span: close,
-            });
+            self.scan_splice_group(DelimKind::Bracket, &mut tokens)?;
         }
         Ok(Some(tokens))
+    }
+
+    fn scan_splice_group(
+        &mut self,
+        kind: DelimKind,
+        tokens: &mut Vec<Lexeme>,
+    ) -> Result<(), LexError> {
+        let open = self.bump_spanned();
+        let (body, close) = self.scan_token_group(open, kind)?;
+        let (left, right) = kind.tokens();
+        tokens.push(Lexeme {
+            token: left,
+            span: open,
+        });
+        tokens.extend(body);
+        if let Some(span) = close {
+            tokens.push(Lexeme { token: right, span });
+        }
+        Ok(())
     }
 
     /// The token after a `$` the caller consumed: `$name`, `$(name)`, or
@@ -1430,7 +1252,7 @@ impl<'a> Lexer<'a> {
     fn scan_dollar(&mut self) -> Result<Option<Token>, LexError> {
         match self.peek() {
             Some(ch) if is_ident_start(ch) => Ok(Some(Token::Variable {
-                name: self.scan_deref_ident(),
+                name: self.scan_deref_ident().into(),
                 delimited: false,
             })),
             Some('{') => {
@@ -1483,7 +1305,7 @@ impl<'a> Lexer<'a> {
                 }
                 self.bump();
                 Ok(Some(Token::Variable {
-                    name,
+                    name: name.into(),
                     delimited: true,
                 }))
             }
@@ -1496,67 +1318,45 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// The text from char index `from` to the next `)` or the end of the
-    /// line, trimmed and capped: what a bash `$(cmd args)` would have run.
+    /// The mistaken command, bounded for its diagnostic.
     fn command_text(&self, from: usize) -> String {
         const CAP: usize = 40;
-        let line: String = self.chars[from..]
-            .iter()
-            .map(|&(_, c)| c)
-            .take_while(|&c| !matches!(c, ')' | '\n'))
-            .collect();
-        let line = line.trim_end();
+        let line = self.source[from..]
+            .split([')', '\n'])
+            .next()
+            .unwrap_or("")
+            .trim_end();
         match line.char_indices().nth(CAP) {
             Some((end, _)) => format!("{}…", &line[..end]),
             None => line.to_owned(),
         }
     }
 
-    fn scan_ident(&mut self) -> String {
-        let Some(ch) = self.peek() else {
-            return String::new();
-        };
-        if !is_ident_start(ch) {
-            return String::new();
+    fn scan_ident(&mut self) -> &'a str {
+        if self.peek().is_some_and(is_ident_start) {
+            self.take_while(is_ident_cont)
+        } else {
+            ""
         }
-
-        let mut name = String::new();
-        name.push(ch);
-        self.bump();
-        name.push_str(&self.take_while(is_ident_cont));
-        name
     }
 
     /// The name of a bare `$name` or `!$name`.  A `-` is an interior name
     /// char, but a trailing one goes back to the stream as literal text, so
     /// `$os-$arch` is two derefs around a `-`.
-    fn scan_deref_ident(&mut self) -> String {
-        let mut name = self.scan_ident();
-        while name.ends_with('-') {
-            name.pop();
-            self.pos -= 1;
-        }
-        name
+    fn scan_deref_ident(&mut self) -> &'a str {
+        let name = self.scan_ident();
+        let trimmed = name.trim_end_matches('-');
+        self.pos -= name.len() - trimmed.len();
+        trimmed
     }
 
-    /// Lex a balanced body under `kind`: the caller has already consumed the
-    /// opener (`opener` is its span, anchoring an `UnterminatedBalanced` if
-    /// EOF comes first), and this consumes the closer without emitting it,
-    /// returning the body and the closer's span.
-    ///
-    /// That bypass of [`Self::open_delim`] is why we push onto `delim_stack`
-    /// here — it gives the body its lexical mode and makes the stack falling
-    /// below our entry depth the signal that our own closer arrived.
-    /// [`Self::close_delim`] does that pop on success; each error path pops
-    /// explicitly.
+    /// The opener is consumed. An editor group may end at EOF without a closer.
     fn scan_token_group(
         &mut self,
         opener: Span,
         kind: DelimKind,
-    ) -> Result<(Vec<Lexeme>, Span), LexError> {
-        // Every lexer recursion runs through here, so `delim_stack.len()`
-        // bounds the recursion depth.  Cap it, or `$[$[$[$[…` overflows the
-        // call stack instead of failing cleanly.
+    ) -> Result<(Vec<Lexeme>, Option<Span>), LexError> {
+        // Every recursive lexing path enters here.
         if self.delim_stack.len() >= crate::syntax::NESTING_DEPTH_LIMIT {
             return Err(Self::error(
                 opener,
@@ -1571,47 +1371,31 @@ impl<'a> Lexer<'a> {
         let mut tokens = Vec::new();
 
         loop {
-            let lexeme = match self.next_token() {
-                Ok(lexeme) => lexeme,
-                Err(e) => {
-                    self.delim_stack.pop();
-                    return Err(e);
-                }
-            };
-            match (&lexeme.token, kind) {
-                // Our closer: `close_delim` already popped us, so the stack
-                // sits below the entry depth.
-                (Token::RBrace, DelimKind::Brace)
-                | (Token::RBracket, DelimKind::Bracket | DelimKind::Expr)
-                    if self.delim_stack.len() < entry_depth =>
-                {
-                    return Ok((tokens, lexeme.span));
-                }
-                // With our delim open, `eof_or_unterminated` turns end of
-                // input into the `Err` caught above.
-                (Token::Eof, _) => {
-                    unreachable!("next_token cannot yield Eof while a delim is open")
-                }
-                _ => tokens.push(lexeme),
+            let lexeme = self.next_token()?;
+            // Only our matching closer can pop below the entry depth.
+            if self.delim_stack.len() < entry_depth {
+                return Ok((tokens, Some(lexeme.span)));
             }
+            if lexeme.token == Token::Eof {
+                self.delim_stack.truncate(entry_depth - 1);
+                return Ok((tokens, None));
+            }
+            tokens.push(lexeme);
         }
     }
 
     fn is_fd_redirect_start(&self) -> bool {
-        let mut offset = 0;
-        while self.peek_n(offset).is_some_and(|ch| ch.is_ascii_digit()) {
-            offset += 1;
-        }
-        matches!(self.peek_n(offset), Some('>' | '<'))
+        let n = self.rest().bytes().take_while(u8::is_ascii_digit).count();
+        matches!(self.rest().as_bytes().get(n), Some(b'>' | b'<'))
     }
 
     /// A digit run glued to `>`/`<`: read whole, then judged against the
     /// nine-spelling vocabulary by `redirect` and `dup`.
-    fn scan_fd_redirect(&mut self, span: Span) -> Result<Lexeme, LexError> {
+    fn scan_fd_redirect(&mut self, span: Span) -> Result<Token, LexError> {
         let digits = self.take_while(|ch| ch.is_ascii_digit());
         match self.peek() {
-            Some('>') => self.scan_redirect_gt(Some(&digits), span),
-            Some('<') => self.scan_redirect_lt(Some(&digits), span),
+            Some('>') => self.scan_redirect_gt(Some(digits), span),
+            Some('<') => self.scan_redirect_lt(Some(digits), span),
             // `is_fd_redirect_start` already saw a `>`/`<` past the digits,
             // and `take_while` consumed exactly those digits.
             _ => unreachable!("scan_fd_redirect entered without a trailing '>' or '<'"),
@@ -1622,6 +1406,12 @@ impl<'a> Lexer<'a> {
     /// rather than left to mean whatever that fd happens to be in the
     /// process: a pipe or a pinned binary of the runtime's own.
     fn fd_refusal(digits: &str) -> String {
+        if digits.len() > 1 && digits.starts_with('0') {
+            return format!(
+                "file-descriptor spelling `{digits}` has leading zeros: \
+                 write `2> file` or `2>&1` exactly; stdin and stdout need no prefix"
+            );
+        }
         format!(
             "file descriptor {digits}: ral has only standard input (0), \
              standard output (1) and standard error (2), so write a file \
@@ -1629,33 +1419,26 @@ impl<'a> Lexer<'a> {
         )
     }
 
-    /// Judge a redirect spelled with `fd`, which is gone from the token.
-    /// `stderr` is set only for `2` with a write, by construction.
-    fn redirect(&self, fd: Option<&str>, op: RedirectOp, span: Span) -> Result<Lexeme, LexError> {
-        let token = |stderr| {
-            Ok(Lexeme {
-                token: Token::Redirect { stderr, op },
-                span: self.finish(span),
-            })
-        };
+    /// Descriptor prefixes are spellings, never numbers.
+    fn redirect(&self, fd: Option<&str>, op: RedirectOp, span: Span) -> Result<Token, LexError> {
         let Some(digits) = fd else {
-            return token(false);
+            return Ok(Token::Redirect(op));
         };
         let refuse = |m: String| Err(Self::error(self.finish(span), m));
-        match (digits.parse::<u32>(), op) {
-            (Ok(2), RedirectOp::Write(_)) => token(true),
-            (Ok(0), RedirectOp::Write(_)) => refuse(STDIN_UNWRITABLE.into()),
-            (Ok(0), _) => refuse("`<` already reads standard input: drop the `0`".into()),
-            (Ok(1), RedirectOp::Write(_)) => refuse(
+        match (digits, op) {
+            ("2", RedirectOp::Stdout(mode)) => Ok(Token::Redirect(RedirectOp::Stderr(mode))),
+            ("0", RedirectOp::Stdout(_)) => refuse(STDIN_UNWRITABLE.into()),
+            ("0", _) => refuse("`<` already reads standard input: drop the `0`".into()),
+            ("1", RedirectOp::Stdout(_)) => refuse(
                 "`>` already writes standard output: drop the `1`; \
                  to pass `1` as an argument, put a space before `>`"
                     .into(),
             ),
-            (Ok(n @ (1 | 2)), RedirectOp::Read) => refuse(format!(
+            (n @ ("1" | "2"), RedirectOp::Read) => refuse(format!(
                 "`<` always feeds standard input, so `{n}<` reads nothing in ral: \
                  drop the `{n}`, or did you mean `{n}> file` to write there?"
             )),
-            (Ok(1 | 2), RedirectOp::HereString) => {
+            ("1" | "2", RedirectOp::HereString) => {
                 refuse("`<<` always feeds stdin: drop the file-descriptor prefix".into())
             }
             _ => refuse(Self::fd_refusal(digits)),
@@ -1663,50 +1446,45 @@ impl<'a> Lexer<'a> {
     }
 
     /// `fd>&to`: `2>&1` is the one dup ral models.
-    fn dup(&self, fd: Option<&str>, to: &str, span: Span) -> Result<Lexeme, LexError> {
+    fn dup(&self, fd: Option<&str>, to: &str, span: Span) -> Result<Token, LexError> {
         let refuse = |m: String| Err(Self::error(self.finish(span), m));
         let fd = fd.unwrap_or("1");
-        match (fd.parse::<u32>(), to.parse::<u32>()) {
-            (Ok(0), Ok(0..=2)) => refuse(STDIN_UNWRITABLE.into()),
-            (Ok(2), Ok(1)) => Ok(Lexeme {
-                token: Token::StderrToStdout,
-                span: self.finish(span),
-            }),
+        match (fd, to) {
+            ("0", "0" | "1" | "2") => refuse(STDIN_UNWRITABLE.into()),
+            ("2", "1") => Ok(Token::StderrToStdout),
             // A bare `>` writes fd 1, so `>&2` is `1>&2` spelled short.  Both
             // are the bash idiom for a diagnostic, and a diagnostic is a
             // builtin here rather than a second name for the byte channel.
-            (Ok(1), Ok(2)) => refuse(
+            ("1", "2") => refuse(
                 "ral has no `1>&2`: to write a diagnostic, use \
                  `warn \"…\"`, which puts one line on standard error. \
                  Did you mean `2>&1`, folding a command's standard error \
                  into its standard output?"
                     .into(),
             ),
-            (Ok(a @ (1 | 2)), Ok(b @ (1 | 2))) if a == b => refuse(format!(
+            (a @ ("1" | "2"), b @ ("1" | "2")) if a == b => refuse(format!(
                 "`{a}>&{a}` names the stream it already is: drop it"
             )),
-            (Ok(a @ 1..=2), Ok(b @ 0..=2)) => refuse(format!(
+            (a @ ("1" | "2"), b @ ("0" | "1" | "2")) => refuse(format!(
                 "ral has no fd plumbing beyond `2>&1`, so `{a}>&{b}` has nothing to mean"
             )),
-            (Ok(0..=2), _) => refuse(Self::fd_refusal(to)),
+            ("0" | "1" | "2", _) => refuse(Self::fd_refusal(to)),
             _ => refuse(Self::fd_refusal(fd)),
         }
     }
 
-    fn scan_redirect_gt(&mut self, fd: Option<&str>, span: Span) -> Result<Lexeme, LexError> {
+    fn scan_redirect_gt(&mut self, fd: Option<&str>, span: Span) -> Result<Token, LexError> {
         self.bump();
-        if self.peek() == Some('>') {
-            self.bump();
-            return self.redirect(fd, RedirectOp::Write(WriteMode::Append), span);
+        if self.eat('>') {
+            return self.redirect(fd, RedirectOp::Stdout(WriteMode::Append), span);
         }
         // `>~` is the stream-write operator only when the `~` stands alone:
         // a bare char after it makes a word, so `>~/path` writes to `~/path`.
         if self.peek() == Some('~') && !self.peek_n(1).is_some_and(continues_bare_word) {
             self.bump();
-            return self.redirect(fd, RedirectOp::Write(WriteMode::Stream), span);
+            return self.redirect(fd, RedirectOp::Stdout(WriteMode::Stream), span);
         }
-        if self.peek() == Some('&') {
-            self.bump();
+        if self.eat('&') {
             let to = self.take_while(|ch| ch.is_ascii_digit());
             if to.is_empty() {
                 return Err(Self::error(
@@ -1714,17 +1492,15 @@ impl<'a> Lexer<'a> {
                     "expected file descriptor after `>&`",
                 ));
             }
-            return self.dup(fd, &to, span);
+            return self.dup(fd, to, span);
         }
-        self.redirect(fd, RedirectOp::Write(WriteMode::Write), span)
+        self.redirect(fd, RedirectOp::Stdout(WriteMode::Write), span)
     }
 
-    fn scan_redirect_lt(&mut self, fd: Option<&str>, span: Span) -> Result<Lexeme, LexError> {
+    fn scan_redirect_lt(&mut self, fd: Option<&str>, span: Span) -> Result<Token, LexError> {
         self.bump();
-        if self.peek() == Some('<') {
-            self.bump();
-            if self.peek() == Some('<') {
-                self.bump();
+        if self.eat('<') {
+            if self.eat('<') {
                 return Err(Self::error(
                     self.finish(span),
                     "`<<<` is bash's here-string operator: ral's `<<` already \
@@ -2149,10 +1925,7 @@ mod tests {
         let toks = tok_types("echo hello > out.txt");
         assert!(matches!(
             toks[2],
-            Token::Redirect {
-                stderr: false,
-                op: RedirectOp::Write(WriteMode::Write),
-            }
+            Token::Redirect(RedirectOp::Stdout(WriteMode::Write))
         ));
     }
 
@@ -2161,10 +1934,7 @@ mod tests {
         let toks = tok_types("cmd 2> err.log");
         assert!(matches!(
             toks[1],
-            Token::Redirect {
-                stderr: true,
-                op: RedirectOp::Write(WriteMode::Write),
-            }
+            Token::Redirect(RedirectOp::Stderr(WriteMode::Write))
         ));
     }
 
@@ -2186,10 +1956,7 @@ mod tests {
         assert!(
             matches!(
                 toks[2],
-                Token::Redirect {
-                    stderr: false,
-                    op: RedirectOp::Write(WriteMode::Write),
-                }
+                Token::Redirect(RedirectOp::Stdout(WriteMode::Write))
             ),
             "expected a plain Write redirect, got {:?}",
             toks[2]
@@ -2204,10 +1971,7 @@ mod tests {
         assert!(
             matches!(
                 toks[2],
-                Token::Redirect {
-                    stderr: false,
-                    op: RedirectOp::Write(WriteMode::Stream),
-                }
+                Token::Redirect(RedirectOp::Stdout(WriteMode::Stream))
             ),
             "expected a StreamWrite redirect, got {:?}",
             toks[2]
@@ -2566,13 +2330,11 @@ mod tests {
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
-        assert!(inner.iter().any(|l| matches!(
-            l.token,
-            Token::Redirect {
-                op: RedirectOp::Read,
-                ..
-            }
-        )));
+        assert!(
+            inner
+                .iter()
+                .any(|l| matches!(l.token, Token::Redirect(RedirectOp::Read)))
+        );
         assert!(lex_err("$[1 & 0]").contains("`&&`"));
         // Glued: `&` ends a word here, so `true&&false` is a conjunction
         // rather than one long command name.
@@ -2603,10 +2365,7 @@ mod tests {
             vec![
                 plain("echo"),
                 plain("a"),
-                Token::Redirect {
-                    stderr: false,
-                    op: RedirectOp::Write(WriteMode::Write),
-                },
+                Token::Redirect(RedirectOp::Stdout(WriteMode::Write)),
                 plain("="),
                 plain("b"),
                 Token::Eof,
@@ -2973,13 +2732,9 @@ mod tests {
     fn herestring_redirect() {
         let tokens = lex("cat << x").unwrap();
         assert!(
-            tokens.iter().any(|l| matches!(
-                l.token,
-                Token::Redirect {
-                    stderr: false,
-                    op: RedirectOp::HereString,
-                }
-            )),
+            tokens
+                .iter()
+                .any(|l| matches!(l.token, Token::Redirect(RedirectOp::HereString))),
             "got {tokens:?}"
         );
         assert!(lex_err("cat 0<< x").contains("drop the `0`"));

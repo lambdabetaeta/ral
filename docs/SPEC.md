@@ -1786,7 +1786,16 @@ A stdout redirect has a fresh result grade at the body's value type (§17.3).
 Stdin/stderr redirects and `2>&1` preserve the body's grade. This affects
 result typing, not which bytes are written or where they go.
 
-These nine spellings are the whole redirect vocabulary: `< path`, `<< value`, `> path`, `>> path`, `>~ path`, `2> path`, `2>> path`, `2>~ path` and `2>&1`. The digit `2` names standard error and is the only fd prefix; `1>` is refused with advice to put a space before the `>` to pass `1` as an argument (`echo 1>file` would otherwise write an empty file). A redirect list binds streams: each of standard input, output, and error is bound at most once, and a second binding is a parse error with a caret on the second redirect. `cmd > a > b`, `cmd 2> e 2>&1`, `cmd 2>&1 2> e`, and `cmd < a << b` are all refused with "standard output is redirected twice; which one do you mean?" or its input and error counterpart. Position carries no meaning: `2>&1` sends standard error wherever standard output ends up, so `cmd 2>&1 > f` and `cmd > f 2>&1` are one command. Redirect targets are evaluated before their files are opened, and the files open in one fixed order: standard input, output, error. Relative paths use the scoped logical working directory.
+Only the forms in the table are accepted: `1>`, `02>` and `2>&01` are errors.
+To pass a number as an argument before a redirect, leave a space: `echo 1 > file`.
+
+Each standard stream may be redirected at most once; `cmd > a > b` is an error.
+Redirect order does not matter: `cmd 2>&1 > f` and `cmd > f 2>&1` both send
+standard output and standard error to `f`.
+
+All redirect operands are evaluated before any file is opened. Files are then
+opened in the order stdin, stdout, stderr. Relative paths are resolved against
+the scoped working directory.
 
 ral has no numbered descriptors beyond these three streams. A redirect naming any other file descriptor — `3> path`, `4< path`, `>&5` — is rejected outright, with a diagnostic naming standard input, output, and error as the only three that exist; there is no general facility for managing a spawned process's own inherited handles.
 
@@ -4935,7 +4944,7 @@ Cursor and span offsets count Unicode characters, not UTF-8 bytes.
 | `_ed-push` | Save the current buffer on a stack and clear it for another command. |
 | `_ed-accept` | Execute the resulting buffer immediately when the handler returns. |
 | `_ed-history prefix limit` | Return matching history, most recent first; zero means no limit. |
-| `_ed-parse` | Return `[words, current, offset]` for the simple command at the cursor, open blocks read as closed: `words[current]` is the word the cursor touches, or a spliced-in `''` when it sits in whitespace, and `offset` is that word's start. `words` is empty when the buffer does not lex. |
+| `_ed-parse` | Return `[words, current, offset]` for the simple command at the cursor, admitting open strings and blocks: `words[current]` is the word the cursor touches, or a spliced-in `''` when it sits in whitespace, and `offset` is that word's start. `words` is empty when the buffer does not lex. |
 | `_ed-ghost text` | Set suggestion text; an empty string clears it. |
 | `_ed-highlight spans` | Replace highlight spans of shape `[start, end, style]`; an empty list clears them. |
 | `_ed-state default updater` | Read, transform, store, and return one persistent cell belonging to the plugin. |

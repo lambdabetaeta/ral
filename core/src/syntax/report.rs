@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn lex_error_ariadne_names_the_bumped_closing_delimiter() {
         let err = parse_error_from(LexErrorKind::UnterminatedString {
-            form: StringForm::BumpedSingle(2),
+            form: StringForm::SingleQuoted(2),
             opened: Span::new(FileId::DUMMY, 0, 1),
             inner: None,
         });

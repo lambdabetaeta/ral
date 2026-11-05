@@ -28,7 +28,7 @@ use ral_core::path::complete::{PartialPath, Tilde, spell_entry};
 use ral_core::protocol::probe::PathEntry;
 use ral_core::record;
 use ral_core::source::Span as ByteSpan;
-use ral_core::syntax::lexer::{Lexeme, Token, lex_open, separates};
+use ral_core::syntax::lexer::{Lexeme, OpenLexemes, Token, lex_open};
 use ral_core::syntax::quote_word;
 use ral_core::text::{byte_to_char, char_to_byte, rank};
 use std::borrow::Cow;
@@ -276,11 +276,10 @@ fn entries(engine: &dyn Transport, dir: &Path) -> Vec<PathEntry> {
 /// precedes it is nothing or a separator.  A path candidate replaces the whole
 /// atom, so it is one atom again — words that touch do not parse.
 pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize, Vec<Candidate>) {
-    let Some(lexemes) = lex_open(&line[..pos]) else {
+    let Some(OpenLexemes { tokens, .. }) = lex_open(&line[..pos]) else {
         return (pos, vec![]);
     };
-    // Lexemes starting at `pos` are the closers `lex_open` appended, or `Eof`.
-    let seen = &lexemes[..lexemes.partition_point(|l| (l.span.start as usize) < pos)];
+    let seen = &tokens[..tokens.len() - 1]; // Exclude EOF.
     let atom = seen
         .last()
         .filter(|l| l.span.end as usize >= pos && !separates(&l.token));
@@ -434,6 +433,19 @@ record!(typed CommandAt {
     offset: "offset",
 });
 
+/// Boundaries of the editor's simple command.
+fn separates(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Pipe
+            | Token::Question
+            | Token::Semi
+            | Token::Newline
+            | Token::LBrace
+            | Token::RBrace
+    )
+}
+
 /// True for token kinds that carry word-like content (command names,
 /// arguments, variable references) as opposed to pure syntax (pipes,
 /// braces, separators) that only delimit them.
@@ -459,15 +471,16 @@ fn is_word_token(tok: &Token) -> bool {
 /// from the source span — its `\n`, `\"`, `$…` escapes verbatim, not
 /// interpreted.  Plugins tokenizing the buffer see double-quoted text exactly
 /// as typed; unescaping it is theirs to do if they need the runtime value.
-fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
+fn word_text(text: &str, tok: &Token, span: ByteSpan, unclosed: Option<ByteSpan>) -> String {
     if let Token::SingleQuoted(s) = tok {
         return s.clone();
     }
     let (start, end) = (span.start as usize, span.end as usize);
-    // Any closer `lex_open` supplied ends past `text`.
     match tok {
-        Token::DoubleQuoted(_) => text[start + 1..(end - 1).min(text.len())].to_string(),
-        _ => text[start..end.min(text.len())].to_string(),
+        Token::DoubleQuoted(_) => {
+            text[start + 1..end - usize::from(unclosed != Some(span))].to_owned()
+        }
+        _ => text[start..end].to_owned(),
     }
 }
 
@@ -477,7 +490,10 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
 /// always the word being typed (bash's `COMP_CWORD`, zsh's `CURRENT`).
 pub(super) fn parse_at(text: &str, cursor: usize) -> Option<CommandAt> {
     let at = char_to_byte(text, cursor);
-    let tokens = lex_open(text)?;
+    let OpenLexemes {
+        tokens,
+        unclosed_string,
+    } = lex_open(text)?;
     let start = tokens
         .iter()
         .rposition(|l| separates(&l.token) && l.span.end as usize <= at)
@@ -492,7 +508,7 @@ pub(super) fn parse_at(text: &str, cursor: usize) -> Option<CommandAt> {
         .map(|Lexeme { token, span }| {
             (
                 (span.start as usize, span.end as usize),
-                word_text(text, token, *span),
+                word_text(text, token, *span, unclosed_string),
             )
         })
         .unzip();
@@ -1044,10 +1060,10 @@ mod tests {
         assert_eq!(parse("echo 'open▮"), Some((w(&["echo", "open"]), 1, 5)));
     }
 
-    /// `lex_open`'s synthetic `"` is not in the buffer, so no body char is cut.
+    /// Only a written closing quote is stripped.
     #[test]
     fn parse_at_keeps_every_char_of_an_open_double_quote() {
-        for body in ["abc", "é", "漢字", "🦀", ""] {
+        for body in ["abc", "é", "漢字", "🦀", "", "a\\\"", "a\\", "é\\n"] {
             assert_eq!(
                 parse(&format!("echo \"{body}▮")),
                 Some((w(&["echo", body]), 1, 5)),
@@ -1055,6 +1071,16 @@ mod tests {
             );
         }
         assert_eq!(parse("echo \"ab\"▮"), Some((w(&["echo", "ab"]), 1, 5)));
+    }
+
+    #[test]
+    fn parse_at_reaches_eof_after_a_comment_in_an_open_group() {
+        assert_eq!(parse("{ # tail▮"), Some((w(&[""]), 0, 8)));
+        assert_eq!(
+            parse("echo \"!{cmd # tail▮"),
+            Some((w(&["echo", "!{cmd # tail"]), 1, 5)),
+        );
+        assert_eq!(parse("echo ##'猫'#▮"), Some((w(&["echo", "猫'#"]), 1, 5)));
     }
 
     #[test]

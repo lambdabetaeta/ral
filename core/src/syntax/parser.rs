@@ -1611,13 +1611,13 @@ impl Parser {
                 self.advance();
                 Ok(Redirect::StderrToStdout)
             }
-            Token::Redirect { stderr, op } => {
+            Token::Redirect(op) => {
                 self.advance();
                 if self.at_cmd_end() {
                     return Err(ParseError::new(Some(op_span), redirect_needs_a_target(op)));
                 }
                 let (word_span, word) = self.capture_span(Self::parse_word)?;
-                let redirect = redirect_word(stderr, op, word);
+                let redirect = redirect_word(op, word);
                 if let Redirect::Stdin(StdinSource::Here(Ast::Word(w))) = &redirect {
                     let message = match w {
                         Word::Plain(_) => crate::syntax::NO_HEREDOCS,
@@ -1644,7 +1644,7 @@ impl Parser {
     }
 
     fn at_redirect(&self) -> bool {
-        matches!(self.peek(), Token::Redirect { .. } | Token::StderrToStdout)
+        matches!(self.peek(), Token::Redirect(_) | Token::StderrToStdout)
     }
 
     /// arg = atom | '...' atom
@@ -1841,7 +1841,7 @@ impl Parser {
                     | Token::Comma
                     | Token::Colon
                     | Token::Spread
-                    | Token::Redirect { .. }
+                    | Token::Redirect(_)
                     | Token::StderrToStdout
             ),
         }
@@ -2192,16 +2192,15 @@ impl Parser {
     }
 }
 
-/// Eliminate a word-taking redirect token into the three streams.  The
-/// lexer has already refused every fd spelling but `2`, which is `stderr`.
-fn redirect_word<T>(stderr: bool, op: RedirectOp, word: T) -> Redirect<T> {
-    match (stderr, op) {
-        (_, RedirectOp::Read) => Redirect::Stdin(StdinSource::File(word)),
-        (_, RedirectOp::HereString) => Redirect::Stdin(StdinSource::Here(word)),
-        (false, RedirectOp::Write(mode)) => Redirect::Stdout(mode, word),
+/// Attach the operand to its stream.
+fn redirect_word<T>(op: RedirectOp, word: T) -> Redirect<T> {
+    match op {
+        RedirectOp::Read => Redirect::Stdin(StdinSource::File(word)),
+        RedirectOp::HereString => Redirect::Stdin(StdinSource::Here(word)),
+        RedirectOp::Stdout(mode) => Redirect::Stdout(mode, word),
         // Stderr streams: staging diagnostics for an atomic commit would
         // withhold them until the frame settles.
-        (true, RedirectOp::Write(mode)) => Redirect::Stderr(
+        RedirectOp::Stderr(mode) => Redirect::Stderr(
             match mode {
                 WriteMode::Write => WriteMode::Stream,
                 other => other,
@@ -2214,7 +2213,7 @@ fn redirect_word<T>(stderr: bool, op: RedirectOp, word: T) -> Redirect<T> {
 /// What a word-taking redirect is missing when nothing follows it.
 fn redirect_needs_a_target(op: RedirectOp) -> &'static str {
     match op {
-        RedirectOp::Write(_) => "`>` needs a file to write to",
+        RedirectOp::Stdout(_) | RedirectOp::Stderr(_) => "`>` needs a file to write to",
         RedirectOp::Read => "`<` needs a file to read",
         RedirectOp::HereString => "`<<` needs a string to feed",
     }
@@ -2458,7 +2457,7 @@ fn continues_command(tok: &Token) -> bool {
     is_atom_start(tok)
         || matches!(
             tok,
-            Token::Pipe | Token::Question | Token::Redirect { .. } | Token::StderrToStdout
+            Token::Pipe | Token::Question | Token::Redirect(_) | Token::StderrToStdout
         )
 }
 

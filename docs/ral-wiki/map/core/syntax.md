@@ -1,5 +1,5 @@
 ---
-generated_at_commit: af1be8d60b959119f0ccc371d356d3afc0a4abf5
+generated_at_commit: 69c49a2f50f38693bb3057d7825a5daa88df3512
 generated_at_date: 2026-11-05
 covers_paths: [core/src/syntax/, editors/]
 ---
@@ -10,7 +10,13 @@ covers_paths: [core/src/syntax/, editors/]
 sees raw bytes and bare words.
 
 - `lexer.rs` — `lex(source) -> Result<Vec<Lexeme>, LexError>`; the
-  `Token` enum. The innermost open delimiter (`DelimKind`: `Brace`,
+  `Token` enum. A UTF-8-boundary byte cursor scans borrowed slices; source
+  length is checked against the `u32` span limit at entry. `next_token`
+  stamps ordinary tokens once, and `operator_prefix` reads expression
+  operators longest-first. `lex_open` shares the scanner under `EofPolicy::AllowOpen`:
+  no source is appended or re-lexed, and no closing tokens are invented.
+  `OpenLexemes` carries the written tokens and an unclosed-string span for
+  editor quote stripping; all spans remain within the original source. The innermost open delimiter (`DelimKind`: `Brace`,
   `Bracket`, `Expr`) is the lexer's whole context: it decides whether a
   newline separates, whether `,` punctuates, and — inside `$[…]` only —
   whether `<` `>` `<=` `>=` `!=` `&&` `||` and the arithmetic characters are
@@ -31,6 +37,10 @@ sees raw bytes and bare words.
   `[key]`. An unterminated string names
   the exact closer it still wants, `StringForm::closing()` — a bumped literal
   wants its `#` run back after the `'`, so the bare reflex never closes it.
+  `StringForm::SingleQuoted(n)` includes ordinary quotes at level zero.
+  A trailing backslash in a double-quoted string is incomplete too: the next
+  newline can continue it. `RedirectOp` is `Read | HereString | Stdout(mode) |
+  Stderr(mode)`, so an output stream cannot carry a read operator.
   Folding fd 1 onto fd 2 (`1>&2`, and `>&2`, which is the same redirect
   spelled short) is refused at the lexer, pointing at the `warn` builtin, and
   at `2>&1` for a program holding the direction backwards: a diagnostic is a

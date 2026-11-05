@@ -2730,6 +2730,7 @@ fn continuation_is_asked_only_where_a_suffix_completes_the_input() {
         ("let f = {# comment", "\n }"),
         ("return [a, b", "]"),
         ("\"foo", "\""),
+        ("\"foo\\", "\nbar\""),
         ("\"foo !{cmd", "}\""),
         ("echo $(x", ")"),
         ("$[1 +", " 2]"),

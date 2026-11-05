@@ -17,11 +17,11 @@ one.
 **The fd number is spelling, eliminated at the lexer.** The vocabulary is
 exactly nine spellings: `< f`, `<< str`, `> f`, `>> f`, `>~ f`, `2> f`,
 `2>> f`, `2>~ f` and `2>&1`. A digit run glued to `>` or `<` is read whole and
-judged; the token stream never carries an fd number. `Token::Redirect { stderr,
-op }` is a word-taking operator, with `stderr` set only for the `2` writes (by
-construction, so a stderr read cannot be built), and `Token::StderrToStdout` is
-`2>&1`. The parser's `redirect_word` is then a total function of `(stderr, op)`
-into the sum.
+matched as spelling, never parsed numerically: `02>` and `2>&01` are refused.
+The token stream never carries an fd number. `Token::Redirect(RedirectOp)`
+holds `Read | HereString | Stdout(WriteMode) | Stderr(WriteMode)`, so a stderr
+read cannot be constructed. `Token::StderrToStdout` is `2>&1`. The parser's
+`redirect_word` is a total function of the operator and its operand into the sum.
 
 **A list of redirects is a set of bindings, one per stream.** `Redirects<T>`
 (`core/src/syntax/ast.rs`) is the checked list: `stdin`, `stdout` and `stderr`
