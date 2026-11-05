@@ -10,21 +10,27 @@ use crate::ports;
 pub const PREFIX: &str = "ral.";
 
 /// Compiled by `media-manifest`, compared by `check-media`, both in build-tools.
-pub const CONTRACT: u32 = 4;
+pub const CONTRACT: u32 = 3;
 
 /// The engine path defaults because it belongs to the image, not the session.
 pub const DEFAULT_ENGINE: &str = "/usr/libexec/ral/engine";
 
-/// Virtiofs tags have a 36-byte limit.
+/// Both export names obey virtiofs's stricter limit.
 const MAX_TAG: usize = 36;
 
 const ZERO_PORT: &str =
     "names no port; 0 is the kernel's wildcard, not something a guest can connect to.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Shares {
-    Virtiofs { tag: String },
-    Plan9 { port: u32 },
+pub enum Export {
+    Virtiofs {
+        tag: String,
+    },
+    Plan9 {
+        name: String,
+        /// The host's workspace transport port, distinct from [`Boot::port`].
+        port: u32,
+    },
 }
 
 /// A nonzero port and a distinct gateway inside the guest's subnet, validated once.
@@ -122,9 +128,7 @@ const fn netmask(prefix: u8) -> Ipv4Addr {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Boot {
-    pub shares: Shares,
-    /// The host's folder-maintenance port, separate from control and net.
-    pub mounts: u32,
+    pub workspace: Export,
     /// The host's control port; its connection becomes the engine's protocol socket.
     pub port: u32,
     /// Host Unix seconds; the guest's clock is untrusted until these are applied.
@@ -137,7 +141,7 @@ impl Boot {
     /// # Errors
     /// Refuses missing, unknown, valueless or invalid `ral.` settings with a remedy.
     pub fn read(cmdline: &str) -> Result<Self, String> {
-        let (mut shares, mut mounts, mut port, mut epoch, mut engine, mut net) =
+        let (mut workspace, mut plan9, mut port, mut epoch, mut engine, mut net) =
             (None, None, None, None, None, None);
         let mut addressed_to_us = false;
 
@@ -153,8 +157,8 @@ impl Boot {
                 )
             })?;
             match key {
-                "shares" => shares = Some(parse_shares(value)?),
-                "mounts" => mounts = Some(parse_vsock_port("mounts", value)?),
+                "workspace" => workspace = Some(validate_name(value)?),
+                "plan9" => plan9 = Some(parse_vsock_port("plan9", value)?),
                 "port" => port = Some(parse_vsock_port("port", value)?),
                 "epoch" => epoch = Some(parse_epoch(value)?),
                 "engine" => engine = Some(validate_engine(value)?),
@@ -162,8 +166,8 @@ impl Boot {
                 _ => {
                     return Err(format!(
                         "the kernel command line carries `{PREFIX}{key}=…`, which ral-guest \
-                         does not understand. The settings it knows are {PREFIX}shares, \
-                         {PREFIX}mounts, {PREFIX}port, {PREFIX}epoch, {PREFIX}engine, and \
+                         does not understand. The settings it knows are {PREFIX}workspace, \
+                         {PREFIX}plan9, {PREFIX}port, {PREFIX}epoch, {PREFIX}engine, and \
                          {PREFIX}net."
                     ));
                 }
@@ -178,24 +182,25 @@ impl Boot {
             ));
         }
 
+        // Resolve the export after all keys: workspace and plan9 may arrive in either order.
+        let name = workspace.ok_or_else(|| {
+            format!(
+                "the boot is missing `{PREFIX}workspace=<name>`, the name the host published the \
+                 granted folder under (a virtiofs tag, or a 9p share's name when \
+                 `{PREFIX}plan9` gives the port its server answers on). Without it the guest \
+                 cannot find the one directory it is allowed to work in."
+            )
+        })?;
+
         Ok(Self {
-            shares: shares.ok_or_else(|| {
-                format!(
-                    "the boot is missing `{PREFIX}shares=virtiofs:<tag>` or \
-                     `{PREFIX}shares=9p:<port>`. Name the host's share transport; \
-                     folders are mounted separately after boot."
-                )
-            })?,
-            mounts: mounts.ok_or_else(|| {
-                format!(
-                    "the boot is missing `{PREFIX}mounts=<port>`, the host's vsock port for \
-                     folder maintenance. Supply its listener port; there is no safe default."
-                )
-            })?,
+            workspace: match plan9 {
+                Some(port) => Export::Plan9 { name, port },
+                None => Export::Virtiofs { tag: name },
+            },
             port: port.ok_or_else(|| {
                 format!(
                     "the boot is missing `{PREFIX}port=<port>`, the host's vsock port for the \
-                     control plane, not the share transport or folder-maintenance wire. \
+                     control plane; not `{PREFIX}plan9`, which is the workspace's transport. \
                      There is no safe default: a guessed port would leave the engine waiting on \
                      a connection nobody is listening for."
                 )
@@ -218,18 +223,18 @@ pub fn command_line(boot: &Boot, console: &str) -> String {
     use std::fmt::Write as _;
 
     let mut line = format!("console={console}");
-    match &boot.shares {
-        Shares::Virtiofs { tag } => {
-            let _ = write!(line, " {PREFIX}shares=virtiofs:{tag}");
+    match &boot.workspace {
+        Export::Virtiofs { tag } => {
+            let _ = write!(line, " {PREFIX}workspace={tag}");
         }
-        Shares::Plan9 { port } => {
-            let _ = write!(line, " {PREFIX}shares=9p:{port}");
+        Export::Plan9 { name, port } => {
+            let _ = write!(line, " {PREFIX}workspace={name} {PREFIX}plan9={port}");
         }
     }
     let _ = write!(
         line,
-        " {PREFIX}mounts={} {PREFIX}port={} {PREFIX}epoch={}",
-        boot.mounts, boot.port, boot.epoch
+        " {PREFIX}port={} {PREFIX}epoch={}",
+        boot.port, boot.epoch
     );
     if boot.engine != DEFAULT_ENGINE {
         let _ = write!(line, " {PREFIX}engine={}", boot.engine);
@@ -248,37 +253,25 @@ pub fn command_line(boot: &Boot, console: &str) -> String {
     line
 }
 
-fn parse_shares(value: &str) -> Result<Shares, String> {
-    match value.split_once(':') {
-        Some(("virtiofs", tag)) => Ok(Shares::Virtiofs {
-            tag: validate_tag(tag)?,
-        }),
-        Some(("9p", port)) => Ok(Shares::Plan9 {
-            port: parse_vsock_port("shares", port)?,
-        }),
-        _ => Err(format!(
-            "`{PREFIX}shares={value}` names an unknown share transport. \
-             Use `{PREFIX}shares=virtiofs:<tag>` or `{PREFIX}shares=9p:<port>`."
-        )),
-    }
-}
-
-fn validate_tag(value: &str) -> Result<String, String> {
+fn validate_name(value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err(format!(
-            "`{PREFIX}shares=virtiofs:` has an empty tag; supply the host's virtiofs device tag."
+            "`{PREFIX}workspace=` is empty; it must name the export the host published the \
+             granted folder as (a virtiofs tag, or a 9p share's name)."
         ));
     }
     if value.len() > MAX_TAG {
         return Err(format!(
-            "`{PREFIX}shares=virtiofs:{value}` has a {}-byte tag; use at most {MAX_TAG} bytes.",
+            "`{PREFIX}workspace={value}` is {} characters; the workspace's name may be at most \
+             {MAX_TAG}.",
             value.len()
         ));
     }
     if value.contains('/') {
         return Err(format!(
-            "`{PREFIX}shares=virtiofs:{value}` looks like a path. Supply the virtiofs device \
-             tag, not a directory."
+            "`{PREFIX}workspace={value}` looks like a path. It is the export's *name*, a word \
+             the host and guest agree on (a virtiofs tag or a 9p share's `aname`), not a \
+             directory."
         ));
     }
     Ok(value.to_string())
@@ -415,16 +408,13 @@ mod tests {
     #[test]
     fn a_full_command_line_reads_into_a_boot() {
         let boot = Boot::read(
-            "console=hvc0 root=/dev/vda ro ral.shares=virtiofs:shares ral.mounts=1733 ral.port=1729 ral.epoch=1771200000",
+            "console=hvc0 root=/dev/vda ro ral.workspace=work ral.port=1729 ral.epoch=1771200000",
         )
         .expect("a complete command line must parse");
         assert_eq!(
             boot,
             Boot {
-                shares: Shares::Virtiofs {
-                    tag: "shares".into()
-                },
-                mounts: 1733,
+                workspace: Export::Virtiofs { tag: "work".into() },
                 port: 1729,
                 epoch: 1_771_200_000,
                 engine: DEFAULT_ENGINE.into(),
@@ -434,29 +424,44 @@ mod tests {
     }
 
     #[test]
-    fn plan9_and_mounts_keep_their_own_ports() {
+    fn a_plan9_port_makes_the_workspace_a_share_the_guest_dials_for() {
         let boot = Boot::read(
-            "console=ttyS0 ral.shares=9p:564 ral.mounts=1733 ral.port=1729 ral.epoch=1771200000",
+            "console=ttyS0 ral.workspace=work ral.plan9=50001 ral.port=1729 ral.epoch=1771200000",
         )
-        .unwrap();
-        assert_eq!(boot.shares, Shares::Plan9 { port: 564 });
-        assert_eq!(boot.port, 1729);
-        assert_eq!(boot.mounts, 1733);
+        .expect("a Hyper-V command line must parse");
+        assert_eq!(
+            boot.workspace,
+            Export::Plan9 {
+                name: "work".into(),
+                port: 50001,
+            }
+        );
+        assert_eq!(
+            boot.port, 1729,
+            "the control plane keeps its own port; ral.plan9 never displaces ral.port"
+        );
     }
 
     #[test]
-    fn settings_may_arrive_in_any_order() {
-        let before = Boot::read("ral.mounts=3 ral.shares=9p:7 ral.port=1 ral.epoch=0").unwrap();
-        let after = Boot::read("ral.epoch=0 ral.port=1 ral.shares=9p:7 ral.mounts=3").unwrap();
+    fn the_plan9_port_may_be_written_before_the_workspace_it_serves() {
+        let before = Boot::read("ral.plan9=7 ral.workspace=w ral.port=1 ral.epoch=0")
+            .expect("plan9 before workspace must parse");
+        let after = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.plan9=7")
+            .expect("plan9 after workspace must parse");
         assert_eq!(before, after);
+        assert_eq!(
+            before.workspace,
+            Export::Plan9 {
+                name: "w".into(),
+                port: 7
+            }
+        );
     }
 
     #[test]
     fn the_engine_path_may_be_overridden() {
-        let boot = Boot::read(
-            "ral.shares=virtiofs:s ral.mounts=3 ral.port=1 ral.epoch=0 ral.engine=/opt/ral/engine",
-        )
-        .expect("an overridden engine path must parse");
+        let boot = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.engine=/opt/ral/engine")
+            .expect("an overridden engine path must parse");
         assert_eq!(boot.engine, "/opt/ral/engine");
     }
 
@@ -471,27 +476,29 @@ mod tests {
 
     #[test]
     fn each_missing_setting_names_itself() {
-        for (line, key) in [
-            ("ral.mounts=3 ral.port=1 ral.epoch=0", "ral.shares"),
-            ("ral.shares=virtiofs:s ral.port=1 ral.epoch=0", "ral.mounts"),
-            ("ral.shares=9p:7 ral.mounts=3 ral.epoch=0", "ral.port"),
-            ("ral.shares=9p:7 ral.mounts=3 ral.port=1", "ral.epoch"),
-        ] {
-            let err = Boot::read(line).expect_err(key);
-            assert!(err.contains(key), "{err}");
-        }
+        let missing_workspace =
+            Boot::read("ral.port=1 ral.epoch=0").expect_err("workspace is required");
+        assert!(
+            missing_workspace.contains("ral.workspace"),
+            "{missing_workspace}"
+        );
+
+        let missing_port = Boot::read("ral.workspace=w ral.epoch=0").expect_err("port is required");
+        assert!(missing_port.contains("ral.port"), "{missing_port}");
+
+        let missing_epoch =
+            Boot::read("ral.workspace=w ral.port=1").expect_err("epoch is required");
+        assert!(missing_epoch.contains("ral.epoch"), "{missing_epoch}");
     }
 
     #[test]
     fn an_unknown_ral_setting_is_refused() {
-        let err =
-            Boot::read("ral.shares=virtiofs:s ral.mounts=3 ral.port=1 ral.epoch=0 ral.netowrk=on")
-                .expect_err("a misspelled setting must be refused");
+        let err = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.netowrk=on")
+            .expect_err("a misspelled setting must be refused");
         assert!(err.contains("does not understand"), "{err}");
         for known in [
-            "ral.shares",
-            "ral.mounts",
-            "ral.engine",
+            "ral.workspace",
+            "ral.plan9",
             "ral.port",
             "ral.epoch",
             "ral.net",
@@ -511,86 +518,66 @@ mod tests {
 
     #[test]
     fn a_repeated_setting_takes_its_last_value() {
-        let boot = Boot::read("ral.shares=virtiofs:first ral.mounts=3 ral.port=1 ral.epoch=0 ral.shares=9p:7 ral.mounts=4").unwrap();
-        assert_eq!(boot.shares, Shares::Plan9 { port: 7 });
-        assert_eq!(boot.mounts, 4);
+        let boot = Boot::read("ral.workspace=first ral.port=1 ral.epoch=0 ral.workspace=second")
+            .expect("a repeated setting must parse");
+        assert_eq!(
+            boot.workspace,
+            Export::Virtiofs {
+                tag: "second".into()
+            }
+        );
     }
 
     #[test]
-    fn a_virtiofs_tag_is_a_short_pathless_word() {
-        for tag in [
-            String::new(),
-            "/shares".into(),
-            "t".repeat(MAX_TAG + 1),
-            "é".repeat(19),
+    fn a_workspace_name_is_a_short_pathless_word() {
+        for line in [
+            "ral.workspace=/work ral.port=1 ral.epoch=0",
+            "ral.workspace=/work ral.plan9=7 ral.port=1 ral.epoch=0",
         ] {
-            let line = format!("ral.shares=virtiofs:{tag} ral.mounts=3 ral.port=1 ral.epoch=0");
-            Boot::read(&line).expect_err("invalid tag");
+            let slash = Boot::read(line).expect_err("a path is not a name");
+            assert!(slash.contains("export's *name*"), "{slash}");
         }
-        for tag in ["t".repeat(MAX_TAG), "é".repeat(18)] {
-            let line = format!("ral.shares=virtiofs:{tag} ral.mounts=3 ral.port=1 ral.epoch=0");
-            assert_eq!(Boot::read(&line).unwrap().shares, Shares::Virtiofs { tag });
-        }
-    }
 
-    #[test]
-    fn unknown_transports_name_both_legal_spellings() {
-        for value in ["", "shares", "9p", "virtiofs", "other:s", "9P:7"] {
-            let err = Boot::read(&format!("ral.shares={value}")).unwrap_err();
-            assert!(err.contains("ral.shares=virtiofs:<tag>"), "{err}");
-            assert!(err.contains("ral.shares=9p:<port>"), "{err}");
-        }
-    }
-
-    #[test]
-    fn retired_settings_have_no_compatibility_path() {
-        for setting in ["ral.workspace=w", "ral.plan9=564"] {
-            let err = Boot::read(setting).unwrap_err();
-            assert!(err.contains("does not understand"), "{err}");
-        }
+        let long = format!(
+            "ral.workspace={} ral.port=1 ral.epoch=0",
+            "t".repeat(MAX_TAG + 1)
+        );
+        let err = Boot::read(&long).expect_err("an over-long name must be refused");
+        assert!(err.contains("at most"), "{err}");
     }
 
     #[test]
     fn a_vsock_port_of_zero_is_refused_whichever_setting_carries_it() {
-        for setting in ["ral.port=0", "ral.mounts=0", "ral.shares=9p:0"] {
-            let err = Boot::read(setting).unwrap_err();
-            assert!(err.contains("wildcard"), "{err}");
-        }
-    }
+        let control = Boot::read("ral.workspace=w ral.port=0 ral.epoch=0").expect_err("port 0");
+        assert!(control.contains("wildcard"), "{control}");
+        assert!(control.contains("ral.port=0"), "{control}");
 
-    #[test]
-    fn malformed_vsock_ports_are_refused() {
-        for value in ["", "-1", "4294967296", "port", "1:2"] {
-            for setting in [
-                format!("ral.shares=9p:{value}"),
-                format!("ral.mounts={value}"),
-                format!("ral.port={value}"),
-            ] {
-                Boot::read(&setting).expect_err(&setting);
-            }
-        }
+        let workspace =
+            Boot::read("ral.workspace=w ral.plan9=0 ral.port=1 ral.epoch=0").expect_err("plan9 0");
+        assert!(workspace.contains("wildcard"), "{workspace}");
+        assert!(
+            workspace.contains("ral.plan9=0"),
+            "the refusal names the setting the host wrote: {workspace}"
+        );
     }
 
     #[test]
     fn a_negative_epoch_is_refused() {
-        let err = Boot::read("ral.shares=virtiofs:s ral.mounts=3 ral.port=1 ral.epoch=-1")
-            .expect_err("before 1970");
+        let err = Boot::read("ral.workspace=w ral.port=1 ral.epoch=-1").expect_err("before 1970");
         assert!(err.contains("before 1970"), "{err}");
     }
 
     #[test]
     fn a_relative_engine_path_is_refused() {
-        let err = Boot::read(
-            "ral.shares=virtiofs:s ral.mounts=3 ral.port=1 ral.epoch=0 ral.engine=engine",
-        )
-        .expect_err("a relative engine path must be refused");
+        let err = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.engine=engine")
+            .expect_err("a relative engine path must be refused");
         assert!(err.contains("absolute path"), "{err}");
     }
 
     #[test]
     fn a_net_key_reads_into_its_four_fields() {
         let boot =
-            Boot::read("ral.shares=virtiofs:s ral.mounts=3 ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.2.2")
+            Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.2.2")
                 .expect("a well-formed net key must parse");
         assert_eq!(
             boot.net,
@@ -625,7 +612,7 @@ mod tests {
                 prefix: 24,
             })
         );
-        Boot::read("ral.shares=virtiofs:s ral.mounts=3 ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.3.2")
+        Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.3.2")
             .expect_err("a gateway outside the subnet must be refused");
     }
 
@@ -638,53 +625,27 @@ mod tests {
             "ral.net=1730,10.0.2.15/24,not-a-gateway",
             "ral.net=0,10.0.2.15/24,10.0.2.2",
         ] {
-            let err = Boot::read(&format!(
-                "ral.shares=virtiofs:s ral.mounts=3 ral.port=1 ral.epoch=0 {value}"
-            ))
-            .expect_err(value);
+            let err = Boot::read(&format!("ral.workspace=w ral.port=1 ral.epoch=0 {value}"))
+                .expect_err(value);
             assert!(!err.is_empty(), "{value}");
         }
-    }
-
-    #[test]
-    fn command_line_writes_only_the_new_share_and_mount_settings() {
-        let mut boot = Boot {
-            shares: Shares::Virtiofs {
-                tag: "shares".into(),
-            },
-            mounts: 1733,
-            port: 1729,
-            epoch: 0,
-            engine: DEFAULT_ENGINE.into(),
-            net: None,
-        };
-        assert_eq!(
-            command_line(&boot, "hvc0"),
-            "console=hvc0 ral.shares=virtiofs:shares ral.mounts=1733 ral.port=1729 ral.epoch=0"
-        );
-        boot.shares = Shares::Plan9 { port: 564 };
-        assert_eq!(
-            command_line(&boot, "ttyS0"),
-            "console=ttyS0 ral.shares=9p:564 ral.mounts=1733 ral.port=1729 ral.epoch=0"
-        );
     }
 
     #[test]
     fn command_line_round_trips_through_read() {
         for boot in [
             Boot {
-                shares: Shares::Virtiofs {
-                    tag: "shares".into(),
-                },
-                mounts: 1733,
+                workspace: Export::Virtiofs { tag: "work".into() },
                 port: 1729,
                 epoch: 1_771_200_000,
                 engine: DEFAULT_ENGINE.into(),
                 net: None,
             },
             Boot {
-                shares: Shares::Plan9 { port: 564 },
-                mounts: 1733,
+                workspace: Export::Plan9 {
+                    name: "work".into(),
+                    port: 50001,
+                },
                 port: 1729,
                 epoch: 1_771_200_000,
                 engine: "/opt/ral/engine".into(),

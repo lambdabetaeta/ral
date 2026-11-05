@@ -1,7 +1,4 @@
-//! Net and mounts vsock frames are `<u32 LE length> <payload>`, with no prologue.
-//!
-//! Net carries IPv4 packets; the third wire carries [`crate::mounts`] messages.
-//! Control retains the engine protocol's own framing.
+//! Net vsock frames are `<u32 LE length> <IPv4 packet>`, with no prologue.
 //! Lengths outside `1..=MTU` are refused before payload allocation or I/O.
 
 use crate::link::MTU;
@@ -27,7 +24,7 @@ impl fmt::Display for Error {
                     "the peer claimed {len} bytes, over the {limit}-byte limit"
                 )
             }
-            Self::Io(err) => write!(f, "the framed link failed: {err}"),
+            Self::Io(err) => write!(f, "the net link failed: {err}"),
         }
     }
 }
