@@ -57,7 +57,7 @@ if $[!{has '-h' !{args}} || !{has '--help' !{args}}] {
 }
 
 for !{args} { |a|
-    if $[not !{has $a $known}] { warn "!{styled red "unknown argument: $a"}"; fail [status: 2, message: "unknown argument: $a"] }
+    if $[not !{has $a $known}] { warn "!{styled red "unknown argument: $a"}"; exit 2 }
 }
 
 let dry_run      = has '--dry-run'      !{args}

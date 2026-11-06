@@ -92,7 +92,7 @@ fn on_path(name: &str) -> String {
 fn refusal(r: Settled<()>) -> String {
     match r {
         Ok(()) => panic!("the guard admitted a call it had to refuse"),
-        Err(Break::Error(err)) => err.message,
+        Err(Break::Error(err)) => err.describe().into_owned(),
         Err(other) => panic!("expected a grant denial, got: {other:?}"),
     }
 }

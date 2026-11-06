@@ -107,9 +107,9 @@ fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
             .ask(wire_start_req("unattached", parent_seal()))
             .expect_err("an engine that never attached must be refused");
         assert!(
-            err.message.contains("could not be started"),
+            err.describe().contains("could not be started"),
             "got: {}",
-            err.message
+            err.describe()
         );
         assert_eq!(
             summary(&desk.call.handle, &desk.call.fleet).live,
@@ -129,10 +129,10 @@ fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
             .ask(wire_start_req("never-made", parent_seal()))
             .expect_err("a refused factory must be refused");
         assert!(
-            err.message.contains("could not make a helper engine")
-                && err.message.contains("connection reset by peer"),
+            err.describe().contains("could not make a helper engine")
+                && err.describe().contains("connection reset by peer"),
             "must name the factory's refusal and its reason, got: {}",
-            err.message
+            err.describe()
         );
     });
 }
@@ -147,9 +147,9 @@ fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
             .ask(super::start_req(NurseryId(0), "go", "in-process"))
             .expect_err("a wire desk has no nursery to adopt a parked fork from");
         assert!(
-            err.message.contains("`sealed <bytes>`"),
+            err.describe().contains("`sealed <bytes>`"),
             "must name the tag this host does take, got: {}",
-            err.message
+            err.describe()
         );
         assert_eq!(
             factory.calls(),

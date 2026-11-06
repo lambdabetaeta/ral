@@ -103,12 +103,11 @@ Nullary and divergent are shapes a scheme writes, not a second rule:
 
 - **Nullary** — `clear`, `reset`, `help`, and the `from-X` codecs, which read
   the byte channel — is a body with no arrow over it.
-- **Divergent** — `fail` and `exit` / `quit`, whose escape unwinds past every
-  binding — quantifies a fresh result type directly, so
-  `if $c { exit 1 } else { return "x" }` takes its type from the arm that
-  returns. `fail` also carries the nonzero-status diagnostic
-  ([[design/failure|failure]]), which is a facet of its registry row rather
-  than of its type.
+- **Divergent** — `fail`, `raise` and `exit` / `quit` — quantifies a fresh
+  result type directly, so `if $c { exit 1 } else { return "x" }` takes its
+  type from the arm that returns. `fail` takes text and `raise` takes the
+  closed error record ([[design/failure|failure]]); generic shape guidance
+  points a caught record passed to `fail` toward `raise`.
 - **Writing** — every encoder, `help`, `explain` and the terminal controls are
   `… → Command` rows: the type tells a bind or a pipeline that the command
   writes ([[design/capture|grades and capture]]).
@@ -178,7 +177,7 @@ intercepts at the bare head, and `^name` — like a path head — skips both and
 reaches the external directly
 ([[design/name-resolution|resolution]]).
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] (builtins are the pure fragment — not every kernel call is an effect),
+See also [[design/exec|exec]] (builtins are the pure fragment — not every kernel call is an effect),
 [[design/name-resolution|name-resolution]], [[design/codecs|codecs]],
 [[design/failure|failure]], [[design/pipelines|pipelines]];
 [[internals/builtins-registry|builtins-registry]], [[map/core/builtins|map: builtins]],

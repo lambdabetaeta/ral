@@ -257,11 +257,18 @@ mod tests {
             &ctx(),
         )
         .unwrap_err();
-        let msg = match err {
-            Break::Error(e) => e.message,
-            other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
+        let Break::Error(error) = err else {
+            panic!("expected a profile error, got {err:?}");
         };
-        assert!(msg.contains("<test:nonmap>"), "should name the file: {msg}");
+        assert_eq!(
+            error.context.as_deref(),
+            Some("capability file <test:nonmap>")
+        );
+        let rejection = error.rejection.as_ref().expect("non-map compile rejection");
+        assert_eq!(
+            rejection.source.origin(),
+            &SourceOrigin::named("<test:nonmap>")
+        );
     }
 
     fn load_err_message(source: &str, label: &str) -> String {
@@ -271,7 +278,7 @@ mod tests {
             load_capabilities_from_str(&Mooring::adrift(), &mut shell, source, &origin, &ctx())
                 .unwrap_err();
         match err {
-            Break::Error(e) => e.message,
+            Break::Error(e) => e.describe().into_owned(),
             other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
         }
     }

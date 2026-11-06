@@ -125,7 +125,7 @@ The graded-monad semantics of §5 interprets `F_e A` as `e∗ F T⟦A⟧` over a
 of a graded monad. Nothing in ral needs it while the grade is a producer kind, but it is the
 shape a denotational model would take the day the shell wants a real effect
 discipline over its syscall signature
-([[design/syscalls-are-effects|syscalls-are-effects]]) rather than a capture
+([[design/exec|exec]]) rather than a capture
 coercion. The `⊤⊤`-lifting logical relation of §6.1 — varying-arity, indexed by
 contexts — is the technique a relational model of ral would want either way, and
 is the reason a substitution kit and a well-formedness predicate are the *first*

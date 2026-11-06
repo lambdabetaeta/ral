@@ -1,12 +1,22 @@
 ---
 status: active
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
-verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
-anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::of_child, final_poll, End, Stop, ExitCode, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Status::WorkerStopped, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
+anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::of_child, final_poll, End, Stop, ExitCode, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Reason::Cancelled, Reason::TimedOut, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
 ---
 
 # Delimiters are handlers for `poll`
+
+> Amended 2026-11-05 by [[decisions/261105_the-error-record|the error record]]:
+> the current failure payload is exactly `[reason, cmd, site]`; runtime
+> `Error` and data record share one `Reason`. `fail` takes text; faithful
+> re-raising is `raise $e`, trusting its record unchanged while refusing
+> `exited 0` and signals outside `1..=127`. Law 4 now applies to `raise`;
+> law 7 derives codes from reasons (`raised` gives 1), retaining raw external
+> exits until the failure-code clamp. `Stop.at` holds `Option<Prov>`;
+> worker conversion preserves it and completes unlocated errors before
+> publication. The historical rules and rationale below retain their spelling.
 
 > Amended 2026-11-05 (see [[design/endings|endings]]):
 > the construct table's top-of-run row is the `err`/`exited`/`stopped`

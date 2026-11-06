@@ -1,11 +1,11 @@
 //! The evaluator's control-flow currencies: `Escape` and `Break` for exits.
 
 use super::Shell;
-use super::error::Error;
+use super::error::{Error, Prov};
 use super::value::Value;
 use crate::fact::{Done, Ending, ExitCode, FailureCode};
 use crate::process::{CancelCause, Cancellation, ChildEnd, Scope, ScopeId};
-use crate::source::Span;
+use crate::source::{SourceDb, Span};
 use std::num::NonZeroU8;
 
 /// A stop: consumed by its owner, caught by no `try`.
@@ -16,7 +16,7 @@ pub struct Stop {
     /// stop no node minted (the closed-stdout stop), the top's.
     pub owner: Option<ScopeId>,
     /// Where it unwound through, for the caret.
-    pub at: Option<Span>,
+    pub at: Option<Prov>,
 }
 
 impl FailureCode for Stop {
@@ -53,7 +53,7 @@ pub enum Break {
 impl std::fmt::Display for Break {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Error(e) => f.write_str(&e.message),
+            Self::Error(e) => e.fmt(f),
             Self::Escape(e) => e.fmt(f),
         }
     }
@@ -70,6 +70,37 @@ impl ExitCode for Break {
 }
 
 impl Break {
+    /// The one slot a failure's provenance lives in; an `exit` has none.
+    fn prov_slot(&mut self) -> Option<&mut Option<Prov>> {
+        match self {
+            Self::Error(e) => Some(&mut e.prov),
+            Self::Escape(Escape::Stopped(stop)) => Some(&mut stop.at),
+            Self::Escape(Escape::Exit(_)) => None,
+        }
+    }
+
+    /// Claims an unset provenance for `prov`.
+    pub(crate) fn claimed_by(mut self, prov: impl FnOnce() -> Prov) -> Self {
+        if let Some(slot) = self.prov_slot() {
+            slot.get_or_insert_with(prov);
+        }
+        self
+    }
+
+    /// Claims an unset provenance for the frame `name` at `span`; a span the
+    /// session cannot resolve claims nothing.
+    pub(crate) fn locate(self, name: &str, span: Option<Span>, shell: &Shell) -> Self {
+        match span {
+            Some(span) if shell.session.sources.get(span.file).is_some() => {
+                self.claimed_by(|| Prov::Live {
+                    name: name.to_owned().into(),
+                    span,
+                })
+            }
+            _ => self,
+        }
+    }
+
     /// The one minting site for a stop: every poll point, every write a
     /// sink stopped, every child's teardown.
     pub(crate) fn stopped(cause: CancelCause, owner: Option<ScopeId>) -> Self {
@@ -82,16 +113,9 @@ impl Break {
 
     /// A child's end: `Failed` is the command's error; `Cancelled` is
     /// [`Self::cancelled`].
-    pub(crate) fn of_child(
-        cmd: &str,
-        end: ChildEnd,
-        scope: &Scope,
-        shell: &crate::shell::runtime::Shell,
-    ) -> Self {
+    pub(crate) fn of_child(cmd: &str, end: ChildEnd, scope: &Scope) -> Self {
         match end {
-            ChildEnd::Failed(failure) => {
-                Self::Error(Error::from_command_failure(cmd, failure, shell))
-            }
+            ChildEnd::Failed(failure) => Self::Error(Error::from_command_failure(cmd, failure)),
             ChildEnd::Cancelled(cause) => Self::cancelled(cause, scope),
         }
     }
@@ -111,20 +135,6 @@ impl Break {
 
 /// Result whose error is a [`Break`].
 pub type Settled<T> = Result<T, Break>;
-
-/// Stamp `cmd` on an error that has no command yet, so the innermost dispatch
-/// wins — the rule `stamp` uses for a span.  Not an observation, and it
-/// happens whether or not anyone is listening: `try`'s record needs it with
-/// no trail open.  An `_`-prefixed internal name defers to the public wrapper
-/// that called it.
-pub(crate) fn name_failure(cmd: &str, result: &mut Settled<Value>) {
-    if let Err(Break::Error(e)) = result
-        && e.command.is_none()
-        && !cmd.starts_with('_')
-    {
-        e.command = Some(cmd.into());
-    }
-}
 
 impl From<Error> for Break {
     fn from(e: Error) -> Self {
@@ -185,6 +195,19 @@ impl End {
         }
     }
 
+    /// The ending leaves the shell `sources` belongs to: every provenance
+    /// into a file the parent registry lacks is resolved first, so no span
+    /// crosses to a registry that cannot read it.
+    pub(crate) fn leaving(mut self, sources: &SourceDb) -> Self {
+        let slot = match &mut self {
+            Self::Err(error) => &mut error.prov,
+            Self::Stopped(stop) => &mut stop.at,
+            Self::Ok(_) | Self::Exited(_) | Self::Panic(_) => return self,
+        };
+        *slot = slot.take().map(|prov| prov.leaving(sources));
+        self
+    }
+
     /// Back into the machine's currency, a panic resumed.
     ///
     /// # Errors
@@ -223,8 +246,8 @@ pub(crate) fn panic_text(payload: &dyn std::any::Any) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{CancelCause as C, DurableRoot, ScopeNode, WorkerStop};
-    use crate::shell::runtime::Status;
+    use crate::fact::Reason;
+    use crate::process::{CancelCause as C, DurableRoot, ScopeNode};
     use crate::source::FileId;
 
     fn nz(n: u8) -> NonZeroU8 {
@@ -251,21 +274,15 @@ mod tests {
 
     #[test]
     fn every_end_has_its_code() {
-        let error = |status| End::Err(Error::with_status("x", status));
+        let error = |reason| End::Err(Error::from_reason(reason));
         assert_eq!(End::Ok(Value::Unit).code(), 0);
-        assert_eq!(error(Status::Raised(nz(7))).code(), 7);
+        assert_eq!(error(Reason::Raised("x".into())).code(), 1);
         assert_eq!(
-            error(Status::Process(crate::process::CommandFailure::ExitCode(3))).code(),
+            error(Reason::process("tool", crate::fact::Failure::Exited(3))).code(),
             3
         );
-        assert_eq!(
-            error(Status::WorkerStopped(WorkerStop::TimedOut)).code(),
-            124
-        );
-        assert_eq!(
-            error(Status::WorkerStopped(WorkerStop::Cancelled)).code(),
-            143
-        );
+        assert_eq!(error(Reason::TimedOut).code(), 124);
+        assert_eq!(error(Reason::Cancelled).code(), 143);
         assert_eq!(End::Exited(5).code(), 5);
         for cause in [C::ReaderGone, C::Interrupted, C::TimedOut, C::Aborted] {
             assert_eq!(
@@ -281,7 +298,7 @@ mod tests {
         assert_eq!(End::Panic("x".into()).code(), crate::fact::PANIC_CODE);
     }
 
-    fn stopped(cause: C, owner: Option<ScopeId>, at: Option<Span>) -> Settled<Value> {
+    fn stopped(cause: C, owner: Option<ScopeId>, at: Option<Prov>) -> Settled<Value> {
         Err(Break::Escape(Escape::Stopped(Stop { cause, owner, at })))
     }
 
@@ -293,7 +310,10 @@ mod tests {
 
     #[test]
     fn final_poll_prefers_the_join_and_keeps_a_located_equal() {
-        let sp = Span::new(FileId(1), 0, 4);
+        let sp = || Prov::Live {
+            name: "sleep".into(),
+            span: Span::new(FileId(1), 0, 4),
+        };
         let node = node_under(C::Interrupted);
         let cause = |r: Settled<Value>| match r {
             Err(Break::Escape(Escape::Stopped(Stop { cause, owner, at }))) => (cause, owner, at),
@@ -306,15 +326,15 @@ mod tests {
         );
         assert_eq!(
             cause(final_poll(
-                stopped(C::Interrupted, Some(node.id()), Some(sp)),
+                stopped(C::Interrupted, Some(node.id()), Some(sp())),
                 &node
             )),
-            (C::Interrupted, Some(node.id()), Some(sp))
+            (C::Interrupted, Some(node.id()), Some(sp()))
         );
         let other = crate::process::DurableRoot::default().worker().id();
         assert_eq!(
             cause(final_poll(
-                stopped(C::Interrupted, Some(other), Some(sp)),
+                stopped(C::Interrupted, Some(other), Some(sp())),
                 &node
             )),
             (C::Interrupted, Some(node.id()), None)
@@ -330,8 +350,54 @@ mod tests {
         ));
         let calm = DurableRoot::default().worker();
         assert!(matches!(
-            final_poll(Err(Break::Error(Error::raised("x", nz(7)))), &calm),
-            Err(Break::Error(e)) if e.failure_code() == nz(7)
+            final_poll(Err(Break::Error(Error::raised("x"))), &calm),
+            Err(Break::Error(e)) if e.failure_code() == nz(1)
         ));
+    }
+
+    /// A forked registry keeps its inherited ids live and resolves the rest:
+    /// both an error's and a stop's provenance, as a stage thread's ending
+    /// carries either out of its shell.
+    #[test]
+    fn an_ending_resolves_provenance_past_the_forked_prefix() {
+        use crate::source::{Source, SourceDb, SourceOrigin};
+        let source = |name: &str| Source::from_text(SourceOrigin::named(name), "a\nb\n");
+        let mut parent = SourceDb::default();
+        let inherited = parent.register(source("parent"));
+        let mut child = parent.fork();
+        let own = child.register(source("own"));
+        let live = |file| Prov::Live {
+            name: "fail".into(),
+            span: Span::new(file, 2, 3),
+        };
+
+        let kept = End::Err(Error {
+            prov: Some(live(inherited)),
+            ..Error::raised("x")
+        })
+        .leaving(&child);
+        assert!(matches!(
+            kept,
+            End::Err(Error {
+                prov: Some(Prov::Live { .. }),
+                ..
+            })
+        ));
+
+        let End::Stopped(stop) = (End::Stopped(Stop {
+            cause: C::Cancelled,
+            owner: None,
+            at: Some(live(own)),
+        }))
+        .leaving(&child) else {
+            unreachable!()
+        };
+        let Some(Prov::Resolved(pair)) = stop.at else {
+            panic!("a stop into the child's own file resolves: {:?}", stop.at)
+        };
+        assert_eq!(
+            (pair.0.as_str(), &*pair.1.script, pair.1.line),
+            ("fail", "own", 2)
+        );
     }
 }

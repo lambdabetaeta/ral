@@ -30,7 +30,7 @@ let total = length $checked
 let bad = length !{filter { |[ok: ok]| return $[not $ok] } $checked}
 
 if $[$bad > 0] {
-    fail [status: 1, message: "$bad of $total entries failed"]
+    fail "$bad of $total entries failed"
 } else {
     echo "$total entries verified"
 }

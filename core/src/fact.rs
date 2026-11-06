@@ -11,7 +11,7 @@ mod fs;
 mod observation;
 
 pub use ending::{Done, Ending, ExitCode, FailureCode, PANIC_CODE, tag};
-pub use error::{ErrorRecord, Reason};
+pub use error::{ErrorRecord, Failure, NotRunnable, Process, Reason, Unrunnable};
 pub(crate) use fs::{DirEntry, FileInfo};
 pub use observation::{
     Act, AuditIo, Check, Command, CommandOrigin, Decision, Grep, Observation, Observed, Read,

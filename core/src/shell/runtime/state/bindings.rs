@@ -754,7 +754,7 @@ mod chokepoint_tests {
             SourceOrigin::named("<test>"),
         )) {
             RunReport::Static { diagnostics } => {
-                let msg = diagnostics.render().0;
+                let msg = diagnostics.render(shell.exit_hints()).0;
                 assert!(
                     msg.contains("undefined variable: $prune_x"),
                     "expected an undefined-variable diagnostic, got: {msg}"

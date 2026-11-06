@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 ---
 
 # Failure: status, not truth
@@ -23,7 +23,7 @@ share one return type.
 
 **`try` turns failure into data, and is ral's only `||`.** `try B H` runs `B`;
 on success it returns `B`'s value, on failure it calls the handler `H` with an
-error record `[status, cmd, reason, message, site]` and returns *its* value,
+closed error record `[reason, frame, site]` and returns *its* value,
 unifying both outcomes into one type. It catches recoverable runtime errors and
 nothing else — `exit` and a stop, the two `Escape`s, bypass it. When a
 command encodes its result in its exit status rather than a value — an external
@@ -33,6 +33,26 @@ command-level `||`: it would force precedence against `?` and `|` for a case
 `try` already covers. The only `||` is the short-circuiting `Bool` connective
 inside `$[…]` expression blocks (`docs/SPEC.md` §17.1), which takes strict `Bool`
 operands and never inspects command success.
+
+**A failure is its reason and one provenance.** The
+[[decisions/261105_the-error-record|error-record decision]] fixes the two rules:
+
+- `fail m` raises `raised m` at the innermost visible operation, including
+  `fail` itself. `raise e` re-raises the closed record unchanged and trusts
+  its claims. `describe e` derives the text from the reason alone.
+- `frame` names a failing frame, which may be `index`, not a command; it is
+  provenance only. A process failure names its own subject: `process [program,
+  failure]`, with `program` the command head as dispatched.
+- `frame` is a provenance coordinate: shown with the site, never the subject of
+  a process's wording. Visibility
+  means a span in a session source; prelude frames defer to the user's call.
+  Name and site come from that same frame. Every run supplies a base, so an
+  otherwise unclaimed failure is sited at its start, `script:1:1`.
+- Reason hints are recomputed on re-raise; situational hints, context and
+  unwind facts are report-only and are dropped. A worker's live error carries
+  its completed provenance to `done`, `poll` and `await` alike.
+- The exit code is derived from `reason`, never stored beside it. Raised
+  text exits 1; scripts choosing a code use top-level `exit n`.
 
 The cleanup forms differ only in what they do with the original failure:
 
@@ -56,18 +76,21 @@ its cleanup in front of the body's outcome (`guard` / `restore` frames), so a cl
 
 Failure propagates predictably through the rest of the grammar:
 
-- a written sequence or `let` halts at the first failure and adds the hint
-  about later steps only when it abandoned written steps. Compiler-generated
-  operand hoists, returned-thunk splits and capture decoding add no such hint;
+- a written sequence or `let` halts at the first failure and records whether
+  it abandoned written steps. Compiler-generated operand hoists, returned-thunk
+  splits and capture decoding set no such fact. Rendering follows the hint,
+  counted capture-discard note, then eligible abandoned-tail note; the last
+  is omitted for spawn failures or when a hint exists;
 - a [[design/pipelines|pipeline]] fails whole on any stage failure, bar a stage
   ral itself ended because its reader was gone;
 - `for` / `map` stop iterating on a failing body;
 - a loose worker's failure is observed only by `await`, `race` or `poll`; it
   never fails the run or session. Its lifetime is independent of its ending
   ([[design/endings|endings]]);
-- an unhandled failure at top level exits the process with that status.
+- an unhandled failure at top level exits with the code derived from its reason
+  ([[design/endings|endings]]).
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] (failure is an operation's exceptional outcome),
+See also [[design/exec|exec]] (failure is an operation's exceptional outcome),
 [[design/pipelines|pipelines]],
 [[design/control-operators|control-operators]], [[design/types|types]],
 [[design/cbpv|cbpv]].

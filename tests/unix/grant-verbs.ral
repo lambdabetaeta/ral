@@ -2,7 +2,7 @@
 # layer that supplies the axis lists it
 
 let can-cd = { |body|
-    try { !$body; return 'cd permitted' } { |e| return $e[message] }
+    try { !$body; return 'cd permitted' } { |e| return !{describe $e} }
 }
 let dest = temp-dir
 

@@ -530,7 +530,10 @@ mod tests {
         )]];
         let err = WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table)
             .expect_err("out-of-range ref must fail the build");
-        assert_eq!(err.message, "seed: scope ref 5 out of range or unresolved");
+        assert_eq!(
+            err.describe(),
+            "seed: scope ref 5 out of range or unresolved"
+        );
     }
 
     /// Encoding walks the chain as a queue, so a quarter-megabyte stack

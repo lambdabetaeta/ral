@@ -243,7 +243,7 @@ truthiness conversion. `/` on two integers is integer division.
     } elsif $[$mode == 'build'] {
         echo building
     } else {
-        fail [status: 2, message: "unknown mode: $mode"]
+        fail "unknown mode: $mode"
     }
 
 A two-armed `if` returns a value:
@@ -516,19 +516,27 @@ stops the current computation unless something handles it.
     let config = try {
         return !{curl -fsS $primary | from-json}
     } { |error|
-        echo "primary failed: $error[message]"
+        echo "primary failed: !{describe $error}"
         return !{curl -fsS $fallback | from-json}
     }
 
 Keep the handler on the same line as the body's closing brace: `} {`.
-The handler receives an error record with `status`, `cmd`, `message` and
-`site` fields, where `site` is `` `some [script: String, line: Int, col: Int] ``
-or `` `none ``. `message` describes the failure; it is not the command's stderr.
+The handler receives exactly `[reason, cmd, site]`. `reason` is a variant:
+`` `exited n `` for an external exit, `` `raised text `` for a raised failure,
+and so on (SPEC §8.6). `cmd` names the failing frame: a command, an operation
+such as `index`, or `fail` itself. `site` is always
+`[script: String, line: Int, col: Int]`. `describe $error` derives the
+failure's text; it is not the command's stderr.
 
-Raise and re-raise with an error record:
+Raise from text; re-raise a caught record unchanged:
 
-    fail [status: 2, message: 'usage: deploy HOST']
-    try { risky-work } { |error| fail $error }
+    fail 'usage: deploy HOST'
+    try { risky-work } { |error| raise $error }
+
+An unhandled `fail` exits 1. To choose a code, use `exit n` at top level.
+`raise` trusts a hand-built record, including its reason and site, but refuses
+`` `exited 0 `` and signals outside `1..=127`. Re-raising preserves reason
+hints, not situational advice or unwind notes from the first report.
 
 `guard` always runs cleanup, then lets the original failure continue — and a
 cleanup that fails in turn pre-empts it, since a cleanup that could not fail
@@ -560,7 +568,7 @@ The prelude contains common policies:
 
     case $report[outcome] [
         `ok:  { |value| return $value },
-        `err: { |error| echo $error[message] },
+        `err: { |error| echo !{describe $error} },
     ]
 
 `trail` is the flat list of what happened during the body, each entry an
@@ -789,13 +797,14 @@ This script writes a JSON manifest of a directory's regular files:
     #!/usr/bin/env ral
 
     if $[!{length !{args}} != 2] {
-        fail [status: 2, message: 'usage: manifest ROOT OUTPUT.json']
+        warn 'usage: manifest ROOT OUTPUT.json'
+        exit 2
     }
 
     let [root, output] = args
 
     if $[not !{is-dir $root}] {
-        fail [status: 2, message: "not a directory: $root"]
+        fail "not a directory: $root"
     }
 
     let manifest = within [dir: $root] {

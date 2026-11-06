@@ -455,7 +455,7 @@ particular files, a defence at the name layer with the name layer's limits.
 Naming the class as open is worth more than pretending the `exec` dimension
 covers it.
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] (a capability is permission over the effect set),
+See also [[design/exec|exec]] (a capability is permission over the effect set),
 [[design/scoping|scoping]], [[design/control-operators|control-operators]],
 [[design/two-enforcers|two-enforcers]], [[related/system-c|system-c]] (the
 type-based pole of this calculus),

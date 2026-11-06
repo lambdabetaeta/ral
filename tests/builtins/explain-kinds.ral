@@ -3,7 +3,7 @@
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {
         warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
-        fail [status: 1, message: "assertion failed: $name"]
+        fail "assertion failed: $name"
     }
 }
 let headed = { |name kind|

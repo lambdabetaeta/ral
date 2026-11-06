@@ -1,12 +1,20 @@
 ---
 status: active
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
-verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
 anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, CompletionPermit, Cradle, Brood, ScopeOwner, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, spawn_form]
 ---
 
 # `await` is the block run here, and a worker ends with its children
+
+> Amended 2026-11-05 by [[decisions/261105_the-error-record|the error record]]:
+> worker failures carry the one `Reason` and completed provenance before
+> publication. `done`, `poll` and `try` around `await` receive the same closed
+> `[reason, cmd, site]` record with total site, not observer-relative locations.
+> `await` propagates the live error and its report facts; a handler's
+> `raise $e` keeps only the record and recomputable reason hints. `describe`
+> derives its text. The original ownership rationale below is unchanged.
 
 > Amended 2026-11-05 (see [[design/endings|endings]]):
 > I3's session owner answers for its loose workers' lifetime, never their

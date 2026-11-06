@@ -1,9 +1,17 @@
 # Test: codecs refuse what they cannot represent, and name the refuser
 
-let refusal = { |body| try $body { |e| echo $e[cmd] $e[reason]; return () } }
+let refusal = { |body| try $body { |e|
+    case $e[reason] [
+        `raised: { |_| echo $e[frame] raised },
+        `process: { |_| fail 'expected a raised refusal' },
+        `timed-out: { |_| fail 'expected a raised refusal' },
+        `cancelled: { |_| fail 'expected a raised refusal' },
+    ]
+    return ()
+} }
 # The refusal's message mentions `where`: the failing position, not the stream's
 let refusal-at = { |where body|
-    try $body { |e| echo $e[cmd] !{re-match $where $e[message]}; return () }
+    try $body { |e| echo $e[frame] !{re-match $where !{describe $e}}; return () }
 }
 
 # Decoders are strict about UTF-8 ... except the line reader, which is lossy

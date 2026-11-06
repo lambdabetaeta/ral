@@ -1,60 +1,59 @@
 # Test: §10.1 try / handler dispatch
 #
 # `try body handler` runs body and returns its value; on failure it
-# calls handler with an ErrorRec [cmd, status, message, site] and
+# calls handler with an ErrorRecord [reason, frame, site] and
 # returns the handler's value instead.
 
 # Success: the body's value comes back and the handler is not called.
-echo !{try { return 0 } { |e| return $e[status] }}
+echo !{try { return 0 } { |_| return -1 }}
 
-# Command failure: status flows into the handler.  `cat`'s complaint lands in
+# Command failure: the reason flows into the handler.  `cat`'s complaint lands in
 # a file, so the failure is `cat`'s own.
 let d = temp-dir
-echo !{try { cat /nonexistent 2> "$d/err"; return 0 } { |e| return $e[status] }}
+echo !{try { cat /nonexistent 2> "$d/err"; return `raised unreached } { |e| return $e[reason] }}
 rm -rf $d
 
-# Explicit fail: status flows through.
-echo !{try { fail [status: 42, message: 'explicit status'] } { |e| return $e[status] }}
+# Explicit fail: the reason carries the text.
+echo !{try { fail 'explicit failure' } { |e| return $e[reason] }}
 
-# fail with a custom message: status and message round-trip.
-try { fail [status: 7, message: 'custom failure'] } { |e|
-    echo $e[status]
-    echo $e[message]
+# A custom message is data in raised, and describe supplies its text.
+try { fail 'custom failure' } { |e|
+    echo $e[reason]
+    echo !{describe $e}
 }
 
-# fail re-raise inside a handler: $e round-trips through nested try.
-try {
-    try { fail [status: 9, message: 'boom'] } { |e| fail $e }
-} { |e|
-    echo $e[status]
-    echo $e[message]
+# raise inside a handler preserves the entire record.
+let original = try { fail 'boom' } { |e| return $e }
+try { raise $original } { |e|
+    echo $[$e == $original]
+    echo !{describe $e}
 }
 
 # `try` with side-effecting handler.
-try { fail [status: 1, message: 'side-effecting handler test'] } { |err|
-    echo "caught status $err[status]"
+try { fail 'side-effecting handler test' } { |err|
+    echo "caught !{describe $err}"
 }
 
 # Nested try.
 try {
-    try { fail [status: 1, message: 'nested try test'] } { |_err| echo 'inner caught' }
+    try { fail 'nested try test' } { |_err| echo 'inner caught' }
     echo 'continued after inner'
 } { |_err| echo 'outer caught' }
 
 # retry.
 try {
-    retry 3 { echo 'trying...'; fail [status: 1, message: 'retry test'] }
+    retry 3 { echo 'trying...'; fail 'retry test' }
 } { |_err| echo 'retry exhausted' }
 
-# The record carries why the body failed, its status, and where it happened
-try { fail [status: 3, message: 'x'] } { |e| echo $e[reason] $e[status] }
-try { fail [status: 1, message: 'x'] } { |e|
-    case $e[site] [`some: { |s| echo $[$s[line] > 0] }, `none: { |_| echo none }]
+# The record carries why the body failed, its operation, and a total site.
+try { fail 'x' } { |e| echo $e[reason] $e[frame] }
+try { fail 'x' } { |e|
+    echo $[$e[site][line] > 0]
 }
 
-# guard: the body's error propagates, not the cleanup's
-try { guard { fail [status: 42, message: 'original failure'] } { echo cleanup } } { |e|
-    echo "status $e[status]"
+# guard: the body's error propagates, not the cleanup's.
+try { guard { fail 'original failure' } { echo cleanup } } { |e|
+    echo !{describe $e}
 }
 
 echo 'try error tests done'

@@ -154,9 +154,9 @@ mod tests {
         else {
             panic!("an unnameable entry is an error, not a stop");
         };
-        assert!(error.message.starts_with("glob: "), "{error:?}");
-        assert!(error.message.contains("bad-\\xFF"), "{error:?}");
-        assert!(error.message.contains("not valid UTF-8"), "{error:?}");
-        assert!(error.message.ends_with("rename it?"), "{error:?}");
+        assert!(error.describe().starts_with("glob: "), "{error:?}");
+        assert!(error.describe().contains("bad-\\xFF"), "{error:?}");
+        assert!(error.describe().contains("not valid UTF-8"), "{error:?}");
+        assert!(error.describe().ends_with("rename it?"), "{error:?}");
     }
 }

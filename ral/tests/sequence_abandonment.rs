@@ -14,10 +14,7 @@ use common::run;
 
 #[test]
 fn a_failing_final_part_abandons_nothing() {
-    let out = run(
-        "ral_abandoned_none",
-        "echo first\nfail [status: 1, message: boom]\n",
-    );
+    let out = run("ral_abandoned_none", "echo first\nfail boom\n");
     assert!(
         !out.stderr.contains("did not run"),
         "nothing followed the failure, so nothing was abandoned; stderr: {}",
@@ -30,7 +27,7 @@ fn a_failing_final_part_abandons_nothing() {
 fn the_hint_belongs_to_the_innermost_sequence() {
     let out = run(
         "ral_abandoned_innermost",
-        "echo outer\n!{ echo inner; fail [status: 1, message: boom]; echo a; echo b }\necho last\n",
+        "echo outer\n!{ echo inner; fail boom; echo a; echo b }\necho last\n",
     );
     assert!(
         out.stderr.contains("later steps in this block did not run"),

@@ -1,0 +1,55 @@
+# Test: `raise` trusts reason records; `fail` raises only text.
+# `cancelled` and `timed-out` are reachable here, as a worker's stop is
+# re-raised from its error record.
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail "assertion failed: $name"
+    }
+}
+let caught = { |body|
+    try { !$body; fail 'ran' } { |e| return $e }
+}
+
+let site = [script: 'manual', line: 2, col: 3]
+let timed-record = [reason: `timed-out, frame: sleep, site: $site]
+let timed = caught { raise $timed-record }
+assert_eq 'timed-out reason' true $[$timed[reason] == `timed-out]
+assert_eq 'timed-out record' $timed-record $timed
+assert_eq 'timed-out description' 'worker timed out' !{describe $timed}
+
+let stopped-record = [reason: `cancelled, frame: sleep, site: $site]
+let stopped = caught { raise $stopped-record }
+assert_eq 'cancelled reason' true $[$stopped[reason] == `cancelled]
+assert_eq 'cancelled record' $stopped-record $stopped
+
+# The reasons are told apart by tag, as a case does
+let tag = { |e|
+    case $e[reason] [
+        `process:      { |_| return process },
+        `cancelled:    { |_| return cancelled },
+        `timed-out:    { |_| return timed-out },
+        `raised:       { |_| return raised }
+    ]
+}
+assert_eq 'tag timed-out' timed-out !{tag $timed}
+assert_eq 'tag cancelled' cancelled !{tag $stopped}
+assert_eq 'tag plain fail' raised !{tag !{caught { fail 'plain' }}}
+
+# A caught error re-raises with its reason intact
+let again = caught { raise $timed }
+assert_eq 'reraised reason' timed-out !{tag $again}
+assert_eq 'reraised record' $timed $again
+
+# Success and invalid signals are refused as fresh raised failures.
+let refused = caught { raise [reason: `process [program: tool, failure: `exited 0], frame: tool, site: $site] }
+assert_eq 'success refused' raised !{tag $refused}
+assert_eq 'refusal operation' raise $refused[frame]
+let refused-signal = caught { raise [reason: `process [program: tool, failure: `signaled 128], frame: tool, site: $site] }
+assert_eq 'signal refused' raised !{tag $refused-signal}
+# A hand-built external failure keeps its reason and claimed provenance.
+let claimed = [reason: `process [program: tool, failure: `exited 3], frame: tool, site: $site]
+assert_eq 'trusted external' $claimed !{caught { raise $claimed }}
+
+echo 'raise with reason tests done'

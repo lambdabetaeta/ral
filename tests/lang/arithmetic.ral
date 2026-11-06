@@ -45,7 +45,7 @@ try { let _ = div $min -1 } { |_| echo 'min / -1 refused' }
 try { let _ = rem $min -1 } { |_| echo 'min % -1 refused' }
 
 # `&&` and `||` are lazy: the right side of a decided operator is never forced
-let boom = { fail [status: 1, message: 'forced'] }
+let boom = { fail 'forced' }
 echo $[false && !$boom]
 echo $[true || !$boom]
 

@@ -9,8 +9,8 @@ let [path, field] = args
 
 let rows = from-csv < $path
 
-if !{is-empty $rows} { fail [status: 1, message: "$path has no data rows"] }
-if $[not !{has $rows[0] $field}] { fail [status: 1, message: "$path has no field $field"] }
+if !{is-empty $rows} { fail "$path has no data rows" }
+if $[not !{has $rows[0] $field}] { fail "$path has no field $field" }
 
 let nums = map { |r| return !{float $r[$field]} } $rows
 let sorted = sort-list $nums

@@ -315,7 +315,7 @@ mod tests {
     use ral_core::shell::runtime::{Observation, Observed};
 
     fn observation_wire(what: Observed) -> ral_core::data::FOValue {
-        Observation::instant(None, None, what).encode()
+        Observation::instant(ral_core::test_helper::site(), None, what).encode()
     }
 
     #[test]

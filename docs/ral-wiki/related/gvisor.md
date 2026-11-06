@@ -1,7 +1,7 @@
 ---
 verified_at_commit: d9abfb52
 verified_at_date: 2026-09-11
-against: [design/two-enforcers, design/syscalls-are-effects, decisions/260715_vm-workspaces-cross-by-copy]
+against: [design/two-enforcers, design/exec, decisions/260715_vm-workspaces-cross-by-copy]
 ---
 
 # gVisor
@@ -17,7 +17,7 @@ in advance.
 **ral is not that.** ral is authority over effects composed from OS
 primitives — bwrap, Landlock, seccomp — under two enforcers, not a
 reimplementation of the kernel interface a confined program sees
-([[design/two-enforcers|two-enforcers]], [[design/syscalls-are-effects|syscalls-are-effects]]).
+([[design/two-enforcers|two-enforcers]], [[design/exec|exec]]).
 A confined command still talks to the real kernel; ral narrows what it may
 ask for rather than answering on the kernel's behalf. Where ral asks "should
 this envelope run hostile code at all", the answer is

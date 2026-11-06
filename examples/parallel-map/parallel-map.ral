@@ -17,10 +17,7 @@ let gzipped = get $by 'gzipped' []
 let failed = map { |r| return $r[path] } !{get $by 'failed' []}
 
 if $[!{length $failed} > 0] {
-    fail [
-        status: 1,
-        message: "gzipped !{length $gzipped} files; failed: !{intercalate ', ' $failed}",
-    ]
+    fail "gzipped !{length $gzipped} files; failed: !{intercalate ', ' $failed}"
 } else {
     echo "gzipped !{length $gzipped} files"
 }

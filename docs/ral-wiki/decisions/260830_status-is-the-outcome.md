@@ -4,6 +4,9 @@ status: active
 
 # Status is the outcome
 
+Superseded in part by [[decisions/261105_the-error-record|the error record]]:
+a failure's code is derived from its reason, not stored on the error record.
+
 A run's exit status is a pure function of its outcome, computed once and
 nowhere stored: `status(Ok _) = 0`; an error's status is its `exit_code()`;
 `exit n` is `n`; a stop by signal `s` is `128 + s`. `Shell::last_status`

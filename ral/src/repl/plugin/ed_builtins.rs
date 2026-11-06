@@ -170,7 +170,7 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     match result {
         Ok(_) => Ok(tui_result(Value::string(captured_line(&bytes)), 0)),
         Err(Break::Error(e)) => Ok(tui_result(
-            Value::string(e.message.clone()),
+            Value::string(e.describe().into_owned()),
             i64::from(e.failure_code().get()),
         )),
         Err(other) => Err(other),
@@ -642,11 +642,11 @@ mod tests {
             panic!("a stale cell must be refused, got {result:?}");
         };
         assert!(
-            e.message
+            e.describe()
                 .contains("_ed-state (the plugin's persistent cell)")
-                && e.message.contains("the value is text (`'stale'`)"),
+                && e.describe().contains("the value is text (`'stale'`)"),
             "{}",
-            e.message
+            e.describe()
         );
         assert_eq!(asked, 1, "the read only: the updater must not have run");
     }
@@ -668,9 +668,9 @@ mod tests {
             panic!("a read-only grant must refuse, got {result:?}");
         };
         assert!(
-            e.message.contains("_ed-state requires editor: [`write]"),
+            e.describe().contains("_ed-state requires editor: [`write]"),
             "{}",
-            e.message
+            e.describe()
         );
         assert_eq!(asked, 0, "the host must not have been asked");
     }

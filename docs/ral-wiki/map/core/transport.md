@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d56977ff
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-03
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -66,7 +66,11 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   declared once yields both its encoding and its ral type; the
   records ral reads back live in `fact` (`ErrorRecord`, `Observation`, `Io`,
   `Receipt`, ...), below the checker, which reads their types off the
-  declarations (`ErrorRecord::ty()`); `poll`'s polymorphic shape is
+  declarations (`ErrorRecord::ty()`). That closed record is exactly
+  `[reason, frame, site]`: one reason with its payload, a frame name and a
+  total `CallSite`, with no status or derived message. It crosses the wire
+  unchanged ([[decisions/261105_the-error-record|the error record]]).
+  `poll`'s polymorphic shape is
   `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`shell::runtime::error`, `shell::runtime::audit`).
 - `data/string.rs` — `Str`, the shared immutable string, exported as

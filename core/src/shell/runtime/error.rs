@@ -1,14 +1,16 @@
 //! The runtime error type.
 
+use super::ExitHints;
 use super::flow::Stop;
 use crate::compile::CompileError;
 use crate::diagnostic::{Label, Rejection, Report, palette};
-use crate::fact::{Ending, FailureCode};
+use crate::fact::{Ending, Failure, FailureCode, Reason};
 use crate::process::{CancelCause, CommandFailure, SpawnFailure, WorkerStop};
 use crate::source::{CallSite, FileId, Source, SourceDb, Span};
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 use std::num::NonZeroU8;
+use std::sync::Arc;
 
 mod record;
 pub use record::outcome_value;
@@ -17,24 +19,115 @@ pub use record::outcome_value;
 /// `result_large_err` refuses an `Err` of 128 bytes.
 #[derive(Debug, Clone)]
 pub struct Error {
-    pub message: String,
-    pub status: Status,
-    /// `None` until `evaluator::machine`'s `stamp` sets the innermost
-    /// enclosing node's span.
-    pub span: Option<Span>,
+    pub reason: Reason,
+    pub prov: Option<Prov>,
+    /// Only advice that depends on more than the failure record.
     pub hint: Option<Box<str>>,
-    /// A second place in the source the message points at: the use that imposed
-    /// what a value failed to meet.
     pub witness: Option<Box<Span>>,
-    /// The shown name of the command whose failure this is; `None` until
-    /// `shell::runtime::flow::name_failure` stamps the innermost dispatch.
-    pub(crate) command: Option<Box<str>>,
-    /// A loaded file that failed to compile: renderers draw its report, not
-    /// `message`.
     pub rejection: Option<Box<Rejection>>,
-    /// The site a re-raised record carried, read by `record_at` ahead of the
-    /// span.  Set only by `fail`.
-    pub(crate) site: Option<Box<CallSite>>,
+    pub context: Option<Box<str>>,
+    pub unwound: Unwound,
+}
+
+/// Where a failure was claimed.  `Live` is resolved against a source registry
+/// only when drawn; `Resolved` carries its coordinates and renders no caret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prov {
+    Live { name: FrameName, span: Span },
+    Resolved(Box<(String, CallSite)>),
+}
+
+/// A frame's name.  Static spellings and shared [`crate::ir::Name`]s clone
+/// without allocating, which the evaluator's per-step register depends on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameName {
+    Static(&'static str),
+    Shared(Arc<str>),
+}
+
+impl std::ops::Deref for FrameName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Static(name) => name,
+            Self::Shared(name) => name,
+        }
+    }
+}
+
+impl From<&'static str> for FrameName {
+    fn from(name: &'static str) -> Self {
+        Self::Static(name)
+    }
+}
+
+impl From<Arc<str>> for FrameName {
+    fn from(name: Arc<str>) -> Self {
+        Self::Shared(name)
+    }
+}
+
+impl From<&Arc<str>> for FrameName {
+    fn from(name: &Arc<str>) -> Self {
+        Self::Shared(Arc::clone(name))
+    }
+}
+
+impl From<Cow<'static, str>> for FrameName {
+    fn from(name: Cow<'static, str>) -> Self {
+        match name {
+            Cow::Borrowed(name) => Self::Static(name),
+            Cow::Owned(name) => name.into(),
+        }
+    }
+}
+
+impl From<String> for FrameName {
+    fn from(name: String) -> Self {
+        Self::Shared(name.into())
+    }
+}
+
+impl Prov {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Live { name, .. } => name,
+            Self::Resolved(pair) => &pair.0,
+        }
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::Live { span, .. } => Some(*span),
+            Self::Resolved(_) => None,
+        }
+    }
+
+    pub(crate) fn site(&self, db: &SourceDb) -> CallSite {
+        match self {
+            Self::Live { span, .. } => db.site(*span).expect("live provenance is registered"),
+            Self::Resolved(pair) => pair.1.clone(),
+        }
+    }
+
+    /// Leaving the shell `db` belongs to: a span into a file the parent
+    /// registry does not hold (or holds as another file) becomes coordinates.
+    pub(crate) fn leaving(self, db: &SourceDb) -> Self {
+        match self {
+            Self::Live { name, span } if !db.inherits(span.file) => match db.site(span) {
+                Some(site) => Self::Resolved(Box::new((name.to_string(), site))),
+                None => Self::Live { name, span },
+            },
+            prov => prov,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Unwound {
+    pub abandoned_tail: bool,
+    pub discarded: u32,
 }
 
 /// Said the same way wherever a block is sequenced: a phrase list
@@ -42,56 +135,20 @@ pub struct Error {
 const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
                                    `attempt` if its failure should not stop the rest";
 
-/// Said once however many captures an error unwinds: a running count would
-/// need a field `Error` has no room for.
-const DISCARDED_NOTE: &str = "bytes written to stdout before the failure were discarded with \
-                              the value; run the command without `let` to see them, or use \
-                              `audit` to keep its output";
-
 const _: () = assert!(
     std::mem::size_of::<Error>() < 128,
     "Error must stay under clippy's result_large_err threshold"
 );
 
-/// An error's exit status: one constructor per fact, whichever door reported it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
-    Raised(NonZeroU8),
-    /// A stop an owner converted into an error at its boundary.
-    WorkerStopped(WorkerStop),
-    Process(CommandFailure),
-}
-
-impl FailureCode for Status {
-    fn failure_code(&self) -> NonZeroU8 {
-        match self {
-            Self::Raised(code) => *code,
-            Self::Process(failure) => failure.failure_code(),
-            Self::WorkerStopped(owned) => owned.cause().failure_code(),
-        }
-    }
-}
-
-impl Status {
-    /// The code an external command chose to exit with, if that is what this is.
-    pub fn exited(&self) -> Option<i32> {
-        match self {
-            Self::Process(CommandFailure::ExitCode(code)) => Some(*code),
-            _ => None,
-        }
-    }
-}
-
 impl FailureCode for Error {
     fn failure_code(&self) -> NonZeroU8 {
-        self.status.failure_code()
+        self.reason.failure_code()
     }
 }
 
 impl Error {
-    /// An error with status 1.
     pub fn new(message: impl Into<String>) -> Self {
-        Self::raised(message, NonZeroU8::MIN)
+        Self::raised(message)
     }
 
     /// A loaded file's failure: the plain message for a handler to read, the
@@ -104,21 +161,29 @@ impl Error {
         }
     }
 
-    pub fn raised(message: impl Into<String>, status: NonZeroU8) -> Self {
-        Self::with_status(message, Status::Raised(status))
+    pub fn raised(message: impl Into<String>) -> Self {
+        Self::from_reason(Reason::Raised(message.into()))
     }
 
-    pub(crate) fn with_status(message: impl Into<String>, status: Status) -> Self {
+    pub fn from_reason(reason: Reason) -> Self {
         Self {
-            message: message.into(),
-            status,
-            span: None,
+            reason,
+            prov: None,
             hint: None,
             witness: None,
-            command: None,
             rejection: None,
-            site: None,
+            context: None,
+            unwound: Unwound::default(),
         }
+    }
+
+    /// The failure's own provenance, else the register's frame.
+    pub(crate) fn prov_or<'a>(&'a self, register: &'a Prov) -> &'a Prov {
+        self.prov.as_ref().unwrap_or(register)
+    }
+
+    pub fn describe(&self) -> Cow<'_, str> {
+        self.reason.describe()
     }
 
     /// An I/O failure on `what`, in the one phrasing every door shares.  The
@@ -139,59 +204,31 @@ impl Error {
     }
 
     pub(crate) fn worker_stopped(owned: WorkerStop) -> Self {
-        Self::with_status(owned.message(), Status::WorkerStopped(owned))
+        Self::from_reason(owned.into())
     }
 
     /// A command that never became a process, whether the pre-spawn probe or
     /// the spawn itself found out.
-    pub(crate) fn spawn_failure(cmd: &str, failure: SpawnFailure) -> Self {
-        let hint = failure.text_hint(cmd, None);
-        let failure = CommandFailure::Spawn(failure);
-        Self {
-            hint: hint.map(Into::into),
-            ..Self::with_status(failure.message(cmd), Status::Process(failure))
-        }
+    pub(crate) fn spawn_failure(program: &str, failure: SpawnFailure) -> Self {
+        Self::from_reason(Reason::from_command(
+            program,
+            CommandFailure::Spawn(failure),
+        ))
     }
 
-    /// The error of a step that halted a sequence with steps after it.  A
-    /// command that never became a process gets no advice to `attempt` it,
-    /// which cannot make it run; a hint already carried says more.
-    pub(crate) fn abandoning_tail(self) -> Self {
-        match self.status {
-            Status::Process(CommandFailure::Spawn(_)) => self,
-            _ if self.hint.is_some() => self,
-            _ => self.with_hint(ABANDONED_TAIL_HINT),
-        }
+    pub(crate) fn abandoning_tail(mut self) -> Self {
+        self.unwound.abandoned_tail = true;
+        self
     }
 
-    /// The error of a capture that dropped what its body wrote, below any
-    /// hint already carried.
-    pub(crate) fn discarding(self) -> Self {
-        match &self.hint {
-            Some(hint) if hint.contains(DISCARDED_NOTE) => self,
-            _ => self.append_hint(DISCARDED_NOTE),
-        }
+    pub(crate) fn discarded(mut self, bytes: u32) -> Self {
+        self.unwound.discarded = self.unwound.discarded.saturating_add(bytes);
+        self
     }
 
     /// A bare exit code takes its hint from the session's `exit_hints` table.
-    pub(crate) fn from_command_failure(
-        cmd: &str,
-        failure: CommandFailure,
-        shell: &crate::shell::runtime::Shell,
-    ) -> Self {
-        let hint = failure.default_hint().or_else(|| match &failure {
-            CommandFailure::ExitCode(code) => shell.session.exit_hints.lookup(cmd, *code),
-            _ => None,
-        });
-        Self {
-            hint: hint.map(Into::into),
-            ..Self::with_status(failure.message(cmd), Status::Process(failure))
-        }
-    }
-
-    pub(crate) fn at_span(mut self, span: Span) -> Self {
-        self.span = Some(span);
-        self
+    pub(crate) fn from_command_failure(program: &str, failure: CommandFailure) -> Self {
+        Self::from_reason(Reason::from_command(program, failure))
     }
 
     pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
@@ -224,9 +261,11 @@ impl Error {
         self
     }
 
-    /// Prefixes `message` with `ctx`, preserving span, hint, status and command.
     pub fn context(mut self, ctx: impl std::fmt::Display) -> Self {
-        self.message = format!("{ctx}: {}", self.message);
+        self.context = Some(match self.context.take() {
+            Some(inner) => format!("{ctx}: {inner}").into(),
+            None => ctx.to_string().into(),
+        });
         self
     }
 
@@ -241,72 +280,97 @@ impl Error {
     /// expecting a trailing newline (`eprint!`, `write_all`, a wire payload)
     /// keeps it as is; one that stores it for a later `println!`/`eprintln!`
     /// must `trim_end()` first, or that newline doubles.
-    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>) -> String {
-        render(&self.diagnosis(), db, compact_root)
+    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>, hints: &ExitHints) -> String {
+        render(&self.diagnosis(hints), db, compact_root)
     }
 
-    /// The one-liner for a single-command input.
-    pub fn compact(&self) -> String {
-        self.diagnosis().compact()
+    pub fn compact(&self, hints: &ExitHints) -> String {
+        let diagnosis = self.diagnosis(hints);
+        let (message, hint) = diagnosis.compose();
+        diagnosis.compact(&message, hint.as_deref())
     }
 
     /// A host refusal has no source location.
-    pub(crate) fn render_spanless(&self) -> String {
+    pub(crate) fn render_spanless(&self, hints: &ExitHints) -> String {
         render(
             &Diagnosis {
                 at: None,
                 witness: None,
                 rejection: None,
-                ..self.diagnosis()
+                ..self.diagnosis(hints)
             },
             &SourceDb::default(),
             None,
         )
     }
 
-    fn diagnosis(&self) -> Diagnosis<'_> {
+    fn diagnosis(&self, hints: &ExitHints) -> Diagnosis<'_> {
+        let hint = self
+            .hint
+            .as_deref()
+            .map(Cow::Borrowed)
+            .or_else(|| self.reason.hint())
+            .or_else(|| {
+                let Reason::Process(process) = &self.reason else {
+                    return None;
+                };
+                let Failure::Exited(n) = process.failure else {
+                    return None;
+                };
+                hints.lookup(&process.program, n).map(Cow::Owned)
+            });
         Diagnosis {
-            message: Cow::Borrowed(&self.message),
-            at: self.span,
+            message: self.describe(),
+            at: self.prov.as_ref(),
             witness: self.witness.as_deref().copied(),
-            hint: self.hint.as_deref(),
-            shown: match &self.status {
-                Status::Process(_) => None,
-                status => Some(status.failure_code()),
-            },
+            hint,
+            shown: matches!(self.reason, Reason::TimedOut | Reason::Cancelled)
+                .then(|| self.failure_code()),
             rejection: self.rejection.as_deref(),
+            context: self.context.as_deref(),
+            unwound: self.unwound,
+            spawn: matches!(
+                self.reason.failure(),
+                Some(Failure::NotFound | Failure::NotRunnable(_))
+            ),
         }
     }
 }
 
 struct Diagnosis<'a> {
     message: Cow<'a, str>,
-    at: Option<Span>,
+    at: Option<&'a Prov>,
     witness: Option<Span>,
-    hint: Option<&'a str>,
+    hint: Option<Cow<'a, str>>,
     shown: Option<NonZeroU8>,
     rejection: Option<&'a Rejection>,
+    context: Option<&'a str>,
+    unwound: Unwound,
+    spawn: bool,
 }
 
 impl Stop {
     fn diagnosis(&self) -> Diagnosis<'_> {
         Diagnosis {
             message: Cow::Borrowed(self.cause.message()),
-            at: self.at,
+            at: self.at.as_ref(),
             witness: None,
             hint: None,
             shown: Some(self.failure_code()),
             rejection: None,
+            context: None,
+            unwound: Unwound::default(),
+            spawn: false,
         }
     }
 }
 
 impl<V> Ending<V, Error, Stop> {
     /// The one rendering: values, exits and reader-gone stops are silent.
-    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>) -> String {
+    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>, hints: &ExitHints) -> String {
         match self {
             Self::Ok(_) | Self::Exited(_) => String::new(),
-            Self::Err(error) => render(&error.diagnosis(), db, compact_root),
+            Self::Err(error) => render(&error.diagnosis(hints), db, compact_root),
             Self::Stopped(stop) if stop.cause == CancelCause::ReaderGone => String::new(),
             Self::Stopped(stop) => render(&stop.diagnosis(), db, compact_root),
             Self::Panic(text) => render(
@@ -317,6 +381,9 @@ impl<V> Ending<V, Error, Stop> {
                     hint: None,
                     shown: None,
                     rejection: None,
+                    context: None,
+                    unwound: Unwound::default(),
+                    spawn: false,
                 },
                 db,
                 None,
@@ -326,47 +393,99 @@ impl<V> Ending<V, Error, Stop> {
 }
 
 fn render(d: &Diagnosis<'_>, db: &SourceDb, compact_root: Option<FileId>) -> String {
-    match (d.rejection, compact_root) {
-        (Some(rejection), _) => rejection.render(),
-        (None, Some(root)) if d.at.is_none_or(|sp| sp.file == root) => d.compact(),
-        _ => d.draw(db),
+    let (message, hint) = d.compose();
+    let stays_in = |root| match d.at {
+        Some(Prov::Live { span, .. }) => span.file == root,
+        Some(Prov::Resolved(_)) | None => true,
+    };
+    if d.rejection.is_some() || compact_root.is_some_and(stays_in) {
+        d.compact(&message, hint.as_deref())
+    } else {
+        d.draw(db, &message, hint.as_deref())
     }
 }
 
 impl Diagnosis<'_> {
-    fn draw(&self, db: &SourceDb) -> String {
+    /// The words of a diagnosis before layout: the message under its context
+    /// and resolved site, and the notes under it.
+    fn compose(&self) -> (String, Option<String>) {
+        let message = match self.context {
+            Some(context) => format!("{context}: {}", self.message),
+            None => self.message.to_string(),
+        };
+        let message = match self.at {
+            Some(Prov::Resolved(pair)) => format!(
+                "{}:{}:{}: {message}",
+                pair.1.script, pair.1.line, pair.1.col
+            ),
+            _ => message,
+        };
+        let mut notes = self
+            .hint
+            .as_deref()
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if self.unwound.discarded > 0 {
+            notes.push(format!(
+                "{} bytes written to stdout before the failure were discarded with the value; run the command without `let` to see them, or use `audit` to keep its output",
+                self.unwound.discarded,
+            ));
+        }
+        if self.unwound.abandoned_tail && !self.spawn && self.hint.is_none() {
+            notes.push(ABANDONED_TAIL_HINT.into());
+        }
+        (message, (!notes.is_empty()).then(|| notes.join("\n\n")))
+    }
+
+    fn draw(&self, db: &SourceDb, message: &str, hint: Option<&str>) -> String {
         let label = |span, text: &str| Label {
             span: Some(span),
             text: text.into(),
         };
-        let resolved = self.at.and_then(|sp| Some((sp, db.get(sp.file)?)));
+        let resolved = self
+            .at
+            .and_then(Prov::span)
+            .and_then(|sp| Some((sp, db.get(sp.file)?)));
         let report = |at, also| Report {
             code: Some("R0001"),
-            message: self.message.to_string(),
+            message: message.to_owned(),
             at,
             also,
-            hint: self.hint.map(Into::into),
+            hint: hint.map(Into::into),
         };
-        match resolved {
-            Some((sp, src)) => report(
+        if let Some((sp, src)) = resolved {
+            report(
                 Some(label(sp, "here")),
                 self.witness
                     .filter(|w| w.file == sp.file)
                     .map(|w| label(w, "the use this script makes of it")),
             )
-            .render(src),
-            None => report(None, None).plain(),
+            .render(src)
+        } else {
+            report(None, None).plain()
         }
     }
 
-    fn compact(&self) -> String {
+    /// One line and its hint; a rejection is already a report of its own.
+    fn compact(&self, message: &str, hint: Option<&str>) -> String {
         let (red, cyan, reset) = palette();
-        let mut out = format!("{red}error{reset}: {}", self.message);
+        if let Some(rejection) = self.rejection {
+            let mut out = match self.context {
+                Some(context) => format!("{context}: {}", rejection.render()),
+                None => rejection.render(),
+            };
+            if let Some(hint) = hint {
+                let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
+            }
+            return out;
+        }
+        let mut out = format!("{red}error{reset}: {message}");
         if let Some(code) = self.shown {
             let _ = write!(out, " (exit status {code})");
         }
         out.push('\n');
-        if let Some(hint) = self.hint {
+        if let Some(hint) = hint {
             let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
         }
         out
@@ -375,7 +494,7 @@ impl Diagnosis<'_> {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        write!(f, "{}", self.describe())
     }
 }
 
@@ -405,14 +524,17 @@ mod tests {
         let end = End::Stopped(Stop {
             cause: CancelCause::TimedOut,
             owner: None,
-            at: Some(Span::new(file, 0, 7)),
+            at: Some(Prov::Live {
+                name: "sleep".into(),
+                span: Span::new(file, 0, 7),
+            }),
         });
-        let caret = crate::io::ansi::strip(&end.render(&db, None));
+        let caret = crate::io::ansi::strip(&end.render(&db, None, &ExitHints::default()));
         assert!(
             caret.contains("R0001") && caret.contains("here") && caret.contains("timed out"),
             "{caret}"
         );
-        let compact = crate::io::ansi::strip(&end.render(&db, Some(file)));
+        let compact = crate::io::ansi::strip(&end.render(&db, Some(file), &ExitHints::default()));
         assert!(compact.contains("timed out (exit status 124)"), "{compact}");
         assert!(!compact.contains("here"), "{compact}");
     }
@@ -423,16 +545,23 @@ mod tests {
         let end = End::Stopped(Stop {
             cause: CancelCause::ReaderGone,
             owner: None,
-            at: Some(Span::new(file, 0, 7)),
+            at: Some(Prov::Live {
+                name: "echo".into(),
+                span: Span::new(file, 0, 7),
+            }),
         });
-        assert_eq!(end.render(&db, None), "");
-        assert_eq!(end.render(&db, Some(file)), "");
+        assert_eq!(end.render(&db, None, &ExitHints::default()), "");
+        assert_eq!(end.render(&db, Some(file), &ExitHints::default()), "");
     }
 
     #[test]
     fn a_panic_renders_spanless() {
         let (db, file) = db_with("main.ral", "echo hi");
-        let out = crate::io::ansi::strip(&End::Panic("kaput".into()).render(&db, Some(file)));
+        let out = crate::io::ansi::strip(&End::Panic("kaput".into()).render(
+            &db,
+            Some(file),
+            &ExitHints::default(),
+        ));
         assert!(out.contains("run panicked: kaput"), "{out}");
         assert!(!out.contains("here") && !out.contains("main.ral"), "{out}");
     }
@@ -448,13 +577,32 @@ mod tests {
         let err = Error::compile(
             CompileError::Parse(parse),
             Source::from_text(file_origin("plugin.ral"), "let [x"),
-        );
+        )
+        .discarded(412)
+        .abandoning_tail()
+        .context("use");
         let (db, root) = db_with("main.ral", "load-plugin plugin");
-        let out = err.render(&db, Some(root));
+        let out = err.render(&db, Some(root), &ExitHints::default());
         assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
-        assert_eq!(err.message, "parse error: expected ]");
+        assert_eq!(err.describe(), "parse error: expected ]");
         assert_eq!(err.failure_code(), NonZeroU8::MIN);
         assert_eq!(err.rejection.as_ref().unwrap().status.get(), 2);
+        let discard = out.find("412 bytes written").expect("discard note");
+        let tail = out.find("later steps").expect("abandoned tail note");
+        assert!(
+            out.find("P0001").unwrap() < discard && discard < tail,
+            "{out}"
+        );
+        assert_eq!(out.matches("were discarded").count(), 1);
+        assert_eq!(out.matches(ABANDONED_TAIL_HINT).count(), 1);
+
+        let advised = err.with_hint("runtime advice");
+        let out = advised.render(&db, Some(root), &ExitHints::default());
+        assert!(out.contains("P0001"), "{out}");
+        assert!(out.find("runtime advice").unwrap() < out.find("412 bytes written").unwrap());
+        assert_eq!(out.matches("runtime advice").count(), 1);
+        assert_eq!(out.matches("were discarded").count(), 1);
+        assert!(!out.contains(ABANDONED_TAIL_HINT), "{out}");
     }
 
     fn runtime(
@@ -464,9 +612,14 @@ mod tests {
         hint: Option<&str>,
     ) -> String {
         let mut err = Error::new("boom").with_witness(witness);
-        err.span = span;
+        err.prov = span
+            .filter(|sp| db.get(sp.file).is_some())
+            .map(|span| Prov::Live {
+                name: "fail".into(),
+                span,
+            });
         err.hint = hint.map(Into::into);
-        crate::io::ansi::strip(&err.render(db, None))
+        crate::io::ansi::strip(&err.render(db, None, &ExitHints::default()))
     }
 
     #[test]
@@ -523,7 +676,7 @@ mod tests {
         ));
         let module = db.register(Source::from_text(
             file_origin("mod.ral"),
-            "let a = 1\nfail [status: 1, message: 'kaboom']\n",
+            "let a = 1\nfail 'kaboom'\n",
         ));
         let out = runtime(&db, Some(Span::new(module, 10, 14)), None, None);
         assert!(out.contains("R0001"));
@@ -541,8 +694,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unwind_facts_render_once_in_fixed_order_without_changing_the_record() {
+        let shell = crate::test_helper::core_shell();
+        let error = Error::new("boom")
+            .discarded(200)
+            .discarded(212)
+            .abandoning_tail();
+        let record = error.record(&shell);
+        let rendered = error.render(shell.sources(), None, shell.exit_hints());
+        let discard = rendered
+            .find("412 bytes written")
+            .expect("summed discard count");
+        let tail = rendered.find("later steps").expect("abandoned tail");
+        assert!(discard < tail, "{rendered}");
+        assert_eq!(rendered.matches("were discarded").count(), 1);
+        assert_eq!(record.describe(), "boom");
+        let decorated = error
+            .with_hint("specific advice")
+            .context("inner")
+            .context("outer");
+        let rendered = decorated.render(shell.sources(), None, shell.exit_hints());
+        assert!(rendered.contains("outer: inner: boom"), "{rendered}");
+        assert!(
+            rendered.find("specific advice").unwrap() < rendered.find("412 bytes written").unwrap()
+        );
+        assert!(!rendered.contains("later steps"), "{rendered}");
+        assert_eq!(decorated.record(&shell), record);
+        assert_eq!(decorated.discarded(u32::MAX).unwound.discarded, u32::MAX);
+    }
+
     fn said(e: &io::Error) -> String {
-        Error::io("f", e).message
+        Error::io("f", e).describe().into_owned()
     }
 
     /// `NotFound` and `PermissionDenied` say the fixed string, whoever made

@@ -23,7 +23,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 35;
+pub const PROTOCOL_VERSION: u32 = 36;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -345,15 +345,12 @@ pub enum SessionEvent {
     DeferredSurface(Vec<FOValue>),
 }
 
-/// What crosses when an enquiry is refused or its handler fails: message *and*
-/// status, so a refusal raises the same error under both transports.
+/// A desk refusal's text, raised alike under both transports.
 ///
-/// Not `crate::shell::runtime::Error`, whose `span` resolves against an engine-side
-/// `SourceDb`; the location is stamped at the enquiring builtin instead.
+/// The enquiring builtin supplies the engine-side provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnquiryError {
     pub message: String,
-    pub status: NonZeroU8,
 }
 
 impl EnquiryError {
@@ -363,14 +360,13 @@ impl EnquiryError {
     pub fn no_desk() -> Self {
         Self {
             message: crate::shell::runtime::NO_DESK.to_string(),
-            status: crate::shell::runtime::NO_DESK_STATUS,
         }
     }
 }
 
 impl From<EnquiryError> for Error {
     fn from(refusal: EnquiryError) -> Self {
-        Self::raised(refusal.message, refusal.status)
+        Self::raised(refusal.message)
     }
 }
 
@@ -455,7 +451,7 @@ mod ending_wire_round_trip_tests {
     //! encodes, a front-end decodes back byte-for-byte.
 
     use super::*;
-    use crate::shell::runtime::Status;
+    use crate::fact::Reason;
 
     fn nz(n: u8) -> NonZeroU8 {
         NonZeroU8::new(n).unwrap()
@@ -483,8 +479,35 @@ mod ending_wire_round_trip_tests {
     }
 
     #[test]
+    fn an_enquiry_refusal_carries_only_text_and_becomes_a_plain_raise() {
+        use crate::fact::FailureCode as _;
+
+        let refusal = EnquiryError {
+            message: "the desk refused".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&refusal).unwrap(),
+            r#"{"message":"the desk refused"}"#
+        );
+        let frame = Frame::Answer(EnquiryId(7), Err(refusal));
+        let encoded = serde_json::to_string(&frame).unwrap();
+        let decoded: Frame = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, frame);
+        let Frame::Answer(_, Err(refusal)) = decoded else {
+            panic!("the refusal must survive the wire")
+        };
+        let error = Error::from(refusal);
+        assert_eq!(error.reason, Reason::Raised("the desk refused".into()));
+        assert_eq!(error.failure_code(), NonZeroU8::MIN);
+    }
+
+    #[test]
     fn err_round_trips() {
-        let record = ErrorRecord::new("cmd", &Status::Raised(nz(7)), "boom", None);
+        let record = ErrorRecord::new(
+            Reason::Raised("boom".into()),
+            "cmd".into(),
+            crate::test_helper::site(),
+        );
         round_trips(&ran(Ending::Err(record)));
     }
 

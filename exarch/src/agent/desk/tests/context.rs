@@ -178,7 +178,7 @@ fn transcript_read_names_the_role_of_every_turn_it_answers() {
         let error = desk
             .ask(transcript_read_request(&[9]))
             .expect_err("a read must not reach past what is recorded");
-        assert_eq!(error.message, "turn 9 is not recorded: the latest is 4");
+        assert_eq!(error.describe(), "turn 9 is not recorded: the latest is 4");
 
         desk.loan
             .get()
@@ -190,7 +190,7 @@ fn transcript_read_names_the_role_of_every_turn_it_answers() {
             .ask(transcript_read_request(&[5]))
             .expect_err("the turn being written is not readable");
         assert_eq!(
-            error.message,
+            error.describe(),
             "turn 5 is being written now: it is the one turn the transcript cannot read back yet"
         );
     });
@@ -218,7 +218,11 @@ fn grep_refuses_a_bad_regex_with_the_crate_message() {
                 }),
             ))
             .expect_err("an invalid regex is not searchable");
-        assert!(error.message.ends_with(&expected), "got: {}", error.message);
+        assert!(
+            error.describe().ends_with(&expected),
+            "got: {}",
+            error.describe()
+        );
     });
 }
 
@@ -250,7 +254,7 @@ fn transcript_grep_refuses_a_field_it_does_not_read() {
             ))
             .expect_err("`turn` is not a field `grep` reads");
         assert_eq!(
-            err.message,
+            err.describe(),
             "`` exarch-transcript `grep ``: unknown field `turn`: did you mean `turns`?"
         );
         desk.ask(transcript_grep_request("answer", Some(&[1, 2])))
@@ -342,7 +346,7 @@ fn context_evict_refuses_a_note_that_is_not_one_short_line() {
                 .ask(context_evict_request(1, 1, note))
                 .expect_err("a note that is not one short line is refused");
             assert_eq!(
-                err.message,
+                err.describe(),
                 format!("`` exarch-context `evict ``: {refusal}")
             );
         }
@@ -373,7 +377,7 @@ fn context_evict_refuses_a_field_it_does_not_read() {
             ))
             .expect_err("`through` is not a field `evict` reads");
         assert_eq!(
-            err.message,
+            err.describe(),
             "`` exarch-context `evict ``: unknown field `through`: expected `from`, `to`, `note`"
         );
         desk.ask(context_evict_request(1, 2, "the parser is fixed"))

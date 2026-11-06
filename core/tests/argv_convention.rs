@@ -54,7 +54,9 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
         }
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
-            diagnostics.render().0
+            diagnostics
+                .render(&ral_core::shell::runtime::ExitHints::default())
+                .0
         ),
     }
 }
@@ -138,9 +140,9 @@ fn a_grant_refusal_outranks_the_shape_of_an_argument() {
         );
         match run_capture(&source).0 {
             Err(Break::Error(e)) => assert!(
-                e.message.contains("denied by active grant"),
+                e.describe().contains("denied by active grant"),
                 "{call}: {}",
-                e.message
+                e.describe()
             ),
             other => panic!("{call}: expected a grant refusal, got {other:?}"),
         }

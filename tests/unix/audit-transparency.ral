@@ -37,11 +37,11 @@ echo !{commands $report3}[1][argv][1]
 
 # A failing body settles into `err`, carrying the same record `try` hands a
 # handler; the audit expression itself succeeds
-let failed = audit { fail [status: 3, message: 'no index'] }
+let failed = audit { fail 'no index' }
 echo !{succeeded $failed}
 case $failed[outcome] [
     `ok:  { |_| echo 'unreachable' },
-    `err: { |e| echo "$e[status] $e[message]" },
+    `err: { |e| echo "$e[frame] !{describe $e}" },
 ]
 
 # Nested audit: the inner audit still returns its own report, but its real

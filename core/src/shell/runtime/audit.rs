@@ -12,9 +12,9 @@ mod observation;
 
 pub(crate) use fan_out::AuditStart;
 
-use super::{Value, outcome_value};
+use super::{Prov, Value, outcome_value};
 use crate::fact::{ErrorRecord, Observation};
-use crate::source::Span;
+use crate::source::CallSite;
 use serde::{Deserialize, Serialize};
 
 /// Whether per-command bytes are teed into audit observations.  `Off` lets fd
@@ -60,28 +60,60 @@ pub struct TrailScope {
 
 /// Audit collector — one per `Shell`, collecting exactly while `trail` is
 /// `Some`.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Audit {
     trail: Option<Vec<Observation>>,
     capture: CapturePolicy,
-    /// Where the command now running was dispatched from — the register every
-    /// observation resolves its site against, `None` before a run's first
-    /// dispatch.  `Shell::stamp_call_site` skips a span outside the session's
-    /// sources — the baked prelude's — so a prelude wrapper's observations
-    /// name the user's call rather than the wrapper's; `IoLoan` in `crate::shell::run` clears
-    /// the register per run and restores it on drop.  A redirect runs its own
-    /// steps under its span (`Shell::at_site`), restoring this on exit.
-    pub(crate) call_site: Option<Span>,
+    /// The innermost visible frame; written only by bracketed
+    /// [`Self::enter_site`] and [`Self::restore_site`].
+    call_site: Prov,
+}
+
+/// The register an [`Audit::enter_site`] displaced; only
+/// [`Audit::restore_site`] consumes it.
+#[must_use = "a displaced call site must be restored"]
+pub(crate) struct DisplacedSite(Prov);
+
+impl Default for Audit {
+    fn default() -> Self {
+        Self {
+            trail: None,
+            capture: CapturePolicy::default(),
+            call_site: Prov::Resolved(Box::new((
+                "session".into(),
+                CallSite {
+                    script: "<session>".into(),
+                    line: 1,
+                    col: 1,
+                },
+            ))),
+        }
+    }
 }
 
 impl Audit {
     /// An inactive collector whose register already names `call_site`: a
     /// child's, so its first observation resolves where its parent stood.
-    pub(crate) fn dispatched_from(call_site: Option<Span>) -> Self {
+    pub(crate) fn dispatched_from(call_site: Prov) -> Self {
         Self {
             call_site,
             ..Self::default()
         }
+    }
+
+    /// The innermost visible frame.
+    pub(crate) fn call_site(&self) -> &Prov {
+        &self.call_site
+    }
+
+    /// Make `site` the innermost visible frame until the returned token is
+    /// restored.
+    pub(crate) fn enter_site(&mut self, site: Prov) -> DisplacedSite {
+        DisplacedSite(std::mem::replace(&mut self.call_site, site))
+    }
+
+    pub(crate) fn restore_site(&mut self, DisplacedSite(site): DisplacedSite) {
+        self.call_site = site;
     }
 
     /// True when a scope is collecting.
@@ -217,7 +249,7 @@ mod tests {
 
     fn dummy(pattern: &str) -> Observation {
         Observation::instant(
-            None,
+            crate::test_helper::site(),
             None,
             Observed::Grep(Grep {
                 scope: String::new(),

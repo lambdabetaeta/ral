@@ -115,19 +115,21 @@ pub(super) fn spawn_stage(
         stdout,
         held,
     } = route;
-    let kind = match spec.launch {
-        StageLaunch::Direct { head, args } => StageKind::External(launch_external_stage_direct(
-            head, &args, spec.span, stdin, stdout, cx, &slot,
-        )?),
-        StageLaunch::Thread => StageKind::Thread(launch_thread_stage(
-            stage,
-            &spec,
-            stdin,
-            stdout,
-            cx,
-            slot.clone(),
-        )?),
+    let name = match &stage.item {
+        crate::ir::CompKind::Exec(exec) => exec.head.name().written(),
+        _ => "pipeline".into(),
     };
+    let span = spec.span;
+    let kind = match spec.launch {
+        StageLaunch::Direct { head, args } => {
+            launch_external_stage_direct(head, &args, span, stdin, stdout, cx, &slot)
+                .map(StageKind::External)
+        }
+        StageLaunch::Thread => {
+            launch_thread_stage(stage, stdin, stdout, cx, slot.clone()).map(StageKind::Thread)
+        }
+    }
+    .map_err(|b| b.locate(&name, span, cx.shell))?;
     Ok(StageHandle::new(kind, held, slot))
 }
 
@@ -141,42 +143,43 @@ fn launch_external_stage_direct(
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<ExternalStage> {
-    let head = cx
-        .shell
-        .at_site(span, |shell| head.admit(cx.mooring, shell))?;
-    let SpawnPlan {
-        shown,
-        admitted,
-        args,
-    } = command::vet(head, args)?;
-    let mut cmd = command::build_launch(
-        admitted,
-        &args,
-        crate::authority::sandbox::Ownership::Kept,
-        cx.shell,
-        &cx.shell.scope,
-    )?;
-    // Confinement may have taken seconds since the caller's own poll, so poll
-    // again rather than spawn into an expired wall.
-    cx.shell.poll()?;
-
-    let pumps = wire_stage(&mut cmd, stdin, stdout, cx.holds_terminal, cx.shell)?;
-
-    let (mut child, leader, jail) = command::spawn(
-        &mut cmd,
-        PgidPolicy::Join(cx.group.leader_pgid()),
-        &shown,
-        cx.shell,
-    )?;
-    let pumps = pumps.start(&mut child, &cx.shell.scope);
-    // A joining stage leads a group only behind an envelope, whose payload
-    // leads a session of its own out of the pipeline group's reach.
-    Ok(ExternalStage {
-        watch: slot.watch(child),
-        name: shown,
-        args,
-        jail,
-        pumps,
-        envelope: leader,
+    let name = head.shown.clone();
+    let mooring = cx.mooring;
+    let group = cx.group;
+    let holds_terminal = cx.holds_terminal;
+    cx.shell.at_site(name, span, |shell| {
+        let head = head.admit(mooring, shell)?;
+        let SpawnPlan {
+            shown,
+            admitted,
+            args,
+        } = command::vet(head, args)?;
+        let mut cmd = command::build_launch(
+            admitted,
+            &args,
+            crate::authority::sandbox::Ownership::Kept,
+            shell,
+            &shell.scope,
+        )?;
+        // Confinement may have outlived the caller's poll.
+        shell.poll()?;
+        let pumps = wire_stage(&mut cmd, stdin, stdout, holds_terminal, shell)?;
+        let (mut child, leader, jail) = command::spawn(
+            &mut cmd,
+            PgidPolicy::Join(group.leader_pgid()),
+            &shown,
+            shell,
+        )?;
+        let pumps = pumps.start(&mut child, &shell.scope);
+        // An envelope's payload leads its own group.
+        Ok(ExternalStage {
+            watch: slot.watch(child),
+            prov: shell.local.audit.call_site().clone(),
+            name: shown,
+            args,
+            jail,
+            pumps,
+            envelope: leader,
+        })
     })
 }

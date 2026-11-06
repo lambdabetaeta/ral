@@ -395,9 +395,9 @@ fn a_denied_program_is_refused_before_its_arguments_are_shaped() {
     let (result, events) = common::run_recorded(&mut with_detach(), source, true);
     match result {
         Err(Break::Error(e)) => assert!(
-            e.message.contains("denied by active grant"),
+            e.describe().contains("denied by active grant"),
             "{}",
-            e.message
+            e.describe()
         ),
         other => panic!("expected a grant refusal, got {other:?}"),
     }

@@ -15,7 +15,7 @@ within [dir: "$root/inner"] { cd sub; cwd-is "$root/inner/sub" }
 cwd-is "$root/outer"
 
 # The cell is restored when the body fails
-try { within [dir: "$root/inner"] { cd sub; fail [status: 3, message: 'boom'] } } { |_| echo 'failed' }
+try { within [dir: "$root/inner"] { cd sub; fail 'boom' } } { |_| echo 'failed' }
 cwd-is "$root/outer"
 
 # A child launched after the `cd` starts in the moved cell, and a redirect resolves there
@@ -36,7 +36,7 @@ cwd-is "$root/outer"
 # Entering `within [dir:]` needs no chdir authority; a `cd` inside it does
 echo $[!{grant [shell: []] { within [dir: "$root/inner"] { cwd } }} == !{resolve-path "$root/inner"}]
 try { grant [shell: []] { within [dir: "$root/inner"] { cd sub } } } { |e|
-    echo $e[message]
+    echo !{describe $e}
 }
 
 # ...and the scoped directory may be one an fs grant confines to
@@ -60,7 +60,7 @@ $chdir-fn "$root/outer"
 cwd-is "$root/outer"
 
 # The empty path names no directory, and nothing moves
-try { let empty = ''; cd $empty } { |e| echo $e[message] }
+try { let empty = ''; cd $empty } { |e| echo !{describe $e} }
 cwd-is "$root/outer"
 
 cd /

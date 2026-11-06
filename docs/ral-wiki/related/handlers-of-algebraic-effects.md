@@ -1,7 +1,7 @@
 ---
 verified_at_commit: d9abfb52
 verified_at_date: 2026-09-11
-against: [design/effects-handlers, design/syscalls-are-effects, design/pipelines]
+against: [design/effects-handlers, design/exec, design/pipelines]
 ---
 
 # Handlers of algebraic effects — the calculus ral's handlers restrict
@@ -21,7 +21,7 @@ primary.
 
 - **Operation vs interpretation is the founding move.** The theory's operations
   are syntax; the free-model monad interprets `F σ`; a handler supplies another
-  model. [[design/syscalls-are-effects|syscalls-are-effects]] is this picture
+  model. ral's one effect, [[design/exec|exec]], is this picture
   with the OS as the ambient model: performing `git` is an operation of the
   free theory, the OS its default interpretation, `within [handlers: …]` a
   user-supplied remodelling.
@@ -51,7 +51,7 @@ primary.
   Benton–Kennedy value clause, and parameter passing are all absent. The cut is
   domain-honest: re-running a session against a world already perturbed is
   incoherent, and multi-shot earns its keep for pure effects ral does not model
-  as commands ([[design/syscalls-are-effects|syscalls-are-effects]]).
+  as commands ([[design/exec|exec]]).
 - **No correctness obligation, because ral's theory is free.** The paper splits
   handler *definition* from handler *use* into two calculi so the meta-level
   can check each handler is a model — that its clauses respect the effect

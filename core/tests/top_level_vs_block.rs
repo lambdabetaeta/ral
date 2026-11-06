@@ -97,7 +97,7 @@ fn top_level_partial_effects_persist_on_error() {
         let mut shell = shell_under(caps);
         let _ = top_level(
             &mut shell,
-            "let pre_fail_x = 1\nfail [status: 1, message: x]\nlet post_fail_y = 2",
+            "let pre_fail_x = 1\nfail x\nlet post_fail_y = 2",
         );
         assert!(
             shell.scope_lookup("pre_fail_x").is_some(),

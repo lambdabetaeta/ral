@@ -1,7 +1,7 @@
 item 0.2
 item 0.01
 0.2 0.01
-par failed status=3
+par failed reason= `raised boom
 hi 42
 fast
 ended

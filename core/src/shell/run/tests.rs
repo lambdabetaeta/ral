@@ -77,12 +77,7 @@ fn a_last_run_drops_its_loose_workers_endings() {
         Break::stopped(CancelCause::Cancelled, None)
     });
     let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
-    for body in [
-        "fail [status: 7, message: boom]",
-        "core-panic-now",
-        "exit 7",
-        "foreign-stop",
-    ] {
+    for body in ["fail 'boom'", "core-panic-now", "exit 7", "foreign-stop"] {
         let report = shell.run(Run {
             last: true,
             ..Run::captured(
@@ -244,7 +239,7 @@ fn a_hook_fault_names_its_hook() {
         let End::Err(error) = run_block_hook(&mut shell, name, "{ cd '' }", deny()) else {
             panic!("`cd ''` must raise");
         };
-        assert!(error.message.starts_with(label), "{}", error.message);
+        assert_eq!(error.context.as_deref(), Some(label.trim_end_matches(": ")));
     }
 }
 
@@ -640,13 +635,13 @@ fn cancelling_a_session_by_handle_reaches_its_aside() {
 fn a_session_is_deaf_to_the_ambient_causes() {
     let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
     let mut runtime = crate::test_helper::core_runtime();
-    install_act(&mut runtime, "raise", |_, _| {
+    install_act(&mut runtime, "raise-ambient-causes", |_, _| {
         crate::process::request_interrupt();
         crate::process::request_root_cancel(crate::process::CancelCause::Aborted);
     });
     let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let report = shell.run(Run::captured(
-        "raise\nlet rpv = 42\nreturn $rpv",
+        "raise-ambient-causes\nlet rpv = 42\nreturn $rpv",
         test_origin(),
     ));
     crate::process::cancel::clear_root_request();
@@ -808,6 +803,7 @@ fn panicking_run_reports_panic_and_rolls_back() {
             captured: None,
             compact: None,
             trail,
+            ..
         } => {
             assert_eq!(text, "run-door test: deliberate mid-eval panic");
             assert_eq!(trail, []);
@@ -1008,6 +1004,235 @@ fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
     );
 }
 
+fn caught_record(shell: &mut Shell, source: &str) -> crate::fact::ErrorRecord {
+    use crate::data::datum::Datum as _;
+    let End::Ok(value) = shell.run(Run::captured(source, test_origin())).expect_ran() else {
+        panic!("the handler must return the error record: {source}");
+    };
+    crate::fact::ErrorRecord::decode(&crate::data::FOValue::try_from(&value).expect("data"))
+        .expect("error record")
+}
+
+#[test]
+fn an_invisible_prelude_failure_names_and_sites_the_users_call() {
+    let mut shell = crate::test_helper::fresh_shell();
+    let record = caught_record(&mut shell, "try { last [] } { |e| return $e }");
+    assert_eq!(record.frame(), "last");
+    assert_eq!(record.site().script.as_ref(), "<test>");
+    assert_eq!((record.site().line, record.site().col), (1, 7));
+}
+
+#[test]
+fn a_private_call_is_as_visible_as_any_other_source_frame() {
+    let mut shell = crate::test_helper::fresh_shell();
+    let record = caught_record(
+        &mut shell,
+        "let _last = $last\ntry { _last [] } { |e| return $e }",
+    );
+    assert_eq!(record.frame(), "_last");
+    assert_eq!((record.site().line, record.site().col), (2, 7));
+}
+
+#[test]
+fn index_refusals_name_the_operation_inside_and_outside_a_function() {
+    for (source, line, col) in [
+        (
+            "let xs = [1]\ntry { let _ = return $xs[3]; fail 'unexpected success' } { |e| return $e }",
+            2,
+            22,
+        ),
+        (
+            "let f = { |xs| return $xs[3] }\ntry { let _ = f [1]; fail 'unexpected success' } { |e| return $e }",
+            1,
+            23,
+        ),
+    ] {
+        let mut shell = crate::test_helper::core_shell();
+        let record = caught_record(&mut shell, source);
+        assert_eq!(record.frame(), "index", "{source}");
+        assert_eq!(
+            (record.site().line, record.site().col),
+            (line, col),
+            "{source}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_direct_external_pipeline_stage_keeps_its_head_and_site() {
+    let mut shell = crate::test_helper::core_shell();
+    let record = caught_record(
+        &mut shell,
+        "try { let _ = !{ ^sh -c 'exit 7' | ^cat }; fail 'unexpected success' } { |e| return $e }",
+    );
+    assert_eq!(
+        record.reason(),
+        &crate::fact::Reason::process("sh", crate::fact::Failure::Exited(7))
+    );
+    assert_eq!(record.frame(), "sh");
+    assert_eq!((record.site().line, record.site().col), (1, 18));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_invisible_external_pipeline_stage_keeps_its_visible_caller() {
+    let mut shell = crate::test_helper::core_shell();
+    crate::shell::evaluator::run_source("let hidden-pipe = { ^sh -c 'exit 7' | ^cat }", &mut shell)
+        .expect("invisible library");
+    let record = caught_record(
+        &mut shell,
+        "try { let _ = hidden-pipe; fail 'unexpected success' } { |e| return $e }",
+    );
+    assert_eq!(
+        record.reason(),
+        &crate::fact::Reason::process("sh", crate::fact::Failure::Exited(7))
+    );
+    assert_eq!(record.frame(), "hidden-pipe");
+    assert_eq!((record.site().line, record.site().col), (1, 15));
+}
+
+#[test]
+fn named_invisible_blocks_keep_their_call_frames_with_and_without_arguments() {
+    for (source, name, line) in [
+        ("try { hidden-zero } { |e| return $e }", "hidden-zero", 1),
+        ("try { hidden-arg 0 } { |e| return $e }", "hidden-arg", 1),
+        (
+            "let local-hidden = $hidden-zero\ntry { local-hidden } { |e| return $e }",
+            "local-hidden",
+            2,
+        ),
+        (
+            "let local-hidden = $hidden-arg\ntry { local-hidden 0 } { |e| return $e }",
+            "local-hidden",
+            2,
+        ),
+    ] {
+        let mut shell = crate::test_helper::fresh_shell();
+        crate::shell::evaluator::run_source(
+            "let hidden-zero = { last [] }\nlet hidden-arg = { |x| last [] }",
+            &mut shell,
+        )
+        .expect("invisible library");
+        let before = shell.local.audit.call_site().clone();
+        let record = caught_record(&mut shell, source);
+        assert_eq!(record.frame(), name, "{source}");
+        assert_eq!(record.site().script.as_ref(), "<test>", "{source}");
+        assert_eq!(
+            (record.site().line, record.site().col),
+            (line, 7),
+            "{source}"
+        );
+        assert_eq!(shell.local.audit.call_site(), &before, "{source}");
+    }
+}
+
+#[test]
+fn a_visible_fail_names_and_sites_itself_even_in_a_private_function() {
+    let mut shell = crate::test_helper::core_shell();
+    let record = caught_record(
+        &mut shell,
+        "let _boom = { |x| fail 'nope' }\ntry { _boom 1 } { |e| return $e }",
+    );
+    assert_eq!(record.frame(), "fail");
+    assert_eq!((record.site().line, record.site().col), (1, 19));
+}
+
+#[test]
+fn completed_sibling_calls_do_not_leak_their_provenance() {
+    let mut shell = crate::test_helper::fresh_shell();
+    let before = shell.local.audit.call_site().clone();
+    let record = caught_record(
+        &mut shell,
+        "let f = { |x| return $x }\ntry { f 1; last [] } { |e| return $e }",
+    );
+    assert_eq!(record.frame(), "last");
+    assert_eq!((record.site().line, record.site().col), (2, 12));
+    assert_eq!(shell.local.audit.call_site(), &before);
+}
+
+#[test]
+fn invisible_code_recovers_its_caller_after_a_visible_nested_call() {
+    let mut shell = crate::test_helper::fresh_shell();
+    shell
+        .run(Run::captured(
+            "let visible = { echo nested; return () }",
+            test_origin(),
+        ))
+        .expect_ran();
+    crate::shell::evaluator::run_source("let hidden = { visible; last [] }", &mut shell)
+        .expect("compile invisible library code");
+    let record = caught_record(&mut shell, "try { hidden } { |e| return $e }");
+    assert_eq!(record.frame(), "hidden");
+    assert_eq!((record.site().line, record.site().col), (1, 7));
+}
+
+#[test]
+fn visible_tail_calls_keep_a_bounded_stack_and_restore_the_register() {
+    let mut shell = crate::test_helper::core_shell();
+    shell.set_stack_limit(8);
+    let before = shell.local.audit.call_site().clone();
+    let ending = shell
+        .run(Run::captured(
+            "let loop = { |n| if $[$n == 0] { return 0 } else { loop $[$n - 1] } }\nloop 1000",
+            test_origin(),
+        ))
+        .expect_ran();
+    assert!(matches!(ending, End::Ok(Value::Int(0))), "{ending:?}");
+    assert_eq!(shell.local.audit.call_site(), &before);
+}
+
+#[test]
+fn visible_non_tail_recursion_uses_the_computational_stack_budget() {
+    let mut shell = crate::test_helper::core_shell();
+    shell.set_stack_limit(30_000);
+    let before = shell.local.audit.call_site().clone();
+    let ending = shell
+        .run(Run::captured(
+            "let sum = { |n| if $[$n == 0] { return 0 } else { let prev = sum $[$n - 1]; return $[$n + $prev] } }\nsum 10000",
+            test_origin(),
+        ))
+        .expect_ran();
+    assert!(
+        matches!(ending, End::Ok(Value::Int(50_005_000))),
+        "{ending:?}"
+    );
+    assert_eq!(shell.local.audit.call_site(), &before);
+}
+
+#[test]
+fn an_unclaimed_hook_failure_uses_its_origin_base() {
+    use crate::shell::runtime::{DefaultPolicy, HookName, HookSig};
+    let mut runtime = crate::test_helper::core_runtime();
+    install_body(&mut runtime, "hook-refusal", |_, _| {
+        Err(Error::new("hook refused").into())
+    });
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
+    let name = HookName::session("origin-probe");
+    let value = shell
+        .scope_lookup("hook-refusal")
+        .expect("native binding")
+        .clone();
+    shell
+        .register_hook(name.clone(), value, HookSig::Block, DefaultPolicy::denied())
+        .expect("hook registration");
+    let origin = SourceOrigin::named("<hook-origin>");
+    let run = Run {
+        program: Program::Hook {
+            name: name.clone(),
+            args: vec![],
+        },
+        ..Run::captured("", origin)
+    };
+    let End::Err(error) = shell.run(run).expect_ran() else {
+        panic!("hook refusal")
+    };
+    let record = error.record(&shell);
+    assert_eq!(record.frame(), name.fault_label());
+    assert_eq!(record.site().script.as_ref(), "<hook-origin>");
+    assert_eq!((record.site().line, record.site().col), (1, 1));
+}
+
 /// A lambda compiled by one run and called by the next draws its caret into
 /// the text that defined it: the registry only grows, so a run boundary
 /// costs a value nothing of its origin.
@@ -1016,7 +1241,7 @@ fn a_lambda_faults_against_the_run_that_compiled_it() {
     let mut shell = crate::test_helper::core_shell();
     assert!(matches!(
         shell.run(Run::captured(
-            "let boom = { |x| fail [status: 1, message: nope] }",
+            "let boom = { |x| fail 'nope' }",
             test_origin()
         )),
         RunReport::Ran {
@@ -1026,7 +1251,7 @@ fn a_lambda_faults_against_the_run_that_compiled_it() {
     ));
     let rendered = crate::io::ansi::strip(&rendered_fault(&mut shell, "boom 1"));
     assert!(
-        rendered.contains("message: nope] }"),
+        rendered.contains("fail 'nope' }") && rendered.contains("<test>:1:18"),
         "the caret must be drawn into the defining run's text:\n{rendered}"
     );
 }
@@ -1266,7 +1491,7 @@ fn a_fallback_passes_a_stop() {
     let (ending, out) = ran(
         unstruck_runtime(),
         Run::captured(
-            "!{ stop-unstruck\nfail [status: 1, message: x] } ? echo fallback",
+            "!{ stop-unstruck\nfail 'x' } ? echo fallback",
             test_origin(),
         ),
     );
@@ -1395,7 +1620,7 @@ fn a_signalled_child_under_a_shield_is_a_failure() {
 fn the_scope_comes_back_after_a_cleanup() {
     for src in [
         "guard { return 1 } { echo in }\nstrike\necho after",
-        "try { guard { fail [status: 1, message: x] } { echo in } } { |e|\nstrike\necho after }",
+        "try { guard { fail 'x' } { echo in } } { |e|\nstrike\necho after }",
     ] {
         let (runtime, _) = marking_runtime();
         let (ending, out) = ran(runtime, Run::captured(src, test_origin()));

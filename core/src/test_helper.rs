@@ -26,6 +26,15 @@ pub fn eventually<T>(within: Duration, mut probe: impl FnMut() -> Option<T>) -> 
     }
 }
 
+/// A fixed call site for fixtures that need one.
+pub fn site() -> crate::source::CallSite {
+    crate::source::CallSite {
+        script: "test.ral".into(),
+        line: 1,
+        col: 1,
+    }
+}
+
 /// Core's Σ alone, no host dressing: what a checker with no live shell types
 /// against.
 pub fn core_schemes() -> crate::typecheck::SessionSchemes {

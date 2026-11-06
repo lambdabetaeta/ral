@@ -1,8 +1,7 @@
 //! The boot builtin: `_ral-boot`, bound as the `Session "boot"` hook, is a
 //! front-end's first dispatch. It does in a run what must run — startup files
-//! evaluate ral — so its `Ending` carries the status: a `--capabilities`
-//! failure is `err` status 2, an rc's `exit N` is `exited N`. It
-//! answers what the rc settled for the host.
+//! evaluate ral. Capability refusals are data whose host exit is 2;
+//! an rc failure remains an error ending.
 
 use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
@@ -12,8 +11,7 @@ use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Ran, Report};
 use ral_core::record;
 use ral_core::shell::runtime::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, Status,
-    sig,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, sig,
 };
 use ral_core::ty::{Row, Scheme, Ty, Typed as _};
 use ral_core::typecheck::Unifier;
@@ -21,7 +19,6 @@ use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
 use ral_core::{Shell, Value};
 use ral_core::{err, errln};
 use std::borrow::Cow;
-use std::num::NonZeroU8;
 use std::path::PathBuf;
 
 use crate::repl::{RcSettings, install_default_prompt, source_rc_file};
@@ -40,14 +37,13 @@ static BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
 )];
 pub(crate) static BUILTINS: &[BuiltinEntry] = &BUILTINS_ARR;
 
-/// `∀ρ. {ρ} → F settings`: the row stays open, since the builtin checks its own
-/// fields.
+/// The request row stays open; the answer distinguishes host refusals.
 fn scheme(u: &mut Unifier) -> Scheme {
     let row = u.fresh_row_var();
     mk_scheme(
         &[],
         &[(row, false)],
-        thunk(fun(Ty::Record(Row::Var(row)), pure(RcSettings::ty()))),
+        thunk(fun(Ty::Record(Row::Var(row)), pure(BootAnswer::ty()))),
     )
 }
 
@@ -68,6 +64,16 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())
 }
+
+enum BootAnswer {
+    Settled(RcSettings),
+    CapabilitiesRefused(String),
+}
+
+ral_core::variant!(typed BootAnswer {
+    Settled(RcSettings): "settled",
+    CapabilitiesRefused(String): "capabilities-refused",
+});
 
 /// What a front-end asks of its boot. Batch sources no startup files.
 pub(crate) struct Boot {
@@ -159,27 +165,29 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
         shell.set_stack_limit(n);
     }
     let paths: Vec<PathBuf> = boot.capabilities.iter().map(Into::into).collect();
-    ral_core::shell::load::profile::apply_session_profiles(mooring, shell, &paths).map_err(
-        |e| match e {
-            Break::Error(mut e) => {
-                e.status = Status::Raised(const { NonZeroU8::new(2).unwrap() });
-                Break::Error(e.context("--capabilities"))
-            }
-            escape @ Break::Escape(_) => escape,
-        },
-    )?;
+    match ral_core::shell::load::profile::apply_session_profiles(mooring, shell, &paths) {
+        Ok(()) => {}
+        Err(Break::Error(e)) => {
+            let diagnostic =
+                e.context("--capabilities")
+                    .render(shell.sources(), None, shell.exit_hints());
+            return Ok(Value::from(
+                BootAnswer::CapabilitiesRefused(diagnostic).encode(),
+            ));
+        }
+        Err(escape @ Break::Escape(_)) => return Err(escape),
+    }
     if shell.is_interactive() {
         install_default_prompt(shell);
     }
-    Ok(Value::from(settings.encode()))
+    Ok(Value::from(BootAnswer::Settled(settings).encode()))
 }
 
 fn refuse(message: &str) -> Break {
     sig(format!("{NAME}: {message}"))
 }
 
-/// What the boot dispatch came to: the rc's settings, or the status the
-/// session ends with, anything the failure rendered already printed.
+/// Decode the boot answer; only the host chooses capability refusals' exit 2.
 pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, u8> {
     let report = match report {
         Ok(report) => report,
@@ -193,10 +201,17 @@ pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, u8> 
         Report::Ran(Ran {
             ending: Ending::Ok(value),
             ..
-        }) => RcSettings::decode(&value).map_err(|e| {
-            errln!("ral: {NAME} answered settings this front-end cannot read: {e}");
-            1
-        }),
+        }) => match BootAnswer::decode(&value) {
+            Ok(BootAnswer::Settled(settings)) => Ok(settings),
+            Ok(BootAnswer::CapabilitiesRefused(diagnostic)) => {
+                err!("{diagnostic}");
+                Err(2)
+            }
+            Err(e) => {
+                errln!("ral: {NAME} answered a boot result this front-end cannot read: {e}");
+                Err(1)
+            }
+        },
         Report::Ran(Ran {
             ending: Ending::Exited(_),
             ..
@@ -206,6 +221,88 @@ pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, u8> 
         | Report::Ran(Ran { rendered, .. }) => {
             err!("{rendered}");
             Err(code)
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+
+    fn report(answer: BootAnswer) -> Report {
+        Report::Ran(Ran {
+            ending: Ending::Ok(answer.encode()),
+            rendered: String::new(),
+            single_command: false,
+            captured: None,
+            trail: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn settle_decodes_the_boot_sum_and_chooses_two_only_for_capability_refusals() {
+        assert!(settle(Ok(report(BootAnswer::Settled(RcSettings::default())))).is_ok());
+        assert!(matches!(
+            settle(Ok(report(BootAnswer::CapabilitiesRefused(
+                "refused\n".into()
+            )))),
+            Err(2)
+        ));
+        let report = Report::Ran(Ran {
+            ending: Ending::Err(ral_core::fact::ErrorRecord::new(
+                ral_core::fact::Reason::Raised("rc failed".into()),
+                "fail".into(),
+                ral_core::source::CallSite {
+                    script: "rc.ral".into(),
+                    line: 1,
+                    col: 1,
+                },
+            )),
+            rendered: "rc failed\n".into(),
+            single_command: false,
+            captured: None,
+            trail: Vec::new(),
+        });
+        assert!(matches!(settle(Ok(report)), Err(1)));
+    }
+
+    #[test]
+    fn boot_renders_a_capability_profiles_compile_rejection_engine_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("broken.ral");
+        std::fs::write(&profile, "let [").unwrap();
+        let mut runtime = ral_core::test_helper::core_runtime();
+        runtime.install_builtins(BUILTINS);
+        let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
+        register(&mut shell).unwrap();
+        let request = Boot {
+            no_rc: true,
+            recursion_limit: None,
+            capabilities: vec![utf8(&profile).unwrap().to_owned()],
+        };
+        let answer = boot(
+            &[Value::from(request.encode())],
+            &Mooring::adrift(),
+            &mut shell,
+        )
+        .unwrap();
+        let BootAnswer::CapabilitiesRefused(diagnostic) =
+            BootAnswer::decode(&FOValue::try_from(&answer).unwrap()).unwrap()
+        else {
+            panic!("a rejected capability profile is a boot answer, not an rc failure")
+        };
+        assert!(diagnostic.contains("--capabilities"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("broken.ral:1:5") && diagnostic.contains("[L0002]"),
+            "{diagnostic}"
+        );
+        for detail in [
+            "unterminated `[…]`",
+            "`[` opened here",
+            "expected closing `]` before end of input",
+        ] {
+            assert!(diagnostic.contains(detail), "{diagnostic}");
         }
     }
 }

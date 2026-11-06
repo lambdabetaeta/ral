@@ -13,7 +13,7 @@
 //! two kinds of row, and the argv half's: `BuiltinBody` has no bodiless
 //! variant, so no entry is expressible without a live body.
 
-use super::flow::{Settled, name_failure};
+use super::flow::Settled;
 use super::value::Value;
 use super::{Mooring, Shell};
 use crate::ty::Site;
@@ -125,12 +125,13 @@ impl BuiltinEntry {
     /// builtin application is not an observation.
     pub(crate) fn framed(
         &self,
+        span: Option<crate::source::Span>,
         shell: &mut Shell,
         f: impl FnOnce(&mut Shell, &Frame) -> Settled<Value>,
     ) -> Settled<Value> {
-        let mut result = f(shell, &Frame(()));
-        name_failure(&self.decl.name, &mut result);
-        result
+        shell.at_site(self.decl.name.clone(), span, |shell| {
+            f(shell, &Frame(())).map_err(|b| b.locate(&self.decl.name, span, shell))
+        })
     }
 
     /// Invoke the body — reachable only with a proof that a [`Self::framed`]
@@ -293,7 +294,7 @@ mod tests {
     /// (`test_access::has_result_only_var`).
     #[test]
     fn a_result_only_variable_is_a_boundary_or_divergence() {
-        const DIVERGENT: [&str; 3] = ["fail", "exit", "quit"];
+        const DIVERGENT: [&str; 4] = ["fail", "raise", "exit", "quit"];
         let sets: [&[BuiltinEntry]; 5] = [
             CORE_BUILTINS,
             BOUNDARY_BUILTINS,

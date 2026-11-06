@@ -49,7 +49,7 @@ let task-set-notes  = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], t
 ## corrupt the round trip.  `where` names the tag that was asked for.
 let check-tag = { |where g|
   if !{re-match #'[,\]]'# $g} {
-    fail [status: 1, message: "exarch-tasks `$where: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+    fail "exarch-tasks `$where: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"
   } else { () }
 }
 
@@ -106,15 +106,15 @@ let tasks-decode = { |v|
       try {
         case $slot [
           `card: { |marks|
-            let describe = { |m| case $m [
+            let describe-mark = { |m| case $m [
               `text:    { |_|          [kind: "text",    rows: []] },
               `measure: { |_|          [kind: "measure", rows: []] },
               `fields:  { |[rows: rs]| [kind: "fields",  rows: $rs] },
             ] }
-            let [d0, d1, d2] = map $describe $marks
-            if $[$d0[kind] == "text"]    { () } else { fail [status: 1, message: "not task-shaped"] }
-            if $[$d1[kind] == "measure"] { () } else { fail [status: 1, message: "not task-shaped"] }
-            if $[$d2[kind] == "fields"]  { () } else { fail [status: 1, message: "not task-shaped"] }
+            let [d0, d1, d2] = map $describe-mark $marks
+            if $[$d0[kind] == "text"]    { () } else { fail "not task-shaped" }
+            if $[$d1[kind] == "measure"] { () } else { fail "not task-shaped" }
+            if $[$d2[kind] == "fields"]  { () } else { fail "not task-shaped" }
             map { |r|
               let [label: lbl, value: valv] = $r
               case $valv [
@@ -129,7 +129,7 @@ let tasks-decode = { |v|
                     elsif $[$word == "doing"]   { `doing }
                     elsif $[$word == "blocked"] { `blocked }
                     elsif $[$word == "open"]    { `open }
-                    else  { fail [status: 1, message: "not task-shaped"] }
+                    else  { fail "not task-shaped" }
                   let tags =
                     if $[$tagtext == ""] { [] }
                     else { re-split "," !{slice $tagtext 2 $[!{length $tagtext} - 3]} }
@@ -142,7 +142,7 @@ let tasks-decode = { |v|
           },
         ]
       } { |_|
-        fail [status: 1, message: "exarch-tasks: the card under the 'tasks' pin is not task-shaped — expected `text [spans: [heading]] then `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
+        fail "exarch-tasks: the card under the 'tasks' pin is not task-shaped — expected `text [spans: [heading]] then `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"
       }
     },
   ]

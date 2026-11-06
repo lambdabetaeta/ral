@@ -24,7 +24,7 @@ superseded_by: decisions/260606_alias-head-defines-its-modes
 # Handlers and aliases preserve a head's pipe signature
 
 A handler reinterprets an operation; it does not retype it. The
-[[design/syscalls-are-effects|operation/interpretation separation]] puts the
+[[design/exec|operation/interpretation separation]] puts the
 calling convention on the operation, so the OS reading and any `within`/`alias`
 reading must agree on the same signature — exactly as a handler clause in the
 algebraic-effects literature must match its operation's signature. **A handler
@@ -198,6 +198,6 @@ See also
 [[decisions/260603_session-scheme-continuity|session-scheme-continuity]],
 [[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]],
 [[design/effects-handlers|effects-handlers]],
-[[design/syscalls-are-effects|syscalls-are-effects]],
+[[design/exec|exec]],
 [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]],
 [[internals/handler-dispatch|handler-dispatch]].

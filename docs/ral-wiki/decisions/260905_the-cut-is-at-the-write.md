@@ -101,7 +101,7 @@ the writer's own next write.
   clause because it follows from it.
 - A write is the one operation that touches the edge, so it is the one place
   the reader's absence is a fact about the stage:
-  [[design/syscalls-are-effects|write(edge) is an effect operation]], and "the
+  [[design/exec|write(edge) is an effect operation]], and "the
   reader is gone" is its interpretation there. For a ral-written stage the
   cut is exact; for a process it lands within the kill's few-microsecond
   latency after the first dead write — the same race 260820 accepted,
@@ -121,7 +121,7 @@ verdict it produced leaked the producer's own signal disposition
 ral keeps SIGPIPE's cut point and discards its verdict.
 
 See also [[design/pipelines|pipelines]],
-[[design/syscalls-are-effects|syscalls-are-effects]],
+[[design/exec|exec]],
 [[design/failure|failure]],
 [[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]],
 [[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]],

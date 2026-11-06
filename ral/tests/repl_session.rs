@@ -514,7 +514,7 @@ fn a_repl_announces_an_unclaimed_worker_once() {
     };
     prompt(&mut session, 1);
     session
-        .send_line("let h = spawn \"f\" { fail [status: 1, message: boom] }")
+        .send_line("let h = spawn \"f\" { fail boom }")
         .unwrap();
     let mut prompts = 1;
     loop {

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d56977ff
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-03
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
@@ -31,7 +31,9 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   from a lambda computation awaiting its argument.
 - `eval_rules` has one arm per `CompKind`; `step_return` and `step_halt`
   have one per `Frame`. Rules return `Settled<Focus>`; raising points use
-  `stamp`, and `step` folds failure into `Halt`.
+  visibility-checked `Break::locate(name, span, shell)`; `step` folds failure
+  into `Halt`. The operation-name table excludes `Exec`/`App`: dispatch and
+  admission claim those failures at their own innermost frame.
 - `App` pushes one `Frame::Arg` per argument, right to left, then evaluates
   the head. Only `Lambda` consumes `Arg`, binding its one name and entering
   the body. Returned-thunk splits follow the [[invariants/ir-pure-cbpv|IR
@@ -49,17 +51,23 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   to its handler by the same push-then-force rule.
 - `Capture` swaps stdout for a buffer. Success restores the sink and returns
   exact `Bytes`; overflow refuses a prefix. A halt restores the sink and
-  drops the buffer.
+  drops the buffer, adding its actual byte count to `Error.unwound.discarded`
+  saturatingly on errors. Nested counts render as one note.
 - `Rec` unfolds the selected member of a shared `GroupNode`. Every sibling
   closes over one environment restricted to the group's occurrence set;
   recursive references re-enter through force without rewriting bodies.
-- Every frame is pushed through a `Slot` that `reserve`/`reserve_n` checked
+- Every computational frame is pushed through a `Slot` that `reserve`/`reserve_n` checked
   against `session.stack_limit` before any effect. `push_args` reserves all n
   `Arg` frames at once. Consuming `Arg` enters the body in tail position;
   no consumed call frame remains.
 - `Frame::abandon` supplies undo to the rules and panic walk. Only `Seq`
-  and a written `let` add the abandoned-steps hint; compiler-written binds
-  do not add it merely for abandoning an operand or split call.
+  and a written `let` set the abandoned-tail fact; compiler-written binds
+  do not set it merely for abandoning an operand or split call.
+- `Frame::CallSite` restores a visible call's register on return, halt or
+  panic. Adjacent tail-call restorations coalesce, and these provenance-only
+  frames do not count toward the computational stack cap. Synchronous
+  operations use `at_site`; delayed eliminations locate their own refusals.
+  See [[decisions/261105_the-error-record|the error record]].
 - Shell rules dispatch `Exec`, launch and join a `PipeNode` for `Pipeline`,
   and birth workers for `Spawn`. `Frame::Gather` owns a `ScopeOwner` and
   restores its displaced cradle before the shared brood-exit machinery

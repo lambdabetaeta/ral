@@ -256,3 +256,32 @@ fn a_denied_search_says_the_same_whether_or_not_the_local_name_exists() {
     assert_eq!(present.to_string(), absent.to_string());
     assert!(absent.to_string().contains(&shown(&local)), "{absent}");
 }
+
+#[test]
+fn a_module_raising_use_prefixed_text_still_gets_loader_context_once() {
+    use ral_core::fact::Reason;
+    use ral_core::shell::runtime::Break;
+
+    let (_tmp, root) = scratch();
+    let inner = root.join("inner.ral");
+    let outer = root.join("outer.ral");
+    std::fs::write(&inner, "fail 'use: user text'").unwrap();
+    std::fs::write(
+        &outer,
+        format!("use {}", quote_word(inner.to_str().unwrap())),
+    )
+    .unwrap();
+    let mut shell = fresh_shell();
+    for module in [&inner, &outer] {
+        let source = format!("use {}", quote_word(module.to_str().unwrap()));
+        let Break::Error(error) = top_level(&mut shell, &source).expect_err("module fails") else {
+            panic!("expected a module error");
+        };
+        assert_eq!(error.context.as_deref(), Some("use"));
+        assert_eq!(error.reason, Reason::Raised("use: user text".into()));
+        let record = error.record(&shell);
+        assert_eq!(record.reason(), &error.reason);
+        assert_eq!(record.frame(), "fail");
+        assert_eq!(record.site().script.as_ref(), shown(&inner));
+    }
+}

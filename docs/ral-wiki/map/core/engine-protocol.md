@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-06
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -109,10 +109,10 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `SessionEvent` — engine→front-end with no dispatch to ride: `Attached` /
   `Refused(String)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
   (a worker's batch, and a watched worker's lines).
-- `EnquiryError` — message plus `u8` status, the wire shape of a refused enquiry;
+- `EnquiryError` — message only, the wire shape of a refused enquiry;
   `no_desk()` is the fixed wording for a host with nothing to answer, and
   `From<EnquiryError> for Error` the one way a refusal becomes the error
-  both carriers' desks raise.
+  both carriers' desks raise as plain `Reason::Raised`.
 - `Control` — `Strike(DispatchId, CancelCause)`, `Terminate`, `Abort` (a
   `Terminate` whose cause is `Aborted`); applied by `Scopes::apply` under
   both carriers. Even a terminal dispatch-local cause never ends the engine.
@@ -127,10 +127,14 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   its first-order encoding, and exarch reads its `reason()` for the
   command-exit tip. `Report::Ran(Ran)` holds the ending with its rendering,
   captured streams and trail.
-- Every failure status on the wire is `NonZeroU8`: `Static`/`Faulted`'s and
-  the record's own. Serde refuses a 0, so no peer reports a successful failure.
-  `Report::code() -> u8` reads this status for `Static`/`Faulted` and delegates
-  to the ending for `Ran`. Hosts exit through `std::process::ExitCode::from(u8)`.
+- The error record is exactly `[reason, frame, site]`, with a total site and
+  no stored status or derived message. `Report::code() -> u8` reads the
+  `NonZeroU8` host status for `Static`/`Faulted` and delegates to the ending
+  for `Ran`, whose errors project through the one `Reason` code table.
+  Desk refusals become plain raised errors. Hosts exit through
+  `std::process::ExitCode::from(u8)`. The versioned wire carries the new
+  record unchanged, without backwards compatibility
+  ([[decisions/261105_the-error-record|the error record]]).
 - Serde externally tags the ending in kebab-case: `{"exited":3}`,
   `{"stopped":"timed-out"}`, `{"panic":"…"}`. `Ok` carries an `FOValue`
   (`{"ok":"unit"}` for Unit), and `Err` carries the record. This is not the

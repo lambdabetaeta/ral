@@ -2,13 +2,9 @@
 //! `exit`, `surface`, `warn`, and `ask`.
 
 use crate::data::{FOValue, datum::Datum};
-use crate::fact::{FailureCode as _, Reason};
-use crate::process::{CommandFailure, Signal, SpawnFailure, WorkerStop};
-use crate::shell::runtime::{
-    Break, CallSite, Error, Escape, Map, Mooring, Settled, Shell, Status, Value, sig,
-};
+use crate::fact::{ErrorRecord, Failure};
+use crate::shell::runtime::{Break, Error, Escape, Mooring, Settled, Shell, Value, sig};
 use crate::site::{Silent, site};
-use std::num::NonZeroU8;
 
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 /// `ESC c` (RIS): a terminal reset that leaves stty modes untouched.
@@ -32,124 +28,47 @@ fn exit_status(n: i64) -> Result<u8, Break> {
     })
 }
 
-/// Keep zero's advice; the checker also refuses a literal zero.
-fn fail_status_code(status: i64) -> Result<NonZeroU8, Break> {
-    if status == 0 {
-        return Err(sig(
-            "fail requires a nonzero status (use `return` for clean exit)",
-        ));
-    }
-    u8::try_from(status)
-        .ok()
-        .and_then(NonZeroU8::new)
-        .ok_or_else(|| {
-            sig(format!(
-                "fail: status {status} is outside 1..=255: an exit status is one byte"
-            ))
-        })
+fn error_record(args: &[Value], cmd: &str) -> Result<ErrorRecord, Break> {
+    let value = args
+        .first()
+        .ok_or_else(|| sig(format!("{cmd}: expected an error record")))?;
+    let data = FOValue::try_from(value).map_err(|_| sig(format!("{cmd}: expected plain data")))?;
+    ErrorRecord::decode(&data).map_err(|why| sig(format!("{cmd}: {why}")))
 }
 
-/// A record field decoded as `T`; `None` when absent.
-fn optional<T: Datum>(m: &Map, key: &str) -> Result<Option<T>, Break> {
-    m.get(key)
-        .map(|v| {
-            FOValue::try_from(&*v)
-                .map_err(|_| "not plain data".to_string())
-                .and_then(|fo| T::decode(&fo))
-                .map_err(|why| sig(format!("fail: `{key}`: {why}")))
-        })
-        .transpose()
-}
-
-/// The failure a record's `reason` names, at the record's `status`.
-fn projected(reason: Reason, status: NonZeroU8) -> Result<Status, Break> {
-    Ok(match reason {
-        Reason::Exited(0) => {
+fn reraise(args: &[Value]) -> Result<Error, Break> {
+    let record = error_record(args, "raise")?;
+    match record.reason().failure() {
+        Some(Failure::Exited(0)) => {
             return Err(sig(
-                "fail: `exited 0` is success, not an external failure; use `return`, or drop reason",
+                "raise: `exited 0` is success, not a failure; use `return`",
             ));
         }
-        Reason::Exited(n) => Status::Process(CommandFailure::ExitCode(n)),
-        Reason::Signaled(n) if (1..=127).contains(&n) => {
-            Status::Process(CommandFailure::Signal(Signal::new(n)))
-        }
-        Reason::Signaled(n) => {
+        Some(Failure::Signaled(n)) if !(1..=127).contains(n) => {
             return Err(sig(format!(
-                "fail: `signaled {n}` names no signal; signals are 1 to 127"
+                "raise: `signaled {n}` names no signal; signals are 1 to 127"
             )));
         }
-        Reason::NotFound => Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)),
-        Reason::NotRunnable => {
-            Status::Process(CommandFailure::Spawn(SpawnFailure::PermissionDenied {
-                found: None,
-            }))
-        }
-        Reason::Cancelled => Status::WorkerStopped(WorkerStop::Cancelled),
-        Reason::TimedOut => Status::WorkerStopped(WorkerStop::TimedOut),
-        Reason::Raised => Status::Raised(status),
-    })
-}
-
-/// The checker demands `[status: Int, message: String, ...]` of `fail`, so the
-/// shape refusals here answer only a record that reached the call through an
-/// unchecked boundary: a decoder's result, or a module's asserted shape.
-/// A record `try` handed over re-raises faithfully: `reason`, `cmd` and `site`
-/// ride along.
-fn reraise(args: &[Value]) -> Result<Error, Break> {
-    let Some(Value::Map(m)) = args.first() else {
-        return Err(sig(
-            "fail expects an error record [status: Int, message: String, ...]",
-        ));
-    };
-    let Some(status) = m.get("status").as_deref().and_then(Value::as_int) else {
-        return Err(sig(
-            "fail: error record missing or non-integer 'status' field",
-        ));
-    };
-    let status = fail_status_code(status)?;
-    let message = m.get("message");
-    let Some(Value::String(message)) = message.as_deref() else {
-        return Err(sig(
-            "fail: this error record has no String `message`; the message is the text the failure carries",
-        ));
-    };
-    let message = message.to_string();
-    let reason = m
-        .get("reason")
-        .map(|v| {
-            FOValue::try_from(&*v)
-                .ok()
-                .and_then(|fo| Reason::decode(&fo).ok())
-                .ok_or_else(|| {
-                    sig(format!(
-                        "fail: reason {} is not a reason; see try's error record",
-                        *v
-                    ))
-                })
-        })
-        .transpose()?;
-    let projected = reason.map_or(Ok(Status::Raised(status)), |r| projected(r, status))?;
-    if projected.failure_code() != status {
-        let (shown, code) = (
-            Value::from_datum(reason.expect("only a reason projects")),
-            projected.failure_code(),
-        );
-        return Err(sig(format!(
-            "fail: status {status} disagrees with reason {shown}: that failure has status {code}; \
-             set status to {code}, or drop reason"
-        )));
+        _ => {}
     }
-    let command = optional::<String>(m, "cmd")?;
-    let site = optional::<Option<CallSite>>(m, "site")?.flatten();
-    Ok(Error {
-        command: command.map(Into::into),
-        site: site.map(Box::new),
-        ..Error::with_status(message, projected)
-    })
+    Ok(Error::from_record(record))
 }
 
 pub(super) fn builtin_fail(args: &[Value]) -> Break {
+    match args.first().and_then(|v| v.as_str("fail").ok()) {
+        Some(message) => Error::raised(message).into(),
+        None => sig("fail: expected a String; use `raise $e` to re-raise an error record"),
+    }
+}
+
+pub(super) fn builtin_raise(args: &[Value]) -> Break {
     reraise(args).map_or_else(|b| b, Break::Error)
+}
+
+pub(super) fn builtin_describe(args: &[Value]) -> Settled<Value> {
+    Ok(Value::string(
+        error_record(args, "describe")?.describe().into_owned(),
+    ))
 }
 
 pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
@@ -234,12 +153,10 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fact::ErrorRecord;
-    use crate::process::CancelCause;
-
-    fn nz(n: u8) -> NonZeroU8 {
-        NonZeroU8::new(n).unwrap()
-    }
+    use crate::fact::{FailureCode as _, NotRunnable, Reason, Unrunnable};
+    use crate::shell::runtime::ExitHints;
+    use crate::source::CallSite;
+    use std::num::NonZeroU8;
 
     fn site() -> CallSite {
         CallSite {
@@ -249,33 +166,33 @@ mod tests {
         }
     }
 
+    fn tool(failure: Failure) -> Reason {
+        Reason::process("tool", failure)
+    }
+
     fn reraised(record: &ErrorRecord) -> Error {
-        match builtin_fail(&[Value::from_datum(record.clone())]) {
+        match builtin_raise(&[Value::from_datum(record.clone())]) {
             Break::Error(e) => e,
             other @ Break::Escape(_) => panic!("expected an error, got {other:?}"),
         }
     }
 
     fn refusal(record: Value) -> String {
-        match builtin_fail(&[record]) {
-            Break::Error(e) => e.message,
+        match builtin_raise(&[record]) {
+            Break::Error(e) => e.describe().into_owned(),
             other @ Break::Escape(_) => panic!("expected a refusal, got {other:?}"),
         }
     }
 
-    fn record_value(status: i64, reason: Value) -> Value {
-        Value::map(vec![
-            ("status".into(), Value::Int(status)),
-            ("message".into(), Value::string("m")),
-            ("reason".into(), reason),
-        ])
+    fn record_value(reason: Reason) -> Value {
+        Value::from_datum(ErrorRecord::new(reason, "tool".into(), site()))
     }
 
     #[test]
     fn exit_takes_an_int_not_numeric_text() {
         let mut shell = crate::test_helper::core_shell();
         match builtin_exit(&[Value::string("3")], &mut shell) {
-            Err(Break::Error(e)) => assert_eq!(e.message, "exit: expected Int, got String"),
+            Err(Break::Error(e)) => assert_eq!(e.describe(), "exit: expected Int, got String"),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -288,7 +205,7 @@ mod tests {
                 panic!("exit {status} must refuse");
             };
             assert_eq!(
-                error.message,
+                error.describe(),
                 format!("exit: status {status} is outside 0..=255: an exit status is one byte")
             );
         }
@@ -301,122 +218,118 @@ mod tests {
     }
 
     #[test]
-    fn fail_refuses_a_status_outside_one_byte() {
-        let record = |status| {
-            Value::map(vec![
-                ("status".into(), Value::Int(status)),
-                ("message".into(), Value::string("x")),
-            ])
+    fn fail_takes_text_and_refuses_records() {
+        let Break::Error(error) = builtin_fail(&[Value::string("boom")]) else {
+            panic!()
         };
-        for status in [-1, 256] {
-            assert_eq!(
-                refusal(record(status)),
-                format!("fail: status {status} is outside 1..=255: an exit status is one byte")
-            );
-        }
-        assert_eq!(
-            refusal(record(0)),
-            "fail requires a nonzero status (use `return` for clean exit)"
-        );
-        assert!(
-            matches!(builtin_fail(&[record(255)]), Break::Error(error) if error.failure_code().get() == 255)
-        );
+        assert_eq!(error.reason, Reason::Raised("boom".into()));
+        let Break::Error(error) = builtin_fail(&[record_value(tool(Failure::Exited(3)))]) else {
+            panic!()
+        };
+        assert!(error.describe().contains("use `raise $e`"));
     }
 
     #[test]
-    fn fail_of_a_record_is_a_faithful_reraise() {
-        let statuses = [
-            Status::Raised(nz(9)),
-            Status::Process(CommandFailure::ExitCode(3)),
-            Status::Process(CommandFailure::Signal(Signal::new(9))),
-            Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)),
-            Status::Process(CommandFailure::Spawn(SpawnFailure::PermissionDenied {
-                found: None,
+    fn raise_of_a_record_is_a_faithful_reraise() {
+        let shell = crate::test_helper::core_shell();
+        for reason in [
+            Reason::Raised("boom".into()),
+            tool(Failure::Exited(3)),
+            tool(Failure::Signaled(9)),
+            tool(Failure::NotFound),
+            tool(Failure::NotRunnable(NotRunnable {
+                found: "tool".into(),
+                why: Unrunnable::PermissionDenied,
             })),
-            Status::WorkerStopped(WorkerStop::Cancelled),
-            Status::WorkerStopped(WorkerStop::TimedOut),
-        ];
-        for status in statuses {
-            for site in [None, Some(site())] {
-                let record = ErrorRecord::new("cmd", &status, "boom", site);
-                assert_eq!(reraised(&record).record_at(None), record);
-            }
-        }
-        assert_eq!(
-            Status::WorkerStopped(WorkerStop::Cancelled).failure_code(),
-            CancelCause::Cancelled.failure_code()
-        );
-        assert_eq!(
-            Status::WorkerStopped(WorkerStop::TimedOut).failure_code(),
-            CancelCause::TimedOut.failure_code()
-        );
-    }
-
-    #[test]
-    fn fail_refuses_a_status_that_disagrees_with_its_reason() {
-        let msg = refusal(record_value(
-            5,
-            Value::variant("exited", Some(Value::Int(3))),
-        ));
-        assert!(
-            msg.contains("disagrees with reason") && msg.contains("set status to 3"),
-            "{msg}"
-        );
-    }
-
-    #[test]
-    fn fail_refuses_a_zero_external_exit_reason() {
-        for status in [1, 255] {
-            let Break::Error(error) =
-                builtin_fail(&[record_value(status, Value::from_datum(Reason::Exited(0)))])
-            else {
-                panic!("a zero external exit reason must be refused");
-            };
-            assert_eq!(
-                error.message,
-                "fail: `exited 0` is success, not an external failure; use `return`, or drop reason"
-            );
-            assert_eq!(error.failure_code(), NonZeroU8::MIN);
-            assert_eq!(error.record_at(None).reason, Reason::Raised);
+            Reason::Cancelled,
+            Reason::TimedOut,
+        ] {
+            let record = ErrorRecord::new(reason, "tool".into(), site());
+            assert_eq!(reraised(&record).record(&shell), record);
         }
     }
 
     #[test]
-    fn fail_preserves_negative_external_exit_reasons() {
+    fn raise_trusts_a_hand_built_records_provenance() {
+        let shell = crate::test_helper::core_shell();
+        let record = ErrorRecord::new(tool(Failure::Exited(3)), "claimed".into(), site());
+        assert_eq!(reraised(&record).record(&shell), record);
+        assert_eq!(reraised(&record).failure_code().get(), 3);
+    }
+
+    #[test]
+    fn raise_refuses_a_zero_external_exit_reason() {
+        assert_eq!(
+            refusal(record_value(tool(Failure::Exited(0)))),
+            "raise: `exited 0` is success, not a failure; use `return`"
+        );
+    }
+
+    #[test]
+    fn raise_preserves_negative_external_exit_reasons() {
         for raw in [-1, i32::MIN, -1_073_741_790] {
-            let reason = Reason::Exited(raw);
-            let Break::Error(error) = builtin_fail(&[record_value(1, Value::from_datum(reason))])
-            else {
-                panic!("a negative Windows exit is a failure");
-            };
+            let record = ErrorRecord::new(tool(Failure::Exited(raw)), "tool".into(), site());
+            let error = reraised(&record);
             assert_eq!(error.failure_code(), NonZeroU8::MIN);
-            assert_eq!(error.record_at(None).reason, reason);
-            let mismatch = refusal(record_value(2, Value::from_datum(reason)));
-            assert!(mismatch.contains("disagrees with reason"), "{mismatch}");
-            assert!(mismatch.contains("set status to 1"), "{mismatch}");
+            assert_eq!(error.reason, tool(Failure::Exited(raw)));
         }
     }
 
     #[test]
-    fn fail_refuses_a_signal_out_of_range() {
-        let msg = refusal(record_value(
-            1,
-            Value::variant("signaled", Some(Value::Int(200))),
-        ));
+    fn raise_refuses_a_signal_out_of_range() {
+        let msg = refusal(record_value(tool(Failure::Signaled(200))));
         assert!(msg.contains("names no signal"), "{msg}");
     }
 
     #[test]
-    fn fail_keeps_a_records_site() {
-        let record = ErrorRecord::new("cmd", &Status::Raised(nz(2)), "boom", Some(site()));
-        assert_eq!(reraised(&record).site.as_deref(), Some(&site()));
+    fn reraised_exited_record_uses_the_session_table_and_situational_hint_wins() {
+        let mut shell = crate::test_helper::core_shell();
+        shell.set_exit_hints(ExitHints::from_text("tool 3 check the input"));
+        let record = ErrorRecord::new(tool(Failure::Exited(3)), "wrapper".into(), site());
+        let error = reraised(&record);
+        assert!(error.hint.is_none());
+        let rendered = error.render(shell.sources(), None, shell.exit_hints());
+        assert!(rendered.contains("check the input"), "{rendered}");
+        let decorated = error
+            .with_hint("check this invocation")
+            .context("outer")
+            .discarded(12);
+        let rendered = decorated.render(shell.sources(), None, shell.exit_hints());
+        assert!(rendered.contains("check this invocation"), "{rendered}");
+        assert!(!rendered.contains("check the input"), "{rendered}");
+        let raised = reraised(&decorated.record(&shell));
+        assert!(raised.hint.is_none() && raised.context.is_none());
+        assert_eq!(raised.unwound, crate::shell::runtime::Unwound::default());
+        assert!(
+            raised
+                .render(shell.sources(), None, shell.exit_hints())
+                .contains("check the input")
+        );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn fail_keeps_runtime_as_cmd() {
-        let record = ErrorRecord::new("<runtime>", &Status::Raised(nz(2)), "boom", None);
-        let error = reraised(&record);
-        assert_eq!(error.command.as_deref(), Some("<runtime>"));
-        assert_eq!(error.record_at(None).cmd(), "<runtime>");
+    fn reraised_records_recompute_reason_hints_without_a_caret() {
+        let record = ErrorRecord::new(tool(Failure::Signaled(9)), "wrapper".into(), site());
+        let rendered = reraised(&record).compact(&ExitHints::default());
+        assert!(rendered.contains("SIGKILL"));
+        assert!(rendered.contains("a.ral:3:4"));
+        assert!(!rendered.contains("here"));
+        let record = ErrorRecord::new(
+            Reason::process(
+                "./text",
+                Failure::NotRunnable(NotRunnable {
+                    found: "./text".into(),
+                    why: Unrunnable::NotExecutable,
+                }),
+            ),
+            "wrapper".into(),
+            site(),
+        );
+        assert!(
+            reraised(&record)
+                .compact(&ExitHints::default())
+                .contains("to use the path as text")
+        );
     }
 }

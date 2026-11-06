@@ -16,7 +16,7 @@ pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Va
     let origin = SourceOrigin::named("<exarch:agent>");
     ral_core::shell::load::evaluate_source(mooring, shell, AGENT_SOURCE, &origin, None).map_err(
         |e| match e {
-            Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
+            Break::Error(err) => sig(format!("exarch agent library: {}", err.describe())),
             other @ Break::Escape(_) => other,
         },
     )

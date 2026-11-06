@@ -4,6 +4,13 @@ status: active
 
 # A finished handle has one settle; the eliminators project it
 
+> Amended 2026-11-05 by [[decisions/261105_the-error-record|the error record]]:
+> the current `ErrorRecord` is exactly `[reason, cmd, site]`, with a total
+> site and no status or derived message field. `describe` derives its text;
+> `raise` re-raises it unchanged. A worker completes provenance before
+> publication, so `done`, `poll` and `try` around `await` agree. The original
+> settle rationale below records the shape at that decision.
+
 > Amended 2026-11-05 (see [[design/endings|endings]]):
 > `poll`'s `ready.outcome` is the ok/err half of the one generic `Ending`,
 > sharing its tags with `audit` and the worker's `Done`. Exit, foreign stop

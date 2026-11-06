@@ -1,7 +1,7 @@
 # Test: rounding, integer conversion, ranges and status limits refuse
 # what cannot be represented, and say so
 
-let refusal = { |body| try $body { |e| echo $e[message]; return () } }
+let refusal = { |body| try $body { |e| echo !{describe $e}; return () } }
 
 # round <x> <places> is the decimal dial and always returns a Float;
 # halves go away from zero
@@ -30,8 +30,10 @@ refusal { int 3.7; return () }
 # range checks its arithmetic
 refusal { range -2 9223372036854775807; return () }
 
-# A status must fit one byte
-refusal { fail [status: 4294967296, message: 'status out of i32 range'] }
+# External raw codes survive a record round trip; only process exit clamps.
+let external = [reason: `process [program: tool, failure: `exited 429496729], frame: 'tool', site: [script: 'manual', line: 1, col: 1]]
+try { raise $external } { |e| echo $[$e == $external] }
+# An explicit host exit must fit one byte.
 refusal { exit 4294967296 }
 
 echo 'numeric tests done'

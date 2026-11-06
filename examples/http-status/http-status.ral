@@ -6,7 +6,7 @@
 # orders per-job files by index, every time.  A ral worker returns a url/code record.
 
 if !{is-empty !{args}} {
-    fail [status: 2, message: 'usage: http-status URL...']
+    fail 'usage: http-status URL...'
 } else {
     return ()
 }
@@ -29,5 +29,5 @@ for !{keys $classes} { |c| echo "$c: $[!{length $classes[$c]}]" }
 
 let dead = filter { |r| $[$r[code] == '000'] } $results
 if !{is-empty $dead} { return () } else {
-    fail [status: 1, message: "unreachable: $[!{intercalate ', ' !{map { |r| return $r[url] } $dead}}]"]
+    fail "unreachable: $[!{intercalate ', ' !{map { |r| return $r[url] } $dead}}]"
 }

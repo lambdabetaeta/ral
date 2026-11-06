@@ -340,11 +340,11 @@ mod tests {
             register_plugin_hooks("p", &hooks_only(vec![(HookEvent::PostExec, h)]), &mut shell)
                 .expect_err("a two-parameter lifecycle handler must be rejected");
         assert!(
-            err.message.contains("post-exec")
-                && err.message.contains("1 parameter")
-                && err.message.contains("got 2"),
+            err.describe().contains("post-exec")
+                && err.describe().contains("1 parameter")
+                && err.describe().contains("got 2"),
             "error should name the hook and the arity mismatch, got: {}",
-            err.message
+            err.describe()
         );
     }
 

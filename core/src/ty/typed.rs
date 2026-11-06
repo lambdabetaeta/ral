@@ -112,6 +112,12 @@ impl<T: Typed> Typed for Option<T> {
     }
 }
 
+impl<T: Typed> Typed for Box<T> {
+    fn ty() -> Ty {
+        T::ty()
+    }
+}
+
 impl<T: Typed> Typed for Vec<T> {
     fn ty() -> Ty {
         Ty::list(T::ty())

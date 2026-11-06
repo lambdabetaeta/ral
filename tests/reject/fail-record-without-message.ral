@@ -1,5 +1,5 @@
-# codes: T0021
+# codes: T0010
 # status: 1
 # at: 5:6
-# contains: missing a field named 'message'
+# contains: couldn't match
 fail [status: 3]

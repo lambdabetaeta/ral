@@ -33,9 +33,9 @@ pub use self::construct::{Bequest, Runtime};
 pub(crate) use self::construct::{Image, Terms};
 use self::modules::Modules;
 use self::workers::Roster;
-use super::audit::Audit;
+use super::audit::{Audit, DisplacedSite};
 use super::env::Env;
-use super::error::Error;
+use super::error::{Error, FrameName, Prov};
 use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
 use super::mooring::{Mooring, TerminalAccess};
@@ -226,23 +226,39 @@ impl Shell {
     /// A call's span becomes the dispatch site, unless it lies outside the
     /// session's sources — the baked prelude's — so a prelude function's
     /// inner command is stamped where the user called the function.
-    pub(crate) fn stamp_call_site(&mut self, span: Option<Span>) {
-        if let Some(span) = span
-            && self.session.sources.get(span.file).is_some()
-        {
-            self.local.audit.call_site = Some(span);
-        }
+    ///
+    /// Returns the register it displaced, for the frame to restore; `None`
+    /// when the register was left alone.
+    pub(crate) fn enter_frame(
+        &mut self,
+        name: impl Into<FrameName>,
+        span: Option<Span>,
+    ) -> Option<DisplacedSite> {
+        let span = span.filter(|span| self.session.sources.get(span.file).is_some())?;
+        Some(self.local.audit.enter_site(Prov::Live {
+            name: name.into(),
+            span,
+        }))
     }
 
     /// Run `f` with `span` as the dispatch site, then restore the old one:
     /// what `f` observes is stamped by the syntax that asked for it, not by
     /// whatever a body dispatched last.
-    pub(crate) fn at_site<R>(&mut self, span: Option<Span>, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved = self.local.audit.call_site;
-        self.stamp_call_site(span);
-        let r = f(self);
-        self.local.audit.call_site = saved;
-        r
+    pub(crate) fn at_site<R>(
+        &mut self,
+        name: impl Into<FrameName>,
+        span: Option<Span>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = self.enter_frame(name, span);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        if let Some(saved) = saved {
+            self.local.audit.restore_site(saved);
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     /// The dispatch register [`Audit`] carries, resolved against the session's
@@ -251,8 +267,8 @@ impl Shell {
     /// `pub`, not `pub(crate)`: a host entry that builds its own
     /// [`crate::shell::runtime::Observation`] (a grep walk, a read outside any
     /// redirect) needs the same call site core's own entries stamp.
-    pub fn call_site(&self) -> Option<CallSite> {
-        self.session.sources.site(self.local.audit.call_site?)
+    pub fn call_site(&self) -> CallSite {
+        self.local.audit.call_site().site(&self.session.sources)
     }
 
     /// Put one enquiry to `mooring`'s host desk and block for the answer.  The
@@ -269,11 +285,8 @@ impl Shell {
         match mooring.desk.as_ref() {
             Some(desk) => desk.enquire(req, &self.scope),
             None => Err(Break::Error(
-                Error::raised(
-                    crate::shell::runtime::NO_DESK,
-                    crate::shell::runtime::NO_DESK_STATUS,
-                )
-                .with_hint(crate::shell::runtime::NO_DESK_HINT),
+                Error::raised(crate::shell::runtime::NO_DESK)
+                    .with_hint(crate::shell::runtime::NO_DESK_HINT),
             )),
         }
     }
@@ -286,14 +299,16 @@ impl Shell {
             .register(Source::from_text(origin.clone(), text))
     }
 
-    /// Register a top-level run's script and point [`SessionState::root_file`]
-    /// at it.  [`crate::shell::run::run_framed`] alone calls this; a module load takes
-    /// [`Self::install_script_context`], which appends without disturbing
-    /// `root_file`, so the run's own root keeps its origin.
-    pub(crate) fn install_root_context(&mut self, origin: &SourceOrigin, text: &str) -> FileId {
+    /// Register a top-level run's script, returning its file and the frame
+    /// spanning it: the run's [`SessionState::root_file`] and base register,
+    /// for [`crate::shell::run::run_framed`] to install.
+    pub(crate) fn register_root(&mut self, origin: &SourceOrigin, text: &str) -> (FileId, Prov) {
         let file = self.install_script_context(origin, text);
-        self.session.root_file = Some(file);
-        file
+        let base = Prov::Live {
+            name: origin.to_string().into(),
+            span: Span::new(file, 0, u32::try_from(text.len()).unwrap_or(u32::MAX)),
+        };
+        (file, base)
     }
 
     /// Write `bytes` to the current stdout sink.

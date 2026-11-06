@@ -29,11 +29,8 @@ fn a_guard_cleanup_runs_under_an_exit_and_the_exit_follows() {
 /// A cleanup's own failure pre-empts the halt it ran under.
 #[test]
 fn a_cleanups_fail_pre_empts_an_exit() {
-    match top_level(
-        &mut fresh_shell(),
-        "guard { exit 3 } { fail [status: 7, message: x] }",
-    ) {
-        Err(Break::Error(e)) => assert_eq!(e.failure_code().get(), 7),
-        other => panic!("expected an error with code 7, got {other:?}"),
+    match top_level(&mut fresh_shell(), "guard { exit 3 } { fail x }") {
+        Err(Break::Error(e)) => assert_eq!(e.failure_code().get(), 1),
+        other => panic!("expected an error with code 1, got {other:?}"),
     }
 }

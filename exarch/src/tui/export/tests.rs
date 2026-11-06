@@ -64,7 +64,7 @@ fn session(dir: &OwnDir) -> (Recorder, std::path::PathBuf) {
     let _ = emit(
         Display::Observation {
             value: Observation::instant(
-                None,
+                ral_core::test_helper::site(),
                 None,
                 Observed::Read(Read {
                     path: "a.rs".into(),

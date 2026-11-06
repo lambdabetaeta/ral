@@ -64,14 +64,14 @@ pub use map::Map;
 pub use crate::data::Bytes;
 
 mod error;
-pub use error::{Error, Status, outcome_value};
+pub use error::{Error, FrameName, Prov, Unwound, outcome_value};
 
 mod exit_hints;
 pub use exit_hints::ExitHints;
 
 mod flow;
 pub use flow::{Break, End, Escape, Settled, Stop};
-pub(crate) use flow::{final_poll, name_failure, panic_text};
+pub(crate) use flow::{final_poll, panic_text};
 
 mod walk;
 pub use walk::AdmittedWalk;
@@ -85,10 +85,10 @@ pub use coerce::{settings_map, sig};
 pub use state::modules::Modules;
 
 pub mod audit;
-pub(crate) use audit::AuditStart;
 pub use audit::{
     Audit, AuditFragment, CapturePolicy, TrailScope, epoch_us, report_envelope, report_value,
 };
+pub(crate) use audit::{AuditStart, DisplacedSite};
 
 // Here because the session speaks them: the records `fact` declares.
 pub use crate::fact::{
@@ -101,8 +101,8 @@ pub use crate::source::CallSite;
 
 mod mooring;
 pub use mooring::{
-    DeferredSink, Desk, EnquiryDesk, EventSink, Fork, Mooring, NO_DESK, NO_DESK_HINT,
-    NO_DESK_STATUS, Nursery, NurseryId, SurfaceSink, TitlePolicy,
+    DeferredSink, Desk, EnquiryDesk, EventSink, Fork, Mooring, NO_DESK, NO_DESK_HINT, Nursery,
+    NurseryId, SurfaceSink, TitlePolicy,
 };
 pub(crate) use mooring::{NurseryGuard, TerminalAccess};
 

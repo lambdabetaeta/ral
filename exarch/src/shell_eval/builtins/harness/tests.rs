@@ -774,7 +774,7 @@ fn a_run_with_no_fork_door_refuses_in_its_own_words() {
     };
     match ending.into_settled() {
         Err(Break::Error(e)) => assert_eq!(
-            e.message,
+            e.describe(),
             "exarch-agents: this host adopts no forked sessions"
         ),
         other => panic!("expected the no-fork-door refusal, got {other:?}"),

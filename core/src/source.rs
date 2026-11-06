@@ -342,6 +342,9 @@ impl std::fmt::Display for CallSite {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceDb {
     sources: Arc<Vec<Source>>,
+    /// The length when a fork cloned this registry: below it an id names, in
+    /// the parent too, the file it names here; at or above it, only here.
+    inherited: u32,
 }
 
 impl SourceDb {
@@ -350,6 +353,20 @@ impl SourceDb {
         let id = self.next_id();
         Arc::make_mut(&mut self.sources).push(source);
         id
+    }
+
+    /// A clone for a child shell, which registers on its own from here.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            sources: Arc::clone(&self.sources),
+            inherited: self.next_id().0,
+        }
+    }
+
+    /// Whether `id` names the same file in the registry this one was forked
+    /// from.
+    pub(crate) fn inherits(&self, id: FileId) -> bool {
+        id.0 < self.inherited
     }
 
     /// The [`Source`] `id` resolves to, or `None` for an id this registry
@@ -399,6 +416,7 @@ impl<'de> Deserialize<'de> for SourceDb {
                     .map(|(origin, text)| Source::new(origin, text))
                     .collect(),
             ),
+            inherited: 0,
         })
     }
 }

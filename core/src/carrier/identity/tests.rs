@@ -200,7 +200,7 @@ mod enquiry_tests {
         else {
             panic!("an absent desk is an error, not a stop");
         };
-        assert_eq!(err.message, crate::shell::runtime::NO_DESK);
+        assert_eq!(err.describe(), crate::shell::runtime::NO_DESK);
     }
 
     /// A no-op receiver, for a desk built without a real dispatch behind it.

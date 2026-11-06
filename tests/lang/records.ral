@@ -23,12 +23,12 @@ let ok = try { return 42 } { |_| return -1 }
 echo $[$ok == 42]
 
 # try calls the handler on failure with a typed error record.
-let status = try { fail [status: 7, message: 'typed error record test'] } { |e| return $e[status] }
-echo $[$status == 7]
+let reason = try { fail 'typed error record test' } { |e| return $e[reason] }
+echo $[$reason == `raised 'typed error record test']
 
 # Inline form: handler can echo, return, or further dispatch.
-try { fail [status: 3, message: 'inline dispatch test'] } { |err|
-    echo "status is $err[status]"
+try { fail 'inline dispatch test' } { |err|
+    echo 'reason is' $err[reason]
 }
 
 # A spread updates the fields of a record

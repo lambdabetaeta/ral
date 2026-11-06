@@ -137,7 +137,7 @@ fn parse_handlers(arms: Vec<(String, Value)>, shell: &Shell) -> Settled<Vec<Hand
 fn parse_catch_all(v: &Value, shell: &Shell) -> Settled<Value> {
     let closure = arm_closure(v, "within handler: catch-all", HandlerArity::CatchAll)?;
     crate::typecheck::catch_all_stands_in(closure.comp(), shell.closure_schemes(closure))
-        .map_err(|error| refused_arm("within handler", &error, closure.comp().span))?;
+        .map_err(|error| refused_arm("within handler", &error, closure.comp().span, shell))?;
     Ok(v.clone())
 }
 
@@ -214,7 +214,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         let cmd = shell
             .run(Run::captured(
-                r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[cmd] }"#,
+                r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[frame] }"#,
                 SourceOrigin::named("<test>"),
             ))
             .expect_ran()

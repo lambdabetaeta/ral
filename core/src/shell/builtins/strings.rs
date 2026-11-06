@@ -350,7 +350,7 @@ mod tests {
 
     fn refusal(result: Settled<Value>) -> String {
         match result {
-            Err(Break::Error(e)) => e.message,
+            Err(Break::Error(e)) => e.describe().into_owned(),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }

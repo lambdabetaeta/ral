@@ -312,8 +312,6 @@ pub enum TypeErrorKind {
         command: String,
         ty: Ty,
     },
-    /// A nonzero status is required, so `fail` cannot masquerade as a clean exit.
-    FailStatusZero,
     /// The elaborated IR for an `alias name { body }` statement has the wrong shape.
     MalformedAlias {
         detail: &'static str,
@@ -359,7 +357,6 @@ impl TypeErrorKind {
             Self::HandlerNotFirstClass { .. } => "T0041",
             Self::BuiltinNotFirstClass { .. } => "T0042",
             Self::BuiltinArity { .. } => "T0050",
-            Self::FailStatusZero => "T0051",
             Self::MalformedAlias { .. } => "T0052",
             Self::MalformedUnalias { .. } => "T0053",
             Self::DecoderTakesNoArgument { .. } => "T0054",

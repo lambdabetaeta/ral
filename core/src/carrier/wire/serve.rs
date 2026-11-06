@@ -617,10 +617,9 @@ mod wire_desk_tests {
         );
     }
 
-    /// A refusal raises with the front-end's own message and status, so an
-    /// enquiry fails alike under either transport.
+    /// A desk refusal raises its text alike under either transport.
     #[test]
-    fn refused_enquiry_raises_message_and_status() {
+    fn refused_enquiry_raises_the_front_ends_text() {
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(desk_over(ours, 1));
 
@@ -640,10 +639,10 @@ mod wire_desk_tests {
             panic!("a refusal is an error, not a stop");
         };
         front_end.join().expect("front-end thread");
-        assert_eq!(err.message, crate::shell::runtime::NO_DESK);
+        assert_eq!(err.describe(), crate::shell::runtime::NO_DESK);
         assert_eq!(
-            err.status,
-            crate::shell::runtime::Status::Raised(crate::shell::runtime::NO_DESK_STATUS)
+            err.reason,
+            crate::fact::Reason::Raised(crate::shell::runtime::NO_DESK.into())
         );
     }
 

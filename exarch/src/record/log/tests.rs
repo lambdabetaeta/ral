@@ -133,7 +133,7 @@ fn a_large_observation_replays_exactly_from_compact_bytes() {
     let log = Log::create(&dir).unwrap();
     let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024).collect();
     let observation = Observation::instant(
-        None,
+        ral_core::test_helper::site(),
         None,
         Observed::Command(Command::new(
             "producer",

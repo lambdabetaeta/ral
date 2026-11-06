@@ -1,19 +1,19 @@
 0
-1
-42
-7
+`process [failure: `exited 1, program: cat]
+`raised explicit failure
+`raised custom failure
 custom failure
-9
+true
 boom
-caught status 1
+caught side-effecting handler test
 inner caught
 continued after inner
 trying...
 trying...
 trying...
 retry exhausted
-`raised 3
+`raised x fail
 true
 cleanup
-status 42
+original failure
 try error tests done

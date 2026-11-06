@@ -222,11 +222,11 @@ mod tests {
             HookEvent::PostExec,
             "{ |ev| record $ev[src] $ev[status] }",
         )]);
-        let line = "fail [status: 7, message: 'x']";
+        let line = "fail 'x'";
         run(line, &t, &host);
         assert_eq!(
             *sink.lock().unwrap(),
-            vec![Value::string(line), Value::Int(7)]
+            vec![Value::string(line), Value::Int(1)]
         );
     }
 
@@ -276,11 +276,7 @@ mod tests {
     /// A failing `pre-exec` hook is reported, and the line runs as typed.
     #[test]
     fn failing_pre_exec_does_not_stop_the_line() {
-        let (t, host, sink) = dressed(&[(
-            "p",
-            HookEvent::PreExec,
-            "{ |_ev| fail [status: 1, message: 'boom'] }",
-        )]);
+        let (t, host, sink) = dressed(&[("p", HookEvent::PreExec, "{ |_ev| fail 'boom' }")]);
         run("record ran", &t, &host);
         assert_eq!(*sink.lock().unwrap(), vec![Value::string("ran")]);
     }
@@ -297,7 +293,7 @@ mod tests {
     /// `post-exec` through the ordinary run.
     #[test]
     fn pre_exec_refuses_by_rewriting_to_a_failing_line() {
-        let refusal = "fail [status: 4, message: 'refused']";
+        let refusal = "fail 'refused'";
         let (t, host, sink) = dressed(&[
             (
                 "p",
@@ -313,7 +309,7 @@ mod tests {
         run("record never", &t, &host);
         assert_eq!(
             *sink.lock().unwrap(),
-            vec![Value::string(refusal), Value::Int(4)]
+            vec![Value::string(refusal), Value::Int(1)]
         );
     }
 

@@ -1,7 +1,7 @@
 # Algebraic effects and handlers
 
 **Handlers are the orthogonal layer that reinterprets an operation.** That
-[[design/syscalls-are-effects|system calls are algebraic effects]] is the
+[[design/exec|system calls are algebraic effects]] is the
 principle; whether to install a handler over an operation — and whether that
 handler reifies a continuation — are two independent choices layered on top, and
 ral takes the smallest on both: a restricted, continuation-free fragment.
@@ -96,7 +96,7 @@ Self-masking removes exactly the owning frame; nearer unmatched frames remain
 visible too. In particular, an outer named arm wins over a nearer catch-all,
 and that catch-all remains available while the named arm runs.
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]], [[design/control-operators|control-operators]], [[design/scoping|scoping]], [[design/grant|grant]], [[related/system-c|system-c]] (self-masking as capability-set subtraction), [[related/handlers-of-algebraic-effects|handlers-of-algebraic-effects]] (the calculus this fragment restricts).
+See also [[design/exec|exec]], [[design/control-operators|control-operators]], [[design/scoping|scoping]], [[design/grant|grant]], [[related/system-c|system-c]] (self-masking as capability-set subtraction), [[related/handlers-of-algebraic-effects|handlers-of-algebraic-effects]] (the calculus this fragment restricts).
 
 **Realised in** [[internals/handler-dispatch|handler-dispatch]].
 

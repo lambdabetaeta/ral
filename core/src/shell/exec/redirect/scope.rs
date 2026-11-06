@@ -165,7 +165,10 @@ impl RedirectState {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Self> {
-        shell.at_site(span, |shell| Self::open(redirects, span, mooring, shell))
+        shell.at_site("redirect", span, |shell| {
+            Self::open(redirects, span, mooring, shell)
+                .map_err(|b| b.locate("redirect", span, shell))
+        })
     }
 
     fn open(
@@ -208,7 +211,9 @@ impl RedirectState {
         self.tear_down(shell);
         let span = self.span;
         let intents = std::mem::take(&mut self.write_intents);
-        shell.at_site(span, |shell| settle(intents, fate, mooring, shell))
+        shell.at_site("redirect", span, |shell| {
+            settle(intents, fate, mooring, shell).map_err(|b| b.locate("redirect", span, shell))
+        })
     }
 
     /// Flushes, then restores the sinks and stdin. Idempotent: a second call

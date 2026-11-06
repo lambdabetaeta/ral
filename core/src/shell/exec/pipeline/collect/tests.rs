@@ -13,8 +13,12 @@ fn nz(n: u8) -> NonZeroU8 {
     NonZeroU8::new(n).unwrap()
 }
 
-fn error_break(status: u8, msg: &str) -> Break {
-    Error::raised(msg, nz(status)).into()
+fn error_break(status: u8) -> Break {
+    Error::from_reason(crate::fact::Reason::process(
+        "tool",
+        crate::fact::Failure::Exited(i32::from(status)),
+    ))
+    .into()
 }
 
 fn stopped(cause: CancelCause) -> Break {
@@ -25,7 +29,10 @@ fn stopped_at(cause: CancelCause, at: u32) -> Break {
     Break::Escape(Escape::Stopped(Stop {
         cause,
         owner: None,
-        at: Some(Span::new(FileId::DUMMY, at, at)),
+        at: Some(crate::shell::runtime::Prov::Live {
+            name: "pipeline".into(),
+            span: Span::new(FileId::DUMMY, at, at),
+        }),
     }))
 }
 
@@ -36,9 +43,12 @@ fn cut(stage: &ScopeId) -> Break {
 
 fn stop_of(br: &Break) -> Option<(CancelCause, Option<u32>)> {
     match br {
-        Break::Escape(Escape::Stopped(Stop { cause, at, .. })) => {
-            Some((*cause, at.as_ref().map(|s| s.start)))
-        }
+        Break::Escape(Escape::Stopped(Stop { cause, at, .. })) => Some((
+            *cause,
+            at.as_ref()
+                .and_then(crate::shell::runtime::Prov::span)
+                .map(|s| s.start),
+        )),
         _ => None,
     }
 }
@@ -51,8 +61,8 @@ fn is_error(br: &Break, code: u8) -> bool {
 /// reader-gone stop under everything, and within a rank the earlier stage wins.
 #[test]
 fn breaks_join_by_rank_earlier_stage_breaking_ties() {
-    match stronger(error_break(7, "first"), error_break(9, "second")) {
-        Break::Error(error) => assert_eq!(error.message, "first"),
+    match stronger(error_break(7), error_break(9)) {
+        Break::Error(error) => assert_eq!(error.failure_code(), nz(7)),
         Break::Escape(_) => panic!("an error must not displace an earlier error"),
     }
     assert!(matches!(
@@ -63,17 +73,11 @@ fn breaks_join_by_rank_earlier_stage_breaking_ties() {
         Break::Escape(Escape::Exit(1))
     ));
     assert!(matches!(
-        stronger(
-            error_break(7, "early failure"),
-            Break::Escape(Escape::Exit(3))
-        ),
+        stronger(error_break(7), Break::Escape(Escape::Exit(3))),
         Break::Escape(Escape::Exit(3))
     ));
     assert!(matches!(
-        stronger(
-            Break::Escape(Escape::Exit(3)),
-            error_break(7, "later failure")
-        ),
+        stronger(Break::Escape(Escape::Exit(3)), error_break(7)),
         Break::Escape(Escape::Exit(3))
     ));
     let (interrupted, timed_out) = (CancelCause::Interrupted, CancelCause::TimedOut);
@@ -99,17 +103,14 @@ fn breaks_join_by_rank_earlier_stage_breaking_ties() {
         "equal stops keep the earlier"
     );
     let root = DurableRoot::default().worker();
-    assert!(is_error(&stronger(cut(&root.id()), error_break(7, "x")), 7));
-    assert!(is_error(&stronger(error_break(7, "x"), cut(&root.id())), 7));
+    assert!(is_error(&stronger(cut(&root.id()), error_break(7)), 7));
+    assert!(is_error(&stronger(error_break(7), cut(&root.id())), 7));
     assert!(matches!(
         stronger(cut(&root.id()), Break::Escape(Escape::Exit(1))),
         Break::Escape(Escape::Exit(1))
     ));
     assert_eq!(
-        stop_of(&stronger(
-            stopped(CancelCause::ReaderGone),
-            error_break(7, "x")
-        )),
+        stop_of(&stronger(stopped(CancelCause::ReaderGone), error_break(7))),
         Some((CancelCause::ReaderGone, None)),
         "the closed-stdout stop is a stop"
     );
@@ -117,11 +118,8 @@ fn breaks_join_by_rank_earlier_stage_breaking_ties() {
 
 #[test]
 fn protocol_error_does_not_supersede_earlier_failure() {
-    match stronger(
-        error_break(7, "stage one boom"),
-        error_break(1, "report pipe: broken"),
-    ) {
-        Break::Error(error) => assert_eq!(error.message, "stage one boom"),
+    match stronger(error_break(7), error_break(1)) {
+        Break::Error(error) => assert_eq!(error.failure_code(), nz(7)),
         Break::Escape(_) => panic!("expected the first stage failure to win"),
     }
 }
@@ -299,6 +297,7 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
     state.push(StageHandle::new(
         StageKind::External(ExternalStage {
             watch: slot.watch(crate::process::ChildHandle::from_std(child)),
+            prov: crate::shell::runtime::Audit::default().call_site().clone(),
             name: "sleep".to_string(),
             args: Vec::new(),
             jail: Some(crate::process::jail::JailCgroup::at(
@@ -574,6 +573,7 @@ fn with_no_loan_a_heard_signal_is_inert() {
 fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
     let shell = crate::test_helper::core_shell();
     let end = || StageEnd::External {
+        prov: shell.local.audit.call_site().clone(),
         name: "sleep".to_string(),
         args: Vec::new(),
         outcome: WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGINT)),
@@ -602,9 +602,8 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
     match settled(&DurableRoot::default().worker()) {
         Err(Break::Error(e)) => assert!(
             matches!(
-                e.status,
-                crate::shell::runtime::Status::Process(crate::process::CommandFailure::Signal(s))
-                    if s == crate::process::Signal::new(libc::SIGINT)
+                e.reason.failure(),
+                Some(crate::fact::Failure::Signaled(libc::SIGINT))
             ),
             "{e:?}"
         ),
@@ -644,7 +643,7 @@ fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
 #[test]
 fn a_try_in_a_stage_cannot_see_its_reader_gone_stop() {
     let src = "let spew = { |n| to-line y\n spew $n }\n\
-               !{ try { spew 0 } { |err| fail [status: 7, message: x] } } | /usr/bin/head -n 1";
+               !{ try { spew 0 } { |err| fail x } } | /usr/bin/head -n 1";
     let mut shell = crate::test_helper::core_shell();
     let report = shell.run(crate::protocol::Run::captured(
         src,
@@ -700,9 +699,8 @@ fn a_stage_kill_is_forgiven_by_sent_and_kept_without_it() {
     match ancestors.fold(&mooring, &mut shell) {
         Err(Break::Error(e)) => assert!(
             matches!(
-                e.status,
-                crate::shell::runtime::Status::Process(crate::process::CommandFailure::Signal(s))
-                    if s == crate::process::Signal::new(libc::SIGKILL)
+                e.reason.failure(),
+                Some(crate::fact::Failure::Signaled(libc::SIGKILL))
             ),
             "{e:?}"
         ),
@@ -741,7 +739,13 @@ fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
 
     let _ = step(
         &mut state,
-        Event::Returned(0, StageObservation::failure(Error::raised("boom", nz(3)))),
+        Event::Returned(
+            0,
+            StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+                "tool",
+                crate::fact::Failure::Exited(3),
+            ))),
+        ),
     );
 
     match state.fold(&mooring, &mut shell) {
@@ -799,7 +803,13 @@ fn a_reader_gone_stages_cleanup_halt_is_forwarded() {
     let (mut state, _scopes, _tx) = threads_with(1);
     let _ = step(
         &mut state,
-        returned(0, StageObservation::failure(Error::raised("x", nz(7)))),
+        returned(
+            0,
+            StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+                "tool",
+                crate::fact::Failure::Exited(7),
+            ))),
+        ),
     );
     assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.failure_code() == nz(7)));
 }
@@ -811,7 +821,13 @@ fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
     let (mut state, _scopes, _tx) = threads_with(2);
     let _ = step(
         &mut state,
-        returned(0, StageObservation::failure(Error::raised("x", nz(7)))),
+        returned(
+            0,
+            StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+                "tool",
+                crate::fact::Failure::Exited(7),
+            ))),
+        ),
     );
     let _ = step(
         &mut state,
@@ -1181,7 +1197,13 @@ fn a_stage_halt_outranks_the_teardown_at_the_fold() {
         vec![
             (
                 50,
-                returned(0, StageObservation::failure(Error::raised("x", nz(7)))),
+                returned(
+                    0,
+                    StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+                        "tool",
+                        crate::fact::Failure::Exited(7),
+                    ))),
+                ),
             ),
             (50, returned(1, StageObservation::ok())),
         ],
@@ -1284,9 +1306,9 @@ fn a_guard_dropped_while_panicking_settles_its_index() {
     match event {
         Event::Returned(0, obs) => match obs.end {
             End::Err(err) => assert!(
-                err.message.contains("without reporting"),
+                err.describe().contains("without reporting"),
                 "expected the one dead-man's message: {}",
-                err.message
+                err.describe()
             ),
             other => panic!("expected an Error break, got {other:?}"),
         },
@@ -1320,9 +1342,9 @@ fn a_guard_dropped_without_a_panic_reports_a_silent_end() {
     match rx.recv().expect("the guard settles on drop") {
         Event::Returned(0, obs) => match obs.end {
             End::Err(err) => assert!(
-                err.message.contains("without reporting"),
+                err.describe().contains("without reporting"),
                 "expected the silent-end message: {}",
-                err.message
+                err.describe()
             ),
             other => panic!("expected an Error break, got {other:?}"),
         },

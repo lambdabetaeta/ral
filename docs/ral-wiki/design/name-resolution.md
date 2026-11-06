@@ -91,7 +91,7 @@ The one boundary this layering does *not* draw is between bytes and values: that
 crossing is named by the `from-X` / `to-X` codecs, which are core builtins like
 any other ([[design/codecs|codecs]]).
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] (the layering is the pure-fragment/effect boundary),
+See also [[design/exec|exec]] (the layering is the pure-fragment/effect boundary),
 [[design/builtins|builtins]], [[design/codecs|codecs]],
 [[design/pipelines|pipelines]], [[design/control-operators|control-operators]],
 [[design/grant|grant]]; [[internals/builtins-registry|builtins-registry]],

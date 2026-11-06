@@ -96,8 +96,8 @@ fn report(o: &Output) -> Value {
 
 #[test]
 fn audit_reports_a_raised_error_as_an_err_outcome() {
-    let o = run_c(&["--audit"], "fail [status: 3, message: nope]");
-    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+    let o = run_c(&["--audit"], "fail nope");
+    assert_eq!(o.status, 1, "stderr: {}", o.stderr);
     assert_eq!(report(&o)["outcome"]["tag"], "err");
 }
 

@@ -1,0 +1,5 @@
+# codes: T0010
+# status: 1
+# at: 5:6
+# contains: couldn't match
+fail [reason: `raised "boom", frame: "deploy", site: [script: "manual", line: 1, col: 1], attempt: 3]

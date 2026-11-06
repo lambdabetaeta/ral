@@ -13,13 +13,13 @@ let [path] = args
 
 let rows = from-csv < $path
 if !{is-empty $rows} {
-    fail [status: 1, message: "$path: no data rows to convert"]
+    fail "$path: no data rows to convert"
 }
 
 let cols = keys $rows[0]
 let cells = flat-map { |r| return !{values $r} } $rows
 if !{re-match '[\t\n\r]' !{intercalate '' [...$cols, ...$cells]}} {
-    fail [status: 1, message: "$path: a column name or field holds a tab, carriage return, or newline, which TSV cannot escape"]
+    fail "$path: a column name or field holds a tab, carriage return, or newline, which TSV cannot escape"
 }
 
 to-line !{intercalate "\t" $cols}

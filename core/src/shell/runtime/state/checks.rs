@@ -316,7 +316,7 @@ mod tests {
                 panic!("a grant refusal is an error, never an escape");
             };
             assert_eq!(
-                fs.message,
+                fs.describe(),
                 format!(
                     "fs read denied by grant: no allowance for reading {}",
                     crate::path::shown(&file)
@@ -329,7 +329,7 @@ mod tests {
             else {
                 panic!("a grant refusal is an error, never an escape");
             };
-            assert_eq!(flag.message, "detach: an active grant withholds it, so nothing here may outlive this session. Would `spawn` do, since it ends when the session does?");
+            assert_eq!(flag.describe(), "detach: an active grant withholds it, so nothing here may outlive this session. Would `spawn` do, since it ends when the session does?");
             assert!(flag.hint.is_none());
             assert_eq!(flag.failure_code().get(), 1);
         });

@@ -1,5 +1,5 @@
 hello
-no match: status 1
+no match: `process [failure: `exited 1, program: grep]
 /bin/sh: exited with status 137
 /bin/sh: killed by signal 9 (SIGKILL)
 /bin/sh: exited with status 42

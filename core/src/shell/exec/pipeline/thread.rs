@@ -4,15 +4,13 @@
 
 use super::collect::{SettleOnDrop, Slot, StageObservation};
 use super::launch::LaunchCx;
-use super::resolve::StageSpec;
 use super::route::{ByteIn, ByteOut};
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::process::{CancelCause, POLL_SLICE, ScopeId, ScopeNode};
 #[cfg(test)]
 use crate::process::{DurableRoot, Scope};
-use crate::shell::runtime::{Break, End, Error, Mooring, Settled};
-use crate::source::Span;
+use crate::shell::runtime::{End, Error, Mooring, Settled};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
@@ -90,18 +88,9 @@ impl Drop for ThreadStage {
     }
 }
 
-/// A parent-side error carrying the stage's own span.
-fn stage_error(message: String, span: Option<Span>) -> Break {
-    Break::Error(Error {
-        span,
-        ..Error::new(message)
-    })
-}
-
 /// Spawn one ral-written stage on its own thread.
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
-    spec: &StageSpec,
     stdin: ByteIn,
     stdout: ByteOut,
     cx: &LaunchCx<'_>,
@@ -133,7 +122,6 @@ pub(super) fn launch_thread_stage(
     let env = cx.env.clone();
     let eval = cx.eval.run;
     let comp = Arc::clone(stage);
-    let span = spec.span;
 
     let join = cx
         .shell
@@ -142,18 +130,13 @@ pub(super) fn launch_thread_stage(
             let settle = SettleOnDrop::new(slot);
             child.io = io;
             child.local.audit.install_active_policy(policy);
-            let end = End::of(|| eval(comp, env, mooring, child));
+            let end = End::of(|| eval(comp, env, mooring, child)).leaving(&child.session.sources);
             settle.send(StageObservation {
                 end,
                 audit: child.local.audit.take_fragment(),
             });
         })
-        .map_err(|e| {
-            stage_error(
-                format!("could not start a pipeline stage thread: {e}"),
-                span,
-            )
-        })?;
+        .map_err(|e| Error::new(format!("could not start a pipeline stage thread: {e}")))?;
 
     Ok(ThreadStage {
         join: Some(join),
@@ -164,7 +147,6 @@ pub(super) fn launch_thread_stage(
 #[cfg(all(test, unix))]
 mod tests {
     use super::super::group::PipelineGroup;
-    use super::super::resolve::StageLaunch;
     use super::*;
     use crate::io::Edge;
     use crate::process::DurableRoot;
@@ -184,13 +166,6 @@ mod tests {
         comp.clone()
     }
 
-    fn spec_for(comp: &Comp) -> StageSpec {
-        StageSpec {
-            launch: StageLaunch::Thread,
-            span: comp.span,
-        }
-    }
-
     /// An owning group whose channel nobody reads: these tests watch a single
     /// stage's own reports, never the anchor's.
     fn prepared_group() -> PipelineGroup {
@@ -207,7 +182,6 @@ mod tests {
         let env = shell.env.clone();
         let group = prepared_group();
         let stage = compile_one("echo hi");
-        let spec = spec_for(&stage);
         let (mut reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
         let mooring = Mooring::adrift();
         let cx = LaunchCx {
@@ -221,7 +195,6 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let _handle = launch_thread_stage(
             &stage,
-            &spec,
             ByteIn::Parent,
             ByteOut::Downstream(writer, Edge::new()),
             &cx,
@@ -250,7 +223,6 @@ mod tests {
         // A self-recursive, argument-incrementing call with no base case:
         // nothing but a cancel ends it.
         let stage = compile_one("!{ let go = { |n| go $[$n + 1] }; go 0 }");
-        let spec = spec_for(&stage);
         let (_reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
         let mooring = Mooring::adrift();
         let cx = LaunchCx {
@@ -264,7 +236,6 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = launch_thread_stage(
             &stage,
-            &spec,
             ByteIn::Parent,
             ByteOut::Downstream(writer, Edge::new()),
             &cx,

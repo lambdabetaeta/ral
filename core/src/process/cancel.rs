@@ -244,14 +244,6 @@ impl WorkerStop {
             Self::TimedOut => CancelCause::TimedOut,
         }
     }
-
-    /// `worker was cancelled` (143), `worker timed out` (124).
-    pub fn message(self) -> &'static str {
-        match self {
-            Self::Cancelled => "worker was cancelled",
-            Self::TimedOut => "worker timed out",
-        }
-    }
 }
 
 /// A scope node's identity: the name a stop carries for its owner.

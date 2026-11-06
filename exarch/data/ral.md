@@ -252,16 +252,16 @@ A failed call ends a `ral` script unless its failure is caught. Definitions that
 
 Choose how to handle a failure: `try` runs a recovery handler, `audit` records the outcome and command output for inspection, and `attempt` deliberately ignores the failure. This also applies to tools whose exit codes carry data, such as `grep`, `diff`, and `test`; distinguish expected nonzero exits from actual errors.
 
-`try`'s handler receives an error record, the same one an `audit` report's `` `err `` outcome carries. Call `explain try` for its fields:
+`try`'s handler receives exactly `[reason, frame, site]`, the same record an `audit` report's `` `err `` outcome carries. `frame` names where the failure is reported (a command, `index`, `fail`, your function, etc.); `site` is always `[script: String, line: Int, col: Int]`. Call `explain try` for details:
 
     let log =
       try { sort in.txt 2>&1 | from-string } { |err|
-        "sort failed: exited $err[status], $err[message]"
+        "sort failed: !{describe $err}"
       }
 
-`$err[reason]` is a variant saying why it failed; branch on its tag, as the `audit` example below does.
+`$err[reason]` is a variant saying why it failed: `` `process [program: String, failure: …] `` for a program that did not succeed (`failure` is `` `exited n ``, `` `signaled n ``, `` `not-found `` or `` `not-runnable […] ``), else `` `timed-out ``, `` `cancelled `` or `` `raised text ``. Compare it or branch on its tag, as the `audit` example below does.
 
-The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `$err[message]` is synthetic status text; to see the failing command's output, wrap the call in `audit`.
+The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `describe $err` derives the failure's text from its reason; to see the failing command's output, wrap the call in `audit`.
 
 Prelude functions cover common cases:
 
@@ -271,7 +271,7 @@ Prelude functions cover common cases:
 
 `guard BODY CLEANUP` runs the cleanup block whether the body succeeds or fails, then hands back the body's own result — so a failure keeps propagating. A cleanup that fails or exits pre-empts that result and becomes the outcome; write `guard BODY { attempt { … } }` if the cleanup's own failure should be ignored.
 
-An error may be raised deliberately using e.g. `fail [status: 2, message: #'failure caused by x'#]`.
+Raise a fresh error with `fail #'failure caused by x'#` (reason `` `raised text ``, exit code 1). Re-raise a caught record unchanged with `raise $e`; use top-level `exit n` to choose a process code. `raise` trusts the record, including its provenance, but refuses a failure of `` `exited 0 `` and signals outside `1..=127`. Reason hints are recomputed; situational advice and unwind notes are not in the record.
 
 
 ## Audit
@@ -284,7 +284,7 @@ Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `comma
     case $r[outcome] [
       `ok:  { |_| bytes-to-string !{commands $r}[0][stdout] },
       `err: { |e|
-        if $[$e[reason] == `exited 1] { #'no matches'# } else { fail $e }
+        if $[$e[reason] == `process [program: grep, failure: `exited 1]] { #'no matches'# } else { raise $e }
       }
     ]
 
@@ -320,7 +320,7 @@ You need not wait for it: end the turn when nothing else remains, and if its res
 `await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. A handle's result is claimed once: you may await it turns later, but a second `await` of it, or one after `cancel` or `race` claimed it, fails. An `exit` inside the block exits the turn that awaits it.
 
     let out = await $h          # a command's output, as `let out = !{ … }` would bind it
-    try { await $h } { |e| echo "failed: $e[message]" }    # or this instead, to recover
+    try { await $h } { |e| echo "failed: !{describe $e}" }    # or this instead, to recover
 
 Retain the handle returned by `spawn` (or `watch`) whenever you will need its result or individual cancellation; a worker ID in `workers` or a completion notice is for observation only and cannot recover a handle.
 

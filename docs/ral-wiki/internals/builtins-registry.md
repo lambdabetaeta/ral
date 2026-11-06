@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_date: 2026-11-04
+verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+verified_at_date: 2026-11-06
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke]
 ---
 
@@ -18,7 +18,7 @@ each builtin as one row, collapsed into the `CORE_BUILTINS` static
 - doc line;
 - [[internals/type-inference|type rule]] — a scheme factory, and nothing else;
 - an optional diagnostic facet — what a misuse this verb has a name for earns:
-  a decoder's argument, `fail`'s literal zero status;
+  a decoder's argument;
 - runtime body.
 
 Because the facets are one entry, they cannot drift apart. Arity is not among
@@ -32,10 +32,11 @@ well as the evaluator's application gate.
 
 The diagnostic facet is deliberately not a typing rule. It says what a wrong
 call *means* for this verb, which no polytype can state — that an argument
-written to a decoder is a misreading of where the bytes come from, or that
-a zero `status` on `fail` wants `return`. Everything a type can state is in the
-scheme — including whether a row writes, which is its result grade (`Command`),
-not a facet ([[design/capture|grades and capture]]). `Decl::scheme` freshens
+written to a decoder is a misreading of where the bytes come from.
+A caught record passed to `fail` instead earns generic shape guidance from
+`shape_hint`/`row_has_reason`, pointing to `raise $e` or `describe $e`.
+Everything a type can state is in the scheme — including whether a row writes,
+which is its result grade (`Command`), not a facet ([[design/capture|grades and capture]]). `Decl::scheme` freshens
 ordinary result grades; command, boundary and already graded results retain
 their declared grades. Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,

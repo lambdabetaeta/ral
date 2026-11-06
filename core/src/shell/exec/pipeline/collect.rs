@@ -12,8 +12,8 @@ use crate::process::{
     Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Observed, Settled, Shell,
-    Stop, Value,
+    AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Observed, Prov, Settled,
+    Shell, Stop, Value,
 };
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -31,11 +31,12 @@ fn augment_stage_failure(err: Error, shell: &Shell, started: Instant) -> Error {
 /// interest is judged.
 fn synth_external_stage_audit(
     shell: &Shell,
+    prov: &Prov,
     name: &str,
     args: Vec<String>,
     broke: Option<&Break>,
 ) -> AuditFragment {
-    let obs = shell.observation(Observed::Command(Command::new(
+    let mut obs = shell.observation(Observed::Command(Command::new(
         name,
         args,
         broke.map_or(0, ExitCode::code),
@@ -43,6 +44,7 @@ fn synth_external_stage_audit(
         AuditIo::default(),
         broke.map(Break::to_string),
     )));
+    obs.site = prov.site(&shell.session.sources);
     AuditFragment::from_observations(vec![obs])
 }
 
@@ -55,6 +57,7 @@ fn synth_external_stage_audit(
     reason = "the one shell-touching finish; each argument is a distinct fact of the settlement"
 )]
 fn finish_external_settlement(
+    prov: &Prov,
     name: &str,
     args: Vec<String>,
     outcome: WaitOutcome,
@@ -66,9 +69,9 @@ fn finish_external_settlement(
 ) -> StageObservation {
     let broke = match outcome.classify(cause) {
         Some(ChildEnd::Cancelled(c)) if sent == Some(c) => None,
-        end => end.map(|end| Break::of_child(name, end, scope, shell)),
+        end => end.map(|end| Break::of_child(name, end, scope).claimed_by(|| prov.clone())),
     };
-    let audit = synth_external_stage_audit(shell, name, args, broke.as_ref());
+    let audit = synth_external_stage_audit(shell, prov, name, args, broke.as_ref());
     let settled = match broke {
         Some(Break::Error(err)) => Err(Break::Error(augment_stage_failure(err, shell, started))),
         Some(stop) => Err(stop),
@@ -87,6 +90,7 @@ pub(super) enum StageEnd {
         stage: ScopeId,
     },
     External {
+        prov: Prov,
         name: String,
         args: Vec<String>,
         outcome: WaitOutcome,
@@ -112,6 +116,7 @@ impl StageEnd {
             Self::Thread { obs, stage } if obs.names(&stage) => obs.forgiven(),
             Self::Thread { obs, .. } => obs,
             Self::External {
+                prov,
                 name,
                 args,
                 outcome,
@@ -129,7 +134,9 @@ impl StageEnd {
                     });
                 }
                 let cause = sent.max(scope.cause().filter(|c| *c != CancelCause::ReaderGone));
-                finish_external_settlement(&name, args, outcome, cause, sent, scope, shell, started)
+                finish_external_settlement(
+                    &prov, &name, args, outcome, cause, sent, scope, shell, started,
+                )
             }
         }
     }

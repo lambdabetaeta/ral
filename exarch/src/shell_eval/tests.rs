@@ -588,11 +588,11 @@ fn decode_surface_round_trips_each_class() {
     assert!(matches!(
         decode_surface(
             &Observation::instant(
-                Some(CallSite {
+                CallSite {
                     script: "run.ral".into(),
                     line: 1,
                     col: 1,
-                }),
+                },
                 Some("alex".into()),
                 Observed::Read(Read {
                     path: "a.rs".into()
@@ -676,7 +676,7 @@ fn a_failed_spawn_wakes_the_model_with_its_failure() {
     let emit = Emitter::new(tx, session.id());
     let _ = session.ral(
         &DurableRoot::default().child(),
-        "let h = spawn \"boom\" { fail [status: 5, message: 'boom'] }",
+        "let h = spawn \"boom\" { fail 'boom' }",
         10,
         &emit,
     );
@@ -835,17 +835,17 @@ fn command_exit_is_the_tool_exit() {
     assert_eq!(r.exit, 3, "the command's true exit code is the tool exit");
 }
 
-/// A raised error's status travels the same way a command's does.
+/// Raised text has failure code one at the tool exit.
 #[test]
-fn raised_error_status_is_the_tool_exit() {
+fn raised_error_has_tool_exit_one() {
     let engine = fresh();
     let r = run_shell_direct(
         &engine,
-        "fail [status: 7, message: 'raised error']",
+        "fail 'raised error'",
         10,
         &crate::record::Emitter::none(),
     );
-    assert_eq!(r.exit, 7, "the raised error's status is the tool exit");
+    assert_eq!(r.exit, 1, "raised text derives tool exit one");
 }
 
 /// The same timeout must tear down a sandbox-confined eval child.  The

@@ -85,7 +85,12 @@ fn unreadable(val: &Value, what: &str, rule: &str) -> Error {
 
 // ── Primitive ops ────────────────────────────────────────────────────────
 
-pub(crate) fn eval_prim(prim: &Prim, env: Env, sig: &Signature) -> Settled<Value> {
+pub(crate) fn eval_prim(
+    prim: &Prim,
+    env: Env,
+    shell: &crate::shell::runtime::Shell,
+) -> Settled<Value> {
+    let sig = &shell.sig;
     Ok(match prim {
         Prim::Binary(op, lhs, rhs) => eval_binary(*op, lhs, rhs, &env, sig)?,
         Prim::Negate(value) => eval_negate(value, &env, sig)?,
@@ -100,7 +105,7 @@ pub(crate) fn eval_prim(prim: &Prim, env: Env, sig: &Signature) -> Settled<Value
         }
         Prim::Update { base, fields } => assemble::eval_update(base, fields, &env, sig)?,
         Prim::List(elems) => assemble::eval_list(elems, &env, sig)?,
-        Prim::Map(entries) => assemble::eval_map(entries, &env, sig)?,
+        Prim::Map(entries) => assemble::eval_map(entries, &env, shell)?,
         Prim::Render(value) => Value::string(render(&form(value, &env, sig)?)?),
         Prim::Concat(parts) => {
             let mut text = String::new();

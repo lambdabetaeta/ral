@@ -130,7 +130,7 @@ pub(crate) fn run(
     };
     match outcome.classify(cause) {
         None => Ok(Value::Unit),
-        Some(end) => Err(match Break::of_child(&cmd_name, end, &shell.scope, shell) {
+        Some(end) => Err(match Break::of_child(&cmd_name, end, &shell.scope) {
             Break::Error(err) => Break::Error(with_denials(err, shell, pids, started)),
             escape @ Break::Escape(_) => escape,
         }),

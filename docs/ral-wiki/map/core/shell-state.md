@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-04
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
@@ -63,14 +63,18 @@ fact data are reached through their owning modules.
   ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]],
   [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
-- `error.rs` — `Error` and `Status` (`Raised(i32) | WorkerStopped(WorkerStop) |
-  Process(CommandFailure)`, one constructor per fact, whoever reports
-  it; `Status::code` delegates to each failure's own `code`).
+- `error.rs` — `Error { reason, prov, hint, witness, rejection, context,
+  unwound }`, with the one `fact::Reason` shared by the error record.
+  `Prov` pairs a failing frame name with a live span or resolved `CallSite`.
+  `Unwound` holds abandoned-tail and saturating discarded-byte facts.
+  `describe` and failure code delegate to `Reason`; hints/context remain
+  report-only ([[decisions/261105_the-error-record|the error record]]).
   `Error::compile` converts a `CompileError` and its `Source` into a catchable
   runtime error carrying its own rejection, without giving `compile` a runtime
   dependency.
   `audit.rs` — the
-  `Audit` collector, over `fact/observation.rs`'s `Observation` / `Observed`
+  `Audit` collector, holding one total `Prov` register, over
+  `fact/observation.rs`'s `Observation` / `Observed`
   and `fact::AuditIo` (captured byte prefixes and totals) — data independent of
   runtime, shared by the trail, the surface rail, `--audit`'s JSON, and the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `first_order.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
   fields private and `Closure::new` its one constructor, which `restrict`s
@@ -147,9 +151,10 @@ checkpoint, since a run never writes it.
   snapshot, the launch role ([[map/core/io-process|io-process]]). These
   genuinely change *within* a run — a redirect frame swaps the sinks — so
   they are taken on **loan** and repaid: `shell::run::IoLoan` swaps a fresh `Io` in
-  at install and restores the previous one on `Drop`, carrying the two `Copy`
+  at install and restores the previous one on `Drop`, carrying the two
   registers the run's frame also owns for its life (`session.root_file` and
-  `local.audit.call_site`) with it, so an unwinding evaluation cannot leave a
+  the total `Prov` register in `local.audit`, entered for a `DisplacedSite`)
+  with it, so an unwinding evaluation cannot leave a
   stale register behind. The loan carries the current cancel scope too.
 - **`scope`** — the cancel scope the computation in focus polls
   (`Shell::poll`), which also genuinely changes within a run: a thread base

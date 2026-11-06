@@ -48,6 +48,6 @@ full in [[related/rows-and-handlers|rows-and-handlers]].
 
 `box`/`unbox` as a selective crossing from dynamic authority into capability
 types. Rejected as a language feature: it contradicts the dynamic-authority
-commitment of [[design/syscalls-are-effects|syscalls-are-effects]]. It remains
+commitment of [[design/exec|exec]]. It remains
 at most a research direction for the exarch boundary
 ([[related/system-c|system-c]]).

@@ -128,16 +128,15 @@ pub(crate) fn with_denials(
     if shell.sandbox_projection().is_none() {
         return err;
     }
-    if let Some(hint) = crate::authority::sandbox::denial_hint(&pids(), since, err.status.exited())
-    {
+    let exited = match err.reason.failure() {
+        Some(&crate::fact::Failure::Exited(n)) => Some(n),
+        _ => None,
+    };
+    if let Some(hint) = crate::authority::sandbox::denial_hint(&pids(), since, exited) {
         return err.append_hint(hint);
     }
     #[cfg(target_os = "macos")]
-    if let Some(hint) = err
-        .status
-        .exited()
-        .and_then(crate::process::limits::failure_hint)
-    {
+    if let Some(hint) = exited.and_then(crate::process::limits::failure_hint) {
         return err.append_hint(hint);
     }
     err
@@ -244,14 +243,66 @@ fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::spawn_error;
-    use crate::shell::runtime::Break;
+    use super::{spawn_error, with_denials};
+    use crate::fact::{Failure, Reason};
+    use crate::shell::runtime::{Break, Error};
 
-    fn message(b: &Break) -> &str {
+    #[test]
+    fn unsandboxed_failures_keep_raw_exits_without_sampling_pids() {
+        let shell = crate::test_helper::core_shell();
+        assert!(shell.sandbox_projection().is_none());
+        for raw in [128, 384, -1, i32::MIN] {
+            let error = with_denials(
+                Error::from_reason(Reason::process("tool", Failure::Exited(raw))),
+                &shell,
+                || panic!("an unsandboxed failure must not sample pids"),
+                std::time::Instant::now(),
+            );
+            assert_eq!(error.reason, Reason::process("tool", Failure::Exited(raw)));
+            assert!(error.hint.is_none());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandboxed_fork_brake_hints_read_only_raw_exited_reasons() {
+        use crate::authority::policy::{Capabilities, FsPolicy};
+
+        let mut shell = crate::test_helper::core_shell();
+        let layer = crate::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy::default()),
+            ..Capabilities::default()
+        });
+        shell.with_layer(layer, |shell| {
+            assert!(shell.sandbox_projection().is_some());
+            for reason in [
+                Reason::process("tool", Failure::Exited(128)),
+                Reason::process("tool", Failure::Exited(384)),
+                Reason::process("tool", Failure::Exited(-1)),
+                Reason::process("tool", Failure::Signaled(128)),
+                Reason::Raised("exit status 128".into()),
+            ] {
+                let expected = match reason.failure() {
+                    Some(&Failure::Exited(raw)) => crate::process::limits::failure_hint(raw),
+                    _ => None,
+                };
+                let error = with_denials(
+                    Error::from_reason(reason.clone()),
+                    shell,
+                    std::collections::HashSet::new,
+                    std::time::Instant::now(),
+                );
+                assert_eq!(error.reason, reason);
+                assert_eq!(error.hint.as_deref(), expected.as_deref());
+            }
+        });
+    }
+
+    fn message(b: &Break) -> std::borrow::Cow<'_, str> {
         let Break::Error(e) = b else {
             panic!("spawn_error yields an Error break")
         };
-        &e.message
+        e.describe()
     }
 
     /// One `ENOENT` means two different things depending on who the launcher

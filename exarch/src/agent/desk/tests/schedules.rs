@@ -19,14 +19,14 @@ fn every_schedule_tag_is_refused_in_the_models_own_vocabulary() {
                 .ask(request)
                 .expect_err("every schedule tag is refused without the grant");
             assert!(
-                err.message.starts_with(&format!("`{verb}` refused:")),
+                err.describe().starts_with(&format!("`{verb}` refused:")),
                 "the refusal must name the tag the model typed, got: {}",
-                err.message
+                err.describe()
             );
             assert!(
-                err.message.contains("--allow-schedule"),
+                err.describe().contains("--allow-schedule"),
                 "must name the grant flag, got: {}",
-                err.message
+                err.describe()
             );
         });
     }
@@ -87,7 +87,11 @@ fn a_duplicate_schedule_is_refused_and_tiers_its_act_row() {
         let err = desk
             .ask(add_req("1s", "nightly", "wake"))
             .expect_err("a duplicate label must be refused");
-        assert!(err.message.contains("nightly"), "got: {}", err.message);
+        assert!(
+            err.describe().contains("nightly"),
+            "got: {}",
+            err.describe()
+        );
         assert_eq!(
             table(desk.ask(Request::Schedules(Schedules::List)).unwrap()).len(),
             1

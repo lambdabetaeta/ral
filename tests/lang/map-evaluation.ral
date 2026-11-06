@@ -8,35 +8,35 @@ to-json $m; echo
 try {
     let _ = [$k: 1, $k: !{mark duplicate-value 2}, ...!{mark later-spread [:, b: 3]}]
     return ()
-} { |e| echo $e[status] $e[message] }
+} { |e| echo !{describe $e} }
 try {
     let _ = [$k: 1, $k: !{mark duplicate-value 2}]
     return ()
-} { |e| echo $e[status] $e[message] }
+} { |e| echo !{describe $e} }
 
 # An operand failure prevents assembly, even with a repeated computed key.
 try {
-    let _ = [$k: 1, $k: !{mark duplicate-value 2}, ...!{fail [status: 7, message: later-spread]}]
+    let _ = [$k: 1, $k: !{mark duplicate-value 2}, ...!{fail later-spread}]
     return ()
-} { |e| echo $e[status] $e[message] }
+} { |e| echo !{describe $e} }
 try {
-    let _ = [$k: 1, $k: !{fail [status: 8, message: duplicate-value]}]
+    let _ = [$k: 1, $k: !{fail duplicate-value}]
     return ()
-} { |e| echo $e[status] $e[message] }
+} { |e| echo !{describe $e} }
 
-# The earliest failing spread, key, or value keeps its status and message.
+# The earliest failing spread, key, or value keeps its raised text.
 try {
-    let _ = [...!{fail [status: 7, message: first-spread]}, "!{mark forbidden a}": 1]
+    let _ = [...!{fail first-spread}, "!{mark forbidden a}": 1]
     return ()
-} { |e| echo $e[status] $e[message] }
+} { |e| echo !{describe $e} }
 try {
-    let _ = ["!{fail [status: 8, message: first-key]}": !{mark forbidden 1}, ...!{fail [status: 9, message: later-spread]}]
+    let _ = ["!{fail first-key}": !{mark forbidden 1}, ...!{fail later-spread}]
     return ()
-} { |e| echo $e[status] $e[message] }
+} { |e| echo !{describe $e} }
 try {
-    let _ = [$k: !{fail [status: 9, message: first-value]}, ...!{mark forbidden [:, a: 2]}]
+    let _ = [$k: !{fail first-value}, ...!{mark forbidden [:, a: 2]}]
     return ()
-} { |e| echo $e[status] $e[message] }
+} { |e| echo !{describe $e} }
 
 # Explicit beats every spread; among spreads the first wins. Iteration is sorted.
 let a = [:, a: 1, b: 10, c: 100]

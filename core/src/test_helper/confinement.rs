@@ -60,14 +60,19 @@ impl Output {
                 ending, captured, ..
             } => (ending, captured),
             RunReport::Static { diagnostics } => {
-                panic!("enforcement probe did not run: {}", diagnostics.render().0)
+                panic!(
+                    "enforcement probe did not run: {}",
+                    diagnostics
+                        .render(&crate::shell::runtime::ExitHints::default())
+                        .0
+                )
             }
         };
         let status = ending.code();
         let captured = captured.expect("an enforcement probe captures its streams");
         let mut stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
         if let End::Err(error) = ending {
-            stderr.push_str(&error.message);
+            stderr.push_str(&error.describe());
         }
         Self {
             stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),

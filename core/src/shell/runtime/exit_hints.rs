@@ -1,5 +1,5 @@
 //! A table from (command basename, exit status) to a short explanation, read
-//! by `Error::from_command_failure`.
+//! while building a runtime diagnosis.
 //!
 //! Finding the file is the host's job; parse the text here and install with
 //! `Shell::set_exit_hints`.
@@ -26,12 +26,12 @@ impl ExitHints {
         Self(table)
     }
 
-    /// Hint for a command's exit status: the command's own entry, else the wildcard.
+    /// Hint for a program's exit status: the program's own entry, else the wildcard.
     ///
     /// Signals never reach here: the caller consults this only for
-    /// `CommandFailure::ExitCode`, so no status is ever a 128+N encoding.
-    pub(crate) fn lookup(&self, cmd: &str, status: i32) -> Option<String> {
-        [crate::path::basename(cmd), "*"]
+    /// `Failure::Exited`, so no status is ever a 128+N encoding.
+    pub(crate) fn lookup(&self, program: &str, status: i32) -> Option<String> {
+        [crate::path::basename(program), "*"]
             .into_iter()
             .find_map(|name| self.0.get(name)?.get(&status))
             .cloned()

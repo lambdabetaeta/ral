@@ -79,7 +79,7 @@ touches the world ([[design/cbpv|cbpv]],
   record of thunks — a value product of `U`s — serves.
 - **The effect interface is fixed.** Levy's calculus is effect-agnostic; ral
   pins the operation signature at the external-command boundary
-  ([[design/syscalls-are-effects|syscalls-are-effects]]), the Plotkin–Power
+  ([[design/exec|exec]]), the Plotkin–Power
   layer over CBPV
   ([[related/handlers-of-algebraic-effects|handlers-of-algebraic-effects]]).
 

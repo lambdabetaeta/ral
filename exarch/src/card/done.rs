@@ -94,7 +94,7 @@ pub fn settled_text(
 mod tests {
     use super::*;
     use ral_core::process::CancelCause;
-    use ral_core::shell::runtime::{ErrorRecord, Status};
+    use ral_core::shell::runtime::{ErrorRecord, Reason};
 
     fn done(outcome: Done) -> FOValue {
         DoneEvent {
@@ -112,10 +112,9 @@ mod tests {
         for outcome in [
             Done::Ok(()),
             Done::Err(ErrorRecord::new(
-                "<runtime>",
-                &Status::Raised(std::num::NonZeroU8::new(2).unwrap()),
-                "boom",
-                None,
+                Reason::Raised("boom".into()),
+                "run".into(),
+                ral_core::test_helper::site(),
             )),
             Done::Panic("kaput".into()),
             Done::Exited(3),
@@ -133,10 +132,9 @@ mod tests {
                 "building",
                 Some(Duration::from_secs(192)),
                 &Done::Err(ErrorRecord::new(
-                    "<runtime>",
-                    &Status::Raised(std::num::NonZeroU8::new(2).unwrap()),
-                    "build failed",
-                    None,
+                    Reason::Raised("build failed".into()),
+                    "run".into(),
+                    ral_core::test_helper::site(),
                 ))
             ),
             "errand #7 (building) finished after 3 mins 12 secs (failed): build failed"

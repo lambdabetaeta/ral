@@ -198,16 +198,15 @@ mod tests {
 
     #[test]
     fn a_completion_notice_names_the_worker_to_await() {
-        use ral_core::shell::runtime::{Done, DoneEvent, ErrorRecord, Status, WorkerId};
+        use ral_core::shell::runtime::{Done, DoneEvent, ErrorRecord, Reason, WorkerId};
         let done = DoneEvent {
             id: WorkerId(7),
             title: "building".into(),
             elapsed_ms: 192_000,
             outcome: Done::Err(ErrorRecord::new(
-                "<runtime>",
-                &Status::Raised(std::num::NonZeroU8::new(7).unwrap()),
-                "build failed",
-                None,
+                Reason::Raised("build failed".into()),
+                "run".into(),
+                ral_core::test_helper::site(),
             )),
         };
         assert_eq!(

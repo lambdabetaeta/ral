@@ -10,6 +10,7 @@ use super::thread::ThreadStage;
 use crate::process::Scope;
 use crate::process::jail::JailCgroup;
 use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
+use crate::shell::runtime::Prov;
 use std::sync::Arc;
 
 pub(super) struct StageHandle {
@@ -26,6 +27,7 @@ pub(super) struct StageHandle {
 /// [`Watch`] holds the wait and posts the outcome.
 pub(super) struct ExternalStage {
     pub(super) watch: Watch,
+    pub(super) prov: Prov,
     /// The shown name, and its arguments as vetted for exec: the stage's
     /// observation spells the same argv a standalone dispatch would.
     pub(super) name: String,
@@ -127,6 +129,7 @@ impl StageHandle {
         let _ = e.watch.reap();
         drop(held);
         StageEnd::External {
+            prov: e.prov,
             name: e.name,
             args: e.args,
             outcome: outcome.enveloped(e.envelope.is_some()),
@@ -155,6 +158,7 @@ impl StageHandle {
         Self::new(
             StageKind::External(ExternalStage {
                 watch: slot.watch(child),
+                prov: crate::shell::runtime::Audit::default().call_site().clone(),
                 name: "test".to_string(),
                 args: Vec::new(),
                 jail: None,
@@ -179,6 +183,7 @@ impl StageHandle {
         Self::new(
             StageKind::External(ExternalStage {
                 watch,
+                prov: crate::shell::runtime::Audit::default().call_site().clone(),
                 name: "fake".to_string(),
                 args: Vec::new(),
                 jail: None,

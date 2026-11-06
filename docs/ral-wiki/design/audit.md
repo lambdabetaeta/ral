@@ -17,15 +17,16 @@ act are one shape apiece rather than seven private ones.
 **The report has two fields, and neither is a second copy of something else.**
 `outcome` is `` `ok `` of the body's value or `` `err `` of *exactly* the error
 record `try` hands its handler — so `try`, `poll`, and `audit` report failure
-in one vocabulary, and a reader that can read one can read all three. `trail`
+in one vocabulary: exactly `[reason, frame, site]`, with a total site and no
+stored status or derived message. A reader that can read one can read all three. `trail`
 is the list of observations. Nothing else: no status field duplicating the
 process exit status the host already owns and `audit` never changes, and no
-hint appended to the message, because a hint is advice for a person and a
+hint in the error record, because a hint is advice for a person and a
 report is data. An ordinary failure settles into `` `err ``; an
 `exit` escape and a stop are not failures and walk past the report entirely
 ([[design/failure|failure]]).
 
-**The kind is the tag.** An observation is an envelope — an optional `site`,
+**The kind is the tag.** An observation is an envelope — a total `site`,
 `start`, `end`, `principal` — around one `what`, a variant over
 `` `command | `write | `read | `grep | `check | `worker | `act ``. There is no
 `kind` string beside it, so there is no second place for the kind to be
@@ -58,7 +59,7 @@ act — and a builtin reaches the world only through one of those, which records
 the effect there, typed as what it is: `edit-hash` lands as the `` `write `` its
 `atomic_write` commits, `spawn` as its `` `worker ``, a `==` comparison as
 nothing, because the pure fragment performs no effect
-([[design/syscalls-are-effects|syscalls-are-effects]]). The inventory of
+([[design/exec|exec]]). The inventory of
 observed effects is the inventory capability enforcement guards —
 `Shell::judge` is asked about the same effects — so a builtin that could change
 the world past both would be a gap in that inventory, not a reason to observe
@@ -169,13 +170,14 @@ What builds up the trail is itself scoped:
   neither the REPL nor exarch's tool call asks: the surface rail already
   hears every observation, and a trail would also *retain* each until the
   run ends;
-- `try` reads nothing. The failing command's name is stamped on the error by
-  the dispatch that failed, so the innermost failing dispatch wins the way the
-  innermost source span does, and `try` costs no more than its own frame. It
-  never had a reason to consult the trail: a name recovered by scanning
-  observations is a guess about which of them was the cause, whereas the
-  dispatch that raised the error *knows*. This also decouples the two — the
-  error record is complete whether or not anyone is collecting;
+- `try` reads nothing. The innermost visible operation claims both name and
+  span with `locate`, and record minting falls back to the run's total
+  provenance register. `frame` can name `index` or `fail`, not just a command.
+  `try` costs no more than its own frame: recovering a name from observations
+  would guess which was the cause. The record is complete whether or not
+  anyone is collecting. Observations read the same total register; with no
+  listeners, `audit_start` returns `None` before observation work
+  ([[decisions/261105_the-error-record|the error record]]);
 - a `grant` has no say. Whenever a trail is open, a capability *denial* is
   recorded as a `` `check `` observation and an allowed check never is: the
   denial is a fact about authority nothing else in the trail attests, while
@@ -199,7 +201,7 @@ in-process guard, which excuses such a target from an *access*
 *mutation*. Every redirect seam already passes through that fan-out, so the rule
 is stated once and no seam can forget it.
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] — an audit trail
+See also [[design/exec|exec]] — an audit trail
 is a trace of the operations performed and the scopes that framed them.
 
 One module owns it all: `core/src/shell/runtime/audit.rs` is the trail (`Audit`, with

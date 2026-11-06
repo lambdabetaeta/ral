@@ -41,7 +41,7 @@ fn external_pipeline_bundled_rg() {
 
 #[test]
 fn external_pipeline_argument_errors_are_not_dropped() {
-    let o = run("/bin/echo !{fail [status: 3, message: argboom]} | cat");
+    let o = run("/bin/echo !{fail argboom} | cat");
     assert_ne!(o.status, 0);
     assert!(o.stderr.contains("argboom"), "stderr: {}", o.stderr);
 }
@@ -1395,7 +1395,7 @@ fn audited_failing_stage_preserves_nested_external_audit() {
     // structured failure.  The parent must extend its audit trail with the
     // nested external before surfacing the stage's error.
     let script = r#"
-printf hi | !{ let _s = !{from-string}; let _x = !{/bin/echo nested-record}; fail [status: 1, message: "stage failed"] }
+printf hi | !{ let _s = !{from-string}; let _x = !{/bin/echo nested-record}; fail "stage failed" }
 "#;
     let o = run_with_timeout(&["--audit"], script, Duration::from_secs(5))
         .expect("audited failing-stage pipeline hung");
@@ -1653,14 +1653,10 @@ fn a_producers_try_cannot_change_its_reader_gone_stop() {
 fn a_reader_gone_stage_runs_its_cleanup_and_the_cleanups_halt_is_the_verdict() {
     let (o, ran) = run_marked(
         "ral_pipe_gone_cleanup_halt",
-        |f| {
-            format!(
-                "!{{ guard {{ yes }} {{ touch {f}; fail [status: 7, message: x] }} }} | head -1"
-            )
-        },
+        |f| format!("!{{ guard {{ yes }} {{ touch {f}; fail x }} }} | head -1"),
         Duration::from_secs(10),
     );
-    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+    assert_eq!(o.status, 1, "stderr: {}", o.stderr);
     assert!(ran, "the cleanup did not run");
 }
 
@@ -1681,11 +1677,11 @@ fn a_nested_reader_gone_stages_cleanup_halt_is_the_verdict() {
     // outer collector forgives nothing it was not handed.
     let o = run_with_timeout(
         &[],
-        "!{ !{ guard { yes } { fail [status: 7, message: x] } } | cat } | head -1",
+        "!{ !{ guard { yes } { fail x } } | cat } | head -1",
         Duration::from_secs(10),
     )
     .expect("nested pipeline hung");
-    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+    assert_eq!(o.status, 1, "stderr: {}", o.stderr);
 }
 
 #[test]
@@ -1717,10 +1713,10 @@ fn a_reader_gone_stages_cleanup_command_runs_to_completion_and_its_halt_is_the_v
     // The cut the shield masks once left it blocked until the 5 s grace.
     let (o, ran, took) = run_marked_timed("ral_pipe_gone_cleanup_command", |f| {
         format!(
-            "!{{ guard {{ /bin/sleep 0.2 }} {{ {PAST_ANY_PIPE}; touch {f}; fail [status: 7, message: x] }} }} | !{{ return () }}"
+            "!{{ guard {{ /bin/sleep 0.2 }} {{ {PAST_ANY_PIPE}; touch {f}; fail x }} }} | !{{ return () }}"
         )
     });
-    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+    assert_eq!(o.status, 1, "stderr: {}", o.stderr);
     assert!(ran, "the cleanup's command never finished");
     assert!(
         took < Duration::from_secs(3),
@@ -1777,12 +1773,8 @@ fn a_rolled_back_stages_cleanup_does_not_block_on_the_edge_its_reader_never_took
 
 #[test]
 fn an_exit_in_a_stage_outranks_a_sibling_error() {
-    let o = run_with_timeout(
-        &[],
-        "!{ exit 3 } | !{ fail [status: 7, message: x] }",
-        Duration::from_secs(10),
-    )
-    .expect("exit-vs-error pipeline hung");
+    let o = run_with_timeout(&[], "!{ exit 3 } | !{ fail x }", Duration::from_secs(10))
+        .expect("exit-vs-error pipeline hung");
     assert_eq!(o.status, 3, "stderr: {}", o.stderr);
 }
 
@@ -1814,9 +1806,9 @@ fn a_nested_reader_gone_stages_sibling_error_is_the_verdict() {
     // ranks under the failure beside it.
     let o = run_with_timeout(
         &[],
-        "!{ !{ fail [status: 7, message: x] } | !{ yes } } | head -1",
+        "!{ !{ fail x } | !{ yes } } | head -1",
         Duration::from_secs(10),
     )
     .expect("nested pipeline hung");
-    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+    assert_eq!(o.status, 1, "stderr: {}", o.stderr);
 }

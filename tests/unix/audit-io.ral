@@ -23,7 +23,7 @@ echo !{io-facts !{audit {
     to-string z >~ "$io-dir/s.txt"
 }}}
 echo !{io-facts !{audit {
-    try { !{ fail [status: 1, message: 'boom'] } > "$io-dir/never.txt" } { |_| return () }
+    try { !{ fail 'boom' } > "$io-dir/never.txt" } { |_| return () }
     try { to-string x > "$io-dir/no-such-dir/out.txt" } { |_| return () }
 }}}
 echo !{exists "$io-dir/never.txt"}
@@ -32,7 +32,7 @@ echo !{exists "$io-dir/never.txt"}
 let write-cols = { |report|
     fold { |acc o|
         case $o[what] [
-            `write:   { |_| case $o[site] [`some: { |s| return [...$acc, $s[col]] }, `none: { |_| return $acc }] },
+            `write:   { |_| return [...$acc, $o[site][col]] },
             `read:    { |_| return $acc },
             `check:   { |_| return $acc },
             `command: { |_| return $acc },

@@ -398,7 +398,7 @@ mod tests {
         let display = |what| {
             observation_display_card(
                 &Observation {
-                    site: None,
+                    site: ral_core::test_helper::site(),
                     start: 0,
                     end: 0,
                     principal: None,

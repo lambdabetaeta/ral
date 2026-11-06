@@ -139,7 +139,7 @@ fn live_surfaces_record_their_seam_twins() {
         let applier = SurfaceApplier::new(d.loan.get().unwrap().log.record_emitter());
 
         let read = ral_core::shell::runtime::Observation::instant(
-            None,
+            ral_core::test_helper::site(),
             None,
             ral_core::shell::runtime::Observed::Read(ral_core::fact::Read {
                 path: "a.rs".into(),

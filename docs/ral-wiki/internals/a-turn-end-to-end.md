@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
-verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
@@ -106,18 +106,19 @@ module's framed scaffold:
   frame; the surface has no liveness role, so a clone of it can never define
   run completion. What genuinely changes within the run is taken on loan: the
   byte streams — the `Io` `build_run` seeds from the ambient session — and the
-  two `Copy` registers the run's frame owns for its life, the root-source
-  register `session.root_file` and the dispatch register
-  `local.audit.call_site`.
+  two registers the run's frame owns for its life, the root-source
+  register `session.root_file` and the call-site register in
+  `local.audit`.
 - `run_framed` borrows the mooring, installs the run's `Io` through an
   `IoLoan`, and evaluates. The loan is RAII over that one swap: it moves the
   new streams onto `shell.io` and restores the previous ones on `Drop`, so
   teardown survives a caught worker panic. The mooring needs no guard — it
   never moved, so an outer run's is back the instant this stack frame ends,
   and the `NurseryGuard` beside it empties the nursery on the unwinding path
-  as surely as on the clean one. The root context is installed — for a
-  source run only, a hook having no text to register — and the body runs
-  under the session's own stack. `audit_deputy_prefixes` reports its flagged
+  as surely as on the clean one. A source run registers its root
+  (`register_root`) and installs a base `Prov` naming its whole-program span;
+  a hook registers no text but installs its resolved name and origin at 1:1. Workers inherit
+  the parent's register at spawn. The body runs under the session's stack. `audit_deputy_prefixes` reports its flagged
   prefixes to the run's trail before evaluation — `run_phrases(&top.phrases,
   shell.env.clone(), Mode::Session, mooring, shell)` for the source arm, the
   in-frame `shell::evaluator::apply` of the resolved hook for the hook arm
@@ -134,11 +135,14 @@ module's framed scaffold:
   that landed after the body's last poll — a key a terminal loan heard back
   and struck on the node included — is not lost; a stop is an escape no `try`
   absorbs anyway. It emits ready-boundary notices while the run frame and
-  sinks are still installed. Only then does the IO guard drop.
+  sinks are still installed. Before the IO guard restores the caller, any
+  unlocated error is completed from the run's own total register.
 - Back in `run_built`, `End::settled` folds the machine result into
   `Ending<Value, Error, Stop>`: `Ok`, `Err`, `Exited` or `Stopped`.
   A wall is a `TimedOut` stop, not a separate flag.
-  `RunReport::Ran { ending, compact, captured, trail }` carries it home; `trail`
+  `RunReport::Ran { ending, base, compact, captured, trail }` carries it home;
+  `base`, the run's origin at 1:1 that `run_under` resolves once, sites a
+  data-boundary refusal after the register is restored; `trail`
   starts `Vec::new()` here — `run_built` has no view of the dispatch's own
   scope, only of what a body opened and closed on its own account.
 - One level up, at `Shell::enter` — the durability wrapper all three run doors
@@ -151,11 +155,15 @@ module's framed scaffold:
   observations land in `RunReport::Ran.trail`; a caught panic's are drained
   and discarded — the panicked dispatch reports `Ran` with `End::Panic`,
   status 101, no compact root, capture or trail.
-  `RunReport::into_report` calls `End::render` against the shell's sources;
+  `RunReport::into_report` calls `End::render` against the shell's sources,
+  borrowing its actual session exit-hints table;
   errors, stops and panics share the `Diagnosis` renderer. The wire alias is
   `Ending<FOValue, ErrorRecord, CancelCause>`: a value becomes first-order data,
-  an error its `ErrorRecord`, and a `Stop` its cause. A non-data value
-  becomes `Err`, status 1, rendered like any spanless error.
+  an error its closed `[reason, frame, site]` record, and a `Stop` its cause.
+  A non-data value becomes `Err`, code 1, completed with the retained base
+  even after the caller's frame is restored. `Reason` is shared by runtime
+  error and record; code and description are projections
+  ([[decisions/261105_the-error-record|the error record]]).
   `Report::Ran(Ran { ending, rendered, single_command, captured, trail })` keeps
   run context outside the cases; `Report::code()` is the host's `u8` status.
   A `Static` renders through `StaticDiagnostics::render` (2 parse, 1 type);

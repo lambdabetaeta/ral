@@ -53,8 +53,8 @@ let hs = !{spawn { return 7 }}
 let settled = { |h| case !{poll $h} [
     `ready: { |s| return $s },
     `running: { |_| sleep 0.01; settled $h },
-    `stopping: { |_| fail [status: 1, message: "unexpected stopping"] },
-    `consumed: { |_| fail [status: 1, message: "unexpected consumed"] }
+    `stopping: { |_| fail "unexpected stopping" },
+    `consumed: { |_| fail "unexpected consumed" }
 ] }
 let sampled = settled $hs
 echo !{case $sampled[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }]}

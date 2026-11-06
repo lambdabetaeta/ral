@@ -27,13 +27,13 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
          The result is `[outcome: `ok value | `err error, trail: observations]`. The trail records commands, reads, writes, workers, host acts, and denied capability checks performed by the body. Each command observation keeps `argv`, `status`, `stdout`, `stderr`, and total byte counts; each stream retains at most 1 MiB.\n\n\
          Use `succeeded $report` for a Boolean and `commands $report` for just the command observations. Inspect a failure with `case $report[outcome] [...]`. Output still flows to the surrounding pipe or redirect while it is recorded.\n\n\
          An uncaught failure stops the body; wrap individual calls in `attempt` when later calls should still run.\n\n\
-         Example:\n  let report = audit { grep -c ERROR app.log }\n  case $report[outcome] [\n    `ok: { |_| bytes-to-string !{commands $report}[0][stdout] },\n    `err: { |e|\n      if $[$e[reason] == `exited 1] { 'no matches' } else { fail $e }\n    }\n  ]",
+         Example:\n  let report = audit { grep -c ERROR app.log }\n  case $report[outcome] [\n    `ok: { |_| bytes-to-string !{commands $report}[0][stdout] },\n    `err: { |e|\n      if $[$e[reason] == `process [program: grep, failure: `exited 1]] { 'no matches' } else { raise $e }\n    }\n  ]",
     ),
     (
         "case",
         "case <variant> [`tag: { |payload| body }, ...]  — run the arm matching a variant's tag.\n\n\
          Write every arm at the `case`; the checker uses that fixed set to prove the match exhaustive. Each arm is a one-argument block, or a name holding one. A tag without a payload passes `()`. All arms must return compatible results.\n\n\
-         Example:\n  case $result [\n    `ok:  { |value| return $value },\n    `err: { |error| fail $error },\n  ]",
+         Example:\n  case $result [\n    `ok:  { |value| return $value },\n    `err: { |error| raise $error },\n  ]",
     ),
     (
         "else",
@@ -106,8 +106,8 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
     (
         "try",
         "try { body } { |error| handler }  — recover from a failure raised while running body.\n\n\
-         On success, return the body's value without running the handler. On failure, call the handler with a record with fields `cmd`, `status`, `reason`, `message`, and `site`; branch on `reason`, and use `fail $error` to re-raise. `site` is `some` carrying a record with fields `script`, `line`, and `col`, or `none` when no source location is available. Body and handler must return compatible results. Output is not captured: use `audit` when stdout, stderr, or the full trail is needed. Exits and internal control escapes bypass the handler.\n\n\
-         Example:\n  try { from-string < config.txt } { |error|\n    warn \"config: $error[message]\"\n    return #'{}'#\n  }",
+         On success, return the body's value without running the handler. On failure, call the handler with a record with fields `reason`, `frame`, and `site`; branch on `reason`, whose `process` arm names the failed `program` and its `failure`; use `raise $e` to re-raise, and use `describe $e` for the text. `site` is a record with fields `script`, `line`, and `col`. Body and handler must return compatible results. Output is not captured: use `audit` when stdout, stderr, or the full trail is needed. Exits and internal control escapes bypass the handler.\n\n\
+         Example:\n  try { from-string < config.txt } { |error|\n    warn \"config: !{describe $error}\"\n    return #'{}'#\n  }",
     ),
     (
         "within",

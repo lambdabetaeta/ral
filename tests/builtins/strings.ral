@@ -15,10 +15,10 @@ echo !{re-replace world al 'hello world'}
 echo !{re-replace-all a b 'a-a-a'}
 
 # re-replace errors on an ambiguous (>1 match) pattern
-try { re-replace a b 'a-a' } { |e| echo "$e[cmd] refused"; return "" }
+try { re-replace a b 'a-a' } { |e| echo "$e[frame] refused"; return "" }
 
 # re-replace errors on a missing pattern
-try { re-replace xyz q 'hello' } { |e| echo "$e[cmd] refused"; return "" }
+try { re-replace xyz q 'hello' } { |e| echo "$e[frame] refused"; return "" }
 
 # re-split / intercalate
 let parts = re-split '/' '/usr/local/bin'

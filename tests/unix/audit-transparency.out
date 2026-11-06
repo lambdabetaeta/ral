@@ -22,7 +22,7 @@ true
 a
 b
 false
-3 no index
+fail no index
 outer
 inner
 true

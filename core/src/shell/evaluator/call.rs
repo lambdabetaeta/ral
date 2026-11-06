@@ -16,10 +16,11 @@ pub(crate) fn run_native(
     entry: &BuiltinEntry,
     args: &[Value],
     site: Option<&Arc<crate::ty::Site>>,
+    span: Option<crate::source::Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    entry.framed(shell, |shell, frame| {
+    entry.framed(span, shell, |shell, frame| {
         entry.call_body(frame, args, site, mooring, shell)
     })
 }
@@ -31,6 +32,6 @@ impl BuiltinEntry {
     /// # Errors
     /// Propagates a `Break` raised by the body.
     pub fn run(&self, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        run_native(self, args, None, mooring, shell)
+        run_native(self, args, None, None, mooring, shell)
     }
 }

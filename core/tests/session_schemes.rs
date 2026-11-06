@@ -514,7 +514,7 @@ fn a_sized_kind_does_not_change_the_key_forms_read_rule() {
 /// The refusal a run ended in, as text.
 fn refusal(result: Settled<Value>) -> String {
     match result {
-        Err(ral_core::shell::runtime::Break::Error(e)) => e.message,
+        Err(ral_core::shell::runtime::Break::Error(e)) => e.describe().into_owned(),
         other => panic!("the run must be refused, got {other:?}"),
     }
 }

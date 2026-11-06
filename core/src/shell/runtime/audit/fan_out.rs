@@ -17,9 +17,9 @@ use crate::source::CallSite;
 
 /// Where a command was called from and when it began: the two halves of an
 /// observation's stamp, paired so the dispatch site carries one local.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct AuditStart {
-    pub site: Option<CallSite>,
+    pub site: CallSite,
     pub(crate) time: i64,
 }
 
@@ -67,18 +67,12 @@ impl Shell {
         }
     }
 
-    /// Open one command's audit stamp.  With nobody listening the stamp is
-    /// empty and costs neither the `script` clone nor the `epoch_us` syscall;
-    /// should the command's own body then open a trail, the observation
-    /// carries that empty stamp rather than a late one.
-    pub(crate) fn audit_start(&self, mooring: &Mooring) -> AuditStart {
-        if !self.listening(mooring) {
-            return AuditStart::default();
-        }
-        AuditStart {
+    /// With nobody listening, no stamp, clone, or clock read.
+    pub(crate) fn audit_start(&self, mooring: &Mooring) -> Option<AuditStart> {
+        self.listening(mooring).then(|| AuditStart {
             site: self.call_site(),
             time: epoch_us(),
-        }
+        })
     }
 
     /// Record a check worth reporting: a refusal, or a deputy admitted but

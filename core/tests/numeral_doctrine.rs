@@ -48,7 +48,9 @@ fn printed(src: &str) -> String {
         }
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
-            diagnostics.render().0
+            diagnostics
+                .render(&ral_core::shell::runtime::ExitHints::default())
+                .0
         ),
     }
 }

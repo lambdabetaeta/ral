@@ -25,7 +25,7 @@ use super::linux::landlock::Landlocked;
 use super::{ExecProjection, SandboxProjection};
 use crate::Role;
 use crate::authority::policy::{Admitted, Program, Subject, Withheld};
-use crate::fact::FailureCode as _;
+use crate::fact::{Failure, FailureCode as _};
 use crate::path::{Depth, LeafMode, LexicalPath, shown, walk};
 use crate::process::SpawnFailure;
 use crate::site::{Silent, site};
@@ -311,7 +311,9 @@ fn exec(
         "ral",
         &format!("{}: {err}{}", shown(real), hint.unwrap_or_default()),
     );
-    SpawnFailure::from(&err).failure_code().get()
+    Failure::from_spawn(&shown(real), SpawnFailure::from(&err))
+        .failure_code()
+        .get()
 }
 
 impl Warrant {

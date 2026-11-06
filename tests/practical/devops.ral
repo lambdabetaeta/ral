@@ -22,7 +22,7 @@ for $files { |f|
 try {
     cat /nonexistent/file | from-string
 } { |err|
-    echo "caught error with status $err[status]"; return ""
+    echo 'caught error with reason' $err[reason]; return ""
 }
 
 # Cleanup with explicit rm

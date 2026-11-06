@@ -3,7 +3,7 @@ out
 4
 await: this worker's result was already claimed
 partial
-status=7
+reason= `raised boom
 [hi]
 polled
 3

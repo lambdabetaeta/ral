@@ -8,7 +8,6 @@ use super::value::Value;
 use crate::process::{DurableRoot, ScopeNode};
 use crate::sync::LockExt as _;
 use std::collections::HashMap;
-use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,10 +40,6 @@ pub type SurfaceSink = Arc<dyn EventSink>;
 /// their own copy: a run must not be able to tell which host refused it by the
 /// wording.
 pub const NO_DESK: &str = "this host answers no enquiries";
-
-/// The status that refusal carries. Not a failure of the request — the host
-/// simply has no desk — but a raise all the same, since there is no answer.
-pub const NO_DESK_STATUS: NonZeroU8 = NonZeroU8::MIN;
 
 /// The hint that refusal carries, spelled once alongside it: host-independent,
 /// since the wording must not reveal which host refused.

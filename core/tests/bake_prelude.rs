@@ -183,10 +183,7 @@ fn builtin_schemes_carry_their_grades() {
         shown("fold-lines"),
         "∀α ν ξ. {α → String → Command[ν] α} → α → Command[ξ] α"
     );
-    assert_eq!(
-        shown("fail"),
-        "∀α ν ρ. [status: Integer, message: String, ...ρ] → Command[ν] α"
-    );
+    assert_eq!(shown("fail"), "∀α ν. String → Command[ν] α");
     // No printed quantifier for a grade paired with a non-unit type.
     assert_eq!(shown("cd"), "∀ν. String → Command[ν] Unit");
     assert_eq!(shown("length"), "∀α:sized. α → Returns Integer");

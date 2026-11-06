@@ -6,7 +6,7 @@ use super::super::command::Head;
 use super::super::dispatch;
 use super::StageEval;
 use crate::ir::{Comp, CompKind};
-use crate::shell::runtime::{Env, Mooring, Settled, Shell, TerminalAccess, Value};
+use crate::shell::runtime::{Break, Env, Mooring, Settled, Shell, TerminalAccess, Value};
 use crate::source::Span;
 use std::sync::Arc;
 
@@ -46,19 +46,22 @@ pub(super) struct StageSpec {
 /// capture its accounting.  Admission is `Head::admit`'s at launch, so a head
 /// the grant denies still routes through here and refuses as an ordinary error.
 fn resolve_launch(stage: &Comp, env: &Env, eval: StageEval, shell: &Shell) -> Settled<StageLaunch> {
-    let CompKind::Exec(e) = &stage.item else {
+    let CompKind::Exec(exec) = &stage.item else {
         return Ok(StageLaunch::Thread);
     };
-    let dispatch::Resolution::External(head) = dispatch::resolve_command_word(&e.head, env, shell)
+    let dispatch::Resolution::External(head) =
+        dispatch::resolve_command_word(&exec.head, env, shell)
     else {
         return Ok(StageLaunch::Thread);
     };
-    if !e.redirects.is_empty() || shell.local.audit.captures_bytes() {
+    if !exec.redirects.is_empty() || shell.local.audit.captures_bytes() {
         return Ok(StageLaunch::Thread);
     }
     Ok(StageLaunch::Direct {
         head,
-        args: (eval.close_argv)(&e.argv, env, &shell.sig)?,
+        args: (eval.close_argv)(&exec.argv, env, &shell.sig).map_err(|error| {
+            Break::from(error).locate(&exec.head.name().written(), stage.span, shell)
+        })?,
     })
 }
 

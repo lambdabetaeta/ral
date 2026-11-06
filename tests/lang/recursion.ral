@@ -35,7 +35,7 @@ let probe-handled = { |n| if $[$n <= 0] { return !{within-probe} } else { probe-
 echo !{within [handlers: [within-probe: { |args| to-string pong }]] { probe-handled 3 }}
 
 # Deep tail recursion stays flat through a `?` chain, a case arm, and a bind continuation
-let no = { |x| fail [status: 1, message: "x"] }
+let no = { |x| fail "x" }
 let chained = { |n| if $[$n <= 0] { return $n } else { no $n ? chained $[$n - 1] } }
 echo !{chained 150000}
 let cased = { |n| if $[$n <= 0] { return 0 } else { case `go $[$n - 1] [`go: { |m| cased $m }] } }

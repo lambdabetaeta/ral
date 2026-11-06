@@ -135,7 +135,7 @@ fn enquiry_answers_certify_both_success_and_recorded_error_exits() {
             })
             .unwrap();
         let error = desk.ask(Request::Agents(Agents::List)).unwrap_err();
-        assert!(error.message.contains("answer sync failed"));
+        assert!(error.describe().contains("answer sync failed"));
     });
 }
 
@@ -343,7 +343,7 @@ fn unknown_class_answers_the_extension_error() {
                 payload: None,
             })
             .expect_err("an unrecognised class must not answer Ok");
-        assert_eq!(err.message, "unrecognised enquiry class `no-such-class`");
+        assert_eq!(err.describe(), "unrecognised enquiry class `no-such-class`");
     });
 }
 
@@ -357,11 +357,11 @@ fn unknown_tag_answers_the_extension_error_too() {
                 .handle(&family_req(class, "no-such-tag", None))
                 .expect_err("an unrecognised tag must not answer Ok");
             assert!(
-                err.message.starts_with(&format!(
+                err.describe().starts_with(&format!(
                     "unrecognised tag in `` exarch-{class} `no-such-tag ``: "
                 )),
                 "got: {}",
-                err.message
+                err.describe()
             );
         });
     }
@@ -375,9 +375,9 @@ fn non_variant_request_errors_didactically() {
             .handle(&FOValue::Unit)
             .expect_err("a non-variant request must not answer Ok");
         assert!(
-            err.message.contains("must be a variant"),
+            err.describe().contains("must be a variant"),
             "error must name the expected shape, got: {}",
-            err.message
+            err.describe()
         );
     });
 }
@@ -522,6 +522,5 @@ fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
     let error = host
         .enquire(Request::Agents(Agents::List).encode())
         .unwrap_err();
-    assert_eq!(error.status, EnquiryError::no_desk().status);
-    assert_eq!(error.message, EnquiryError::no_desk().message);
+    assert_eq!(error, EnquiryError::no_desk());
 }

@@ -199,10 +199,7 @@ mod tests {
 
     #[test]
     fn failing_prompt_thunk_falls_back_to_default() {
-        assert_eq!(
-            render_src("{ fail [status: 1, message: 'boom'] }"),
-            DEFAULT_PROMPT
-        );
+        assert_eq!(render_src("{ fail 'boom' }"), DEFAULT_PROMPT);
     }
 
     /// A prompt whose value cannot cross falls back rather than rendering it.

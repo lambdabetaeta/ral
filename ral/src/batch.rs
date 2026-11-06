@@ -252,7 +252,7 @@ fn halted(halt: Halt, origin: &SourceOrigin, source: &str) -> ExitCode {
         Err(e) => {
             let (rendered, status) =
                 StaticDiagnostics::Compile(e.reject(Source::from_text(origin.clone(), source)))
-                    .render();
+                    .render(&ral_core::shell::runtime::ExitHints::default());
             err!("{rendered}");
             ExitCode::from(status.get())
         }

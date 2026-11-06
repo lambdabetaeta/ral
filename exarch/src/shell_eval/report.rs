@@ -10,7 +10,7 @@
 
 use super::clip::clip;
 use super::{ToolResult, ral_value_to_text};
-use ral_core::fact::{ExitCode as _, Reason};
+use ral_core::fact::{ExitCode as _, Failure};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::WorkerRow;
 use ral_core::protocol::{Ending, Ran};
@@ -94,7 +94,7 @@ fn render(
     }
     out.push_str(rendered);
     match ending {
-        Ending::Err(record) if matches!(record.reason(), Reason::Exited(_)) => {
+        Ending::Err(record) if matches!(record.reason().failure(), Some(Failure::Exited(_))) => {
             out.push_str(&exit_tip(*single_command));
         }
         Ending::Stopped(CancelCause::TimedOut) => out.push_str(&timeout_tip(timeout_secs)),

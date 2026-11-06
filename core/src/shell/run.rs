@@ -19,10 +19,10 @@ use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source};
 use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
-    Break, DeferredSink, Desk, End, Error, Fork, Mooring, Notice, NurseryGuard, Observation,
-    Settled, Shell, SurfaceSink, TrailScope, Value, final_poll,
+    Break, DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
+    Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, Value, final_poll,
 };
-use crate::source::{FileId, Span};
+use crate::source::FileId;
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
@@ -41,17 +41,17 @@ pub enum StaticDiagnostics {
 
 impl StaticDiagnostics {
     /// The run drawn whole, with the exit status it ends on.
-    pub fn render(&self) -> (String, NonZeroU8) {
+    pub fn render(&self, hints: &crate::shell::runtime::ExitHints) -> (String, NonZeroU8) {
         match self {
             Self::Compile(rejection) => (rejection.render(), rejection.status),
-            Self::Host(e) => spanless(e),
+            Self::Host(e) => spanless(e, hints),
         }
     }
 }
 
 /// A host-level error as the one-liner a host prints, and the status it exits on.
-fn spanless(e: &Error) -> (String, NonZeroU8) {
-    (e.render_spanless(), e.failure_code())
+fn spanless(e: &Error, hints: &crate::shell::runtime::ExitHints) -> (String, NonZeroU8) {
+    (e.render_spanless(hints), e.failure_code())
 }
 
 // ── The run entry: one synchronous, runtime-agnostic host entry ──────────────
@@ -101,6 +101,8 @@ pub enum RunReport {
     Static { diagnostics: StaticDiagnostics },
     Ran {
         ending: End,
+        /// The run's origin at 1:1, siting the wire's data-boundary refusal.
+        base: Prov,
         compact: Option<FileId>,
         captured: Option<Captured>,
         /// This dispatch's own trail, filled in by [`Shell::run_under`] once
@@ -122,7 +124,9 @@ impl RunReport {
             Self::Ran { ending, .. } => ending,
             Self::Static { diagnostics } => panic!(
                 "the run must reach evaluation, but was refused:\n{}",
-                diagnostics.render().0
+                diagnostics
+                    .render(&crate::shell::runtime::ExitHints::default())
+                    .0
             ),
         }
     }
@@ -170,10 +174,12 @@ impl Shell {
         // walk is paid once per name.
         crate::path::forget_located_commands();
         let checkpoint = (self.env.clone(), self.context.clone());
+        let base = resolved_base(&req.run);
         let scope: Option<TrailScope> = req.run.trail.map(|policy| self.local.audit.open(policy));
 
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(under, req)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.dispatch(under, req, &base)
+        }));
 
         let trail = scope.map(|scope| self.local.audit.close(scope));
 
@@ -188,6 +194,7 @@ impl Shell {
                 (self.env, self.context) = checkpoint;
                 RunReport::Ran {
                     ending: End::Panic(crate::shell::runtime::panic_text(payload.as_ref())),
+                    base,
                     compact: None,
                     captured: None,
                     trail: Vec::new(),
@@ -198,7 +205,7 @@ impl Shell {
 
     /// Resolve the run's [`Program`] and hand it to the framed scaffold, with
     /// this run's foreground frame minted under `under`.
-    fn dispatch(&mut self, under: &Scope, mut req: RunRequest) -> RunReport {
+    fn dispatch(&mut self, under: &Scope, mut req: RunRequest, base: &Prov) -> RunReport {
         // Armed *before* compiling, so the limit bounds compile and typecheck
         // too: `compile_run`'s `process::clear` touches only the signal
         // escalation count, never the reaper. The guard disarms on drop, so
@@ -231,7 +238,7 @@ impl Shell {
                     self.local.bindings.renew(top.referenced_names());
                 }
 
-                self.run_built(req, foreground, wall, compact, |m, s| {
+                self.run_built(req, foreground, wall, compact, base, |m, s| {
                     crate::shell::evaluator::readmit(&top, s)?;
                     crate::shell::evaluator::run_phrases(
                         &top.phrases,
@@ -275,9 +282,9 @@ impl Shell {
                 if hook.policy.aside {
                     let mut aside = self.join_session();
                     aside.io = build_run(self, None, Source::Empty);
-                    return aside.run_built(req, foreground, wall, None, body);
+                    return aside.run_built(req, foreground, wall, None, base, body);
                 }
-                self.run_built(req, foreground, wall, None, body)
+                self.run_built(req, foreground, wall, None, base, body)
             }
         }
     }
@@ -295,6 +302,7 @@ impl Shell {
         foreground: ScopeNode,
         wall: Option<Deadline>,
         compact: Option<FileId>,
+        base: &Prov,
         body: impl FnOnce(&Mooring, &mut Self) -> Settled<Value>,
     ) -> RunReport {
         let RunRequest {
@@ -329,10 +337,11 @@ impl Shell {
             terminal_access,
         };
         let next = build_run(self, capture.as_ref(), stdin);
-        let result = run_framed(&mooring, self, next, &run, wall, body);
+        let result = run_framed(&mooring, self, next, &run, wall, base, body);
 
         RunReport::Ran {
             ending: End::settled(result),
+            base: base.clone(),
             compact,
             captured: capture.map(Capture::finish),
             // Filled in by `enter`, which holds this dispatch's scope.
@@ -344,7 +353,7 @@ impl Shell {
 // ── The spine behind the entry: compile, build, install, classify ────────────
 
 /// Holds what a run takes on loan from the shell — the byte streams, the
-/// current scope, `session.root_file`, `local.audit.call_site` — and restores it on `Drop`, so
+/// current scope, `session.root_file`, the call-site register — and restores it on `Drop`, so
 /// an unwinding run leaves nothing stale on the persistent `Shell`. Everything
 /// else a run installs lives on the [`Mooring`], which was never on the shell
 /// and so needs no restoring.
@@ -353,17 +362,22 @@ struct IoLoan<'s> {
     saved: Io,
     saved_scope: Scope,
     saved_root: Option<FileId>,
-    saved_site: Option<Span>,
+    /// `Some` until `Drop` restores it.
+    saved_site: Option<DisplacedSite>,
 }
 
 impl<'s> IoLoan<'s> {
-    /// The run starts with the registers cleared, not inherited: a fresh run
-    /// has no call site and no root file until it registers one.
-    fn install(shell: &'s mut Shell, next: Io, scope: Scope) -> Self {
+    fn install(
+        shell: &'s mut Shell,
+        next: Io,
+        scope: Scope,
+        root: Option<FileId>,
+        base: Prov,
+    ) -> Self {
         let saved = std::mem::replace(&mut shell.io, next);
         let saved_scope = std::mem::replace(&mut shell.scope, scope);
-        let saved_root = shell.session.root_file.take();
-        let saved_site = shell.local.audit.call_site.take();
+        let saved_root = std::mem::replace(&mut shell.session.root_file, root);
+        let saved_site = Some(shell.local.audit.enter_site(base));
         Self {
             shell,
             saved,
@@ -381,7 +395,9 @@ impl Drop for IoLoan<'_> {
         std::mem::swap(&mut self.shell.io, &mut self.saved);
         std::mem::swap(&mut self.shell.scope, &mut self.saved_scope);
         self.shell.session.root_file = self.saved_root;
-        self.shell.local.audit.call_site = self.saved_site;
+        if let Some(site) = self.saved_site.take() {
+            self.shell.local.audit.restore_site(site);
+        }
     }
 }
 
@@ -435,9 +451,9 @@ impl Capture {
 /// consumed, and it cannot be read back later: [`IoLoan`] restores
 /// `session.root_file` on drop. The id is *peeked* before compiling so the
 /// program's spans carry this run's file identity, while
-/// [`Shell::install_root_context`] registers for real from [`run_framed`], once
-/// a frame exists to install into — sound only because nothing in between
-/// registers a source and the registry never shrinks.
+/// [`Shell::register_root`] registers for real from [`run_framed`] — sound
+/// only because nothing in between registers a source and the registry never
+/// shrinks.
 pub(crate) fn compile_run(
     shell: &Shell,
     src: &str,
@@ -478,6 +494,21 @@ pub(crate) fn compile_run(
     Ok((top, compact))
 }
 
+/// A run's root register: its origin at 1:1.
+fn resolved_base(run: &Run) -> Prov {
+    Prov::Resolved(Box::new((
+        match &run.program {
+            Program::Source(_) => run.origin.to_string(),
+            Program::Hook { name, .. } => name.fault_label(),
+        },
+        crate::source::CallSite {
+            script: run.origin.to_string().into(),
+            line: 1,
+            col: 1,
+        },
+    )))
+}
+
 /// Install the built run state, run `body`,
 /// and tear the frame down. Both program arms settle to one [`Settled<Value>`],
 /// so this spine is shared verbatim; the caller keeps the mooring, the limits
@@ -488,20 +519,22 @@ pub(crate) fn run_framed(
     next: Io,
     run: &Run,
     wall: Option<Deadline>,
+    base: &Prov,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> Settled<Value> {
-    let guard = IoLoan::install(shell, next, Scope::clone(&mooring.home));
-    let shell = &mut *guard.shell;
     // Only a source run registers: a hook's spans point into the file the hook
     // was defined in, so an entry for its absent text would name nothing and
     // never be reclaimed — the registry is append-only for the session's life.
-    let boundary = match &run.program {
+    let (root, site) = match &run.program {
         Program::Source(src) => {
-            shell.install_root_context(&run.origin, src);
-            true
+            let (file, site) = shell.register_root(&run.origin, src);
+            (Some(file), site)
         }
-        Program::Hook { .. } => false,
+        Program::Hook { .. } => (None, base.clone()),
     };
+    let boundary = root.is_some();
+    let guard = IoLoan::install(shell, next, Scope::clone(&mooring.home), root, site);
+    let shell = &mut *guard.shell;
 
     // A trail opened by this run reports the deputy prefixes of the stack it runs under.
     shell.audit_deputy_prefixes();
@@ -518,7 +551,8 @@ pub(crate) fn run_framed(
     if let Some(claimed) = wall.and_then(Deadline::disarm) {
         claimed.wait();
     }
-    let result = final_poll(result, &mooring.home);
+    let result = final_poll(result, &mooring.home)
+        .map_err(|b| b.claimed_by(|| shell.local.audit.call_site().clone()));
 
     // Ready-boundary housekeeping — reap notices as `` `notice `` surface
     // classes, the large-binding warning onto stderr — must go out while this

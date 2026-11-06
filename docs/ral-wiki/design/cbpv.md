@@ -115,7 +115,7 @@ spawned block shares nothing mutable.
   computed once, where a node is built, and inspecting a literal shares its
   ρ rather than recomputing; only computations cost O(data).
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] (commands are the effect half this splits off),
+See also [[design/exec|exec]] (commands are the effect half this splits off),
 [[design/scoping|scoping]], [[design/control-operators|control-operators]],
 [[invariants/fixed-arity|fixed-arity]], [[related/system-c|system-c]] (box = thunk, unbox = force),
 [[related/call-by-push-value|call-by-push-value]] (the substrate at its source).

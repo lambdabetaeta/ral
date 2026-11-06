@@ -2,5 +2,5 @@
 # status: 1
 # at: 6:26
 # contains: stands in for the `echo` in force
-let h = { |args| fold-lines { |a l| fail [status: 5, message: 'callback never runs'] } 0 }
+let h = { |args| fold-lines { |a l| fail 'callback never runs' } 0 }
 within [handlers: [echo: $h]] { echo hi }

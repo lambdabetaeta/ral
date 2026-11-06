@@ -44,7 +44,7 @@ let from-words = {
 let for = { |list fn| each $fn $list }
 ## Reduce without an initial value; list must be non-empty.
 let reduce = { |f items|
-    if !{is-empty $items} { fail [status: 1, message: "reduce: the list is empty; use fold if you have an initial value"] } else {
+    if !{is-empty $items} { fail "reduce: the list is empty; use fold if you have an initial value" } else {
         let [head, ...tail] = $items
         fold $f $head $tail
     }
@@ -61,7 +61,7 @@ let reverse = { |items|
 ## Last element of a non-empty list; fails on empty.
 let last = { |items|
     if !{is-empty $items} {
-        fail [status: 1, message: "last: empty list has no last element"]
+        fail "last: empty list has no last element"
     } else {
         let [head, ...rest] = $items
         if !{is-empty $rest} { return $head } else { last $rest }
@@ -146,7 +146,7 @@ let indent = { |n s|
 ## Retry body up to n times on failure.
 let retry = { |n body|
     try $body { |err|
-        if $[$n > 1] { retry $[$n - 1] $body } else { fail $err }
+        if $[$n > 1] { retry $[$n - 1] $body } else { raise $err }
     }
 }
 
@@ -168,7 +168,7 @@ let par = { |f items jobs|
         ## failure is raised here, and the gather ends the rest.  A success
         ## keeps its result for the ordered pass below; an already-claimed
         ## child fails honestly.
-        let _claimed = { |_| fail [status: 1, message: "par: this worker's result was already claimed"] }
+        let _claimed = { |_| fail "par: this worker's result was already claimed" }
         let _raise-if-failed = { |h|
             case !{poll $h} [
                 `ready: { |s| case $s[outcome] [`err: { |_| await $h; return () }, `ok: { |_| return () }] },
@@ -259,11 +259,11 @@ let max = { |a b| if $[$a >= $b] { return $a } else { return $b } }
 let min = { |a b| if $[$a <= $b] { return $a } else { return $b } }
 ## The largest element of a non-empty list.
 let maximum = { |xs|
-    if !{is-empty $xs} { fail [status: 1, message: "maximum: the list is empty"] } else { reduce $max $xs }
+    if !{is-empty $xs} { fail "maximum: the list is empty" } else { reduce $max $xs }
 }
 ## The smallest element of a non-empty list.
 let minimum = { |xs|
-    if !{is-empty $xs} { fail [status: 1, message: "minimum: the list is empty"] } else { reduce $min $xs }
+    if !{is-empty $xs} { fail "minimum: the list is empty" } else { reduce $min $xs }
 }
 
 ## Cartesian product of two lists, each pair combined by `f`.  Build a
@@ -288,7 +288,7 @@ let group-by = { |key-fn xs|
 ## Lower-middle on even length; fails on the empty list.
 let median-by = { |key-fn xs|
     if !{is-empty $xs} {
-        fail [status: 1, message: "median-by: empty list has no median"]
+        fail "median-by: empty list has no median"
     } else {
         let sorted = sort-list-by $key-fn $xs
         nth $[(!{length $sorted} - 1) / 2] $sorted
@@ -390,7 +390,7 @@ let styled = { |style text|
             elsif $[$style == 'blue']    { '\e[0;34m' }
             elsif $[$style == 'magenta'] { '\e[0;35m' }
             elsif $[$style == 'cyan']    { '\e[0;36m' }
-            else { fail [status: 2, message: "styled: unknown style '$style'"] }
+            else { fail "styled: unknown style '$style'" }
         return "$code$text\e[0m"
     } else {
         return $text

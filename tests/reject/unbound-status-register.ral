@@ -1,5 +1,5 @@
 # codes: T0071
 # status: 1
-# at: 5:52
+# at: 5:30
 # contains: there is no status register
-try { fail [status: 3, message: boom] } { |_| echo $STATUS }
+try { fail boom } { |_| echo $STATUS }

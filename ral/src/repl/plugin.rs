@@ -629,11 +629,7 @@ mod tests {
     /// one notice, and is not run on the fourth.
     #[test]
     fn a_failing_complete_hook_trips_the_breaker_on_the_third_tab() {
-        let (t, host, _) = dressed(&[(
-            "p",
-            HookEvent::Complete,
-            "{ |_at| fail [status: 1, message: 'boom'] }",
-        )]);
+        let (t, host, _) = dressed(&[("p", HookEvent::Complete, "{ |_at| fail 'boom' }")]);
         for _ in 0..3 {
             assert_eq!(run_complete_hooks(&t, &host, "git ", 4), None);
         }

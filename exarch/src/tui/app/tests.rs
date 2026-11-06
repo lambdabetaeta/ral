@@ -1216,7 +1216,12 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
         );
     };
     let read_at = |path: &str| {
-        Observation::instant(None, None, Observed::Read(Read { path: path.into() })).encode()
+        Observation::instant(
+            ral_core::test_helper::site(),
+            None,
+            Observed::Read(Read { path: path.into() }),
+        )
+        .encode()
     };
 
     fact(

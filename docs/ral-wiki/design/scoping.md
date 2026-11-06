@@ -89,7 +89,7 @@ superseding
 [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]
 as a description of the mechanism).
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] (dynamic scope is for the authority over effects), [[design/cbpv|cbpv]], [[design/control-operators|control-operators]].
+See also [[design/exec|exec]] (dynamic scope is for the authority over effects), [[design/cbpv|cbpv]], [[design/control-operators|control-operators]].
 
 **Realised in** [[internals/evaluator-machine|evaluator-machine]] (the dynamic frame stack).
 

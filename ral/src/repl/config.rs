@@ -181,7 +181,7 @@ impl RcPlan {
                         .map(|(name, f)| match f.into_owned() {
                             f @ Value::Thunk(_) => shell.vet_alias(name.to_string(), f).map_err(|b| {
                                 refuse(match b {
-                                    Break::Error(e) => e.context(format!("alias '{name}'")).message,
+                                    Break::Error(e) => format!("alias '{name}': {}", e.describe()),
                                     Break::Escape(_) => format!("alias '{name}' escaped"),
                                 })
                             }),

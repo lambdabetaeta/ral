@@ -56,7 +56,7 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
     )
     .map_err(|e| match e {
         ral_core::shell::runtime::Break::Error(err) => {
-            format!("built-in base '{name}' failed to parse: {}", err.message)
+            format!("built-in base '{name}' failed to parse: {}", err.describe())
         }
         other @ ral_core::shell::runtime::Break::Escape(_) => {
             format!("built-in base '{name}' failed: {other:?}")

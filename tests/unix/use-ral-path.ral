@@ -3,7 +3,7 @@
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {
         warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
-        fail [status: 1, message: "assertion failed: $name"]
+        fail "assertion failed: $name"
     }
 }
 
@@ -27,9 +27,9 @@ within [dir: "$d/elsewhere", env: [RAL_PATH: "$d/second"]] {
 # Absent from every entry, the name is refused as a plain runtime error
 let refused = try {
     within [dir: "$d/elsewhere", env: [RAL_PATH: "$d/first"]] { let _ = use 'ral-path-only.ral' }
-    return [cmd: ran, status: 0]
-} { |e| return [cmd: $e[cmd], status: $e[status]] }
-assert_eq 'unfound' [cmd: use, status: 1] $refused
+    return ran
+} { |e| return $e[frame] }
+assert_eq 'unfound' use $refused
 
 rm -rf $d
 echo 'ral path tests done'

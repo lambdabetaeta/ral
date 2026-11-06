@@ -2,10 +2,11 @@ use super::*;
 use ral_core::data::FOValue;
 use ral_core::data::Finite;
 use ral_core::data::datum::Datum as _;
+use ral_core::fact::Failure;
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::WorkerState;
 use ral_core::shell::runtime::{Done, Owner};
-use ral_core::shell::runtime::{ErrorRecord, Status};
+use ral_core::shell::runtime::{ErrorRecord, Reason};
 
 fn born(ids: &[u64]) -> HashSet<u64> {
     ids.iter().copied().collect()
@@ -43,13 +44,11 @@ fn settled_ending() -> Ending {
     Ending::Ok(FOValue::Unit)
 }
 
-fn failure(status: u8) -> Ending {
-    let status = std::num::NonZeroU8::new(status).unwrap();
+fn failure(message: &str) -> Ending {
     Ending::Err(ErrorRecord::new(
-        "<test>",
-        &Status::Raised(status),
-        "boom",
-        None,
+        Reason::Raised(message.into()),
+        "<test>".into(),
+        ral_core::test_helper::site(),
     ))
 }
 
@@ -115,9 +114,9 @@ fn only_a_timed_out_stop_carries_the_tip() {
 
 #[test]
 fn raise_without_command_exit_carries_no_remedy() {
-    let ending = failure(7);
+    let ending = failure("boom");
     let (out, exit) = render(&ran(ending, "error: boom\n"), &HashSet::new(), None, &[], 5);
-    assert_eq!(exit, 7);
+    assert_eq!(exit, 1);
     assert!(out.contains("error: boom"));
     assert!(
         !out.contains("recovery:"),
@@ -163,7 +162,7 @@ fn a_consumed_worker_is_nobodys_orphan() {
 /// A failed data projection shares the one handle-fate sentence.
 #[test]
 fn a_non_data_result_explains_which_handles_landed() {
-    let ending = failure(1);
+    let ending = failure("the result is a handle, and a run can return only data");
     let births = born(&[4]);
     let workers = vec![worker_row(4, "block at <test>, line 1", true)];
     let (out, exit) = render(
@@ -214,9 +213,9 @@ fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
 
     let endings: [(&str, Ending, u8); 6] = [
         ("ok", settled_ending(), 0),
-        ("raise", failure(7), 7),
+        ("raise", failure("boom"), 1),
         ("wall", Ending::Stopped(CancelCause::TimedOut), 124),
-        ("non-data", failure(1), 1),
+        ("non-data", failure("the result is a handle"), 1),
         ("exit", Ending::Exited(3), 3),
         (
             "panic",
@@ -329,24 +328,25 @@ fn a_panicked_run_reads_with_the_panic_tip() {
 fn only_an_external_failure_carries_the_exit_tip() {
     let record = FOValue::Map {
         entries: vec![
-            ("cmd".into(), "tool".to_owned().encode()),
-            ("status".into(), 3_u8.encode()),
-            ("reason".into(), ral_core::fact::Reason::Exited(3).encode()),
-            ("message".into(), "failed".to_owned().encode()),
-            ("site".into(), None::<ral_core::source::CallSite>.encode()),
+            ("frame".into(), "tool".to_owned().encode()),
+            (
+                "reason".into(),
+                Reason::process("tool", Failure::Exited(3)).encode(),
+            ),
+            ("site".into(), ral_core::test_helper::site().encode()),
         ],
     };
     let ending = Ending::Err(ErrorRecord::decode(&record).unwrap());
     for single_command in [true, false] {
         let ran = Ran {
             single_command,
-            ..ran(ending.clone(), "external failed\n")
+            ..ran(ending.clone(), "tool: exited with status 3\n")
         };
         let (out, exit) = render(&ran, &HashSet::new(), None, &[], 5);
         assert_eq!(exit, 3);
         assert_eq!(
             out,
-            format!("external failed\n{}", exit_tip(single_command))
+            format!("tool: exited with status 3\n{}", exit_tip(single_command))
         );
     }
 }

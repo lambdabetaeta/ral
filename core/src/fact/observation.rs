@@ -23,8 +23,7 @@ use strum::{IntoStaticStr, VariantArray};
 /// redirect read opened, a capability check decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
-    /// `None` where the observing dispatch has no position in a session source.
-    pub site: Option<CallSite>,
+    pub site: CallSite,
     /// Microseconds since the Unix epoch; equal to `end` at an instantaneous
     /// door.
     pub start: i64,

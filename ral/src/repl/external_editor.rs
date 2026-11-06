@@ -49,13 +49,12 @@ fn failure(context: &str, error: impl std::fmt::Display) -> Break {
     ))
 }
 
-/// An error keeps its status and gains the other's message.  An escape is no
-/// error to extend: it wins, and the other goes to stderr beside it.
+/// Preserve the edit failure; report cleanup separately. An escape wins.
 fn joined(shell: &mut Shell, edit: Break, removal: Break) -> Break {
     match (edit, removal) {
-        (Break::Error(mut edit), Break::Error(removal)) => {
-            edit.message = format!("{}; {}", edit.message, removal.message);
-            Break::Error(edit)
+        (edit @ Break::Error(_), Break::Error(removal)) => {
+            let _ = shell.write_stderr(format!("{removal}\n").as_bytes());
+            edit
         }
         (escape @ Break::Escape(_), other) | (other, escape @ Break::Escape(_)) => {
             let _ = shell.write_stderr(format!("{other}\n").as_bytes());
@@ -302,14 +301,49 @@ mod tests {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
         });
-        let error = shell
-            .with_layer(layer, |shell| {
-                workspace.finish(shell, Err::<(), _>(sig("the editor failed")))
-            })
-            .unwrap_err()
-            .to_string();
-        assert!(error.starts_with("the editor failed; "), "{error}");
-        assert!(error.contains("fs write denied by grant"), "{error}");
+        let workspace = std::sync::Mutex::new(Some(workspace));
+        let entry = BuiltinEntry::new(
+            Cow::Borrowed("failed-editor"),
+            ral_core::typecheck::builtins::scheme::diverges,
+            "test failed edit and cleanup",
+            BuiltinBody::Captured(std::sync::Arc::new(move |_, _, shell| {
+                let workspace = workspace.lock().unwrap().take().expect("called once");
+                shell.with_layer(layer.clone(), |shell| {
+                    workspace.finish(shell, Err::<Value, _>(sig("the editor failed")))
+                })
+            })),
+        );
+        let hook = HookName::session("failed-editor");
+        shell
+            .register_hook(
+                hook.clone(),
+                Value::Native(entry.into()),
+                HookSig::Block,
+                DefaultPolicy::denied(),
+            )
+            .unwrap();
+        let ral_core::shell::run::RunReport::Ran {
+            ending,
+            captured: Some(captured),
+            ..
+        } = shell.run(ral_core::protocol::Run {
+            program: ral_core::protocol::Program::Hook {
+                name: hook,
+                args: Vec::new(),
+            },
+            ..ral_core::protocol::Run::captured(
+                "",
+                ral_core::source::SourceOrigin::named("<editor-test>"),
+            )
+        })
+        else {
+            panic!("the editor hook must run with captured streams")
+        };
+        let error = ending.into_settled().unwrap_err().to_string();
+        assert_eq!(error, "the editor failed");
+        let cleanup = String::from_utf8(captured.stderr).unwrap();
+        assert!(cleanup.contains("fs write denied by grant"), "{cleanup}");
+        assert!(!cleanup.contains("the editor failed"), "{cleanup}");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

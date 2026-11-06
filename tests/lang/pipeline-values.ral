@@ -58,13 +58,13 @@ let v = echo hi | audit { cat }
 echo !{succeeded $v}
 
 # try's handler value can be the recovery value
-let recovered = try { fail [status: 7, message: 'caught by handler'] } { |_| echo caught }
+let recovered = try { fail 'caught by handler' } { |_| echo caught }
 echo "x=$recovered"
 
 # A producer failing before any bytes wins over the tail
-let boom = { fail [status: 3, message: 'producer failed'] }
-try { let result = !{!$boom | from-json}; echo $result } { |e| echo "$e[message]" }
-try { echo not-json | from-json; return () } { |e| echo "$e[message]" }
+let boom = { fail 'producer failed' }
+try { let result = !{!$boom | from-json}; echo $result } { |e| echo !{describe $e} }
+try { echo not-json | from-json; return () } { |e| echo !{describe $e} }
 
 # A list-producing lazy chain of 2000 links crosses the final stage
 let chain = { |xs| if !{is-empty $xs} { return `done } else {

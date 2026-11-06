@@ -7,7 +7,7 @@ use crate::io::{Sink, new_buffer};
 use crate::process::{DurableRoot, Scope, WorkerStop};
 use crate::shell::runtime::{
     Break, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed, Error, Escape,
-    HandleInner, Mooring, Observed, Owner, ScopeOwner, Settled, Shell, Stop, SurfaceSink, Value,
+    HandleInner, Mooring, Observed, Owner, ScopeOwner, Settled, Shell, SurfaceSink, Value,
     WatchEvent, WorkerEntry, WorkerId, final_poll, sig,
 };
 use std::sync::Arc;
@@ -55,11 +55,7 @@ where
     let node = cradle.under.child();
     let (title, watched) = match birth {
         Birth::Spawn { title } => (
-            title.unwrap_or_else(|| {
-                shell
-                    .call_site()
-                    .map_or_else(|| "block".into(), |site| format!("block at {site}"))
-            }),
+            title.unwrap_or_else(|| format!("block at {}", shell.call_site())),
             None,
         ),
         Birth::Watch { label } => (label.clone(), Some(label)),
@@ -133,7 +129,13 @@ where
                 )
             });
             let end = flush_worker_stream(end, &mut child.io.stdout);
-            let end = flush_worker_stream(end, &mut child.io.stderr);
+            let mut end = flush_worker_stream(end, &mut child.io.stderr);
+            if let End::Err(error) = &mut end {
+                error
+                    .prov
+                    .get_or_insert_with(|| child.local.audit.call_site().clone());
+            }
+            let end = end.leaving(&child.session.sources);
             let receipt = receipt.map(|(started, title, surface)| {
                 let outcome = end.done(child);
                 (started, title, outcome, surface)
@@ -188,15 +190,20 @@ fn flush_worker_stream(end: End, sink: &mut Sink) -> End {
 /// the session becomes the handle's error, carrying the stop's cause.  A stop
 /// the host owns (a root cause, an interrupt) passes as the escape it is.
 pub(super) fn convert_own_stop(result: Settled<Value>, root: &DurableRoot) -> Settled<Value> {
-    let stop = match &result {
-        Err(Break::Escape(Escape::Stopped(Stop {
-            cause,
-            owner: Some(owner),
-            ..
-        }))) if *owner != root.id() => WorkerStop::of(*cause),
-        _ => None,
-    };
-    stop.map_or(result, |stop| Err(Error::worker_stopped(stop).into()))
+    match result {
+        Err(Break::Escape(Escape::Stopped(stop))) => {
+            if stop.owner.as_ref().is_some_and(|owner| *owner != root.id())
+                && let Some(cause) = WorkerStop::of(stop.cause)
+            {
+                let mut error = Error::worker_stopped(cause);
+                error.prov = stop.at;
+                Err(error.into())
+            } else {
+                Err(Escape::Stopped(stop).into())
+            }
+        }
+        result => result,
+    }
 }
 
 /// The exit rule a worker's base and a `gather` share (I4, I4′): a body

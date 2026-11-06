@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-06
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
@@ -30,9 +30,11 @@ through `report::tool_result`, which also reports whether the run failed.
 `tool_result` takes the whole `Ran`; `render` reads `ending`, `rendered` and
 `single_command` from it. The ending is `Ending<FOValue, ErrorRecord,
 CancelCause>`: `Ok`, `Err`, `Exited`,
-`Stopped`, `Panic`. `ToolResult.exit` is `u8`, read from `ending.code()`.
+`Stopped`, `Panic`. `Err` carries exactly `[reason, frame, site]`, with total
+provenance, no stored status or derived message. `ToolResult.exit` is `u8`,
+read from `ending.code()`; failures delegate to the one table on `Reason`.
 Hosts keep `rendered` verbatim, adding an exit tip only for
-`Err(record)` whose `reason()` is `Exited`, a timeout tip only for `Stopped(TimedOut)`, and
+`Err(record)` whose reason is a process failure `Exited`, a timeout tip only for `Stopped(TimedOut)`, and
 `PANIC_TIP` for `Panic`. A run panic restores the checkpoint, discards capture
 and trail and reports status 101; its tip names a ral bug, warns that the
 call's bindings rolled back but outside effects stand, and asks the model to
@@ -265,7 +267,9 @@ never by the decoder or by the seam that records it (`surface::record`):
   bound handle and registry inspect it:
   ``errand #7 (building) finished after 3 mins 12 secs (failed): build failed. `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``
   `Surface::Done` and `Display::Done` keep core `Done`, worded through
-  `Done::parts`/`said`. At admission, `Agent::admit` probes once and admits
+  `Done::parts`/`said`, with failure text derived by `ErrorRecord::describe`.
+  A worker completes provenance before publishing, so its `done`, `poll`
+  and `await` records agree. At admission, `Agent::admit` probes once and admits
   the done card and wake only for a present unclaimed (`Running | Ready`)
   row. A claimed or absent row, or a failed probe, suppresses both, while
   other surfaced values still replay;

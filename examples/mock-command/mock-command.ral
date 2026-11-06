@@ -8,7 +8,7 @@
 let deploy = { |host|
     let resp = curl -s -X POST "https://$host/api/deploy" | from-json
     if $[$resp[status] == 'ok'] { echo "deployed to $host (rev $resp[rev])" }
-    else { fail [status: 1, message: "deploy to $host rejected"] }
+    else { fail "deploy to $host rejected" }
 }
 
 within [

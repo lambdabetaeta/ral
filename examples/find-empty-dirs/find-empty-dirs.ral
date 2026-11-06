@@ -37,7 +37,7 @@ let undecided = filter { |r| return $[$r[verdict] == `unknown] } $rows
 if $[not !{is-empty $undecided}] {
     for $undecided { |r| warn "cannot read, so cannot judge: $r[path]" }
     let count = length $undecided
-    fail [status: 1, message: "$count directories could not be read"]
+    fail "$count directories could not be read"
 }
 
 for !{filter { |r| return $[$r[verdict] == `empty] } $rows} { |r| echo $r[path] }

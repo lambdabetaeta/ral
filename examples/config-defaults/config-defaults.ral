@@ -14,5 +14,5 @@ let unknown = keys !{difference $config $default-config}
 if !{is-empty $unknown} {
     to-json !{union $default-config $config}
 } else {
-    fail [status: 1, message: "unknown config keys: !{intercalate ', ' $unknown}"]
+    fail "unknown config keys: !{intercalate ', ' $unknown}"
 }

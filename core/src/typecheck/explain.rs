@@ -154,7 +154,6 @@ impl TypeErrorKind {
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
-            Self::FailStatusZero => "fail requires a nonzero status".into(),
             Self::MalformedAlias { .. } => "malformed alias definition".into(),
             Self::MalformedUnalias { .. } => "malformed unalias".into(),
             Self::IndexOnLiteral { literal, key } => format!(
@@ -228,7 +227,6 @@ impl TypeErrorKind {
             | Self::BuiltinNotFirstClass { .. }
             | Self::BuiltinArity { .. }
             | Self::DecoderTakesNoArgument { .. }
-            | Self::FailStatusZero
             | Self::MalformedAlias { .. }
             | Self::MalformedUnalias { .. } => "here".into(),
             Self::UnboundVariable { .. } => "not defined".into(),
@@ -799,7 +797,6 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         TypeErrorKind::ExecArgNotText { command, ty } => {
             RefusedArg::of_ty(ty).map(|refusal| refusal.remedy(command))
         }
-        TypeErrorKind::FailStatusZero => Some("use `return` for a clean exit".to_string()),
         TypeErrorKind::MalformedAlias { detail } | TypeErrorKind::MalformedUnalias { detail } => {
             Some(detail.to_string())
         }
@@ -1138,12 +1135,11 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
                 .to_string(),
         );
     }
-    let is_error_record = |t: &Ty| matches!(t, Ty::Record(row) if row_has_status_int(row));
+    let is_error_record = |t: &Ty| matches!(t, Ty::Record(row) if row_has_reason(row));
     if is_error_record(expected) || is_error_record(actual) {
         return Some(
-            "a failure is raised with an error record: at least \
-             `[status: Int, message: String]` with a nonzero status, and any other \
-             fields you care to carry: `fail $e` re-raises a caught error as it stands"
+            "`fail` takes a String; use `raise $e` to re-raise an error record, \
+             or `describe $e` for its text"
                 .to_string(),
         );
     }
@@ -1218,13 +1214,12 @@ fn read_hint(kind: &TypeErrorKind, reason: &Reason) -> Option<String> {
     )
 }
 
-/// Whether a row carries `status: Int`.  An error carries the row as it stood
+/// Whether a row carries `reason`. An error carries the row as it stood
 /// when the constraint failed, and nothing re-applies it here, so a `Var` tail
 /// reads as absent.  That only ever withholds a hint, never asserts one.
-fn row_has_status_int(row: &Row) -> bool {
+fn row_has_reason(row: &Row) -> bool {
     row.fields()
-        .find(|(label, _)| **label == Label::Field("status".into()))
-        .is_some_and(|(_, ty)| *ty == Ty::Int)
+        .any(|(label, _)| *label == Label::Field("reason".into()))
 }
 
 /// A list where `Bytes` was wanted, or the reverse.  Every byte-channel writer
@@ -1242,8 +1237,7 @@ fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
 /// Why `$STATUS` names nothing; the runtime's undefined-variable error says
 /// the same.
 pub(crate) const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
-    error record that carries its own status: catch it with `try` and read \
-    `$err[status]` from the handler's argument";
+    error record: catch it with `try` and read `$e[reason]` from the handler's argument";
 
 /// The message and hint refusing `...` in a value's application, which the
 /// elaborator raises for a head it knows to be a value: the checker's words.
@@ -1420,7 +1414,7 @@ impl TypeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty::CompTy;
+    use crate::ty::{CompTy, Typed as _};
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
         TypeErrorKind::TyMismatch {
@@ -1451,9 +1445,9 @@ mod tests {
                 "a block value",
             ),
             (
-                Ty::Record(Row::Empty).extend("status", Ty::Int),
+                crate::fact::ErrorRecord::ty(),
                 Ty::String,
-                "an error record",
+                "use `raise $e` to re-raise an error record",
             ),
             (Ty::Bytes, Ty::list(Ty::Int), "Bytes are not a list"),
         ];
@@ -1509,7 +1503,7 @@ mod tests {
     #[test]
     fn command_value_grade_hints_take_priority_over_payload_shapes() {
         for value in [
-            Ty::Record(Row::Empty).extend("status", Ty::Int),
+            crate::fact::ErrorRecord::ty(),
             Ty::Variant(Row::Empty),
             Ty::Thunk(Box::new(CompTy::pure(Ty::Unit))),
             Ty::Bytes,

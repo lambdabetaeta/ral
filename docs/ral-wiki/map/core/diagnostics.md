@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-06
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
@@ -22,12 +22,14 @@ the IR free of presentation state.
 
 ## Runtime source identity — `SourceDb`
 
-**A runtime error carries the span of the node it broke on, not a cursor the
-evaluator wrote down.** `Error` (`shell/runtime/error.rs`) holds
-`span: Option<Span>` — `None` at mint, stamped by the break path with the
-innermost enclosing node's span as it unwinds (`Error::at_span`). Since a
-`Span` is already tagged with its `FileId`, the source identity is the
-value's own and no ambient position has to be maintained.
+**A runtime error carries one provenance: the failing frame's name and site.**
+`Error` (`shell/runtime/error.rs`) holds `prov: Option<Prov>` until located.
+`Break::locate(name, span, shell)` claims an unlocated error or stop only when
+its span lies in a session source. `Prov::Live { name, span }` draws a caret;
+`Prov::Resolved` holds a name and `CallSite`, drawing coordinates without a
+caret. An initial `_` does not hide a frame; the baked prelude is invisible
+because its spans are outside session sources. See
+[[decisions/261105_the-error-record|the error record]].
 
 Every registered `Source` carries its `SourceOrigin` (`source.rs`): a
 `File` by the native path it was read from, or a `Virtual` label —
@@ -51,8 +53,8 @@ of every source the *session* has loaded, keyed by `FileId`, living on
 `SessionState::sources`: **append-only for the session's whole life**, so a
 nested run can never re-mint a `FileId` an outer run's live spans still
 name. `Shell::install_script_context` registers a source and
-`install_root_context` additionally seeds `SessionState::root_file` with the
-current run's root (`None` between runs); `SourceDb::next_id` peeks
+`register_root` also returns the run's root span, which `IoLoan` installs
+with `SessionState::root_file` (`None` between runs); `SourceDb::next_id` peeks
 the id a registration will mint, so a compiler can stamp a program's spans
 before the source they name is itself in the db. Hosts read the db after a
 run returns to render.
@@ -64,17 +66,18 @@ not the top-level script's. An id the renderer cannot resolve (the placeholder
 `FileId::DUMMY`, or an unregistered source) renders messageless rather than
 indexing an unrelated text. ([[decisions/260614_structural-bug-prevention|structural-bug-prevention]] class 9.)
 
-`CallSite` (`source.rs`, resolved by `SourceDb::site`) is the audit-and-wire shape a `Span` resolves
-*to* — script name plus 1-indexed `(line, col)` — which hosts read off every
-observation, command or capability check alike. It rides the
-[[map/core/shell-state|audit collector]] rather than the run frame, so an
-observation carries the position of the dispatch that produced it. Both a
-command and a function application stamp it, but one whose span resolves
-outside the session's sources — the baked prelude's — leaves it alone, so
-a prelude function's inner command is stamped where the user called the function. A dispatch with no position is
-`None` (`Shell::site_of`, `Observation.site`), and the ral records that
-project it — a trail entry, `try`'s error — carry an optional
-`` site: `some [script, line, col] | `none ``.
+`CallSite` (`source.rs`, resolved by `SourceDb::site`) is the audit-and-wire
+shape a span resolves to: script name and 1-indexed `(line, col)`.
+`Audit` holds one total, private `Prov` register for the innermost visible
+frame; `enter_site` displaces it for a `DisplacedSite` token that only
+`restore_site` consumes, and visible calls bracket it so, with adjacent
+tail-call restorations coalesced. `Shell::at_site(name, span, body)` brackets synchronous operations.
+Every source run installs its root span; hooks install their origin at 1:1;
+workers inherit the parent's register at spawn. `Observation.site` and
+`Shell::call_site()` are total `CallSite`s. Minting an error record reads its
+own provenance, else that register, so an unclaimed failure names the run's
+start. A worker completes provenance before publishing, making `done`, `poll`
+and `await` agree.
 
 **A compile failure carries its own text**: `Rejection` (`diagnostic.rs`) pairs
 the failure's `Report`s with their `Source` and the status a run that failed so
@@ -91,10 +94,11 @@ loaded at runtime — a `use`d module, the rc, a plugin, a capability profile �
 carries its rejection on the runtime `Error` instead, as `Error::rejection`,
 from `Error::compile` (`shell/runtime/error.rs`) at the loader's compile door
 (`shell::load::check_source`); `CompileError` itself knows no runtime error.
-Its `message` stays the plain sentence a `try` handler reads
-(`use: parse error: …`), and its `span` is left to the break path's stamp,
-so `$err[site]` names the `use` that failed, while the rejection draws the
-loaded source's compile failure.
+Its `Reason::Raised` carries the plain compile sentence a `try` handler reads
+with `describe`; a loader's context prefix belongs only to the report.
+`locate` supplies the `use` frame's provenance, so `$err[site]` names the
+`use` that failed, while the rejection draws the loaded source's compile
+failure.
 
 ## Rendering — `core/src/diagnostic.rs`
 
@@ -109,14 +113,21 @@ is the compact one-liner. The builders sit with their errors:
 `LexErrorKind::headline` alone; a plain `P0001` carries its own help, the
 message saying what is wrong and the help what to write), `TypeError::report` in
 `typecheck/explain.rs`, and `Error::render` / `Error::compact`
-(`shell/runtime/error.rs`, resolving the error's `Span` against a `SourceDb`).
+(`shell/runtime/error.rs`, resolving live provenance against a `SourceDb`
+and borrowing the session's `ExitHints`).
 Rendering tests live inline with each owner: generic renderer tests in
 `diagnostic.rs`, parse and lexer reports in `syntax/report.rs`, type reports in
 `typecheck/explain.rs`, and runtime source selection in `shell/runtime/error.rs`.
 
 **`End::render` draws an ending through one private `Diagnosis` and one
 `render` function** in `shell/runtime/error.rs`. `Error::diagnosis` supplies
-the error's fields; `Stop::diagnosis` supplies its cause and unwind span.
+the described reason and report-only facts; `Stop::diagnosis` supplies its
+cause and provenance. `Reason::describe(&self)` is the one wording, reading
+the reason alone; `Error::describe` and `ErrorRecord::describe` delegate.
+Reason hints (`Reason::hint(&self)`: signal, path-as-text on `program`, session
+exit-hints lookup by `program` basename and status) are recomputed; a stored
+situational hint takes precedence. Context prefixes never change the reason. The renderer
+composes hint, saturating counted discard, then eligible abandoned-tail note.
 A panic is spanless `run panicked: …`; values, exits and reader-gone stops
 render nothing. `Error::render`, `compact` and `render_spanless` use that same
 renderer. Hosts print the supplied `rendered` verbatim.
@@ -168,7 +179,7 @@ crate's [[map/repl/loop|repl::theme]].
 
 ## Exit-code hints — `core/src/shell/runtime/exit_hints.rs`
 
-`ExitHints` is a pure `(command basename, exit-status) → explanation` lookup table
+`ExitHints` is a pure `(program basename, exit-status) → explanation` lookup table
 (two maps, `*` the wildcard),
 populated via `from_text` and installed into the `Shell`; `lookup` is consulted
 when an external command fails. Loading the table is the caller's concern.

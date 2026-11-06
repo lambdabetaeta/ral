@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d56977ff
-verified_at_commit: d56977ff
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-03
 anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, ScopeOwner, exit_brood]
 ---
@@ -52,7 +52,7 @@ meeting `Arg` is a fault in ral, unreachable for a checked program.
 
 **Tail entry retains no consumed argument frame.** A call with n arguments
 needs n free frames before its head runs; after a lambda consumes its frame,
-its body runs in tail position. Every frame is pushed through a `Slot` that
+its body runs in tail position. Every computational frame is pushed through a `Slot` that
 `reserve`/`reserve_n` checked against `session.stack_limit` (default 100 000,
 set by `--recursion-limit`) before any effect. `push_args` reserves all n
 argument frames at once.
@@ -67,9 +67,9 @@ snapshots.
   extends that saved environment for the rest. `Seq` pushes `{ rest, env }`
   and discards the first computation's returned value. A written `let _`
   still uses `Bind`, so it has the ordinary capture rule.
-- Only a written sequence or `let` adds “later steps in this block did not
-  run” when its continuation is abandoned. Synthetic hoists, returned-thunk
-  splits, rendering and capture decoding add none.
+- Only a written sequence or `let` sets the abandoned-tail fact when its
+  continuation is abandoned. Synthetic hoists, returned-thunk splits,
+  rendering and capture decoding set none.
 - `Redirect`, `Unmask`, `Within`, `Grant` and `Try` pass lambda terminals
   through. Value-demanding frames reject a bare lambda; `let` avoids that
   case by binding a function-typed right-hand side unrun as its thunk.
@@ -78,7 +78,9 @@ snapshots.
   abandonment.
 - `Capture` swaps stdout for a fresh buffer and holds the replaced sink.
   Success yields exact `Bytes`; a halt restores that sink and drops the
-  buffer. Buffer overflow refuses a prefix. The surrounding
+  buffer, adding the actual discarded byte count to the error's saturating
+  unwind total. Escapes carry no unwind facts. Buffer overflow refuses a
+  prefix. The surrounding
   bind feeds `Prim::Decode`, which drops one trailing terminator and checks
   UTF-8, with the environment dropped before taking over the byte buffer.
 - Shell frames restore their own dynamic state: redirects settle writes,
@@ -90,8 +92,16 @@ snapshots.
   ([[invariants/a-worker-ends-with-its-children|a worker ends with its children]]).
 
 `eval_rules` has one arm per `CompKind`; `step_return` and `step_halt` have
-one arm per frame. Rules return `Settled<Focus>`; raising points stamp errors
-with their node or frame span, and `step` folds the error into `Halt`.
+one arm per frame. Rules return `Settled<Focus>`; raising points locate errors
+with one visible operation name/span, and `step` folds the error into `Halt`.
+`frame` names that frame (`index`, `fail`, a command head), not necessarily a
+command. `Exec`/`App` rely on their innermost dispatch/admission, not fallback
+stamps. A `CallSite` frame restores the caller's total provenance register on
+return, halt and panic; adjacent tail-call restorations coalesce and are not
+counted toward the computational stack cap. Synchronous operations bracket
+register changes with `at_site`. A run base completes unclaimed failures, so
+the record's site is total, at its start when nothing narrower claims it
+([[decisions/261105_the-error-record|the error record]]).
 `Frame::abandon` supplies the undo shared by failure and the panic walk.
 Destructuring parameters are binds at their own spans, so a mismatch points
 at the parameter, at runtime as at type-check time.

@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
 anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::sync, Signal::Synced, OwnDir::xdg_synced, Log::read, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal, AgentLog::human_children, Mail::owes]
 ---
@@ -47,7 +47,10 @@ make its session un-resumable. Reader and writer are both stack-grown
 never re-parses. `Display::Done` holds core's
 `Done = Ending<(), ErrorRecord, CancelCause>` through `data::datum::as_datum`:
 its `Datum` encoding becomes an externally tagged `FOValue`, not the ending's
-direct serde wire encoding. The Unit payload is absent (`` `ok ``); `untag`
+direct serde wire encoding. Its error is exactly `[reason, frame, site]`, with
+a total site and no stored status or derived message. Worker text is derived
+by `ErrorRecord::describe`
+([[decisions/261105_the-error-record|the error record]]). The Unit payload is absent (`` `ok ``); `untag`
 reads an explicit Unit as absent too. No compatibility with older done-record shapes
 is required ([[design/endings|endings]]).
 The types still internally tagged inside records (`Settlement`, `Mark`, diff

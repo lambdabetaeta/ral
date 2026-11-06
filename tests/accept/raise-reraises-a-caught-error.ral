@@ -1,0 +1,1 @@
+try { fail "boom" } { |e| raise $e }

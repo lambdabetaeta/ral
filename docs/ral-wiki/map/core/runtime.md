@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-01
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -50,8 +50,13 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   environment-head and handler lookup, never evaluating shell source. The
   caller supplies its mooring; current grants, scope, audit and streams remain
   in force. The REPL external-editor hook uses this entry.
-- `dispatch.rs` also holds `call_external`, the call of an external: stamp the
-  start, tee its streams, name a failure, settle the one `Observed::Command`.
+- `dispatch.rs` also holds `call_external`, the call of an external: snapshot
+  the audit start, tee its streams, locate a failure with the visible head
+  and span, settle the one `Observed::Command`. A failure becomes
+  `Reason::from_command(program, ..)` with `program` the head as dispatched;
+  its text is `Reason::describe`; `audit_start` returns `None` when nobody listens.
+  Direct external stages retain one `Prov` from launch through collection,
+  completing errors and stops before the observation is settled.
 - `command.rs` — the External arm: vet the admitted head, launch its
   admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
   `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps

@@ -16,7 +16,6 @@ use ral_core::sync::LockExt as _;
 use ral_core::text::plural;
 use ral_core::{Captured, RequestedTerminalAccess, Value};
 use ral_core::{errln, outln};
-use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -203,10 +202,7 @@ impl Host for ReplHost {
     }
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-        let refuse = |message: String| EnquiryError {
-            message,
-            status: NonZeroU8::MIN,
-        };
+        let refuse = |message: String| EnquiryError { message };
         match Enquiry::decode(&req).map_err(refuse)? {
             Enquiry::Editor(op) => self
                 .editor

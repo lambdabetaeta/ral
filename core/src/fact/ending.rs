@@ -1,6 +1,6 @@
 //! How a computation ended: the one type; every observer is a projection.
 
-use super::ErrorRecord;
+use super::{ErrorRecord, Failure, Reason};
 use crate::data::FOValue;
 use crate::data::datum::{self, Datum};
 use crate::process::CancelCause;
@@ -189,9 +189,33 @@ impl FailureCode for CancelCause {
     }
 }
 
+impl FailureCode for Reason {
+    fn failure_code(&self) -> NonZeroU8 {
+        use crate::process::WorkerStop;
+        match self {
+            Self::Process(process) => process.failure.failure_code(),
+            Self::TimedOut => WorkerStop::TimedOut.cause().failure_code(),
+            Self::Cancelled => WorkerStop::Cancelled.cause().failure_code(),
+            Self::Raised(_) => NonZeroU8::MIN,
+        }
+    }
+}
+
+impl FailureCode for Failure {
+    fn failure_code(&self) -> NonZeroU8 {
+        use crate::process::outcome::failure_byte;
+        match self {
+            Self::Exited(n) => failure_byte(*n),
+            Self::Signaled(n) => failure_byte(128_i32.saturating_add(*n)),
+            Self::NotFound => const { NonZeroU8::new(127).unwrap() },
+            Self::NotRunnable(_) => const { NonZeroU8::new(126).unwrap() },
+        }
+    }
+}
+
 impl FailureCode for ErrorRecord {
     fn failure_code(&self) -> NonZeroU8 {
-        self.status
+        self.reason.failure_code()
     }
 }
 
@@ -199,11 +223,11 @@ impl FailureCode for ErrorRecord {
 pub type Done = Ending<(), ErrorRecord, CancelCause>;
 
 impl Done {
-    /// The head and its detail; failures use [`ErrorRecord::message`].
+    /// The head and its detail; failures use [`ErrorRecord::describe`].
     pub fn parts(&self) -> (Cow<'static, str>, Option<String>) {
         match self {
             Self::Ok(()) => ("returned".into(), None),
-            Self::Err(f) => ("failed".into(), Some(f.message().to_owned())),
+            Self::Err(f) => ("failed".into(), Some(f.describe().into_owned())),
             Self::Exited(n) => (format!("ran `exit {n}`").into(), None),
             Self::Stopped(s) => (s.message().into(), None),
             Self::Panic(t) => ("panicked".into(), Some(t.clone())),
@@ -227,11 +251,9 @@ mod tests {
 
     fn failure() -> ErrorRecord {
         ErrorRecord {
-            cmd: "fail".into(),
-            status: NonZeroU8::new(7).unwrap(),
-            reason: Reason::Raised,
-            message: "boom".into(),
-            site: None,
+            frame: "fail".into(),
+            reason: Reason::Raised("boom".into()),
+            site: crate::test_helper::site(),
         }
     }
 
@@ -247,7 +269,7 @@ mod tests {
 
     #[test]
     fn every_ending_has_its_code() {
-        for (ending, code) in dones().into_iter().zip([0, 7, 3, 124, PANIC_CODE]) {
+        for (ending, code) in dones().into_iter().zip([0, 1, 3, 124, PANIC_CODE]) {
             assert_eq!(ending.code(), code);
         }
         for (cause, code) in [

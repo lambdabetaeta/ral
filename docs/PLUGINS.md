@@ -203,7 +203,7 @@ that fails, and its status reaches `post-exec` through the ordinary run:
 hooks: [
     pre-exec: { |ev|
         if !{re-match '^rm -rf /' $ev[src]} {
-            return "fail [status: 1, message: 'refused']"
+            return "fail 'refused'"
         } else { return $ev[src] }
     },
 ]

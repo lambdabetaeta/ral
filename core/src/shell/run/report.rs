@@ -48,23 +48,29 @@ impl RunReport {
             // Not the shell's sources: a static failure carries the text its
             // carets point into, so nothing about it was ever registered.
             Self::Static { diagnostics } => {
-                let (rendered, status) = diagnostics.render();
+                let (rendered, status) = diagnostics.render(shell.exit_hints());
                 Report::Static { rendered, status }
             }
             Self::Ran {
                 ending,
+                base,
                 compact,
                 captured,
                 trail,
             } => {
                 let ending = match ending {
-                    End::Ok(value) => FOValue::try_from(&value).map_err(not_data).into(),
+                    End::Ok(value) => FOValue::try_from(&value)
+                        .map_err(|error| Error {
+                            prov: Some(base),
+                            ..not_data(error)
+                        })
+                        .into(),
                     End::Err(error) => Ending::Err(error),
                     End::Exited(code) => Ending::Exited(code),
                     End::Stopped(stop) => Ending::Stopped(stop),
                     End::Panic(text) => Ending::Panic(text),
                 };
-                let rendered = ending.render(shell.sources(), compact);
+                let rendered = ending.render(shell.sources(), compact, shell.exit_hints());
                 let ending = ending.map(identity, |error| error.record(shell), |stop| stop.cause);
                 Report::Ran(Ran {
                     ending,
@@ -84,7 +90,10 @@ impl Report {
     /// host-level static failure is, so a host never has to know which of the
     /// two it is printing.
     pub(crate) fn refused(message: impl Into<String>) -> Self {
-        let (rendered, status) = spanless(&Error::new(message));
+        let (rendered, status) = spanless(
+            &Error::new(message),
+            &crate::shell::runtime::ExitHints::default(),
+        );
         Self::Static { rendered, status }
     }
 
@@ -94,7 +103,10 @@ impl Report {
     /// Only the wire engine, a unix process, has an outside to fault in.
     #[cfg(unix)]
     pub(crate) fn faulted(message: impl Into<String>) -> Self {
-        let (rendered, status) = spanless(&Error::new(message));
+        let (rendered, status) = spanless(
+            &Error::new(message),
+            &crate::shell::runtime::ExitHints::default(),
+        );
         Self::Faulted { rendered, status }
     }
 }
@@ -106,12 +118,34 @@ impl Report {
 #[cfg(test)]
 mod runtime_error_seam_tests {
     use super::*;
-    use std::num::NonZeroU8;
+
+    #[test]
+    fn a_wire_data_refusal_keeps_its_run_base_after_the_register_is_restored() {
+        let mut shell = crate::test_helper::core_shell();
+        let before = shell.local.audit.call_site().clone();
+        let report = shell.run(crate::protocol::Run::captured(
+            "return { return 1 }",
+            crate::source::SourceOrigin::named("<data-boundary>"),
+        ));
+        assert_eq!(shell.local.audit.call_site(), &before);
+        let Report::Ran(Ran {
+            ending: Ending::Err(record),
+            rendered,
+            ..
+        }) = report.into_report(&shell)
+        else {
+            panic!("a block cannot cross the data boundary")
+        };
+        assert_eq!(record.frame(), "<data-boundary>");
+        assert_eq!(record.site().script.as_ref(), "<data-boundary>");
+        assert_eq!((record.site().line, record.site().col), (1, 1));
+        assert!(rendered.contains("<data-boundary>"), "{rendered}");
+    }
 
     #[test]
     fn runtime_error_projects_to_a_full_diagnostic_string() {
         let shell = crate::test_helper::core_shell();
-        let err = Error::raised("boom", NonZeroU8::new(3).unwrap()).with_hint("try harder");
+        let err = Error::raised("boom").with_hint("try harder");
         // A single command whose error carries no span: the compact one-liner.
         let Report::Ran(Ran {
             rendered,
@@ -120,6 +154,7 @@ mod runtime_error_seam_tests {
             ..
         }) = (RunReport::Ran {
             ending: End::Err(err),
+            base: shell.local.audit.call_site().clone(),
             compact: Some(crate::source::FileId(0)),
             captured: None,
             trail: Vec::new(),
@@ -130,7 +165,7 @@ mod runtime_error_seam_tests {
         };
         assert!(single_command);
         assert_eq!(
-            record.message(),
+            record.describe(),
             "boom",
             "the record carries the bare message: {record:?}"
         );
@@ -140,8 +175,8 @@ mod runtime_error_seam_tests {
         );
         assert!(rendered.contains("boom"), "message missing: {rendered:?}");
         assert!(
-            rendered.contains("exit status 3"),
-            "exit status missing: {rendered:?}"
+            !rendered.contains("exit status"),
+            "a raised reason has no redundant exit status: {rendered:?}"
         );
         assert!(
             rendered.contains("try harder"),
@@ -239,7 +274,7 @@ mod static_diagnostic_seam_tests {
         let (rendered, status) = StaticDiagnostics::Host(crate::shell::runtime::Error::new(
             "hook 'x' is not registered",
         ))
-        .render();
+        .render(&crate::shell::runtime::ExitHints::default());
         assert_eq!(status, NonZeroU8::MIN);
         assert!(rendered.contains("hook 'x' is not registered"));
         assert!(!rendered.contains('╰'), "no span, no caret: {rendered:?}");
@@ -263,6 +298,7 @@ mod static_diagnostic_seam_tests {
         let shell = crate::test_helper::core_shell();
         let report = RunReport::Ran {
             ending: End::Panic("boom".into()),
+            base: shell.local.audit.call_site().clone(),
             compact: None,
             captured: None,
             trail: Vec::new(),

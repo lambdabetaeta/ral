@@ -3,7 +3,7 @@
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {
         warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
-        fail [status: 1, message: "assertion failed: $name"]
+        fail "assertion failed: $name"
     }
 }
 
@@ -32,8 +32,8 @@ let indirect = try $arm { |_| return () } | from-line
 assert_eq 'command arm in hand' indirect $indirect
 
 # An unwritten handler arrow still receives the error; `let` captures the join.
-let h = { |e| echo "handled $e[message]" }
-let handled = try { fail [status: 1, message: 'boom'] } { !$h }
+let h = { |e| echo "handled !{describe $e}" }
+let handled = try { fail 'boom' } { !$h }
 assert_eq 'handler under an unwritten arrow' 'handled boom' $handled
 
 echo 'join capture done'

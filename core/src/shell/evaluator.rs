@@ -10,8 +10,7 @@ pub(crate) mod scope;
 pub(crate) mod val;
 
 use crate::ir::{Comp, Pattern, Phrase};
-use crate::process::CommandFailure;
-use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Status, Value};
+use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Spanned;
 use crate::ty::Scheme;
 use std::sync::Arc;
@@ -70,14 +69,25 @@ pub(crate) fn run_phrases(
     for (i, phrase) in phrases.iter().enumerate() {
         let result = shell
             .poll()
-            .map_err(|b| machine::stamp(b, phrase.span))
+            .map_err(|b| {
+                b.locate(
+                    match &phrase.item {
+                        Phrase::Run(_) => "sequence",
+                        Phrase::Define { .. } => "let",
+                    },
+                    phrase.span,
+                    shell,
+                )
+            })
             .and_then(|()| match &phrase.item {
                 Phrase::Run(m) => machine::evaluate(Arc::clone(m), ran.env.clone(), mooring, shell),
                 Phrase::Define {
                     pattern,
                     comp,
                     schemes,
-                } => ran.define(pattern, comp, schemes, mode, mooring, shell),
+                } => ran
+                    .define(pattern, comp, schemes, mode, mooring, shell)
+                    .map_err(|b| b.locate("let", phrase.span, shell)),
             });
         match result {
             Ok(v) => ran.outcome = Ok(v),
@@ -141,18 +151,13 @@ impl Ran {
 /// A `let` whose right-hand side is one bare word naming no program: the
 /// hint says how to bind that word as text.
 fn as_let_text(e: Error, pattern: &Pattern, comp: &Comp) -> Error {
-    let (
-        Pattern::Name(binder),
-        Some(exec),
-        Some(cmd),
-        Status::Process(CommandFailure::Spawn(failure)),
-    ) = (pattern, comp.command(), e.command.as_deref(), &e.status)
+    let (Pattern::Name(binder), Some(exec), crate::fact::Reason::Process(process)) =
+        (pattern, comp.command(), &e.reason)
     else {
         return e;
     };
-    match failure
-        .text_hint(cmd, Some(binder))
-        .filter(|_| exec.argv.is_empty())
+    match (process.is_path_as_text() && exec.argv.is_empty())
+        .then(|| crate::process::path_as_text_hint(&process.program, Some(binder)))
     {
         Some(hint) => e.with_hint(hint),
         None => e,

@@ -9,7 +9,7 @@ let refusal = try {
     let big = yes ral | head -c 20000000
     return "bound"
 } { |e|
-    return $e[message]
+    return !{describe $e}
 }
 echo $refusal
 
@@ -28,8 +28,8 @@ let settle = { |h|
     case !{poll $h} [
         `ready: { |s| return $s },
         `running: { |_| sleep 0.05; settle $h },
-        `stopping: { |_| fail [status: 1, message: "unexpected stopping"] },
-        `consumed: { |_| fail [status: 1, message: "unexpected consumed"] }
+        `stopping: { |_| fail "unexpected stopping" },
+        `consumed: { |_| fail "unexpected consumed" }
     ]
 }
 let res = settle $h

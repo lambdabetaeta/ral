@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 generated_at_date: 2026-11-06
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -43,9 +43,11 @@ type-rule facet is a `BuiltinTypeRule`, which is a scheme factory —
 `fold-lines` is an ordinary one whose factory (`scheme::fold_lines`) is a
 plain scheme ([[map/core/typecheck|typecheck]]);
 there is no separate reducer arm. Beside it sits an optional diagnostic facet,
-which is not a typing rule: it carries what a misuse this verb has a name for
-earns — a decoder handed an argument, `fail` handed a literal zero status
-([[internals/builtins-registry|builtins-registry]]). An entry's first-class
+which is not a typing rule: it diagnoses a decoder handed an argument
+([[internals/builtins-registry|builtins-registry]]). A caught record handed to
+`fail` instead earns generic shape guidance from `shape_hint`/`row_has_reason`
+in `typecheck/explain.rs`, pointing to `raise $e` or `describe $e`.
+An entry's first-class
 form is its scheme, so it has one by construction, every entry in the table
 having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
@@ -317,8 +319,11 @@ Bodies are grouped by concern, one submodule each:
   rather than the caller's own block-local scope. Module loads carry no cache,
   so the guards keep re-evaluation terminating — see
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
-- `misc.rs` — `exit` refuses a status outside `0..=255`, and `fail` one
-  outside `1..=255`, minting a `NonZeroU8`; `builtin_surface` is the body
+- `misc.rs` — `fail` takes a `String`, raising `Reason::Raised`; `raise`
+  decodes the closed `[reason, frame, site]` record and trusts it unchanged,
+  refusing a failure of `exited 0` and signals outside `1..=127`. `describe` delegates to
+  `ErrorRecord::describe`. `exit` refuses outside `0..=255`. See
+  [[decisions/261105_the-error-record|the error record]]. `builtin_surface` is the body
   `SURFACE_BUILTIN` (above) wraps: it forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;
 - `math.rs` — the Float rounding builtins (`round`, `floor`, `ceil`, `trunc`);

@@ -150,13 +150,13 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
         assert!(
             desk.agent_read("helper".into())
                 .unwrap_err()
-                .message
+                .describe()
                 .contains("still working")
         );
         assert!(
             desk.agent_read("grandchild".into())
                 .unwrap_err()
-                .message
+                .describe()
                 .contains("reads only your own helpers")
         );
         child
@@ -165,7 +165,7 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
         assert!(
             desk.agent_read("helper".into())
                 .unwrap_err()
-                .message
+                .describe()
                 .contains("failed without a reply to read: engine failed")
         );
         let silent = test_agent(
@@ -178,14 +178,14 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
         assert!(
             desk.agent_read("silent".into())
                 .unwrap_err()
-                .message
+                .describe()
                 .contains("has no reply to read")
         );
         child.report(ChildStatus::Stopped).unwrap();
         assert!(
             desk.agent_read("helper".into())
                 .unwrap_err()
-                .message
+                .describe()
                 .contains("stopped without a reply to read; message it to continue")
         );
     });
@@ -208,7 +208,7 @@ fn read_refuses_an_old_reply_while_a_follow_up_is_working() {
         assert!(
             desk.agent_read("helper".into())
                 .unwrap_err()
-                .message
+                .describe()
                 .contains("still working")
         );
     });
@@ -329,10 +329,11 @@ fn a_refused_role_never_registers_a_child() {
                 ))
                 .expect_err("an unbound role must be refused");
             assert!(
-                err.message.contains("`` exarch-agents `start `` refused")
-                    && err.message.contains(said),
+                err.describe()
+                    .contains("`` exarch-agents `start `` refused")
+                    && err.describe().contains(said),
                 "the refusal must name the tag and the reason, got: {}",
-                err.message
+                err.describe()
             );
             assert_eq!(
                 summary(&desk.call.handle, &desk.call.fleet).live,
@@ -369,7 +370,7 @@ fn start_refuses_a_spec_missing_a_field_by_name() {
             .handle(&spoilt_start(|spec| spec.retain(|(key, _)| key != "name")))
             .expect_err("a spec missing `name` must be refused");
         assert_eq!(
-            err.message,
+            err.describe(),
             "`` exarch-agents `start ``: `spec: no `name field in a record of 3 fields"
         );
     });
@@ -383,7 +384,7 @@ fn start_refuses_a_misspelt_spec_field() {
             .handle(&spoilt_start(|spec| spec[1].0 = "nmae".into()))
             .expect_err("`nmae` is not a field the spec carries");
         assert_eq!(
-            err.message,
+            err.describe(),
             "`` exarch-agents `start ``: `spec: unknown field `nmae`: did you mean `name`?"
         );
     });
@@ -398,14 +399,14 @@ fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
         });
         let err = err.expect_err("zero fuel must refuse");
         assert!(
-            err.message.contains("no spawn fuel remains"),
+            err.describe().contains("no spawn fuel remains"),
             "got: {}",
-            err.message
+            err.describe()
         );
         assert!(
-            err.message.contains("Fuel bounds how deep"),
+            err.describe().contains("Fuel bounds how deep"),
             "must state that fuel bounds depth, not fan-out, got: {}",
-            err.message
+            err.describe()
         );
         assert!(
             left_parked,
@@ -440,9 +441,9 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
         });
         let err = err.expect_err("a second spawn naming a live agent must be refused");
         assert!(
-            err.message.contains("already bears the name 'helper'"),
+            err.describe().contains("already bears the name 'helper'"),
             "got: {}",
-            err.message
+            err.describe()
         );
         assert!(
             left_parked,
@@ -470,9 +471,9 @@ fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
         });
         let err = err.expect_err("a malformed name must be refused");
         assert!(
-            err.message.contains("ASCII letters"),
+            err.describe().contains("ASCII letters"),
             "the refusal must carry the name rule; got: {}",
-            err.message
+            err.describe()
         );
         assert!(
             left_parked,
@@ -540,8 +541,10 @@ fn a_retained_desk_refuses_start_after_its_loan_returns() {
     let err = retained
         .ask(start_req(NurseryId(0), "hi", "helper"))
         .unwrap_err();
-    assert_eq!(err.failure_code(), EnquiryError::no_desk().status);
-    assert_eq!(err.message, EnquiryError::no_desk().message);
+    assert_eq!(
+        err.reason,
+        ral_core::fact::Reason::Raised(EnquiryError::no_desk().message)
+    );
 }
 
 /// A refusal at adoption: here, a restriction record the capability
@@ -561,9 +564,9 @@ fn refused_enquiry_leaves_the_nursery_empty() {
         );
         let err = answer.expect_err("a `net axis that is not a Bool must refuse");
         assert!(
-            err.message.contains("net"),
+            err.describe().contains("net"),
             "must name the axis it could not read, got: {}",
-            err.message
+            err.describe()
         );
         assert!(
             !left_parked,
@@ -612,7 +615,7 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
             assert!(
                 desk.agent_stop("parent")
                     .unwrap_err()
-                    .message
+                    .describe()
                     .contains("not an agent you started")
             );
             assert!(desk.agent_stop("sibling").is_err());
@@ -694,7 +697,11 @@ fn stop_answers_say_what_they_did_or_why_they_refused() {
             desk.call.handle = (*mid).clone();
             desk.call.life = mid.mailbox.life();
             for refused in ["sibling", "mid"] {
-                let message = desk.agent_stop(refused).unwrap_err().message;
+                let message = desk
+                    .agent_stop(refused)
+                    .unwrap_err()
+                    .describe()
+                    .into_owned();
                 assert!(
                     message.contains(&format!("agent '{refused}' is not an agent you started"))
                         && message.contains("may only reach a descendant of yours"),
@@ -776,13 +783,13 @@ fn message_reaches_a_working_peer_but_a_resting_helper_admits_only_its_parent() 
             assert!(
                 desk.ask(message_req("mid", "hi"))
                     .unwrap_err()
-                    .message
+                    .describe()
                     .contains("is you")
             );
             let error = desk.ask(message_req("sibling", "hi")).unwrap_err();
             assert!(
                 error
-                    .message
+                    .describe()
                     .contains("rests; only 'parent' can message it now")
             );
             assert!(sibling.mailbox.begin());
@@ -869,7 +876,7 @@ fn dismiss_refuses_a_grandchild_and_leaves_both_lives_untouched() {
             .ask(Request::Agents(Agents::Dismiss("grandchild".into())))
             .unwrap_err();
         assert_eq!(
-            error.message,
+            error.describe(),
             "dismiss only an agent you started; its parent may dismiss it"
         );
         assert!(child.is_live());
@@ -984,10 +991,10 @@ fn reply_refuses_a_poisoned_mail_cell_without_staging_a_value() {
             .is_err()
         );
         let error = desk.agent_reply(text("not staged")).unwrap_err();
-        assert_eq!(error.message, agent.status().err().unwrap().to_string());
+        assert_eq!(error.describe(), agent.status().err().unwrap().to_string());
         assert!(
             error
-                .message
+                .describe()
                 .contains("resuming the run rebuilds its state from the log")
         );
         assert!(desk.loan.get().unwrap().reply.is_none());

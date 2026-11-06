@@ -1,9 +1,7 @@
 //! What the OS reported when a child ended, and the user-facing failure it
-//! becomes: a `CommandFailure` travels on as `Status::Process` in `shell/runtime/error.rs`.
+//! becomes: a `CommandFailure` converts once into the runtime's `Reason`.
 
 use super::cancel::CancelCause;
-use crate::fact::FailureCode;
-use crate::path::shown;
 use std::num::NonZeroU8;
 
 /// The exit code ral's every Windows kill uses (ASCII "RALK"), there being
@@ -27,11 +25,6 @@ impl Signal {
 
     pub(crate) const fn number(self) -> i32 {
         self.number
-    }
-
-    /// The shell status of a death by this signal.
-    pub(crate) const fn status(self) -> i32 {
-        128 + self.number
     }
 
     /// The signal a shell status reports, if it reports one.
@@ -153,7 +146,7 @@ impl WaitOutcome {
 }
 
 /// Why a spawn failed before there was a process.  Its payloads are boxed:
-/// `Error` carries one in its `Status`, and must stay under `result_large_err`.
+/// spawn refusals travel through the process boundary without growing its errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpawnFailure {
     NotFound,
@@ -177,27 +170,6 @@ pub enum Unrunnable {
     Directory,
     /// A file lacking the executable bit.
     File,
-}
-
-impl FailureCode for SpawnFailure {
-    fn failure_code(&self) -> NonZeroU8 {
-        match self {
-            Self::NotFound => const { NonZeroU8::new(127).unwrap() },
-            _ => const { NonZeroU8::new(126).unwrap() },
-        }
-    }
-}
-
-impl SpawnFailure {
-    /// The likeliest intent behind a path that names no program: itself as
-    /// text, bound to `binder` when the head is the whole right-hand side of
-    /// that `let`.
-    pub(crate) fn text_hint(&self, cmd: &str, binder: Option<&str>) -> Option<String> {
-        let Self::NotAProgram { found: None, .. } = self else {
-            return None;
-        };
-        Some(path_as_text_hint(cmd, binder))
-    }
 }
 
 /// What to write to use the path `cmd`, which stands where a command goes, as
@@ -229,76 +201,17 @@ pub enum CommandFailure {
 }
 
 // Negative Windows NTSTATUS values must remain failures.
-fn failure_byte(n: i32) -> NonZeroU8 {
+pub(crate) fn failure_byte(n: i32) -> NonZeroU8 {
     u8::try_from(n.clamp(1, 255))
         .ok()
         .and_then(NonZeroU8::new)
         .unwrap_or(NonZeroU8::MIN)
 }
 
-impl FailureCode for CommandFailure {
-    fn failure_code(&self) -> NonZeroU8 {
-        match self {
-            Self::ExitCode(code) => failure_byte(*code),
-            Self::Signal(sig) => failure_byte(sig.status()),
-            Self::Spawn(failure) => failure.failure_code(),
-        }
-    }
-}
-
-impl CommandFailure {
-    pub fn message(&self, cmd: &str) -> String {
-        match self {
-            #[cfg(windows)]
-            Self::ExitCode(windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT) => {
-                format!("{cmd}: ended by Ctrl-C")
-            }
-            Self::ExitCode(code) => format!("{cmd}: exited with status {code}"),
-            Self::Signal(sig) => format!("{cmd}: killed by signal {sig}"),
-            Self::Spawn(SpawnFailure::NotFound) => format!("{cmd}: command not found"),
-            Self::Spawn(SpawnFailure::PermissionDenied { found: None }) => {
-                format!("{cmd}: permission denied")
-            }
-            Self::Spawn(SpawnFailure::PermissionDenied { found: Some(path) }) => format!(
-                "{cmd}: permission denied ({} is not executable)",
-                shown(path)
-            ),
-            Self::Spawn(SpawnFailure::NotAProgram { found, kind }) => {
-                let what = match kind {
-                    Unrunnable::Directory => "a directory, not a command",
-                    Unrunnable::File => "a file, not an executable",
-                };
-                match found {
-                    Some(path) => format!("{cmd}: {} is {what}", shown(path)),
-                    None => format!("{cmd} is {what}"),
-                }
-            }
-            Self::Spawn(SpawnFailure::Io(msg)) => format!("{cmd}: {msg}"),
-        }
-    }
-
-    /// The follow-up line under the message.  `None` for a plain exit code, where
-    /// `Error::from_command_failure` falls back to the user's exit-hints table.
-    pub(crate) fn default_hint(&self) -> Option<String> {
-        match self {
-            Self::ExitCode(_) | Self::Spawn(_) => None,
-            #[cfg(unix)]
-            Self::Signal(sig) if sig.number() == libc::SIGKILL => Some(
-                "the process was killed with SIGKILL; the kernel or another process may have terminated it"
-                    .to_string(),
-            ),
-            #[cfg(unix)]
-            Self::Signal(sig) if sig.number() == libc::SIGSEGV => {
-                Some("the process crashed with a segmentation fault".to_string())
-            }
-            Self::Signal(sig) => Some(format!("the process terminated from {sig}")),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fact::{FailureCode as _, Reason};
     use strum::VariantArray as _;
 
     #[cfg(unix)]
@@ -322,10 +235,14 @@ mod tests {
         assert_eq!(Signal::new(0).to_string(), "0");
     }
 
-    /// Every failure's number, from the type that owns it.
+    fn code(failure: CommandFailure) -> u8 {
+        Reason::from_command("cmd", failure).failure_code().get()
+    }
+
+    /// Every failure's number, from the one table on `Reason`.
     #[test]
     fn every_failure_has_its_code() {
-        for (failure, code) in [
+        for (failure, expected) in [
             (CommandFailure::ExitCode(3), 3),
             (CommandFailure::Signal(Signal::new(11)), 139),
             (CommandFailure::Spawn(SpawnFailure::NotFound), 127),
@@ -335,28 +252,25 @@ mod tests {
             ),
             (CommandFailure::Spawn(SpawnFailure::Io("boom".into())), 126),
         ] {
-            assert_eq!(failure.failure_code().get(), code, "{failure:?}");
+            assert_eq!(code(failure.clone()), expected, "{failure:?}");
         }
     }
 
     #[test]
     fn an_externals_failure_is_never_a_clean_exit() {
-        for (raw, code) in [
+        for (raw, expected) in [
             (300, 255),
             (-1, 1),
             (0xC000_013A_u32.cast_signed(), 1),
             (3, 3),
         ] {
             assert_eq!(
-                CommandFailure::ExitCode(raw).failure_code().get(),
-                code,
+                code(CommandFailure::ExitCode(raw)),
+                expected,
                 "raw status {raw}"
             );
         }
-        assert_eq!(
-            CommandFailure::Signal(Signal::new(9)).failure_code().get(),
-            137
-        );
+        assert_eq!(code(CommandFailure::Signal(Signal::new(9))), 137);
     }
 
     #[test]
@@ -488,12 +402,13 @@ mod tests {
             Some(died_of(libc::SIGKILL))
         );
         assert_eq!(
-            CommandFailure::Signal(Signal::new(libc::SIGKILL)).message("sh"),
+            Reason::from_command("sh", CommandFailure::Signal(Signal::new(libc::SIGKILL)))
+                .describe(),
             "sh: killed by signal 9 (SIGKILL)"
         );
         assert_eq!(
-            CommandFailure::Signal(Signal::new(libc::SIGSEGV))
-                .default_hint()
+            Reason::from_command("sh", CommandFailure::Signal(Signal::new(libc::SIGSEGV)))
+                .hint()
                 .as_deref(),
             Some("the process crashed with a segmentation fault")
         );
@@ -578,7 +493,8 @@ mod tests {
             )))
         );
         assert_eq!(
-            CommandFailure::ExitCode(STATUS_CONTROL_C_EXIT).message("ping"),
+            Reason::from_command("ping", CommandFailure::ExitCode(STATUS_CONTROL_C_EXIT))
+                .describe(),
             "ping: ended by Ctrl-C"
         );
     }

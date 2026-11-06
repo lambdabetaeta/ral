@@ -244,7 +244,7 @@ mod tests {
             );
             let e = refused(head, &mut shell);
             assert_eq!(e.failure_code().get(), 126, "{e:?}");
-            assert!(!e.message.contains("denied by active grant"), "{e:?}");
+            assert!(!e.describe().contains("denied by active grant"), "{e:?}");
         }
     }
 
@@ -265,7 +265,7 @@ mod tests {
             &shell.context,
         );
         let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
-        assert!(e.message.contains("denied by active grant"), "{e:?}");
+        assert!(e.describe().contains("denied by active grant"), "{e:?}");
     }
 
     /// `let scratch = /tmp` runs a path, which a grant refuses; the refusal is
@@ -278,7 +278,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         let head = Head::resolve(&CommandName::Path(shown.clone()), &shell.context);
         let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
-        assert!(e.message.contains("denied by active grant"), "{e:?}");
+        assert!(e.describe().contains("denied by active grant"), "{e:?}");
         let hint = e.hint.as_deref().expect("a refusal carries a hint");
         let (text, grant) = hint.split_once("\n\n").expect("both hints are kept");
         assert!(text.contains(&format!("#'{shown}'#")), "{hint}");
@@ -311,7 +311,7 @@ mod tests {
                 let e = refused(head, shell);
                 (e, shell.local.audit.close(scope))
             });
-            assert!(e.message.contains("denied by active grant"), "{e:?}");
+            assert!(e.describe().contains("denied by active grant"), "{e:?}");
             let hint = e.hint.as_deref().expect("a refusal carries a hint");
             assert_eq!(
                 hint.split_once("\n\n").expect("both hints are kept").0,
@@ -343,7 +343,9 @@ mod tests {
         );
         let e = refused(head, &mut shell);
         assert_eq!(e.failure_code().get(), 127);
-        assert!(e.message.contains("no-such-dir"), "{}", e.message);
+        assert!(e.prov.is_none());
+        let description = e.describe();
+        assert!(description.contains("no-such-dir"), "{description}");
     }
 
     #[test]
@@ -393,7 +395,7 @@ mod tests {
                     panic!("the admitted path cannot be run");
                 };
                 assert_eq!(e.failure_code().get(), code, "{e:?}");
-                assert!(!e.message.contains("cannot pass"), "{e:?}");
+                assert!(!e.describe().contains("cannot pass"), "{e:?}");
             }
         });
     }
@@ -418,7 +420,7 @@ mod tests {
                 panic!("a non-executable candidate cannot be run");
             };
             assert_eq!(e.failure_code().get(), 126, "{e:?}");
-            assert!(e.message.contains(&crate::path::shown(&file)), "{e:?}");
+            assert!(e.describe().contains(&crate::path::shown(&file)), "{e:?}");
         });
     }
 

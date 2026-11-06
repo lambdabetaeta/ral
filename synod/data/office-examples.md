@@ -14,7 +14,7 @@ the result:
 
     let output = #'letter.docx'#
     let conversion = audit {
-      if !{exists $output} { fail [status: 1, message: #'`letter.docx` already exists; choose another output name.'#] }
+      if !{exists $output} { fail #'`letter.docx` already exists; choose another output name.'# }
       pandoc draft.md -o $output
       let text = pandoc -t plain $output | from-lines
       [file: $output, lines: !{length $text}, preview: !{take 10 $text}]

@@ -10,10 +10,11 @@
 use std::sync::Arc;
 
 use crate::io::{self, Sink};
+use crate::ir::Name;
 use crate::ir::Redirects;
 use crate::ir::{
-    Argv, CaseArm, Comp, CompKind, GroupNode, NativeEntry, Pattern, Val, ValListElem, is_synthetic,
-    synthetic,
+    Argv, CaseArm, Comp, CompKind, GroupNode, NativeEntry, Pattern, Prim, Val, ValListElem,
+    is_synthetic, synthetic,
 };
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
@@ -22,9 +23,9 @@ use crate::shell::exec::pipeline;
 use crate::shell::exec::redirect::scope::{RedirectState, WriteFate};
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
-    Binding, Break, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle, Env, Error, Escape,
-    FrameHandle, HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell, Signature, Stop,
-    TrailScope, Value, report_value, sig, sig_hint,
+    Binding, Break, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle, DisplacedSite, Env,
+    Error, FrameHandle, FrameName, HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell,
+    Signature, TrailScope, Value, report_value, sig, sig_hint,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -61,6 +62,8 @@ pub(crate) enum Focus {
 /// into the IR, never cloned IR, never a `Context` clone, and an `Env` only
 /// with syntax to close over it: `To` and `Seq`. Large states are boxed.
 enum Frame {
+    /// Adjacent tail calls share one restoration point.
+    CallSite(Box<DisplacedSite>),
     /// `M to x. N`: `bind` is the `Bind` node itself, read for its pattern,
     /// rest and span.
     To {
@@ -70,6 +73,7 @@ enum Frame {
     Seq {
         rest: Arc<Comp>,
         env: Env,
+        span: Option<Span>,
     },
     /// `□ V`: an argument awaiting the λ it binds; `span` is its call's.
     Arg {
@@ -89,12 +93,17 @@ enum Frame {
     },
     Try {
         handler: Value,
+        span: Option<Span>,
     },
     Guard {
         cleanup: Value,
+        span: Option<Span>,
     },
     /// Checks and wraps the returned value against the site (`Site::protect`).
-    Protect(Arc<Site>),
+    Protect {
+        site: Arc<Site>,
+        span: Option<Span>,
+    },
     Cleanup {
         outcome: Settled<Value>,
         /// The current scope before the cleanup's shield, restored on pop
@@ -104,12 +113,16 @@ enum Frame {
     Within(WithinUndo),
     /// Where its layer sits: a session frame pushed above survives the pop.
     Grant(usize),
-    Audit(TrailScope),
+    Audit {
+        scope: TrailScope,
+        span: Option<Span>,
+    },
     /// `gather`: the unique owner of its body's brood, and the cradle to
     /// restore when it exits.
     Gather {
         owner: ScopeOwner,
         prev: Cradle,
+        span: Option<Span>,
     },
 }
 
@@ -121,6 +134,8 @@ const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
 pub(crate) struct Machine {
     focus: Focus,
     stack: Vec<Frame>,
+    /// Provenance frames do not consume the computational stack budget.
+    call_site_frames: usize,
 }
 
 impl Default for Machine {
@@ -129,6 +144,7 @@ impl Default for Machine {
         Self {
             focus: Focus::Return(Terminal::Value(Value::Unit)),
             stack: Vec::new(),
+            call_site_frames: 0,
         }
     }
 }
@@ -144,25 +160,50 @@ pub(crate) const NESTED_MACHINE_LIMIT: usize = 24;
 
 // ── Small pure helpers ────────────────────────────────────────────────
 
-/// Stamp an unspanned error or an unlocated stop with `span`, the innermost
-/// node or frame that raised it — applied at each raising point instead of
-/// once at the end of a bigger function.
-pub(super) fn stamp(b: Break, span: Option<Span>) -> Break {
-    match (b, span) {
-        (Break::Error(e), Some(span)) if e.span.is_none() => Break::Error(e.at_span(span)),
-        (
-            Break::Escape(Escape::Stopped(Stop {
-                cause,
-                owner,
-                at: None,
-            })),
-            Some(span),
-        ) => Break::Escape(Escape::Stopped(Stop {
-            cause,
-            owner,
-            at: Some(span),
-        })),
-        (b, _) => b,
+fn operation_name(comp: &CompKind) -> Option<FrameName> {
+    let name = match comp {
+        CompKind::Exec(_) | CompKind::App { .. } | CompKind::Force(_) => return None,
+        CompKind::Prim(Prim::Binary(op, ..)) => op.symbol(),
+        CompKind::Native { entry, .. } => return Some(entry.0.decl.name.clone().into()),
+        CompKind::Prim(Prim::Negate(_)) => "-",
+        CompKind::Prim(Prim::Not(_)) => "not",
+        CompKind::Prim(Prim::Render(_)) => "str",
+        CompKind::Prim(Prim::Concat(_)) => "concat",
+        CompKind::Prim(Prim::Decode(_)) | CompKind::Protect { .. } => "decode",
+        CompKind::Prim(Prim::Index { .. }) => "index",
+        CompKind::Prim(Prim::Update { .. }) => "update",
+        CompKind::Prim(Prim::List(_)) => "list",
+        CompKind::Prim(Prim::Map(_)) => "map",
+        CompKind::Return(_) => "return",
+        CompKind::Lam { .. } => "lambda",
+        CompKind::Bind { .. } => "let",
+        CompKind::Seq { .. } => "sequence",
+        CompKind::Rec { .. } => "rec",
+        CompKind::If { .. } => "if",
+        CompKind::Case { .. } => "case",
+        CompKind::Try { .. } => "try",
+        CompKind::Guard { .. } => "guard",
+        CompKind::Capture(_) => "capture",
+        CompKind::Pipeline { .. } => "pipeline",
+        CompKind::Redirect { .. } => "redirect",
+        CompKind::Within { .. } => "within",
+        CompKind::Grant { .. } => "grant",
+        CompKind::Spawn { .. } => "spawn",
+        CompKind::Gather { .. } => "gather",
+        CompKind::Audit { .. } => "audit",
+        CompKind::Tilde(_) => "~",
+    };
+    Some(FrameName::Static(name))
+}
+
+/// Protection preserves the source variable; compiler binders name no call.
+fn forced_name(mut value: &Val) -> Option<&Name> {
+    while let Val::Protected { value: inner, .. } = value {
+        value = inner;
+    }
+    match value {
+        Val::Variable(name) if !is_synthetic(name) => Some(name),
+        _ => None,
     }
 }
 
@@ -248,6 +289,7 @@ fn run_boundary(
     entry: &BuiltinEntry,
     argv: &[Value],
     site: Option<&Arc<Site>>,
+    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -259,7 +301,7 @@ fn run_boundary(
             argv.len()
         )));
     }
-    super::call::run_native(entry, argv, site, mooring, shell)
+    super::call::run_native(entry, argv, site, span, mooring, shell)
 }
 
 fn form_args<'a>(
@@ -307,7 +349,7 @@ fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<V
 
 /// Room for frames, handed out only after the stack cap check.
 struct Slot<'a> {
-    stack: &'a mut Vec<Frame>,
+    machine: &'a mut Machine,
     count: usize,
 }
 
@@ -318,15 +360,30 @@ impl Slot<'_> {
 
     fn extend(self, frames: impl ExactSizeIterator<Item = Frame>) {
         assert_eq!(frames.len(), self.count, "push must match its reservation");
-        self.stack.extend(frames);
+        for frame in frames {
+            self.machine.push_frame(frame);
+        }
     }
 }
 
 impl Machine {
+    fn push_frame(&mut self, frame: Frame) {
+        let call_site = usize::from(matches!(frame, Frame::CallSite(_)));
+        self.stack.push(frame);
+        self.call_site_frames += call_site;
+    }
+
+    fn pop_frame(&mut self) -> Option<Frame> {
+        let frame = self.stack.pop()?;
+        self.call_site_frames -= usize::from(matches!(frame, Frame::CallSite(_)));
+        Some(frame)
+    }
+
     /// The stack cap: refuse `n` more frames past `shell.session.stack_limit`,
     /// before any effect — every pushing rule calls this first.
     fn room(&self, n: usize, shell: &Shell) -> Settled<()> {
-        if self.stack.len() + n > shell.session.stack_limit {
+        let depth = self.stack.len() - self.call_site_frames;
+        if depth + n > shell.session.stack_limit {
             return Err(sig_hint(
                 format!(
                     "recursion limit exceeded ({} frames)",
@@ -346,7 +403,7 @@ impl Machine {
     fn reserve_n(&mut self, count: usize, shell: &Shell) -> Settled<Slot<'_>> {
         self.room(count, shell)?;
         Ok(Slot {
-            stack: &mut self.stack,
+            machine: self,
             count,
         })
     }
@@ -368,13 +425,13 @@ impl Machine {
         self.focus = match focus {
             Focus::Eval { comp, env } => self.step_eval(&comp, env, mooring, shell),
             Focus::Return(t) => {
-                let frame = self.stack.pop().expect(
+                let frame = self.pop_frame().expect(
                     "Return with an empty stack: evaluate's loop must stop before calling step again",
                 );
                 self.step_return(frame, t, mooring, shell)
             }
             Focus::Halt(brk) => {
-                let frame = self.stack.pop().expect(
+                let frame = self.pop_frame().expect(
                     "Halt with an empty stack: evaluate's loop must stop before calling step again",
                 );
                 self.step_halt(frame, brk, mooring, shell)
@@ -384,6 +441,14 @@ impl Machine {
     }
 
     // ── call, force ────────────────────────────────────────────────────
+
+    fn enter_call(&mut self, name: impl Into<FrameName>, span: Option<Span>, shell: &mut Shell) {
+        if let Some(prev) = shell.enter_frame(name, span)
+            && !matches!(self.stack.last(), Some(Frame::CallSite(_)))
+        {
+            self.push_frame(Frame::CallSite(Box::new(prev)));
+        }
+    }
 
     /// The one way anything is called: `args` pushed, then `f` forced.
     fn call(
@@ -455,13 +520,16 @@ impl Machine {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Focus> {
-        self.eval_rules(comp, env, mooring, shell)
-            .map_err(|b| stamp(b, comp.span))
+        match operation_name(&comp.item) {
+            Some(name) => shell.at_site(name.clone(), comp.span, |shell| {
+                self.eval_rules(comp, env, mooring, shell)
+                    .map_err(|b| b.locate(&name, comp.span, shell))
+            }),
+            None => self.eval_rules(comp, env, mooring, shell),
+        }
     }
 
-    /// One rule per row on [`CompKind`], each raising with `?`. `step_eval`
-    /// is their only exit, so no rule can reach the machine without passing
-    /// under `stamp`.
+    /// Dispatch claims its own refusals; other operations use `step_eval`.
     fn eval_rules(
         &mut self,
         comp: &Arc<Comp>,
@@ -471,7 +539,10 @@ impl Machine {
     ) -> Settled<Focus> {
         Ok(match &comp.item {
             CompKind::Protect { body, site } => {
-                self.reserve(shell)?.push(Frame::Protect(Arc::clone(site)));
+                self.reserve(shell)?.push(Frame::Protect {
+                    site: Arc::clone(site),
+                    span: comp.span,
+                });
                 Focus::Eval {
                     comp: Arc::clone(body),
                     env,
@@ -517,10 +588,15 @@ impl Machine {
                 path.shown(&shell.context.require_home()?),
             ))),
 
-            CompKind::Force(val) => Self::force_val(val, env, comp.span, shell)?,
+            CompKind::Force(val) => {
+                let name = forced_name(val).map_or(FrameName::Static("!"), FrameName::from);
+                self.enter_call(name.clone(), comp.span, shell);
+                Self::force_val(val, env, comp.span, shell)
+                    .map_err(|b| b.locate(&name, comp.span, shell))?
+            }
 
             CompKind::Prim(prim) => {
-                Focus::Return(Terminal::Value(expr::eval_prim(prim, env, &shell.sig)?))
+                Focus::Return(Terminal::Value(expr::eval_prim(prim, env, shell)?))
             }
 
             CompKind::Bind {
@@ -544,6 +620,7 @@ impl Machine {
                 self.reserve(shell)?.push(Frame::Seq {
                     rest: Arc::clone(rest),
                     env: env.clone(),
+                    span: comp.span,
                 });
                 Focus::Eval {
                     comp: Arc::clone(first),
@@ -569,21 +646,29 @@ impl Machine {
             }
 
             CompKind::App { head, args } => {
-                shell.poll()?;
-                shell.stamp_call_site(comp.span);
-                let args = form_args(args.iter().map(|arg| &arg.item), &env, &shell.sig)?;
-                self.push_args(args, comp.span, shell)?;
-                Focus::Eval {
-                    comp: Arc::clone(head),
-                    env,
+                let name = match &head.item {
+                    CompKind::Force(val) => forced_name(val),
+                    _ => None,
                 }
+                .map_or(FrameName::Static("apply"), FrameName::from);
+                self.enter_call(name.clone(), comp.span, shell);
+                let call = (|| {
+                    shell.poll()?;
+                    let args = form_args(args.iter().map(|arg| &arg.item), &env, &shell.sig)?;
+                    self.push_args(args, comp.span, shell)?;
+                    Ok(Focus::Eval {
+                        comp: Arc::clone(head),
+                        env,
+                    })
+                })();
+                call.map_err(|b: Break| b.locate(&name, comp.span, shell))?
             }
 
             CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, mooring, shell)?,
 
             CompKind::Native { entry, args } => {
                 let args = form_args(args, &env, &shell.sig)?;
-                let v = super::call::run_native(&entry.0, &args, None, mooring, shell)?;
+                let v = super::call::run_native(&entry.0, &args, None, comp.span, mooring, shell)?;
                 Focus::Return(Terminal::Value(v))
             }
 
@@ -653,26 +738,34 @@ impl Machine {
             CompKind::Try { body, handler } => {
                 let body = form(body, &env, &shell.sig)?;
                 let handler = form(handler, &env, &shell.sig)?;
-                self.reserve(shell)?.push(Frame::Try { handler });
+                self.reserve(shell)?.push(Frame::Try {
+                    handler,
+                    span: comp.span,
+                });
                 Self::force(body, comp.span)?
             }
 
             CompKind::Guard { body, cleanup } => {
                 let body = form(body, &env, &shell.sig)?;
                 let cleanup = form(cleanup, &env, &shell.sig)?;
-                self.reserve(shell)?.push(Frame::Guard { cleanup });
+                self.reserve(shell)?.push(Frame::Guard {
+                    cleanup,
+                    span: comp.span,
+                });
                 Self::force(body, comp.span)?
             }
 
             CompKind::Audit { body } => {
                 let body = form(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
-                slot.push(Frame::Audit(shell.local.audit.open(CapturePolicy::Bytes)));
+                slot.push(Frame::Audit {
+                    scope: shell.local.audit.open(CapturePolicy::Bytes),
+                    span: comp.span,
+                });
                 Self::force(body, comp.span)?
             }
 
             CompKind::Spawn { title, body } => {
-                shell.stamp_call_site(comp.span);
                 let title = title
                     .as_ref()
                     .map(|t| legible_title(&form(&t.item, &env, &shell.sig)?, "spawn"))
@@ -691,7 +784,11 @@ impl Machine {
                     &mut shell.local.cradle,
                     Cradle::owning(shell.scope.clone(), owner.brood()),
                 );
-                slot.push(Frame::Gather { owner, prev });
+                slot.push(Frame::Gather {
+                    owner,
+                    prev,
+                    span: comp.span,
+                });
                 Self::force(body, comp.span)?
             }
         })
@@ -739,20 +836,33 @@ impl Machine {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Focus> {
+        let name = FrameName::from(exec.head.name().written().into_owned());
+        self.enter_call(name.clone(), span, shell);
+        self.dispatch_exec(exec, span, env, mooring, shell)
+            .map_err(|b| b.locate(&name, span, shell))
+    }
+
+    fn dispatch_exec(
+        &mut self,
+        exec: &crate::ir::Exec,
+        span: Option<Span>,
+        env: &Env,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Focus> {
         shell.poll()?;
         let argv = close_argv(&exec.argv, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
-        shell.stamp_call_site(span);
         match dispatch::classify_command(&exec.head, env, mooring, shell)? {
             Resolution::Env(Value::Native(entry)) if entry.decl.is_boundary() => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
-                let v = run_boundary(&entry, &argv, exec.site.as_ref(), mooring, shell)?;
+                let v = run_boundary(&entry, &argv, exec.site.as_ref(), span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             // Agda's `prim` rule: a builtin given its arity runs on its argv.
             Resolution::Env(Value::Native(entry)) if argv.len() == entry.decl.fixed_arity() => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
-                let v = super::call::run_native(&entry, &argv, None, mooring, shell)?;
+                let v = super::call::run_native(&entry, &argv, None, span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::Env(v) => {
@@ -788,23 +898,31 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         match frame {
-            Frame::Protect(site) => Ok(Focus::Return(Terminal::Value(
-                site.protect(as_value(t)?, shell)?,
-            ))),
+            Frame::CallSite(prev) => {
+                shell.local.audit.restore_site(*prev);
+                Ok(Focus::Return(t))
+            }
+            Frame::Protect { site, span } => shell.at_site("decode", span, |shell| {
+                let value = as_value(t).and_then(|v| site.protect(v, shell));
+                value
+                    .map(|v| Focus::Return(Terminal::Value(v)))
+                    .map_err(|b| b.locate("decode", span, shell))
+            }),
             Frame::To { bind, env } => {
-                let v = as_value(t).map_err(|b| stamp(b, bind.span))?;
+                let v = as_value(t).map_err(|b| b.locate("let", bind.span, shell))?;
                 let CompKind::Bind { pattern, rest, .. } = &bind.item else {
                     unreachable!("a To frame's `bind` is always a Bind comp")
                 };
-                let env = pattern::bind(pattern, &v, env).map_err(|b| stamp(b, bind.span))?;
+                let env = pattern::bind(pattern, &v, env)
+                    .map_err(|b| b.locate("let", bind.span, shell))?;
                 Ok(Focus::Eval {
                     comp: Arc::clone(rest),
                     env,
                 })
             }
 
-            Frame::Seq { rest, env } => {
-                as_value(t)?;
+            Frame::Seq { rest, env, span } => {
+                as_value(t).map_err(|b| b.locate("sequence", span, shell))?;
                 Ok(Focus::Eval { comp: rest, env })
             }
 
@@ -814,7 +932,7 @@ impl Machine {
                     let CompKind::Lam { param, body } = &comp.item else {
                         unreachable!("a Terminal::Lambda is built only from a Lam node")
                     };
-                    shell.poll().map_err(|b| stamp(b, span))?;
+                    shell.poll().map_err(|b| b.locate("apply", span, shell))?;
                     env.bind(
                         param.clone(),
                         Binding {
@@ -827,13 +945,13 @@ impl Machine {
                         env,
                     })
                 }
-                Terminal::Value(v) => Err(stamp(not_a_function(&v), span)),
+                Terminal::Value(v) => Err(not_a_function(&v).locate("apply", span, shell)),
             },
 
             Frame::Capture { prev, buf, span } => {
                 shell.io.stdout = prev;
                 if buf.overflowed() {
-                    Err(stamp(Break::Error(capture_overflowed()), span))
+                    Err(Break::from(capture_overflowed()).locate("capture", span, shell))
                 } else {
                     Ok(Focus::Return(Terminal::Value(Value::bytes(buf.take()))))
                 }
@@ -847,15 +965,17 @@ impl Machine {
 
             Frame::Try { .. } => Ok(Focus::Return(t)),
 
-            Frame::Guard { cleanup } => {
-                let v = as_value(t)?;
-                let slot = self.reserve(shell)?;
+            Frame::Guard { cleanup, span } => {
+                let v = as_value(t).map_err(|b| b.locate("guard", span, shell))?;
+                let slot = self
+                    .reserve(shell)
+                    .map_err(|b| b.locate("guard", span, shell))?;
                 let prev = shell.shield(mooring.cleanup_grace);
                 slot.push(Frame::Cleanup {
                     outcome: Ok(v),
                     prev,
                 });
-                Self::force(cleanup, None)
+                Self::force(cleanup, span).map_err(|b| b.locate("guard", span, shell))
             }
 
             Frame::Cleanup { outcome, prev } => {
@@ -868,15 +988,16 @@ impl Machine {
                 Ok(Focus::Return(t))
             }
 
-            Frame::Audit(scope) => {
+            Frame::Audit { scope, span } => {
                 let trail = shell.local.audit.close(scope);
-                let v = as_value(t)?;
+                let v = as_value(t).map_err(|b| b.locate("audit", span, shell))?;
                 Ok(Focus::Return(Terminal::Value(report_value(Ok(v), trail))))
             }
 
-            Frame::Gather { owner, prev } => {
+            Frame::Gather { owner, prev, span } => {
                 shell.local.cradle = prev;
-                let v = concurrency::exit_brood(&owner, as_value(t), mooring.cleanup_grace, shell)?;
+                let v = concurrency::exit_brood(&owner, as_value(t), mooring.cleanup_grace, shell)
+                    .map_err(|b| b.locate("gather", span, shell))?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
         }
@@ -890,6 +1011,12 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         match frame {
+            Frame::CallSite(prev) => {
+                let at = shell.local.audit.call_site();
+                let s = s.locate(at.name(), at.span(), shell);
+                shell.local.audit.restore_site(*prev);
+                Err(s)
+            }
             Frame::To { bind, .. } => {
                 let CompKind::Bind { pattern, .. } = &bind.item else {
                     unreachable!("a To frame's `bind` is always a Bind comp")
@@ -910,12 +1037,14 @@ impl Machine {
             Frame::Capture { prev, buf, .. } => {
                 shell.io.stdout = prev;
                 Err(match s {
-                    Break::Error(e) if buf.total() > 0 => Break::Error(e.discarding()),
+                    Break::Error(e) if buf.total() > 0 => {
+                        Break::Error(e.discarded(u32::try_from(buf.total()).unwrap_or(u32::MAX)))
+                    }
                     s => s,
                 })
             }
 
-            Frame::Arg { .. } | Frame::Protect(_) => Err(s),
+            Frame::Arg { .. } | Frame::Protect { .. } => Err(s),
 
             Frame::Cleanup { prev, .. } => {
                 shell.scope = prev;
@@ -933,25 +1062,28 @@ impl Machine {
                 Err(s)
             }
 
-            Frame::Try { handler } => match s {
+            Frame::Try { handler, span } => match s {
                 Break::Error(e) => {
                     let record = Value::from_datum(e.record(shell));
-                    self.call(handler, vec![record], None, shell)
+                    self.call(handler, vec![record], span, shell)
+                        .map_err(|b| b.locate("try", span, shell))
                 }
                 escape @ Break::Escape(_) => Err(escape),
             },
 
-            Frame::Guard { cleanup } => {
-                let slot = self.reserve(shell)?;
+            Frame::Guard { cleanup, span } => {
+                let slot = self
+                    .reserve(shell)
+                    .map_err(|b| b.locate("guard", span, shell))?;
                 let prev = shell.shield(mooring.cleanup_grace);
                 slot.push(Frame::Cleanup {
                     outcome: Err(s),
                     prev,
                 });
-                Self::force(cleanup, None)
+                Self::force(cleanup, span).map_err(|b| b.locate("guard", span, shell))
             }
 
-            Frame::Audit(scope) => match s {
+            Frame::Audit { scope, .. } => match s {
                 Break::Error(e) => {
                     let trail = shell.local.audit.close(scope);
                     let record = e.record(shell);
@@ -961,12 +1093,12 @@ impl Machine {
                     ))))
                 }
                 escape @ Break::Escape(_) => {
-                    Frame::Audit(scope).abandon(shell);
+                    drop(shell.local.audit.close(scope));
                     Err(escape)
                 }
             },
 
-            Frame::Gather { owner, prev } => {
+            Frame::Gather { owner, prev, .. } => {
                 shell.local.cradle = prev;
                 owner.end(mooring.cleanup_grace);
                 Err(s)
@@ -985,10 +1117,11 @@ impl Frame {
     /// owner to stop its brood without waiting.  The rest do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
+            Self::CallSite(prev) => shell.local.audit.restore_site(*prev),
             Self::Capture { prev, .. } => shell.io.stdout = prev,
             Self::Redirect(state) => state.abandon(shell),
             Self::Unmask { frame } => shell.context.handlers.restore_matched(*frame),
-            Self::Audit(scope) => drop(shell.local.audit.close(scope)),
+            Self::Audit { scope, .. } => drop(shell.local.audit.close(scope)),
             Self::Within(undo) => undo.apply(shell),
             Self::Grant(at) => shell.context.grants.remove(at, 1),
             Self::Cleanup { prev, .. } => shell.scope = prev,
@@ -998,7 +1131,7 @@ impl Frame {
             | Self::Arg { .. }
             | Self::Try { .. }
             | Self::Guard { .. }
-            | Self::Protect(_) => {}
+            | Self::Protect { .. } => {}
         }
     }
 }
@@ -1047,7 +1180,7 @@ fn run(
     match result {
         Ok(()) => end_of_run(m.focus),
         Err(payload) => {
-            while let Some(frame) = m.stack.pop() {
+            while let Some(frame) = m.pop_frame() {
                 frame.abandon(shell);
             }
             std::panic::resume_unwind(payload);
@@ -1098,18 +1231,19 @@ mod tests {
     use super::*;
     use crate::ir::{Name, Phrase};
     use crate::shell::evaluator::{run_source, with_capture};
-    use crate::shell::runtime::{Break, captured};
-    use crate::source::FileId;
+    use crate::shell::runtime::{Break, Escape, Stop, captured};
 
     /// Run every phrase of `source` through the machine: a `Define` binds
     /// into the running `Env` with `pattern::bind`, a `Run` phrase's
     /// value is the previous one, mirroring `run_phrases`'s shape without
     /// its lease machinery, irrelevant to what these tests probe.
     fn run_with(source: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+        let file =
+            shell.install_script_context(&crate::source::SourceOrigin::named("<machine>"), source);
         let top = crate::compile::compile_and_typecheck(
             source,
             crate::test_helper::core_schemes(),
-            FileId::DUMMY,
+            file,
             None,
             None,
         )
@@ -1185,7 +1319,7 @@ mod tests {
         let mut shell = new_shell();
         let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias boom { |a| echo partial; fail [status: 1, message: 'x'] }\n\
+                "alias boom { |a| echo partial; fail 'x' }\n\
                  let x = boom\nreturn $x",
                 shell,
             )
@@ -1201,7 +1335,7 @@ mod tests {
         let mut shell = new_shell();
         let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias boom { |a| echo partial; fail [status: 1, message: 'x'] }\n\
+                "alias boom { |a| echo partial; fail 'x' }\n\
                  let x = try { return !{ echo in | boom } } { |_| return 'handled' }\n\
                  return $x",
                 shell,
@@ -1211,14 +1345,12 @@ mod tests {
         assert!(bytes.is_empty(), "the failed capture wrote {bytes:?}");
     }
 
-    /// Nested captures that both fail write nothing, and the report says
-    /// once that they dropped bytes.
     #[test]
-    fn nested_failing_captures_write_nothing_and_note_it_once() {
+    fn nested_failing_captures_sum_their_bytes_into_one_note() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+        let (result, bytes, _) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias boom { |a| echo cde; fail [status: 1, message: 'x'] }\n\
+                "alias boom { |a| echo cde; fail 'x' }\n\
                  let x = !{ echo ab; let y = boom; echo z }\nreturn $x",
                 shell,
             )
@@ -1227,8 +1359,37 @@ mod tests {
         let Err(Break::Error(e)) = result else {
             panic!("expected the inner failure, got {result:?}")
         };
-        let hint = e.hint.expect("the report notes the dropped bytes");
-        assert_eq!(hint.matches("discarded").count(), 1, "{hint}");
+        assert_eq!(e.unwound.discarded, 7, "ab\\n plus cde\\n");
+        assert!(e.hint.is_none());
+        let rendered = e.render(shell.sources(), None, shell.exit_hints());
+        assert_eq!(rendered.matches("were discarded").count(), 1, "{rendered}");
+        assert!(rendered.contains("7 bytes written to stdout"), "{rendered}");
+    }
+
+    #[test]
+    fn discard_and_abandoned_tail_notes_render_in_that_order() {
+        let mut shell = new_shell();
+        let (result, bytes, _) = with_capture(&mut shell, |shell| {
+            run_source(
+                "let x = !{ echo ab; fail 'x'; echo later }; return $x",
+                shell,
+            )
+        });
+        assert_eq!(bytes, [] as [u8; 0]);
+        let Err(Break::Error(e)) = result else {
+            panic!("expected failure")
+        };
+        assert_eq!(e.unwound.discarded, 3);
+        assert!(e.unwound.abandoned_tail);
+        assert!(e.hint.is_none());
+        let rendered = e.render(shell.sources(), None, shell.exit_hints());
+        let discard = rendered
+            .find("3 bytes written to stdout")
+            .expect("discard note");
+        let tail = rendered
+            .find("later steps in this block did not run")
+            .expect("tail note");
+        assert!(discard < tail, "{rendered}");
     }
 
     /// An escape out of a capture drops what it wrote, like a failure.
@@ -1265,9 +1426,12 @@ mod tests {
 
     /// A value meeting an argument is unreachable for checked code.
     #[test]
-    fn a_value_meeting_an_argument_is_stamped_with_the_calls_span() {
+    fn a_value_meeting_an_argument_is_located_at_the_call() {
         let mut shell = new_shell();
-        let file = FileId::DUMMY;
+        let file = shell.install_script_context(
+            &crate::source::SourceOrigin::named("<call>"),
+            "                     ",
+        );
         let span = crate::source::Span::new(file, 10, 20);
         let head = Arc::new(Spanned::with_span(
             Some(span),
@@ -1284,12 +1448,12 @@ mod tests {
         match out {
             Err(Break::Error(e)) => {
                 assert!(
-                    e.message.contains("is not a function"),
+                    e.describe().contains("is not a function"),
                     "got {:?}",
-                    e.message
+                    e.describe()
                 );
                 assert_eq!(
-                    e.span,
+                    e.prov.as_ref().and_then(crate::shell::runtime::Prov::span),
                     Some(span),
                     "the value application error must carry the call's span"
                 );
@@ -1532,6 +1696,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn call_site_accounting_tracks_coalescing_return_and_halt() {
+        let mut shell = new_shell();
+        shell.session.stack_limit = 2;
+        let file = shell
+            .install_script_context(&crate::source::SourceOrigin::named("<accounting>"), "f g");
+        let span = Some(Span::new(file, 0, 1));
+        let before = shell.local.audit.call_site().clone();
+        let mut machine = Machine::default();
+        machine.enter_call("f", span, &mut shell);
+        machine.enter_call("g", span, &mut shell);
+        assert_eq!((machine.stack.len(), machine.call_site_frames), (1, 1));
+        machine
+            .push_args(vec![Value::Unit, Value::Unit], span, &shell)
+            .expect("provenance costs no computational frames");
+        machine.enter_call("f", span, &mut shell);
+        machine.enter_call("g", span, &mut shell);
+        assert_eq!((machine.stack.len(), machine.call_site_frames), (4, 2));
+        assert!(machine.reserve(&shell).is_err());
+        assert_eq!((machine.stack.len(), machine.call_site_frames), (4, 2));
+
+        let mooring = Mooring::adrift();
+        machine.step(&mooring, &mut shell);
+        assert_eq!((machine.stack.len(), machine.call_site_frames), (3, 1));
+        assert!(matches!(machine.focus, Focus::Return(_)));
+        machine.step(&mooring, &mut shell);
+        assert_eq!((machine.stack.len(), machine.call_site_frames), (2, 1));
+        assert!(matches!(machine.focus, Focus::Halt(_)));
+        machine.step(&mooring, &mut shell);
+        assert_eq!((machine.stack.len(), machine.call_site_frames), (1, 1));
+        machine.step(&mooring, &mut shell);
+        assert_eq!((machine.stack.len(), machine.call_site_frames), (0, 0));
+        assert!(machine.pop_frame().is_none());
+        assert!(machine.room(2, &shell).is_ok());
+        assert_eq!(shell.local.audit.call_site(), &before);
+    }
+
+    #[test]
+    fn panic_abandons_interleaved_call_site_and_computational_frames() {
+        let mut shell = new_shell();
+        let file =
+            shell.install_script_context(&crate::source::SourceOrigin::named("<panic>"), "f g");
+        let span = Some(Span::new(file, 0, 1));
+        let before = shell.local.audit.call_site().clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = run(
+                |machine, _, shell| {
+                    machine.enter_call("f", span, shell);
+                    machine.push_args(vec![Value::Unit], span, shell).unwrap();
+                    machine.enter_call("g", span, shell);
+                    assert_eq!((machine.stack.len(), machine.call_site_frames), (3, 2));
+                    panic!("abandon the continuation");
+                },
+                &Mooring::adrift(),
+                &mut shell,
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(shell.local.audit.call_site(), &before);
+        assert_eq!(shell.local.machine_depth, 0);
+    }
+
     /// The stack cap: its error text, and a refused push leaves
     /// `io.stdout` exactly where it was.
     #[test]
@@ -1549,9 +1775,9 @@ mod tests {
         match out {
             Err(Break::Error(e)) => {
                 assert!(
-                    e.message.contains("recursion limit exceeded"),
+                    e.describe().contains("recursion limit exceeded"),
                     "got {:?}",
-                    e.message
+                    e.describe()
                 );
             }
             other => panic!("expected a recursion-limit error, got {other:?}"),
@@ -1580,15 +1806,22 @@ mod tests {
     #[test]
     fn map_validation_errors_name_the_operand_span() {
         use crate::ir::{MapEntryV, Prim};
-        let span = Span::new(FileId::DUMMY, 10, 20);
+        let mut shell = new_shell();
+        let file = shell.install_script_context(
+            &crate::source::SourceOrigin::named("<map>"),
+            "                     ",
+        );
+        let span = Span::new(file, 10, 20);
         let bad = || Spanned::with_span(Some(span), Val::Int(1));
         for entry in [MapEntryV::Entry(bad(), bad()), MapEntryV::Spread(bad())] {
-            let mut shell = new_shell();
             let node = Arc::new(Spanned::synthetic(CompKind::Prim(Prim::Map(Box::new([
                 entry,
             ])))));
             match evaluate(node, shell.env.clone(), &Mooring::adrift(), &mut shell) {
-                Err(Break::Error(e)) => assert_eq!(e.span, Some(span)),
+                Err(Break::Error(e)) => assert_eq!(
+                    e.prov.as_ref().and_then(crate::shell::runtime::Prov::span),
+                    Some(span)
+                ),
                 other => panic!("expected located map validation failure, got {other:?}"),
             }
         }
@@ -1599,7 +1832,11 @@ mod tests {
         let mut shell = new_shell();
         let mooring = Mooring::adrift();
         shell.scope = Scope::clone(&mooring.home);
-        let span = Span::new(FileId::DUMMY, 10, 20);
+        let file = shell.install_script_context(
+            &crate::source::SourceOrigin::named("<bind>"),
+            "                     ",
+        );
+        let span = Span::new(file, 10, 20);
         let node = Arc::new(Spanned::with_span(
             Some(span),
             CompKind::bind(
@@ -1613,7 +1850,7 @@ mod tests {
             .cancel(crate::process::cancel::CancelCause::Cancelled);
         let out = evaluate(node, shell.env.clone(), &mooring, &mut shell);
         assert!(
-            matches!(out, Err(Break::Escape(Escape::Stopped(Stop { at: Some(at), .. }))) if at == span)
+            matches!(out, Err(Break::Escape(Escape::Stopped(Stop { at: Some(at), .. }))) if at.span() == Some(span))
         );
     }
 
@@ -1621,7 +1858,7 @@ mod tests {
     fn map_operand_hoists_propagate_exit_without_running_later_operands() {
         let mut shell = new_shell();
         let out = run_source(
-            "let k = 'a'; try { let _ = [$k: !{exit 5}, ...!{fail [status: 7, message: later]}]; return () } { |e| return () }",
+            "let k = 'a'; try { let _ = [$k: !{exit 5}, ...!{fail 'later'}]; return () } { |e| return () }",
             &mut shell,
         );
         assert!(matches!(out, Err(Break::Escape(Escape::Exit(5)))));
@@ -1645,7 +1882,7 @@ mod tests {
     }
 
     /// A cancellation is a `Break` like any other: whichever polled rule
-    /// sees it, the halt leaves `step_eval` through `stamp` and so
+    /// sees it, the halt leaves `step_eval` through `locate` and so
     /// carries that node's span.
     #[test]
     fn a_cancelled_rec_and_a_cancelled_bind_both_carry_a_span() {
@@ -1684,9 +1921,9 @@ mod tests {
             match out {
                 Err(Break::Error(e)) => {
                     assert!(
-                        e.message.contains("native re-entry depth exceeded"),
+                        e.describe().contains("native re-entry depth exceeded"),
                         "expected the depth-exceeded error, got {:?}",
-                        e.message
+                        e.describe()
                     );
                 }
                 other => panic!("expected the native re-entry cap to fire, got {other:?}"),

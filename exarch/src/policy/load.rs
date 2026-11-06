@@ -45,9 +45,9 @@ pub(super) fn load_fragment_ral(
 fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> Result<T, String> {
     read().map_err(|e| {
         if let Break::Error(err) = &e
-            && err.message.starts_with(NOT_FOUND)
+            && err.describe().starts_with(NOT_FOUND)
         {
-            return format!("{flag} {}", err.message);
+            return format!("{flag} {}", err.describe());
         }
         format!("{flag} {}: {e}", ral_core::path::shown(path))
     })

@@ -10,7 +10,7 @@
 use crate::path::{Judged, LexicalPath, Located, Reading};
 use crate::shell::evaluator::Mode;
 use crate::shell::load::{ModuleLoad, check_source, module_phrases};
-use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell, Value, sig};
+use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell, Value};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
 use std::sync::Arc;
@@ -18,27 +18,20 @@ use std::sync::Arc;
 /// Read and normalise the module `located` holds, which the grant judged for
 /// reading; `shown` names it in errors.  The handle ends here, by signature.
 fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled<String> {
-    let what = format!("use: {shown}");
     let read = located.read();
     drop(located);
-    let mut file = read.map_err(|e| Error::io(&what, &e))?;
+    let mut file = read.map_err(|e| Error::io(shown, &e).context("use"))?;
     let mut source = String::new();
-    std::io::Read::read_to_string(&mut file, &mut source).map_err(|e| Error::io(&what, &e))?;
+    std::io::Read::read_to_string(&mut file, &mut source)
+        .map_err(|e| Error::io(shown, &e).context("use"))?;
     Ok(crate::source::normalize_source_text(source))
 }
 
-/// Prefix `use:` onto a loader failure while keeping its status: a `fail
-/// [status: 7]` inside a used module must reach the caller's handler as 7,
-/// not the `1` a fresh `sig` imposes.  Idempotent, so a nested `use` does not
-/// stack the prefix.
+/// Report the loader's context without changing the failure value.
 fn tag_loader_error(e: Break) -> Break {
     match e {
-        Break::Error(mut err) => {
-            if !err.message.starts_with("use: ") {
-                err.message = format!("use: {}", err.message);
-            }
-            Break::Error(err)
-        }
+        Break::Error(err) if err.context.is_none() => Break::Error(err.context("use")),
+        error @ Break::Error(_) => error,
         other @ Break::Escape(_) => other,
     }
 }
@@ -66,7 +59,7 @@ pub(crate) fn builtin_use(
     };
 
     let file = SourceFile::new(located.real().as_path().to_path_buf())
-        .map_err(|e| sig(format!("use: {e}")))?;
+        .map_err(|e| Error::new(e.to_string()).context("use"))?;
     let source = read_and_normalize(located, &crate::path::shown(file.path()))?;
     let origin = SourceOrigin::File(file);
     let top = check_source(&source, &origin, shell, None).map_err(tag_loader_error)?;
@@ -127,7 +120,7 @@ fn resolve_in_current_script(path: &str, shell: &Shell) -> Settled<crate::path::
     match origin.and_then(SourceOrigin::file) {
         Some(script) => resolver
             .resolve_in_script(path, script)
-            .map_err(|e| sig(format!("use: {e}"))),
+            .map_err(|e| Error::new(e.to_string()).context("use").into()),
         None => Ok(resolver.resolve(path)),
     }
 }

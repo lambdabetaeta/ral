@@ -56,6 +56,10 @@ impl Shell {
         &self.session.fixings
     }
 
+    pub fn exit_hints(&self) -> &ExitHints {
+        &self.session.exit_hints
+    }
+
     pub fn set_exit_hints(&mut self, hints: ExitHints) {
         self.session.exit_hints = Arc::new(hints);
     }

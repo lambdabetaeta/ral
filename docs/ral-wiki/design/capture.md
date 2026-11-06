@@ -32,7 +32,7 @@ A *grade* says how a computation produces its result, not whether it writes.
 - **Fresh grades: other producers.** `return`, primitives, `~`, `capture`,
   `spawn`, `audit`, and handled `alias`/`unalias` statements; ordinary builtin
   results, except commands, boundaries and already graded results such as
-  `fail` and `await`; and stdout redirects, `M > f : F^ν A` for `M : F^g A`.
+  `fail`, `raise` and `await`; and stdout redirects, `M > f : F^ν A` for `M : F^g A`.
 - Ordinary text/byte decoders (`from-bytes`, `from-string`, `from-line`,
   `from-lines`) have fresh result grades too; their non-unit payload types
   hide those grades when printed as `Returns`.
@@ -136,8 +136,13 @@ the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
   On a halt, `Frame::Capture` restores its previous sink and drops the buffer:
   a capture that does not become its value commits nothing, so
   `let x = try { return !{ cmd } } { |_| return 'x' }` writes nothing to
-  stdout. A failure's report says once that bytes were discarded; `audit`
-  keeps a command's output.
+  stdout. On error, each capture adds its actual byte count to
+  `Unwound.discarded`, summed saturatingly across nesting. One renderer shows
+  one counted note, after failure advice and before any eligible abandoned-tail
+  note. The count is report-only and does not enter `[reason, frame, site]` or
+  survive `raise` of that record; escapes carry no unwind facts. `audit`
+  keeps a command's output
+  ([[decisions/261105_the-error-record|the error record]]).
 
 See [[design/types|types]], [[design/codecs|codecs]],
 [[internals/output-capture-and-detachment|output capture]],

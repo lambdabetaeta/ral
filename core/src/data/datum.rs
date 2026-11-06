@@ -382,6 +382,16 @@ impl<T: Datum> Datum for Option<T> {
     }
 }
 
+impl<T: Datum> Datum for Box<T> {
+    fn encode(self) -> FOValue {
+        (*self).encode()
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        T::decode(v).map(Self::new)
+    }
+}
+
 impl Datum for i64 {
     fn encode(self) -> FOValue {
         FOValue::Int { value: self }

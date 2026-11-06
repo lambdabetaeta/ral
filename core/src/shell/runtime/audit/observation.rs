@@ -8,7 +8,7 @@ use crate::source::CallSite;
 impl Observation {
     /// An instantaneous door: the observation is stamped now, and its window
     /// has no width.
-    pub fn instant(site: Option<CallSite>, principal: Option<String>, what: Observed) -> Self {
+    pub fn instant(site: CallSite, principal: Option<String>, what: Observed) -> Self {
         let now = epoch_us();
         Self::spanning(site, now, now, principal, what)
     }
@@ -16,7 +16,7 @@ impl Observation {
     /// A door with a body behind it: the caller stamped `start` before the
     /// body ran and `end` after it settled.
     pub(crate) fn spanning(
-        site: Option<CallSite>,
+        site: CallSite,
         start: i64,
         end: i64,
         principal: Option<String>,
@@ -52,7 +52,7 @@ mod tests {
     }
 
     fn round_trips(what: Observed) {
-        let obs = Observation::spanning(Some(site()), 100, 250, Some("alex".into()), what);
+        let obs = Observation::spanning(site(), 100, 250, Some("alex".into()), what);
         assert_eq!(Observation::decode(&obs.clone().encode()), Ok(obs));
     }
 
@@ -173,9 +173,9 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_site_encodes_as_none_and_round_trips() {
+    fn the_site_is_total_and_round_trips() {
         let obs = Observation::instant(
-            None,
+            site(),
             None,
             Observed::Grep(Grep {
                 scope: String::new(),
@@ -185,10 +185,7 @@ mod tests {
         let Value::Map(m) = Value::from(obs.clone().encode()) else {
             panic!("an observation encodes as a record")
         };
-        assert_eq!(
-            m.get("site").as_deref(),
-            Some(&Value::variant("none", None))
-        );
+        assert_eq!(m.get("site").as_deref(), Some(&Value::from_datum(site())));
         assert_eq!(
             m.get("principal").as_deref(),
             Some(&Value::variant("none", None))
@@ -217,7 +214,7 @@ mod tests {
 
     #[test]
     fn the_surface_form_is_the_record_under_its_tag() {
-        let obs = Observation::instant(None, None, Observed::Read(Read { path: "a".into() }));
+        let obs = Observation::instant(site(), None, Observed::Read(Read { path: "a".into() }));
         let surfaced = obs.to_surface();
         assert_eq!(
             untag(&surfaced),
@@ -258,7 +255,7 @@ mod tests {
     #[test]
     fn the_tag_is_the_kind_and_stands_alone() {
         let obs = Observation::instant(
-            Some(site()),
+            site(),
             None,
             Observed::Read(Read {
                 path: "in.txt".into(),
@@ -285,7 +282,7 @@ mod tests {
             new_bytes: Some(Bytes::default()),
             old_bytes: None,
         });
-        let obs = Observation::instant(Some(site()), None, what.clone());
+        let obs = Observation::instant(site(), None, what.clone());
         let (_, fact) = fact_of(&Value::from(obs.encode()));
         assert_eq!(
             fact.get("new-bytes").as_deref(),
@@ -305,7 +302,7 @@ mod tests {
     #[test]
     fn survives_encode_fovalue_json_and_back() {
         for what in every_kind() {
-            let obs = Observation::spanning(Some(site()), 10, 20, Some("alex".into()), what);
+            let obs = Observation::spanning(site(), 10, 20, Some("alex".into()), what);
             let json = serde_json::to_vec(&obs.clone().encode()).expect("serialise FOValue");
             let back: FOValue = serde_json::from_slice(&json).expect("deserialise FOValue");
             assert_eq!(Observation::decode(&back), Ok(obs));
@@ -318,7 +315,7 @@ mod tests {
     #[test]
     fn a_check_encodes_its_resources_decision() {
         let obs = Observation::instant(
-            Some(site()),
+            site(),
             Some("alex".into()),
             Observed::Check(Check::new(
                 Resource::Exec,

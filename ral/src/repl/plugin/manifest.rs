@@ -338,9 +338,9 @@ mod tests {
         ]);
         let err = parse(&manifest).expect_err("a manifest with capabilities: must be rejected");
         assert!(
-            err.message.contains("capabilities") && err.message.contains("grant"),
+            err.describe().contains("capabilities") && err.describe().contains("grant"),
             "error should name the key and point at grant, got: {}",
-            err.message
+            err.describe()
         );
     }
 
@@ -355,9 +355,9 @@ mod tests {
         ]);
         let err = parse(&manifest).expect_err("an unknown key must be rejected");
         assert!(
-            err.message.contains("'hookz'") && err.message.contains("name, aliases, hooks"),
+            err.describe().contains("'hookz'") && err.describe().contains("name, aliases, hooks"),
             "error should name the key and the list, got: {}",
-            err.message
+            err.describe()
         );
     }
 
@@ -386,13 +386,14 @@ mod tests {
             match &key.holds {
                 Holds::Refused(advice) => {
                     let err = result.expect_err("refused key must error");
-                    assert_eq!(&err.message, *advice);
+                    assert_eq!(err.describe().as_ref(), *advice);
                 }
                 _ => {
                     result.unwrap_or_else(|err| {
                         panic!(
                             "key '{}' should parse cleanly, got: {}",
-                            key.label, err.message
+                            key.label,
+                            err.describe()
                         )
                     });
                 }
@@ -405,7 +406,7 @@ mod tests {
     fn a_manifest_without_a_name_is_refused() {
         let err =
             parse(&Value::map(vec![])).expect_err("a manifest without a name must be rejected");
-        assert!(err.message.contains("name"), "got: {}", err.message);
+        assert!(err.describe().contains("name"), "got: {}", err.describe());
     }
 
     /// A manifest with no `capabilities:` key parses into a clean plugin
@@ -454,11 +455,11 @@ mod tests {
             ]);
             let err = parse(&manifest).expect_err("wrong type must be rejected");
             assert!(
-                err.message.contains(field)
-                    && err.message.contains(expected)
-                    && err.message.contains("Int"),
+                err.describe().contains(field)
+                    && err.describe().contains(expected)
+                    && err.describe().contains("Int"),
                 "error should name the field and both types, got: {}",
-                err.message
+                err.describe()
             );
         }
     }
@@ -469,9 +470,9 @@ mod tests {
     fn non_map_manifest_is_load_error() {
         let err = parse(&Value::Int(42)).expect_err("non-map must be rejected");
         assert!(
-            err.message.contains("manifest") && err.message.contains("Int"),
+            err.describe().contains("manifest") && err.describe().contains("Int"),
             "error should name the manifest shape, got: {}",
-            err.message
+            err.describe()
         );
     }
 
@@ -480,9 +481,9 @@ mod tests {
     fn unit_manifest_lacks_a_name() {
         let err = parse(&Value::Unit).expect_err("a manifest needs a name");
         assert!(
-            err.message.contains("missing required 'name'"),
+            err.describe().contains("missing required 'name'"),
             "{}",
-            err.message
+            err.describe()
         );
     }
 
@@ -497,9 +498,9 @@ mod tests {
         let err = parse_keybindings(std::iter::once(entry))
             .expect_err("non-block handler must be rejected");
         assert!(
-            err.message.contains("ctrl-t") && err.message.contains("block"),
+            err.describe().contains("ctrl-t") && err.describe().contains("block"),
             "error should name the key and expected type, got: {}",
-            err.message
+            err.describe()
         );
     }
 
@@ -513,9 +514,9 @@ mod tests {
         ]);
         let err = parse_keybindings(std::iter::once(entry)).expect_err("non-string guard rejected");
         assert!(
-            err.message.contains("guard") && err.message.contains("Int"),
+            err.describe().contains("guard") && err.describe().contains("Int"),
             "error should name the guard and its type, got: {}",
-            err.message
+            err.describe()
         );
     }
 
@@ -534,9 +535,9 @@ mod tests {
         let err = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", Some("("))))
             .expect_err("malformed regex must be rejected");
         assert!(
-            err.message.contains("ctrl-t") && err.message.contains("guard"),
+            err.describe().contains("ctrl-t") && err.describe().contains("guard"),
             "error should name the key and the guard, got: {}",
-            err.message
+            err.describe()
         );
     }
 
@@ -553,11 +554,11 @@ mod tests {
             let err = parse_keybindings(std::iter::once(keybinding_entry(key, None)))
                 .expect_err("unguarded builtin chord must be rejected");
             assert!(
-                err.message.contains(key)
-                    && err.message.contains(action)
-                    && err.message.contains("guard"),
+                err.describe().contains(key)
+                    && err.describe().contains(action)
+                    && err.describe().contains("guard"),
                 "error should name the key, the action, and the fix, got: {}",
-                err.message
+                err.describe()
             );
         }
     }
@@ -579,9 +580,9 @@ mod tests {
             let err = parse_keybindings(std::iter::once(keybinding_entry(key, guard)))
                 .expect_err("reserved chord must be rejected");
             assert!(
-                err.message.contains(key) && err.message.contains("reserved"),
+                err.describe().contains(key) && err.describe().contains("reserved"),
                 "error should name the key as reserved, got: {}",
-                err.message
+                err.describe()
             );
         }
     }
@@ -592,9 +593,9 @@ mod tests {
         let err = parse_keybindings(std::iter::once(keybinding_entry("hyper-x", None)))
             .expect_err("bad notation must be rejected");
         assert!(
-            err.message.contains("keybinding 'hyper-x'") && err.message.contains("not a key"),
+            err.describe().contains("keybinding 'hyper-x'") && err.describe().contains("not a key"),
             "error should name the notation and the fault, got: {}",
-            err.message
+            err.describe()
         );
     }
 
@@ -609,9 +610,9 @@ mod tests {
             let err = parse_keybindings(std::iter::once(keybinding_entry(key, Some("x"))))
                 .expect_err("a sequence off ctrl-x must be rejected");
             assert!(
-                err.message.contains(key) && err.message.contains("begins with ctrl-x"),
+                err.describe().contains(key) && err.describe().contains("begins with ctrl-x"),
                 "error should name the key and the rule, got: {}",
-                err.message
+                err.describe()
             );
         }
     }
@@ -622,7 +623,7 @@ mod tests {
     fn shift_with_a_character_is_load_error() {
         let err = parse_keybindings(std::iter::once(keybinding_entry("shift-a", Some("x"))))
             .expect_err("shift-a must be rejected");
-        assert!(err.message.contains("'A'"), "got: {}", err.message);
+        assert!(err.describe().contains("'A'"), "got: {}", err.describe());
         parse_keybindings(std::iter::once(keybinding_entry("shift-f5", None)))
             .expect("shift-f5 binds unguarded");
     }

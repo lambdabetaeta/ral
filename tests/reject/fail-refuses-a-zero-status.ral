@@ -1,5 +1,5 @@
-# codes: T0051
+# codes: T0010
 # status: 1
-# at: 5:1
-# contains: fail requires a nonzero status
+# at: 5:6
+# contains: couldn't match
 fail [status: 0, message: 'zero status should be rejected']

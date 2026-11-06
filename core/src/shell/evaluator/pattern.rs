@@ -133,7 +133,7 @@ mod tests {
 
     fn message(result: Settled<Vec<(Name, Value)>>) -> String {
         match result {
-            Err(Break::Error(e)) => e.message,
+            Err(Break::Error(e)) => e.describe().into_owned(),
             other => panic!("expected length error, got {other:?}"),
         }
     }

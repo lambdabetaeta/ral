@@ -1,5 +1,0 @@
-# codes: T0010
-# status: 1
-# at: 5:6
-# contains: couldn't match
-fail "boom"

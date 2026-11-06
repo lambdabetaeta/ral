@@ -223,7 +223,7 @@ fn a_par_childs_external_dies_with_the_call() {
         "ral_worker_teardown",
         &[],
         &format!(
-            "try {{ par {{ |x| if $[$x == 0] {{ cat {}; fail [status: 1, message: x] }} \
+            "try {{ par {{ |x| if $[$x == 0] {{ cat {}; fail x }} \
              else {{ {} }} }} [0, 1] 2 }} {{ |_| echo caught; return [] }}\n",
             tree.gate.display(),
             tree.fixture.display()
@@ -270,7 +270,7 @@ fn par_raises_the_first_failure_at_once() {
         "ral_worker_teardown",
         &[],
         &format!(
-            "try {{ par {{ |x| if $[$x == 1] {{ cat {}; fail [status: 1, message: x] }} \
+            "try {{ par {{ |x| if $[$x == 1] {{ cat {}; fail x }} \
              else {{ {} }} }} [0, 1] 2 }} {{ |_| echo caught; return [] }}\n",
             tree.gate.display(),
             tree.fixture.display()

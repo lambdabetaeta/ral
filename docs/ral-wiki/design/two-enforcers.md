@@ -322,7 +322,7 @@ with the sandbox is the design.
 This is the boundary [[design/exarch-architecture|exarch]] reuses — a run
 evaluates under a grant frame whose two enforcers are exactly these.
 
-See also [[design/syscalls-are-effects|syscalls-are-effects]] (the guard sits where an effect is performed),
+See also [[design/exec|exec]] (the guard sits where an effect is performed),
 [[design/grant|grant]], [[design/scoping|scoping]],
 [[design/capability-carriers|capability-carriers]] (this split as a type
 distinction — the sharp judge's view vs the blunt sentry's checklist); realised in

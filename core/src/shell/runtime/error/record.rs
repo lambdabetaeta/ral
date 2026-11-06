@@ -1,39 +1,8 @@
-//! Minting the record `try` hands its handler (`fact::ErrorRecord`) from an
-//! [`Error`] and its [`Status`].
+//! Minting the record `try` hands its handler.
 
-use super::{Error, Status};
-use crate::fact::{ErrorRecord, FailureCode as _, Reason, tag};
-use crate::process::{CommandFailure, SpawnFailure, WorkerStop};
+use super::{Error, Prov};
+use crate::fact::{ErrorRecord, tag};
 use crate::shell::runtime::{Shell, Value};
-use crate::source::CallSite;
-
-impl From<&Status> for Reason {
-    fn from(status: &Status) -> Self {
-        match status {
-            Status::Raised(_) => Self::Raised,
-            Status::Process(CommandFailure::ExitCode(code)) => Self::Exited(*code),
-            Status::Process(CommandFailure::Signal(sig)) => Self::Signaled(sig.number()),
-            Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)) => Self::NotFound,
-            Status::Process(CommandFailure::Spawn(_)) => Self::NotRunnable,
-            Status::WorkerStopped(WorkerStop::Cancelled) => Self::Cancelled,
-            Status::WorkerStopped(WorkerStop::TimedOut) => Self::TimedOut,
-        }
-    }
-}
-
-impl ErrorRecord {
-    /// `status` is `status`'s own code and `reason` its projection, so the two
-    /// cannot disagree.
-    pub fn new(cmd: &str, status: &Status, message: &str, site: Option<CallSite>) -> Self {
-        Self {
-            cmd: cmd.into(),
-            status: status.failure_code(),
-            reason: status.into(),
-            message: message.into(),
-            site,
-        }
-    }
-}
 
 /// `` `ok v | `err record ``: how `poll`'s settled arm and the report
 /// envelope read a body's end.
@@ -45,22 +14,20 @@ pub fn outcome_value(outcome: Result<Value, ErrorRecord>) -> Value {
 }
 
 impl Error {
-    /// This error as the record `try` hands its handler.  The failing command
-    /// is the one the innermost dispatch stamped (`name_failure` in `shell::runtime::flow`),
-    /// `<runtime>` for a failure no dispatch owns; its
-    /// position is the error's own span, or the run's call site when that
-    /// lies outside the session's sources.
     pub fn record(&self, shell: &Shell) -> ErrorRecord {
-        let own = self.span.and_then(|span| shell.session.sources.site(span));
-        self.record_at(own.or_else(|| shell.call_site()))
+        let prov = self.prov_or(shell.local.audit.call_site());
+        ErrorRecord::new(
+            self.reason.clone(),
+            prov.name().into(),
+            prov.site(&shell.session.sources),
+        )
     }
 
-    /// [`Self::record`] at a position the caller already knows, `None` for
-    /// one that has none.
-    pub fn record_at(&self, site: Option<CallSite>) -> ErrorRecord {
-        let cmd = self.command.as_deref().unwrap_or("<runtime>");
-        let site = self.site.as_deref().cloned().or(site);
-        ErrorRecord::new(cmd, &self.status, &self.message, site)
+    pub(crate) fn from_record(record: ErrorRecord) -> Self {
+        Self {
+            prov: Some(Prov::Resolved(Box::new((record.frame, record.site)))),
+            ..Self::from_reason(record.reason)
+        }
     }
 }
 
@@ -69,32 +36,32 @@ mod tests {
     use super::*;
     use crate::data::FOValue;
     use crate::data::datum::{Datum, tag};
-    use std::num::NonZeroU8;
+    use crate::fact::{Failure, FailureCode as _, Reason};
+    use crate::source::CallSite;
+
+    fn site() -> CallSite {
+        CallSite {
+            script: "test.ral".into(),
+            line: 1,
+            col: 1,
+        }
+    }
 
     #[test]
-    fn status_is_the_reasons_own_projection() {
+    fn reason_is_the_failure_codes_only_source() {
         let rec = ErrorRecord::new(
-            "sh",
-            &Status::Process(CommandFailure::ExitCode(3)),
-            "x",
-            None,
+            Reason::process("sh", Failure::Exited(3)),
+            "sh".into(),
+            site(),
         );
-        assert_eq!((rec.status().get(), rec.reason()), (3, Reason::Exited(3)));
-        let cause = ErrorRecord::new(
-            "sh",
-            &Status::WorkerStopped(WorkerStop::TimedOut),
-            "x",
-            None,
-        );
-        assert_eq!(
-            (cause.status().get(), cause.reason()),
-            (124, Reason::TimedOut)
-        );
+        assert_eq!(rec.failure_code().get(), 3);
+        let cause = ErrorRecord::new(Reason::TimedOut, "sh".into(), site());
+        assert_eq!(cause.failure_code().get(), 124);
     }
 
     #[test]
     fn a_wire_record_with_an_unknown_reason_is_refused() {
-        let mut wire = ErrorRecord::new("sh", &Status::Raised(NonZeroU8::MIN), "x", None).encode();
+        let mut wire = ErrorRecord::new(Reason::Raised("x".into()), "sh".into(), site()).encode();
         let FOValue::Map { entries } = &mut wire else {
             unreachable!()
         };

@@ -4,6 +4,6 @@ let w = { |h| within [handler: $h] { () } }; w { |name args| cd ~ }
 within [handler: { |n a| echo caught }] { zzz }
 let h = { |n a| echo caught }; within [handler: $h] { zzz }
 let w = { |h| within [handler: $h] { () } }; w { |n a| echo caught }
-within [handler: { |n a| fail [status: 1, message: 'unhandled command'] }] { zzz }
-let h = { |n a| fail [status: 1, message: 'unhandled command'] }; within [handler: $h] { zzz }
-let w = { |h| within [handler: $h] { () } }; w { |n a| fail [status: 1, message: 'unhandled command'] }
+within [handler: { |n a| fail 'unhandled command' }] { zzz }
+let h = { |n a| fail 'unhandled command' }; within [handler: $h] { zzz }
+let w = { |h| within [handler: $h] { () } }; w { |n a| fail 'unhandled command' }

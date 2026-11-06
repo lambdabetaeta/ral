@@ -14,7 +14,7 @@ use ral_core::{Shell, io::terminal};
 /// skipped whole if it never compiled, which a compile report cannot say, or
 /// else `ran`, for a caller with that to say.
 pub(super) fn report_failed_load(shell: &Shell, what: &str, e: &Error, ran: Option<&str>) {
-    err!("{}", e.render(shell.sources(), None));
+    err!("{}", e.render(shell.sources(), None, shell.exit_hints()));
     let why = match e.rejection {
         Some(_) => Some("skipped, since it does not compile"),
         None => ran,

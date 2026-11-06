@@ -1,7 +1,7 @@
 ---
 verified_at_commit: d9abfb52
 verified_at_date: 2026-09-11
-against: [design/grant, design/effects-handlers, design/cbpv, design/syscalls-are-effects, design/scoping, design/capability-freeze, decisions/260906_object-not-name]
+against: [design/grant, design/effects-handlers, design/cbpv, design/exec, design/scoping, design/capability-freeze, decisions/260906_object-not-name]
 ---
 
 # System C — effects and capabilities reconciled
@@ -21,7 +21,7 @@ runtime, System C lifts the same structure into types, toggled term-by-term.
 
 - **Mentioning authority is an effect; the thunk delays it.** ral's value
   language is *inert* — `$`-deref, builtins, and the prelude perform nothing
-  ([[design/cbpv|cbpv]], [[design/syscalls-are-effects|syscalls-are-effects]]).
+  ([[design/cbpv|cbpv]], [[design/exec|exec]]).
   System C makes the same move one level down: a *block* (second-class function)
   may close over capabilities, but doing so is the effect, suspended by `box` and
   discharged by `unbox`. ral is full CBPV and already has the thunk; System C
@@ -99,8 +99,8 @@ runtime, System C lifts the same structure into types, toggled term-by-term.
   boundary that wants a *static* bound on the effect set rather than only the
   runtime grant chokepoint: the [[design/exarch-architecture|exarch]] sandbox.
   System C is the recipe; adopting it broadly would contradict
-  [[design/syscalls-are-effects|syscalls-are-effects]]'s dynamic-authority
-  commitment, so it stays a hatch, not a turn. Escape from a delimiter is not
+  the dynamic-authority
+  commitment of [[design/exec|exec]], so it stays a hatch, not a turn. Escape from a delimiter is not
   such a boundary — where System C makes escape safe by re-requiring the set at
   `unbox`, `detach` makes it safe by freezing the frame's projection into the
   survivor for life, unnameable by any later frame and so unwidenable

@@ -12,7 +12,7 @@ let step = { |a op b|
     elsif $[$op == '*'] { return $[$a * $b] }
     elsif $[$op == '/'] { return $[$a / $b] }
     elsif $[$op == '%'] { return $[$a % $b] }
-    else { fail [status: 2, message: "unknown operator: $op"] }
+    else { fail "unknown operator: $op" }
 }
 let go = { |acc toks|
     if !{is-empty $toks} { return $acc } else {

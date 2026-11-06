@@ -51,7 +51,7 @@ impl Shell {
             session: SessionState {
                 root,
                 anchor: scope,
-                sources: self.session.sources.clone(),
+                sources: self.session.sources.fork(),
                 root_file: self.session.root_file,
                 exit_hints: Arc::clone(&self.session.exit_hints),
                 scratch: self.session.scratch.clone(),
@@ -63,7 +63,7 @@ impl Shell {
                 hooks: None,
             },
             local: LocalState {
-                audit: Audit::dispatched_from(self.local.audit.call_site),
+                audit: Audit::dispatched_from(self.local.audit.call_site().clone()),
                 workers,
                 cradle: self.local.cradle.clone(),
                 bindings: BindingLedger::default(),
@@ -209,9 +209,14 @@ mod tests {
         let span = crate::source::Span::new(file, 8, 11);
         let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", move |_, child| {
-                crate::shell::runtime::Error::new("boom")
-                    .at_span(span)
-                    .render(&child.session.sources, None)
+                crate::shell::runtime::Error {
+                    prov: Some(crate::shell::runtime::Prov::Live {
+                        name: "fail".into(),
+                        span,
+                    }),
+                    ..crate::shell::runtime::Error::new("boom")
+                }
+                .render(&child.session.sources, None, child.exit_hints())
             })
             .expect("spawn_thread");
 
@@ -230,13 +235,13 @@ mod tests {
     #[test]
     fn spawned_worker_inherits_the_root_file() {
         let mut parent = crate::test_helper::core_shell();
-        parent.install_root_context(
+        let root_file = Some(parent.install_script_context(
             &crate::source::SourceOrigin::File(
                 crate::source::SourceFile::new("main.ral").expect("UTF-8"),
             ),
             "",
-        );
-        let root_file = parent.session.root_file;
+        ));
+        parent.session.root_file = root_file;
         let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
                 child.session.root_file

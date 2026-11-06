@@ -15,8 +15,8 @@ use crate::fact::{DirEntry, FileInfo};
 use crate::fact::{ErrorRecord, Io, Observation, Receipt};
 use crate::protocol::probe::WorkerRow;
 use crate::ty::{
-    CachedFreeVars, CompTy, Grade, GradeVar, Kind, Label, Row, RowVar, Scheme, Ty, TyVar, Typed,
-    WeakVars, closed_record, closed_variant,
+    CachedFreeVars, CompTy, Grade, GradeVar, Kind, Row, RowVar, Scheme, Ty, TyVar, Typed, WeakVars,
+    closed_record, closed_variant,
 };
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
@@ -33,7 +33,6 @@ pub(crate) type BuiltinTypeRule = fn(&mut Unifier) -> Scheme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinDiagnostic {
     None,
-    FailStatusNonzero,
     /// A `from-*` decoder: an argument is not an arity slip but a misreading
     /// of where the bytes come from.
     Decoder,
@@ -340,24 +339,6 @@ macro_rules! scheme {
     };
 }
 
-/// The error record a raising form demands of its argument: `status` and
-/// `message`, over a fresh tail.  Open, because re-raising a caught error
-/// carries `cmd`, `site` and whatever else the record picked up along
-/// the way; the tail is what makes `ErrorRecord::ty` an instance of this
-/// shape.  The caller quantifies the row itself — [`scheme::fail`] — so this
-/// takes it directly rather than minting one.
-pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
-    Ty::Record(Row::Extend(
-        Label::Field("status".into()),
-        Box::new(Ty::Int),
-        Box::new(Row::Extend(
-            Label::Field("message".into()),
-            Box::new(Ty::String),
-            Box::new(Row::Var(row)),
-        )),
-    ))
-}
-
 /// The record `audit { … }` produces, field for field the value
 /// `report_value` materialises.  The body's outcome is a variant, so a failure
 /// is read by `case` rather than by comparing a status against 0; the
@@ -407,8 +388,8 @@ pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, DirEntry, FileInfo, Grade, GradeVar, Kind, Receipt, Row, Scheme, Ty, TyEnv, TyVar,
-        Unifier, WorkerRow, command, error_record_shape, fun, generalize, graded, mk_plain_scheme,
+        CompTy, DirEntry, ErrorRecord, FileInfo, Grade, GradeVar, Kind, Receipt, Row, Scheme, Ty,
+        TyEnv, TyVar, Unifier, WorkerRow, command, fun, generalize, graded, mk_plain_scheme,
         mk_scheme, poll_variant, pure, thunk,
     };
     use crate::ty::Typed as _;
@@ -744,17 +725,24 @@ pub mod scheme {
         )
     }
 
-    /// `fail :: ∀ε α r. {status: Int, message: String | r} → F^ε α`.
-    ///
-    /// An error record, open at the tail so a caught error re-raises with the
-    /// fields `try` gave it.
     pub(crate) fn fail(u: &mut Unifier) -> Scheme {
-        let row = u.fresh_row_var();
         let (av, ev, never) = divergent(u);
         graded(
             &[ev],
-            mk_plain_scheme(&[av], &[row], thunk(fun(error_record_shape(row), never))),
+            mk_plain_scheme(&[av], &[], thunk(fun(Ty::String, never))),
         )
+    }
+
+    pub(crate) fn raise(u: &mut Unifier) -> Scheme {
+        let (av, ev, never) = divergent(u);
+        graded(
+            &[ev],
+            mk_plain_scheme(&[av], &[], thunk(fun(ErrorRecord::ty(), never))),
+        )
+    }
+
+    pub(crate) fn describe(_u: &mut Unifier) -> Scheme {
+        mk_plain_scheme(&[], &[], thunk(fun(ErrorRecord::ty(), pure(Ty::String))))
     }
 
     /// `exit`/`quit` :: ∀ε α. Int → F^ε α — a status, and no return.
@@ -783,23 +771,6 @@ pub mod scheme {
 pub fn builtin_type_hint(manifest: &Manifest, name: &str) -> Option<String> {
     let mut u = Unifier::new();
     Some(manifest.get(name)?.scheme(&mut u).to_string())
-}
-
-/// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule
-/// `builtins::misc::builtin_fail` enforces at runtime can be diagnosed at
-/// typecheck time.
-///
-/// Computed statuses and spreads still defer to the runtime.
-pub(crate) fn fail_status_is_zero_literal(argv: &crate::ir::Argv) -> bool {
-    let Some(positional) = argv.positional() else {
-        return false;
-    };
-    matches!(
-        positional.first().map(|slot| &slot.item),
-        Some(crate::ir::Val::Record(entries)) if entries.shape().iter().any(|(k, v)| {
-            k.as_ref() == "status" && matches!(v.item, crate::ir::Val::Int(0))
-        })
-    )
 }
 
 #[cfg(test)]

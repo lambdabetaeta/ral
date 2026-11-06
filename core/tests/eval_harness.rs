@@ -21,11 +21,8 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::shell::runtime::Settled<V
         RunReport::Ran { ending, .. } => ending.into_settled(),
         // A static diagnostic reads as a failed run: no value was produced.
         RunReport::Static { diagnostics } => {
-            let msg = diagnostics.render().0;
-            Err(
-                ral_core::shell::runtime::Error::raised(msg, std::num::NonZeroU8::new(2).unwrap())
-                    .into(),
-            )
+            let msg = diagnostics.render(shell.exit_hints()).0;
+            Err(ral_core::shell::runtime::Error::raised(msg).into())
         }
     }
 }
@@ -71,8 +68,8 @@ fn must_fail(input: &str) {
 fn try_error_record_carries_the_script() {
     assert_eq!(
         must_succeed(
-            "try { fail [status: 1, message: 'x'] } { |err| \
-             case $err[site] [`some: { |s| return \"$s[script]:$s[line]\" }, `none: { |_| return none }] }"
+            "try { fail 'x' } { |err| \
+             return \"$err[site][script]:$err[site][line]\" }"
         ),
         Value::string("<test>:1")
     );
@@ -86,23 +83,21 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
     assert_eq!(result, Value::string("override"));
 }
 
-/// `$STATUS` is not a name any longer: a failure carries its status in the
-/// `Err` record `try` binds, so reading the register is refused statically
-/// like any other unbound name — and the hint says where the status went.
+/// `$STATUS` is not a name: `try` binds a record carrying the failure reason.
 #[test]
 fn status_is_an_unbound_variable_that_names_its_replacement() {
     let Err(Break::Error(e)) = eval("return $STATUS") else {
         panic!("$STATUS must not resolve");
     };
     assert!(
-        e.message.contains("undefined variable: $STATUS"),
+        e.describe().contains("undefined variable: $STATUS"),
         "unexpected diagnostic: {}",
-        e.message
+        e.describe()
     );
     assert!(
-        e.message.contains("`try`"),
+        e.describe().contains("`try`"),
         "the diagnostic must point at `try`: {}",
-        e.message
+        e.describe()
     );
 }
 

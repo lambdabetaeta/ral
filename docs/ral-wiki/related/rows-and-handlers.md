@@ -62,7 +62,7 @@ type records and variants, never computations.
   world effects, each with a default interpretation (the OS performing the
   syscall), and there are no meaningless abstract names. In Links a handler
   *confers* meaning; in ral it *shadows* one
-  ([[design/syscalls-are-effects|syscalls-are-effects]]).
+  ([[design/exec|exec]]).
 - **Even the row flavour differs.** Links rows are Rémy's — distinct labels
   with presence information; their §6 places Koka and Frank on the other side,
   "allow[ing] multiple occurrences of the same label in a row". ral's rows are

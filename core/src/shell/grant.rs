@@ -88,7 +88,7 @@ mod tests {
             let Break::Error(error) = Break::from(error) else {
                 panic!("a policy refusal is never an escape")
             };
-            assert_eq!(error.message, "a refusal");
+            assert_eq!(error.describe(), "a refusal");
             assert_eq!(error.hint.as_deref(), hint.as_deref());
         }
     }

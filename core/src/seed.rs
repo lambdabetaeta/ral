@@ -141,7 +141,7 @@ impl Datum for Sealed {
 
 /// How a decode failure is worded, naming the part of the seed it was in.
 fn failed(part: &'static str) -> impl FnOnce(Error) -> String {
-    move |e| format!("seed: the seed's {part} failed to decode: {}", e.message)
+    move |e| format!("seed: the seed's {part} failed to decode: {}", e.describe())
 }
 
 impl EngineSeed {

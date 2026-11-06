@@ -1,0 +1,5 @@
+# codes: T0020
+# status: 1
+# at: 5:7
+# contains: attempt
+raise [reason: `raised "boom", frame: "deploy", site: [script: "manual", line: 1, col: 1], attempt: 3]

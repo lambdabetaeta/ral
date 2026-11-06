@@ -77,7 +77,7 @@ impl HandlerEntry {
             closure.comp(),
             shell.closure_schemes(closure),
         )
-        .map_err(|error| refused_arm(label, &error, closure.comp().span))?;
+        .map_err(|error| refused_arm(label, &error, closure.comp().span, shell))?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {
             entry.scheme = Some(Arc::new(scheme));
@@ -111,11 +111,13 @@ pub(crate) fn refused_arm(
     label: &str,
     error: &crate::typecheck::TypeError,
     span: Option<crate::source::Span>,
+    shell: &Shell,
 ) -> crate::shell::runtime::Break {
     let sentence = error.hint().unwrap_or_else(|| error.kind.render_message());
-    let mut error = crate::shell::runtime::Error::new(format!("{label}: {sentence}"));
-    error.span = span;
-    error.into()
+    crate::shell::runtime::Break::Error(crate::shell::runtime::Error::new(format!(
+        "{label}: {sentence}"
+    )))
+    .locate(label, span, shell)
 }
 
 impl HandlerArity {

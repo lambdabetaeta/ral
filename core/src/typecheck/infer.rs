@@ -1,6 +1,6 @@
 //! Infer types and build pending CBPV nodes, mutually recursive through thunks.
 
-use super::builtins::{BuiltinDiagnostic, Decl, LANGUAGE_CONSTANTS, fail_status_is_zero_literal};
+use super::builtins::{BuiltinDiagnostic, Decl, LANGUAGE_CONSTANTS};
 use super::contract::catch_all_shape;
 use super::env::{HandlerBinding, HandlerOrigin, InferCtx, Pending, TyEnv};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
@@ -713,12 +713,6 @@ impl Inferencer<'_> {
                     got: positional.len(),
                 },
             });
-        }
-
-        if entry.diagnostic == BuiltinDiagnostic::FailStatusNonzero
-            && fail_status_is_zero_literal(argv)
-        {
-            self.ctx.diagnose(TypeErrorKind::FailStatusZero);
         }
 
         let scheme = entry.scheme(&mut self.ctx.unifier);

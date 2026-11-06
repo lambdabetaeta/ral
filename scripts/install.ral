@@ -7,7 +7,7 @@ let here      = dirname $SCRIPT
 let repo_root = resolve-path "$here/.."
 
 if $[not !{is-file "$repo_root/ral/Cargo.toml"}] {
-    fail [status: 1, message: 'ral/Cargo.toml not found — repository may be incomplete']
+    fail 'ral/Cargo.toml not found — repository may be incomplete'
 }
 
 cargo +stable install --force --locked --path "$repo_root/ral"

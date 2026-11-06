@@ -1,10 +1,9 @@
 //! Pure collection assembly.
 
 use crate::ir::{MapEntryV, Name, Val, ValListElem};
-use crate::shell::runtime::{Env, Error, List, Map, Settled, Signature, Value};
+use crate::shell::runtime::{Break, Env, Error, List, Map, Settled, Signature, Value};
 use crate::source::Spanned;
 
-use super::machine::stamp;
 use super::val::{form, spread_type_err};
 
 /// Evaluates a list literal, splicing `...spread` elements inline. The
@@ -68,36 +67,40 @@ pub(super) fn eval_update(
     Ok(Value::map(pairs))
 }
 
-pub(super) fn eval_map(entries: &[MapEntryV], env: &Env, sig: &Signature) -> Settled<Value> {
+pub(super) fn eval_map(
+    entries: &[MapEntryV],
+    env: &Env,
+    shell: &crate::shell::runtime::Shell,
+) -> Settled<Value> {
+    let sig = &shell.sig;
     let mut explicit = std::collections::HashSet::new();
     let mut result = Map::new();
     for entry in entries {
         match entry {
             MapEntryV::Entry(key, value) => {
-                let formed =
-                    form(&key.item, env, sig).map_err(|error| stamp(error.into(), key.span))?;
+                let formed = form(&key.item, env, sig)
+                    .map_err(|error| Break::from(error).locate("map", key.span, shell))?;
                 let Value::String(label) = formed else {
-                    return Err(stamp(
+                    return Err(Break::from(
                         Error::new(format!(
                             "map key must be a String, got {} '{formed}'",
                             formed.type_name()
                         ))
-                        .with_hint("use str to convert")
-                        .into(),
-                        key.span,
-                    ));
+                        .with_hint("use str to convert"),
+                    )
+                    .locate("map", key.span, shell));
                 };
                 let label = label.into_string();
                 if !explicit.insert(label.clone()) {
-                    return Err(stamp(duplicate_key(&label).into(), key.span));
+                    return Err(Break::from(duplicate_key(&label)).locate("map", key.span, shell));
                 }
-                let value =
-                    form(&value.item, env, sig).map_err(|error| stamp(error.into(), value.span))?;
+                let value = form(&value.item, env, sig)
+                    .map_err(|error| Break::from(error).locate("map", value.span, shell))?;
                 result.insert(label, value);
             }
             MapEntryV::Spread(value) => {
-                for (key, value) in
-                    &form_map(value, env, sig).map_err(|error| stamp(error.into(), value.span))?
+                for (key, value) in &form_map(value, env, sig)
+                    .map_err(|error| Break::from(error).locate("map", value.span, shell))?
                 {
                     if !result.contains_key(key) {
                         result.insert(key.to_string(), value.into_owned());

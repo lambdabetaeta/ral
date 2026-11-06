@@ -10,13 +10,13 @@ await $h
 let v = spawn { echo out; return 4 }
 let n = await $v
 echo $n
-try { let _ = await $v } { |e| echo $e[message] }
+try { let _ = await $v } { |e| echo !{describe $e} }
 # Expected: out, 4, await: this worker's result was already claimed
 
 # A failed block's bytes replay before its failure is raised
-let f = spawn { echo partial; fail [status: 7, message: boom] }
-try { await $f } { |e| echo "status=$e[status]" }
-# Expected: partial, status=7
+let f = spawn { echo partial; fail boom }
+try { await $f } { |e| echo 'reason=' $e[reason] }
+# Expected: partial, reason= `raised boom
 
 # Inside a capture, the replay is what is captured
 let c = spawn { echo hi }
@@ -31,8 +31,8 @@ let settle = { |h|
     case !{poll $h} [
         `ready: { |_| return () },
         `running: { |_| sleep 0.01; settle $h },
-        `stopping: { |_| fail [status: 1, message: "unexpected stopping"] },
-        `consumed: { |_| fail [status: 1, message: "unexpected consumed"] }
+        `stopping: { |_| fail "unexpected stopping" },
+        `consumed: { |_| fail "unexpected consumed" }
     ]
 }
 settle $p
@@ -49,7 +49,7 @@ echo cancelled-nothing
 # cancel claims the handle, so an await after it finds the result claimed
 let z = spawn { sleep 30 }
 cancel $z
-try { await $z } { |e| echo $e[message] }
+try { await $z } { |e| echo !{describe $e} }
 # Expected: await: this worker's result was already claimed
 
 # A value block's await is its value

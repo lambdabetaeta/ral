@@ -13,7 +13,7 @@ let rows = from-csv < $path
 
 let unknown = flat-map { |r| filter { |c| return $[not !{has $r $c}] } $cols } !{take 1 $rows}
 if $[not !{is-empty $unknown}] {
-    fail [status: 1, message: "no such column: !{intercalate ', ' $unknown}"]
+    fail "no such column: !{intercalate ', ' $unknown}"
 }
 
 let write-row = { |cells|

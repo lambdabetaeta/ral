@@ -22,7 +22,7 @@ echo "let x = 9" > "$tmpdir/sub/inner.ral"
 echo #'let m = !{use 'sub/inner.ral'}
 let via_use = $m[x]'# > "$tmpdir/entry.ral"
 let entry = use "$tmpdir/entry.ral"
-if $[$entry[via_use] != 9] { fail [status: 1, message: "module: caller-relative use did not resolve sub/inner.ral"] }
+if $[$entry[via_use] != 9] { fail "module: caller-relative use did not resolve sub/inner.ral" }
 
 # use is cacheless: each call re-reads the file, so rewriting a module
 # between two `use` calls surfaces the new bindings.
@@ -30,15 +30,15 @@ echo "let version = 1" > "$tmpdir/reload.ral"
 let m1 = use "$tmpdir/reload.ral"
 echo "let version = 2" > "$tmpdir/reload.ral"
 let mfresh = use "$tmpdir/reload.ral"
-if $[$mfresh[version] != 2] { fail [status: 1, message: "module: reload did not pick up the rewritten file"] }
+if $[$mfresh[version] != 2] { fail "module: reload did not pick up the rewritten file" }
 
 # A module that uses itself is a cycle
 echo "let _ = use '$tmpdir/cycle.ral'" > "$tmpdir/cycle.ral"
-echo !{try { let _ = use "$tmpdir/cycle.ral"; return false } { |e| return !{re-match 'circular dependency' $e[message]} }}
+echo !{try { let _ = use "$tmpdir/cycle.ral"; return false } { |e| return !{re-match 'circular dependency' !{describe $e}} }}
 
-# A failing module keeps its status and is tagged once
-echo "fail [status: 7, message: 'boom']" > "$tmpdir/failing.ral"
-echo !{try { let _ = use "$tmpdir/failing.ral"; return '' } { |e| return "$e[status] $e[message]" }}
+# A failing module keeps its own reason, without report-only loader context.
+echo "fail 'boom'" > "$tmpdir/failing.ral"
+echo !{try { let _ = use "$tmpdir/failing.ral"; return `raised 'module unexpectedly succeeded' } { |e| return $e[reason] }}
 
 # A module sees the session, earlier definitions included, but not a
 # block's local `let`; only its own non-underscore names come back
@@ -47,7 +47,7 @@ let outer_define = 41
 echo #'let visible = 1
 let _hidden = 2
 let reads_earlier = $[$outer_define + 1]'# > "$tmpdir/session.ral"
-echo !{try { let _ = !{ let local = 1; use "$tmpdir/block-local.ral" }; return '' } { |e| return $e[message] }}
+echo !{try { let _ = !{ let local = 1; use "$tmpdir/block-local.ral" }; return '' } { |e| return !{describe $e} }}
 let sess = use "$tmpdir/session.ral"
 let hidden = try { let probe = use "$tmpdir/session.ral"; return $probe[_hidden] } { |_| return hidden }
 echo "$sess[visible] $sess[reads_earlier] $hidden"
@@ -59,7 +59,7 @@ try {
     grant [fs: [read: [`absolute "$tmpdir/other"]]] {
         within [dir: "$tmpdir/other", env: [RAL_PATH: "$tmpdir/lib"]] { let _ = use 'g.ral' }
     }
-} { |e| echo !{re-match 'denied by grant' $e[message]} }
+} { |e| echo !{re-match 'denied by grant' !{describe $e}} }
 
 # Cleanup
 rm -rf $tmpdir

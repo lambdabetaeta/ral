@@ -10,7 +10,7 @@ use crate::fact::{AuditIo, Command, ExitCode};
 use crate::ir::{CommandName, CommandWord};
 use crate::shell::runtime::{
     AuditStart, Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring,
-    Observation, Observed, Settled, Shell, Value, epoch_us, name_failure,
+    Observation, Observed, Settled, Shell, Value, epoch_us,
 };
 
 use super::capture::with_audit_capture;
@@ -121,7 +121,7 @@ pub(crate) fn run_base_frame(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    entry.framed(shell, |shell, frame| {
+    entry.framed(span, shell, |shell, frame| {
         with_redirects(redirects, span, mooring, shell, |shell| {
             entry.call_body(frame, args, None, mooring, shell)
         })
@@ -138,7 +138,7 @@ pub(crate) fn run_external(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let shown = head.shown.clone();
-    call_external(&shown, args, mooring, shell, |shell| {
+    call_external(&shown, args, span, mooring, shell, |shell| {
         with_redirects(redirects, span, mooring, shell, |shell| {
             command::run(head, args, mooring, shell)
         })
@@ -150,29 +150,30 @@ pub(crate) fn run_external(
 fn call_external(
     shown: &str,
     args: &[Value],
+    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> Settled<Value> {
-    let start = shell.audit_start(mooring);
-    let (mut result, io) = with_audit_capture(shell, body);
-    name_failure(shown, &mut result);
-    finish_command(shell, mooring, start, shown, args, &result, io);
-    result
+    shell.at_site(shown.to_owned(), span, |shell| {
+        let start = shell.audit_start(mooring);
+        let (result, io) = with_audit_capture(shell, body);
+        let result = result.map_err(|b| b.locate(shown, span, shell));
+        finish_command(shell, mooring, start, shown, args, &result, io);
+        result
+    })
 }
 
 fn finish_command(
     shell: &mut Shell,
     mooring: &Mooring,
-    start: AuditStart,
+    start: Option<AuditStart>,
     shown: &str,
     args: &[Value],
     result: &Settled<Value>,
     io: AuditIo,
 ) {
-    if !shell.listening(mooring) {
-        return;
-    }
+    let Some(start) = start else { return };
     // A stop is recorded too, as a pipeline's external stage records it.
     let broke = result.as_ref().err();
     let obs = Observation::spanning(
@@ -186,7 +187,10 @@ fn finish_command(
             broke.map_or(0, ExitCode::code),
             CommandOrigin::External,
             io,
-            broke.map(Break::to_string),
+            broke.map(|b| match b {
+                Break::Error(e) => e.describe().into_owned(),
+                Break::Escape(e) => e.to_string(),
+            }),
         )),
     );
     shell.observe_stamped(Some(mooring), obs);
@@ -236,6 +240,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn native_external_audit_names_the_program_and_sites_the_visible_register() {
+        let (_tmp, mut shell) = external();
+        let wrapper = crate::shell::runtime::Prov::Resolved(Box::new((
+            "native-wrapper".into(),
+            crate::source::CallSite {
+                script: "wrapper.ral".into(),
+                line: 2,
+                col: 3,
+            },
+        )));
+        let _site = shell.local.audit.enter_site(wrapper);
+        let scope = shell
+            .local
+            .audit
+            .open(crate::shell::runtime::CapturePolicy::Off);
+        let result = shell.run_external_argv(
+            "native-external",
+            &[Value::string("one argument"), Value::string("7")],
+            &Mooring::adrift(),
+        );
+        let Err(Break::Error(error)) = result else {
+            panic!("the child exits 7")
+        };
+        assert!(
+            error.prov.is_none(),
+            "an outer visible frame may still claim it"
+        );
+        let trail = shell.local.audit.close(scope);
+        let [observation] = trail.as_slice() else {
+            panic!("one command observation")
+        };
+        let Observed::Command(command) = &observation.what else {
+            panic!("the external command")
+        };
+        assert_eq!(
+            command.error.as_deref(),
+            Some("native-external: exited with status 7")
+        );
+        assert_eq!(observation.site, shell.call_site());
     }
 
     #[test]

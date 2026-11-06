@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Signal::of_status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
 # Cancellation
@@ -306,7 +306,8 @@ aims at the current scope. A shield is minted as a `Scope` alone, so no
 A collector consumes a stop iff it names one of its stages' nodes, forgiving
 it. A worker consumes every `Cancelled` or `TimedOut` stop whose owner is a
 node of the session other than its root — its own, an ancestor worker's, the
-call it is a child of — into the handle's `WorkerStopped` error, so a cancel
+call it is a child of — into the handle's `Reason::Cancelled` or
+`Reason::TimedOut` error, preserving `Stop.at`, so a cancel
 made inside the session is the awaiter's failure, never a foreign stop that
 ends its run (`convert_own_stop`). The root's causes (`Terminated`,
 `Aborted`), `Interrupted` and an unnamed stop pass every base and reach the
@@ -396,34 +397,45 @@ landed.** A cancel that lands before a spawn meets a poll point; one that
 lands after meets a torn-down child. Both doors mint the one constructor
 `Break::stopped(cause, owner)`, so the two cannot disagree. Two traits
 project status. `FailureCode::failure_code() -> NonZeroU8` belongs to what can
-only fail: a cause, a `Stop`, a `Status`, an `Error`, an `ErrorRecord`.
+only fail: a cause, a `Stop`, a `Reason`, an `Error`, an `ErrorRecord`.
 `ExitCode::code() -> u8` belongs to what can also succeed: an ending (`Ok` is
 0, an `exit n` is `n`, a panic 101, the rest delegate) and a `Break`. `Stop`
-holds cause, owner and unwind span; `End = Ending<Value, Error, Stop>` holds
-the ending. `Status` is a two-level sum with its own messages and hints:
+holds cause, owner and `Option<Prov>`; `End = Ending<Value, Error, Stop>`
+holds the ending. Runtime error and data record share the one `Reason`:
 
-    Status         = Raised(NonZeroU8) | WorkerStopped(WorkerStop) | Process(CommandFailure)
-    CommandFailure = ExitCode(i32) | Signal(Signal) | Spawn(SpawnFailure)
+    Reason  = Process(program, Failure) | Cancelled | TimedOut | Raised(String)
+    Failure = Exited(i32) | Signaled(i32) | NotFound | NotRunnable(detail)
+
+`Reason::describe` is the one wording; the one `FailureCode for Reason`
+table supplies failure codes (`Process` delegating to `Failure`), with errors,
+records and process-layer failures delegating. Worker-stop cases delegate
+through `WorkerStop` to `CancelCause`.
+A worker completes otherwise unlocated errors from its inherited register
+before publication, so `done`, `poll` and `await` agree on name and site.
 
 The two command-audit observers read `Break`'s `code`; `fact::Command.status`
 is `u8`, since a command can succeed.
 
-`WorkerStopped` is the one stop that becomes an error: a worker's boundary
+An in-session worker stop becomes an error: a worker's boundary
 converts a `Cancelled` or `TimedOut` stop owned inside the session, and
 `await`/`poll` report it as the awaiter's failure. Signal handlers call
 `failure_code`, which allocates and locks nothing, widening only at
-`_exit`/`ExitProcess`. `Signal::status` and `Signal::of_status` retain their
-raw `i32` arithmetic for `128 + n`. External failures enter through
-`failure_byte`, clamped into `1..=255`; raw `CommandFailure::ExitCode(i32)`
-remains available for messages and hints. A negative Windows `NTSTATUS` must
-not become success. `exit` refuses outside `0..=255` and `fail` outside
-`1..=255`. A failure reporting success is unrepresentable: every stored
-failure status, the wire's included, is `NonZeroU8`
-([[design/endings|endings]]):
+`_exit`/`ExitProcess`. `Failure::Signaled` projects `128 + n` through
+`failure_byte`; `Signal::of_status` decodes an envelope's raw status.
+External raw exits remain in
+`Failure::Exited` for messages and hints until the failure-code projection
+clamps through `failure_byte` into `1..=255`. A negative Windows `NTSTATUS`
+must not become success. `exit` refuses outside `0..=255`; `fail` takes text,
+yielding code 1. `raise` trusts the closed record unchanged, refusing
+a failure of `exited 0` and signals outside `1..=127`. There is no stored
+status on the error record. Host `Static`/`Faulted` statuses stay `NonZeroU8`
+([[design/endings|endings]],
+[[decisions/261105_the-error-record|the error record]]):
 
 | break | code |
 |---|---:|
-| `Raised(n)`, `exit n` | n |
+| `Raised(text)` | 1 |
+| `exit n` | n |
 | `ExitCode(n)` | n clamped into `1..=255` |
 | `Signal(s)` | 128 + s, clamped into `1..=255` |
 | spawn: not found | 127 |
@@ -436,10 +448,10 @@ failure status, the wire's included, is `NonZeroU8`
 | `stop ReaderGone` | 141 (`128 + SIGPIPE`) |
 | `Panic(_)` | 101 |
 
-Errors reach ral code as the error record's `reason`
-(`shell/runtime/error/record.rs`, `Reason`), of which `status` is the projection;
-`` `cancelled `` and `` `timed-out `` are the two `WorkerStopped` facts. A stop
-has no record: no `try` sees it.
+Errors reach ral code as `[reason, frame, site]`. `Reason` lives in
+`fact/error.rs`; the exit code is its projection. `` `cancelled `` and
+`` `timed-out `` are the two converted worker-stop facts. A stop has no
+record: no `try` sees it.
 
 ### Attribution
 
@@ -481,7 +493,7 @@ was lent for (`Mooring::home`) as it hears**:
 - a **lone command** is heard at `reclaim`, the instant it is dead, from its
   own `death`; `command.rs` then reads the *current scope* once, so Ctrl-C
   ends the command stopped with `Interrupted` and the run is stopped — unless
-  a shield masks it, when the death is the command's own `` `signaled 2 ``
+  a shield masks it, when the death is the command's own `` `process [.., failure: `signaled 2] ``
   and the stop follows at the cleanup's first poll after the grace;
 - a **pipeline**'s loan is held by its collector: the anchor reports each
   signal it swallowed raw as `Event::Heard(signal)`, which strikes the node

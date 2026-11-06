@@ -30,6 +30,6 @@ let pick2 = if false { |x| return nope } else { |x| return $x }
 echo !{pick2 world}
 
 # A `?` arm that is not taken hoists nothing
-echo !{return 1 ? return !{fail [status: 1, message: "untaken arm's hoist ran"]}}
+echo !{return 1 ? return !{fail "untaken arm's hoist ran"}}
 
 echo 'conditional tests done'
