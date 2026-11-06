@@ -201,7 +201,6 @@ fn edit_with(
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::fact::FailureCode as _;
 
     fn shell() -> Shell {
         Shell::root(
@@ -438,6 +437,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn failed_child_never_returns_its_changed_file() {
+        use ral_core::fact::FailureCode as _;
         let result = run_child("printf discarded > \"$1\"; exit 7");
         assert!(
             matches!(result, Err(ral_core::shell::runtime::Break::Error(ref e)) if e.failure_code().get() == 7),

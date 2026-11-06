@@ -2,7 +2,6 @@
 //! probes, all through one in-process engine.
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
-use crate::fact::ExitCode as _;
 use crate::path::EnginePath;
 use crate::process::CancelCause;
 use crate::protocol::{Ending, EnquiryError, Ran, Report, Root};
@@ -14,6 +13,8 @@ mod within;
 
 mod identity_cancel_tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::fact::ExitCode as _;
     use crate::test_helper::SLEEP;
     use std::time::{Duration, Instant};
 

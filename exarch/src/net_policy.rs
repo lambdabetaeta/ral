@@ -9,8 +9,9 @@
 //! no-authority grant as [`crate::config::load_declared`].
 
 use ral_core::egress::{Host, NetPolicy};
+use ral_core::own::UserFile;
 use ral_core::shell::runtime::Value;
-use ral_core::source::SourceOrigin;
+use ral_core::source::{SourceFile, SourceOrigin};
 
 const DEFAULT_POLICY_RAL: &str = include_str!("net_policy/default-policy.ral");
 
@@ -41,17 +42,21 @@ pub fn load() -> Result<NetPolicy, String> {
     )
 }
 
-/// `/etc/exarch/net-policy.ral`, if present.
-#[cfg(unix)]
+/// Where the machine policy lives: a system place, since the sandboxed guest
+/// writes only cwd and scratch. None off Unix, where `/etc` is drive-relative
+/// and unowned.
+const MACHINE_POLICY: Option<(&str, &str)> = if cfg!(unix) {
+    Some(("/etc/exarch", "net-policy.ral"))
+} else {
+    None
+};
+
+/// The machine policy, if one is trusted here and present.
 fn machine_policy() -> Result<Option<(String, SourceOrigin)>, String> {
-    use ral_core::own::UserFile;
-    use ral_core::source::SourceFile;
-
-    /// A system place, deliberately: the sandboxed guest writes only cwd and scratch.
-    const POLICY_DIR: &str = "/etc/exarch";
-    const POLICY_FILE: &str = "net-policy.ral";
-
-    let file = UserFile::fixed(POLICY_DIR, POLICY_FILE);
+    let Some((dir, name)) = MACHINE_POLICY else {
+        return Ok(None);
+    };
+    let file = UserFile::fixed(dir, name);
     crate::config::read_optional_file(&file, LABEL)?
         .map(|text| {
             SourceFile::new(file.path())
@@ -59,12 +64,6 @@ fn machine_policy() -> Result<Option<(String, SourceOrigin)>, String> {
                 .map_err(|e| format!("{LABEL} {e}"))
         })
         .transpose()
-}
-
-/// No trusted machine path yet: `/etc/exarch` is drive-relative and unowned here.
-#[cfg(not(unix))]
-fn machine_policy() -> Result<Option<(String, SourceOrigin)>, String> {
-    Ok(None)
 }
 
 /// Decode the policy's terminal map into a [`NetPolicy`]. An unrecognised key
