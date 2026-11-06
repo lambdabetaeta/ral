@@ -346,7 +346,10 @@ fn a_foreign_prefix_refuses_but_everything_after_first_damage_is_ignored_without
         )
         .is_err()
     );
-    file.set_len(before.len() as u64).unwrap();
+    dir.open_write(RECORD)
+        .unwrap()
+        .set_len(before.len() as u64)
+        .unwrap();
     file.write_all(b"not JSON\n{}\n").unwrap();
     file.write_all(&crate::record::commit_line(&[Display::Answer {
         text: "lost whole commit\n".into(),
