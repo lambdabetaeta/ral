@@ -218,7 +218,7 @@ mod tests {
                 SourceOrigin::named("<test>"),
             ))
             .expect_ran()
-            .into_result()
+            .into_settled()
             .expect("the handler must run");
         assert_eq!(cmd.to_string(), "sh");
         assert_eq!(
@@ -264,9 +264,13 @@ mod tests {
             "audit { core-panic-now }",
             SourceOrigin::named("<test>"),
         )) {
-            RunReport::Faulted { .. } => {}
+            RunReport::Ran {
+                ending: crate::shell::runtime::End::Panic(_),
+                captured: None,
+                ..
+            } => {}
             RunReport::Static { .. } | RunReport::Ran { .. } => {
-                panic!("a panicking body must report Faulted")
+                panic!("a panicking body must report a panic ending")
             }
         }
         assert_eq!(
@@ -299,9 +303,13 @@ mod tests {
             format!("let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"),
             SourceOrigin::named("<test>"),
         )) {
-            RunReport::Faulted { .. } => {}
+            RunReport::Ran {
+                ending: crate::shell::runtime::End::Panic(_),
+                captured: None,
+                ..
+            } => {}
             RunReport::Static { .. } | RunReport::Ran { .. } => {
-                panic!("a panicking body must report Faulted")
+                panic!("a panicking body must report a panic ending")
             }
         }
 
@@ -326,7 +334,7 @@ mod tests {
         let report = shell.run(Run::captured(
             "audit { /bin/echo one; try { /bin/echo two } { |_e| return () }; /bin/echo three }",
             SourceOrigin::named("<test>"),
-        )).expect_ran().into_result().expect("audit body must succeed");
+        )).expect_ran().into_settled().expect("audit body must succeed");
         assert_eq!(
             command_argv0s(&report),
             ["/bin/echo", "/bin/echo", "/bin/echo"]
@@ -345,7 +353,7 @@ mod tests {
                 SourceOrigin::named("<test>"),
             ))
             .expect_ran()
-            .into_result()
+            .into_settled()
             .expect("audit body must succeed");
         assert_eq!(command_argv0s(&report), ["/bin/echo"]);
     }
@@ -362,7 +370,7 @@ mod tests {
                 SourceOrigin::named("<test>"),
             ))
             .expect_ran()
-            .into_result()
+            .into_settled()
             .expect("audit { echo hi } must succeed");
         let map = report.as_map("test").expect("audit returns a map");
         match map.get("outcome").as_deref() {

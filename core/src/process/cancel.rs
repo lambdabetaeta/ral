@@ -68,19 +68,6 @@ crate::label!(typed CancelCause);
 pub(crate) const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl CancelCause {
-    /// The process exit status of a run this cause ended: a signal-born
-    /// cause reports 128 plus its signal, a deadline `timeout(1)`'s 124.
-    /// Async-signal-safe.
-    pub const fn code(self) -> u8 {
-        match self {
-            Self::ReaderGone => 141,
-            Self::Interrupted => 130,
-            Self::Cancelled | Self::Terminated => 143,
-            Self::TimedOut => 124,
-            Self::Aborted => 131,
-        }
-    }
-
     /// The word every poll point and every host's parked wait reports this
     /// cause with, so the phrasing cannot drift between them.
     pub fn message(self) -> &'static str {

@@ -494,3 +494,95 @@ fn grant_core_limit_wins_over_rc_session_limit() {
     );
     assert!(repl_output_lines(&out.stdout).any(|l| l == "0"), "{out:?}");
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_repl_announces_an_unclaimed_worker_once() {
+    use common::pty::PtySession;
+    use std::time::{Duration, Instant};
+
+    let mut session = PtySession::spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let prompt = |session: &mut PtySession, count| {
+        assert!(
+            session.wait_until(deadline.saturating_duration_since(Instant::now()), |text| {
+                text.matches('❯').count() >= count
+            }),
+            "no prompt #{count}: {}",
+            session.text()
+        );
+    };
+    prompt(&mut session, 1);
+    session
+        .send_line("let h = spawn \"f\" { fail [status: 1, message: boom] }")
+        .unwrap();
+    let mut prompts = 1;
+    loop {
+        prompts += 1;
+        prompt(&mut session, prompts);
+        if session.text().contains("note: worker #") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no worker notice: {}",
+            session.text()
+        );
+        // A new prompt observes deferred delivery without claiming the result.
+        session.send_line("").unwrap();
+    }
+    for line in ["echo a", "echo b"] {
+        session.send_line(line).unwrap();
+        prompts += 1;
+        prompt(&mut session, prompts);
+    }
+    session.send_line("exit").unwrap();
+    assert!(
+        session
+            .wait_for_exit(deadline.saturating_duration_since(Instant::now()))
+            .unwrap()
+            .success()
+    );
+    let out = session.text();
+    let notes: Vec<_> = out
+        .lines()
+        .filter(|line| line.contains("note: worker #"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{out}");
+    assert!(notes[0].contains("(f) failed: boom"), "{out}");
+    assert!(!out.contains("dropped a surfaced value"), "{out}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_repl_never_announces_a_claimed_worker() {
+    // Claim before the next prompt's announcement gate.
+    let out = repl(
+        &["-i", "--norc"],
+        &[],
+        "let a = spawn \"a\" { return 1 }; await $a\nlet b = spawn \"b\" { ^sleep 5 }; cancel $b\n^sleep 1\necho next\n",
+    );
+    assert_eq!(out.status, 0, "{out:?}");
+    assert!(out.stdout.contains("next"), "{out:?}");
+    for channel in [&out.stdout, &out.stderr] {
+        assert!(!channel.contains("note: worker #"), "{out:?}");
+        assert!(!channel.contains("dropped a surfaced value"), "{out:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_repl_quit_takes_a_running_worker_down() {
+    let start = std::time::Instant::now();
+    let out = repl(
+        &["-i", "--norc"],
+        &[],
+        "let h = spawn \"t\" { ^sleep 30 }\nexit\n",
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    assert!(
+        out.stderr.contains("taking down 1 worker still running: #"),
+        "{out:?}"
+    );
+    assert!(out.stderr.contains("(t)"), "{out:?}");
+}

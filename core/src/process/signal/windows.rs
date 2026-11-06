@@ -5,6 +5,7 @@
 //! with the interrupt's status.  Nothing fans out: a group hears Ctrl-Break
 //! only from the teardown of the scope that owns it.
 
+use crate::fact::FailureCode as _;
 use std::sync::atomic::Ordering;
 
 use super::ESCALATION;
@@ -25,9 +26,9 @@ pub fn install_handlers() {
             // thread holds a lock can deadlock — the Unix handler reaches for
             // `_exit` on the same reasoning.
             unsafe {
-                windows_sys::Win32::System::Threading::ExitProcess(
-                    CancelCause::Interrupted.code().into(),
-                );
+                windows_sys::Win32::System::Threading::ExitProcess(u32::from(
+                    CancelCause::Interrupted.failure_code().get(),
+                ));
             }
         }
         request_interrupt();

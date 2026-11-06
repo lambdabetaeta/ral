@@ -6,15 +6,17 @@ use clipboard::{Clipboard, Copied};
 use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum as _, untag};
+use ral_core::io::ansi::{DIM, RESET};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::{WorkerRow, WorkerState};
-use ral_core::protocol::{Ending, EnquiryError, Program, Report, Run};
-use ral_core::shell::runtime::{DeferredSink, HookName};
+use ral_core::protocol::{Ending, EnquiryError, Program, Ran, Report, Run};
+use ral_core::shell::runtime::{DeferredSink, DoneEvent, HookName};
 use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
 use ral_core::text::plural;
 use ral_core::{Captured, RequestedTerminalAccess, Value};
 use ral_core::{errln, outln};
+use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,6 +35,7 @@ pub(super) struct ReplHost {
     /// The session prompt's latest fault, so a broken prompt says so once.
     prompt_fault: Mutex<Option<String>>,
     clipboard: Mutex<Clipboard>,
+    settled: Mutex<Vec<DoneEvent>>,
 }
 
 /// How a hook run ended.  An `exit` from a hook is ignored.  A fault is
@@ -73,6 +76,7 @@ impl ReplHost {
             clipboard: Mutex::new(Clipboard::new(
                 ral_core::host::var("SSH_CONNECTION").is_some(),
             )),
+            settled: Mutex::default(),
         })
     }
 
@@ -118,21 +122,18 @@ impl ReplHost {
             Ok(Report::Static { rendered, .. } | Report::Faulted { rendered, .. }) => {
                 (Outcome::Faulted(rendered), None)
             }
-            Ok(Report::Ran {
-                ending, captured, ..
-            }) => (
+            Ok(Report::Ran(Ran {
+                ending,
+                rendered,
+                captured,
+                ..
+            })) => (
                 match ending {
-                    Ending::Settled { value, .. } => Outcome::Settled(value),
+                    Ending::Ok(value) => Outcome::Settled(value),
                     Ending::Exited(_) => Outcome::Exited,
-                    Ending::Stopped {
-                        rendered,
-                        cause: CancelCause::TimedOut,
-                        ..
-                    } => Outcome::Walled(rendered),
-                    Ending::Stopped { rendered, .. } => Outcome::Stopped(rendered),
-                    Ending::Raised { rendered, .. } | Ending::Unreturnable { rendered, .. } => {
-                        Outcome::Faulted(rendered)
-                    }
+                    Ending::Stopped(CancelCause::TimedOut) => Outcome::Walled(rendered),
+                    Ending::Stopped(_) => Outcome::Stopped(rendered),
+                    Ending::Err(_) | Ending::Panic(_) => Outcome::Faulted(rendered),
                 },
                 captured,
             ),
@@ -144,6 +145,26 @@ impl ReplHost {
             outcome,
             captured,
             ctx,
+        }
+    }
+
+    /// The `done`s held since the last prompt, one faint line each for a result
+    /// still unclaimed: an already awaited or cancelled worker is not announced.
+    pub(super) fn announce_settled(&self, t: &dyn Transport) {
+        let settled = std::mem::take(&mut *self.settled.lock_ignore_poison());
+        if settled.is_empty() {
+            return;
+        }
+        let Ok(rows) = t.workers() else { return };
+        for done in settled {
+            if done.unclaimed_in(&rows) {
+                self.line(&format!(
+                    "{DIM}note: worker #{} ({}) {}{RESET}",
+                    done.id.0,
+                    done.title,
+                    done.outcome.said()
+                ));
+            }
         }
     }
 
@@ -182,7 +203,10 @@ impl Host for ReplHost {
     }
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-        let refuse = |message: String| EnquiryError { message, status: 1 };
+        let refuse = |message: String| EnquiryError {
+            message,
+            status: NonZeroU8::MIN,
+        };
         match Enquiry::decode(&req).map_err(refuse)? {
             Enquiry::Editor(op) => self
                 .editor
@@ -210,7 +234,11 @@ impl Host for ReplHost {
 impl DeferredSink for ReplHost {
     fn deliver(&self, batch: Vec<FOValue>) {
         for v in &batch {
-            self.render(v);
+            if let Some(done) = DoneEvent::from_surface(v) {
+                self.settled.lock_ignore_poison().push(done);
+            } else {
+                self.render(v);
+            }
         }
     }
 }
@@ -260,7 +288,7 @@ mod tests {
             if running {
                 WorkerState::Running
             } else {
-                WorkerState::Ready(ral_core::shell::runtime::Done::Ok)
+                WorkerState::Ready(ral_core::shell::runtime::Done::Ok(()))
             },
         )
     }

@@ -296,7 +296,8 @@ fn inactive_export_refuses_replaced_sessions_before_source_open_including_after_
 #[cfg(unix)]
 #[test]
 fn inactive_export_accepts_parent_aliases_but_refuses_record_links_and_special_files() {
-    use std::os::unix::fs::symlink;
+    use std::ffi::CString;
+    use std::os::unix::{ffi::OsStrExt as _, fs::symlink};
     let root = OwnDir::for_test("export-source-kinds").unwrap();
     let run = root.make_dir("project").unwrap().make_dir("run").unwrap();
     let held = run.make_dir("sessions").unwrap().make_dir("0").unwrap();
@@ -317,12 +318,15 @@ fn inactive_export_accepts_parent_aliases_but_refuses_record_links_and_special_f
     assert!(error.to_string().contains("is a link"), "{error}");
     // Keep the link as evidence; a second session holds a special source.
     let special = run.dir("sessions").unwrap().make_dir("1").unwrap();
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        special.path().join(RECORD),
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    let fifo = CString::new(special.path().join(RECORD).as_os_str().as_bytes()).unwrap();
+    // SAFETY: fifo is a live, NUL-terminated path; mkfifo retains no pointer.
+    let result = unsafe { libc::mkfifo(fifo.as_ptr(), libc::S_IRUSR | libc::S_IWUSR) };
+    assert_eq!(
+        result,
+        0,
+        "create test FIFO: {}",
+        std::io::Error::last_os_error()
+    );
     let error = inactive_under(&root, &special).err().unwrap();
     assert!(error.to_string().contains("regular file"), "{error}");
 }

@@ -406,7 +406,7 @@ mod chokepoint_tests {
         shell
             .run(Run::foreground(source, SourceOrigin::named("<test>")))
             .expect_ran()
-            .into_result()
+            .into_settled()
     }
 
     /// One captured run's stderr — where the ready boundary writes the
@@ -421,7 +421,6 @@ mod chokepoint_tests {
                 String::from_utf8_lossy(&captured.stderr).into_owned()
             }
             RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-            RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
         }
     }
 
@@ -594,7 +593,7 @@ mod chokepoint_tests {
             SourceOrigin::named("<test>"),
         )) {
             RunReport::Static { .. } => {}
-            RunReport::Ran { .. } | RunReport::Faulted { .. } => {
+            RunReport::Ran { .. } => {
                 panic!("ill-typed source must be refused statically")
             }
         }
@@ -644,7 +643,7 @@ mod chokepoint_tests {
         ));
         report
             .expect_ran()
-            .into_result()
+            .into_settled()
             .expect("the hook body must run");
 
         assert_eq!(
@@ -761,7 +760,7 @@ mod chokepoint_tests {
                     "expected an undefined-variable diagnostic, got: {msg}"
                 );
             }
-            RunReport::Ran { .. } | RunReport::Faulted { .. } => {
+            RunReport::Ran { .. } => {
                 panic!("a pruned name must be refused before it runs")
             }
         }
@@ -802,7 +801,7 @@ mod chokepoint_tests {
     fn stopping_handle_pins_name_until_consumed() {
         use crate::io::ByteBuffer;
         use crate::process::DurableRoot;
-        use crate::shell::runtime::{HandleInner, ThreadEnd, WorkerId};
+        use crate::shell::runtime::{End, HandleInner, WorkerId};
 
         let mut shell = armed_shell(2);
         let (handle, permit) = HandleInner::new(
@@ -825,7 +824,7 @@ mod chokepoint_tests {
         );
         assert!(shell.scope_lookup("h_stopping").is_some());
 
-        let _ = permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        let _ = permit.finish(End::Ok(Value::Unit));
         assert_eq!(handle.sample(), Sample::Consumed);
 
         let notices = shell.local.bindings.prune(&mut shell.env);

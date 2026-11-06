@@ -1,31 +1,44 @@
 //! The evaluator's control-flow currencies: `Escape` and `Break` for exits.
 
+use super::Shell;
 use super::error::Error;
 use super::value::Value;
+use crate::fact::{Done, Ending, ExitCode, FailureCode};
 use crate::process::{CancelCause, Cancellation, ChildEnd, Scope, ScopeId};
 use crate::source::Span;
+use std::num::NonZeroU8;
+
+/// A stop: consumed by its owner, caught by no `try`.
+#[derive(Debug, Clone)]
+pub struct Stop {
+    pub cause: CancelCause,
+    /// The outermost node whose own flag attains the join; `None` for a
+    /// stop no node minted (the closed-stdout stop), the top's.
+    pub owner: Option<ScopeId>,
+    /// Where it unwound through, for the caret.
+    pub at: Option<Span>,
+}
+
+impl FailureCode for Stop {
+    fn failure_code(&self) -> NonZeroU8 {
+        self.cause.failure_code()
+    }
+}
 
 /// Non-catchable exits from a delimited scope.
 #[derive(Debug, Clone)]
 pub enum Escape {
     /// `exit n`: the host's alone.
-    Exit(i32),
-    /// A stop: consumed by the owner `owner` names, caught by no `try`.
-    /// `owner` is the outermost node whose own flag attains the join;
-    /// `None` for a stop no node minted (the closed-stdout stop), the top's.
-    /// `at` is where it unwound through, for the caret.
-    Stopped {
-        cause: CancelCause,
-        owner: Option<ScopeId>,
-        at: Option<Span>,
-    },
+    Exit(u8),
+    /// A stop.
+    Stopped(Stop),
 }
 
 impl std::fmt::Display for Escape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Exit(code) => write!(f, "exit {code}"),
-            Self::Stopped { cause, .. } => f.write_str(cause.message()),
+            Self::Stopped(Stop { cause, .. }) => f.write_str(cause.message()),
         }
     }
 }
@@ -46,15 +59,25 @@ impl std::fmt::Display for Break {
     }
 }
 
+impl ExitCode for Break {
+    fn code(&self) -> u8 {
+        match self {
+            Self::Error(error) => error.failure_code().get(),
+            Self::Escape(Escape::Exit(code)) => *code,
+            Self::Escape(Escape::Stopped(stop)) => stop.failure_code().get(),
+        }
+    }
+}
+
 impl Break {
     /// The one minting site for a stop: every poll point, every write a
     /// sink stopped, every child's teardown.
     pub(crate) fn stopped(cause: CancelCause, owner: Option<ScopeId>) -> Self {
-        Self::Escape(Escape::Stopped {
+        Self::Escape(Escape::Stopped(Stop {
             cause,
             owner,
             at: None,
-        })
+        }))
     }
 
     /// A child's end: `Failed` is the command's error; `Cancelled` is
@@ -82,15 +105,6 @@ impl Break {
         match scope.in_force() {
             Some((join, owner)) => Self::stopped(join, Some(owner)),
             None => Self::stopped(cause, None),
-        }
-    }
-
-    /// The exit status this break ends a run on.
-    pub fn code(&self) -> i32 {
-        match self {
-            Self::Error(error) => error.code(),
-            Self::Escape(Escape::Exit(code)) => *code,
-            Self::Escape(Escape::Stopped { cause, .. }) => i32::from(cause.code()),
         }
     }
 }
@@ -140,38 +154,59 @@ impl From<Cancellation> for Break {
 pub(crate) fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value> {
     match (node.in_force(), settled) {
         (_, exit @ Err(Break::Escape(Escape::Exit(_)))) => exit,
-        (
-            Some((join, owner)),
-            Err(Break::Escape(Escape::Stopped {
-                cause,
-                owner: named,
-                at,
-            })),
-        ) if cause > join || (cause == join && named.as_ref() == Some(&owner)) => {
-            Err(Break::Escape(Escape::Stopped {
-                cause,
-                owner: named,
-                at,
-            }))
+        (Some((join, owner)), Err(Break::Escape(Escape::Stopped(stop))))
+            if stop.cause > join || (stop.cause == join && stop.owner.as_ref() == Some(&owner)) =>
+        {
+            Err(Break::Escape(Escape::Stopped(stop)))
         }
         (Some((join, owner)), _) => Err(Break::stopped(join, Some(owner))),
         (None, settled) => settled,
     }
 }
 
-/// How a thread's body ended: a worker's channel and a stage's report carry it.
-#[derive(Debug, Clone)]
-pub enum ThreadEnd {
-    Settled(Settled<Value>),
-    Panicked(String),
-}
+/// How a thread's body, or a run, ended.
+pub type End = Ending<Value, Error, Stop>;
 
-impl ThreadEnd {
-    /// The body under `catch_unwind`: a thread base's first half.
+impl End {
+    /// The body under `catch_unwind`: a base frame's first half.
     pub(crate) fn of(body: impl FnOnce() -> Settled<Value>) -> Self {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
-            Ok(settled) => Self::Settled(settled),
-            Err(payload) => Self::Panicked(panic_text(&*payload)),
+            Ok(settled) => Self::settled(settled),
+            Err(payload) => Self::Panic(panic_text(&*payload)),
+        }
+    }
+
+    pub(crate) fn settled(settled: Settled<Value>) -> Self {
+        match settled {
+            Ok(value) => Self::Ok(value),
+            Err(Break::Error(error)) => Self::Err(error),
+            Err(Break::Escape(Escape::Exit(code))) => Self::Exited(code),
+            Err(Break::Escape(Escape::Stopped(stop))) => Self::Stopped(stop),
+        }
+    }
+
+    /// Back into the machine's currency, a panic resumed.
+    ///
+    /// # Errors
+    /// A failure, exit or stop becomes the corresponding [`Break`].
+    pub fn into_settled(self) -> Settled<Value> {
+        match self {
+            Self::Ok(value) => Ok(value),
+            Self::Err(error) => Err(error.into()),
+            Self::Exited(code) => Err(Escape::Exit(code).into()),
+            Self::Stopped(stop) => Err(Escape::Stopped(stop).into()),
+            Self::Panic(text) => std::panic::resume_unwind(Box::new(text)),
+        }
+    }
+
+    /// The record minted against `shell`, the stop's cause.
+    pub(crate) fn done(&self, shell: &Shell) -> Done {
+        match self {
+            Self::Ok(_) => Done::Ok(()),
+            Self::Err(error) => Done::Err(error.record(shell)),
+            Self::Exited(code) => Done::Exited(*code),
+            Self::Stopped(stop) => Done::Stopped(stop.cause),
+            Self::Panic(text) => Done::Panic(text.clone()),
         }
     }
 }
@@ -192,6 +227,10 @@ mod tests {
     use crate::shell::runtime::Status;
     use crate::source::FileId;
 
+    fn nz(n: u8) -> NonZeroU8 {
+        NonZeroU8::new(n).unwrap()
+    }
+
     #[test]
     fn cancellation_becomes_a_noncatchable_stop_naming_its_owner() {
         let root = DurableRoot::default();
@@ -202,18 +241,19 @@ mod tests {
         let stop = Break::from(child.poll().expect_err("cancelled"));
         assert!(matches!(
             stop,
-            Break::Escape(Escape::Stopped {
+            Break::Escape(Escape::Stopped(Stop {
                 cause: C::Interrupted,
                 owner: Some(owner),
                 at: None,
-            }) if owner == root.id()
+            })) if owner == root.id()
         ));
     }
 
     #[test]
-    fn every_break_has_its_code() {
-        let error = |status| Break::Error(Error::with_status("x", status));
-        assert_eq!(error(Status::Raised(7)).code(), 7);
+    fn every_end_has_its_code() {
+        let error = |status| End::Err(Error::with_status("x", status));
+        assert_eq!(End::Ok(Value::Unit).code(), 0);
+        assert_eq!(error(Status::Raised(nz(7))).code(), 7);
         assert_eq!(
             error(Status::Process(crate::process::CommandFailure::ExitCode(3))).code(),
             3
@@ -226,14 +266,23 @@ mod tests {
             error(Status::WorkerStopped(WorkerStop::Cancelled)).code(),
             143
         );
-        assert_eq!(Break::Escape(Escape::Exit(5)).code(), 5);
+        assert_eq!(End::Exited(5).code(), 5);
         for cause in [C::ReaderGone, C::Interrupted, C::TimedOut, C::Aborted] {
-            assert_eq!(Break::stopped(cause, None).code(), i32::from(cause.code()));
+            assert_eq!(
+                End::Stopped(Stop {
+                    cause,
+                    owner: None,
+                    at: None
+                })
+                .code(),
+                cause.failure_code().get()
+            );
         }
+        assert_eq!(End::Panic("x".into()).code(), crate::fact::PANIC_CODE);
     }
 
     fn stopped(cause: C, owner: Option<ScopeId>, at: Option<Span>) -> Settled<Value> {
-        Err(Break::Escape(Escape::Stopped { cause, owner, at }))
+        Err(Break::Escape(Escape::Stopped(Stop { cause, owner, at })))
     }
 
     fn node_under(cause: C) -> ScopeNode {
@@ -247,7 +296,7 @@ mod tests {
         let sp = Span::new(FileId(1), 0, 4);
         let node = node_under(C::Interrupted);
         let cause = |r: Settled<Value>| match r {
-            Err(Break::Escape(Escape::Stopped { cause, owner, at })) => (cause, owner, at),
+            Err(Break::Escape(Escape::Stopped(Stop { cause, owner, at }))) => (cause, owner, at),
             other => panic!("not a stop: {other:?}"),
         };
 
@@ -281,8 +330,8 @@ mod tests {
         ));
         let calm = DurableRoot::default().worker();
         assert!(matches!(
-            final_poll(Err(Break::Error(Error::raised("x", 7))), &calm),
-            Err(Break::Error(e)) if e.code() == 7
+            final_poll(Err(Break::Error(Error::raised("x", nz(7)))), &calm),
+            Err(Break::Error(e)) if e.failure_code() == nz(7)
         ));
     }
 }

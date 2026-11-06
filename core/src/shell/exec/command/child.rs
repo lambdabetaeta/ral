@@ -480,7 +480,8 @@ mod tests {
         }
         match report {
             crate::shell::run::RunReport::Ran {
-                ending: crate::shell::run::Ending::Stopped { cause, .. },
+                ending:
+                    crate::shell::runtime::End::Stopped(crate::shell::runtime::Stop { cause, .. }),
                 ..
             } => cause,
             _ => panic!("a struck run must stop"),
@@ -539,10 +540,10 @@ mod tests {
         assert!(
             matches!(
                 ending,
-                crate::shell::run::Ending::Stopped {
+                crate::shell::runtime::End::Stopped(crate::shell::runtime::Stop {
                     cause: CancelCause::TimedOut,
                     ..
-                }
+                })
             ),
             "{ending:?}"
         );

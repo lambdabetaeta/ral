@@ -11,7 +11,7 @@ use crate::ir::Comp;
 use crate::process::{CancelCause, POLL_SLICE, ScopeId, ScopeNode};
 #[cfg(test)]
 use crate::process::{DurableRoot, Scope};
-use crate::shell::runtime::{Break, Error, Mooring, Settled, ThreadEnd};
+use crate::shell::runtime::{Break, End, Error, Mooring, Settled};
 use crate::source::Span;
 use std::sync::Arc;
 
@@ -142,7 +142,7 @@ pub(super) fn launch_thread_stage(
             let settle = SettleOnDrop::new(slot);
             child.io = io;
             child.local.audit.install_active_policy(policy);
-            let end = ThreadEnd::of(|| eval(comp, env, mooring, child));
+            let end = End::of(|| eval(comp, env, mooring, child));
             settle.send(StageObservation {
                 end,
                 audit: child.local.audit.take_fragment(),
@@ -168,7 +168,7 @@ mod tests {
     use super::*;
     use crate::io::Edge;
     use crate::process::DurableRoot;
-    use crate::shell::runtime::{Escape, TerminalAccess};
+    use crate::shell::runtime::{Stop, TerminalAccess};
     use std::io::Read;
     use std::time::{Duration, Instant};
 
@@ -239,10 +239,7 @@ mod tests {
             panic!("a thread stage must settle as Event::Returned");
         };
         assert_eq!(ix, 0);
-        assert!(
-            matches!(obs.end, ThreadEnd::Settled(Ok(_))),
-            "echo hi must not fail"
-        );
+        assert!(matches!(obs.end, End::Ok(_)), "echo hi must not fail");
     }
 
     #[test]
@@ -288,10 +285,10 @@ mod tests {
         assert!(
             matches!(
                 &obs.end,
-                ThreadEnd::Settled(Err(Break::Escape(Escape::Stopped {
+                End::Stopped(Stop {
                     cause: CancelCause::ReaderGone,
                     ..
-                })))
+                })
             ),
             "a cancelled thread ends in the reader-gone stop: {:?}",
             obs.end

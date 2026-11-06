@@ -14,6 +14,7 @@ use atomic_refcell::AtomicRefCell;
 use ral_core::carrier::Host;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::fact::FailureCode as _;
 use ral_core::process::Scope;
 use ral_core::protocol::EnquiryError;
 use ral_core::shell::runtime::Error;
@@ -216,7 +217,7 @@ impl Host for RunHost {
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
         self.desk.handle(&req).map_err(|e| EnquiryError {
-            status: e.code(),
+            status: e.failure_code(),
             message: e.message,
         })
     }

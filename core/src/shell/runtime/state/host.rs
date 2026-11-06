@@ -13,7 +13,7 @@ use crate::io::terminal::TerminalState;
 use crate::process::{DurableRoot, ScopeNode, TerminalLease};
 use crate::protocol::probe::{WorkerRow, WorkerState};
 use crate::shell::runtime::ExitHints;
-use crate::shell::runtime::{BuiltinEntry, Done, ReapNotice, Sample, WorkerEntry};
+use crate::shell::runtime::{BuiltinEntry, ReapNotice, Sample, WorkerEntry};
 use crate::source::SourceDb;
 use crate::ty::Fixings;
 use std::sync::Arc;
@@ -115,7 +115,7 @@ impl Shell {
     /// snapshot without claiming the handle.
     pub(crate) fn worker_row(&self, entry: &WorkerEntry) -> Option<WorkerRow> {
         let h = &entry.handle;
-        let snap = h.snapshot(|c| Done::of(&c.end, self));
+        let snap = h.snapshot(|c| c.end.done(self));
         let (state, retention_left) = match snap.state {
             Sample::Running(()) => (WorkerState::Running, None),
             Sample::Stopping => (WorkerState::Stopping, None),
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn worker_row_is_coherent_across_running_stopping_ready_and_consumed() {
         use crate::io::ByteBuffer;
-        use crate::shell::runtime::{HandleInner, Owner, ThreadEnd, Value, WorkerId};
+        use crate::shell::runtime::{Done, End, HandleInner, Owner, Value, WorkerId};
 
         let mut shell = crate::test_helper::core_shell();
         shell.arm_worker_retention(4);
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(row.state, WorkerState::Running);
         assert_eq!(row.settled, None);
         assert_eq!(row.retention_left, None);
-        let _ = running_permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        let _ = running_permit.finish(End::Ok(Value::Unit));
 
         // 2. Stopping: settled is None, retention_left is None even if settled_epoch is Some.
         let (stopping_h, stopping_permit) = make(2, "stopping");
@@ -366,19 +366,19 @@ mod tests {
         assert_eq!(row.retention_left, None);
 
         // Once stopping finishes, it becomes Consumed and worker_row returns None.
-        let _ = stopping_permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        let _ = stopping_permit.finish(End::Ok(Value::Unit));
         assert!(shell.worker_row(&stopping_entry).is_none());
 
         // 3. Ready: settled is Some, retention_left reflects settled_epoch countdown.
         let (ready_h, ready_permit) = make(3, "ready");
-        let _ = ready_permit.finish(ThreadEnd::Settled(Ok(Value::Int(7))));
+        let _ = ready_permit.finish(End::Ok(Value::Int(7)));
         let ready_entry = WorkerEntry {
             handle: ready_h.clone(),
             owner: Owner::Session,
             settled_epoch: Some(0),
         };
         let row = shell.worker_row(&ready_entry).expect("ready produces row");
-        assert_eq!(row.state, WorkerState::Ready(Done::Ok));
+        assert_eq!(row.state, WorkerState::Ready(Done::Ok(())));
         assert!(row.settled.is_some());
         assert_eq!(row.retention_left, Some(4));
 

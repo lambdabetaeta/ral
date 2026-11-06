@@ -5,6 +5,7 @@ use crate::card::testkit::card_value;
 use crate::record::{ChildStatus, Display, Record};
 use ral_core::carrier::Severed;
 use ral_core::process::DurableRoot;
+use ral_core::protocol::probe::WorkerState;
 use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,7 @@ fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
         id: WorkerId(id),
         title: title.into(),
         elapsed_ms: 25,
-        outcome: Done::Ok,
+        outcome: Done::Ok(()),
     }
     .to_surface()
 }
@@ -118,9 +119,9 @@ fn surface_batch_without_done_event_replays_cards_and_wakes_model() {
 
 /// When a worker's result was already claimed by `await` (or its row is
 /// absent), `admit` suppresses the redundant model wakeup while still
-/// replaying historical cards and the done breadcrumb.
+/// replaying its other cards.
 #[test]
-fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
+fn a_claimed_workers_done_is_neither_recorded_nor_woken() {
     let mut session = Agent::for_test("system").unwrap();
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
@@ -149,10 +150,8 @@ fn consumed_worker_done_event_suppresses_wakeup_but_replays_cards() {
         "cards in the batch must still replay when model wakeup is suppressed: {facts:?}"
     );
     assert!(
-        facts
-            .iter()
-            .any(|d| matches!(d, Display::Done { id: Some(1), .. })),
-        "the historical done line still replays to the scrollback: {facts:?}"
+        !facts.iter().any(|d| matches!(d, Display::Done { .. })),
+        "a claimed worker has no done breadcrumb: {facts:?}"
     );
 }
 
@@ -225,6 +224,12 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
         "cards still replay when stopping suppresses model wakeup"
     );
 
+    assert!(
+        !stopping_facts
+            .iter()
+            .any(|d| matches!(d, Display::Done { .. }))
+    );
+
     let ready_item = Input::Surface {
         generation: session.generation,
         values: vec![done_surface(ready_id, "ready")],
@@ -232,6 +237,12 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     assert!(
         session.admit(ready_item).is_some(),
         "an unclaimed ready worker must wake the model"
+    );
+
+    assert!(
+        display_facts(&rx)
+            .iter()
+            .any(|d| matches!(d, Display::Done { id: Some(id), .. } if *id == ready_id))
     );
 
     let running_item = Input::Surface {
@@ -251,8 +262,8 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     }
 }
 
-/// A severed `workers()` probe during `admit` still replays the surface cards
-/// first, then declines the input and leaves the engine loss observable.
+/// A severed probe replays other cards, declines the done and wake,
+/// and leaves the engine loss observable.
 #[test]
 fn severed_worker_probe_declines_after_replaying_cards() {
     let session = Agent::for_test("system").unwrap();
@@ -268,9 +279,10 @@ fn severed_worker_probe_declines_after_replaying_cards() {
     assert_eq!(session.severance(), Some(cause));
 
     let facts = display_facts(&rx);
+    assert!(!facts.iter().any(|d| matches!(d, Display::Done { .. })));
     assert!(
         facts.iter().any(|d| matches!(d, Display::Card { .. })),
-        "cards replay before the worker probe fails: {facts:?}"
+        "cards replay even when the worker probe fails: {facts:?}"
     );
 }
 

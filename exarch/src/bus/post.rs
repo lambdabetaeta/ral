@@ -205,14 +205,14 @@ mod tests {
             elapsed_ms: 192_000,
             outcome: Done::Err(ErrorRecord::new(
                 "<runtime>",
-                &Status::Raised(101),
+                &Status::Raised(std::num::NonZeroU8::new(7).unwrap()),
                 "build failed",
                 None,
             )),
         };
         assert_eq!(
             surface_notice(&[done.to_surface()]),
-            "errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed. \
+            "errand #7 (building) finished after 3 mins 12 secs (failed): build failed. \
              If you kept its handle and the result is still unclaimed, `await $h` replays \
              its output and returns its result. `workers` shows current status; an ID \
              cannot recover a handle."

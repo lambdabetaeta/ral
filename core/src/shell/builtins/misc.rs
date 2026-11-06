@@ -2,12 +2,13 @@
 //! `exit`, `surface`, `warn`, and `ask`.
 
 use crate::data::{FOValue, datum::Datum};
-use crate::fact::Reason;
+use crate::fact::{FailureCode as _, Reason};
 use crate::process::{CommandFailure, Signal, SpawnFailure, WorkerStop};
 use crate::shell::runtime::{
     Break, CallSite, Error, Escape, Map, Mooring, Settled, Shell, Status, Value, sig,
 };
 use crate::site::{Silent, site};
+use std::num::NonZeroU8;
 
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 /// `ESC c` (RIS): a terminal reset that leaves stty modes untouched.
@@ -23,20 +24,29 @@ pub(super) fn builtin_reset(_args: &[Value], shell: &mut Shell) -> Settled<Value
     Ok(Value::Unit)
 }
 
-fn status_i32(who: &str, n: i64) -> Result<i32, Break> {
-    i32::try_from(n).map_err(|_| sig(format!("{who}: status {n} is outside the exit-code range")))
+fn exit_status(n: i64) -> Result<u8, Break> {
+    u8::try_from(n).map_err(|_| {
+        sig(format!(
+            "exit: status {n} is outside 0..=255: an exit status is one byte"
+        ))
+    })
 }
 
-/// The nonzero check reads the i64 before narrowing, so a status that would
-/// truncate to 0 cannot pass as a clean exit.  The literal `fail [status: 0]`
-/// is caught earlier by [`crate::typecheck::builtins::fail_status_is_zero_literal`].
-fn fail_status_code(status: i64) -> Result<i32, Break> {
+/// Keep zero's advice; the checker also refuses a literal zero.
+fn fail_status_code(status: i64) -> Result<NonZeroU8, Break> {
     if status == 0 {
         return Err(sig(
             "fail requires a nonzero status (use `return` for clean exit)",
         ));
     }
-    status_i32("fail", status)
+    u8::try_from(status)
+        .ok()
+        .and_then(NonZeroU8::new)
+        .ok_or_else(|| {
+            sig(format!(
+                "fail: status {status} is outside 1..=255: an exit status is one byte"
+            ))
+        })
 }
 
 /// A record field decoded as `T`; `None` when absent.
@@ -52,8 +62,13 @@ fn optional<T: Datum>(m: &Map, key: &str) -> Result<Option<T>, Break> {
 }
 
 /// The failure a record's `reason` names, at the record's `status`.
-fn projected(reason: Reason, status: i32) -> Result<Status, Break> {
+fn projected(reason: Reason, status: NonZeroU8) -> Result<Status, Break> {
     Ok(match reason {
+        Reason::Exited(0) => {
+            return Err(sig(
+                "fail: `exited 0` is success, not an external failure; use `return`, or drop reason",
+            ));
+        }
         Reason::Exited(n) => Status::Process(CommandFailure::ExitCode(n)),
         Reason::Signaled(n) if (1..=127).contains(&n) => {
             Status::Process(CommandFailure::Signal(Signal::new(n)))
@@ -114,10 +129,10 @@ fn reraise(args: &[Value]) -> Result<Error, Break> {
         })
         .transpose()?;
     let projected = reason.map_or(Ok(Status::Raised(status)), |r| projected(r, status))?;
-    if projected.code() != status {
+    if projected.failure_code() != status {
         let (shown, code) = (
             Value::from_datum(reason.expect("only a reason projects")),
-            projected.code(),
+            projected.failure_code(),
         );
         return Err(sig(format!(
             "fail: status {status} disagrees with reason {shown}: that failure has status {code}; \
@@ -144,7 +159,7 @@ pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
             args[0].type_name()
         )));
     };
-    Err(Break::Escape(Escape::Exit(status_i32("exit", *n)?)))
+    Err(Break::Escape(Escape::Exit(exit_status(*n)?)))
 }
 
 /// Hand the event to the host's structured-event sink, or to nothing when none
@@ -222,6 +237,10 @@ mod tests {
     use crate::fact::ErrorRecord;
     use crate::process::CancelCause;
 
+    fn nz(n: u8) -> NonZeroU8 {
+        NonZeroU8::new(n).unwrap()
+    }
+
     fn site() -> CallSite {
         CallSite {
             script: "a.ral".into(),
@@ -262,9 +281,52 @@ mod tests {
     }
 
     #[test]
+    fn exit_refuses_a_status_outside_one_byte() {
+        let mut shell = crate::test_helper::core_shell();
+        for status in [-1, 256] {
+            let Err(Break::Error(error)) = builtin_exit(&[Value::Int(status)], &mut shell) else {
+                panic!("exit {status} must refuse");
+            };
+            assert_eq!(
+                error.message,
+                format!("exit: status {status} is outside 0..=255: an exit status is one byte")
+            );
+        }
+        for status in [0, 255] {
+            assert!(matches!(
+                builtin_exit(&[Value::Int(i64::from(status))], &mut shell),
+                Err(Break::Escape(Escape::Exit(code))) if code == status
+            ));
+        }
+    }
+
+    #[test]
+    fn fail_refuses_a_status_outside_one_byte() {
+        let record = |status| {
+            Value::map(vec![
+                ("status".into(), Value::Int(status)),
+                ("message".into(), Value::string("x")),
+            ])
+        };
+        for status in [-1, 256] {
+            assert_eq!(
+                refusal(record(status)),
+                format!("fail: status {status} is outside 1..=255: an exit status is one byte")
+            );
+        }
+        assert_eq!(
+            refusal(record(0)),
+            "fail requires a nonzero status (use `return` for clean exit)"
+        );
+        assert!(
+            matches!(builtin_fail(&[record(255)]), Break::Error(error) if error.failure_code().get() == 255)
+        );
+    }
+
+    #[test]
     fn fail_of_a_record_is_a_faithful_reraise() {
         let statuses = [
-            Status::Raised(9),
+            Status::Raised(nz(9)),
             Status::Process(CommandFailure::ExitCode(3)),
             Status::Process(CommandFailure::Signal(Signal::new(9))),
             Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)),
@@ -281,12 +343,12 @@ mod tests {
             }
         }
         assert_eq!(
-            Status::WorkerStopped(WorkerStop::Cancelled).code(),
-            i32::from(CancelCause::Cancelled.code())
+            Status::WorkerStopped(WorkerStop::Cancelled).failure_code(),
+            CancelCause::Cancelled.failure_code()
         );
         assert_eq!(
-            Status::WorkerStopped(WorkerStop::TimedOut).code(),
-            i32::from(CancelCause::TimedOut.code())
+            Status::WorkerStopped(WorkerStop::TimedOut).failure_code(),
+            CancelCause::TimedOut.failure_code()
         );
     }
 
@@ -303,6 +365,39 @@ mod tests {
     }
 
     #[test]
+    fn fail_refuses_a_zero_external_exit_reason() {
+        for status in [1, 255] {
+            let Break::Error(error) =
+                builtin_fail(&[record_value(status, Value::from_datum(Reason::Exited(0)))])
+            else {
+                panic!("a zero external exit reason must be refused");
+            };
+            assert_eq!(
+                error.message,
+                "fail: `exited 0` is success, not an external failure; use `return`, or drop reason"
+            );
+            assert_eq!(error.failure_code(), NonZeroU8::MIN);
+            assert_eq!(error.record_at(None).reason, Reason::Raised);
+        }
+    }
+
+    #[test]
+    fn fail_preserves_negative_external_exit_reasons() {
+        for raw in [-1, i32::MIN, -1_073_741_790] {
+            let reason = Reason::Exited(raw);
+            let Break::Error(error) = builtin_fail(&[record_value(1, Value::from_datum(reason))])
+            else {
+                panic!("a negative Windows exit is a failure");
+            };
+            assert_eq!(error.failure_code(), NonZeroU8::MIN);
+            assert_eq!(error.record_at(None).reason, reason);
+            let mismatch = refusal(record_value(2, Value::from_datum(reason)));
+            assert!(mismatch.contains("disagrees with reason"), "{mismatch}");
+            assert!(mismatch.contains("set status to 1"), "{mismatch}");
+        }
+    }
+
+    #[test]
     fn fail_refuses_a_signal_out_of_range() {
         let msg = refusal(record_value(
             1,
@@ -313,13 +408,13 @@ mod tests {
 
     #[test]
     fn fail_keeps_a_records_site() {
-        let record = ErrorRecord::new("cmd", &Status::Raised(2), "boom", Some(site()));
+        let record = ErrorRecord::new("cmd", &Status::Raised(nz(2)), "boom", Some(site()));
         assert_eq!(reraised(&record).site.as_deref(), Some(&site()));
     }
 
     #[test]
     fn fail_keeps_runtime_as_cmd() {
-        let record = ErrorRecord::new("<runtime>", &Status::Raised(2), "boom", None);
+        let record = ErrorRecord::new("<runtime>", &Status::Raised(nz(2)), "boom", None);
         let error = reraised(&record);
         assert_eq!(error.command.as_deref(), Some("<runtime>"));
         assert_eq!(error.record_at(None).cmd(), "<runtime>");

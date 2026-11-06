@@ -7,6 +7,7 @@ use crate::data::{Bytes, Finite};
 use crate::record;
 use crate::source::CallSite;
 use std::collections::BTreeMap;
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 /// A [`Datum`] whose encoding has a ral type.  Declared once, by the
@@ -85,6 +86,9 @@ macro_rules! leaf {
 }
 
 leaf! {
+    () => Ty::Unit,
+    u8 => Ty::Int,
+    NonZeroU8 => Ty::Int,
     String => Ty::String,
     Arc<str> => Ty::String,
     bool => Ty::Bool,

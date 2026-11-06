@@ -48,7 +48,7 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
         } => {
             let stdout = captured.map(|c| c.stdout).unwrap_or_default();
             (
-                ending.into_result(),
+                ending.into_settled(),
                 String::from_utf8(stdout).expect("captured stdout is UTF-8"),
             )
         }
@@ -56,7 +56,6 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
             "{src:?} must reach the evaluator, got {}",
             diagnostics.render().0
         ),
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -67,7 +66,7 @@ fn static_codes(src: &str) -> Vec<String> {
         RunReport::Static {
             diagnostics: StaticDiagnostics::Compile(r),
             ..
-        } if r.status == 1 => r
+        } if r.status.get() == 1 => r
             .reports
             .iter()
             .filter_map(|r| r.code.map(String::from))
@@ -83,7 +82,7 @@ fn static_codes(src: &str) -> Vec<String> {
             diagnostics: StaticDiagnostics::Host(e),
             ..
         } => panic!("{src:?}: expected type diagnostics, got host {e:?}"),
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
+
         RunReport::Ran { .. } => Vec::new(),
     }
 }

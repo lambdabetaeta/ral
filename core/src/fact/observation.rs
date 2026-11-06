@@ -83,7 +83,7 @@ pub struct AuditIo {
 pub struct Command {
     /// Shown name first, then its arguments.
     pub argv: Vec<String>,
-    pub status: i32,
+    pub status: u8,
     pub origin: CommandOrigin,
     /// Retained prefix and total bytes written; empty and 0 without byte capture.
     pub stdout: Bytes,
@@ -102,7 +102,7 @@ impl Command {
     pub fn new(
         shown: &str,
         args: impl IntoIterator<Item = String>,
-        status: i32,
+        status: u8,
         origin: CommandOrigin,
         io: AuditIo,
         error: Option<String>,

@@ -16,8 +16,7 @@ use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::path::CwdPath;
 use crate::shell::evaluator::{Mode, run_phrases};
 use crate::shell::runtime::{
-    Break, BuiltinEntry, BuiltinTable, Env, Escape, Mooring, PreludeMap, Runtime, Set, Shell,
-    language_constants,
+    BuiltinEntry, BuiltinTable, Env, Mooring, PreludeMap, Runtime, Set, Shell, language_constants,
 };
 use crate::site::{Silent, site};
 use crate::typecheck::Manifest;
@@ -88,12 +87,7 @@ impl BakedPrelude {
             &mut shell,
         );
         if let Err(brk) = ran.outcome {
-            let why = match brk {
-                Break::Error(e) => e.to_string(),
-                Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
-                Break::Escape(Escape::Stopped { cause, .. }) => cause.message().to_owned(),
-            };
-            panic!("the prelude failed to run: {why}");
+            panic!("the prelude failed to run: {brk}");
         }
         Arc::new(
             ran.env

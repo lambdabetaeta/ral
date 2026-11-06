@@ -1,12 +1,24 @@
 ---
 status: active
-generated_at_commit: fe9cd32d
-verified_at_commit: 61c288f
-verified_at_date: 2026-10-21
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_date: 2026-11-06
 anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, CompletionPermit, Cradle, Brood, ScopeOwner, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, spawn_form]
 ---
 
 # `await` is the block run here, and a worker ends with its children
+
+> Amended 2026-11-05 (see [[design/endings|endings]]):
+> I3's session owner answers for its loose workers' lifetime, never their
+> failure. A returning batch script (`Run.last`) waits for still-unclaimed
+> session workers in birth order, claims them, writes stdout then stderr and
+> drops every ending, retaining its own value and status. A halt skips the
+> wait and session teardown takes them down. This adds the return rule for
+> the session's last run; it does not give a run a brood or I4's failure duty.
+> A `done` is announced only while its result is still unclaimed at exarch
+> admission or the REPL's next prompt, not according to a future `await`.
+> A prior `await`, `race` or `cancel` suppresses it; batch announces none.
+> `Done` is the Unit-valued projection of the one `Ending`, worded by core.
 
 > Amended 2026-10-21:
 > - **Four-state handle lifecycle (`running` → `stopping` → `ready` → `consumed`).**

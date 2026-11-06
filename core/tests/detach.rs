@@ -76,10 +76,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
     });
     match report {
         RunReport::Ran {
-            ending:
-                ral_core::shell::run::Ending::Settled {
-                    value: Value::Unit, ..
-                },
+            ending: ral_core::shell::runtime::End::Ok(Value::Unit),
             captured: Some(captured),
             ..
         } => serde_json::from_slice(&captured.stdout).expect("`to-json` emits JSON"),
@@ -87,7 +84,6 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
             panic!("{call} must return a receipt record, got {ending:?}")
         }
         RunReport::Static { .. } => panic!("{call} must compile"),
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -101,12 +97,11 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
     });
     match report {
         RunReport::Ran {
-            ending: ral_core::shell::run::Ending::Raised { error, .. },
+            ending: ral_core::shell::runtime::End::Err(error),
             ..
         } => error.to_string(),
         RunReport::Ran { ending, .. } => panic!("{source} must be refused, got {ending:?}"),
         RunReport::Static { .. } => panic!("{source} must compile"),
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

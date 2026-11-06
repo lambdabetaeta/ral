@@ -59,7 +59,7 @@ pub struct ToolResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub value: Option<String>,
-    pub exit: i32,
+    pub exit: u8,
 }
 
 /// Deferred worker batches carry the engine generation that produced them.

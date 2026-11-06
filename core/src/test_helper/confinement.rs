@@ -1,9 +1,11 @@
 //! Live enforcement requires a successful confined launch and a control.
 
 use crate::authority::policy::{Capabilities, FsPolicy, GrantStack};
+use crate::fact::ExitCode as _;
 use crate::path::FrozenPath;
 use crate::protocol::Run;
-use crate::shell::run::{Ending, RunReport};
+use crate::shell::run::RunReport;
+use crate::shell::runtime::End;
 use crate::source::SourceOrigin;
 use std::sync::OnceLock;
 
@@ -60,18 +62,17 @@ impl Output {
             RunReport::Static { diagnostics } => {
                 panic!("enforcement probe did not run: {}", diagnostics.render().0)
             }
-            RunReport::Faulted { error } => panic!("enforcement probe faulted: {}", error.message),
         };
-        let status = ending.status();
+        let status = ending.code();
         let captured = captured.expect("an enforcement probe captures its streams");
         let mut stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
-        if let Ending::Raised { error, .. } = ending {
+        if let End::Err(error) = ending {
             stderr.push_str(&error.message);
         }
         Self {
             stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
             stderr,
-            status,
+            status: i32::from(status),
         }
     }
 }

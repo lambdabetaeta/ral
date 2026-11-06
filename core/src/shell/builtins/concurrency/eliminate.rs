@@ -11,13 +11,12 @@
 //! second `cancel` nothing.  `poll`, `is-done` and `first-settled` are the
 //! observations that return data instead: they write nothing and claim nothing.
 //! `poll` reports `` `running ``, `` `stopping ``, `` `ready `` or
-//! `` `consumed `` from one snapshot; in `` `ready ``, an ordinary failure or
-//! the worker's own stop surfaces as `` `err ``, while an `exit`, a foreign
-//! stop and a panic are re-raised.
+//! `` `consumed `` from one snapshot. `poll` hands over the ok/err half of
+//! the ending; the rest is re-raised as `await` raises it.
 
 use crate::fact::Io;
 use crate::shell::runtime::{
-    Break, CompletedHandle, HandleInner, Mooring, Sample, Settled, Shell, ThreadEnd, Value,
+    Break, CompletedHandle, HandleInner, Mooring, Owner, Sample, Settled, Shell, Value,
     outcome_value, sig, stop_and_drain,
 };
 
@@ -52,19 +51,10 @@ fn already_claimed(verb: &str) -> Break {
     sig(format!("{verb}: this worker's result was already claimed"))
 }
 
-/// End as the block ended: its value, or its failure, exit or stop raised as
-/// it stands, or its panic resumed.
-fn conclude(end: ThreadEnd) -> Settled<Value> {
-    match end {
-        ThreadEnd::Settled(settled) => settled,
-        ThreadEnd::Panicked(text) => std::panic::resume_unwind(Box::new(text)),
-    }
-}
-
 /// Exact await of a claimed result: replay, then conclude.
 fn exact(handle: &HandleInner, settle: CompletedHandle, shell: &mut Shell) -> Settled<Value> {
     replay(&settle.stdout, &settle.stderr, shell)?;
-    handle.protect_value(conclude(settle.end)?, shell)
+    handle.protect_value(settle.end.into_settled()?, shell)
 }
 
 /// One cancel-aware foreground wait, shared by `await`, `race`, a gather's
@@ -109,6 +99,21 @@ pub(crate) fn join(handle: &HandleInner, shell: &mut Shell) -> Settled<Option<Va
     claim_first(std::slice::from_ref(handle), shell)?
         .map(|(_, settle)| exact(handle, settle, shell))
         .transpose()
+}
+
+/// Claim each loose worker in birth order, replay its bytes, and drop its ending.
+pub(crate) fn outlive(shell: &mut Shell) -> Settled<()> {
+    for entry in shell
+        .workers()
+        .into_iter()
+        .filter(|entry| entry.owner == Owner::Session && !entry.handle.sample().is_claimed())
+    {
+        let handle = entry.handle;
+        if let Some((_, settle)) = claim_first(std::slice::from_ref(&handle), shell)? {
+            replay(&settle.stdout, &settle.stderr, shell)?;
+        }
+    }
+    Ok(())
 }
 
 /// [`join`], for a caller to whom another claimer is `verb`'s failure.
@@ -158,9 +163,10 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
         )),
         Sample::Stopping => Ok(Value::variant("stopping", Some(elapsed_record(elapsed)))),
         Sample::Ready(settle) => {
-            let outcome = match settle.end {
-                ThreadEnd::Settled(Err(Break::Error(e))) => Err(e.record(shell)),
-                end => Ok(handle.protect_value(conclude(end)?, shell)?),
+            let outcome = match settle.end.outcome() {
+                Ok(Ok(v)) => Ok(handle.protect_value(v, shell)?),
+                Ok(Err(e)) => Err(e.record(shell)),
+                Err(halt) => return halt.widen().into_settled(),
             };
             let io = Io::of(settle.stdout, settle.stderr);
             let fields = [

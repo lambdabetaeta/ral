@@ -1,7 +1,7 @@
 //! The boot builtin: `_ral-boot`, bound as the `Session "boot"` hook, is a
 //! front-end's first dispatch. It does in a run what must run — startup files
 //! evaluate ral — so its `Ending` carries the status: a `--capabilities`
-//! failure is `Raised` status 2, an rc's `exit N` is `Exited(N)`. It
+//! failure is `err` status 2, an rc's `exit N` is `exited N`. It
 //! answers what the rc settled for the host.
 
 use ral_core::carrier::Severed;
@@ -9,7 +9,7 @@ use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::host::EnvVars;
 use ral_core::path::{Resolver, is_absolute, shown, utf8};
-use ral_core::protocol::{Ending, Program, Report};
+use ral_core::protocol::{Ending, Program, Ran, Report};
 use ral_core::record;
 use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, Status,
@@ -21,6 +21,7 @@ use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
 use ral_core::{Shell, Value};
 use ral_core::{err, errln};
 use std::borrow::Cow;
+use std::num::NonZeroU8;
 use std::path::PathBuf;
 
 use crate::repl::{RcSettings, install_default_prompt, source_rc_file};
@@ -161,7 +162,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
     ral_core::shell::load::profile::apply_session_profiles(mooring, shell, &paths).map_err(
         |e| match e {
             Break::Error(mut e) => {
-                e.status = Status::Raised(2);
+                e.status = Status::Raised(const { NonZeroU8::new(2).unwrap() });
                 Break::Error(e.context("--capabilities"))
             }
             escape @ Break::Escape(_) => escape,
@@ -179,30 +180,32 @@ fn refuse(message: &str) -> Break {
 
 /// What the boot dispatch came to: the rc's settings, or the status the
 /// session ends with, anything the failure rendered already printed.
-pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, i32> {
-    let ending = match report {
+pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, u8> {
+    let report = match report {
+        Ok(report) => report,
         Err(severed) => {
             errln!("ral: {severed}");
             return Err(1);
         }
-        Ok(Report::Static { rendered, status } | Report::Faulted { rendered, status }) => {
-            err!("{rendered}");
-            return Err(status.get());
-        }
-        Ok(Report::Ran { ending, .. }) => ending,
     };
-    let status = ending.status();
-    match ending {
-        Ending::Settled { value, .. } => RcSettings::decode(&value).map_err(|e| {
+    let code = report.code();
+    match report {
+        Report::Ran(Ran {
+            ending: Ending::Ok(value),
+            ..
+        }) => RcSettings::decode(&value).map_err(|e| {
             errln!("ral: {NAME} answered settings this front-end cannot read: {e}");
             1
         }),
-        Ending::Exited(_) => Err(status),
-        Ending::Raised { rendered, .. }
-        | Ending::Stopped { rendered, .. }
-        | Ending::Unreturnable { rendered, .. } => {
+        Report::Ran(Ran {
+            ending: Ending::Exited(_),
+            ..
+        }) => Err(code),
+        Report::Static { rendered, .. }
+        | Report::Faulted { rendered, .. }
+        | Report::Ran(Ran { rendered, .. }) => {
             err!("{rendered}");
-            Err(status)
+            Err(code)
         }
     }
 }

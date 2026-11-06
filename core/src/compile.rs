@@ -6,6 +6,7 @@ use crate::ir::{Name, Toplevel};
 use crate::source::{FileId, Source};
 use crate::syntax::parser::{ParseError, parse_with};
 use crate::typecheck::{ReturnContract, SessionSchemes, TypeError, typecheck};
+use std::num::NonZeroU8;
 use std::path::Path;
 
 /// Why [`compile_and_typecheck`] produced no toplevel, kept structured until
@@ -34,8 +35,11 @@ impl CompileError {
     /// failed so exits on: 2 for a parse failure, 1 for a type failure.
     pub fn reject(self, source: Source) -> Rejection {
         let (reports, status) = match self {
-            Self::Parse(e) => (vec![e.report(&source)], 2),
-            Self::Types(errs) => (errs.iter().map(TypeError::report).collect(), 1),
+            Self::Parse(e) => (
+                vec![e.report(&source)],
+                const { NonZeroU8::new(2).unwrap() },
+            ),
+            Self::Types(errs) => (errs.iter().map(TypeError::report).collect(), NonZeroU8::MIN),
         };
         Rejection {
             source,

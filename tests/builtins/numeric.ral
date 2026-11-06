@@ -30,7 +30,7 @@ refusal { int 3.7; return () }
 # range checks its arithmetic
 refusal { range -2 9223372036854775807; return () }
 
-# A status must fit an i32
+# A status must fit one byte
 refusal { fail [status: 4294967296, message: 'status out of i32 range'] }
 refusal { exit 4294967296 }
 

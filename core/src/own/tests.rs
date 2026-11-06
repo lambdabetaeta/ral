@@ -298,14 +298,19 @@ mod unix {
 
     #[test]
     fn open_update_refuses_special_files_before_data_open() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
         let dir = scratch("open-update-special");
-        let fifo = dir.path().join("fifo");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        let fifo = CString::new(dir.path().join("fifo").as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo is a live, NUL-terminated path; mkfifo retains no pointer.
+        let result = unsafe { libc::mkfifo(fifo.as_ptr(), libc::S_IRUSR | libc::S_IWUSR) };
+        assert_eq!(
+            result,
+            0,
+            "create test FIFO: {}",
+            io::Error::last_os_error()
+        );
         assert_eq!(
             dir.open_update("fifo").unwrap_err().kind(),
             io::ErrorKind::InvalidInput

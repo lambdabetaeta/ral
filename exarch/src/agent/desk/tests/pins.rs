@@ -155,7 +155,7 @@ fn live_surfaces_record_their_seam_twins() {
                 id: ral_core::shell::runtime::WorkerId(7),
                 title: "<block>".into(),
                 elapsed_ms: 0,
-                outcome: ral_core::shell::runtime::Done::Ok,
+                outcome: ral_core::shell::runtime::Done::Ok(()),
             }
             .to_surface(),
         );
@@ -182,7 +182,7 @@ fn live_surfaces_record_their_seam_twins() {
                             Record::Display(Display::Observation { .. }) => "io",
                             Record::Display(Display::Card { .. }) => "card",
                             Record::Display(Display::Done {
-                                outcome: crate::card::DoneOutcome::Ok,
+                                outcome: ral_core::fact::Done::Ok(()),
                                 ..
                             }) => "done",
                             Record::Forensic(Forensic::Reap { cause, .. })

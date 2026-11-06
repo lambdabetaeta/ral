@@ -4,6 +4,7 @@
 //! into an ambient cause its host forwards to the engine as `Control`, and
 //! ticks an escalation ladder whose third delivery forces `_exit`.
 
+use crate::fact::FailureCode as _;
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -54,7 +55,7 @@ extern "C" fn handler(sig: libc::c_int) {
     let cause = handler_cause(sig);
     if ESCALATION.fetch_add(1, Ordering::Relaxed) >= 2 {
         // `_exit`, not `exit`: atexit hooks run arbitrary code under a handler.
-        unsafe { libc::_exit(cause.code().into()) };
+        unsafe { libc::_exit(i32::from(cause.failure_code().get())) };
     }
     // Async-signal-safe: atomic read-modify-writes on `static`s.  SIGTERM/SIGHUP
     // land on the durable root, so workers hear them too.
@@ -294,7 +295,11 @@ mod tests {
             (libc::SIGTERM, 143),
             (libc::SIGHUP, 143),
         ] {
-            assert_eq!(i32::from(handler_cause(sig).code()), code, "signal {sig}");
+            assert_eq!(
+                handler_cause(sig).failure_code().get(),
+                code,
+                "signal {sig}"
+            );
         }
     }
 

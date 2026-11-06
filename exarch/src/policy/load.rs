@@ -5,7 +5,7 @@
 use ral_core::authority::grant::freeze::FreezeCtx;
 use ral_core::authority::policy::{Fragment, GrantLayer};
 use ral_core::shell::load::profile::NOT_FOUND;
-use ral_core::shell::runtime::{Break, Escape, Mooring, Shell};
+use ral_core::shell::runtime::{Break, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
@@ -44,17 +44,12 @@ pub(super) fn load_fragment_ral(
 
 fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> Result<T, String> {
     read().map_err(|e| {
-        let detail = match e {
-            Break::Error(err) if err.message.starts_with(NOT_FOUND) => {
-                return format!("{flag} {}", err.message);
-            }
-            Break::Error(err) => err.message,
-            Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
-            Break::Escape(Escape::Stopped { cause, .. }) => {
-                format!("stopped: {}", cause.message())
-            }
-        };
-        format!("{flag} {}: {detail}", ral_core::path::shown(path))
+        if let Break::Error(err) = &e
+            && err.message.starts_with(NOT_FOUND)
+        {
+            return format!("{flag} {}", err.message);
+        }
+        format!("{flag} {}: {e}", ral_core::path::shown(path))
     })
 }
 

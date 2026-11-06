@@ -70,7 +70,7 @@ mod exit_hints;
 pub use exit_hints::ExitHints;
 
 mod flow;
-pub use flow::{Break, Escape, Settled, ThreadEnd};
+pub use flow::{Break, End, Escape, Settled, Stop};
 pub(crate) use flow::{final_poll, name_failure, panic_text};
 
 mod walk;
@@ -92,8 +92,8 @@ pub use audit::{
 
 // Here because the session speaks them: the records `fact` declares.
 pub use crate::fact::{
-    Check, CommandOrigin, Decision, ErrorRecord, Observation, Observed, Reason, Resource, WorkerId,
-    WriteOutcome,
+    Check, CommandOrigin, Decision, Done, ErrorRecord, Observation, Observed, Reason, Resource,
+    WorkerId, WriteOutcome,
 };
 
 // Here because every observation carries one.
@@ -114,7 +114,7 @@ pub use state::hooks::{
 pub use state::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
 pub(crate) use state::{Image, Terms};
 
-pub use state::workers::{Done, DoneEvent, Owner, ReapCause, ReapNotice, WatchEvent, WorkerEntry};
+pub use state::workers::{DoneEvent, Owner, ReapCause, ReapNotice, WatchEvent, WorkerEntry};
 
 pub use state::bindings::{BindingLease, Pruned};
 pub use state::notice::Notice;

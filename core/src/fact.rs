@@ -1,15 +1,16 @@
 //! The records ral reads back: a failure, an observation, what a worker
 //! wrote, what a detach hands over.
 //!
-//! Each is declared once, as the `record!`, `variant!` or `label!` that yields
-//! both its encoding and its ral type, and knows no `Value` or `Shell`: the
+//! Each owns its encoding and its ral type, and knows no `Value` or `Shell`: the
 //! checker reads its types off these declarations, and the doors that mint
 //! them live above (`shell::runtime::error`, `shell::runtime::audit`, the builtins).
 
+mod ending;
 mod error;
 mod fs;
 mod observation;
 
+pub use ending::{Done, Ending, ExitCode, FailureCode, PANIC_CODE, tag};
 pub use error::{ErrorRecord, Reason};
 pub(crate) use fs::{DirEntry, FileInfo};
 pub use observation::{

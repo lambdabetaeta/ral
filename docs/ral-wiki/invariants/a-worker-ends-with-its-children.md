@@ -33,6 +33,24 @@ they have, so `await` of a worker is still its block run here, its last
 implicit step included. A run outside any gather has no brood: its births
 belong to the session.
 
+**Lifetime and failure are orthogonal.** The owner determines both policies,
+not one hidden success obligation for every worker:
+
+| Work | Failure obligation | Lifetime obligation |
+|---|---|---|
+| Brood: a gather's child, a worker's included | yes (I4) | owner joins on return; cancels and drains on halt |
+| Loose session `spawn`/`watch` | none; only explicit `await`, `race` or `poll` observes its ending | a returning last run waits and replays bytes; session end takes it down on halt |
+| External `detach` | none | outlives the session |
+
+`Run.last`'s wait claims still-unclaimed session workers in birth order,
+writes stdout then stderr and drops every ending, even a panic. The script's
+value and status stay its own. A failure or stop while waiting or replaying
+can halt that wait; a worker's ending cannot. REPL quit and exarch session end
+are halts. A forgotten `spawn { serve }` can hold a returning script open:
+`cancel` work no longer needed, halt with `exit` or Ctrl-C, or use Unix
+`detach` for an external that must outlive the session, never for a ral block.
+See [[design/endings|endings]] for the timing-race rationale.
+
 **Cancellation is hereditary.** A gather's birth hangs under the scope current
 when the gather was entered — a worker's own node inside a worker, the run's
 scope at a `gather` in a run — and a session birth under the session root. So

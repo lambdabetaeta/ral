@@ -1,10 +1,14 @@
 //! The runtime error type.
 
+use super::flow::Stop;
 use crate::compile::CompileError;
 use crate::diagnostic::{Label, Rejection, Report, palette};
+use crate::fact::{Ending, FailureCode};
 use crate::process::{CancelCause, CommandFailure, SpawnFailure, WorkerStop};
 use crate::source::{CallSite, FileId, Source, SourceDb, Span};
+use std::borrow::Cow;
 use std::fmt::{self, Write as _};
+use std::num::NonZeroU8;
 
 mod record;
 pub use record::outcome_value;
@@ -52,22 +56,23 @@ const _: () = assert!(
 /// An error's exit status: one constructor per fact, whichever door reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
-    Raised(i32),
+    Raised(NonZeroU8),
     /// A stop an owner converted into an error at its boundary.
     WorkerStopped(WorkerStop),
     Process(CommandFailure),
 }
 
-impl Status {
-    /// The numeric status; each failure owns its code.
-    pub fn code(&self) -> i32 {
+impl FailureCode for Status {
+    fn failure_code(&self) -> NonZeroU8 {
         match self {
             Self::Raised(code) => *code,
-            Self::Process(failure) => failure.code(),
-            Self::WorkerStopped(owned) => i32::from(owned.cause().code()),
+            Self::Process(failure) => failure.failure_code(),
+            Self::WorkerStopped(owned) => owned.cause().failure_code(),
         }
     }
+}
 
+impl Status {
     /// The code an external command chose to exit with, if that is what this is.
     pub fn exited(&self) -> Option<i32> {
         match self {
@@ -77,10 +82,16 @@ impl Status {
     }
 }
 
+impl FailureCode for Error {
+    fn failure_code(&self) -> NonZeroU8 {
+        self.status.failure_code()
+    }
+}
+
 impl Error {
     /// An error with status 1.
     pub fn new(message: impl Into<String>) -> Self {
-        Self::raised(message, 1)
+        Self::raised(message, NonZeroU8::MIN)
     }
 
     /// A loaded file's failure: the plain message for a handler to read, the
@@ -93,7 +104,7 @@ impl Error {
         }
     }
 
-    pub fn raised(message: impl Into<String>, status: i32) -> Self {
+    pub fn raised(message: impl Into<String>, status: NonZeroU8) -> Self {
         Self::with_status(message, Status::Raised(status))
     }
 
@@ -129,21 +140,6 @@ impl Error {
 
     pub(crate) fn worker_stopped(owned: WorkerStop) -> Self {
         Self::with_status(owned.message(), Status::WorkerStopped(owned))
-    }
-
-    /// The diagnostic for a stop that reached the top of a run, drawn by the error
-    /// renderer through a rendering-only `Error` that never leaves this fn.
-    pub(crate) fn render_stop(
-        cause: CancelCause,
-        at: Option<Span>,
-        db: &SourceDb,
-        compact_root: Option<FileId>,
-    ) -> String {
-        Self {
-            span: at,
-            ..Self::raised(cause.message(), i32::from(cause.code()))
-        }
-        .render(db, compact_root)
     }
 
     /// A command that never became a process, whether the pre-spawn probe or
@@ -234,11 +230,6 @@ impl Error {
         self
     }
 
-    /// Numeric exit code for process exit and `$status`.
-    pub fn code(&self) -> i32 {
-        self.status.code()
-    }
-
     /// A loaded file that failed to compile draws its own report.  Otherwise
     /// compact only when the error stayed inside `compact_root`'s file, the id
     /// of an input that compiled to a single command.
@@ -251,63 +242,134 @@ impl Error {
     /// keeps it as is; one that stores it for a later `println!`/`eprintln!`
     /// must `trim_end()` first, or that newline doubles.
     pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>) -> String {
-        match (&self.rejection, compact_root) {
-            (Some(rejection), _) => rejection.render(),
-            (None, Some(root)) if self.span.is_none_or(|sp| sp.file == root) => self.compact(),
-            _ => self.draw(db),
-        }
+        render(&self.diagnosis(), db, compact_root)
     }
 
-    /// The caret into the source `span` names, resolved through `db`.  A span
-    /// `db` cannot resolve falls back to spanless: no caret beats one in the
-    /// wrong file.
+    /// The one-liner for a single-command input.
+    pub fn compact(&self) -> String {
+        self.diagnosis().compact()
+    }
+
+    /// A host refusal has no source location.
+    pub(crate) fn render_spanless(&self) -> String {
+        render(
+            &Diagnosis {
+                at: None,
+                witness: None,
+                rejection: None,
+                ..self.diagnosis()
+            },
+            &SourceDb::default(),
+            None,
+        )
+    }
+
+    fn diagnosis(&self) -> Diagnosis<'_> {
+        Diagnosis {
+            message: Cow::Borrowed(&self.message),
+            at: self.span,
+            witness: self.witness.as_deref().copied(),
+            hint: self.hint.as_deref(),
+            shown: match &self.status {
+                Status::Process(_) => None,
+                status => Some(status.failure_code()),
+            },
+            rejection: self.rejection.as_deref(),
+        }
+    }
+}
+
+struct Diagnosis<'a> {
+    message: Cow<'a, str>,
+    at: Option<Span>,
+    witness: Option<Span>,
+    hint: Option<&'a str>,
+    shown: Option<NonZeroU8>,
+    rejection: Option<&'a Rejection>,
+}
+
+impl Stop {
+    fn diagnosis(&self) -> Diagnosis<'_> {
+        Diagnosis {
+            message: Cow::Borrowed(self.cause.message()),
+            at: self.at,
+            witness: None,
+            hint: None,
+            shown: Some(self.failure_code()),
+            rejection: None,
+        }
+    }
+}
+
+impl<V> Ending<V, Error, Stop> {
+    /// The one rendering: values, exits and reader-gone stops are silent.
+    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>) -> String {
+        match self {
+            Self::Ok(_) | Self::Exited(_) => String::new(),
+            Self::Err(error) => render(&error.diagnosis(), db, compact_root),
+            Self::Stopped(stop) if stop.cause == CancelCause::ReaderGone => String::new(),
+            Self::Stopped(stop) => render(&stop.diagnosis(), db, compact_root),
+            Self::Panic(text) => render(
+                &Diagnosis {
+                    message: Cow::Owned(format!("run panicked: {text}")),
+                    at: None,
+                    witness: None,
+                    hint: None,
+                    shown: None,
+                    rejection: None,
+                },
+                db,
+                None,
+            ),
+        }
+    }
+}
+
+fn render(d: &Diagnosis<'_>, db: &SourceDb, compact_root: Option<FileId>) -> String {
+    match (d.rejection, compact_root) {
+        (Some(rejection), _) => rejection.render(),
+        (None, Some(root)) if d.at.is_none_or(|sp| sp.file == root) => d.compact(),
+        _ => d.draw(db),
+    }
+}
+
+impl Diagnosis<'_> {
     fn draw(&self, db: &SourceDb) -> String {
         let label = |span, text: &str| Label {
             span: Some(span),
             text: text.into(),
         };
-        let resolved = self.span.and_then(|sp| Some((sp, db.get(sp.file)?)));
+        let resolved = self.at.and_then(|sp| Some((sp, db.get(sp.file)?)));
         let report = |at, also| Report {
             code: Some("R0001"),
-            message: self.message.clone(),
+            message: self.message.to_string(),
             at,
             also,
-            hint: self.hint.as_deref().map(Into::into),
+            hint: self.hint.map(Into::into),
         };
         match resolved {
             Some((sp, src)) => report(
                 Some(label(sp, "here")),
                 self.witness
-                    .as_deref()
                     .filter(|w| w.file == sp.file)
-                    .map(|&w| label(w, "the use this script makes of it")),
+                    .map(|w| label(w, "the use this script makes of it")),
             )
             .render(src),
             None => report(None, None).plain(),
         }
     }
 
-    /// The one-liner for a single-command input, where a caret would only
-    /// point back at the line the user just typed.
-    pub fn compact(&self) -> String {
+    fn compact(&self) -> String {
         let (red, cyan, reset) = palette();
         let mut out = format!("{red}error{reset}: {}", self.message);
-        if let Some(code) = self.status_code_for_display() {
+        if let Some(code) = self.shown {
             let _ = write!(out, " (exit status {code})");
         }
         out.push('\n');
-        if let Some(hint) = &self.hint {
+        if let Some(hint) = self.hint {
             let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
         }
         out
-    }
-
-    /// `None` for a process failure, whose message already names its status.
-    pub(crate) fn status_code_for_display(&self) -> Option<i32> {
-        match &self.status {
-            Status::Raised(0) | Status::Process(_) => None,
-            status => Some(status.code()),
-        }
     }
 }
 
@@ -322,6 +384,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::runtime::End;
     use crate::source::{SourceFile, SourceOrigin};
     use crate::syntax::parser::{ParseError, ParseErrorKind};
     use std::io::{self, ErrorKind};
@@ -334,6 +397,44 @@ mod tests {
         let mut db = SourceDb::default();
         let id = db.register(Source::from_text(file_origin(name), text));
         (db, id)
+    }
+
+    #[test]
+    fn a_stop_renders_through_the_one_diagnosis() {
+        let (db, file) = db_with("main.ral", "sleep 5");
+        let end = End::Stopped(Stop {
+            cause: CancelCause::TimedOut,
+            owner: None,
+            at: Some(Span::new(file, 0, 7)),
+        });
+        let caret = crate::io::ansi::strip(&end.render(&db, None));
+        assert!(
+            caret.contains("R0001") && caret.contains("here") && caret.contains("timed out"),
+            "{caret}"
+        );
+        let compact = crate::io::ansi::strip(&end.render(&db, Some(file)));
+        assert!(compact.contains("timed out (exit status 124)"), "{compact}");
+        assert!(!compact.contains("here"), "{compact}");
+    }
+
+    #[test]
+    fn a_reader_gone_stop_renders_nothing() {
+        let (db, file) = db_with("main.ral", "echo hi");
+        let end = End::Stopped(Stop {
+            cause: CancelCause::ReaderGone,
+            owner: None,
+            at: Some(Span::new(file, 0, 7)),
+        });
+        assert_eq!(end.render(&db, None), "");
+        assert_eq!(end.render(&db, Some(file)), "");
+    }
+
+    #[test]
+    fn a_panic_renders_spanless() {
+        let (db, file) = db_with("main.ral", "echo hi");
+        let out = crate::io::ansi::strip(&End::Panic("kaput".into()).render(&db, Some(file)));
+        assert!(out.contains("run panicked: kaput"), "{out}");
+        assert!(!out.contains("here") && !out.contains("main.ral"), "{out}");
     }
 
     #[test]
@@ -352,8 +453,8 @@ mod tests {
         let out = err.render(&db, Some(root));
         assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
         assert_eq!(err.message, "parse error: expected ]");
-        assert_eq!(err.code(), 1);
-        assert_eq!(err.rejection.as_ref().unwrap().status, 2);
+        assert_eq!(err.failure_code(), NonZeroU8::MIN);
+        assert_eq!(err.rejection.as_ref().unwrap().status.get(), 2);
     }
 
     fn runtime(

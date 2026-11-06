@@ -15,9 +15,10 @@ use ral_core::HostSurface;
 use ral_core::carrier::{IdentityTransport, Transport, dispatch_to_report};
 use ral_core::data::datum::Datum as _;
 use ral_core::engine::EngineInstaller;
+use ral_core::fact::ExitCode as _;
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::EnginePath;
-use ral_core::protocol::{Attach, Report, Run};
+use ral_core::protocol::{Attach, Ran, Report, Run};
 use ral_core::shell::runtime::{CapturePolicy, Observed};
 use ral_core::source::SourceOrigin;
 use std::sync::Arc;
@@ -78,13 +79,13 @@ fn an_interrupt_through_the_control_sender_stops_an_in_flight_run() {
         elapsed < Duration::from_secs(10),
         "the cancel never reached the run: it slept {elapsed:?} of its 30 s"
     );
-    let Report::Ran { ending, trail, .. } = report else {
+    let Report::Ran(Ran { ending, trail, .. }) = report else {
         panic!("the run must reach evaluation, got {report:?}");
     };
     // The child dies of SIGINT, `Interrupt`'s own grace signal, so the run
     // reports the interrupt.
     assert_eq!(
-        ending.status(),
+        ending.code(),
         130,
         "an interrupted child is torn down with SIGINT"
     );

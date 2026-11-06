@@ -1,4 +1,4 @@
-//! The worker registry: a per-[`Shell`] directory of every
+//! The worker registry: a per-[`Shell`](crate::shell::runtime::Shell) directory of every
 //! worker (`spawn` and `watch`, a `gather`'s children included) spawned from
 //! it. Pure bookkeeping, never a policy itself.
 //!
@@ -20,10 +20,10 @@
 
 use crate::data::FOValue;
 use crate::data::datum::{Datum, tag, untag};
-use crate::fact::WorkerId;
-use crate::process::CancelCause;
+use crate::fact::{Done, WorkerId};
+use crate::protocol::probe::WorkerRow;
 use crate::shell::runtime::handle::compacting::Compacting;
-use crate::shell::runtime::{Break, ErrorRecord, Escape, HandleInner, Sample, Shell, ThreadEnd};
+use crate::shell::runtime::{HandleInner, Sample};
 use crate::sync::LockExt as _;
 use crate::{label, record, variant};
 use std::collections::HashSet;
@@ -71,39 +71,6 @@ variant!(typed Owner {
     Gather: "gather",
 });
 
-/// How a worker ended, as its `` `done `` event says: no return
-/// value, which only `await` hands over.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Done {
-    Ok,
-    Err(ErrorRecord),
-    Exited(i32),
-    Stopped(CancelCause),
-    Panic(String),
-}
-
-variant!(typed Done {
-    Ok: "ok",
-    Err(ErrorRecord): "err",
-    Exited(i32): "exited",
-    Stopped(CancelCause): "stopped",
-    Panic(String): "panic",
-});
-
-impl Done {
-    pub(crate) fn of(end: &ThreadEnd, shell: &Shell) -> Self {
-        match end {
-            ThreadEnd::Settled(Ok(_)) => Self::Ok,
-            ThreadEnd::Settled(Err(Break::Error(e))) => Self::Err(e.record(shell)),
-            ThreadEnd::Settled(Err(Break::Escape(Escape::Exit(n)))) => Self::Exited(*n),
-            ThreadEnd::Settled(Err(Break::Escape(Escape::Stopped { cause, .. }))) => {
-                Self::Stopped(*cause)
-            }
-            ThreadEnd::Panicked(text) => Self::Panic(text.clone()),
-        }
-    }
-}
-
 /// The event a worker appends at completion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DoneEvent {
@@ -126,6 +93,14 @@ impl DoneEvent {
 
     pub fn to_surface(self) -> FOValue {
         tag(Self::SURFACE_TAG, Some(self.encode()))
+    }
+
+    /// Whether a host may announce this `done`: its worker still has an
+    /// unclaimed row.  A consumed worker has no row, so absence reads as
+    /// claimed.
+    pub fn unclaimed_in(&self, rows: &[WorkerRow]) -> bool {
+        rows.iter()
+            .any(|row| row.id == self.id.0 && row.state.unclaimed())
     }
 
     /// Inverse of [`Self::to_surface`]; `None` for any other surface event.
@@ -248,7 +223,7 @@ impl Default for RegistryInner {
     }
 }
 
-/// Cheap-clonable, per-[`Shell`] directory of every worker
+/// Cheap-clonable, per-[`Shell`](crate::shell::runtime::Shell) directory of every worker
 /// spawned from it.
 ///
 /// A newtype over `Arc<Mutex<RegistryInner>>`: cloning shares the store, which
@@ -552,8 +527,8 @@ mod tests {
     use super::*;
     use crate::io::ByteBuffer;
     use crate::process::DurableRoot;
-    use crate::shell::runtime::Value;
     use crate::shell::runtime::handle::compacting::MIN_SWEEP_AT;
+    use crate::shell::runtime::{End, Value};
 
     fn test_handle(id: u64, title: &str) -> (HandleInner, impl FnOnce()) {
         let (handle, permit) = HandleInner::new(
@@ -564,7 +539,7 @@ mod tests {
             ByteBuffer::default(),
         );
         (handle, move || {
-            let _ = permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+            let _ = permit.finish(End::Ok(Value::Unit));
         })
     }
 

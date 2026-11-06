@@ -772,7 +772,7 @@ fn a_run_with_no_fork_door_refuses_in_its_own_words() {
     let RunReport::Ran { ending, .. } = report else {
         panic!("well-formed source must run")
     };
-    match ending.into_result() {
+    match ending.into_settled() {
         Err(Break::Error(e)) => assert_eq!(
             e.message,
             "exarch-agents: this host adopts no forked sessions"

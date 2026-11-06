@@ -6,6 +6,7 @@
 mod common;
 
 use common::{fresh_shell, top_level};
+use ral_core::fact::FailureCode as _;
 
 use ral_core::shell::runtime::{Break, Escape};
 
@@ -32,7 +33,7 @@ fn a_cleanups_fail_pre_empts_an_exit() {
         &mut fresh_shell(),
         "guard { exit 3 } { fail [status: 7, message: x] }",
     ) {
-        Err(Break::Error(e)) => assert_eq!(e.code(), 7),
+        Err(Break::Error(e)) => assert_eq!(e.failure_code().get(), 7),
         other => panic!("expected an error with code 7, got {other:?}"),
     }
 }

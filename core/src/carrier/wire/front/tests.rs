@@ -7,7 +7,7 @@
 use super::*;
 use crate::path::EnginePath;
 use crate::process::CancelCause;
-use crate::protocol::{Ending, PROTOCOL_VERSION, Report};
+use crate::protocol::{Ending, PROTOCOL_VERSION, Ran, Report};
 use crate::source::SourceOrigin;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -330,14 +330,13 @@ fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
     }
     peer.write_frame(&Frame::Event(
         id,
-        Event::Report(Report::Ran {
-            ending: Ending::Settled {
-                value: FOValue::Int { value: 2 },
-                status: 0,
-            },
+        Event::Report(Report::Ran(Ran {
+            ending: Ending::Ok(FOValue::Int { value: 2 }),
+            rendered: String::new(),
+            single_command: false,
             captured: None,
             trail: Vec::new(),
-        }),
+        })),
     ))
     .unwrap();
 

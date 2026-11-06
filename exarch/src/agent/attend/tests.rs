@@ -502,7 +502,7 @@ fn an_already_claimed_worker_batch_replays_cards_but_opens_no_job() {
         id: WorkerId(1),
         title: "claimed".into(),
         elapsed_ms: 10,
-        outcome: Done::Ok,
+        outcome: Done::Ok(()),
     }
     .to_surface();
     assert!(
@@ -521,9 +521,10 @@ fn an_already_claimed_worker_batch_replays_cards_but_opens_no_job() {
             .any(|record| matches!(record, Record::Display(Display::Card { .. })))
     );
     assert!(
-        records
+        !records
             .iter()
-            .any(|record| matches!(record, Record::Display(Display::Done { id: Some(1), .. })))
+            .any(|record| matches!(record, Record::Display(Display::Done { .. }))),
+        "a claimed worker has no done breadcrumb: {records:?}"
     );
     assert!(
         !records
@@ -579,7 +580,7 @@ fn ready_workers_and_non_done_surfaces_are_admitted_but_stale_batches_are_not() 
                 id: WorkerId(worker.id),
                 title: "ready-job".into(),
                 elapsed_ms: 5,
-                outcome: Done::Ok,
+                outcome: Done::Ok(()),
             }
             .to_surface(),
         ],

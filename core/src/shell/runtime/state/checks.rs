@@ -292,6 +292,7 @@ impl Shell {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::fact::FailureCode as _;
 
     #[test]
     fn fs_and_flag_refusals_keep_their_diagnostics_and_error_status() {
@@ -322,7 +323,7 @@ mod tests {
                 )
             );
             assert_eq!(fs.hint.as_deref(), Some("add it to the grant's fs `read` or `write` list"));
-            assert_eq!(fs.code(), 1);
+            assert_eq!(fs.failure_code().get(), 1);
 
             let Break::Error(flag) = shell.check(Flag::Shell(ShellVerb::Detach), "detach").unwrap_err()
             else {
@@ -330,7 +331,7 @@ mod tests {
             };
             assert_eq!(flag.message, "detach: an active grant withholds it, so nothing here may outlive this session. Would `spawn` do, since it ends when the session does?");
             assert!(flag.hint.is_none());
-            assert_eq!(flag.code(), 1);
+            assert_eq!(flag.failure_code().get(), 1);
         });
     }
 

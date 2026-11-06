@@ -69,7 +69,11 @@ fn captured_line(bytes: &[u8]) -> String {
 #[cfg(test)]
 pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
     let run = exec::line_run(src);
-    shell.run(run).expect_ran().into_result().expect("evaluate")
+    shell
+        .run(run)
+        .expect_ran()
+        .into_settled()
+        .expect("evaluate")
 }
 
 /// Core's surface with the REPL's prelude seated: the runtime a test engine

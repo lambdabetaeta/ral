@@ -57,6 +57,13 @@ pub enum WorkerState {
     Ready(Done),
 }
 
+impl WorkerState {
+    /// Whether the result is still to be claimed.
+    pub fn unclaimed(&self) -> bool {
+        !matches!(self, Self::Stopping)
+    }
+}
+
 variant!(typed WorkerState {
     Running: "running",
     Stopping: "stopping",
@@ -355,7 +362,7 @@ mod tests {
         for state in [
             WorkerState::Running,
             WorkerState::Stopping,
-            WorkerState::Ready(Done::Ok),
+            WorkerState::Ready(Done::Ok(())),
         ] {
             let row = WorkerRow {
                 id: 1,

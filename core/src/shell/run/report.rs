@@ -7,28 +7,13 @@
 
 use crate::data::datum::Datum;
 use crate::data::{FOValue, NotData, Opaque};
-use crate::process::CancelCause;
-use crate::protocol::{Ending, FailureStatus, Report};
-use crate::shell::run::RunReport;
-use crate::shell::runtime::{Error, Shell};
+use crate::fact::Ending;
+use crate::protocol::{Ran, Report};
+use crate::shell::run::{RunReport, spanless};
+use crate::shell::runtime::{End, Error, Shell};
+use std::convert::identity;
 
-/// A settled result that cannot cross, said with what the author likely
-/// meant.
-fn unreturnable(message: String, hint: &str, shell: &Shell) -> Ending {
-    let mut error = Error::new(message);
-    error.hint = Some(hint.into());
-    Ending::Unreturnable {
-        rendered: error.compact(),
-        record: record_of(&error, shell),
-    }
-}
-
-/// The record `try` hands its handler for `error`.
-fn record_of(error: &Error, shell: &Shell) -> FOValue {
-    error.record(shell).encode()
-}
-
-fn not_data(NotData { leaf, nested }: NotData, shell: &Shell) -> Ending {
+fn not_data(NotData { leaf, nested }: NotData) -> Error {
     let (verb, hint) = match (leaf, nested) {
         (Opaque::Handle, false) => (
             "is",
@@ -48,65 +33,10 @@ fn not_data(NotData { leaf, nested }: NotData, shell: &Shell) -> Ending {
             "return only data: force a block with `!{ … }`, or bind it with `let`",
         ),
     };
-    unreturnable(
-        format!("the result {verb} {leaf}, and a run can return only data"),
-        hint,
-        shell,
-    )
-}
-
-/// Project an engine [`Ending`](crate::shell::run::Ending) onto the wire, rendering
-/// a caught runtime error against `shell` — the one lossy step between the
-/// engine and the protocol: the live `Error` renders to the string the host
-/// prints verbatim, and to its record.
-fn render_ending(ending: crate::shell::run::Ending, shell: &Shell) -> Ending {
-    use crate::shell::run::Ending as Raw;
-    match ending {
-        // A top-level result is not an `Observation` — it has no placeholder
-        // vocabulary of its own — so a value the wire cannot carry is
-        // reported, never silently dropped.
-        Raw::Settled { value, status } => match FOValue::try_from(&value) {
-            Ok(fo) => Ending::Settled {
-                value: fo,
-                status: status.clamp(0, 255),
-            },
-            Err(found) => not_data(found, shell),
-        },
-        Raw::Raised { error, compact } => {
-            let (rendered, record, status) = render_raise(&error, compact, shell);
-            Ending::Raised {
-                rendered,
-                record,
-                command_exit: error.status.exited().is_some(),
-                single_command: compact.is_some(),
-                status,
-            }
-        }
-        // The closed-stdout stop prints nothing, as a SIGPIPE death does: the
-        // status is the whole report.
-        Raw::Stopped { cause, at, compact } => Ending::Stopped {
-            rendered: if cause == CancelCause::ReaderGone {
-                String::new()
-            } else {
-                Error::render_stop(cause, at, shell.sources(), compact)
-            },
-            cause,
-        },
-        Raw::Exited(code) => Ending::Exited(code.clamp(0, 255)),
-    }
-}
-
-/// What `Raised` renders: the error, its record and its status.
-fn render_raise(
-    error: &Error,
-    compact: Option<crate::source::FileId>,
-    shell: &Shell,
-) -> (String, FOValue, FailureStatus) {
-    (
-        error.render(shell.sources(), compact),
-        record_of(error, shell),
-        FailureStatus::from(error.code()),
-    )
+    Error::new(format!(
+        "the result {verb} {leaf}, and a run can return only data"
+    ))
+    .with_hint(hint)
 }
 
 impl RunReport {
@@ -119,26 +49,30 @@ impl RunReport {
             // carets point into, so nothing about it was ever registered.
             Self::Static { diagnostics } => {
                 let (rendered, status) = diagnostics.render();
-                Report::Static {
-                    rendered,
-                    status: FailureStatus::from(status),
-                }
+                Report::Static { rendered, status }
             }
             Self::Ran {
                 ending,
+                compact,
                 captured,
                 trail,
-            } => Report::Ran {
-                ending: render_ending(ending, shell),
-                captured,
-                trail: trail.into_iter().map(Datum::encode).collect(),
-            },
-            Self::Faulted { error } => {
-                let (rendered, status) = super::render_spanless(&error);
-                Report::Faulted {
+            } => {
+                let ending = match ending {
+                    End::Ok(value) => FOValue::try_from(&value).map_err(not_data).into(),
+                    End::Err(error) => Ending::Err(error),
+                    End::Exited(code) => Ending::Exited(code),
+                    End::Stopped(stop) => Ending::Stopped(stop),
+                    End::Panic(text) => Ending::Panic(text),
+                };
+                let rendered = ending.render(shell.sources(), compact);
+                let ending = ending.map(identity, |error| error.record(shell), |stop| stop.cause);
+                Report::Ran(Ran {
+                    ending,
                     rendered,
-                    status: FailureStatus::from(status),
-                }
+                    single_command: compact.is_some(),
+                    captured,
+                    trail: trail.into_iter().map(Datum::encode).collect(),
+                })
             }
         }
     }
@@ -150,11 +84,8 @@ impl Report {
     /// host-level static failure is, so a host never has to know which of the
     /// two it is printing.
     pub(crate) fn refused(message: impl Into<String>) -> Self {
-        let (rendered, status) = super::render_spanless(&Error::new(message));
-        Self::Static {
-            rendered,
-            status: FailureStatus::from(status),
-        }
+        let (rendered, status) = spanless(&Error::new(message));
+        Self::Static { rendered, status }
     }
 
     /// A fault outside the run's own report (a panicked engine worker, a
@@ -163,11 +94,8 @@ impl Report {
     /// Only the wire engine, a unix process, has an outside to fault in.
     #[cfg(unix)]
     pub(crate) fn faulted(message: impl Into<String>) -> Self {
-        let (rendered, status) = super::render_spanless(&Error::new(message));
-        Self::Faulted {
-            rendered,
-            status: FailureStatus::from(status),
-        }
+        let (rendered, status) = spanless(&Error::new(message));
+        Self::Faulted { rendered, status }
     }
 }
 
@@ -178,18 +106,32 @@ impl Report {
 #[cfg(test)]
 mod runtime_error_seam_tests {
     use super::*;
+    use std::num::NonZeroU8;
 
     #[test]
     fn runtime_error_projects_to_a_full_diagnostic_string() {
         let shell = crate::test_helper::core_shell();
-        let err = Error::raised("boom", 3).with_hint("try harder");
+        let err = Error::raised("boom", NonZeroU8::new(3).unwrap()).with_hint("try harder");
         // A single command whose error carries no span: the compact one-liner.
-        let (rendered, record, _) = render_raise(&err, Some(crate::source::FileId(0)), &shell);
+        let Report::Ran(Ran {
+            rendered,
+            ending: Ending::Err(record),
+            single_command,
+            ..
+        }) = (RunReport::Ran {
+            ending: End::Err(err),
+            compact: Some(crate::source::FileId(0)),
+            captured: None,
+            trail: Vec::new(),
+        })
+        .into_report(&shell)
+        else {
+            panic!("expected failed run")
+        };
+        assert!(single_command);
         assert_eq!(
-            record.field("message"),
-            Some(&FOValue::String {
-                value: "boom".into()
-            }),
+            record.message(),
+            "boom",
             "the record carries the bare message: {record:?}"
         );
         assert!(
@@ -223,9 +165,10 @@ mod static_diagnostic_seam_tests {
     use crate::protocol::Run;
     use crate::shell::run::StaticDiagnostics;
     use crate::source::SourceOrigin;
+    use std::num::NonZeroU8;
 
     /// The wire report for `src`, and how many registry ids the run minted.
-    fn project(src: &str) -> (String, i32, u32) {
+    fn project(src: &str) -> (String, u8, u32) {
         let mut shell = crate::test_helper::core_shell();
         let before = shell.sources().next_id().0;
         let report = shell.run(Run::captured(src, SourceOrigin::named("<test>")));
@@ -297,7 +240,7 @@ mod static_diagnostic_seam_tests {
             "hook 'x' is not registered",
         ))
         .render();
-        assert_eq!(status, 1);
+        assert_eq!(status, NonZeroU8::MIN);
         assert!(rendered.contains("hook 'x' is not registered"));
         assert!(!rendered.contains('╰'), "no span, no caret: {rendered:?}");
         assert!(rendered.ends_with('\n'));
@@ -315,18 +258,61 @@ mod static_diagnostic_seam_tests {
         assert!(rendered.contains("worker panicked") && !rendered.contains('╰'));
     }
 
-    /// A panicked run projects to `Faulted` on its own status, not to `Static`.
     #[test]
-    fn a_faulted_run_projects_to_a_faulted_report() {
+    fn a_panicked_run_projects_to_a_panic_ending() {
         let shell = crate::test_helper::core_shell();
-        let report = RunReport::Faulted {
-            error: Error::raised("run panicked: boom", 101),
+        let report = RunReport::Ran {
+            ending: End::Panic("boom".into()),
+            compact: None,
+            captured: None,
+            trail: Vec::new(),
         }
         .into_report(&shell);
-        let Report::Faulted { rendered, status } = report else {
-            panic!("a faulted run must project to Report::Faulted");
+        assert_eq!(report.code(), crate::fact::PANIC_CODE);
+        let Report::Ran(Ran {
+            ending: Ending::Panic(text),
+            rendered,
+            ..
+        }) = report
+        else {
+            panic!("expected panic ending");
         };
-        assert_eq!(status.get(), 101);
+        assert_eq!(text, "boom");
         assert!(rendered.contains("run panicked: boom"), "{rendered:?}");
+    }
+
+    #[test]
+    fn a_non_data_result_projects_to_a_failure() {
+        let mut shell = crate::test_helper::core_shell();
+        let report = shell
+            .run(Run::captured(
+                "spawn { return 1 }",
+                SourceOrigin::named("<test>"),
+            ))
+            .into_report(&shell);
+        assert_eq!(report.code(), 1);
+        let Report::Ran(Ran {
+            ending: Ending::Err(_),
+            rendered,
+            ..
+        }) = report
+        else {
+            panic!("expected failed projection");
+        };
+        assert!(rendered.contains("`await $h`"), "{rendered:?}");
+    }
+
+    #[test]
+    fn ok_and_exit_render_nothing() {
+        let mut shell = crate::test_helper::core_shell();
+        for src in ["return 1", "exit 3"] {
+            let report = shell
+                .run(Run::captured(src, SourceOrigin::named("<test>")))
+                .into_report(&shell);
+            let Report::Ran(Ran { rendered, .. }) = report else {
+                panic!("expected run")
+            };
+            assert!(rendered.is_empty(), "{src}: {rendered:?}");
+        }
     }
 }

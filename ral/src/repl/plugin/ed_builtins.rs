@@ -10,6 +10,7 @@
 use ral_core::authority::policy::{EditorVerb, Flag};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::fact::FailureCode as _;
 use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::ty::Site;
 use ral_core::ty::{
@@ -170,7 +171,7 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
         Ok(_) => Ok(tui_result(Value::string(captured_line(&bytes)), 0)),
         Err(Break::Error(e)) => Ok(tui_result(
             Value::string(e.message.clone()),
-            i64::from(e.code()),
+            i64::from(e.failure_code().get()),
         )),
         Err(other) => Err(other),
     }
@@ -623,7 +624,7 @@ mod tests {
             panic!("the line must check and run");
         };
         (
-            ending.into_result(),
+            ending.into_settled(),
             cell.asked.load(std::sync::atomic::Ordering::SeqCst),
         )
     }

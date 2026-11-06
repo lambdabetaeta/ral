@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f2a121e88af273984c3777093eded870b1fe0070
-generated_at_date: 2026-11-05
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_date: 2026-11-06
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -27,6 +27,17 @@ its own dispatch id when the cause rises. It also checks before dispatch, so
 a cancelled exchange starts no effect. Cancellation threads flip scope flags
 and never write to a transport ([[internals/cancellation|cancellation]]). Formatting is `Agent::ral`'s,
 through `report::tool_result`, which also reports whether the run failed.
+`tool_result` takes the whole `Ran`; `render` reads `ending`, `rendered` and
+`single_command` from it. The ending is `Ending<FOValue, ErrorRecord,
+CancelCause>`: `Ok`, `Err`, `Exited`,
+`Stopped`, `Panic`. `ToolResult.exit` is `u8`, read from `ending.code()`.
+Hosts keep `rendered` verbatim, adding an exit tip only for
+`Err(record)` whose `reason()` is `Exited`, a timeout tip only for `Stopped(TimedOut)`, and
+`PANIC_TIP` for `Panic`. A run panic restores the checkpoint, discards capture
+and trail and reports status 101; its tip names a ral bug, warns that the
+call's bindings rolled back but outside effects stand, and asks the model to
+check what changed before resending. A lost report is not a run panic
+([[design/endings|endings]]).
 
 **The session's host-installed layers are the sandbox.** The root's attach
 carries them; the engine installs them once at boot. Every call runs under that
@@ -48,7 +59,7 @@ The request supplies:
   Parse/type errors come back as `Report::Static { rendered, status }`, already
   the caret report the protocol drew, which the model reads clipped whole, then
   the rejection tip (`report::rejection`: no command ran and no `let` bound,
-  resend the whole call); a `Report::Faulted` reads clipped, then the fault
+  resend the whole call); a lost report (`Report::Faulted`) reads clipped, then the fault
   sentence (`report::fault`: some or all of the call may have run, check what
   stands before retrying; `shell_eval/clip.rs` holds the head+tail clip that
   `rejection`/`fault` and `agent::digest` both use); on
@@ -69,7 +80,7 @@ The request supplies:
   default). Core arms it on the run's foreground scope *before compiling*, so
   it bounds the whole run; the wall ends the run as `Ending::Stopped` with
   cause `TimedOut`, the one stop `render` follows with the timeout tip, the
-  exit-124 stderr described under *the wall is a place* below, while Esc stays
+  status-124 stderr described under *the wall is a place* below, while Esc stays
   an interrupt and a closed stdout renders nothing. No `try` in the call can
   catch either. A grant body evaluates locally — no sandbox-IPC
   round trip to interrupt — so cancellation reaches any spawned child through the
@@ -84,8 +95,11 @@ The request supplies:
   engine housekeeping;
 - **`worker_title`** — `TitlePolicy::Required`: an untitled `spawn` is
   refused at its step, before any birth, so every worker the model starts is
-  named by what it does in its birth card, its completion notice and
-  `workers`;
+  named by what it does in its birth card, any unclaimed completion notice
+  and `workers`;
+- **`last: false`** — a tool call does not wait for loose session workers.
+  They survive a call's return or halt; exarch session end takes them down.
+
 Surface delivery and enquiry answering are not `Run` fields: `dispatch_to_report`
 takes one `host: Arc<dyn Host>` —
 [[map/core/engine-protocol|engine-protocol]]'s single object for a run's whole
@@ -150,7 +164,7 @@ order, and exits 124:
    run, so resume from there rather than replaying the call. Then `recovery:` —
    raise `timeout_secs` for work that
    is simply slow, or `let h = spawn "title" { … }` and let the run return,
-   since the host notifies at the next exchange boundary when it settles, and
+   since the host notifies at admission if its result is still unclaimed, and
    `await $h` then behaves as the
    block run there, without polling;
 3. **an audit of what already stands**, when there is any — and not the wall's
@@ -172,13 +186,15 @@ order, and exits 124:
    moored by `Mooring::for_thread` onto the session root precisely so a
    foreground cancel cannot reach it, so a raise, the wall, or an `exit`
    leaves the work running. What the sentence reports is reachability. A
-   handle bound by a step that *completed* before the failure is still bound,
-   so `await $h` reaches it; one the failing step would have bound never
-   landed — `pattern::destructure` is all-or-nothing. An
-   `Ending::Unreturnable` — the run settled on a handle, block, or function,
-   which the wire cannot carry — failed no step, so there the sentence says
-   instead that a handle only *returned* was lost with the result, and
-   `workers` still lists every survivor. Which workers outlived the call
+   handle bound by a step that *completed* before an ordinary failure is still
+   bound, so `await $h` reaches it; one the failing step would have bound never
+   landed — `pattern::destructure` is all-or-nothing. A handle only
+   *returned* never landed either: a non-data result becomes `Err`, status 1,
+   at the wire boundary. A panic instead restores the entry checkpoint: every
+   newly bound handle is rolled back, including completed steps' bindings.
+   The shared fate sentence distinguishes that rollback; `workers` lists
+   survivors but an id cannot recover a handle.
+   Which workers outlived the call
    is a different fact from a committed act, so it is its own sentence and the
    desk grows no worker view to hold it. Which workers are *this* dispatch's is not arithmetic
    across the seam: every birth its extent gave reaches the host as an
@@ -212,8 +228,8 @@ replaces the engine, then advances generation and drops queued batches.
 Preparation failure changes nothing. Old-generation batches arriving later
 are declined. Identity workers retain their birth sink; wire batches use
 the sink installed when they arrive. Both
-go through one private `decode_loudly` and one `surface::record`, with no
-guard layered over them. The
+go through one private `decode_loudly` and one `surface::record`; admission
+filters a claimed `done` before deferred replay. The
 codomain is `Surface`, the shell's own closed vocabulary, wrapped in
 `Decoded` beside `Landed` and `Unknown`. The decoder tries observation, then
 notice, card, and done — the shapes are disjoint, so the order carries no
@@ -247,7 +263,12 @@ never by the decoder or by the seam that records it (`surface::record`):
   — which the inbox also words as the model's wake-up notice
   (`surface_notice`, [[map/exarch/frontend|frontend]]), ending in how the
   bound handle and registry inspect it:
-  ``errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed. `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``;
+  ``errand #7 (building) finished after 3 mins 12 secs (failed): build failed. `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``
+  `Surface::Done` and `Display::Done` keep core `Done`, worded through
+  `Done::parts`/`said`. At admission, `Agent::admit` probes once and admits
+  the done card and wake only for a present unclaimed (`Running | Ready`)
+  row. A claimed or absent row, or a failed probe, suppresses both, while
+  other surfaced values still replay;
 - a value that is none of these, including a direct surface pin/unpin, is
   `Decoded::Unknown`: `decode_loudly` records a `Forensic::SystemNote` naming
   the dropped shape. It renders nothing and raises no model-facing runtime

@@ -65,7 +65,7 @@ mod tests {
     use super::*;
     use crate::path::{LexicalPath, utf8};
     use crate::process::CancelCause;
-    use crate::shell::runtime::Escape;
+    use crate::shell::runtime::{Escape, Stop};
 
     #[test]
     fn an_admitted_walk_that_is_cancelled_aborts() {
@@ -77,11 +77,11 @@ mod tests {
         let stop = walk.next().expect_err("a cancelled scope aborts the walk");
         assert!(matches!(
             stop,
-            Break::Escape(Escape::Stopped {
+            Break::Escape(Escape::Stopped(Stop {
                 cause: CancelCause::Interrupted,
                 owner: Some(id),
                 at: None,
-            }) if id == owner.id()
+            })) if id == owner.id()
         ));
         assert!(walk.next().unwrap().is_none());
     }
@@ -99,11 +99,11 @@ mod tests {
         owner.cancel(CancelCause::TimedOut);
         assert!(matches!(
             walk.next(),
-            Err(Break::Escape(Escape::Stopped {
+            Err(Break::Escape(Escape::Stopped(Stop {
                 cause: CancelCause::TimedOut,
                 owner: Some(id),
                 at: None,
-            })) if id == owner.id()
+            }))) if id == owner.id()
         ));
         assert!(walk.next().unwrap().is_none());
     }

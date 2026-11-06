@@ -52,23 +52,20 @@ fn cancelling_within_interrupts_an_in_flight_identity_dispatch() {
     assert!(
         matches!(
             report,
-            Report::Ran {
-                ending: Ending::Stopped {
-                    cause: CancelCause::Interrupted,
-                    ..
-                },
+            Report::Ran(Ran {
+                ending: Ending::Stopped(CancelCause::Interrupted),
                 ..
-            }
+            })
         ),
         "the run must report Interrupted: {report:?}"
     );
     assert_eq!(transport.session_ended().unwrap(), None);
     assert!(matches!(
         crate::carrier::testkit::eval(&transport, "$[1 + 1]"),
-        Report::Ran {
-            ending: Ending::Settled { status: 0, .. },
+        Report::Ran(Ran {
+            ending: Ending::Ok(_),
             ..
-        }
+        })
     ));
 }
 
@@ -102,13 +99,10 @@ fn terminate_reaches_a_foreign_scope_before_open_and_mid_run() {
         assert!(
             matches!(
                 report,
-                Report::Ran {
-                    ending: Ending::Stopped {
-                        cause: CancelCause::Terminated,
-                        ..
-                    },
+                Report::Ran(Ran {
+                    ending: Ending::Stopped(CancelCause::Terminated),
                     ..
-                }
+                })
             ),
             "the run must report Terminated; before_open={before_open}: {report:?}"
         );

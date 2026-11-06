@@ -10,9 +10,10 @@
 
 use super::clip::clip;
 use super::{ToolResult, ral_value_to_text};
+use ral_core::fact::{ExitCode as _, Reason};
 use ral_core::process::CancelCause;
-use ral_core::protocol::Ending;
 use ral_core::protocol::probe::WorkerRow;
+use ral_core::protocol::{Ending, Ran};
 use std::collections::HashSet;
 
 /// Enough of one call's fan-out to name without crowding the stderr it rides
@@ -37,23 +38,26 @@ const FAULT_TIP: &str = "\nThe engine faulted and lost this call's report, so wh
      any part of it may have run, and its `let` bindings may or may not stand. Find out \
      what changed before you resend any of it.\n";
 
+const PANIC_TIP: &str = "\nral itself panicked: a bug in ral, not in this call. The call's `let` \
+     bindings were rolled back; what it ran outside the shell stands. Find out what \
+     changed before you resend any of it.\n";
+
 /// The model's sections of a run that reached evaluation: its captured
 /// streams, its settled value, and [`render`]'s suffix and exit; `audit` is
 /// the sentence for what the run already committed, if any.
 pub(crate) fn tool_result(
-    ending: &Ending,
-    captured: Option<ral_core::Captured>,
+    mut ran: Ran,
     births: &HashSet<u64>,
     audit: Option<&str>,
     workers: &[WorkerRow],
     timeout_secs: u64,
 ) -> ToolResult {
-    let ral_core::Captured { stdout, mut stderr } = captured.unwrap_or_default();
-    let value = match ending {
-        Ending::Settled { value, .. } => ral_value_to_text(value),
+    let ral_core::Captured { stdout, mut stderr } = ran.captured.take().unwrap_or_default();
+    let value = match &ran.ending {
+        Ending::Ok(value) => ral_value_to_text(value),
         _ => None,
     };
-    let (suffix, exit) = render(ending, births, audit, workers, timeout_secs);
+    let (suffix, exit) = render(&ran, births, audit, workers, timeout_secs);
     stderr.extend_from_slice(suffix.as_bytes());
     ToolResult {
         stdout,
@@ -69,52 +73,42 @@ pub(crate) fn tool_result(
 /// `births` and `workers` are read-only, boundary-legal snapshots: the
 /// `Observed::Worker` ids this dispatch's drain heard, and the `` `workers `` probe
 /// taken at the run boundary.  The audit and the orphan sentence never draw
-/// on a [`Ending::Settled`] ending — it leaves the model well able to see
+/// on a [`Ending::Ok`] ending — it leaves the model well able to see
 /// from the transcript what landed.
 fn render(
-    ending: &Ending,
+    ran: &Ran,
     births: &HashSet<u64>,
     audit: Option<&str>,
     workers: &[WorkerRow],
     timeout_secs: u64,
-) -> (String, i32) {
+) -> (String, u8) {
+    let Ran {
+        ending,
+        rendered,
+        single_command,
+        ..
+    } = ran;
     let mut out = String::new();
-    let exit = match ending {
-        Ending::Settled { .. } => return (out, 0),
-        Ending::Stopped { rendered, cause } => {
-            out.push_str(rendered);
-            if *cause == CancelCause::TimedOut {
-                out.push_str(&timeout_tip(timeout_secs));
-            }
-            ending.status()
+    if matches!(ending, Ending::Ok(_)) {
+        return (out, 0);
+    }
+    out.push_str(rendered);
+    match ending {
+        Ending::Err(record) if matches!(record.reason(), Reason::Exited(_)) => {
+            out.push_str(&exit_tip(*single_command));
         }
-        Ending::Raised {
-            rendered,
-            command_exit,
-            single_command,
-            status,
-            ..
-        } => {
-            out.push_str(rendered);
-            if *command_exit {
-                out.push_str(&exit_tip(*single_command));
-            }
-            status.get()
-        }
-        Ending::Unreturnable { rendered, .. } => {
-            out.push_str(rendered);
-            ending.status()
-        }
-        Ending::Exited(code) => *code,
-    };
+        Ending::Stopped(CancelCause::TimedOut) => out.push_str(&timeout_tip(timeout_secs)),
+        Ending::Panic(_) => out.push_str(PANIC_TIP),
+        _ => {}
+    }
 
     if let Some(audit) = audit {
         out.push_str(audit);
     }
-    if let Some(orphans) = orphan_note(ending, births, workers) {
+    if let Some(orphans) = orphan_note(births, workers, !matches!(ending, Ending::Panic(_))) {
         out.push_str(&orphans);
     }
-    (out, exit)
+    (out, ending.code())
 }
 
 /// A call refused before evaluation: the diagnostic, clipped, then
@@ -173,7 +167,11 @@ fn exit_tip(single_command: bool) -> String {
 /// or ready-unclaimed — is joined against `workers` by id.  A consumed worker
 /// has already left the registry and is nobody's orphan.  `None` when this
 /// dispatch spawned nothing still present — silence is then the whole truth.
-fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) -> Option<String> {
+fn orphan_note(
+    births: &HashSet<u64>,
+    workers: &[WorkerRow],
+    bindings_survive: bool,
+) -> Option<String> {
     let mut cmds: Vec<String> = workers
         .iter()
         .filter(|w| births.contains(&w.id))
@@ -189,20 +187,15 @@ fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) ->
         0 => String::new(),
         n => format!(", and {n} more not named here"),
     };
-    let fate = match ending {
-        Ending::Unreturnable { .. } => {
-            "A handle this call bound with `let` is still bound: `await $h` reaches it; \
-             one it only returned was lost with the result (`workers` shows status; an ID \
-             cannot recover a handle)."
-        }
-        _ => {
-            "A handle bound by a step that completed before the failure is still bound: \
-             `await $h` reaches it; one the failing step would have bound never landed \
-             (`workers` shows status; an ID cannot recover a handle)."
-        }
+    let fate = if bindings_survive {
+        "A handle bound by a step that completed is still bound: `await $h` reaches it; \
+         one the failing step would have bound, or that the call only returned, never landed"
+    } else {
+        "The call's newly bound handles were rolled back, even those bound by completed steps"
     };
+    let status = "`workers` shows status; an ID cannot recover a handle";
     Some(format!(
-        "\nwork this call spawned outlived it: {named}{overflow}. {fate}\n"
+        "\nwork this call spawned outlived it: {named}{overflow}. {fate} ({status}).\n"
     ))
 }
 

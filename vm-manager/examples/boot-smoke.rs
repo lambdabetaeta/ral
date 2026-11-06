@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use ral_core::carrier::{WireTransport, dispatch_to_report};
 use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::protocol::channel::Liveness;
-use ral_core::protocol::{Attach, EngineSpec, Program, Report, Root, Run};
+use ral_core::protocol::{Attach, EngineSpec, Program, Ran, Report, Root, Run};
 use ral_core::shell::runtime::TitlePolicy;
 use ral_core::source::SourceOrigin;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -194,6 +194,7 @@ fn prove_the_host_can_dial_in(
         terminal: RequestedTerminalAccess::Denied,
         stdin: RunStdin::Empty,
         trail: None,
+        last: false,
     };
 
     println!("\nputting a vsock listener in the guest and dialling it from here...");
@@ -209,7 +210,7 @@ fn prove_the_host_can_dial_in(
         }
 
         match listening.join() {
-            Ok(Ok(Report::Ran { captured, .. })) => {
+            Ok(Ok(Report::Ran(Ran { captured, .. }))) => {
                 if let Some(captured) = captured {
                     print!("{}", String::from_utf8_lossy(&captured.stdout));
                     let stderr = String::from_utf8_lossy(&captured.stderr);

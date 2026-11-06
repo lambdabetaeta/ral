@@ -65,7 +65,6 @@ impl Session {
     /// `startup` block. `Err(code)` is a boot that ended the session: a
     /// `--capabilities` failure, or an `exit` in a startup file.
     pub(super) fn boot(opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
-        let exit = |status| ExitCode::from(crate::platform::exit_byte(status));
         let claim = boot::setup_signals().map_err(|e| {
             errln!("ral: could not prepare interruptible input: {e}");
             ExitCode::from(1)
@@ -111,7 +110,7 @@ impl Session {
             })?,
         };
         let (report, _) = host.dispatch(&*transport, hook_run(boot.program(), None), None);
-        let mut settings = boot_builtin::settle(report).map_err(exit)?;
+        let mut settings = boot_builtin::settle(report).map_err(ExitCode::from)?;
         if let Some(surface) = opts.surface {
             settings.surface = surface;
         }
@@ -169,7 +168,7 @@ impl Session {
         // fail with the same cause; exit with its code instead of dealing the
         // user an unusable prompt.
         if let Ok(Some(code)) = t.session_ended() {
-            self.exit_code = crate::platform::exit_byte(code);
+            self.exit_code = code;
             return Flow::Break;
         }
 
@@ -179,6 +178,7 @@ impl Session {
         ral_core::process::clear();
         let cwd = t.cwd().ok().flatten().unwrap_or_default();
         write_terminal_title(&self.terminal, &ral_core::path::shown(cwd));
+        self.host.announce_settled(t);
         let prompt = render_prompt(t, &self.host);
 
         let read = self.frontend.read(
@@ -192,7 +192,7 @@ impl Session {
         // editor has already erased whatever it drew.
         flush_pending_messages(&self.host.runtime);
         if let Ok(Some(code)) = t.session_ended() {
-            self.exit_code = crate::platform::exit_byte(code);
+            self.exit_code = code;
             return Flow::Break;
         }
         match read {

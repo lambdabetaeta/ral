@@ -58,7 +58,7 @@ pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View, context_ro
 // run by it.
 pub use crate::app::RECORD;
 
-use crate::card::{Card, Change, DoneOutcome};
+use crate::card::{Card, Change};
 use crate::provider::{ProviderError, Tuning, Usage, Via};
 use genai::chat::ChatMessage;
 use ral_core::data::FOValue;
@@ -510,7 +510,8 @@ pub enum Display {
         id: Option<u64>,
         title: String,
         elapsed_ms: Option<u64>,
-        outcome: DoneOutcome,
+        #[serde(with = "ral_core::data::datum::as_datum")]
+        outcome: ral_core::fact::Done,
     },
     Context {
         rows: Vec<context::SpanRow>,

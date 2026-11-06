@@ -5,6 +5,7 @@
 //! user-facing act.  `shell_eval::surface::decode_surface` calls in here.
 
 use ral_core::data::FOValue;
+use ral_core::data::datum::untag;
 use ral_core::shell::runtime::WriteOutcome;
 
 use super::change::Change;
@@ -17,11 +18,9 @@ use super::{Card, Field, FieldVal, Mark, Measure, Readout, Role, Span};
 /// The shape is `` `card [mark, mark, …] ``; a known mark surfaced bare
 /// (`` `diff […] ``) lifts into a one-mark card.  Anything else is `None`.
 pub(crate) fn value_to_card(v: &FOValue) -> Option<Card> {
-    let FOValue::Variant { label, payload } = v else {
-        return None;
-    };
+    let (label, payload) = untag(v)?;
     if label == "card" {
-        let marks = match payload.as_deref() {
+        let marks = match payload {
             Some(FOValue::List { items }) => items.iter().map(decode_mark).collect(),
             // A non-list payload is still a deliberate surface: its one mark.
             Some(other) => vec![decode_mark(other)],

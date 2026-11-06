@@ -41,7 +41,7 @@ fn printed(src: &str) -> String {
             ending, captured, ..
         } => {
             ending
-                .into_result()
+                .into_settled()
                 .unwrap_or_else(|e| panic!("{src:?} must run: {e:?}"));
             String::from_utf8(captured.map(|c| c.stdout).unwrap_or_default())
                 .expect("captured stdout is UTF-8")
@@ -50,7 +50,6 @@ fn printed(src: &str) -> String {
             "{src:?} must reach the evaluator, got {}",
             diagnostics.render().0
         ),
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

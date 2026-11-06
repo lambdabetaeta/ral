@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e7
-generated_at_date: 2026-11-01
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_date: 2026-11-06
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -65,7 +65,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 34): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 35): checked at `Attach`; a mismatch refuses.
   `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
   sequences; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
@@ -97,7 +97,10 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `Program::Source`/`Program::Hook`. `Run`'s field types are the run regime,
   held by session state, and live below the wire: `RunIo` and `RunStdin`
   (`io/regime.rs`), `Captured` (`io/sink.rs`) and `RequestedTerminalAccess`
-  (`process/lease.rs`); `ral_core` re-exports them at the root.
+  (`process/lease.rs`); `ral_core` re-exports them at the root. `Run.last`
+  asks a returning run to claim and wait for still-unclaimed session workers,
+  replay their bytes and drop their endings inside its frame. Batch sets it
+  on its script; ordinary REPL and exarch calls leave it false.
 - `Event` — engine→front-end, inside a dispatch's window: `Surface`,
   `Enquiry`, `Reading`, `Report`. Every surfaced value is a tagged variant; an
   audit observation rides as `` `observed <record> `` (`Observation::to_surface`).
@@ -106,49 +109,47 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `SessionEvent` — engine→front-end with no dispatch to ride: `Attached` /
   `Refused(String)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
   (a worker's batch, and a watched worker's lines).
-- `EnquiryError` — message plus status, the wire shape of a refused enquiry;
+- `EnquiryError` — message plus `u8` status, the wire shape of a refused enquiry;
   `no_desk()` is the fixed wording for a host with nothing to answer, and
   `From<EnquiryError> for Error` the one way a refusal becomes the error
   both carriers' desks raise.
 - `Control` — `Strike(DispatchId, CancelCause)`, `Terminate`, `Abort` (a
   `Terminate` whose cause is `Aborted`); applied by `Scopes::apply` under
   both carriers. Even a terminal dispatch-local cause never ends the engine.
-- `Report` / `Ending` / `FailureStatus` — the terminal frame:
-  `Static { rendered, status }` (a refusal: the run never reached evaluation, so
-  no command ran and nothing was bound), `Ran { ending, captured, trail }`, or
-  `Faulted { rendered, status }` (the engine could not report the run: a panic
-  in the run or in the report plumbing, or a report the fuse would not pass; what
-  the run did is unknown, so a host reads it as neither a refusal nor an ending);
-  `Ending` has no process-stop arm — ral does not suspend — so every ending is
-  `Settled`/`Raised`/`Stopped`/`Unreturnable`/`Exited`. `Stopped` is a
-  cancellation stop that reached the top, a top-level effect like `Exited`,
-  carrying its cause and its rendered diagnostic (empty for the closed-stdout
-  stop, which prints nothing). `Unreturnable` is a
-  run that settled on a value the wire cannot carry (a handle, a block, a
-  function), rendered with a hint and reported as status 1. `Raised` and
-  `Unreturnable` carry their error's `record` — what `try`
-  hands its handler, and what `--audit` builds its `` `err `` outcome from —
-  and the two failing arms a `FailureStatus`, never a bare `i32`: it clamps
-  into `1..=255` on the way in and on the way back off the wire, so no ending
-  that failed can be reported with the code that means success.
+- `Report` — `Static { rendered, status }` before evaluation;
+  `Ran(Ran { ending, rendered, single_command, captured, trail })` after it;
+  `Faulted { rendered, status }` only when the report was lost (engine-worker
+  panic or report plumbing/fuse failure), so what ran is unknown.
+- `Ending = fact::Ending<FOValue, ErrorRecord, CancelCause>` has five cases:
+  `Ok(value)`, `Err(record)`, `Exited(u8)`, `Stopped(cause)`, `Panic(text)`.
+  A non-data result becomes `Err`, status 1, with its record and hint.
+  The `ErrorRecord` is the record `try` hands its handler; serde goes through
+  its first-order encoding, and exarch reads its `reason()` for the
+  command-exit tip. `Report::Ran(Ran)` holds the ending with its rendering,
+  captured streams and trail.
+- Every failure status on the wire is `NonZeroU8`: `Static`/`Faulted`'s and
+  the record's own. Serde refuses a 0, so no peer reports a successful failure.
+  `Report::code() -> u8` reads this status for `Static`/`Faulted` and delegates
+  to the ending for `Ran`. Hosts exit through `std::process::ExitCode::from(u8)`.
+- Serde externally tags the ending in kebab-case: `{"exited":3}`,
+  `{"stopped":"timed-out"}`, `{"panic":"…"}`. `Ok` carries an `FOValue`
+  (`{"ok":"unit"}` for Unit), and `Err` carries the record. This is not the
+  `Datum` encoding used for language values and stored worker endings
+  ([[design/endings|endings]]).
 
 ## `core/src/shell/run/report.rs`
 
-The projection is the run's. `RunReport::into_report` and `render_ending`
-project the engine's own `shell::run::Ending`/`RunReport` onto the wire shapes above:
-every diagnostic renders here, runtime errors against the `SourceDb` and static
-ones against the `Source` the diagnostic carries
+**`RunReport::into_report` projects the engine's `End` onto the wire alias.**
+It first turns a value into first-order data, or into `Err(not_data(..))`;
+then renders that ending once (`Ran.rendered`, empty for `Ok`, `Exited` and a
+reader-gone stop; `single_command` records the compact-drawing context); then
+maps an error to its record and a `Stop` to its cause.
+A caught run panic is `Ran` with `Panic`, status 101, after checkpoint restore,
+with no capture or trail. Static diagnostics render against their own source
 ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
-`not_data` / `unreturnable` word a value the wire cannot carry; `record_of`
-is the record `try` hands its handler. A panicked run is a
-`RunReport::Faulted`, projected to a `Report::Faulted` on its error's status.
-`Report::refused` is the engine's own refusal before the run reached
-evaluation (a busy engine, a dispatch that could not be sent) shaped as a
-`Static`, so a host never has to tell it from a run's own failure;
-`Report::faulted` is a fault outside the run's report (a panicked worker, a
-report the fuse would not pass) shaped as a `Faulted`. Both render the
-spanless one-liner through the one rule `StaticDiagnostics::Host` uses. The
-two seam test modules live here.
+`Report::refused`, `Report::faulted` and a host-level static diagnostic share
+one `spanless` helper over the same `Diagnosis` renderer: the former means nothing ran, the latter
+means the report is unavailable, not that evaluation returned a panic ending.
 
 ## `core/src/protocol/probe.rs`
 
@@ -162,6 +163,9 @@ The probe vocabulary, typed once for both ends.
   takes, so a payload its probe does not take is not representable.
 - The rows the answers come in, rendered engine-side, each a `record!`:
   `WorkerRow`, `BindingRow`/`HandleRow`, `CompletionNames`, `PathEntry`.
+  `WorkerState::Ready(Done)` holds the shared worker ending;
+  `WorkerState::unclaimed` is `Running | Ready(_)`. A missing row also means
+  claimed, so an announcing host requires a present unclaimed row.
   `Grants` answers the session's `GrantSummary` as opaque bytes in the codec
   `Root.grants` and a sealed seed ride.
 

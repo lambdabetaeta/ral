@@ -2,9 +2,10 @@
 //! probes, all through one in-process engine.
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
+use crate::fact::ExitCode as _;
 use crate::path::EnginePath;
 use crate::process::CancelCause;
-use crate::protocol::{Ending, EnquiryError, Report, Root};
+use crate::protocol::{Ending, EnquiryError, Ran, Report, Root};
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::Shell;
 
@@ -82,7 +83,7 @@ mod identity_cancel_tests {
     /// Dispatch a child under a forwarder, `raise` once the child is running,
     /// and return the run's status and whether the session then ended.
     #[cfg(unix)]
-    fn forwarded(raise: fn()) -> (i32, Option<i32>) {
+    fn forwarded(raise: fn()) -> (u8, Option<u8>) {
         let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
         let dir = tempfile::tempdir().expect("a temp dir");
         let marker = dir.path().join("running");
@@ -106,11 +107,11 @@ mod identity_cancel_tests {
         raise();
         let report = worker.join().expect("dispatch must not panic");
         crate::process::cancel::clear_root_request();
-        let Report::Ran { ending, .. } = report else {
+        let Report::Ran(Ran { ending, .. }) = report else {
             panic!("the child must reach evaluation, got {report:?}");
         };
         let ended = transport.session_ended().expect("the probe answers");
-        (ending.status(), ended)
+        (ending.code(), ended)
     }
 
     /// Forwarding lags the key: an interrupt raised before a dispatch was
@@ -135,10 +136,11 @@ mod identity_cancel_tests {
             std::thread::yield_now();
         }
         transport.control().hear(crate::process::Ambient::Interrupt);
-        let Report::Ran { ending, .. } = worker.join().expect("dispatch must not panic") else {
+        let Report::Ran(Ran { ending, .. }) = worker.join().expect("dispatch must not panic")
+        else {
             panic!("the run must reach evaluation");
         };
-        assert_eq!(ending.status(), 0, "the interrupt was aimed at no dispatch");
+        assert_eq!(ending.code(), 0, "the interrupt was aimed at no dispatch");
     }
 
     /// A SIGINT reaches an identity engine only as its host's
@@ -239,7 +241,6 @@ mod enquiry_tests {
         }) {
             RunReport::Ran { .. } => {}
             RunReport::Static { .. } => panic!("`ask-desk` must reach evaluation"),
-            RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
         }
 
         let answer = answer
@@ -348,27 +349,44 @@ mod durability_tests {
         |_, _| Ok(()),
     )];
 
-    /// A panicking run arrives as a `Report::Faulted` — the run entry caught it
-    /// and rolled the shell back — and the same transport dispatches the next
-    /// run cleanly.
+    /// A panic is a reported ending; the rolled-back session remains usable.
     #[test]
     fn panicking_dispatch_reports_and_the_session_survives() {
         let transport = crate::carrier::testkit::boot(&PANICKY);
 
-        let report = crate::carrier::testkit::eval(&transport, "protocol-panic-now");
+        let report = dispatch_to_report(
+            &transport,
+            crate::protocol::Run {
+                trail: Some(crate::shell::runtime::CapturePolicy::Off),
+                ..crate::protocol::Run::captured(
+                    "echo before; protocol-panic-now",
+                    crate::source::SourceOrigin::named("<test>"),
+                )
+            },
+            Arc::new(()),
+            None,
+        )
+        .expect("a panic still reports");
+        assert_eq!(report.code(), crate::fact::PANIC_CODE);
         match report {
-            Report::Faulted { rendered, status } => {
+            Report::Ran(Ran {
+                ending: Ending::Panic(text),
+                rendered,
+                captured,
+                trail,
+                ..
+            }) => {
+                assert!(text.contains("deliberate mid-eval panic"), "{text:?}");
                 assert!(rendered.contains("run panicked"), "got {rendered:?}");
-                assert_eq!(status.get(), 101);
+                assert!(captured.is_none(), "a panic discards captured bytes");
+                assert!(trail.is_empty(), "a panic discards its trail");
             }
-            other @ (Report::Static { .. } | Report::Ran { .. }) => {
-                panic!("a panicking run must report Faulted, got {other:?}")
-            }
+            other => panic!("a panicking run must report Ran/Panic, got {other:?}"),
         }
 
         let report = crate::carrier::testkit::eval(&transport, "$[1 + 1]");
         match report {
-            Report::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
+            Report::Ran(Ran { ending, .. }) => assert!(matches!(ending, Ending::Ok(_))),
             Report::Static { .. } | Report::Faulted { .. } => {
                 panic!("the healed session must evaluate")
             }

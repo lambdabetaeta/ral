@@ -14,7 +14,7 @@ await $h2
 try { await $h2 } { |_| echo claimed }
 # Expected: just-once, then claimed
 
-# Spawns nobody awaits leak nothing to the caller's stdout
+# Unawaited loose workers replay their bytes at the script's end, in birth order
 let lost1 = spawn { echo alpha }
 let lost2 = spawn { echo bravo }
 sleep 0.1

@@ -4,7 +4,6 @@ use crate::agent::Agent;
 use crate::bus::{Input, notice, surface_notice};
 use crate::record::{Display, Voice};
 use crate::shell_eval::surface;
-use ral_core::protocol::probe::WorkerState;
 use ral_core::shell::runtime::DoneEvent;
 
 pub(super) struct Prompt {
@@ -46,15 +45,23 @@ impl Agent {
                 if generation != self.generation {
                     return None;
                 }
+                let done = values.iter().rev().find_map(DoneEvent::from_surface);
+                let announced = done.as_ref().is_none_or(|done| {
+                    self.engine()
+                        .read(|transport| transport.workers())
+                        .is_ok_and(|rows| done.unclaimed_in(&rows))
+                });
+                let values = if announced {
+                    values
+                } else {
+                    values
+                        .into_iter()
+                        .filter(|v| DoneEvent::from_surface(v).is_none())
+                        .collect()
+                };
                 surface::replay(&self.recorder(), &values);
-                if let Some(done) = values.iter().rev().find_map(DoneEvent::from_surface) {
-                    let workers = self.engine().read(|transport| transport.workers()).ok()?;
-                    if !workers.iter().any(|row| {
-                        row.id == done.id.0
-                            && matches!(row.state, WorkerState::Ready(_) | WorkerState::Running)
-                    }) {
-                        return None;
-                    }
+                if !announced {
+                    return None;
                 }
                 (surface_notice(&values), Voice::Harness)
             }

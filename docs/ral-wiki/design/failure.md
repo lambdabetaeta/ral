@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
 ---
 
 # Failure: status, not truth
@@ -62,7 +62,9 @@ Failure propagates predictably through the rest of the grammar:
 - a [[design/pipelines|pipeline]] fails whole on any stage failure, bar a stage
   ral itself ended because its reader was gone;
 - `for` / `map` stop iterating on a failing body;
-- `spawn` captures failure in the handle and surfaces it on `await`;
+- a loose worker's failure is observed only by `await`, `race` or `poll`; it
+  never fails the run or session. Its lifetime is independent of its ending
+  ([[design/endings|endings]]);
 - an unhandled failure at top level exits the process with that status.
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (failure is an operation's exceptional outcome),

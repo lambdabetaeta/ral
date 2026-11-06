@@ -4,6 +4,12 @@ status: active
 
 # A finished handle has one settle; the eliminators project it
 
+> Amended 2026-11-05 (see [[design/endings|endings]]):
+> `poll`'s `ready.outcome` is the ok/err half of the one generic `Ending`,
+> sharing its tags with `audit` and the worker's `Done`. Exit, foreign stop
+> and panic are re-raised (the panic resumes unwinding), not handed over as
+> data; the four-state observation and non-consuming claim rule stand.
+
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `await` and
 > `race` no longer unwrap a settle record; they behave as the block run here,
 > writing its stdout then its stderr to the awaiter's streams and ending as it

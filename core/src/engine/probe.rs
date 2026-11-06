@@ -5,6 +5,7 @@
 use super::Engine;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
+use crate::fact::FailureCode as _;
 use crate::protocol::probe::{BindingRow, CompletionNames, HandleRow, Probe};
 use crate::shell::runtime::{Shell, Value};
 
@@ -44,7 +45,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
         Probe::SessionEnded => shell
             .durable_root()
             .cause()
-            .map(|cause| i32::from(cause.code()))
+            .map(|cause| cause.failure_code().get())
             .encode(),
         Probe::CompletionNames => completion_names(shell).encode(),
         Probe::Bindings => binding_rows(shell).encode(),

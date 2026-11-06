@@ -65,7 +65,7 @@ pub fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
     shell
         .run(Run::foreground(source, SourceOrigin::named("<test>")))
         .expect_ran()
-        .into_result()
+        .into_settled()
 }
 
 /// The checker's seed for a surface: the baked prelude's schemes over its Σ.
@@ -188,7 +188,7 @@ pub fn run_recorded(shell: &mut Shell, source: &str, sink: bool) -> (Settled<Val
             ..RunRequest::from(Run::foreground(source, SourceOrigin::named("<test>")))
         })
         .expect_ran()
-        .into_result();
+        .into_settled();
     let events = log.lock().unwrap().clone();
     (result, events)
 }

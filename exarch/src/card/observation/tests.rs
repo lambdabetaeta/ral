@@ -12,7 +12,7 @@ fn line(card: &Card) -> String {
     }
 }
 
-fn fact(argv: &[&str], status: i32) -> Command {
+fn fact(argv: &[&str], status: u8) -> Command {
     let (shown, args) = argv.split_first().expect("a command names a program");
     Command::new(
         shown,
@@ -24,7 +24,7 @@ fn fact(argv: &[&str], status: i32) -> Command {
     )
 }
 
-fn command(argv: &[&str], status: i32) -> Landed {
+fn command(argv: &[&str], status: u8) -> Landed {
     Landed::Effect(Effect::Command(fact(argv, status)))
 }
 

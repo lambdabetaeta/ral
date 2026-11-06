@@ -315,7 +315,7 @@ Do not use `sh -c`, as e.g. `sh -c #'a; b; c'#` payload throws away what `ral` w
 
     let h = spawn "sort the log" { sort huge.txt > sorted.txt }
 
-You need not wait for it: end the turn when nothing else remains, and if its result is still unclaimed when it finishes, the host wakes you naming its id, title, how long it ran and how it ended. Do not poll for completion or to keep a worker alive.
+You need not wait for it: end the turn when nothing else remains, and if its result is still unclaimed when it finishes and the host reads it, the host wakes you naming its id, title, how long it ran and how it ended (`returned`, `failed: …`, a stop's cause); once `await`, `race` or `cancel` has claimed it, it is not announced. Do not poll for completion or to keep a worker alive.
 
 `await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. A handle's result is claimed once: you may await it turns later, but a second `await` of it, or one after `cancel` or `race` claimed it, fails. An `exit` inside the block exits the turn that awaits it.
 

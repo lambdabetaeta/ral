@@ -6,14 +6,14 @@
 
 use super::super::command;
 use super::stage::StageHandle;
-use crate::fact::{AuditIo, Command};
+use crate::fact::{AuditIo, Command, ExitCode};
 use crate::process::{
     CancelCause, ChildEnd, Group, POLL_SLICE, Pgid, Scope, ScopeId, TerminalLoan, WaitOutcome,
     Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, CommandOrigin, Error, Escape, Mooring, Observed, Settled, Shell,
-    ThreadEnd, Value,
+    AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Observed, Settled, Shell,
+    Stop, Value,
 };
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ fn synth_external_stage_audit(
     let obs = shell.observation(Observed::Command(Command::new(
         name,
         args,
-        broke.map_or(0, Break::code),
+        broke.map_or(0, ExitCode::code),
         CommandOrigin::External,
         AuditIo::default(),
         broke.map(Break::to_string),
@@ -75,7 +75,7 @@ fn finish_external_settlement(
         None => Ok(Value::Unit),
     };
     StageObservation {
-        end: ThreadEnd::Settled(settled),
+        end: End::settled(settled),
         audit,
     }
 }
@@ -260,7 +260,7 @@ pub(super) enum Effect {
 /// One stage's observation, normalized across external children and ral stage
 /// threads.
 pub(super) struct StageObservation {
-    pub(super) end: ThreadEnd,
+    pub(super) end: End,
     pub(super) audit: AuditFragment,
 }
 
@@ -268,14 +268,14 @@ impl StageObservation {
     #[cfg(test)]
     pub(super) fn ok() -> Self {
         Self {
-            end: ThreadEnd::Settled(Ok(Value::Unit)),
+            end: End::Ok(Value::Unit),
             audit: AuditFragment::empty(),
         }
     }
 
     pub(super) fn failure(error: Error) -> Self {
         Self {
-            end: ThreadEnd::Settled(Err(Break::Error(error))),
+            end: End::Err(error),
             audit: AuditFragment::empty(),
         }
     }
@@ -285,7 +285,7 @@ impl StageObservation {
     fn names(&self, stage: &ScopeId) -> bool {
         matches!(
             &self.end,
-            ThreadEnd::Settled(Err(Break::Escape(Escape::Stopped { owner: Some(o), .. }))) if o == stage
+            End::Stopped(Stop { owner: Some(o), .. }) if o == stage
         )
     }
 
@@ -294,25 +294,21 @@ impl StageObservation {
     /// doing: a reader-gone stop, or a teardown already running).
     fn tears_down_for(&self, stage: &ScopeId) -> Option<CancelCause> {
         match &self.end {
-            ThreadEnd::Settled(Err(Break::Escape(Escape::Exit(_)))) => Some(CancelCause::Cancelled),
-            ThreadEnd::Settled(Err(Break::Escape(Escape::Stopped { cause, .. })))
-                if !self.names(stage) =>
-            {
-                Some(*cause)
-            }
+            End::Exited(_) => Some(CancelCause::Cancelled),
+            End::Stopped(Stop { cause, .. }) if !self.names(stage) => Some(*cause),
             _ => None,
         }
     }
 
     fn panicked(&self) -> bool {
-        matches!(self.end, ThreadEnd::Panicked(_))
+        matches!(self.end, End::Panic(_))
     }
 
     /// A stop this collector owns is dropped; what the stage observed still
     /// happened and is kept.
     pub(super) fn forgiven(self) -> Self {
         Self {
-            end: ThreadEnd::Settled(Ok(Value::Unit)),
+            end: End::Ok(Value::Unit),
             audit: self.audit,
         }
     }
@@ -323,14 +319,14 @@ impl StageObservation {
 /// other.
 fn rank(br: &Break) -> u8 {
     match br {
-        Break::Escape(Escape::Stopped {
+        Break::Escape(Escape::Stopped(Stop {
             cause: CancelCause::ReaderGone,
             owner: Some(_),
             ..
-        }) => 0,
+        })) => 0,
         Break::Error(_) => 1,
         Break::Escape(Escape::Exit(_)) => 2,
-        Break::Escape(Escape::Stopped { cause, .. }) => 3 + *cause as u8,
+        Break::Escape(Escape::Stopped(Stop { cause, .. })) => 3 + *cause as u8,
     }
 }
 
@@ -685,16 +681,18 @@ impl CollectState {
                 shell.observe_stamped(surface, observation);
             }
             match end {
-                ThreadEnd::Panicked(text) => {
+                End::Panic(text) => {
                     panic.get_or_insert(text);
                 }
-                ThreadEnd::Settled(Err(br)) => {
-                    verdict = Some(match verdict {
-                        Some(held) => stronger(held, br),
-                        None => br,
-                    });
-                }
-                ThreadEnd::Settled(Ok(v)) => last = v,
+                ending => match ending.into_settled() {
+                    Err(br) => {
+                        verdict = Some(match verdict {
+                            Some(held) => stronger(held, br),
+                            None => br,
+                        });
+                    }
+                    Ok(v) => last = v,
+                },
             }
         }
         // On the run thread: the machine's `catch_unwind` abandons its frames

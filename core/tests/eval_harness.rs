@@ -18,14 +18,15 @@ use ral_core::source::SourceOrigin;
 /// the phrases.
 fn run_on(shell: &mut Shell, input: &str) -> ral_core::shell::runtime::Settled<Value> {
     match shell.run(Run::foreground(input, SourceOrigin::named("<test>"))) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
+        RunReport::Ran { ending, .. } => ending.into_settled(),
         // A static diagnostic reads as a failed run: no value was produced.
         RunReport::Static { diagnostics } => {
             let msg = diagnostics.render().0;
-            Err(ral_core::shell::runtime::Error::raised(msg, 2).into())
+            Err(
+                ral_core::shell::runtime::Error::raised(msg, std::num::NonZeroU8::new(2).unwrap())
+                    .into(),
+            )
         }
-        // A panic is never a legitimate "no value": it fails the test.
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

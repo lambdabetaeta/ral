@@ -4,8 +4,8 @@ use crate::host::env::test_support::env_guard;
 use crate::path::EnginePath;
 use crate::process::DurableRoot;
 use crate::process::cancel::REQUEST_SERIAL;
-use crate::protocol::Ending;
 use crate::protocol::channel::Liveness;
+use crate::protocol::{Ending, Ran};
 use crate::source::SourceOrigin;
 use crate::test_helper::eventually;
 
@@ -113,26 +113,20 @@ fn cancelling_within_strikes_its_wire_dispatch_once_and_not_the_next() {
     assert!(
         matches!(
             first,
-            Report::Ran {
-                ending: Ending::Stopped {
-                    cause: CancelCause::Cancelled,
-                    ..
-                },
+            Report::Ran(Ran {
+                ending: Ending::Stopped(CancelCause::Cancelled),
                 ..
-            }
+            })
         ),
         "the first dispatch must report Cancelled: {first:?}"
     );
     assert!(
         matches!(
             next,
-            Report::Ran {
-                ending: Ending::Settled {
-                    value: FOValue::Int { value: 2 },
-                    status: 0
-                },
+            Report::Ran(Ran {
+                ending: Ending::Ok(FOValue::Int { value: 2 }),
                 ..
-            }
+            })
         ),
         "the following dispatch must be untouched: {next:?}"
     );
@@ -178,22 +172,19 @@ fn dispatch_local_causes_preserve_the_wire_engine_and_their_cause() {
                 Some(&within),
             );
             assert!(
-                matches!(report, Report::Ran {
-                ending: Ending::Stopped { cause: actual, .. }, ..
-            } if actual == cause),
+                matches!(report, Report::Ran(Ran {
+                ending: Ending::Stopped(actual), ..
+            }) if actual == cause),
                 "the dispatch must preserve {cause:?}: {report:?}"
             );
             assert!(!dir.path().join("effect").exists());
             assert_eq!(transport.session_ended().unwrap(), None);
             assert!(matches!(
                 dispatch(transport, "$[1 + 1]", None),
-                Report::Ran {
-                    ending: Ending::Settled {
-                        value: FOValue::Int { value: 2 },
-                        status: 0
-                    },
+                Report::Ran(Ran {
+                    ending: Ending::Ok(FOValue::Int { value: 2 }),
                     ..
-                }
+                })
             ));
         });
         assert!(frames.iter().any(|frame| matches!(frame,
@@ -225,13 +216,10 @@ fn a_wire_dispatch_under_cancelled_within_runs_no_effect() {
     assert!(
         matches!(
             report,
-            Report::Ran {
-                ending: Ending::Stopped {
-                    cause: CancelCause::Cancelled,
-                    ..
-                },
+            Report::Ran(Ran {
+                ending: Ending::Stopped(CancelCause::Cancelled),
                 ..
-            }
+            })
         ),
         "the dispatch must be born Cancelled: {report:?}"
     );

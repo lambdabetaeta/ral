@@ -34,7 +34,7 @@ fn enforcement_output(result: &ToolResult) -> Output {
     Output {
         stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
-        status: result.exit,
+        status: i32::from(result.exit),
     }
 }
 
@@ -63,16 +63,9 @@ fn run_shell_direct(
         Some(&DurableRoot::default().child()),
     );
     match outcome {
-        Ok(ral_core::protocol::Report::Ran {
-            ending, captured, ..
-        }) => report::tool_result(
-            &ending,
-            captured,
-            &applier.births(),
-            None,
-            &[],
-            timeout_secs,
-        ),
+        Ok(ral_core::protocol::Report::Ran(ran)) => {
+            report::tool_result(ran, &applier.births(), None, &[], timeout_secs)
+        }
         Ok(ral_core::protocol::Report::Static { rendered, .. }) => {
             panic!("static failure: {rendered}")
         }
@@ -636,7 +629,7 @@ fn decode_surface_round_trips_each_class() {
         id: ral_core::shell::runtime::WorkerId(7),
         title: "building".into(),
         elapsed_ms: 1_500,
-        outcome: Done::Ok,
+        outcome: Done::Ok(()),
     };
     assert!(matches!(
         decode_surface(&done.to_surface()),
@@ -644,7 +637,7 @@ fn decode_surface_round_trips_each_class() {
             id: Some(7),
             title,
             elapsed: Some(elapsed),
-            outcome: crate::card::DoneOutcome::Ok,
+            outcome: ral_core::fact::Done::Ok(()),
         }) if title == "building" && elapsed == std::time::Duration::from_millis(1_500)
     ));
     assert!(matches!(decode_surface(&s("nope")), Decoded::Unknown));
@@ -677,7 +670,7 @@ fn deferred_batches_keep_the_engine_generation_and_refuse_an_ended_owner() {
 /// A failed worker wakes the model with how it really ended, never `exit 0`,
 /// and with the call that gets its result back.
 #[test]
-fn a_failed_spawn_wakes_the_model_with_its_status() {
+fn a_failed_spawn_wakes_the_model_with_its_failure() {
     let mut session = crate::agent::Agent::for_test("system").unwrap();
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
@@ -702,7 +695,7 @@ fn a_failed_spawn_wakes_the_model_with_its_status() {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    for part in ["(exit 5)", "(boom)", "await $h", "workers"] {
+    for part in ["(failed): boom", "(boom)", "await $h", "workers"] {
         assert!(text.contains(part), "the notice names {part}: {text:?}");
     }
     assert!(

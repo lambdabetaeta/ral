@@ -195,6 +195,7 @@ pub(super) fn builtin_fold_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fact::ExitCode as _;
 
     /// Force a lambda literal to a `Value` so a combinator can be driven
     /// directly.  The bodies below are bare values, so applying one reaches

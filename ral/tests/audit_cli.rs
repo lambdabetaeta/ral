@@ -2,8 +2,8 @@
 #![cfg(unix)]
 
 // Integration tests for `ral --audit`: the JSON dumped to stderr must be
-// parseable, and its root must be the same report the `audit { … }` builtin
-// returns (outcome / trail) rather than a synthetic command observation.
+// parseable, with the report envelope's fields (outcome / trail), rather than
+// a synthetic command observation. Its outcome is the run's whole ending.
 // `--pretty` may change the bytes, never the value.
 
 mod common;
@@ -102,10 +102,21 @@ fn audit_reports_a_raised_error_as_an_err_outcome() {
 }
 
 #[test]
-fn audit_reports_exit_as_ok_while_the_process_keeps_its_status() {
-    let o = run_c(&["--audit"], "exit 7");
-    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
-    assert_eq!(report(&o)["outcome"]["tag"], "ok");
+fn audit_reports_exit_as_exited() {
+    let o = run_c(&["--audit"], "exit 3");
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+    assert_eq!(
+        report(&o)["outcome"],
+        serde_json::json!({"tag": "exited", "payload": 3})
+    );
+}
+
+#[test]
+fn a_unit_result_is_a_payload_less_ok() {
+    let o = run_c(&["--audit"], "echo hi");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "hi\n");
+    assert_eq!(report(&o)["outcome"], serde_json::json!({"tag": "ok"}));
 }
 
 #[test]

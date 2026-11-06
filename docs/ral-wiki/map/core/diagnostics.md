@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
-covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs]
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_date: 2026-11-06
+covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
 
 # Map: core / diagnostics
@@ -114,7 +114,14 @@ Rendering tests live inline with each owner: generic renderer tests in
 `diagnostic.rs`, parse and lexer reports in `syntax/report.rs`, type reports in
 `typecheck/explain.rs`, and runtime source selection in `shell/runtime/error.rs`.
 
-`Error::render` dispatches on where the error came from, not what the input
+**`End::render` draws an ending through one private `Diagnosis` and one
+`render` function** in `shell/runtime/error.rs`. `Error::diagnosis` supplies
+the error's fields; `Stop::diagnosis` supplies its cause and unwind span.
+A panic is spanless `run panicked: …`; values, exits and reader-gone stops
+render nothing. `Error::render`, `compact` and `render_spanless` use that same
+renderer. Hosts print the supplied `rendered` verbatim.
+
+The renderer dispatches on where the error came from, not what the input
 looked like: a carried `rejection` draws its own report, so a broken plugin,
 module, rc or profile prints, at every door, the report its own run as a script
 would. Otherwise it takes `compact_root: Option<FileId>` — `Some(root)` when

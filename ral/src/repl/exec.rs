@@ -9,7 +9,7 @@
 use ral_core::carrier::Transport;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
-use ral_core::protocol::{Ending, Report, Run};
+use ral_core::protocol::{Ending, Ran, Report, Run};
 use ral_core::source::SourceOrigin;
 use ral_core::{HookName, Value, shell::builtins};
 use ral_core::{err, errln, outln};
@@ -146,31 +146,31 @@ pub(super) fn step(
     let before = t.cwd().ok().flatten();
 
     let (report, _) = host.dispatch(t, line_run(&src), None);
-    let (status, step) = match report {
+    let report = match report {
+        Ok(report) => report,
         Err(severed) => {
             errln!("ral: {severed}");
             return Step::Exit(1);
         }
-        Ok(Report::Static { rendered, status } | Report::Faulted { rendered, status }) => {
-            err!("{rendered}");
-            (status.get(), Step::Continue)
+    };
+    let status = report.code();
+    let step = match report {
+        Report::Ran(Ran {
+            ending: Ending::Ok(value),
+            ..
+        }) => {
+            print_result(&Value::from(value), theme);
+            Step::Continue
         }
-        Ok(Report::Ran { ending, .. }) => {
-            let status = ending.status();
-            let step = match ending {
-                Ending::Settled { value, .. } => {
-                    print_result(&Value::from(value), theme);
-                    Step::Continue
-                }
-                Ending::Raised { rendered, .. }
-                | Ending::Stopped { rendered, .. }
-                | Ending::Unreturnable { rendered, .. } => {
-                    err!("{rendered}");
-                    Step::Continue
-                }
-                Ending::Exited(code) => Step::Exit(crate::platform::exit_byte(code)),
-            };
-            (status, step)
+        Report::Ran(Ran {
+            ending: Ending::Exited(code),
+            ..
+        }) => Step::Exit(code),
+        Report::Static { rendered, .. }
+        | Report::Faulted { rendered, .. }
+        | Report::Ran(Ran { rendered, .. }) => {
+            err!("{rendered}");
+            Step::Continue
         }
     };
 

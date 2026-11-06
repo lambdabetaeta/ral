@@ -18,7 +18,7 @@ fn run_in(dir: &Path, body: &str) -> Settled<Value> {
     common::fresh_shell()
         .run(Run::captured(source, SourceOrigin::named("<test>")))
         .expect_ran()
-        .into_result()
+        .into_settled()
 }
 
 fn shown(dir: &Path, body: &str) -> String {

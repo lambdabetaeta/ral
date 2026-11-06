@@ -1,7 +1,7 @@
 ---
-generated_at_commit: e5a23909
-verified_at_commit: e5a23909
-verified_at_date: 2026-10-29
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_date: 2026-11-06
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
 
@@ -23,8 +23,9 @@ reimplements evaluation, and no front-end calls the door itself: each is a
 ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). **Completion is the
 door returning** — never a channel disconnecting — so a `spawn`ed
-worker (a server, a watch) holding a clone of the surface cannot keep a run
-from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The
+worker (a server, a watch) holding a clone of the surface cannot itself keep
+a run from ending; only `Run.last` explicitly requests the session-worker wait
+([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The
 reduction primitive behind the door is crate-private, so a host cannot start an
 unframed evaluation against a stale frame
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
@@ -38,7 +39,7 @@ function under the `Mooring` it was given, so the outer run's interrupt and
 wall reach whatever it calls
 ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
 
-**The request carries the policy axes as types, never flags.** A `RunRequest`
+**The request carries the run policy.** A `RunRequest`
 is exactly the places hosts differ:
 
 - **IO** — a `RunIo` regime sum over *byte output*. `Inherit` runs on the
@@ -57,6 +58,11 @@ is exactly the places hosts differ:
   a `spawn` must carry a title).
 - **Surface** — an optional run-local `SurfaceSink` (`Arc<dyn EventSink>`),
   installed only for this run; `None` is the identity.
+- **Last run** — `Run.last`: when the body returns, claim and wait for
+  still-unclaimed session workers in birth order, replay stdout then stderr
+  and discard every ending. This lifetime join never adopts a loose
+  worker's failure. The wait stays inside the run's frame, wall and trail;
+  cancellation or a replay failure can still halt it.
 - **Trail** — `trail: Option<CapturePolicy>` ([[design/audit|audit]]). `Some`
   delimits this dispatch's own extent as an audit scope and carries it home on
   `RunReport::Ran`; `None` neither opens a scope nor collects one.
@@ -122,19 +128,17 @@ module's framed scaffold:
   straight to `shell.context` — there is no post-run install step, so a
   halted run keeps every write that landed before the halt and the run
   remains a resume point regardless of completion, error, or `exit`
-  ([[invariants/turn-ends-ready|exchange-ends-ready]]). Before the status is
-  read, `run_framed` disarms the wall (waiting on a firing already claimed)
+  ([[invariants/turn-ends-ready|exchange-ends-ready]]). After any `Run.last`
+  return-wait, `run_framed` disarms the wall (waiting on a firing already claimed)
   and makes the **closing poll**, `final_poll` on the run's node, so a stop
   that landed after the body's last poll — a key a terminal loan heard back
   and struck on the node included — is not lost; a stop is an escape no `try`
-  absorbs anyway. It then computes the transport
-  status and emits ready-boundary notices while the
-  run frame and sinks are still installed. Only then does the IO guard drop.
-- Back in `run_built`, `classify_ending` folds the settled `Result`, the
-  transport status, `single_command` and `root` into one `shell::run::Ending` —
-  `Settled`, `Raised`, `Stopped`, or `Exited` — a wall being simply a
-  `TimedOut` stop, so no separate "timed out" flag exists to disagree with
-  the result. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`
+  absorbs anyway. It emits ready-boundary notices while the run frame and
+  sinks are still installed. Only then does the IO guard drop.
+- Back in `run_built`, `End::settled` folds the machine result into
+  `Ending<Value, Error, Stop>`: `Ok`, `Err`, `Exited` or `Stopped`.
+  A wall is a `TimedOut` stop, not a separate flag.
+  `RunReport::Ran { ending, compact, captured, trail }` carries it home; `trail`
   starts `Vec::new()` here — `run_built` has no view of the dispatch's own
   scope, only of what a body opened and closed on its own account.
 - One level up, at `Shell::enter` — the durability wrapper all three run doors
@@ -145,17 +149,18 @@ module's framed scaffold:
   rolls back does not cover `local.audit`, so only a scope the panic itself cannot skip keeps
   the trail's close law true at dispatch granularity. A clean exit's
   observations land in `RunReport::Ran.trail`; a caught panic's are drained
-  and discarded — the panicked dispatch reports `RunReport::Faulted`, never a
-  trail.
-  `RunReport::into_report` then renders the engine's `Ending` against the
-  shell — a `Raised` error or a `Stopped` stop becomes the string the host prints
-  verbatim and the `{cmd, status, message, site}` record `try` would hand its
-  handler, `command_exit`/`status` computed alongside it; a `Settled` value
-  the wire cannot carry (a handle, block, or function) becomes `Unreturnable`,
-  its own rendered failure with a hint; a `Static` renders
-  the same way through `StaticDiagnostics::render`, which also settles its exit
-  status (2 parse, 1 type) — onto the wire's own
-  `protocol::Ending`, and projects each `Observation` through
+  and discarded — the panicked dispatch reports `Ran` with `End::Panic`,
+  status 101, no compact root, capture or trail.
+  `RunReport::into_report` calls `End::render` against the shell's sources;
+  errors, stops and panics share the `Diagnosis` renderer. The wire alias is
+  `Ending<FOValue, ErrorRecord, CancelCause>`: a value becomes first-order data,
+  an error its `ErrorRecord`, and a `Stop` its cause. A non-data value
+  becomes `Err`, status 1, rendered like any spanless error.
+  `Report::Ran(Ran { ending, rendered, single_command, captured, trail })` keeps
+  run context outside the cases; `Report::code()` is the host's `u8` status.
+  A `Static` renders through `StaticDiagnostics::render` (2 parse, 1 type);
+  `Report::Faulted` is only a lost report, not a known panic ending. The seam
+  projects each `Observation` through
   [[design/audit|`encode`]] onto `Report::Ran.trail: Vec<FOValue>`, unbounded
   by declaration — the wire's frame fuse is the shared backstop, as it already
   is for `captured`.
@@ -205,10 +210,14 @@ module's framed scaffold:
 
 - ral's batch path (`ral/src/batch.rs`) boots an `IdentityTransport` from the
   `batch` installer, dispatches the `_ral-boot` hook, then the script as one
-  `Program::Source` run under the mute host, with `RunIo::Inherit` and
+  `Program::Source` run with `last: true`, `RunIo::Inherit` and
   `RequestedTerminalAccess` keyed to whether it owns the terminal — the same
   door, the same ending law, and the same typecheck as the REPL
-  ([[map/repl/startup|startup]]).
+  ([[map/repl/startup|startup]]). Return waits for loose workers and replays
+  their bytes without adopting their endings; halt skips the wait and session
+  teardown takes them down. Batch silently consumes their `done` events.
+  REPL lines and exarch calls leave `last` false; their session ends are halts
+  ([[design/endings|endings]]).
 
 The human and the model are interchangeable suppliers of top-level runs over
 one persistent `Shell`.

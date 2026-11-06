@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_date: 2026-11-06
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
 
@@ -35,8 +35,8 @@ no job table: ral does not suspend
   (`ral/src/boot_builtin.rs`). `capabilities` holds absolute paths:
   `Boot::profiles` anchors each argument at the invocation cwd before the
   builtin runs, since the rc and earlier profiles may `cd` first, and the builtin
-  refuses a relative one before sourcing anything. `boot_builtin::settle` reads its `Ending`: `Settled`
-  carries the rc's `RcSettings`, a `--capabilities` failure is `Raised`
+  refuses a relative one before sourcing anything. `boot_builtin::settle` reads
+  its `Ending`: `Ok` carries the rc's `RcSettings`, a `--capabilities` failure is `Err`
   status 2, an rc's `exit N` is `Exited(N)`, and either ends the session
   there. The host then applies `--surface` over the rc's choice, keeps the
   output theme, and dispatches `Session "startup"` if the rc registered one.
@@ -161,7 +161,7 @@ the live session** ([[internals/a-turn-end-to-end|a run, end to end]]).
 `exec.rs::step` is the per-line entry. `line_run` builds the `Run` —
 `Program::Source(line)`, `origin: SourceOrigin::named("<stdin>")`, `GrantStack::root()`,
 no wall, `RunIo::Inherit`, `RequestedTerminalAccess::Leased`,
-`RunStdin::Inherit` — and `ReplHost::dispatch` sends it. Around it the
+`RunStdin::Inherit`, `last: false` — and `ReplHost::dispatch` sends it. Around it the
 lifecycle hooks run as dispatches of their own. Before, `pre_exec` folds the
 plugins' `pre-exec` hooks over the typed line in load order, each dispatched
 with `{src}`: a `Str` result is the next hook's line and, last, the line
@@ -179,13 +179,15 @@ It matches the one flat `Report`:
 
 - `Static` — a parse, type, or host failure that never reached evaluation; its
   `rendered` is the whole caret report, printed verbatim.
-- `Ran` — a run that compiled, matched on its `Ending`: `Settled` prints via
-  `print_result`; `Raised`, `Stopped`, and `Unreturnable` (a settled value
-  the wire cannot carry) print the diagnostic already rendered at the
-  transport seam, verbatim (a closed-stdout stop renders to nothing);
-  `Exited(code)` ends the loop (clamped through `platform::exit_byte`).
+- `Ran(Ran { ending, rendered, … })` — `Ok` prints via
+  `print_result`; `Err`, `Stopped` and `Panic` print `rendered` verbatim
+  (a closed-stdout stop renders nothing). A non-data result is `Err`, status 1;
+  a run panic is `Panic`, status 101, with its checkpoint restored.
+  `Exited(code)` ends the loop with its byte. `Report::code` supplies the
+  status for every report; the process edge is `std::process::ExitCode::from(u8)`.
   `Stopped` is a cancellation, not a process stop: ral does not suspend
   ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+- `Faulted` — only a lost report: print its diagnostic; what ran is unknown.
 
 The same entry backs every host program the REPL holds as a value: the prompt
 body, an rc startup block, and a plugin hook are *registered hooks* run as
@@ -200,7 +202,9 @@ hook is ignored.
 `host.rs::ReplHost` is the REPL's `Host`, and the one place every hook
 dispatch goes through (`dispatch`, `run_hook` → `HookResult {outcome,
 captured, ctx}`, the `Outcome` one of `Settled(value)`, `Exited`,
-`Faulted(text)`, `Walled(text)`, the text trimmed and labelled once there).
+`Faulted(text)`, `Walled(text)`, `Stopped(text)`, the text trimmed and
+labelled once there). This `Outcome` is a hook-policy coarsening, not an
+ending: it folds `Err`, `Panic`, static failure and report loss into `Faulted`.
 
 - `enquire` answers the three classes `enquiry.rs` types once for both ends:
   `` `repl-editor `` (an `EditorOp` — `get`, `set`, `set-lbuffer`, `insert`,
@@ -215,6 +219,14 @@ captured, ctx}`, the `Outcome` one of `Settled(value)`, `Exited`,
   frontend's printer above the prompt, a `` `notice `` dim, an
   `` `observed `` observation skipped by choice (the ral front-ends render no
   audit), and anything else dropped with a note naming its class.
+  `DoneEvent`s are held in `settled: Mutex<Vec<DoneEvent>>` until
+  `Session::iterate` calls `announce_settled` before drawing the next prompt.
+  One workers probe gates the drained events: only a `done` for which
+  `DoneEvent::unclaimed_in(&rows)` holds gets a faint
+  `note: worker #id (title) …`, worded by core's `Done::said`.
+  Claimed/absent rows or a failed probe announce nothing. A later claim cannot
+  retract an earlier notice; batch silently consumes all `done` events
+  ([[design/endings|endings]]).
 - `prompt_fault` prints a render's faults, joined, once while they repeat.
 
 ## The selectable frontend
@@ -234,7 +246,8 @@ and completion live in
 
 ## Prompt, rc, theme
 
-- `prompt.rs` — `render` dispatches the registered `Session/"prompt"` hook,
+- `prompt.rs` — `render` first announces still-unclaimed completions, then
+  dispatches the registered `Session/"prompt"` hook,
   registered with capture: its return value is the prompt, a returned unit
   falls back to its captured stdout. The prompt body reads `user` and `cwd`,
   the ambient builtins, directly. Plugin `prompt` hooks

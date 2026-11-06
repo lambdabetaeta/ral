@@ -25,13 +25,33 @@ fn a_static_rejection_fails_without_an_exit_and_leaves_the_shell_usable() {
 }
 
 #[test]
-fn a_faulted_run_fails_without_an_exit_and_leaves_the_shell_usable() {
+fn a_panicked_run_reports_exit_101_and_leaves_the_shell_usable() {
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(PANIC_BUILTINS));
-    let faulted = run(&mut session, "a4-panic-now", 5);
-    assert!(faulted.failed);
-    assert_eq!(exit_line(&faulted.text), None, "{}", faulted.text);
+    let panicked = run(&mut session, "a4-panic-now", 5);
+    assert!(panicked.failed);
+    assert_eq!(
+        exit_line(&panicked.text),
+        Some("EXIT: 101"),
+        "{}",
+        panicked.text
+    );
+    assert!(
+        panicked
+            .text
+            .contains("run panicked: a4 test: deliberate mid-eval panic"),
+        "{}",
+        panicked.text
+    );
+    assert!(
+        panicked.text.contains(
+            "ral itself panicked: a bug in ral, not in this call. The call's `let` bindings were rolled back; what it ran outside the shell stands. Find out what changed before you resend any of it."
+        ),
+        "{}",
+        panicked.text
+    );
     let after = run(&mut session, "return 1", 5);
     assert!(!after.failed);
+    assert_eq!(exit_line(&after.text), Some("EXIT: 0"), "{}", after.text);
 }
 
 /// The wall is the call's own `timeout_secs`.

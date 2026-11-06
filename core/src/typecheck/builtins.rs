@@ -372,7 +372,10 @@ pub(super) fn audit_record(value_ty: Ty) -> Ty {
 /// The `` `ok α | `err `` a body's outcome is read as: the failure is the
 /// record `try` hands its handler.
 pub(crate) fn outcome_ty(value_ty: Ty) -> Ty {
-    closed_variant(&[("ok", value_ty), ("err", ErrorRecord::ty())])
+    closed_variant(&[
+        (crate::fact::tag::OK, value_ty),
+        (crate::fact::tag::ERR, ErrorRecord::ty()),
+    ])
 }
 
 /// The `{stdout, stderr, elapsed, outcome}` record `poll` carries in its

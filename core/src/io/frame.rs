@@ -213,7 +213,7 @@ mod tests {
 
     fn deep_result_crosses() {
         use crate::data::FOValue;
-        use crate::protocol::{DispatchId, Ending, Event, Frame, Report};
+        use crate::protocol::{DispatchId, Ending, Event, Frame, Ran, Report};
 
         let lists = (0..5000).fold(FOValue::Unit, |inner, _| FOValue::List {
             items: vec![inner],
@@ -224,11 +224,13 @@ mod tests {
         for value in [lists, maps] {
             let frame = Frame::Event(
                 DispatchId(1),
-                Event::Report(Report::Ran {
-                    ending: Ending::Settled { value, status: 0 },
+                Event::Report(Report::Ran(Ran {
+                    ending: Ending::Ok(value),
+                    rendered: String::new(),
+                    single_command: false,
                     captured: None,
                     trail: Vec::new(),
-                }),
+                })),
             );
             let mut framed = Vec::new();
             put(&mut framed, &encode(&frame).unwrap()).unwrap();

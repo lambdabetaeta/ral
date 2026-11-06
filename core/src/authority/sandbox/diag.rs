@@ -268,7 +268,11 @@ fn collect_output(cmd: &mut std::process::Command) -> Option<String> {
 /// when there is nothing to say: the denials in the window since `since` that
 /// are attributable to a PID in `pids`.
 #[cfg(not(windows))]
-pub(crate) fn denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> Option<String> {
+pub(crate) fn denial_hint(
+    pids: &HashSet<u32>,
+    since: Instant,
+    _exit_code: Option<i32>,
+) -> Option<String> {
     if pids.is_empty() {
         return None;
     }
@@ -298,8 +302,12 @@ fn plausible_access_denied_exit(code: i32) -> bool {
 /// With no denial log and no per-PID attribution, the exit code alone decides,
 /// and the hint is fixed text: there is no path here to name.
 #[cfg(windows)]
-pub(crate) fn denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) -> Option<String> {
-    if !plausible_access_denied_exit(exit_code) {
+pub(crate) fn denial_hint(
+    _pids: &HashSet<u32>,
+    _since: Instant,
+    exit_code: Option<i32>,
+) -> Option<String> {
+    if !exit_code.is_some_and(plausible_access_denied_exit) {
         return None;
     }
     Some(
@@ -850,6 +858,16 @@ mod tests {
             hint.contains("(2 more)"),
             "five denials over a cap of three must note two more; got {hint:?}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_denial_hint_reads_the_raw_exit_code() {
+        let pids = HashSet::new();
+        let since = Instant::now();
+        assert!(denial_hint(&pids, since, Some(0xC000_0022_u32.cast_signed())).is_some());
+        assert!(denial_hint(&pids, since, None).is_none());
+        assert!(denial_hint(&pids, since, Some(1)).is_none());
     }
 
     #[cfg(windows)]

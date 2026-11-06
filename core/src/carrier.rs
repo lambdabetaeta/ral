@@ -331,7 +331,7 @@ pub trait Transport: Send + Sync {
     ///
     /// # Errors
     /// As [`Self::cwd`].
-    fn session_ended(&self) -> Result<Option<i32>, ProbeError> {
+    fn session_ended(&self) -> Result<Option<u8>, ProbeError> {
         read(self, &Probe::SessionEnded)
     }
 

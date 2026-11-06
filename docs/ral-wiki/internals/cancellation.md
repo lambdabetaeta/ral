@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 96e103a5
-verified_at_date: 2026-11-01
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
+verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_date: 2026-11-06
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
 # Cancellation
@@ -310,7 +310,8 @@ call it is a child of — into the handle's `WorkerStopped` error, so a cancel
 made inside the session is the awaiter's failure, never a foreign stop that
 ends its run (`convert_own_stop`). The root's causes (`Terminated`,
 `Aborted`), `Interrupted` and an unnamed stop pass every base and reach the
-top uninterpreted, read as `Ending::Stopped`
+top uninterpreted as `End::Stopped(Stop { cause, owner, at })`; the wire's
+`Ending::Stopped` carries only the cause
 ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
 
 ### The shield
@@ -393,24 +394,38 @@ slice.
 **A run's ending is a function of its cause, never of where the cancel
 landed.** A cancel that lands before a spawn meets a poll point; one that
 lands after meets a torn-down child. Both doors mint the one constructor
-`Break::stopped(cause, owner)`, so the two cannot disagree. `Break::code` is
-the one table: an error's code is its `Status`'s, an `exit n` is `n`, a stop
-is its cause's. `Status` is a two-level sum, each level with its own messages
-and hints:
+`Break::stopped(cause, owner)`, so the two cannot disagree. Two traits
+project status. `FailureCode::failure_code() -> NonZeroU8` belongs to what can
+only fail: a cause, a `Stop`, a `Status`, an `Error`, an `ErrorRecord`.
+`ExitCode::code() -> u8` belongs to what can also succeed: an ending (`Ok` is
+0, an `exit n` is `n`, a panic 101, the rest delegate) and a `Break`. `Stop`
+holds cause, owner and unwind span; `End = Ending<Value, Error, Stop>` holds
+the ending. `Status` is a two-level sum with its own messages and hints:
 
-    Status         = Raised(i32) | WorkerStopped(WorkerStop) | Process(CommandFailure)
+    Status         = Raised(NonZeroU8) | WorkerStopped(WorkerStop) | Process(CommandFailure)
     CommandFailure = ExitCode(i32) | Signal(Signal) | Spawn(SpawnFailure)
+
+The two command-audit observers read `Break`'s `code`; `fact::Command.status`
+is `u8`, since a command can succeed.
 
 `WorkerStopped` is the one stop that becomes an error: a worker's boundary
 converts a `Cancelled` or `TimedOut` stop owned inside the session, and
-`await`/`poll` report it as the awaiter's failure. Each fact owns its code (`CancelCause::code`, `SpawnFailure::code`,
-`CommandFailure::code`, `Signal::status`/`Signal::of_status` for `128 + n`);
-a signal handler's `_exit` reads `CancelCause::code` directly:
+`await`/`poll` report it as the awaiter's failure. Signal handlers call
+`failure_code`, which allocates and locks nothing, widening only at
+`_exit`/`ExitProcess`. `Signal::status` and `Signal::of_status` retain their
+raw `i32` arithmetic for `128 + n`. External failures enter through
+`failure_byte`, clamped into `1..=255`; raw `CommandFailure::ExitCode(i32)`
+remains available for messages and hints. A negative Windows `NTSTATUS` must
+not become success. `exit` refuses outside `0..=255` and `fail` outside
+`1..=255`. A failure reporting success is unrepresentable: every stored
+failure status, the wire's included, is `NonZeroU8`
+([[design/endings|endings]]):
 
 | break | code |
 |---|---:|
-| `Raised(n)`, `ExitCode(n)`, `exit n` | n |
-| `Signal(s)` | 128 + s |
+| `Raised(n)`, `exit n` | n |
+| `ExitCode(n)` | n clamped into `1..=255` |
+| `Signal(s)` | 128 + s, clamped into `1..=255` |
 | spawn: not found | 127 |
 | spawn: any other | 126 |
 | `stop Interrupted` | 130 (`128 + SIGINT`) |
@@ -419,6 +434,7 @@ a signal handler's `_exit` reads `CancelCause::code` directly:
 | `stop Terminated` | 143 (`128 + SIGTERM`) |
 | `stop Aborted` | 131 (`128 + SIGQUIT`) |
 | `stop ReaderGone` | 141 (`128 + SIGPIPE`) |
+| `Panic(_)` | 101 |
 
 Errors reach ral code as the error record's `reason`
 (`shell/runtime/error/record.rs`, `Reason`), of which `status` is the projection;

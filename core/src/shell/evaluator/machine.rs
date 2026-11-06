@@ -23,7 +23,7 @@ use crate::shell::exec::redirect::scope::{RedirectState, WriteFate};
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
     Binding, Break, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle, Env, Error, Escape,
-    FrameHandle, HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell, Signature,
+    FrameHandle, HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell, Signature, Stop,
     TrailScope, Value, report_value, sig, sig_hint,
 };
 use crate::source::{Span, Spanned};
@@ -151,17 +151,17 @@ pub(super) fn stamp(b: Break, span: Option<Span>) -> Break {
     match (b, span) {
         (Break::Error(e), Some(span)) if e.span.is_none() => Break::Error(e.at_span(span)),
         (
-            Break::Escape(Escape::Stopped {
+            Break::Escape(Escape::Stopped(Stop {
                 cause,
                 owner,
                 at: None,
-            }),
+            })),
             Some(span),
-        ) => Break::Escape(Escape::Stopped {
+        ) => Break::Escape(Escape::Stopped(Stop {
             cause,
             owner,
             at: Some(span),
-        }),
+        })),
         (b, _) => b,
     }
 }
@@ -1613,7 +1613,7 @@ mod tests {
             .cancel(crate::process::cancel::CancelCause::Cancelled);
         let out = evaluate(node, shell.env.clone(), &mooring, &mut shell);
         assert!(
-            matches!(out, Err(Break::Escape(Escape::Stopped { at: Some(at), .. })) if at == span)
+            matches!(out, Err(Break::Escape(Escape::Stopped(Stop { at: Some(at), .. }))) if at == span)
         );
     }
 
@@ -1657,7 +1657,7 @@ mod tests {
                 .home
                 .cancel(crate::process::cancel::CancelCause::Cancelled);
             match run_with(source, &mooring, &mut shell) {
-                Err(Break::Escape(Escape::Stopped { at, .. })) => {
+                Err(Break::Escape(Escape::Stopped(Stop { at, .. }))) => {
                     assert!(at.is_some(), "a stop in `{source}` must be located");
                 }
                 other => panic!("`{source}` must halt when cancelled, got {other:?}"),

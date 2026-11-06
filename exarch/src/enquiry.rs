@@ -170,19 +170,10 @@ fn unit(v: &FOValue) -> Result<(), String> {
 
 /// `` `some `` a slot's card, or `` `none `` for an empty one.
 fn pinned(v: &FOValue) -> Result<(), String> {
-    match v {
-        FOValue::Variant {
-            label,
-            payload: None,
-        } if label == "none" => Ok(()),
-        FOValue::Variant {
-            label,
-            payload: Some(card),
-        } if label == "some" => is::<Card>(card),
-        other => Err(format!(
-            "expected `none or `some card, got {}",
-            other.shape()
-        )),
+    match untag(v) {
+        Some(("none", None)) => Ok(()),
+        Some(("some", Some(card))) => is::<Card>(card),
+        _ => Err(format!("expected `none or `some card, got {}", v.shape())),
     }
 }
 
@@ -215,7 +206,7 @@ impl Family for Agents {
             Self::Message(message) => tag("message", Some(message.encode())),
             Self::Stop(name) => tag("stop", Some(name.encode())),
             Self::Dismiss(name) => tag("dismiss", Some(name.encode())),
-            Self::Reply(value) => tag("reply", (value != FOValue::Unit).then_some(value)),
+            Self::Reply(value) => tag("reply", Some(value)),
             Self::Read(name) => tag("read", Some(name.encode())),
         }
     }

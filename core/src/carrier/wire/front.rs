@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::num::NonZeroU8;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::time::Duration;
@@ -426,7 +427,7 @@ impl Transport for WireTransport {
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Answer(eid, answer)) {
             let refusal = EnquiryError {
                 message: format!("answer: the host could not reply: {e}"),
-                status: 1,
+                status: NonZeroU8::MIN,
             };
             let _ = self.write(&Frame::Answer(eid, Err(refusal)));
         }

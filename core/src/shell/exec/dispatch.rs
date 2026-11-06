@@ -6,7 +6,7 @@
 //! every arm; pipeline staging reaches
 //! `resolve_command_word`/`classify_command` directly.
 
-use crate::fact::{AuditIo, Command};
+use crate::fact::{AuditIo, Command, ExitCode};
 use crate::ir::{CommandName, CommandWord};
 use crate::shell::runtime::{
     AuditStart, Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring,
@@ -183,7 +183,7 @@ fn finish_command(
         Observed::Command(Command::new(
             shown,
             Value::render_argv(args),
-            broke.map_or(0, Break::code),
+            broke.map_or(0, ExitCode::code),
             CommandOrigin::External,
             io,
             broke.map(Break::to_string),

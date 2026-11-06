@@ -4,7 +4,7 @@
 //! exarch's tool evaluator and batch all enter through [`Shell::run`], which
 //! resolves the [`Run`]'s [`Program`] — source text or a registered hook — then
 //! drives [`compile_run`], [`build_run`] and [`run_framed`] to a
-//! [`Settled<Value>`] and a transport status.
+//! [`Settled<Value>`].
 //!
 //! The frame splits by mutability. What a run fixes once is a [`Mooring`], an
 //! owned local every callee borrows, so the stack unwinding restores an outer
@@ -13,15 +13,17 @@
 //! host may catch a worker panic and carry the same `Shell` on.
 
 use crate::compile::compile_and_typecheck;
-use crate::diagnostic::{Rejection, Report};
+use crate::diagnostic::Rejection;
+use crate::fact::FailureCode as _;
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source};
-use crate::process::{CancelCause, Deadline, RequestedTerminalAccess, Scope, ScopeNode};
+use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
-    Break, DeferredSink, Desk, Error, Escape, Fork, Mooring, Notice, NurseryGuard, Observation,
+    Break, DeferredSink, Desk, End, Error, Fork, Mooring, Notice, NurseryGuard, Observation,
     Settled, Shell, SurfaceSink, TrailScope, Value, final_poll,
 };
 use crate::source::{FileId, Span};
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 mod report;
@@ -39,25 +41,17 @@ pub enum StaticDiagnostics {
 
 impl StaticDiagnostics {
     /// The run drawn whole, with the exit status it ends on.
-    pub fn render(&self) -> (String, i32) {
+    pub fn render(&self) -> (String, NonZeroU8) {
         match self {
             Self::Compile(rejection) => (rejection.render(), rejection.status),
-            Self::Host(e) => render_spanless(e),
+            Self::Host(e) => spanless(e),
         }
     }
 }
 
-/// A spanless [`Error`] drawn as the one-liner, with the exit status it ends
-/// on: the one rule for an error that has no source to point a caret into.
-fn render_spanless(e: &Error) -> (String, i32) {
-    let report = Report {
-        code: None,
-        message: e.message.clone(),
-        at: None,
-        also: None,
-        hint: e.hint.as_deref().map(Into::into),
-    };
-    (report.plain(), e.code())
+/// A host-level error as the one-liner a host prints, and the status it exits on.
+fn spanless(e: &Error) -> (String, NonZeroU8) {
+    (e.render_spanless(), e.failure_code())
 }
 
 // ── The run entry: one synchronous, runtime-agnostic host entry ──────────────
@@ -106,96 +100,30 @@ pub enum RunReport {
     /// carry.
     Static { diagnostics: StaticDiagnostics },
     Ran {
-        ending: Ending,
+        ending: End,
+        compact: Option<FileId>,
         captured: Option<Captured>,
         /// This dispatch's own trail, filled in by [`Shell::run_under`] once
         /// the scope it held closes; empty when `Run.trail` was `None`.
         trail: Vec<Observation>,
     },
-    /// The run panicked. `env` and `context` were rolled back to the
-    /// checkpoint taken at entry, but whatever the run did outside them
-    /// (commands, files) stands.
-    Faulted { error: Error },
 }
 
 #[cfg(any(test, feature = "test-util"))]
 impl RunReport {
     /// The ending of a run whose source must reach evaluation and report;
-    /// a static rejection or a fault panics, naming its diagnostic.
+    /// a static rejection panics, naming its diagnostic.
     ///
     /// # Panics
-    /// On [`Self::Static`] and [`Self::Faulted`].
+    /// On [`Self::Static`].
     #[track_caller]
-    pub fn expect_ran(self) -> Ending {
+    pub fn expect_ran(self) -> End {
         match self {
             Self::Ran { ending, .. } => ending,
             Self::Static { diagnostics } => panic!(
                 "the run must reach evaluation, but was refused:\n{}",
                 diagnostics.render().0
             ),
-            Self::Faulted { error } => panic!(
-                "the run must reach evaluation and report, but faulted: {}",
-                error.message
-            ),
-        }
-    }
-}
-
-/// How a run left evaluation — one arm per way out.
-///
-/// `Ok` beside a timed-out flag is not a state the type can hold.
-/// Unrendered: the error text is rendered once, in
-/// [`Report`](crate::protocol::Report), where a
-/// [`SourceDb`](crate::source::SourceDb) is in hand.
-#[derive(Debug)]
-pub enum Ending {
-    Settled {
-        value: Value,
-        status: i32,
-    },
-    /// `compact` is the root source of a one-command program, the one that
-    /// picks the compact runtime-error rendering.
-    Raised {
-        error: Error,
-        compact: Option<FileId>,
-    },
-    /// A stop that reached the top, a top-level effect: the run was ended, not failed.
-    Stopped {
-        cause: CancelCause,
-        at: Option<Span>,
-        compact: Option<FileId>,
-    },
-    Exited(i32),
-}
-
-impl Ending {
-    /// The transport status: ambient for [`Self::Settled`] (captured at
-    /// construction, since it reads session state a later run could change),
-    /// a pure function of the escape for every other arm.
-    pub fn status(&self) -> i32 {
-        match self {
-            Self::Settled { status, .. } => *status,
-            Self::Raised { error, .. } => error.code(),
-            Self::Stopped { cause, .. } => i32::from(cause.code()),
-            Self::Exited(code) => *code,
-        }
-    }
-
-    /// Recover the flat view a caller that only wants pass/fail still wants.
-    ///
-    /// # Errors
-    /// Every non-[`Self::Settled`] arm, folded back into the [`Break`] it
-    /// came from.
-    pub fn into_result(self) -> Settled<Value> {
-        match self {
-            Self::Settled { value, .. } => Ok(value),
-            Self::Raised { error, .. } => Err(Break::Error(error)),
-            Self::Stopped { cause, at, .. } => Err(Break::Escape(Escape::Stopped {
-                cause,
-                owner: None,
-                at,
-            })),
-            Self::Exited(code) => Err(Break::Escape(Escape::Exit(code))),
         }
     }
 }
@@ -234,7 +162,7 @@ impl Shell {
     /// `dispatch`'s panic arm rolls back does not cover `local.audit`
     /// (`LocalState` partitions it deliberately), so only a scope the panic
     /// cannot skip keeps the opener's close law true at dispatch
-    /// granularity. A panic reports `Faulted` by declaration — the trail
+    /// granularity. A panic is an ending — the trail
     /// closes and is discarded, never attached.
     pub(crate) fn run_under(&mut self, under: &Scope, req: RunRequest) -> RunReport {
         // A run is the extent of ral's picture of `PATH`: whatever happened to
@@ -258,14 +186,11 @@ impl Shell {
             }
             Err(payload) => {
                 (self.env, self.context) = checkpoint;
-                RunReport::Faulted {
-                    error: Error::raised(
-                        format!(
-                            "run panicked: {}",
-                            crate::shell::runtime::panic_text(payload.as_ref())
-                        ),
-                        101,
-                    ),
+                RunReport::Ran {
+                    ending: End::Panic(crate::shell::runtime::panic_text(payload.as_ref())),
+                    compact: None,
+                    captured: None,
+                    trail: Vec::new(),
                 }
             }
         }
@@ -404,27 +329,14 @@ impl Shell {
             terminal_access,
         };
         let next = build_run(self, capture.as_ref(), stdin);
-        let (result, status) = run_framed(&mooring, self, next, &run, wall, body);
+        let result = run_framed(&mooring, self, next, &run, wall, body);
 
         RunReport::Ran {
-            ending: classify_ending(result, status, compact),
+            ending: End::settled(result),
+            compact,
             captured: capture.map(Capture::finish),
             // Filled in by `enter`, which holds this dispatch's scope.
             trail: Vec::new(),
-        }
-    }
-}
-
-/// Fold a settled body's raw parts into the one [`Ending`] they describe.
-/// `status` is used only for [`Ending::Settled`] — every other arm's status
-/// is a pure function of the escape, read lazily through [`Ending::status`].
-fn classify_ending(result: Settled<Value>, status: i32, compact: Option<FileId>) -> Ending {
-    match result {
-        Ok(value) => Ending::Settled { value, status },
-        Err(Break::Error(error)) => Ending::Raised { error, compact },
-        Err(Break::Escape(Escape::Exit(code))) => Ending::Exited(code),
-        Err(Break::Escape(Escape::Stopped { cause, at, .. })) => {
-            Ending::Stopped { cause, at, compact }
         }
     }
 }
@@ -566,7 +478,7 @@ pub(crate) fn compile_run(
     Ok((top, compact))
 }
 
-/// Install the built run state, run `body`, compute the transport status,
+/// Install the built run state, run `body`,
 /// and tear the frame down. Both program arms settle to one [`Settled<Value>`],
 /// so this spine is shared verbatim; the caller keeps the mooring, the limits
 /// and the classification.
@@ -577,7 +489,7 @@ pub(crate) fn run_framed(
     run: &Run,
     wall: Option<Deadline>,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
-) -> (Settled<Value>, i32) {
+) -> Settled<Value> {
     let guard = IoLoan::install(shell, next, Scope::clone(&mooring.home));
     let shell = &mut *guard.shell;
     // Only a source run registers: a hook's spans point into the file the hook
@@ -594,6 +506,11 @@ pub(crate) fn run_framed(
     // A trail opened by this run reports the deputy prefixes of the stack it runs under.
     shell.audit_deputy_prefixes();
     let result = body(mooring, shell);
+    let result = if run.last {
+        result.and_then(|v| crate::shell::builtins::concurrency::outlive(shell).map(|()| v))
+    } else {
+        result
+    };
 
     // The run's last step boundary.  The wall is disarmed first; a firing
     // the daemon has already claimed is waited for (the node may already
@@ -602,8 +519,6 @@ pub(crate) fn run_framed(
         claimed.wait();
     }
     let result = final_poll(result, &mooring.home);
-
-    let status = result.as_ref().err().map_or(0, Break::code);
 
     // Ready-boundary housekeeping — reap notices as `` `notice `` surface
     // classes, the large-binding warning onto stderr — must go out while this
@@ -616,7 +531,7 @@ pub(crate) fn run_framed(
 
     drop(guard);
 
-    (result, status)
+    result
 }
 
 impl Shell {

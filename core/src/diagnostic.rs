@@ -10,6 +10,7 @@ use crate::io::terminal::stderr_color;
 use crate::source::{Source, Span};
 use ariadne::{Color, Config, IndexType, ReportKind};
 use std::fmt::Write;
+use std::num::NonZeroU8;
 use std::ops::Range;
 
 /// A span and the phrase placed beside its underline; `None` is the end of
@@ -41,7 +42,7 @@ pub struct Rejection {
     pub source: Source,
     pub reports: Vec<Report>,
     /// The status a run that failed so exits on.
-    pub status: i32,
+    pub status: NonZeroU8,
 }
 
 impl Rejection {

@@ -5,6 +5,7 @@
 
 use crate::data::{FOValue, Finite};
 use std::collections::BTreeMap;
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 #[doc(hidden)]
@@ -22,17 +23,23 @@ fn expected(what: &str, v: &FOValue) -> String {
     format!("expected {what}, got {}", v.shape())
 }
 
+/// A tagged value; `Unit` is represented by an absent payload.
 pub fn tag(label: &str, payload: Option<FOValue>) -> FOValue {
     FOValue::Variant {
         label: label.into(),
-        payload: payload.map(Box::new),
+        payload: payload
+            .filter(|p| !matches!(p, FOValue::Unit))
+            .map(Box::new),
     }
 }
 
-/// A variant's label and payload; `None` for anything else.
+/// A variant's label and payload, a `Unit` payload read as absent; `None` for anything else.
 pub fn untag(v: &FOValue) -> Option<(&str, Option<&FOValue>)> {
     match v {
-        FOValue::Variant { label, payload } => Some((label, payload.as_deref())),
+        FOValue::Variant { label, payload } => Some((
+            label,
+            payload.as_deref().filter(|p| !matches!(p, FOValue::Unit)),
+        )),
         _ => None,
     }
 }
@@ -166,12 +173,11 @@ macro_rules! variant {
         }
     };
     (@dec $label:literal, $arm:path, $p:ident, $t:ty) => {
-        match $p {
-            Some(x) => <$t as $crate::data::datum::Datum>::decode(x)
-                .map($arm)
-                .map_err(|why| format!("`{}: {why}", $label)),
-            None => Err(format!("`{} needs a payload", $label)),
-        }
+        <$t as $crate::data::datum::Datum>::decode(
+            $p.unwrap_or(&$crate::data::FOValue::Unit),
+        )
+        .map($arm)
+        .map_err(|why| format!("`{}: {why}", $label))
     };
     (typed $ty:ty { $($arm:ident $(($payload:ty))?: $label:literal),* $(,)? }) => {
         $crate::variant!($ty { $($arm $(($payload))?: $label),* });
@@ -230,6 +236,74 @@ pub fn labelled<T: Copy>(
         let known: Vec<_> = all.iter().map(|x| format!("`{}", label(x))).collect();
         format!("expected one of {}, got {}", known.join(", "), v.shape())
     })
+}
+
+impl Datum for () {
+    fn encode(self) -> FOValue {
+        FOValue::Unit
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        match v {
+            FOValue::Unit => Ok(()),
+            _ => Err(expected("()", v)),
+        }
+    }
+}
+
+impl Datum for u8 {
+    fn encode(self) -> FOValue {
+        FOValue::Int { value: self.into() }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        let n = v.as_int().ok_or_else(|| expected("an Int", v))?;
+        Self::try_from(n).map_err(|_| format!("{n} is not a byte (0..=255)"))
+    }
+}
+
+impl Datum for NonZeroU8 {
+    fn encode(self) -> FOValue {
+        FOValue::Int {
+            value: self.get().into(),
+        }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        let n = v.as_int().ok_or_else(|| expected("an Int", v))?;
+        u8::try_from(n)
+            .ok()
+            .and_then(Self::new)
+            .ok_or_else(|| format!("{n} is not a failure status (1..=255)"))
+    }
+}
+
+impl Datum for FOValue {
+    fn encode(self) -> Self {
+        self
+    }
+
+    fn decode(v: &Self) -> Result<Self, String> {
+        Ok(v.clone())
+    }
+}
+
+/// Serde through a type's first-order encoding.
+pub mod as_datum {
+    use super::{Datum, FOValue};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// # Errors
+    /// The serializer's error.
+    pub fn serialize<T: Datum + Clone, S: Serializer>(v: &T, s: S) -> Result<S::Ok, S::Error> {
+        v.clone().encode().serialize(s)
+    }
+
+    /// # Errors
+    /// Invalid first-order data, or the type's decode error.
+    pub fn deserialize<'de, T: Datum, D: Deserializer<'de>>(d: D) -> Result<T, D::Error> {
+        T::decode(&FOValue::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Datum for String {
@@ -302,7 +376,7 @@ impl<T: Datum> Datum for Option<T> {
     fn decode(v: &FOValue) -> Result<Self, String> {
         match untag(v) {
             Some(("none", None)) => Ok(None),
-            Some(("some", Some(x))) => T::decode(x).map(Some),
+            Some(("some", payload)) => T::decode(payload.unwrap_or(&FOValue::Unit)).map(Some),
             _ => Err(expected("`none or `some", v)),
         }
     }
@@ -411,5 +485,69 @@ impl<A: Datum, B: Datum> Datum for (A, B) {
             Some([a, b]) => Ok((A::decode(a)?, B::decode(b)?)),
             _ => Err(expected("a list of 2 elements", v)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ty::{Ty, Typed};
+
+    #[test]
+    fn a_unit_payload_is_absent_at_both_doors() {
+        let raw = |payload: Option<FOValue>| FOValue::Variant {
+            label: "ok".into(),
+            payload: payload.map(Box::new),
+        };
+        assert_eq!(tag("ok", Some(FOValue::Unit)), raw(None));
+        assert_eq!(tag("ok", Some(1_i64.encode())), raw(Some(1_i64.encode())));
+        for absent in [None, Some(FOValue::Unit)] {
+            assert_eq!(untag(&raw(absent)), Some(("ok", None)));
+        }
+        let one = raw(Some(1_i64.encode()));
+        assert_eq!(untag(&one), Some(("ok", Some(&1_i64.encode()))));
+    }
+
+    #[test]
+    fn an_absent_payload_decodes_as_unit_only_for_unit() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Carrier {
+            Carried(()),
+            Number(i64),
+        }
+        variant!(Carrier {
+            Carried(()): "carried",
+            Number(i64): "number",
+        });
+        assert_eq!(
+            Carrier::decode(&tag("carried", None)),
+            Ok(Carrier::Carried(()))
+        );
+        let why = Carrier::decode(&tag("number", None)).unwrap_err();
+        assert!(why.starts_with("`number:"), "{why}");
+        assert_eq!(Option::<()>::decode(&tag("some", None)), Ok(Some(())));
+        assert!(Option::<i64>::decode(&tag("some", None)).is_err());
+    }
+
+    #[test]
+    fn an_optional_unit_round_trips() {
+        for value in [None, Some(())] {
+            assert_eq!(Option::<()>::decode(&value.encode()), Ok(value));
+        }
+        assert_eq!(Option::<i64>::decode(&Some(1_i64).encode()), Ok(Some(1)));
+    }
+
+    #[test]
+    fn a_byte_decodes_only_a_byte() {
+        assert_eq!(u8::decode(&255_i64.encode()), Ok(255));
+        assert_eq!(u8::decode(&0_i64.encode()), Ok(0));
+        for n in [-1_i64, 256] {
+            assert_eq!(
+                u8::decode(&n.encode()),
+                Err(format!("{n} is not a byte (0..=255)"))
+            );
+        }
+        assert!(u8::decode(&FOValue::Unit).is_err());
+        assert_eq!(u8::ty(), Ty::Int);
     }
 }

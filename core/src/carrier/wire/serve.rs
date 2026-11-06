@@ -576,6 +576,7 @@ mod within_tests;
 mod wire_desk_tests {
     use super::*;
     use crate::process::{CancelCause, DurableRoot};
+    use crate::shell::runtime::Stop;
 
     /// A desk for dispatch `id` whose events leave on `ours`.
     fn desk_over(ours: WireChannel, id: u64) -> WireDesk {
@@ -649,10 +650,10 @@ mod wire_desk_tests {
     fn is_cancelled_stop(br: &Break) -> bool {
         matches!(
             br,
-            Break::Escape(crate::shell::runtime::Escape::Stopped {
+            Break::Escape(crate::shell::runtime::Escape::Stopped(Stop {
                 cause: CancelCause::Cancelled,
                 ..
-            })
+            }))
         )
     }
 
@@ -768,9 +769,11 @@ mod wire_desk_tests {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod engine_session_tests {
     use super::*;
+    use crate::fact::ExitCode as _;
     use crate::host::env::test_support::env_guard;
     use crate::path::EnginePath;
     use crate::process::cancel::REQUEST_SERIAL;
+    use crate::protocol::Ran;
 
     const WAIT: Duration = Duration::from_secs(20);
 
@@ -913,14 +916,10 @@ mod engine_session_tests {
 
     fn ran_int(report: &Report) -> i64 {
         match report {
-            Report::Ran {
-                ending:
-                    crate::protocol::Ending::Settled {
-                        value: FOValue::Int { value },
-                        ..
-                    },
+            Report::Ran(Ran {
+                ending: crate::protocol::Ending::Ok(FOValue::Int { value }),
                 ..
-            } => *value,
+            }) => *value,
             other => panic!("expected Ran Ok Int, got {other:?}"),
         }
     }
@@ -1020,7 +1019,7 @@ mod engine_session_tests {
         )));
         let report = host.report(1);
         assert!(
-            matches!(&report, Report::Ran { ending, .. } if ending.status() == 130),
+            matches!(&report, Report::Ran(Ran { ending, .. }) if ending.code() == 130),
             "an interrupted run reports 130, got {report:?}"
         );
         assert_eq!(ran_int(&host.run(2, "$[1 + 1]")), 2, "the session lives on");
@@ -1039,7 +1038,7 @@ mod engine_session_tests {
         let report = host.run(2, "/bin/sleep 30");
         crate::process::cancel::clear_root_request();
         assert!(
-            matches!(&report, Report::Ran { ending, .. } if ending.status() == 143),
+            matches!(&report, Report::Ran(Ran { ending, .. }) if ending.code() == 143),
             "a terminated run reports 143, got {report:?}"
         );
         assert_eq!(host.hang_up_and_join(), 0);

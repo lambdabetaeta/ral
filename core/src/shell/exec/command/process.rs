@@ -128,11 +128,16 @@ pub(crate) fn with_denials(
     if shell.sandbox_projection().is_none() {
         return err;
     }
-    if let Some(hint) = crate::authority::sandbox::denial_hint(&pids(), since, err.code()) {
+    if let Some(hint) = crate::authority::sandbox::denial_hint(&pids(), since, err.status.exited())
+    {
         return err.append_hint(hint);
     }
     #[cfg(target_os = "macos")]
-    if let Some(hint) = crate::process::limits::failure_hint(err.code()) {
+    if let Some(hint) = err
+        .status
+        .exited()
+        .and_then(crate::process::limits::failure_hint)
+    {
         return err.append_hint(hint);
     }
     err

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f2a121e88af273984c3777093eded870b1fe0070
-generated_at_date: 2026-11-05
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_date: 2026-11-06
 covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -141,7 +141,7 @@ text inwards: `run_file` reads a script path, `run_stdin` reads a piped script,
 and both meet `-c` at `run_source`, which is therefore where line endings are
 normalised — one place, one rule. Batch holds no `Shell`: it boots an
 `IdentityTransport` from the `batch` installer and speaks only the protocol,
-through `dispatch_to_report` under the mute host `()`, so it shares the REPL's
+through `dispatch_to_report` with its output host, so it shares the REPL's
 one ending law and one typecheck
 ([[design/engine-protocol|engine-protocol]]).
 
@@ -164,20 +164,26 @@ one ending law and one typecheck
   applies `--capabilities` under its own mooring. Each profile path reaches
   it absolute, anchored at the invocation cwd by `Boot::profiles`, so no
   profile's `cd` can redirect a later one. `boot_builtin::settle` reads
-  its `Ending`: a load failure is `Raised` status 2, an `exit N` is
+  its `Ending`: a load failure is `Err` status 2, an `exit N` is
   `Exited(N)`, and either stops batch there, exactly as it stops the REPL.
 - **The run.** The script is a `Program::Source` dispatch under
-  `GrantStack::root()` and the mute host, inheriting IO and stdin; the engine
+  `GrantStack::root()` with `Run.last: true`, inheriting IO and stdin; the engine
   typechecks it once against the live session. The terminal is `Leased` only
   when the probed terminal carries `startup_foreground`
   ([[decisions/260619_terminal-lease|terminal-lease]]). A watched worker's
-  lines reach batch's deferred sink, which prints them to stdout.
+  lines reach batch's deferred sink, which prints them to stdout. A returning
+  script claims and waits for still-unclaimed loose workers in birth order,
+  replaying stdout then stderr and discarding all five endings. A halt skips
+  that wait and session teardown takes them down. Their `done` events are
+  silently consumed; no completion notice changes output or status.
 - **The verdict.** batch prints the `Report`'s `rendered` as the REPL does and
-  exits with the ending's status through `platform::exit_byte`.
+  exits on `Report::code() -> u8` through `std::process::ExitCode::from(u8)`.
 - **Audit.** `--audit` asks the script's dispatch for its trail
-  (`Run.trail`) and builds the envelope from the `Report`: the trail, and an
-  `` `err `` outcome from the failing ending's `record` — the one `try` hands
-  its handler.
+  (`Run.trail`) and maps the whole ending through `Datum`: `` `ok value ``,
+  `` `err record ``, `` `exited n ``, `` `stopped cause `` or `` `panic text ``.
+  Unit's payload is absent, so a unit result reads `{"tag":"ok"}`; no
+  record re-decoding or fallback is needed
+  ([[design/endings|endings]]).
 
 ## Embedding and the baked prelude
 
@@ -211,8 +217,10 @@ scope[0], so the per-run seed and the prelude's own schemes agree by constructio
 binary needs: `probe_terminal` (under `RAL_INTERACTIVE_MODE`),
 `local_attach` (an in-process engine's `Attach`, at this process's own cwd and
 home), `load_exit_hints` (user override in the data dir, else the embedded
-`data/exit-hints.txt`), and `exit_byte` (the one clamp-and-narrow every mode's
-final code funnels through).
+`data/exit-hints.txt`). Every shell ending already has a byte status;
+`exit` and `fail` refuse out-of-range inputs and only external failures are
+clamped at entry. The utility subprocess's own `i32` clamp in `uutils.rs`
+is separate from this family.
 Default-env seeding is core's: `boot_shell` seeds the host's env and cwd
 (`shell::boot::seed_env`, private) between building the shell and seating the
 prelude.

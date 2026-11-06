@@ -10,6 +10,7 @@
 mod common;
 
 use ral_core::authority::policy::{Capabilities, FsPolicy};
+use ral_core::fact::ExitCode as _;
 use ral_core::path::FrozenPath;
 use ral_core::test_helper::confinement::{Confining, admitted, denied, run};
 use ral_core::test_helper::{layer, stack};
@@ -112,7 +113,7 @@ fn moved_exclusions_reach_children_through_the_identity_transport() {
     use ral_core::engine::EngineInstaller;
     use ral_core::io::terminal::TerminalState;
     use ral_core::path::EnginePath;
-    use ral_core::protocol::{Attach, EngineSpec, Report, Root, Run};
+    use ral_core::protocol::{Attach, EngineSpec, Ran, Report, Root, Run};
     use ral_core::source::SourceOrigin;
     use std::sync::Arc;
 
@@ -166,13 +167,13 @@ fn moved_exclusions_reach_children_through_the_identity_transport() {
             None,
         )
         .unwrap();
-        let Report::Ran {
+        let Report::Ran(Ran {
             ending, captured, ..
-        } = report
+        }) = report
         else {
             panic!("expected evaluation, got {report:?}");
         };
-        (ending.status(), captured.unwrap())
+        (ending.code(), captured.unwrap())
     };
     let (status, output) = dispatch("/bin/cat ok copy; /bin/ls absent");
     assert_eq!(status, 0, "{output:?}");

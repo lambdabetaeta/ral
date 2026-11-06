@@ -540,7 +540,7 @@ fn a_retained_desk_refuses_start_after_its_loan_returns() {
     let err = retained
         .ask(start_req(NurseryId(0), "hi", "helper"))
         .unwrap_err();
-    assert_eq!(err.code(), EnquiryError::no_desk().status);
+    assert_eq!(err.failure_code(), EnquiryError::no_desk().status);
     assert_eq!(err.message, EnquiryError::no_desk().message);
 }
 

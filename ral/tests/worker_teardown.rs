@@ -1,4 +1,4 @@
-// A batch script that ends while a worker's external command is still running
+// A batch script that halts while a worker's external command is still running
 // must take that command down with it — grandchildren included — rather than
 // leaving it reparented to PID 1 to run to completion.
 //
@@ -147,11 +147,10 @@ fn nothing_survives(tail: &str) {
     tree.assert_gone(out);
 }
 
-/// Falling off the end of the script is the plain case: the session's shell
-/// drops with the worker still live.
+/// A returning script now waits; an explicit halt takes the worker down.
 #[test]
-fn a_workers_external_child_dies_with_the_batch_host() {
-    nothing_survives("echo hi");
+fn a_workers_external_child_dies_when_the_batch_script_halts() {
+    nothing_survives("echo hi\nexit 0");
 }
 
 /// `cancel` is the sharper one: it takes the entry out of the registry the

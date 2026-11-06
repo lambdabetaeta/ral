@@ -26,9 +26,10 @@ use std::time::{Duration, Instant};
 mod test_helper;
 
 use ral_core::carrier::{Host, Transport, WireTransport, dispatch_to_report};
+use ral_core::fact::ExitCode as _;
 use ral_core::path::EnginePath;
 use ral_core::protocol::channel::Liveness;
-use ral_core::protocol::{Attach, DispatchId, EngineSpec, Event, Report, Root, Run};
+use ral_core::protocol::{Attach, DispatchId, EngineSpec, Event, Ran, Report, Root, Run};
 use ral_core::source::SourceOrigin;
 
 // Mirror the binary's pre-`main` re-exec dispatch: the `--engine` re-exec is
@@ -98,10 +99,10 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
     assert!(
         matches!(
             report,
-            Report::Ran {
-                ending: ral_core::protocol::Ending::Settled { .. },
+            Report::Ran(Ran {
+                ending: ral_core::protocol::Ending::Ok(_),
                 ..
-            }
+            })
         ),
         "`$[1 + 1]` must settle to Report::Ran {{ Ok }}, got {report:?}"
     );
@@ -150,13 +151,13 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
         elapsed < Duration::from_secs(10),
         "the overtaking cancel was dropped: the run slept {elapsed:?} of its 30 s"
     );
-    let Report::Ran { ending, .. } = report else {
+    let Report::Ran(Ran { ending, .. }) = report else {
         panic!("the run must reach evaluation, got {report:?}");
     };
     // The scope is cancelled before the run reads it, so `sleep` is never
     // spawned and the eval unwinds at its first check point.
     assert_eq!(
-        ending.status(),
+        ending.code(),
         143,
         "a run born under a cancelled scope unwinds without spawning"
     );

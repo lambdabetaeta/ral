@@ -25,6 +25,7 @@ use crate::record::{AgentId, Memory, Voice};
 use crate::record::{Display, Record, Transient};
 use crate::schedule::{Asked, parse_duration};
 use ral_core::data::datum::tag;
+use ral_core::fact::ExitCode as _;
 use ral_core::shell::runtime::NurseryId;
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -515,7 +516,7 @@ fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
         (report, host)
     });
     assert!(
-        matches!(report, ral_core::protocol::Report::Ran { ending, .. } if ending.status() == 0)
+        matches!(report, ral_core::protocol::Report::Ran(ral_core::protocol::Ran { ending, .. }) if ending.code() == 0)
     );
     assert_eq!(agent.body.reply, Some(text("returned state")));
     let error = host

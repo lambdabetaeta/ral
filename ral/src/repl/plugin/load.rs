@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn every_shipped_plugin_loads() {
         use crate::repl::host::ReplHost;
-        use ral_core::protocol::{Ending, Report};
+        use ral_core::protocol::{Ending, Ran, Report};
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins");
         let mut plugins: Vec<_> = std::fs::read_dir(&dir)
@@ -421,14 +421,15 @@ mod tests {
                     .dispatch(&t, run, None)
                     .0
                 {
-                    Ok(Report::Ran {
-                        ending: Ending::Settled { .. },
+                    Ok(Report::Ran(Ran {
+                        ending: Ending::Ok(_),
                         ..
-                    }) => None,
-                    Ok(Report::Ran {
-                        ending: Ending::Raised { rendered, .. },
+                    })) => None,
+                    Ok(Report::Ran(Ran {
+                        ending: Ending::Err(_),
+                        rendered,
                         ..
-                    }) => Some(rendered),
+                    })) => Some(rendered),
                     other => Some(format!("{}: {other:?}", plugin.display())),
                 }
             })

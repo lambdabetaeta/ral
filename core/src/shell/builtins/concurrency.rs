@@ -20,6 +20,7 @@ use crate::shell::runtime::{Closure, Mooring, Settled, Shell, TitlePolicy, Value
 pub(crate) use birth::exit_brood;
 use birth::{Birth, spawn_child};
 use eliminate::join;
+pub(crate) use eliminate::outlive;
 pub(super) use eliminate::{
     builtin_await, builtin_cancel, builtin_first_settled, builtin_is_done, builtin_poll,
     builtin_race, builtin_workers,

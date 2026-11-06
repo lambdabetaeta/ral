@@ -2,7 +2,9 @@
 //! becomes: a `CommandFailure` travels on as `Status::Process` in `shell/runtime/error.rs`.
 
 use super::cancel::CancelCause;
+use crate::fact::FailureCode;
 use crate::path::shown;
+use std::num::NonZeroU8;
 
 /// The exit code ral's every Windows kill uses (ASCII "RALK"), there being
 /// no signal a terminated Windows process could carry.  A child exiting with
@@ -177,15 +179,16 @@ pub enum Unrunnable {
     File,
 }
 
-impl SpawnFailure {
-    /// The shell status: 127 for a command not found, 126 for any other.
-    pub const fn code(&self) -> u8 {
+impl FailureCode for SpawnFailure {
+    fn failure_code(&self) -> NonZeroU8 {
         match self {
-            Self::NotFound => 127,
-            _ => 126,
+            Self::NotFound => const { NonZeroU8::new(127).unwrap() },
+            _ => const { NonZeroU8::new(126).unwrap() },
         }
     }
+}
 
+impl SpawnFailure {
     /// The likeliest intent behind a path that names no program: itself as
     /// text, bound to `binder` when the head is the whole right-hand side of
     /// that `let`.
@@ -225,15 +228,25 @@ pub enum CommandFailure {
     Spawn(SpawnFailure),
 }
 
-impl CommandFailure {
-    pub fn code(&self) -> i32 {
+// Negative Windows NTSTATUS values must remain failures.
+fn failure_byte(n: i32) -> NonZeroU8 {
+    u8::try_from(n.clamp(1, 255))
+        .ok()
+        .and_then(NonZeroU8::new)
+        .unwrap_or(NonZeroU8::MIN)
+}
+
+impl FailureCode for CommandFailure {
+    fn failure_code(&self) -> NonZeroU8 {
         match self {
-            Self::ExitCode(code) => *code,
-            Self::Signal(sig) => sig.status(),
-            Self::Spawn(failure) => failure.code().into(),
+            Self::ExitCode(code) => failure_byte(*code),
+            Self::Signal(sig) => failure_byte(sig.status()),
+            Self::Spawn(failure) => failure.failure_code(),
         }
     }
+}
 
+impl CommandFailure {
     pub fn message(&self, cmd: &str) -> String {
         match self {
             #[cfg(windows)]
@@ -322,18 +335,28 @@ mod tests {
             ),
             (CommandFailure::Spawn(SpawnFailure::Io("boom".into())), 126),
         ] {
-            assert_eq!(failure.code(), code, "{failure:?}");
+            assert_eq!(failure.failure_code().get(), code, "{failure:?}");
         }
-        for (cause, code) in [
-            (CancelCause::Interrupted, 130),
-            (CancelCause::Cancelled, 143),
-            (CancelCause::TimedOut, 124),
-            (CancelCause::Terminated, 143),
-            (CancelCause::Aborted, 131),
-            (CancelCause::ReaderGone, 141),
+    }
+
+    #[test]
+    fn an_externals_failure_is_never_a_clean_exit() {
+        for (raw, code) in [
+            (300, 255),
+            (-1, 1),
+            (0xC000_013A_u32.cast_signed(), 1),
+            (3, 3),
         ] {
-            assert_eq!(cause.code(), code, "{cause:?}");
+            assert_eq!(
+                CommandFailure::ExitCode(raw).failure_code().get(),
+                code,
+                "raw status {raw}"
+            );
         }
+        assert_eq!(
+            CommandFailure::Signal(Signal::new(9)).failure_code().get(),
+            137
+        );
     }
 
     #[test]

@@ -1,12 +1,23 @@
 ---
 status: active
-generated_at_commit: dad6a1b3
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-verified_at_date: 2026-10-25
-anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEnd, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Status::WorkerStopped, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_date: 2026-11-06
+anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::of_child, final_poll, End, Stop, ExitCode, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Status::WorkerStopped, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
 ---
 
 # Delimiters are handlers for `poll`
+
+> Amended 2026-11-05 (see [[design/endings|endings]]):
+> the construct table's top-of-run row is the `err`/`exited`/`stopped`
+> projection of `Ending<Value, Error, Stop>`; `Stop` holds cause, owner and
+> unwind span. Law 7's status is `ExitCode::code() -> u8` for an ending,
+> `FailureCode::failure_code() -> NonZeroU8` for a failure, with the external
+> nonzero clamp at entry and refusal at `exit`/`fail`'s doors.
+> Law 8's run panic is its `panic` ending, status 101, after checkpoint
+> restore and capture/trail discard; `Report::Faulted` is only a lost report.
+> A loose worker's ending never changes the session's status, and its `done`
+> is announced only while still unclaimed at the host's notice check.
 
 > Amended 2026-10-23: the sentinel drains a dead edge for as long as it is
 > held, so an external that a reader-gone stage's cleanup runs does not block
@@ -422,7 +433,7 @@ lands, when a mask ends, and for a process which write is first dead.
 
 ## Where
 
-`Escape`, `Break::stopped`, `Break::of_child`, `final_poll`, `ThreadEnd` in
+`Escape`, `Stop`, `End`, `Break::stopped`, `Break::of_child`, `final_poll` in
 `core/src/shell/runtime/flow.rs` (`From<Cancellation> for Break` preserves cause
 and owner as a non-catchable stop); `Scope`, `ScopeNode`, `ScopeId`,
 `Cancellation`, `WorkerStop`, `POLL_SLICE`, `resolve` in
@@ -431,6 +442,6 @@ and owner as a non-catchable stop); `Scope`, `ScopeNode`, `ScopeId`,
 `core/src/shell/runtime/mooring.rs`; the collector's `rank`, `recv`, `escalate`,
 `cancel_all` and `StageObservation` in `core/src/shell/exec/pipeline/collect.rs`;
 `convert_own_stop` in `core/src/shell/builtins/concurrency/birth.rs`; `Ending` in
-`core/src/shell/run.rs`. See [[internals/cancellation|cancellation]] for the
+`core/src/fact/ending.rs`. See [[internals/cancellation|cancellation]] for the
 runtime narrative and [[design/effects-handlers|effects-handlers]] for the
 handler reading.

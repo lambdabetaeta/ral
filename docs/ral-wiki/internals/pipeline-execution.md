@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
-verified_at_date: 2026-10-27
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
+verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_date: 2026-11-06
+anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -336,11 +336,13 @@ honest. Its audit fragment is folded either way: the verdict is the
 collector's doing, what the stage observed still happened. A stage thread's
 end is its own `Event::Returned`, sent as
 its last act; a panic in the body is caught at the stage's base
-(`ThreadEnd::of`) and reported as `ThreadEnd::Panicked`. A panic is a defect,
+(`End::of`) and reported as `Ending::Panic`. `StageObservation.end` is
+`End = Ending<Value, Error, Stop>`, shared with runs and workers
+([[design/endings|endings]]). A panic is a defect,
 not a signal: the collector tears the pipeline down with `Aborted`, granting no
 grace, and `fold` re-raises it on the run thread (`resume_unwind`), where the
-top restores its checkpoint. A `SettleOnDrop`
-guard, constructed before the closure runs and moved into it, is each
+top restores its checkpoint and reports a `Panic` ending, status 101.
+A `SettleOnDrop` guard, constructed before the closure runs and moved into it, is each
 index's own dead-man's switch: an unwind anywhere on that thread — even
 before the closure body starts — drops the guard still armed, and the drop
 itself posts the index's `Returned` ("ral pipeline stage ended without

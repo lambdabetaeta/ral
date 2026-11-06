@@ -8,7 +8,7 @@ use atomic_refcell::AtomicRefCell;
 use ral_core::carrier::{Host, WireTransport};
 use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::protocol::channel::Liveness;
-use ral_core::protocol::{EnquiryError, Report};
+use ral_core::protocol::{EnquiryError, Ran, Report};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -85,10 +85,10 @@ fn wire_engine_run_round_trips_and_surfaces_a_value() {
     assert!(
         matches!(
             report,
-            Report::Ran {
-                ending: ral_core::protocol::Ending::Settled { .. },
+            Report::Ran(Ran {
+                ending: ral_core::protocol::Ending::Ok(_),
                 ..
-            }
+            })
         ),
         "`surface \\`ping` must settle to Report::Ran {{ Ok }}, got {report:?}"
     );
@@ -128,10 +128,10 @@ fn wire_engine_enquiry_is_answered_through_the_drain_loop() {
     .expect("the engine must answer the dispatch with a Report");
 
     match report {
-        Report::Ran {
-            ending: ral_core::protocol::Ending::Settled { .. },
+        Report::Ran(Ran {
+            ending: ral_core::protocol::Ending::Ok(_),
             ..
-        } => {}
+        }) => {}
         other => {
             panic!("`exarch-agents `list` must settle through the installed desk, got {other:?}")
         }
@@ -172,10 +172,10 @@ fn wire_engine_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
     assert!(
         matches!(
             report,
-            Report::Ran {
-                ending: ral_core::protocol::Ending::Settled { .. },
+            Report::Ran(Ran {
+                ending: ral_core::protocol::Ending::Ok(_),
                 ..
-            }
+            })
         ),
         "the spawning statement itself must settle to Report::Ran {{ Ok }}, got {report:?}"
     );
@@ -246,13 +246,10 @@ fn cancelled_within_settles_an_in_flight_wire_run_promptly() {
     assert!(
         matches!(
             report,
-            Ok(Report::Ran {
-                ending: ral_core::protocol::Ending::Stopped {
-                    cause: CancelCause::Cancelled,
-                    ..
-                },
+            Ok(Report::Ran(Ran {
+                ending: ral_core::protocol::Ending::Stopped(CancelCause::Cancelled),
                 ..
-            })
+            }))
         ),
         "the in-flight dispatch must report cancellation: {report:?}"
     );

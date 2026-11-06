@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-04
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_date: 2026-11-06
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -180,8 +180,8 @@ Bodies are grouped by concern, one submodule each:
   to an already-`Ready` handle), then `join` waits (`claim_first`) until it
   claims the handle's `Ready` result or finds it already claimed (`Stopping` or
   `Consumed`); `exact` `replay`s the stdout bytes, then the stderr bytes, into
-  the awaiter's own sinks and `conclude`s as the block ended — the value,
-  the failure as it stands, an `exit` or a stop re-raised, a panic resumed —
+  the awaiter's own sinks and calls `End::into_settled` as the block ended —
+  the value, the failure as it stands, an `exit` or a stop re-raised, a panic resumed —
   so `await` of a block is that block run there. A handle in `Stopping` or
   `Consumed` fails `await_handle` with `<verb>: this worker's result was already
   claimed`, an ordinary error, and `join` returns `None` for it, which a
@@ -197,14 +197,14 @@ Bodies are grouped by concern, one submodule each:
   `Handle Command`), so `await` returns the grade the block had. `poll` never
   writes and never claims, reporting all four states as data:
   `` `running [stdout, stderr, elapsed] ``,
-  `` `stopping [stdout, stderr, elapsed] `` (both carrying a *cumulative,
-  non-destructive* `CapturedBytes::peek` snapshot of the worker's output so
-  far, peeked before the handle is observed so the buffers stay intact for the
+  `` `stopping [elapsed] `` (a running worker carries a *cumulative,
+  non-destructive* `CapturedBytes::peek` snapshot of its output so far, peeked before the handle is observed so the buffers stay intact for the
   worker's one-shot `CapturedBytes::take` at completion),
   `` `ready [stdout, stderr, elapsed, outcome: <ok: α | err: ErrorRecord>] ``
-  (the `` `err `` payload built through `Error::record`, the record `try` hands
-  its handler), or `` `consumed [elapsed] ``. A worker stopped from elsewhere
-  settles with its own `WorkerStopped` record; on a `Ready` handle an `exit`, a
+  (the ok/err half of `End::outcome`, its `` `err `` payload built through
+  `Error::record`, the record `try` hands its handler), or
+  `` `consumed [elapsed] ``. A worker stopped from elsewhere settles with its
+  own `WorkerStopped` record; on a `Ready` handle an `exit`, a
   foreign stop or a panic is re-raised, as `await` re-raises them, while `poll`
   never fails because a handle is `Stopping` or `Consumed`. `is-done`
   (`builtin_is_done`) is the boolean predicate over the same states, returning
@@ -228,7 +228,10 @@ Bodies are grouped by concern, one submodule each:
   cancel-aware wait loop (`claim_first`, over `first_ready`), so a deadline
   unwinds the wait while a session worker survives
   ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]],
-  [[decisions/261020_gather|gather]]).
+  [[decisions/261020_gather|gather]]). `outlive` uses the same `claim_first`
+  and `replay` when `Run.last` returns: session workers still unclaimed are
+  claimed in birth order, their bytes written and all five endings dropped.
+  Lifetime joins do not make a loose worker's failure the run's.
   The spawn door is `spawn_child`, which takes a `Birth` — `Spawn` or
   `Watch` — and reads the owner off the cradle: with a brood in scope the
   child is the brood's (`Owner::Gather` or `Owner::Worker`, from its
@@ -236,7 +239,9 @@ Bodies are grouped by concern, one submodule each:
   has ended; the new worker was cancelled` if the enclosing gather has already
   closed), writing to the run's live sink as
   a pipeline stage does, unannounced and flushing no `` `done ``; with none it
-  is the session's, announced, its surface deferred. It mints the worker's
+  is the session's, its surface deferred. Hosts that announce gate its
+  `done` on a present unclaimed row at notice time (`WorkerState::unclaimed`);
+  batch announces none. It mints the worker's
   `WorkerId` first and builds the handle around it: `HandleInner` carries the
   `id`, the `title`, and the worker's clock, a birth `Stamp` and an end
   `Stamp` that its `CompletionPermit` sets on every exit path of the worker
@@ -288,7 +293,8 @@ Bodies are grouped by concern, one submodule each:
   omitted), ids ascending, through `worker_row` (`shell/runtime/state/host.rs`, shared
   with the `` `workers `` probe) to a seven-field record — `id`, `title`,
   `owner` (`` `session ``, `` `worker id ``, `` `gather ``), `state`
-  (`` `running ``, `` `stopping ``, or `` `ready `` with the `Done` ending),
+  (`` `running ``, `` `stopping ``, or `` `ready `` with
+  `Done = Ending<(), ErrorRecord, CancelCause>`),
   `started` (Unix seconds), `elapsed` (seconds, off the handle's `Stamp`s),
   `settled` (`` `some `` Unix seconds iff `state` is `` `ready ``, else
   `` `none ``) — derived from a single consistent snapshot per handle
@@ -296,7 +302,8 @@ Bodies are grouped by concern, one submodule each:
   the probe's eighth field, `retention-left`, is the host's alone). It holds
   no handle, so a top-level `workers` crosses the engine protocol. A `Handle`
   is process-local: `Shell::bequeath` scrubs it from every fork, and a run
-  whose result is or holds one ends `Unreturnable` (`core/src/shell/run/report.rs`);
+  whose result is or holds one projects to `Err`, status 1
+  (`core/src/shell/run/report.rs`);
 - `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
   record and admits it with `Site::admit_module`, holding each function to the
   scheme the module was checked at). It runs its phrases through
@@ -310,8 +317,9 @@ Bodies are grouped by concern, one submodule each:
   rather than the caller's own block-local scope. Module loads carry no cache,
   so the guards keep re-evaluation terminating — see
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
-- `misc.rs` — including `builtin_surface`, the body `SURFACE_BUILTIN` (above)
-  wraps: it forwards a tagged variant to the host's
+- `misc.rs` — `exit` refuses a status outside `0..=255`, and `fail` one
+  outside `1..=255`, minting a `NonZeroU8`; `builtin_surface` is the body
+  `SURFACE_BUILTIN` (above) wraps: it forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;
 - `math.rs` — the Float rounding builtins (`round`, `floor`, `ceil`, `trunc`);
 - `help.rs` — `help` (arity-0 language and command index) and `explain <name>`
@@ -406,4 +414,7 @@ semantics ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec
 That dispatch — the `Program::Tool` placement and the hidden
 entrypoint — is the [[map/core/runtime|runtime]]'s; this page owns only the
 registry of names, shims, and the in-binary `uutils_invoke` they converge on.
-`docs/SPEC.md` §14.7 covers the single-binary tool surface.
+`docs/SPEC.md` §14.7 covers the single-binary tool surface. The utility
+subprocess entrypoint retains its own `i32` result clamp in `uutils.rs`; it is
+not part of the shell ending family
+([[design/endings|endings]]).

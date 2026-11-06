@@ -1,5 +1,5 @@
-<!-- verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1 -->
-<!-- generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1 -->
+<!-- verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919 -->
+<!-- generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1996,9 +1996,9 @@ this shape. A record reaching `fail` from an unchecked boundary — a decoder's
 result, a module's asserted shape — is refused at run time instead. `reason`,
 `cmd` and `site` are kept when present.
 
-Status 0 is rejected: use `return` for success. A status must fit the runtime's
-signed exit-code range. Passing the error record received by `try` to `fail`
-re-raises it faithfully: `status`, `message`, `reason`, `cmd`, and a `site`
+Status 0 is rejected: use `return` for success. A status must lie in
+`1..=255`, one byte; anything else is refused. Passing the error record
+received by `try` to `fail` re-raises it faithfully: `status`, `message`, `reason`, `cmd`, and a `site`
 the record has, all round-trip. A `status` that disagrees with its `reason`'s
 projection (§8.6) is refused, naming the status that reason has; a
 `` `signaled n `` outside 1 to 127 is refused. Integers and bare message strings
@@ -2046,8 +2046,8 @@ Reason = `exited Int | `signaled Int | `cancelled | `timed-out
 
 | `reason` | Meaning | `status` |
 |---|---|---:|
-| `` `exited n `` | an external command exited with nonzero `n` | `n` |
-| `` `signaled s `` | an external command died of signal `s`, not by a cancellation (§8.10) | 128 + `s` |
+| `` `exited n `` | an external command exited with nonzero `n` | `n` clamped into `1..=255` |
+| `` `signaled s `` | an external command died of signal `s`, not by a cancellation (§8.10) | 128 + `s`, clamped into `1..=255` |
 | `` `cancelled `` | a worker a cancel inside the session stopped, observed by `await` or `poll` | 143 |
 | `` `timed-out `` | a worker reached by a timeout on an enclosing scope, observed likewise | 124 |
 | `` `not-found `` | no command of that name exists | 127 |
@@ -2128,11 +2128,12 @@ exit
 exit 7
 ```
 
-The default status is 0. An explicit status must be an integer in the signed
-exit-code range. `exit` is a control escape, not an ordinary failure: `?` and
-`try` do not catch it. `await` and `poll` re-raise a worker's `exit`: an
-`exit` in a worker ends the run that observes it, and no other. A command-line host translates it to the platform's
-process exit status; an embedding host receives the structured exit request.
+The default status is 0. An explicit status must lie in `0..=255`, one byte;
+anything else is refused. `exit` is a control escape, not an ordinary failure:
+`?` and `try` do not catch it. `await`, `race` and `poll` re-raise a worker's `exit`:
+an `exit` in a worker ends the run that observes it, and no other. An `exit`
+in a loose worker that nothing observes changes nothing. A command-line host
+translates it to the platform's process exit status; an embedding host receives the structured exit request.
 
 ### 8.9. Diagnostics
 
@@ -2674,8 +2675,12 @@ A gather's child is not announced: no birth notice and no completion notice
 of its own reach the host, since its result and its completion reach the
 session through its owner. It is registered (§11.4), so the host's worker cap
 bounds it and `workers` lists it, and its bytes are buffered and written when
-it is claimed, as any worker's are. A session worker's birth is announced, and
-its completion is reported once.
+it is claimed, as any worker's are. A session worker's birth reaches the host
+as a worker observation (§13.3). Its ending is announced at most once, by a host that announces at all, and
+only while its result is still unclaimed when the host reads it: at the
+REPL's next prompt or at exarch's batch admission. A result already claimed
+by `await`, `race` or `cancel` is not announced; a later claim does not retract
+an earlier announcement. Batch, `-c` and stdin scripts announce nothing.
 
 A session worker is not part of the foreground run. Interrupting or timing
 out the run that created it does not cancel the worker. A gather's child is
@@ -2683,6 +2688,28 @@ part of it: its worker hangs under the gather's entry scope, so an interrupt
 or a timeout on the run reaches it (§11.3). A worker's standard input is
 empty rather than inherited from the terminal, so a worker cannot steal
 interactive input.
+
+Lifetime and failure are independent:
+
+| Work | Does its failure count? | Lifetime |
+|---|---|---|
+| A gather's child, including a worker's child | yes (§11.3) | its owner joins it |
+| A loose session `spawn` or `watch` | only when explicitly observed | a returning batch script waits; a halt takes it down |
+| An external started with `detach` | no | outlives the session |
+
+A loose worker's ending never fails the run or the session; only `await`,
+`race` or `poll` observes it. A script that returns waits for its still-unclaimed
+loose workers in birth order, claims each and writes its stdout then stderr,
+and drops every ending, keeping the script's own value and status. A script
+that halts — `exit`, an uncaught failure, a stop or a panic — takes them down
+at session end instead; Ctrl-C during the wait halts it too. In batch, a
+failing unclaimed worker leaves no failure notice or diagnostic and does not
+change the exit status; any bytes it wrote are still replayed on return.
+
+A forgotten `spawn { serve }` can therefore keep a returning script alive.
+A worker no longer needed is `cancel`led; an `exit` takes every loose worker
+down; an external command meant to outlive the session is started with
+`detach` (§11, Unix). There is no outlive form for a ral block.
 
 Pipelines inside a worker still use byte pipes between stages. Value-style
 composition remains ordinary application and bind. Concurrency changes
@@ -3062,7 +3089,7 @@ ascending id order:
     id: Int,
     title: String,
     owner: <`session | `worker Int | `gather>,
-    state: <`running | `stopping | `ready Done>,
+    state: <`running | `stopping | `ready Ending>,
     started: Int,
     elapsed: Float,
     settled: <`some Int | `none>,
@@ -3072,10 +3099,13 @@ ascending id order:
 where
 
 ```text
-Done = `ok | `err ErrorRecord | `exited Int | `stopped Cause | `panic String
+Ending = `ok | `err ErrorRecord | `exited Int | `stopped Cause | `panic String
 Cause = `reader-gone | `interrupted | `cancelled | `timed-out
       | `terminated | `aborted
 ```
+
+`poll`'s and `audit`'s `outcome` is this ending's `` `ok ``/`` `err `` half;
+`await`, `race` and `poll` re-raise the rest (resuming an unwind for `panic`).
 
 | Field | Meaning |
 |---|---|
@@ -3124,12 +3154,16 @@ batch hosts arm no retention bound or worker cap. The exarch agent host
 currently caps live workers (`running` + `stopping`) at 64 and retains
 unclaimed `` `ready `` entries for 256 ral calls.
 
-Every session worker is cancelled when its session is destroyed. Teardown
+A returning batch script first waits for its still-unclaimed loose workers
+and replays their bytes, discarding their endings (§11.1). A halting script,
+REPL quit and exarch session end do not wait for normal completion: every
+remaining session worker is cancelled when its session is destroyed. Teardown
 claims and stops remaining workers and waits briefly and boundedly for live
 worker threads (both `` `running `` and `` `stopping ``) to finish execution and
 tear down their children. The interactive shell first warns once with the ids
-and titles of workers still live (`` `running `` or `` `stopping ``). Workers do
-not survive process exit; use `detach` when survival is the requirement.
+and titles of workers still live (`` `running `` or `` `stopping ``). Batch
+says nothing. Workers do not survive process exit; use `detach` for an external
+command when survival is the requirement.
 
 ### 11.5. Host-installed worker forms
 
@@ -3782,7 +3816,7 @@ Batch-mode exit status distinguishes static phases:
 |---|---:|
 | lexing, parsing, or elaboration | 2 |
 | type checking | 1 |
-| runtime error or explicit `exit` | the resulting status, clamped to 0–255 |
+| runtime error or explicit `exit` | the resulting byte status (§16.3) |
 
 Successful execution exits 0. Diagnostics go to
 standard error; they are never a payload and never pipeline traffic.
@@ -3823,7 +3857,8 @@ The report is not itself an observation. It has two fields:
 ]
 ```
 
-`outcome` says how the body settled. `` `ok `` carries the body's value.
+`outcome` is the `` `ok ``/`` `err `` half of the body's ending.
+`` `ok `` carries the body's value.
 `` `err `` carries exactly the error record `try` hands its handler, `reason`
 included (§8.6), so
 one outcome vocabulary serves `try`, `poll` (§11.2), and `audit`: a reader who
@@ -3993,7 +4028,8 @@ every byte still streams to its ordinary destination. Ordinary value capture
 (§7) and worker buffers (§11.1) retain their separate 16 MiB limit.
 
 Command observations cover external commands, bundled commands, pipeline
-stages, and `detach` births. Arguments are recorded after evaluation and
+stages, and `detach` births. A command observation's `status` is one byte
+(`0..=255`), presented as an `Int`. Arguments are recorded after evaluation and
 rendered to strings as part of `argv`.
 
 A builtin application is not an observation. The language's own value
@@ -4070,26 +4106,26 @@ script or `-c`; they are not interactive or stdin-script options.
 
 The top-level JSON object is the same two-field report as the language-level
 `audit` form's — `outcome` and `trail` — for the whole run rather than one
-block. `trail` is the run's flat list of observations, in settlement order. An
-ordinary runtime failure gives `` `err `` carrying the run's error record; an
-explicit `exit` at the root is a control escape rather than a failure, and
-gives `` `ok `` of `Unit`.
+block. `trail` is the run's flat list of observations, in settlement order.
+`outcome` is the run's whole ending: `` `ok value ``, `` `err record ``,
+`` `exited n `` for an `exit`, `` `stopped cause ``, or `` `panic text ``.
 
-The report does not carry the process exit status. That status is the host's,
-`--audit` does not change it, and a second copy inside the record could only
-disagree with it.
+The report has no separate top-level process status: the host derives it
+from the ending (§16.3), and `--audit` does not change it.
 
 The JSON projection favours legibility over round-trip fidelity:
 
 - `Bytes` become strings using lossy UTF-8 conversion;
 - `Unit` becomes `null`;
 - variants become objects with `tag` and, where present, `payload`;
-- executable or process-local values such as blocks, functions, natives, and
-  handles become descriptive stubs.
+- a non-data final result (a block, function or handle) becomes an `` `err ``
+  ending, status 1, rather than crossing the result boundary (§11.7).
 
 The variant rule is what shapes the report: `outcome` reads as
-`{"tag": "ok", "payload": …}` or `{"tag": "err", "payload": {…}}`, and each
-observation's `what` as `{"tag": "command", "payload": {…}}` and its kin.
+`{"tag": "ok", "payload": …}`, `{"tag": "err", "payload": {…}}`,
+`{"tag": "exited", "payload": 3}`, and the other ending tags likewise; a
+`Unit` payload is absent, so a unit result reads `{"tag": "ok"}`. Each
+observation's `what` reads as `{"tag": "command", "payload": {…}}` and its kin.
 
 Compact mode writes one JSON document followed by a newline. Pretty mode
 writes the same data with indentation. Both write to fd 2. Program output is
@@ -5071,9 +5107,21 @@ At runtime:
 
 - a normal completion exits 0;
 - `exit N` returns `N`;
-- a raised runtime error prints a source-labelled diagnostic and returns that error’s status.
+- a raised runtime error prints a source-labelled diagnostic and returns that error’s status;
+- a stop returns its cause's status (§8.10), with no diagnostic for a closed stdout;
+- a panic of ral itself prints its message and returns 101.
 
-The final process status is clamped to `0..=255`, and `--audit` does not change it — the JSON report does not carry it. With `--audit`, the runtime failure is represented in the report's `` `err `` outcome and the duplicate ordinary diagnostic is suppressed.
+A returning script waits for its still-unclaimed loose workers and writes their
+bytes; a halting script takes them down. Loose workers' endings never change
+the status (§11.1).
+
+Every status is one byte at the door it enters by: an external's nonzero
+status is clamped into `1..=255` where it is observed, while `exit` and `fail`
+refuse arguments outside `0..=255` and `1..=255`, respectively. A negative
+Windows `NTSTATUS` therefore cannot turn a failed external into success.
+`--audit` does not change the process status and adds no top-level status
+field: it represents the whole ending in `outcome` (§13.4) and suppresses the
+duplicate ordinary diagnostic.
 
 A foreground batch launched from a terminal may lend that terminal to an interactive child. A backgrounded or non-terminal batch has no such authority.
 

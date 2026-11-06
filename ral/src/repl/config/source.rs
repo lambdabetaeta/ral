@@ -14,7 +14,7 @@ use super::{RcPlan, RcSettings, rc};
 /// Why a startup file stopped.
 #[derive(Debug, PartialEq)]
 enum Stop {
-    Exit(i32),
+    Exit(u8),
     Failed(String),
     /// Failed, and already reported in full.
     Reported,
@@ -98,8 +98,8 @@ fn evaluate(
             Err(Stop::Reported)
         }
         Err(Break::Escape(Escape::Exit(code))) => Err(Stop::Exit(code)),
-        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
-            Err(Stop::Failed(format!("{name}: {}", cause.message())))
+        Err(Break::Escape(stop @ Escape::Stopped(_))) => {
+            Err(Stop::Failed(format!("{name}: {stop}")))
         }
     }
 }

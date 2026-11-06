@@ -1083,7 +1083,7 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
             id: WorkerId(id),
             title: title.into(),
             elapsed_ms: 15,
-            outcome: Done::Ok,
+            outcome: Done::Ok(()),
         }
         .to_surface();
         session
@@ -1277,7 +1277,7 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
         id: WorkerId(1),
         title: "boom".into(),
         elapsed_ms: 10,
-        outcome: Done::Ok,
+        outcome: Done::Ok(()),
     }
     .to_surface();
     session

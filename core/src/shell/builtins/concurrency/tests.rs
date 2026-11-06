@@ -1,13 +1,15 @@
-use super::eliminate::await_handle;
+use super::eliminate::{await_handle, first_ready};
 use super::*;
 use crate::data::FOValue;
+use crate::fact::{ExitCode as _, FailureCode as _};
 use crate::io::new_buffer;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
 use crate::shell::runtime::{
-    Break, BroodOwner, BuiltinBody, BuiltinEntry, Cradle, DeferredSink, Error, Escape, HandleInner,
-    Map, Owner, ReapCause, Sample, ScopeOwner, Status, ThreadEnd, WatchEvent, WorkerId,
+    Break, BroodOwner, BuiltinBody, BuiltinEntry, Cradle, DeferredSink, End, Error, Escape,
+    HandleInner, Map, Owner, ReapCause, Sample, ScopeOwner, Status, Stop, WatchEvent, WorkerId,
 };
 use crate::test_helper::SLEEP;
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, mpsc};
 
 /// Release-on-drop gate guard so a panicking assertion never parks a worker
@@ -33,9 +35,9 @@ impl Drop for GateGuard {
     }
 }
 
-fn status(b: Break) -> i32 {
+fn status(b: Break) -> u8 {
     match b {
-        Break::Error(e) => e.code(),
+        Break::Error(e) => e.failure_code().get(),
         other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
     }
 }
@@ -110,7 +112,7 @@ fn fo_expect_variant<'a>(v: &'a FOValue, label: &str) -> &'a FOValue {
 fn a_dropped_settler_settles_as_panicked() {
     let handle = handle_with_panicked_worker(b"", b"");
     match handle.observe(|completed| completed.end.clone()) {
-        Sample::Ready(ThreadEnd::Panicked(text)) => {
+        Sample::Ready(End::Panic(text)) => {
             assert!(text.contains("spawned thread panicked"));
         }
         other => panic!("expected a ready panic, got {other:?}"),
@@ -201,7 +203,7 @@ fn a_cancelled_handle_is_claimed() {
 /// A worker polling its own scope, reporting the
 /// status it saw once `cancel_via` fires.  `ready` confirms it is alive
 /// first, so a test pins propagation, not a worker that never ran.
-fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (i32, ScopeNode) {
+fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (u8, ScopeNode) {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let node = shell.session.root.worker();
@@ -308,11 +310,58 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 
     let err = await_handle(&handle, "await", &mut shell)
         .expect_err("await must unwind on a foreground cancel, not block");
-    assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
+    assert!(matches!(err, Break::Escape(Escape::Stopped(_))));
     assert!(
         !worker_scope.is_cancelled(),
         "the foreground cancel must unblock await without reaping the root-parented worker"
     );
+}
+
+#[test]
+fn first_ready_reraises_mid_wait_cancel_without_claiming_the_worker() {
+    let mut shell = crate::test_helper::core_shell();
+    let (_, stdout) = new_buffer();
+    let (_, stderr) = new_buffer();
+    let worker_scope = shell.session.root.worker();
+    // Retain the unfinished permit so the handle stays running.
+    let (handle, _permit) = HandleInner::new(
+        WorkerId::mint(),
+        "<test>",
+        worker_scope.clone(),
+        stdout,
+        stderr,
+    );
+    let m = Mooring::adrift();
+    shell.scope = Scope::clone(&m.home);
+    let samples = Cell::new(0);
+    let err = first_ready(
+        std::slice::from_ref(&handle),
+        |handle| {
+            assert_eq!(
+                samples.replace(samples.get() + 1),
+                0,
+                "poll must stop the next sweep"
+            );
+            let snapshot = handle.sample();
+            assert_eq!(snapshot, Sample::Running(()));
+            m.home.cancel(CancelCause::Interrupted);
+            snapshot
+        },
+        &shell,
+    )
+    .expect_err("the next poll must re-raise the foreground stop");
+    assert_eq!(samples.get(), 1);
+    let Break::Escape(Escape::Stopped(stop)) = err else {
+        panic!("the wait must re-raise the foreground stop, got {err:?}");
+    };
+    assert_eq!(stop.cause, CancelCause::Interrupted);
+    assert_eq!(stop.owner, Some(m.home.id()));
+    assert_eq!(handle.sample(), Sample::Running(()));
+    assert!(!handle.is_claimed());
+    assert!(!worker_scope.is_cancelled());
+    assert!(handle.claim_and_stop());
+    assert!(handle.is_claimed());
+    assert_eq!(worker_scope.cause(), Some(CancelCause::Cancelled));
 }
 
 /// A body that stays `Running` until cancelled, polling its shell so
@@ -534,13 +583,12 @@ fn run_framed(
         RunReport::Ran {
             ending, captured, ..
         } => (
-            ending.into_result(),
+            ending.into_settled(),
             captured.map(|c| c.stdout).unwrap_or_default(),
         ),
         RunReport::Static { .. } => {
             panic!("well-formed source must run, not fail statically: {src}")
         }
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -980,7 +1028,7 @@ fn first_settled_is_cancel_aware() {
     let args = [Value::list(vec![Value::Handle(Box::new(running.clone()))])];
     let err =
         builtin_first_settled(&args, &shell).expect_err("a cancelled foreground cuts the wait");
-    assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
+    assert!(matches!(err, Break::Escape(Escape::Stopped(_))));
     assert!(!running.is_claimed(), "first-settled claims nothing");
     running.claim_and_stop();
 }
@@ -1266,7 +1314,7 @@ fn deferred_batch_carries_body_surface_before_done() {
     assert_eq!(done_outcome_label(&batch[1]), "panic");
 
     match handle.observe(|completed| completed.end.clone()) {
-        Sample::Ready(ThreadEnd::Panicked(_)) => {}
+        Sample::Ready(End::Panic(_)) => {}
         other => panic!("expected a panicked end, got {other:?}"),
     }
 }
@@ -1766,7 +1814,7 @@ fn stopped_error(b: Break) -> Error {
 
 fn expect_worker_stop(e: &Error, stop: WorkerStop) {
     assert_eq!(e.status, Status::WorkerStopped(stop));
-    assert_eq!(e.code(), i32::from(stop.cause().code()));
+    assert_eq!(e.failure_code(), stop.cause().failure_code());
     assert_eq!(e.message, stop.message());
     let reason = crate::fact::Reason::from(&e.status);
     let want = match stop {
@@ -1859,10 +1907,10 @@ fn a_foreign_stop_is_reraised_by_await_and_poll() {
     assert!(
         matches!(
             err,
-            Break::Escape(Escape::Stopped {
+            Break::Escape(Escape::Stopped(Stop {
                 cause: CancelCause::Terminated,
                 ..
-            })
+            }))
         ),
         "{err:?}"
     );
@@ -1874,10 +1922,10 @@ fn a_foreign_stop_is_reraised_by_await_and_poll() {
     assert!(
         matches!(
             err,
-            Break::Escape(Escape::Stopped {
+            Break::Escape(Escape::Stopped(Stop {
                 cause: CancelCause::Terminated,
                 ..
-            })
+            }))
         ),
         "{err:?}"
     );
@@ -1902,15 +1950,9 @@ fn a_worker_converts_a_cancel_from_inside_the_session_and_passes_a_root_stop() {
         Err(Break::stopped(CancelCause::Terminated, Some(root.id()))),
         &root,
     );
-    assert!(matches!(
-        terminated,
-        Err(Break::Escape(Escape::Stopped { .. }))
-    ));
+    assert!(matches!(terminated, Err(Break::Escape(Escape::Stopped(_)))));
     let unnamed = convert_own_stop(Err(Break::stopped(CancelCause::Cancelled, None)), &root);
-    assert!(matches!(
-        unnamed,
-        Err(Break::Escape(Escape::Stopped { .. }))
-    ));
+    assert!(matches!(unnamed, Err(Break::Escape(Escape::Stopped(_)))));
 }
 
 /// A stage's node under a worker's: the join names the outermost node
@@ -2204,7 +2246,7 @@ fn a_cut_race_ends_what_it_was_given() {
         .collect();
     let err = builtin_race(&[Value::list(handles)], &m, &mut shell)
         .expect_err("a cancelled foreground cuts the wait");
-    assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
+    assert!(matches!(err, Break::Escape(Escape::Stopped(_))));
     assert!(
         given.iter().all(HandleInner::has_ended),
         "drained before race returns"
@@ -2368,10 +2410,10 @@ fn a_walled_gather_drains_its_children_within_the_grace() {
     );
     assert!(matches!(
         ended.expect_err("the wall stops the run"),
-        Break::Escape(Escape::Stopped {
+        Break::Escape(Escape::Stopped(Stop {
             cause: CancelCause::TimedOut,
             ..
-        })
+        }))
     ));
     assert!(started.elapsed() < std::time::Duration::from_secs(6));
     assert_eq!(shell.local.workers.count(), 0, "the child is claimed");
@@ -2420,7 +2462,7 @@ fn a_gather_cancels_its_children_on_an_interrupt() {
     });
     let err = await_handle(&child, "await", &mut shell).expect_err("the stop cuts the wait");
     striker.join().unwrap();
-    assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
+    assert!(matches!(err, Break::Escape(Escape::Stopped(_))));
     assert!(
         child.cancel.is_cancelled(),
         "the run's stop reaches the child"
@@ -2643,7 +2685,7 @@ fn gather_exit_join_panic_cancels_remaining_siblings_top_level_and_nested() {
         wait_ended(&sibling);
         assert_eq!(sibling.sample(), Sample::Consumed);
         match outer.observe(|c| c.end.clone()) {
-            Sample::Ready(ThreadEnd::Panicked(msg)) => {
+            Sample::Ready(End::Panic(msg)) => {
                 assert!(msg.contains("nested child boom"), "{msg}");
             }
             other => panic!("expected outer to settle as panicked, got {other:?}"),
@@ -2943,7 +2985,7 @@ fn watch_flush_panic_isolation_and_precedence_and_no_duplicate_flush() {
         ],
         "panicking stdout flush must not skip stderr partial-line flush"
     );
-    assert!(matches!(end1, ThreadEnd::Panicked(ref s) if s == "comp-panic"));
+    assert!(matches!(end1, End::Panic(ref s) if s == "comp-panic"));
     assert_eq!(
         done1.outcome,
         crate::shell::runtime::Done::Panic("comp-panic".into())
@@ -2953,7 +2995,7 @@ fn watch_flush_panic_isolation_and_precedence_and_no_duplicate_flush() {
     let (end2, seen2, done2) =
         run_case(None, Some("stdout-flush-panic"), Some("stderr-flush-panic"));
     assert_eq!(seen2.len(), 2);
-    assert!(matches!(end2, ThreadEnd::Panicked(ref s) if s == "stdout-flush-panic"));
+    assert!(matches!(end2, End::Panic(ref s) if s == "stdout-flush-panic"));
     assert_eq!(
         done2.outcome,
         crate::shell::runtime::Done::Panic("stdout-flush-panic".into())
@@ -2962,7 +3004,7 @@ fn watch_flush_panic_isolation_and_precedence_and_no_duplicate_flush() {
     // Case 3: when computation and stdout flush succeed, stderr flush panic surfaces.
     let (end3, seen3, done3) = run_case(None, None, Some("stderr-flush-panic"));
     assert_eq!(seen3.len(), 2);
-    assert!(matches!(end3, ThreadEnd::Panicked(ref s) if s == "stderr-flush-panic"));
+    assert!(matches!(end3, End::Panic(ref s) if s == "stderr-flush-panic"));
     assert_eq!(
         done3.outcome,
         crate::shell::runtime::Done::Panic("stderr-flush-panic".into())
@@ -3208,10 +3250,10 @@ fn pending_foreground_cancel_beats_already_ready_result() {
         .expect_err("cancelled foreground must beat ready await");
     assert!(matches!(
         err_await,
-        Break::Escape(Escape::Stopped {
+        Break::Escape(Escape::Stopped(Stop {
             cause: CancelCause::Interrupted,
             ..
-        })
+        }))
     ));
     assert_eq!(
         h_await.sample(),
@@ -3226,10 +3268,10 @@ fn pending_foreground_cancel_beats_already_ready_result() {
     .expect_err("cancelled foreground must beat ready first-settled");
     assert!(matches!(
         err_first,
-        Break::Escape(Escape::Stopped {
+        Break::Escape(Escape::Stopped(Stop {
             cause: CancelCause::Interrupted,
             ..
-        })
+        }))
     ));
     assert_eq!(
         h_first.sample(),
@@ -3245,10 +3287,10 @@ fn pending_foreground_cancel_beats_already_ready_result() {
     .expect_err("cancelled foreground must beat ready race");
     assert!(matches!(
         err_race,
-        Break::Escape(Escape::Stopped {
+        Break::Escape(Escape::Stopped(Stop {
             cause: CancelCause::Interrupted,
             ..
-        })
+        }))
     ));
     assert_eq!(
         h_race.sample(),

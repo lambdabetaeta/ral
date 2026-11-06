@@ -2,7 +2,7 @@
 //! [`Error`] and its [`Status`].
 
 use super::{Error, Status};
-use crate::fact::{ErrorRecord, Reason};
+use crate::fact::{ErrorRecord, FailureCode as _, Reason, tag};
 use crate::process::{CommandFailure, SpawnFailure, WorkerStop};
 use crate::shell::runtime::{Shell, Value};
 use crate::source::CallSite;
@@ -27,7 +27,7 @@ impl ErrorRecord {
     pub fn new(cmd: &str, status: &Status, message: &str, site: Option<CallSite>) -> Self {
         Self {
             cmd: cmd.into(),
-            status: status.code(),
+            status: status.failure_code(),
             reason: status.into(),
             message: message.into(),
             site,
@@ -39,8 +39,8 @@ impl ErrorRecord {
 /// envelope read a body's end.
 pub fn outcome_value(outcome: Result<Value, ErrorRecord>) -> Value {
     match outcome {
-        Ok(v) => Value::variant("ok", Some(v)),
-        Err(record) => Value::variant("err", Some(Value::from_datum(record))),
+        Ok(v) => Value::variant(tag::OK, Some(v)),
+        Err(record) => Value::variant(tag::ERR, Some(Value::from_datum(record))),
     }
 }
 
@@ -69,6 +69,7 @@ mod tests {
     use super::*;
     use crate::data::FOValue;
     use crate::data::datum::{Datum, tag};
+    use std::num::NonZeroU8;
 
     #[test]
     fn status_is_the_reasons_own_projection() {
@@ -78,19 +79,22 @@ mod tests {
             "x",
             None,
         );
-        assert_eq!((rec.status(), rec.reason()), (3, Reason::Exited(3)));
+        assert_eq!((rec.status().get(), rec.reason()), (3, Reason::Exited(3)));
         let cause = ErrorRecord::new(
             "sh",
             &Status::WorkerStopped(WorkerStop::TimedOut),
             "x",
             None,
         );
-        assert_eq!((cause.status(), cause.reason()), (124, Reason::TimedOut));
+        assert_eq!(
+            (cause.status().get(), cause.reason()),
+            (124, Reason::TimedOut)
+        );
     }
 
     #[test]
     fn a_wire_record_with_an_unknown_reason_is_refused() {
-        let mut wire = ErrorRecord::new("sh", &Status::Raised(1), "x", None).encode();
+        let mut wire = ErrorRecord::new("sh", &Status::Raised(NonZeroU8::MIN), "x", None).encode();
         let FOValue::Map { entries } = &mut wire else {
             unreachable!()
         };

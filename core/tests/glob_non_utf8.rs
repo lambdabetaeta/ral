@@ -17,7 +17,10 @@ fn glob(dir: &std::path::Path, pattern: &str) -> Result<(), String> {
     else {
         panic!("the glob must compile");
     };
-    ending.into_result().map(drop).map_err(|b| format!("{b:?}"))
+    ending
+        .into_settled()
+        .map(drop)
+        .map_err(|b| format!("{b:?}"))
 }
 
 #[test]

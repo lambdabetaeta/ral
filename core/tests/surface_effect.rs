@@ -72,7 +72,7 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
             ..RunRequest::from(Run::foreground(source, SourceOrigin::named("<test>")))
         })
         .expect_ran()
-        .into_result()
+        .into_settled()
 }
 
 /// With no sink installed `surface` returns Unit and is otherwise inert.

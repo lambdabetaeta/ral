@@ -32,7 +32,7 @@ pub enum Surface {
         id: Option<u64>,
         title: String,
         elapsed: Option<std::time::Duration>,
-        outcome: crate::card::DoneOutcome,
+        outcome: ral_core::fact::Done,
     },
     Pin {
         key: String,

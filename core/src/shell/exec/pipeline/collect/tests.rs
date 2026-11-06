@@ -1,14 +1,20 @@
 use super::super::group::PipelineGroup;
 use super::*;
+use crate::fact::FailureCode as _;
 #[cfg(unix)]
 use crate::process::Membership;
 use crate::process::{DurableRoot, Scope};
-use crate::shell::runtime::Escape;
+use crate::shell::runtime::{Escape, Stop};
 use crate::source::{FileId, Span};
+use std::num::NonZeroU8;
 use std::time::Duration;
 
-fn error_break(status: i32, msg: &str) -> Break {
-    Error::raised(msg, status).into()
+fn nz(n: u8) -> NonZeroU8 {
+    NonZeroU8::new(n).unwrap()
+}
+
+fn error_break(status: u8, msg: &str) -> Break {
+    Error::raised(msg, nz(status)).into()
 }
 
 fn stopped(cause: CancelCause) -> Break {
@@ -16,11 +22,11 @@ fn stopped(cause: CancelCause) -> Break {
 }
 
 fn stopped_at(cause: CancelCause, at: u32) -> Break {
-    Break::Escape(Escape::Stopped {
+    Break::Escape(Escape::Stopped(Stop {
         cause,
         owner: None,
         at: Some(Span::new(FileId::DUMMY, at, at)),
-    })
+    }))
 }
 
 /// A stage's reader-gone stop, naming its own node.
@@ -30,15 +36,15 @@ fn cut(stage: &ScopeId) -> Break {
 
 fn stop_of(br: &Break) -> Option<(CancelCause, Option<u32>)> {
     match br {
-        Break::Escape(Escape::Stopped { cause, at, .. }) => {
+        Break::Escape(Escape::Stopped(Stop { cause, at, .. })) => {
             Some((*cause, at.as_ref().map(|s| s.start)))
         }
         _ => None,
     }
 }
 
-fn is_error(br: &Break, code: i32) -> bool {
-    matches!(br, Break::Error(e) if e.code() == code)
+fn is_error(br: &Break, code: u8) -> bool {
+    matches!(br, Break::Error(e) if e.failure_code().get() == code)
 }
 
 /// The laws of the join: `Error 1 < Exit 2 < Stopped c (3 + c)`, a stage's
@@ -154,7 +160,7 @@ fn drive_folds_two_settling_stages_to_done() {
 
     collect.drive();
     match collect.fold(&mooring, &mut shell) {
-        Err(Break::Error(error)) => assert_ne!(error.code(), 0),
+        Err(Break::Error(_)) => {}
         other => panic!("expected the final stage's exit to fold in, got {other:?}"),
     }
     drop(group);
@@ -367,10 +373,10 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
     assert!(
         matches!(
             collect.fold(&mooring, &mut shell),
-            Err(Break::Escape(Escape::Stopped {
+            Err(Break::Escape(Escape::Stopped(Stop {
                 cause: CancelCause::TimedOut,
                 ..
-            }))
+            })))
         ),
         "a torn-down stage must fold in the teardown's stop, not a quiet ok"
     );
@@ -412,14 +418,14 @@ fn threads_with(n: usize) -> (CollectState, Vec<Scope>, Sender<Event>) {
 
 fn halted(br: Break) -> StageObservation {
     StageObservation {
-        end: ThreadEnd::Settled(Err(br)),
+        end: End::settled(Err(br)),
         audit: AuditFragment::empty(),
     }
 }
 
 fn panicked(text: &str) -> StageObservation {
     StageObservation {
-        end: ThreadEnd::Panicked(text.to_string()),
+        end: End::Panic(text.to_string()),
         audit: AuditFragment::empty(),
     }
 }
@@ -579,14 +585,16 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
         Pgid::from_raw(1).expect("1 is positive"),
         Scope::clone(&DurableRoot::default().worker()),
     ));
-    let settled = |scope: &Scope| match end().settle(&shell, Instant::now(), scope, &group).end {
-        ThreadEnd::Settled(s) => s,
-        ThreadEnd::Panicked(t) => panic!("{t}"),
+    let settled = |scope: &Scope| {
+        end()
+            .settle(&shell, Instant::now(), scope, &group)
+            .end
+            .into_settled()
     };
     let pressed = DurableRoot::default().worker();
     pressed.cancel(CancelCause::Interrupted);
     match settled(&pressed) {
-        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+        Err(Break::Escape(Escape::Stopped(Stop { cause, .. }))) => {
             assert_eq!(cause, CancelCause::Interrupted);
         }
         other => panic!("expected the key's stop, got {other:?}"),
@@ -622,7 +630,7 @@ fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
     );
 
     match state.fold(&mooring, &mut shell) {
-        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+        Err(Break::Escape(Escape::Stopped(Stop { cause, .. }))) => {
             assert_eq!(cause, CancelCause::Cancelled, "the cause, not the signal");
         }
         other => panic!("expected the teardown's stop, got {other:?}"),
@@ -644,7 +652,7 @@ fn a_try_in_a_stage_cannot_see_its_reader_gone_stop() {
     ));
     match report {
         crate::shell::run::RunReport::Ran {
-            ending: crate::shell::run::Ending::Settled { .. },
+            ending: crate::shell::runtime::End::Ok(_),
             captured,
             ..
         } => {
@@ -733,11 +741,11 @@ fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
 
     let _ = step(
         &mut state,
-        Event::Returned(0, StageObservation::failure(Error::raised("boom", 3))),
+        Event::Returned(0, StageObservation::failure(Error::raised("boom", nz(3)))),
     );
 
     match state.fold(&mooring, &mut shell) {
-        Err(Break::Error(e)) => assert_eq!(e.code(), 3),
+        Err(Break::Error(e)) => assert_eq!(e.failure_code(), nz(3)),
         other => panic!("expected the writer's own exit 3 to survive, got {other:?}"),
     }
 }
@@ -763,7 +771,7 @@ fn a_foreign_reader_gone_is_forwarded() {
         returned(0, halted(cut(&DurableRoot::default().worker().id()))),
     );
     match fold_of(state) {
-        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+        Err(Break::Escape(Escape::Stopped(Stop { cause, .. }))) => {
             assert_eq!(cause, CancelCause::ReaderGone);
         }
         other => panic!("expected the foreign stop, got {other:?}"),
@@ -778,7 +786,7 @@ fn an_armed_stage_that_ends_interrupted_is_kept() {
     let stop = Break::stopped(CancelCause::Interrupted, Some(root));
     let _ = step(&mut state, returned(0, halted(stop)));
     match fold_of(state) {
-        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+        Err(Break::Escape(Escape::Stopped(Stop { cause, .. }))) => {
             assert_eq!(cause, CancelCause::Interrupted);
         }
         other => panic!("expected the stop, got {other:?}"),
@@ -791,9 +799,9 @@ fn a_reader_gone_stages_cleanup_halt_is_forwarded() {
     let (mut state, _scopes, _tx) = threads_with(1);
     let _ = step(
         &mut state,
-        returned(0, StageObservation::failure(Error::raised("x", 7))),
+        returned(0, StageObservation::failure(Error::raised("x", nz(7)))),
     );
-    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.code() == 7));
+    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.failure_code() == nz(7)));
 }
 
 /// Stage 0's error and stage 1's nested reader-gone stop: the stop ranks
@@ -803,13 +811,13 @@ fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
     let (mut state, _scopes, _tx) = threads_with(2);
     let _ = step(
         &mut state,
-        returned(0, StageObservation::failure(Error::raised("x", 7))),
+        returned(0, StageObservation::failure(Error::raised("x", nz(7)))),
     );
     let _ = step(
         &mut state,
         returned(1, halted(cut(&DurableRoot::default().worker().id()))),
     );
-    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.code() == 7));
+    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.failure_code() == nz(7)));
 }
 
 /// An `exit` out of a stage is a top-level effect in flight: the siblings
@@ -853,9 +861,9 @@ fn a_closed_stdout_in_a_stage_tears_the_siblings_down() {
     state.cancel_all(CancelCause::ReaderGone);
     helper.join().expect("helper");
     match fold_of(state) {
-        Err(Break::Escape(Escape::Stopped {
+        Err(Break::Escape(Escape::Stopped(Stop {
             cause, owner: None, ..
-        })) => {
+        }))) => {
             assert_eq!(cause, CancelCause::ReaderGone);
         }
         other => panic!("expected the closed-stdout stop, got {other:?}"),
@@ -892,9 +900,9 @@ fn a_stop_naming_the_stage_is_consumed_whatever_its_cause() {
     state.cancel_all(CancelCause::Terminated);
     helper.join().expect("helper");
     match fold_of(state) {
-        Err(Break::Escape(Escape::Stopped {
+        Err(Break::Escape(Escape::Stopped(Stop {
             cause, owner: None, ..
-        })) => {
+        }))) => {
             assert_eq!(cause, CancelCause::Terminated);
         }
         other => panic!("expected the teardown's own observation, got {other:?}"),
@@ -1155,9 +1163,9 @@ fn a_teardown_is_the_verdict_when_every_stage_survived_it() {
     state.cancel_all(CancelCause::Terminated);
     helper.join().expect("helper");
     match fold_of(state) {
-        Err(Break::Escape(Escape::Stopped {
+        Err(Break::Escape(Escape::Stopped(Stop {
             cause, owner: None, ..
-        })) => {
+        }))) => {
             assert_eq!(cause, CancelCause::Terminated);
         }
         other => panic!("expected the teardown's stop, got {other:?}"),
@@ -1173,14 +1181,14 @@ fn a_stage_halt_outranks_the_teardown_at_the_fold() {
         vec![
             (
                 50,
-                returned(0, StageObservation::failure(Error::raised("x", 7))),
+                returned(0, StageObservation::failure(Error::raised("x", nz(7)))),
             ),
             (50, returned(1, StageObservation::ok())),
         ],
     );
     state.cancel_all(CancelCause::Terminated);
     helper.join().expect("helper");
-    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.code() == 7));
+    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.failure_code() == nz(7)));
 }
 
 /// One strike for every cleanup, before the joins.
@@ -1252,7 +1260,7 @@ fn an_anchors_death_inside_a_teardown_does_not_escalate() {
     state.cancel_all(CancelCause::Interrupted);
     helper.join().expect("helper");
     match fold_of(state) {
-        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+        Err(Break::Escape(Escape::Stopped(Stop { cause, .. }))) => {
             assert_eq!(cause, CancelCause::Interrupted);
         }
         other => panic!("expected the teardown's stop, got {other:?}"),
@@ -1275,7 +1283,7 @@ fn a_guard_dropped_while_panicking_settles_its_index() {
         .expect("the guard settles on unwind");
     match event {
         Event::Returned(0, obs) => match obs.end {
-            ThreadEnd::Settled(Err(Break::Error(err))) => assert!(
+            End::Err(err) => assert!(
                 err.message.contains("without reporting"),
                 "expected the one dead-man's message: {}",
                 err.message
@@ -1311,7 +1319,7 @@ fn a_guard_dropped_without_a_panic_reports_a_silent_end() {
     drop(SettleOnDrop::new(Slot { ix: 0, tx }));
     match rx.recv().expect("the guard settles on drop") {
         Event::Returned(0, obs) => match obs.end {
-            ThreadEnd::Settled(Err(Break::Error(err))) => assert!(
+            End::Err(err) => assert!(
                 err.message.contains("without reporting"),
                 "expected the silent-end message: {}",
                 err.message

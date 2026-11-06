@@ -188,8 +188,8 @@ pub fn epoch_us() -> i64 {
 
 /// The report `audit { … }` returns, and `--audit`'s root.
 ///
-/// The body's own outcome, over the flat trail of observations its dynamic
-/// extent produced.  `Err` carries the record `try` hands its handler.
+/// The ok/err half of the body's ending, over the flat trail of observations
+/// its dynamic extent produced.  `Err` carries the record `try` hands its handler.
 ///
 /// This is not an observation itself — `audit` runs no command and owns no
 /// site of its own, only the outcome of what it forced into being recorded.

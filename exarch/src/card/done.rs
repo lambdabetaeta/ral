@@ -6,7 +6,6 @@
 use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
 use ral_core::data::FOValue;
 use ral_core::shell::runtime::{Done, DoneEvent};
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use super::{Role, Span};
@@ -21,64 +20,33 @@ pub fn elapsed_phrase(elapsed: Duration) -> String {
     PRINTER.unsigned_duration_to_string(&Duration::from_secs(elapsed.as_secs()))
 }
 
-/// A worker's `` `done `` completion, minus the one-line card the
-/// view fold rebuilds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DoneOutcome {
-    Ok,
-    Err { message: String, status: i64 },
-    Exited { status: i64 },
-    Stopped { cause: String },
-    Panic { message: String },
-}
-
 /// Decode a `` `done `` value into the worker's id, title, run time and how
 /// it settled, `None` for anything else — and since
 /// `shell_eval::surface::decode_surface` tries this branch last, `None` drops
 /// the value rather than passing it on.
-pub(crate) fn value_to_done(v: &FOValue) -> Option<(u64, String, Duration, DoneOutcome)> {
+pub(crate) fn value_to_done(v: &FOValue) -> Option<(u64, String, Duration, Done)> {
     let DoneEvent {
         id,
         title,
         elapsed_ms,
         outcome,
     } = DoneEvent::from_surface(v)?;
-    let outcome = match outcome {
-        Done::Ok => DoneOutcome::Ok,
-        Done::Err(rec) => DoneOutcome::Err {
-            message: rec.message().to_owned(),
-            status: rec.status().into(),
-        },
-        Done::Exited(n) => DoneOutcome::Exited { status: n.into() },
-        Done::Stopped(c) => DoneOutcome::Stopped {
-            cause: c.message().to_owned(),
-        },
-        Done::Panic(message) => DoneOutcome::Panic { message },
-    };
     Some((id.0, title, Duration::from_millis(elapsed_ms), outcome))
 }
 
 /// How a settled worker reads: its id and title, how long it ran, and muted
 /// prose around the outcome.
-///
-/// The outcome alone carries a level, roled `ok`/`bad` exactly as the
-/// `$ cmd → status` exec row roles an exit code — which is what a settled
-/// block's is.
 pub fn settled_spans(
     id: Option<u64>,
     title: &str,
     elapsed: Option<Duration>,
-    outcome: &DoneOutcome,
+    outcome: &Done,
 ) -> Vec<Span> {
-    let (role, how, message) = match outcome {
-        DoneOutcome::Ok => (Role::Ok, "exit 0".to_string(), ""),
-        DoneOutcome::Err { message, status } => {
-            (Role::Bad, format!("exit {status}"), message.as_str())
-        }
-        DoneOutcome::Exited { status } => (Role::Bad, format!("exited {status}"), ""),
-        DoneOutcome::Stopped { cause } => (Role::Bad, cause.clone(), ""),
-        DoneOutcome::Panic { message } => (Role::Bad, "panic".to_string(), message.as_str()),
+    let (how, detail) = outcome.parts();
+    let role = if matches!(outcome, Done::Ok(())) {
+        Role::Ok
+    } else {
+        Role::Bad
     };
     let mut spans = vec![
         Span::new(Role::Muted, "errand"),
@@ -98,11 +66,11 @@ pub fn settled_spans(
     }
     spans.extend([
         Span::new(Role::Muted, " ("),
-        Span::new(role, how),
+        Span::new(role, how.into_owned()),
         Span::new(Role::Muted, ")"),
     ]);
-    if !message.is_empty() {
-        spans.push(Span::new(Role::Muted, format!(": {message}")));
+    if let Some(detail) = detail {
+        spans.push(Span::new(Role::Muted, format!(": {detail}")));
     }
     spans
 }
@@ -114,7 +82,7 @@ pub fn settled_text(
     id: Option<u64>,
     title: &str,
     elapsed: Option<Duration>,
-    outcome: &DoneOutcome,
+    outcome: &Done,
 ) -> String {
     settled_spans(id, title, elapsed, outcome)
         .iter()
@@ -141,32 +109,20 @@ mod tests {
     #[test]
     fn value_to_done_decodes_each_outcome() {
         let named = |outcome| Some((7, "building".to_string(), Duration::from_secs(192), outcome));
-        assert_eq!(value_to_done(&done(Done::Ok)), named(DoneOutcome::Ok));
-        let err = ErrorRecord::new("<runtime>", &Status::Raised(2), "boom", None);
-        assert_eq!(
-            value_to_done(&done(Done::Err(err))),
-            named(DoneOutcome::Err {
-                message: "boom".into(),
-                status: 2,
-            })
-        );
-        assert_eq!(
-            value_to_done(&done(Done::Panic("kaput".into()))),
-            named(DoneOutcome::Panic {
-                message: "kaput".into(),
-            })
-        );
-        assert_eq!(
-            value_to_done(&done(Done::Exited(3))),
-            named(DoneOutcome::Exited { status: 3 })
-        );
-        let cause = CancelCause::Cancelled;
-        assert_eq!(
-            value_to_done(&done(Done::Stopped(cause))),
-            named(DoneOutcome::Stopped {
-                cause: cause.message().into(),
-            })
-        );
+        for outcome in [
+            Done::Ok(()),
+            Done::Err(ErrorRecord::new(
+                "<runtime>",
+                &Status::Raised(std::num::NonZeroU8::new(2).unwrap()),
+                "boom",
+                None,
+            )),
+            Done::Panic("kaput".into()),
+            Done::Exited(3),
+            Done::Stopped(CancelCause::Cancelled),
+        ] {
+            assert_eq!(value_to_done(&done(outcome.clone())), named(outcome));
+        }
     }
 
     #[test]
@@ -176,16 +132,18 @@ mod tests {
                 Some(7),
                 "building",
                 Some(Duration::from_secs(192)),
-                &DoneOutcome::Err {
-                    message: "build failed".into(),
-                    status: 2,
-                }
+                &Done::Err(ErrorRecord::new(
+                    "<runtime>",
+                    &Status::Raised(std::num::NonZeroU8::new(2).unwrap()),
+                    "build failed",
+                    None,
+                ))
             ),
-            "errand #7 (building) finished after 3 mins 12 secs (exit 2): build failed"
+            "errand #7 (building) finished after 3 mins 12 secs (failed): build failed"
         );
         assert_eq!(
-            settled_text(Some(7), "building", None, &DoneOutcome::Ok),
-            "errand #7 (building) finished (exit 0)"
+            settled_text(Some(7), "building", None, &Done::Ok(())),
+            "errand #7 (building) finished (returned)"
         );
     }
 

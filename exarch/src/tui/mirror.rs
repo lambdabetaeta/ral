@@ -363,9 +363,8 @@ impl Mirror {
             K::Card { card } => vec![surfaced(card.clone())],
             // Not a card: a settled block is announced, not bounded — a line
             // on the rail, exactly as a subagent's answer arrives.  The shape
-            // holds however it settled: `╳` is the turn's own failure (a
-            // provider error, a stall), never a nonzero exit, which reads as a
-            // red status in the row here just as it does on an exec.
+            // holds however it settled: `╳` is the turn's own failure,
+            // never the worker's ending.
             K::Done {
                 id,
                 title,

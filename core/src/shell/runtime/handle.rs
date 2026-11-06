@@ -6,7 +6,7 @@
 //! `publish_abandoned_if_unfinished`) is private to this module, so a handle's
 //! terminal transition is written at most once.
 
-use super::flow::ThreadEnd;
+use super::flow::End;
 use super::value::Value;
 use crate::fact::{Io, WorkerId};
 use crate::io::ByteBuffer;
@@ -107,7 +107,7 @@ impl<R, L> Sample<R, L> {
 pub struct CompletedHandle {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    pub(crate) end: ThreadEnd,
+    pub(crate) end: End,
 }
 
 /// One locked lifecycle/time projection of a [`HandleInner`].
@@ -301,7 +301,7 @@ impl HandleInner {
     }
 
     /// Publish the worker's terminal outcome once.
-    fn publish(&self, end: ThreadEnd) -> Stamp {
+    fn publish(&self, end: End) -> Stamp {
         let state = self.state.lock_ignore_poison();
         if let Some(ended) = state.ended() {
             drop(state);
@@ -317,11 +317,11 @@ impl HandleInner {
         if state.ended().is_some() {
             return;
         }
-        let end = ThreadEnd::Panicked(format!("{}: spawned thread panicked", self.title));
+        let end = End::Panic(format!("{}: spawned thread panicked", self.title));
         self.install_terminal(state, end);
     }
 
-    fn install_terminal(&self, mut state: MutexGuard<'_, HandleState>, end: ThreadEnd) -> Stamp {
+    fn install_terminal(&self, mut state: MutexGuard<'_, HandleState>, end: End) -> Stamp {
         let stdout = self.stdout_buf.take();
         let stderr = self.stderr_buf.take();
         let ended = Stamp::now();
@@ -346,7 +346,7 @@ impl HandleInner {
 
 /// The worker's sole completion capability, minted by [`HandleInner::new`].
 ///
-/// Consuming it with [`Self::finish`] publishes the worker's [`ThreadEnd`] and
+/// Consuming it with [`Self::finish`] publishes the worker's [`End`] and
 /// returns the terminal [`Stamp`].  Dropping it unfinished publishes an
 /// abandoned-thread panic without invoking any host sink.
 pub(crate) struct CompletionPermit {
@@ -354,7 +354,7 @@ pub(crate) struct CompletionPermit {
 }
 
 impl CompletionPermit {
-    pub(crate) fn finish(self, end: ThreadEnd) -> Stamp {
+    pub(crate) fn finish(self, end: End) -> Stamp {
         self.handle.publish(end)
     }
 }
@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(io.stdout.as_slice(), b"stdout-bytes");
         assert_eq!(io.stderr.as_slice(), b"stderr-bytes");
 
-        let published_stamp = permit.finish(ThreadEnd::Settled(Ok(Value::Int(99))));
+        let published_stamp = permit.finish(End::Ok(Value::Int(99)));
         assert_eq!(handle.sample(), Sample::Ready(()));
         assert!(!handle.sample().is_live());
         assert!(handle.sample().has_ended());
@@ -486,7 +486,7 @@ mod tests {
         // A stopping snapshot copies no bytes.
         assert!(matches!(handle.snapshot_io().state, Sample::Stopping));
 
-        let stamp = permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        let stamp = permit.finish(End::Ok(Value::Unit));
         assert_eq!(handle.sample(), Sample::Consumed);
         assert!(handle.has_ended());
         assert!(handle.sample().is_claimed());
@@ -507,7 +507,7 @@ mod tests {
     fn claim_and_stop_on_ready_discards_result_into_consumed_preserving_stamp() {
         let (handle, permit, out, _err) = make_handle();
         out.append(b"discard-me");
-        let stamp = permit.finish(ThreadEnd::Settled(Ok(Value::Int(1))));
+        let stamp = permit.finish(End::Ok(Value::Int(1)));
         let frozen_elapsed = handle.elapsed();
 
         assert!(handle.claim_and_stop());
@@ -522,7 +522,7 @@ mod tests {
     fn competing_claimers_yield_exactly_one_winner() {
         let (handle, permit, out, _err) = make_handle();
         out.append(b"once");
-        permit.finish(ThreadEnd::Settled(Ok(Value::Int(7))));
+        permit.finish(End::Ok(Value::Int(7)));
 
         let barrier = Arc::new(Barrier::new(2));
         let threads = std::array::from_fn::<_, 2, _>(|_| {
@@ -583,7 +583,7 @@ mod tests {
             Sample::Ready(c) => {
                 assert_eq!(c.stdout, b"partial-out");
                 assert_eq!(c.stderr, b"partial-err");
-                assert!(matches!(c.end, ThreadEnd::Panicked(ref s) if s.contains("<handle-test>")));
+                assert!(matches!(c.end, End::Panic(ref s) if s.contains("<handle-test>")));
             }
             other => panic!("expected Ready from abandoned Running permit, got {other:?}"),
         }
@@ -615,7 +615,7 @@ mod tests {
         assert!(handle.cancel.is_cancelled());
         // Not directly claimed: still Running, not Stopping.
         assert_eq!(handle.sample(), Sample::Running(()));
-        permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        permit.finish(End::Ok(Value::Unit));
         assert_eq!(handle.sample(), Sample::Ready(()));
     }
 }

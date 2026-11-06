@@ -307,10 +307,10 @@ impl<F: FnMut(SynodEvent)> Sink for Narrator<F> {
 mod tests {
     use super::*;
     use crate::wire::MarkDto;
-    use exarch::card::DoneOutcome;
     use exarch::card::{Hunk, Mark, Row, Seg};
     use exarch::record::AgentState;
     use ral_core::data::datum::Datum as _;
+    use ral_core::fact::Done;
     use ral_core::fact::{Read, Worker};
     use ral_core::shell::runtime::{Observation, Observed};
 
@@ -460,7 +460,7 @@ mod tests {
                     id: None,
                     title: "building".into(),
                     elapsed_ms: None,
-                    outcome: DoneOutcome::Ok,
+                    outcome: Done::Ok(()),
                 })
             )
             .is_none()

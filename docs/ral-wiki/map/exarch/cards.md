@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+generated_at_date: 2026-11-06
 covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/card/resources.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/stream.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
@@ -94,22 +94,24 @@ its own rows (`agent/resources.rs`) and the frontend appends the rows it owns
 
 ## Host-composed one-liners — `done`, notices
 
-Some of what the marks describe is composed in Rust, never decoded from a
-kit-authored `` `card ``. `settled_spans` words a worker's completion outcome — the `` `done ``
-event core appends to every deferred surface batch, decoded by `value_to_done`
-into a `DoneOutcome` and recorded as `Display::Done { outcome }` — as one
-sentence, `background block settled (exit n)`, with a failure's message
-appended; a worker that ended on an `exit` or a stop (`` `exited ``,
-`` `stopped `` on the card) reads "exited n" or the stop's cause, roled `bad`. The outcome alone carries a level, roled `ok`/`bad` exactly as the
-`$ cmd → status` exec row roles an exit code, which is what a settled block's
-is: a non-settled `╳` rail marks a turn error (provider, stall, or forensic
-fault) or a cancelled turn, while a nonzero worker exit remains the settled
-outcome rather than a turn error.
-`settled_text` flattens the spans for the two sinks with
-no ink to spend — the headless tee and the model's wake-up notice
-(`surface_notice`, `bus/post.rs`) — so none of the three can drift;
-only `record::view`'s ledger keeps its own `[done: …]`, the bracketed register
-every fact wears there. It names no worker.
+**A worker's completion keeps core's `Done`, not a pre-worded host copy.**
+`value_to_done` decodes the `DoneEvent` into id, title, elapsed time and
+`Done = Ending<(), ErrorRecord, CancelCause>`. `Display::Done { outcome }`
+stores it through `Datum`; `settled_spans` reads `Done::parts` for the head
+and optional detail: `returned`, `failed: …`, ``ran `exit 3` ``, the cause's
+message (`timed out`), or `panicked: …`. Failures use the record's message.
+Only `Ok(())` has role `ok`; the others have role `bad`. A worker is not a
+process, so a failure is not worded `exit N`:
+`errand #7 (building) finished after 3 mins 12 secs (failed): build failed`.
+`settled_text` flattens the same spans for the headless tee and model wake
+(`surface_notice`, `bus/post.rs`); the record view also reads `Done`.
+
+Exarch's admission checks `WorkerState::unclaimed`: a present `Running` or
+`Ready` row admits both `Display::Done` and the wake; `Stopping`, absence or
+a failed probe admits neither. The worker's other surfaced values still
+replay. The check is at admission, not a prediction of later claims.
+The REPL gates at its next prompt; batch announces none
+([[design/endings|endings]]).
 
 A settlement is *announced*, not bounded, so it is no card at all. Exarch's
 transcript seats those spans as a chrome line on the rail — `Chrome::Settled`

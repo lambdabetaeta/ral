@@ -35,7 +35,6 @@ mod value;
 
 pub use change::{Change, change_card};
 pub use diff::{Diff, Hunk, Row, Seg};
-pub use done::DoneOutcome;
 
 pub(crate) use change::settled;
 pub(crate) use decode::{value_to_card, value_to_edit};

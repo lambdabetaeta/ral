@@ -6,9 +6,9 @@ use crate::fact::Worker;
 use crate::io::{Sink, new_buffer};
 use crate::process::{DurableRoot, Scope, WorkerStop};
 use crate::shell::runtime::{
-    Break, BroodOwner, Cradle, DeferredSurface, Done, DoneEvent, EnrolClosed, Error, Escape,
-    HandleInner, Mooring, Observed, Owner, ScopeOwner, Settled, Shell, SurfaceSink, ThreadEnd,
-    Value, WatchEvent, WorkerEntry, WorkerId, final_poll, sig,
+    Break, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed, Error, Escape,
+    HandleInner, Mooring, Observed, Owner, ScopeOwner, Settled, Shell, Stop, SurfaceSink, Value,
+    WatchEvent, WorkerEntry, WorkerId, final_poll, sig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,26 +118,24 @@ where
             child.io.stdout = stdout;
             child.io.stderr = stderr;
 
-            let end = match ThreadEnd::of(|| {
-                // A birth inside this worker hangs under it and is settled by
-                // it: I4, I5.  Constructed inside the catch so a body or join
-                // panic drops the owner and stops accepted children.
+            let end = End::of(|| {
+                // A panic drops the owner and stops accepted children (I4, I5).
                 let owner = ScopeOwner::new(BroodOwner::Worker(id));
                 child.local.cradle = Cradle::owning(Scope::clone(&mooring.home), owner.brood());
                 let body = work(mooring, child);
-                exit_brood(&owner, body, mooring.cleanup_grace, child)
-            }) {
                 // The base's return clause: the closing poll, then the switch.
-                ThreadEnd::Settled(result) => ThreadEnd::Settled(convert_own_stop(
-                    final_poll(result, &mooring.home),
+                convert_own_stop(
+                    final_poll(
+                        exit_brood(&owner, body, mooring.cleanup_grace, child),
+                        &mooring.home,
+                    ),
                     &child.session.root,
-                )),
-                panicked @ ThreadEnd::Panicked(_) => panicked,
-            };
+                )
+            });
             let end = flush_worker_stream(end, &mut child.io.stdout);
             let end = flush_worker_stream(end, &mut child.io.stderr);
             let receipt = receipt.map(|(started, title, surface)| {
-                let outcome = Done::of(&end, child);
+                let outcome = end.done(child);
                 (started, title, outcome, surface)
             });
             let ended = permit.finish(end);
@@ -175,14 +173,14 @@ where
     Ok(handle)
 }
 
-fn flush_worker_stream(end: ThreadEnd, sink: &mut Sink) -> ThreadEnd {
-    let flushed = ThreadEnd::of(|| {
+fn flush_worker_stream(end: End, sink: &mut Sink) -> End {
+    let flushed = End::of(|| {
         sink.flush_pending();
         Ok(Value::Unit)
     });
     match (end, flushed) {
-        (panic @ ThreadEnd::Panicked(_), _) | (_, panic @ ThreadEnd::Panicked(_)) => panic,
-        (end, ThreadEnd::Settled(_)) => end,
+        (panic @ End::Panic(_), _) | (_, panic @ End::Panic(_)) => panic,
+        (end, _) => end,
     }
 }
 
@@ -191,11 +189,11 @@ fn flush_worker_stream(end: ThreadEnd, sink: &mut Sink) -> ThreadEnd {
 /// the host owns (a root cause, an interrupt) passes as the escape it is.
 pub(super) fn convert_own_stop(result: Settled<Value>, root: &DurableRoot) -> Settled<Value> {
     let stop = match &result {
-        Err(Break::Escape(Escape::Stopped {
+        Err(Break::Escape(Escape::Stopped(Stop {
             cause,
             owner: Some(owner),
             ..
-        })) if *owner != root.id() => WorkerStop::of(*cause),
+        }))) if *owner != root.id() => WorkerStop::of(*cause),
         _ => None,
     };
     stop.map_or(result, |stop| Err(Error::worker_stopped(stop).into()))

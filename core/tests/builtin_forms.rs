@@ -26,14 +26,13 @@ fn expect_static(source: &str) -> StaticDiagnostics {
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static rejection, got {ending:?}")
         }
-        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
 /// Run `source` expecting one type error, whose code must be `code`.
 fn expect_type_code(source: &str, code: &str) {
     let codes: Vec<_> = match expect_static(source) {
-        StaticDiagnostics::Compile(r) if r.status == 1 => {
+        StaticDiagnostics::Compile(r) if r.status.get() == 1 => {
             r.reports.iter().filter_map(|r| r.code).collect()
         }
         StaticDiagnostics::Compile(r) => {

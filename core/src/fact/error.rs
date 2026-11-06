@@ -4,6 +4,7 @@
 
 use crate::source::CallSite;
 use crate::{record, variant};
+use std::num::NonZeroU8;
 
 /// Why a failure happened, as the tagged value `$err[reason]` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +34,7 @@ variant!(typed Reason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorRecord {
     pub(crate) cmd: String,
-    pub(crate) status: i32,
+    pub(crate) status: NonZeroU8,
     pub(crate) reason: Reason,
     pub(crate) message: String,
     pub(crate) site: Option<CallSite>,
@@ -47,12 +48,24 @@ record!(typed ErrorRecord {
     site: "site",
 });
 
+impl serde::Serialize for ErrorRecord {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        crate::data::datum::as_datum::serialize(self, s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ErrorRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::data::datum::as_datum::deserialize(d)
+    }
+}
+
 impl ErrorRecord {
     pub fn cmd(&self) -> &str {
         &self.cmd
     }
 
-    pub fn status(&self) -> i32 {
+    pub fn status(&self) -> NonZeroU8 {
         self.status
     }
 

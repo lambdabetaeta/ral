@@ -12,7 +12,7 @@ use super::{
     BlockId, Control, Display, EditAuthority, Eviction, Fold, Forensic, ItemKind, Model, Record,
     Recorded, Refusal, Role, Seq, Settlement, SpanRow, Spent, Transcript, Voice,
 };
-use crate::card::{Card, Change, DoneOutcome, Field, FieldVal, Mark, Role as Ink, Span};
+use crate::card::{Card, Change, Field, FieldVal, Mark, Role as Ink, Span};
 use crate::provider::{ProviderError, Usage};
 use ral_core::data::FOValue;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ pub enum BlockKind {
         id: Option<u64>,
         title: String,
         elapsed_ms: Option<u64>,
-        outcome: DoneOutcome,
+        outcome: ral_core::fact::Done,
     },
     Context {
         rows: Vec<SpanRow>,

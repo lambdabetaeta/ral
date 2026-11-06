@@ -5,7 +5,9 @@
 //! teardown, while EOF initiates it. Dispatch carries one whole run, Event flows
 //! engine to front-end, and Control flows front-end to engine. The carriers
 //! that interpret the algebra are [`crate::carrier`]'s.
+use crate::fact::{ErrorRecord, ExitCode as _};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU8;
 
 use crate::data::FOValue;
 use crate::io::{Captured, RunIo, RunStdin};
@@ -21,7 +23,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -249,6 +251,9 @@ pub struct Run {
     /// scope nor collects one. exarch's tool calls ask with
     /// [`CapturePolicy::Off`]; the REPL never asks.
     pub trail: Option<CapturePolicy>,
+    /// On return, wait for the session's loose workers and replay their bytes,
+    /// dropping their endings. Batch sets this on its script.
+    pub last: bool,
 }
 
 impl Run {
@@ -277,6 +282,7 @@ impl Run {
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
             trail: None,
+            last: false,
         }
     }
 }
@@ -347,7 +353,7 @@ pub enum SessionEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnquiryError {
     pub message: String,
-    pub status: i32,
+    pub status: NonZeroU8,
 }
 
 impl EnquiryError {
@@ -403,118 +409,42 @@ pub enum Report {
     /// Parse/type/host refusal: the run never reached evaluation, so no
     /// command ran and nothing was bound. `rendered` is the whole report —
     /// prefix, code, caret, hint — so the host prints it and exits on `status`.
-    Static {
-        rendered: String,
-        status: FailureStatus,
-    },
+    Static { rendered: String, status: NonZeroU8 },
     /// The run ran to a settled result.
-    Ran {
-        ending: Ending,
-        /// `Some` under [`RunIo::Capture`].
-        captured: Option<Captured>,
-        /// The dispatch's own trail, projected; empty unless [`Run::trail`]
-        /// asked. Unbounded by declaration — the wire's frame fuse is the
-        /// shared backstop, exactly as it is for `captured`.
-        trail: Vec<FOValue>,
-    },
-    /// The engine could not report the run: a panic in the run or in the
+    Ran(Ran),
+    /// The engine could not report the run: a panic in the
     /// report plumbing, or a report the frame fuse would not pass. What the run
     /// did is unknown (it may have run in part or whole), so a host must read it
     /// as neither a refusal nor an ending. `rendered` is the whole one-liner;
     /// the host prints it and exits on `status`.
-    Faulted {
-        rendered: String,
-        status: FailureStatus,
-    },
+    Faulted { rendered: String, status: NonZeroU8 },
 }
 
-/// The status of an ending that *failed*: never zero, so an error can never
-/// be reported with the code that means success.
-///
-/// The clamp lives in the type rather than at any one site: `From<i32>` is
-/// the only way in, the wire form is the plain integer, and `serde` routes a
-/// decoded status back through the same door, so no peer can smuggle a
-/// success code into a failure either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "i32", into = "i32")]
-pub struct FailureStatus(i32);
-
-impl From<i32> for FailureStatus {
-    fn from(status: i32) -> Self {
-        Self(status.clamp(1, 255))
-    }
-}
-
-impl From<FailureStatus> for i32 {
-    fn from(status: FailureStatus) -> Self {
-        status.0
-    }
-}
-
-impl FailureStatus {
-    /// The exit code a host reports.
-    #[must_use]
-    pub fn get(self) -> i32 {
-        self.0
-    }
-}
-
-/// How a run left evaluation, wire-shaped.
-///
-/// The protocol projection of the engine's [`Ending`](crate::shell::run::Ending),
-/// rendered against a [`SourceDb`](crate::source::SourceDb) — a live `Error`
-/// cannot cross the protocol, so [`Self::Raised`]/[`Self::Stopped`] carry the
-/// string it rendered to, and the record `try` would hand its handler.
-/// `status` is carried explicitly wherever it
-/// is not the whole of the arm's payload, since a renderer that has already
-/// discarded the engine `Error` for its `rendered` string has no other way
-/// back to it; on [`Self::Raised`] it is a [`FailureStatus`], which has no
-/// success code to carry, and [`Self::Stopped`] derives it from its cause.
+/// A run that ran to a settled result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Ending {
-    Settled {
-        value: FOValue,
-        status: i32,
-    },
-    /// `command_exit` says whether the status was an external command's
-    /// non-zero exit rather than a raised error — the one classification a
-    /// host's didactics need from a `Status` that never crosses the protocol.
-    /// `single_command` picks between the exit-code remedy's two wordings.
-    Raised {
-        rendered: String,
-        record: FOValue,
-        command_exit: bool,
-        single_command: bool,
-        status: FailureStatus,
-    },
-    /// A stop that reached the top: the run was ended, not failed.  `cause`
-    /// picks a host's remedy (the timeout tip for `TimedOut`); `rendered` is
-    /// empty for `ReaderGone`, whose status is the whole report.
-    Stopped {
-        rendered: String,
-        cause: CancelCause,
-    },
-    /// The run settled, but on a value that is not data — a handle, a block,
-    /// a function — which the protocol cannot carry. Nothing failed, yet the
-    /// value is lost, so it ends as a failure of its own kind, with its own
-    /// record.
-    Unreturnable {
-        rendered: String,
-        record: FOValue,
-    },
-    Exited(i32),
+pub struct Ran {
+    pub ending: Ending,
+    /// The ending's whole diagnostic; empty for values, exits and reader-gone stops.
+    pub rendered: String,
+    /// Whether the program was one command: compact drawing and exit-tip wording.
+    pub single_command: bool,
+    /// `Some` under [`RunIo::Capture`].
+    pub captured: Option<Captured>,
+    /// The dispatch's own trail, projected; empty unless [`Run::trail`]
+    /// asked. Unbounded by declaration — the wire's frame fuse is the
+    /// shared backstop, exactly as it is for `captured`.
+    pub trail: Vec<FOValue>,
 }
 
-impl Ending {
-    /// The flat status view: the `status` an arm carries, or the whole of
-    /// [`Self::Exited`]'s payload.
-    #[must_use]
-    pub fn status(&self) -> i32 {
+/// How a run ended, projected onto the wire.
+pub type Ending = crate::fact::Ending<FOValue, ErrorRecord, CancelCause>;
+
+impl Report {
+    /// The process status a host exits on.
+    pub fn code(&self) -> u8 {
         match self {
-            Self::Settled { status, .. } | Self::Exited(status) => *status,
-            Self::Raised { status, .. } => status.get(),
-            Self::Stopped { cause, .. } => i32::from(cause.code()),
-            Self::Unreturnable { .. } => 1,
+            Self::Static { status, .. } | Self::Faulted { status, .. } => status.get(),
+            Self::Ran(ran) => ran.ending.code(),
         }
     }
 }
@@ -525,13 +455,20 @@ mod ending_wire_round_trip_tests {
     //! encodes, a front-end decodes back byte-for-byte.
 
     use super::*;
+    use crate::shell::runtime::Status;
+
+    fn nz(n: u8) -> NonZeroU8 {
+        NonZeroU8::new(n).unwrap()
+    }
 
     fn ran(ending: Ending) -> Report {
-        Report::Ran {
+        Report::Ran(Ran {
             ending,
+            rendered: String::new(),
+            single_command: false,
             captured: None,
             trail: Vec::new(),
-        }
+        })
     }
 
     fn round_trips(report: &Report) {
@@ -541,38 +478,24 @@ mod ending_wire_round_trip_tests {
     }
 
     #[test]
-    fn settled_round_trips() {
-        round_trips(&ran(Ending::Settled {
-            value: FOValue::Int { value: 1 },
-            status: 0,
-        }));
+    fn ok_round_trips() {
+        round_trips(&ran(Ending::Ok(FOValue::Int { value: 1 })));
     }
 
     #[test]
-    fn raised_round_trips() {
-        round_trips(&ran(Ending::Raised {
-            rendered: "error: boom\n".into(),
-            record: FOValue::Unit,
-            command_exit: true,
-            single_command: false,
-            status: 7.into(),
-        }));
+    fn err_round_trips() {
+        let record = ErrorRecord::new("cmd", &Status::Raised(nz(7)), "boom", None);
+        round_trips(&ran(Ending::Err(record)));
     }
 
     #[test]
     fn stopped_round_trips() {
-        let stopped = ran(Ending::Stopped {
-            rendered: "error: timed out\n".into(),
-            cause: CancelCause::TimedOut,
-        });
-        round_trips(&stopped);
-        let Report::Ran { ending, .. } = &stopped else {
-            unreachable!()
-        };
+        let ending = Ending::Stopped(CancelCause::TimedOut);
         assert_eq!(
-            serde_json::to_string(ending).expect("Ending must encode"),
-            r#"{"Stopped":{"rendered":"error: timed out\n","cause":"timed-out"}}"#,
+            serde_json::to_string(&ending).unwrap(),
+            r#"{"stopped":"timed-out"}"#
         );
+        round_trips(&ran(ending));
     }
 
     #[test]
@@ -580,26 +503,16 @@ mod ending_wire_round_trip_tests {
         round_trips(&ran(Ending::Exited(3)));
     }
 
-    /// A failure never reports success, however it was built and whatever a
-    /// peer sends.
     #[test]
-    fn a_failing_ending_never_carries_a_success_status() {
-        let raised = Ending::Raised {
-            rendered: "error: boom\n".into(),
-            record: FOValue::Unit,
-            command_exit: false,
-            single_command: false,
-            status: 0.into(),
-        };
-        assert_eq!(raised.status(), 1, "a raise reported success");
-        round_trips(&ran(raised));
+    fn panic_round_trips() {
+        round_trips(&ran(Ending::Panic("boom".into())));
     }
 
     #[test]
     fn static_round_trips() {
         round_trips(&Report::Static {
             rendered: "Error: boom\n".into(),
-            status: 1.into(),
+            status: NonZeroU8::MIN,
         });
     }
 
@@ -607,7 +520,7 @@ mod ending_wire_round_trip_tests {
     fn faulted_round_trips() {
         round_trips(&Report::Faulted {
             rendered: "Error: boom\n".into(),
-            status: 101.into(),
+            status: nz(crate::fact::PANIC_CODE),
         });
     }
 }

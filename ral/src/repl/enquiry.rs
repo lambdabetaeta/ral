@@ -168,9 +168,7 @@ impl Datum for EditorOp {
             Self::Highlight(spans) => tag("highlight", Some(spans.encode())),
             Self::History => tag("history", None),
             Self::StateGet => tag("state-get", None),
-            Self::StateSet(Data(value)) => {
-                tag("state-set", (value != FOValue::Unit).then_some(value))
-            }
+            Self::StateSet(Data(value)) => tag("state-set", Some(value)),
         }
     }
 

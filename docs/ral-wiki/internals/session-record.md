@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_date: 2026-11-03
+verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
+verified_at_date: 2026-11-06
 anchors: [Commit, Emitter::commit, Emitter::emit, Sum, Log::append, Log::sync, Signal::Synced, OwnDir::xdg_synced, Log::read, Log::complete_len, Log::extent, LocusReader, LocusReader::record, Signal::Commit, Signal::Transient, Record, Transcript, Control, Display, Forensic, ChildStatus, Control::Status, Transient, Context::step, Blocks::step, Blocks::try_step, Model::narrows, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Model, Mail, Schedules, Folds, Replay, replay, context::resume, Mirror::try_step, Scrollback::commit, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Eviction, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, read_seeds, render_eviction, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable, Unavailable, Emitter::bind, Uncommitted, AgentMailbox, AgentAddress, Control::JobOpened, Control::JobSettled, Forensic::EngineSevered, Forensic::TeardownFailed, Fatal, AgentLog::human_children, Mail::owes]
 ---
 
@@ -44,9 +44,15 @@ internally tagged enum buffers through serde's `Content` and replays it on the
 native stack, bypassing the stack-grown reader, so a deep reply value would
 make its session un-resumable. Reader and writer are both stack-grown
 (`serde_stacker`): `seal` serializes through an adapter into a `RawValue` and
-never re-parses. The types still internally tagged inside records
-(`Settlement`, `DoneOutcome`, `Mark`, diff rows) carry no `FOValue`, so their
-depth is bounded by their type. Lines and bodies read as JSON objects alone;
+never re-parses. `Display::Done` holds core's
+`Done = Ending<(), ErrorRecord, CancelCause>` through `data::datum::as_datum`:
+its `Datum` encoding becomes an externally tagged `FOValue`, not the ending's
+direct serde wire encoding. The Unit payload is absent (`` `ok ``); `untag`
+reads an explicit Unit as absent too. No compatibility with older done-record shapes
+is required ([[design/endings|endings]]).
+The types still internally tagged inside records (`Settlement`, `Mark`, diff
+rows) carry no `FOValue`, so their depth is bounded by their type.
+Lines and bodies read as JSON objects alone;
 an array is foreign. Reports, schedule fires, mailbox clear and reopen
 commit their related control records together on one line.
 

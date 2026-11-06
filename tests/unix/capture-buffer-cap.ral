@@ -34,6 +34,8 @@ let settle = { |h|
 }
 let res = settle $h
 echo !{length $res[stdout]}
+# poll leaves the result unclaimed; discard its bytes before the script returns.
+cancel $h
 
 # Audit retains this smaller stderr stream in full
 let noisy = audit { /bin/sh -c 'head -c 80000 /dev/zero >&2' } 2> /dev/null

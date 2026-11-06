@@ -6,9 +6,9 @@ use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::elaborator::elaborate;
 use ral_core::own;
-use ral_core::protocol::{Ending, Program, Report, Run};
+use ral_core::protocol::{Ending, Program, Ran, Report, Run};
 use ral_core::shell::run::StaticDiagnostics;
-use ral_core::shell::runtime::{CapturePolicy, DeferredSink, Observation};
+use ral_core::shell::runtime::{CapturePolicy, DeferredSink, DoneEvent, Observation};
 use ral_core::source::{FileId, Source, SourceFile, SourceOrigin};
 use ral_core::syntax::parser::parse;
 use ral_core::{RequestedTerminalAccess, SessionSchemes, io::terminal};
@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::boot_builtin::{self, Boot};
 use crate::cli::{BatchOpts, Halt, RunOpts};
-use crate::platform::{exit_byte, local_attach, probe_terminal};
+use crate::platform::{local_attach, probe_terminal};
 use crate::site::{Silent, site};
 use crate::startup::engine::{BATCH, BatchConfig, INSTALLERS, batch_surface};
 
@@ -31,6 +31,8 @@ impl DeferredSink for Stdout {
         for v in &batch {
             if let Some(line) = crate::surface::watch_line(v) {
                 outln!("{line}");
+            } else if DoneEvent::from_surface(v).is_some() {
+                // A loose worker's ending is its own; batch announces none.
             } else if let Some(note) = crate::surface::dropped(v) {
                 errln!("{note}");
             }
@@ -72,23 +74,10 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
     run_source(&SourceOrigin::named("<stdin>"), source, Vec::new(), batch)
 }
 
-/// Serialise the run's report envelope to JSON and emit it on stderr — the
-/// same envelope `audit { … }` returns, with the whole run as its body.  An
-/// escape (`exit`) is not a failure: the process still exits with its code,
-/// but the report reads `` `ok () ``; a stop reads `` `stopped cause ``.
+/// Emit the run's whole ending and trail as the `--audit` envelope.
 fn emit_audit_report(ending: &Ending, trail: &[ral_core::data::FOValue], pretty: bool) {
-    use ral_core::data::datum::Datum as _;
-    use ral_core::shell::runtime::{ErrorRecord, Status, Value, outcome_value, report_envelope};
-    let outcome = match ending {
-        Ending::Settled { value, .. } => outcome_value(Ok(Value::from(value.clone()))),
-        Ending::Raised { record, .. } | Ending::Unreturnable { record, .. } => {
-            outcome_value(Err(ErrorRecord::decode(record).unwrap_or_else(|why| {
-                ErrorRecord::new("<runtime>", &Status::Raised(1), &why, None)
-            })))
-        }
-        Ending::Exited(_) => outcome_value(Ok(Value::Unit)),
-        Ending::Stopped { cause, .. } => Value::variant("stopped", Some(Value::from_datum(*cause))),
-    };
+    use ral_core::shell::runtime::{Value, report_envelope};
+    let outcome = Value::from(ending.clone().encode());
     let trail: Vec<Observation> = trail
         .iter()
         .filter_map(|fo| Observation::decode(fo).ok())
@@ -190,23 +179,26 @@ pub(crate) fn run_source(
     if let Err(status) =
         boot_builtin::settle(dispatch_to_report(&transport, booted, Arc::new(()), None))
     {
-        return ExitCode::from(exit_byte(status));
+        return ExitCode::from(status);
     }
     tick("boot");
 
-    let script = run(
-        Program::Source(source),
-        audit.then_some(CapturePolicy::Bytes),
-    );
+    let script = Run {
+        last: true,
+        ..run(
+            Program::Source(source),
+            audit.then_some(CapturePolicy::Bytes),
+        )
+    };
     let status = dispatch(&transport, script, audit.then_some(pretty));
     tick("evaluate");
-    ExitCode::from(exit_byte(status))
+    ExitCode::from(status)
 }
 
 /// Dispatch `run` under the mute host and print what it rendered — or, under
 /// `--audit` (`Some(pretty)`), its report envelope instead of a runtime error.
 /// The run's status.
-fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32 {
+fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> u8 {
     let report = match dispatch_to_report(transport, run, Arc::new(()), None) {
         Ok(report) => report,
         Err(severed) => {
@@ -214,25 +206,25 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
             return 1;
         }
     };
+    let code = report.code();
     match report {
-        Report::Static { rendered, status } | Report::Faulted { rendered, status } => {
+        Report::Static { rendered, .. } | Report::Faulted { rendered, .. } => {
             err!("{rendered}");
-            status.get()
         }
-        Report::Ran { ending, trail, .. } => {
-            match (&ending, audit) {
-                (_, Some(pretty)) => emit_audit_report(&ending, &trail, pretty),
-                (
-                    Ending::Raised { rendered, .. }
-                    | Ending::Stopped { rendered, .. }
-                    | Ending::Unreturnable { rendered, .. },
-                    None,
-                ) => err!("{rendered}"),
-                _ => {}
+        Report::Ran(Ran {
+            ending,
+            rendered,
+            trail,
+            ..
+        }) => {
+            if let Some(pretty) = audit {
+                emit_audit_report(&ending, &trail, pretty);
+            } else if !rendered.is_empty() {
+                err!("{rendered}");
             }
-            ending.status()
         }
     }
+    code
 }
 
 /// `--check`, `--dump-ast` and `--dump-ir`: static work on the source alone.
@@ -262,7 +254,7 @@ fn halted(halt: Halt, origin: &SourceOrigin, source: &str) -> ExitCode {
                 StaticDiagnostics::Compile(e.reject(Source::from_text(origin.clone(), source)))
                     .render();
             err!("{rendered}");
-            ExitCode::from(exit_byte(status))
+            ExitCode::from(status.get())
         }
     }
 }

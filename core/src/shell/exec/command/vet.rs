@@ -67,7 +67,7 @@ mod tests {
     use crate::authority::policy::{
         Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, Program,
     };
-    use crate::fact::{Check, Observed, Resource};
+    use crate::fact::{Check, FailureCode as _, Observed, Resource};
     use crate::ir::CommandName;
     use crate::path::FrozenPath;
     use crate::shell::runtime::{CapturePolicy, Mooring, Shell};
@@ -149,7 +149,7 @@ mod tests {
 
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
         let e = refused(head, &mut shell);
-        assert_eq!(e.code(), 127);
+        assert_eq!(e.failure_code().get(), 127);
         assert!(
             !format!("{e:?}").contains("permission denied"),
             "a name no walk resolved must not be refused as unexecutable: {e:?}",
@@ -171,7 +171,7 @@ mod tests {
 
         let head = Head::resolve(&CommandName::Path(r".\zztool".into()), &shell.context);
         let e = refused(head, &mut shell);
-        assert_eq!(e.code(), 127);
+        assert_eq!(e.failure_code().get(), 127);
         assert_eq!(e.hint.as_deref(), Some(r"did you mean '.\zztool.bat'?"));
     }
 
@@ -207,7 +207,7 @@ mod tests {
                 .expect("a tempdir is a working directory"),
         );
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        assert_eq!(refused(head, &mut shell).code(), 127);
+        assert_eq!(refused(head, &mut shell).failure_code().get(), 127);
     }
 
     /// Bundled names short-circuit the disk probe: `ls` vets on an empty
@@ -243,7 +243,7 @@ mod tests {
                 &shell.context,
             );
             let e = refused(head, &mut shell);
-            assert_eq!(e.code(), 126, "{e:?}");
+            assert_eq!(e.failure_code().get(), 126, "{e:?}");
             assert!(!e.message.contains("denied by active grant"), "{e:?}");
         }
     }
@@ -342,7 +342,7 @@ mod tests {
             &shell.context,
         );
         let e = refused(head, &mut shell);
-        assert_eq!(e.code(), 127);
+        assert_eq!(e.failure_code().get(), 127);
         assert!(e.message.contains("no-such-dir"), "{}", e.message);
     }
 
@@ -362,7 +362,7 @@ mod tests {
             &CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
             &shell.context,
         );
-        assert_eq!(refused(head, &mut shell).code(), 127);
+        assert_eq!(refused(head, &mut shell).failure_code().get(), 127);
     }
 
     #[test]
@@ -392,7 +392,7 @@ mod tests {
                 let Err(Break::Error(e)) = vet(head, &[Value::Unit]) else {
                     panic!("the admitted path cannot be run");
                 };
-                assert_eq!(e.code(), code, "{e:?}");
+                assert_eq!(e.failure_code().get(), code, "{e:?}");
                 assert!(!e.message.contains("cannot pass"), "{e:?}");
             }
         });
@@ -417,7 +417,7 @@ mod tests {
             let Err(Break::Error(e)) = vet(head, &[Value::Unit]) else {
                 panic!("a non-executable candidate cannot be run");
             };
-            assert_eq!(e.code(), 126, "{e:?}");
+            assert_eq!(e.failure_code().get(), 126, "{e:?}");
             assert!(e.message.contains(&crate::path::shown(&file)), "{e:?}");
         });
     }
