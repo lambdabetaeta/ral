@@ -81,6 +81,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use regex::Regex;
+
 /// The lint's name, in two pieces: this file's code never holds it whole, so
 /// the scan has nothing of its own to find.
 const LINT: &str = concat!("clippy::disallowed_", "methods");
@@ -129,7 +131,8 @@ const BUILD_SCRIPTS: &[&str] = &["core/build.rs", "ral/build.rs", "exarch/build.
 /// The string containment helpers, which `path/` exports for the sandbox
 /// renderers that still hold names as strings: each file outside `path/` that
 /// calls one, with the helper and how many times.  `Rendered::{holds, rebased}`
-/// are counted as `.holds(` and `.rebased(` in a file that names `Rendered`.
+/// are counted as `.holds(` and `.rebased(` with an argument, in a file that
+/// names `Rendered`; `Excluded::holds()` takes none and yields positions.
 /// Nothing new may join this list.
 const STRING_CONTAINMENT_CALLERS: &[(&str, &str, usize)] = &[
     ("core/src/authority/sandbox/linux.rs", ".holds(", 2),
@@ -137,7 +140,8 @@ const STRING_CONTAINMENT_CALLERS: &[(&str, &str, usize)] = &[
     ("core/src/authority/sandbox/macos.rs", "proper_ancestors", 2),
 ];
 
-/// What `Rendered` lends a renderer, counted in a file that names it.
+/// What `Rendered` lends a renderer, counted as calls with an argument in a
+/// file that names it.
 const RENDERED_NAME_HELPERS: &[&str] = &[".holds(", ".rebased("];
 
 /// The helpers `STRING_CONTAINMENT_CALLERS` counts, by name.
@@ -697,20 +701,31 @@ fn every_member_inherits_the_workspace_lints() {
     );
 }
 
+/// How often `code` calls the method `name` (spelled `.m(`) with an argument.
+fn calls_with_argument(code: &str, name: &str) -> usize {
+    code.match_indices(name)
+        .filter(|(at, _)| !code[at + name.len()..].starts_with(')'))
+        .count()
+}
+
 #[test]
 fn the_string_containment_helpers_gain_no_caller() {
     let mut counted: BTreeMap<(String, &str), usize> = BTreeMap::new();
+    let rendered_word = Regex::new(r"\bRendered\b").expect("a valid pattern");
 
     for source in production_sources() {
         if source.rel.starts_with("core/src/path/") || source.rel == "core/src/path.rs" {
             continue;
         }
-        let rendered = source.code.contains("Rendered");
-        for name in STRING_CONTAINMENT_HELPERS
+        let rendered = rendered_word.is_match(&source.code);
+        let named = STRING_CONTAINMENT_HELPERS
             .iter()
-            .chain(RENDERED_NAME_HELPERS.iter().filter(|_| rendered))
-        {
-            let n = source.code.matches(name).count();
+            .map(|name| (name, source.code.matches(name).count()));
+        let lent = RENDERED_NAME_HELPERS
+            .iter()
+            .filter(|_| rendered)
+            .map(|name| (name, calls_with_argument(&source.code, name)));
+        for (name, n) in named.chain(lent) {
             if n > 0 {
                 counted.insert((source.rel.clone(), name), n);
             }
