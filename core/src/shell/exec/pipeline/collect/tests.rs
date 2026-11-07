@@ -330,13 +330,17 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
             watch: slot.watch(crate::process::ChildHandle::from_std(child)),
             payload: None,
             end: ExternalEnd {
-                name: "sleep".to_string(),
-                audit: None,
-                jail: Some(crate::process::jail::JailCgroup::at(
-                    dir.path().to_path_buf(),
-                )),
-                pumps: command::Pumps::default(),
-                claim: Claim::Unconfined,
+                drain: Drain {
+                    jail: Some(crate::process::jail::JailCgroup::at(
+                        dir.path().to_path_buf(),
+                    )),
+                    pumps: command::Pumps::default(),
+                },
+                settlement: Settlement {
+                    name: "sleep".to_string(),
+                    audit: None,
+                    claim: Claim::Unconfined,
+                },
             },
         }),
         None,
@@ -604,11 +608,15 @@ fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
     let settle = |start| {
         StageEnd::External {
             end: ExternalEnd {
-                name: "ls".to_string(),
-                audit: Some(Box::new(stage_audit(&shell, start))),
-                jail: None,
-                pumps: command::Pumps::default(),
-                claim: Claim::Unconfined,
+                drain: Drain {
+                    jail: None,
+                    pumps: command::Pumps::default(),
+                },
+                settlement: Settlement {
+                    name: "ls".to_string(),
+                    audit: Some(Box::new(stage_audit(&shell, start))),
+                    claim: Claim::Unconfined,
+                },
             },
             outcome: WaitOutcome::Exited(3),
             sent: None,
@@ -643,11 +651,15 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
     let shell = crate::test_helper::core_shell();
     let end = || StageEnd::External {
         end: ExternalEnd {
-            name: "sleep".to_string(),
-            audit: Some(Box::new(stage_audit(&shell, None))),
-            jail: None,
-            pumps: command::Pumps::default(),
-            claim: Claim::Unconfined,
+            drain: Drain {
+                jail: None,
+                pumps: command::Pumps::default(),
+            },
+            settlement: Settlement {
+                name: "sleep".to_string(),
+                audit: Some(Box::new(stage_audit(&shell, None))),
+                claim: Claim::Unconfined,
+            },
         },
         outcome: WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGINT)),
         sent: None,
@@ -1982,11 +1994,15 @@ fn an_external_is_hinted_from_its_own_claim() {
 
         let stage = StageEnd::External {
             end: ExternalEnd {
-                name: "sh".into(),
-                audit: Some(Box::new(stage_audit(&shell, None))),
-                jail: None,
-                pumps: command::Pumps::default(),
-                claim: claim(confined),
+                drain: Drain {
+                    jail: None,
+                    pumps: command::Pumps::default(),
+                },
+                settlement: Settlement {
+                    name: "sh".into(),
+                    audit: Some(Box::new(stage_audit(&shell, None))),
+                    claim: claim(confined),
+                },
             },
             outcome: WaitOutcome::Exited(128),
             sent: None,
@@ -2070,11 +2086,12 @@ fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
         watch: slot.watch(child),
         payload: None,
         end: ExternalEnd {
-            name: "sh".into(),
-            audit: Some(Box::new(stage_audit(&shell, None))),
-            jail: None,
-            pumps,
-            claim: Claim::Unconfined,
+            drain: Drain { jail: None, pumps },
+            settlement: Settlement {
+                name: "sh".into(),
+                audit: Some(Box::new(stage_audit(&shell, None))),
+                claim: Claim::Unconfined,
+            },
         },
     };
     collect.push(StageHandle::new(StageKind::External(stage), None, slot));

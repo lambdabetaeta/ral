@@ -67,7 +67,7 @@ process-global and turn-local state at **two** sites that must agree:
 - **standalone** — `ForegroundDecision::for_standalone`
   (`core/src/runtime/command/foreground.rs:54`) reads
   `job_control.may_foreground()` ∧ `startup_foreground` ∧ stdout-sink-shape
-  (`Sink::Terminal | Sink::External`) ∧ no-pump;
+  (`Sink::Stdout | Sink::External`) ∧ no-pump;
 - **pipeline** — `resolve_terminal_plan` (`resolve.rs:295`) reads
   `startup_foreground` ∧ `capture_depth` ∧ `tui_active` ∧ `!windows`.
 

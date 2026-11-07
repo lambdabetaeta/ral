@@ -32,7 +32,7 @@ impl Rendered {
 
     /// Whether `spelled`, taken as written, is this name or lies under it.
     #[cfg(target_os = "linux")]
-    pub(crate) fn holds(&self, spelled: &str) -> bool {
+    pub(crate) fn holds_spelled(&self, spelled: &str) -> bool {
         super::identity::path_within_str(spelled, &self.0)
     }
 

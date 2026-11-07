@@ -112,7 +112,7 @@ pub(crate) enum OutFd {
 pub enum Sink {
     /// The inherited fd 1.  Whether it is a terminal is not this variant's
     /// claim but `TerminalState::startup_stdout_tty`'s.
-    Terminal,
+    Stdout,
     /// The inherited fd 2, and the default `Io::stderr`.
     Stderr,
     /// Redirect target, opened by `shell::exec::redirect`.  `Arc` so a nested frame
@@ -261,7 +261,7 @@ impl Sink {
     /// Returns `Err` if duplicating the handed-over fd fails.
     pub(crate) fn child_stdio(&self, fd: OutFd) -> io::Result<(StdioSpec, Option<Self>)> {
         Ok(match (self, fd) {
-            (Self::Terminal, OutFd::Stdout) | (Self::Stderr, OutFd::Stderr) => {
+            (Self::Stdout, OutFd::Stdout) | (Self::Stderr, OutFd::Stderr) => {
                 (StdioSpec::Inherit, None)
             }
             (Self::File(f), _) => (StdioSpec::from_owned(f.try_clone()?), None),
@@ -274,7 +274,7 @@ impl Sink {
     /// two streams may share a single descriptor.
     pub(crate) fn same_destination(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Terminal, Self::Terminal) | (Self::Stderr, Self::Stderr) => true,
+            (Self::Stdout, Self::Stdout) | (Self::Stderr, Self::Stderr) => true,
             (Self::File(a), Self::File(b)) => Arc::ptr_eq(a, b),
             (Self::Buffer(a), Self::Buffer(b)) => Arc::ptr_eq(a, b),
             (Self::Pipe { writer: a, .. }, Self::Pipe { writer: b, .. }) => Arc::ptr_eq(a, b),
@@ -283,7 +283,7 @@ impl Sink {
                 a1.same_destination(b1) && a2.same_destination(b2)
             }
             (
-                Self::Terminal
+                Self::Stdout
                 | Self::Stderr
                 | Self::File(_)
                 | Self::Buffer(_)
@@ -300,7 +300,7 @@ impl Sink {
     /// `Tee`.
     pub(crate) fn write_under(&mut self, scope: &Scope, bytes: &[u8]) -> Result<(), WriteFault> {
         match self {
-            Self::Terminal => Ok(io::stdout().write_all(bytes)?),
+            Self::Stdout => Ok(io::stdout().write_all(bytes)?),
             Self::Stderr => Ok(io::stderr().write_all(bytes)?),
             Self::File(f) => Ok((&**f).write_all(bytes)?),
             Self::Buffer(b) => {
@@ -334,7 +334,7 @@ impl Sink {
     /// [`Sink::flush_pending`], at end of stream.
     pub(crate) fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::Terminal => io::stdout().flush(),
+            Self::Stdout => io::stdout().flush(),
             Self::Stderr => io::stderr().flush(),
             Self::File(f) => (&**f).flush(),
             Self::Tee(a, b) => {
@@ -393,7 +393,7 @@ impl Clone for Sink {
     /// every variant's handle is itself shared (`Arc`) or trivially copied.
     fn clone(&self) -> Self {
         match self {
-            Self::Terminal => Self::Terminal,
+            Self::Stdout => Self::Stdout,
             Self::Stderr => Self::Stderr,
             Self::File(f) => Self::File(f.clone()),
             Self::Buffer(b) => Self::Buffer(b.clone()),
@@ -808,10 +808,10 @@ mod tests {
         assert!(b.same_destination(&b.clone()));
         assert!(!b.same_destination(&Sink::Buffer(Arc::default())));
 
-        assert!(Sink::Terminal.same_destination(&Sink::Terminal));
+        assert!(Sink::Stdout.same_destination(&Sink::Stdout));
         assert!(Sink::Stderr.same_destination(&Sink::Stderr));
-        assert!(!Sink::Terminal.same_destination(&Sink::Stderr));
-        assert!(!f.same_destination(&Sink::Terminal));
+        assert!(!Sink::Stdout.same_destination(&Sink::Stderr));
+        assert!(!f.same_destination(&Sink::Stdout));
     }
 
     #[test]
@@ -934,12 +934,12 @@ mod tests {
                 Ok((StdioSpec::Piped, Some(pump))) if pump.same_destination(sink)
             )
         };
-        assert!(inherits(&Sink::Terminal, OutFd::Stdout));
+        assert!(inherits(&Sink::Stdout, OutFd::Stdout));
         assert!(inherits(&Sink::Stderr, OutFd::Stderr));
-        assert!(pumped(&Sink::Terminal, OutFd::Stderr));
+        assert!(pumped(&Sink::Stdout, OutFd::Stderr));
         assert!(pumped(&Sink::Stderr, OutFd::Stdout));
         let (buffer, _) = super::new_buffer();
-        let tee = Sink::Tee(Box::new(buffer.clone()), Box::new(Sink::Terminal));
+        let tee = Sink::Tee(Box::new(buffer.clone()), Box::new(Sink::Stdout));
         for fd in [OutFd::Stdout, OutFd::Stderr] {
             assert!(pumped(&buffer, fd));
             assert!(pumped(&tee, fd));

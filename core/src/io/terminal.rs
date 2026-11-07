@@ -78,7 +78,7 @@ impl InteractiveMode {
 ///
 /// The `startup_*_tty` bits answer "was ral launched at a terminal?", never "is
 /// fd N a tty right now".  Consult an output bit only when the matching
-/// `Sink` is `Terminal`/`Stderr`: a `>file` redirect parks elsewhere.  Stdin
+/// `Sink` is `Stdout`/`Stderr`: a `>file` redirect parks elsewhere.  Stdin
 /// needs no such guard; a non-tty fd 0 is a `Source::Reader` from startup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 // A flat record of independent facts, not a state machine; sub-structs would

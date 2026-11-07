@@ -17,7 +17,7 @@ impl Default for Io {
     fn default() -> Self {
         Self {
             stdin: Source::Empty,
-            stdout: Sink::Terminal,
+            stdout: Sink::Stdout,
             stderr: Sink::Stderr,
         }
     }

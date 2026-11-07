@@ -6,10 +6,9 @@
 //! its group, and settled as a command ends ([`CollectState::settle_lone`]).
 
 use super::super::command::{self, Born, Claim};
-use super::stage::{ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
+use super::stage::{Drain, ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
 use crate::fact::AuditIo;
 use crate::io::Sink;
-use crate::process::jail::JailCgroup;
 use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalLoan, WaitOutcome, Watch,
 };
@@ -30,12 +29,12 @@ struct Window<'a> {
 }
 
 /// What an external's ending reads once its process and pumps are done.
-struct Settlement {
-    name: String,
+pub(super) struct Settlement {
+    pub(super) name: String,
     /// Absent for a lone command, whose own door claims and records.
-    audit: Option<Box<StageAudit>>,
+    pub(super) audit: Option<Box<StageAudit>>,
     /// The deny lines its failure may claim, as its start knew them.
-    claim: Claim,
+    pub(super) claim: Claim,
 }
 
 impl Settlement {
@@ -102,20 +101,6 @@ impl Settlement {
     }
 }
 
-impl ExternalEnd {
-    /// What [`drained`] consumes, and what the ending reads.
-    fn split(self) -> (Option<JailCgroup>, command::Pumps, Settlement) {
-        let Self {
-            name,
-            audit,
-            jail,
-            pumps,
-            claim,
-        } = self;
-        (jail, pumps, Settlement { name, audit, claim })
-    }
-}
-
 /// One stage's terminal news, before the fold's shell-touching finish.
 pub(super) enum StageEnd {
     Thread {
@@ -138,15 +123,15 @@ impl StageEnd {
             Self::Thread { obs, stage } if obs.names(&stage) => obs.forgiven(),
             Self::Thread { obs, .. } => obs,
             Self::External { end, outcome, sent } => {
-                let (jail, pumps, settlement) = end.split();
-                let cause = drained(jail, pumps, sent, window);
+                let ExternalEnd { drain, settlement } = end;
+                let cause = drained(drain, sent, window);
                 settlement.observe(outcome, cause, sent, window, shell)
             }
         }
     }
 }
 
-/// Finish a filed external's `jail`, join its `pumps` under `scope`, and read
+/// Finish a filed external's jail, join its pumps under `scope`, and read
 /// the cause it ended under.  The jail goes first, its finish killing a
 /// straggler that holds a pump's pipe; a cause ending the join kills an
 /// `owned` group once; a cut for a dead write detaches the pumps.  The cause
@@ -154,8 +139,7 @@ impl StageEnd {
 /// is stronger: a reader-gone stop this collector did not send attributes
 /// nothing.
 fn drained(
-    jail: Option<JailCgroup>,
-    pumps: command::Pumps,
+    Drain { jail, pumps }: Drain,
     sent: Option<CancelCause>,
     Window { scope, owned, .. }: Window<'_>,
 ) -> Option<CancelCause> {
@@ -435,11 +419,12 @@ impl CollectState {
             // Its group is its collector's own.
             payload: None,
             end: ExternalEnd {
-                name,
-                audit: None,
-                jail,
-                pumps,
-                claim,
+                drain: Drain { jail, pumps },
+                settlement: Settlement {
+                    name,
+                    audit: None,
+                    claim,
+                },
             },
         };
         let mut state = Self::new(
@@ -809,8 +794,8 @@ impl CollectState {
         if let Some(loan) = self.loan.take() {
             loan.reclaim(outcome.death());
         }
-        let (jail, pumps, settlement) = end.split();
-        let cause = drained(jail, pumps, sent, self.window());
+        let ExternalEnd { drain, settlement } = end;
+        let cause = drained(drain, sent, self.window());
         drop(self.pin.take());
         settlement.ending(outcome, cause, self.window())
     }

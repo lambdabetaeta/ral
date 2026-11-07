@@ -3,11 +3,12 @@
 
 use super::super::command;
 use super::super::command::{Born, ChildOut, Head, Started};
+use super::collect::Settlement;
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::StageLaunch;
 use super::route::{ByteIn, ByteOut, StageRoute};
-use super::stage::{ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
+use super::stage::{Drain, ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::error::io_message;
 use crate::fact::AuditIo;
@@ -174,15 +175,16 @@ fn launch_external_stage_direct(
             watch: slot.watch(child),
             payload,
             end: ExternalEnd {
-                name: shown,
-                audit: Some(Box::new(StageAudit {
-                    prov: shell.local.audit.call_site().clone(),
-                    start: audit_start,
-                    args,
-                })),
-                jail,
-                pumps,
-                claim,
+                drain: Drain { jail, pumps },
+                settlement: Settlement {
+                    name: shown,
+                    audit: Some(Box::new(StageAudit {
+                        prov: shell.local.audit.call_site().clone(),
+                        start: audit_start,
+                        args,
+                    })),
+                    claim,
+                },
             },
         })
     })

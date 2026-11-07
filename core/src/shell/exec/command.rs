@@ -595,7 +595,7 @@ fn join_stderr(command: &mut Launch, _stdout: &Sink) -> Settled<Option<Sink>> {
 
 #[cfg(windows)]
 fn join_stderr(command: &mut Launch, stdout: &Sink) -> Settled<Option<Sink>> {
-    let (stdio, pump) = if matches!(stdout, Sink::Terminal) {
+    let (stdio, pump) = if matches!(stdout, Sink::Stdout) {
         // The child inherits our fd 1, so clone fd 1 — not fd 2 — for its
         // stderr.  The bare inherit would hand it fd 2, routing diagnostics
         // straight past `2>&1`.
@@ -725,7 +725,7 @@ pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Pl
             readable: interactive,
         };
     }
-    let foreground = matches!(shell.io.stdout, Sink::Terminal)
+    let foreground = matches!(shell.io.stdout, Sink::Stdout)
         || mooring.terminal_access == TerminalAccess::ExplicitLoan;
     match shell.terminal_lease(mooring).filter(|_| foreground) {
         Some(lease) => {

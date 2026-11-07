@@ -306,7 +306,7 @@ pub(crate) fn bwrap_argv(
                 ));
             }
             for name in binds.names(&deny.name) {
-                if name.holds("/proc") {
+                if name.holds_spelled("/proc") {
                     return Err(format!(
                         "sandbox: the grant denies {}, which hides /proc, and the envelope \
                          needs /proc to start its program; did you mean a path inside it?",

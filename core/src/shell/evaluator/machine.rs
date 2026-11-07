@@ -1883,7 +1883,7 @@ mod tests {
         // needs genuine non-tail recursion: `let prev = f …` keeps this
         // call's `To` frame alive while its own recursive call runs.
         shell.session.stack_limit = 4;
-        let before = matches!(shell.io.stdout, Sink::Terminal);
+        let before = matches!(shell.io.stdout, Sink::Stdout);
         let out = run_source(
             "let f = { |n| if $[$n <= 0] { return 0 } else { let prev = f $[$n - 1]; return $[$n + $prev] } }\nf 100",
             &mut shell,
@@ -1899,7 +1899,7 @@ mod tests {
             other => panic!("expected a recursion-limit error, got {other:?}"),
         }
         assert_eq!(
-            matches!(shell.io.stdout, Sink::Terminal),
+            matches!(shell.io.stdout, Sink::Stdout),
             before,
             "a refused push must leave stdout untouched"
         );

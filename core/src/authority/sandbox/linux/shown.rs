@@ -104,7 +104,7 @@ impl Bind {
 
     /// Whether this bind's mount hides whatever lay at `name`.
     fn shadows(&self, name: &Rendered) -> bool {
-        self.dest.holds(name.as_str())
+        self.dest.holds_spelled(name.as_str())
     }
 
     /// Where this bind shows `name`, if its object holds it.

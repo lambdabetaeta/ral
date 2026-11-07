@@ -414,7 +414,7 @@ lands, when a mask ends, and for a process which write is first dead.
   `par`'s fail-fast covers failures only, a knowing loss: before this change a
   stop was a catchable error, so `par`'s `try` did cancel the siblings on
   Ctrl-C or a wall.
-- **Blocking host waits** outside the sliced rule: `Sink::Terminal` writes (a
+- **Blocking host waits** outside the sliced rule: `Sink::Stdout` writes (a
   stopped tty), reads of an inherited terminal stdin, `ask`, file reads, a pump
   whose descendant holds the pipe in a group ral cannot address (`Joins`, or
   ral's own), an aborting pump's join on `RunningChild`'s panic path. Each

@@ -1049,7 +1049,7 @@ mod foreground {
     use crate::process::{DurableRoot, Membership, Pgid, Scope, TerminalLease};
 
     /// A session owning a terminal lease plus a `Leased` mooring: the REPL, or
-    /// a terminal-launched script.  Stdout defaults to `Sink::Terminal`.
+    /// a terminal-launched script.  Stdout defaults to `Sink::Stdout`.
     fn leased_shell() -> (Shell, Mooring) {
         let mut shell = crate::test_helper::core_shell();
         shell.session.interactive = true;

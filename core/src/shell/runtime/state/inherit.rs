@@ -228,7 +228,7 @@ mod tests {
 
     fn inherited() -> Streams<Sink> {
         Streams {
-            stdout: Sink::Terminal,
+            stdout: Sink::Stdout,
             stderr: Sink::Stderr,
         }
     }

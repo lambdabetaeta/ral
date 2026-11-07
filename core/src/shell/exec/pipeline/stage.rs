@@ -1,8 +1,8 @@
 //! The collector's handle onto one running stage: its process or thread, the
 //! parent's hold on its outbound edge, and the cancel this collector sent it.
 
-use super::super::command::{self, Claim};
-use super::collect::{Slot, StageEnd, StageObservation};
+use super::super::command;
+use super::collect::{Settlement, Slot, StageEnd, StageObservation};
 use super::route::HeldEdge;
 use super::sentinel;
 use super::thread::ThreadStage;
@@ -34,16 +34,18 @@ pub(super) struct LiveExternal {
     pub(super) end: ExternalEnd,
 }
 
-/// What an external's settlement reads once its process is gone.
+/// A filed external's remains: what `drained` consumes, then what its
+/// settlement reads.
 pub(super) struct ExternalEnd {
-    pub(super) name: String,
-    /// Absent for a lone command, whose own door claims and records.
-    pub(super) audit: Option<Box<StageAudit>>,
+    pub(super) drain: Drain,
+    pub(super) settlement: Settlement,
+}
+
+/// What a filed external still holds: finished first, joined second.
+pub(super) struct Drain {
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
-    pub(super) jail: Option<crate::process::jail::JailCgroup>,
+    pub(super) jail: Option<JailCgroup>,
     pub(super) pumps: command::Pumps,
-    /// The deny lines its failure may claim, as its start knew them.
-    pub(super) claim: Claim,
 }
 
 /// What a pipeline stage's settlement owes its audit: the site that claims
@@ -114,7 +116,7 @@ impl StageHandle {
 
     pub(super) fn jail(&self) -> Option<&JailCgroup> {
         match &self.kind {
-            StageKind::External(e) => e.end.jail.as_ref(),
+            StageKind::External(e) => e.end.drain.jail.as_ref(),
             StageKind::Thread(_) => None,
         }
     }
@@ -171,11 +173,15 @@ impl StageHandle {
                 watch: slot.watch(child),
                 payload: None,
                 end: ExternalEnd {
-                    name: "test".to_string(),
-                    audit: None,
-                    jail: None,
-                    pumps: command::Pumps::default(),
-                    claim: Claim::Unconfined,
+                    drain: Drain {
+                        jail: None,
+                        pumps: command::Pumps::default(),
+                    },
+                    settlement: Settlement {
+                        name: "test".to_string(),
+                        audit: None,
+                        claim: command::Claim::Unconfined,
+                    },
                 },
             }),
             None,
@@ -199,11 +205,15 @@ impl StageHandle {
                 watch,
                 payload: None,
                 end: ExternalEnd {
-                    name: "fake".to_string(),
-                    audit: None,
-                    jail: None,
-                    pumps: command::Pumps::default(),
-                    claim: Claim::Unconfined,
+                    drain: Drain {
+                        jail: None,
+                        pumps: command::Pumps::default(),
+                    },
+                    settlement: Settlement {
+                        name: "fake".to_string(),
+                        audit: None,
+                        claim: command::Claim::Unconfined,
+                    },
                 },
             }),
             None,
