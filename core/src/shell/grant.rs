@@ -11,16 +11,17 @@ use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::GrantLayer;
 use crate::data::FOValue;
 use crate::error::Error;
+use crate::host::EnvVars;
 use crate::shell::runtime::Shell;
 
 impl Shell {
     /// The environment, logical cwd and session scratch every grant freezes against.
     pub(crate) fn freeze_ctx(&self) -> FreezeCtx {
-        FreezeCtx::at(
-            self.context.env_overrides().clone(),
-            self.context.cwd().clone(),
-        )
-        .with_scratch(self.scratch())
+        self.freeze_ctx_with_env(self.context.env_overrides().clone())
+    }
+
+    fn freeze_ctx_with_env(&self, env: EnvVars) -> FreezeCtx {
+        FreezeCtx::at(env, self.context.cwd().clone()).with_scratch(self.scratch())
     }
 
     /// `record`, a grant value that crossed as data, resolved against this
@@ -30,6 +31,22 @@ impl Shell {
     /// As [`decode_grant`].
     pub fn decode_grant(&self, record: &FOValue, err_prefix: &str) -> Result<GrantLayer, Error> {
         decode_grant(record, err_prefix, &self.freeze_ctx())
+    }
+
+    /// Decode against an effective environment overlay without installing it.
+    /// `env` replaces the shell's overlay snapshot; host fallback is unchanged.
+    /// The cwd and scratch remain this shell's, as in [`Self::decode_grant`].
+    /// A root recipe can thus resolve its ceiling before seeding its bindings.
+    ///
+    /// # Errors
+    /// As [`decode_grant`].
+    pub fn decode_grant_with_env(
+        &self,
+        record: &FOValue,
+        err_prefix: &str,
+        env: EnvVars,
+    ) -> Result<GrantLayer, Error> {
+        decode_grant(record, err_prefix, &self.freeze_ctx_with_env(env))
     }
 }
 

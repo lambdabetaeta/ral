@@ -4,8 +4,10 @@
 //! confined launch hands down are [`handoff`]'s; the re-exec's side is
 //! [`trampoline`].
 //!
-//! The re-exec's whole argv is `ral --warrant <w> <r>`: the warrant's slot,
-//! then the report socket's ([`crate::process::report`]).  The warrant is
+//! The re-exec's argv starts with `ral --warrant <w> <r>`: the warrant's
+//! slot, then the report socket's ([`crate::process::report`]). A Linux
+//! envelope appends the three payload stream slots, installed only in the
+//! trampoline before its inherited-fd sweep. The warrant is
 //! NUL-terminated fields, with no length anywhere:
 //!
 //! ```text
@@ -146,6 +148,8 @@ impl Warrant {
             image,
             args,
         } = Self::receive(slots.warrant)?;
+        #[cfg(target_os = "linux")]
+        slots.install_streams()?;
         confinement.enter(slots.report)?;
         Ok(Confined { image, args })
     }

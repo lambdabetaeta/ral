@@ -32,6 +32,8 @@ pub(crate) struct Launch {
     /// Owned until a spawn hands it on.
     jail: Option<crate::process::jail::JailCgroup>,
     confined: Option<Confined>,
+    #[cfg(target_os = "linux")]
+    envelope_stdio: Option<EnvelopeCapture>,
 }
 
 #[cfg(unix)]
@@ -49,6 +51,75 @@ pub(crate) struct Envelope {
     /// answering only once the payload is in it or gone; its `Ok(None)` is an
     /// envelope that died before reporting; an error kills and reaps it.
     pub(crate) payload_pgid: Option<PayloadPgid>,
+}
+
+/// Reserved high slots for the payload, and independent envelope stdio.
+/// The slots are allocated before spawning, never over an exec-error pipe.
+#[cfg(target_os = "linux")]
+pub(crate) struct EnvelopeStdio {
+    pub(crate) payload: [std::os::fd::OwnedFd; 3],
+    pub(crate) null: std::os::fd::OwnedFd,
+    pub(crate) error: std::os::fd::OwnedFd,
+    pub(crate) diagnostics: std::fs::File,
+}
+
+/// The installed hook's one remaining choice. Shared only with the hook,
+/// so setting 2>&1 after limits are registered still takes effect before
+/// those limits: dup2 into a high slot must precede a low `RLIMIT_NOFILE`.
+#[cfg(target_os = "linux")]
+struct EnvelopeCapture {
+    stderr_to_stdout: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    diagnostics: std::fs::File,
+}
+
+#[cfg(target_os = "linux")]
+impl EnvelopeStdio {
+    fn install(self, cmd: &mut std::process::Command) -> EnvelopeCapture {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let Self {
+            payload,
+            null,
+            error,
+            diagnostics,
+        } = self;
+        let stderr_to_stdout = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let merge = stderr_to_stdout.clone();
+        // SAFETY: only a lock-free atomic load, dup2 and ioctl. `std` has
+        // installed stdio; this hook is registered before resource limits.
+        unsafe {
+            cmd.pre_exec(move || {
+                if merge.load(std::sync::atomic::Ordering::Relaxed) && libc::dup2(1, 2) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for (source, target) in [0, 1, 2].into_iter().zip(&payload) {
+                    if libc::dup2(source, target.as_raw_fd()) < 0 {
+                        // A closed inherited stream refuses preparation. An
+                        // absent slot is not a marker: bwrap could reuse it.
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                // bwrap discovers the host tty from its actual stdout and
+                // binds it as /dev/console. Keep that tty, never a pipe: tty
+                // lifetime is intentionally shared; pipe EOF/EPIPE is not.
+                let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+                let tty_stdout = libc::ioctl(1, libc::TCGETS, termios.as_mut_ptr()) == 0;
+                for (target, source) in [0, 1, 2].into_iter().zip([&null, &null, &error]) {
+                    if target == 1 && tty_stdout {
+                        continue;
+                    }
+                    if libc::dup2(source.as_raw_fd(), target) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        EnvelopeCapture {
+            stderr_to_stdout,
+            diagnostics,
+        }
+    }
 }
 
 /// A confined launch's trampoline: the report it makes on its program, and
@@ -232,7 +303,17 @@ impl Launch {
             cmd,
             jail: None,
             confined: None,
+            #[cfg(target_os = "linux")]
+            envelope_stdio: None,
         }
+    }
+
+    /// Register capture immediately after the handoff, before callers add
+    /// resource-limit hooks. `std` installs the final stdio before any hook;
+    /// `dup_stdout_to_stderr` supplies the final merge choice to this hook.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn envelope_stdio(&mut self, stdio: EnvelopeStdio) {
+        self.envelope_stdio = Some(stdio.install(&mut self.cmd));
     }
 
     /// Run under the trampoline `confined` describes.
@@ -293,6 +374,13 @@ impl Launch {
     }
 
     pub(crate) fn dup_stdout_to_stderr(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(capture) = &self.envelope_stdio {
+            capture
+                .stderr_to_stdout
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
         use std::os::unix::process::CommandExt;
         unsafe {
             self.cmd.pre_exec(|| {
@@ -350,12 +438,18 @@ impl Launch {
             mut cmd,
             jail,
             confined,
+            #[cfg(target_os = "linux")]
+            envelope_stdio,
         } = self;
         scope.poll()?;
+        #[cfg(target_os = "linux")]
+        let diagnostics = envelope_stdio.map(|capture| capture.diagnostics);
         let ((child, group), confined) = fork(&mut cmd, confined, |cmd| {
             crate::process::spawn_with_pgid(cmd, pgid)
         })?;
         let mut child = crate::process::ChildHandle::from_std(child);
+        #[cfg(target_os = "linux")]
+        child.envelope_stderr(diagnostics);
         let payload = match confined.map(|confined| confined.hear(&mut child, scope)) {
             None => None,
             Some(Ok(payload)) => payload,
@@ -390,17 +484,29 @@ impl Launch {
             mut cmd,
             jail,
             confined,
+            #[cfg(target_os = "linux")]
+            envelope_stdio,
         } = self;
         assert!(
             jail.is_none(),
             "a detached launch must not own a kept jail cgroup: its drop would kill the survivor"
         );
         scope.poll()?;
+        #[cfg(target_os = "linux")]
+        let diagnostics = envelope_stdio.map(|capture| capture.diagnostics);
         let (survivor, confined) = fork(&mut cmd, confined, crate::process::group::spawn_detached)?;
         if let Some(confined) = confined {
             let launcher = confined.launcher();
             let Confined { mut report, .. } = confined;
-            report.first(scope, || vanished(launcher, None))?;
+            report.first(scope, || {
+                #[cfg(target_os = "linux")]
+                let said = diagnostics
+                    .as_ref()
+                    .and_then(crate::process::child::file_said);
+                #[cfg(not(target_os = "linux"))]
+                let said = None;
+                vanished(launcher, said)
+            })?;
         }
         Ok(survivor)
     }

@@ -61,41 +61,90 @@ impl fmt::Display for Slot {
     }
 }
 
-/// The trampoline's two slots: its warrant's, and its report's.
+/// The trampoline's warrant and report; under bwrap, its payload streams
+/// travel separately from the envelope's standard descriptors.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::authority::sandbox) struct Slots {
     pub(in crate::authority::sandbox) warrant: Slot,
     pub(in crate::authority::sandbox) report: Slot,
+    #[cfg(target_os = "linux")]
+    pub(in crate::authority::sandbox) streams: Option<[Slot; 3]>,
 }
 
 impl Slots {
-    /// `--warrant <warrant> <report>`.
-    pub(in crate::authority::sandbox) fn argv(self) -> [String; 3] {
-        [
+    /// The warrant and report, followed by stream slots for an envelope.
+    pub(in crate::authority::sandbox) fn argv(self) -> Vec<String> {
+        let args = vec![
             Role::Warrant.flag().to_owned(),
             self.warrant.to_string(),
             self.report.to_string(),
-        ]
+        ];
+        #[cfg(target_os = "linux")]
+        let args = args
+            .into_iter()
+            .chain(self.streams.into_iter().flatten().map(|at| at.to_string()))
+            .collect();
+        args
     }
 
-    /// The slots `args`, what follows [`Self::argv`]'s flag, name.
+    /// Direct trampolines (macOS and the Linux confinement harness) inherit
+    /// stdio; an envelope names three extra slots.
     pub(super) fn parse(args: &[OsString]) -> Result<Self, String> {
+        let slot = |arg: &OsString| Slot::parse(&shown(arg));
+        #[cfg(target_os = "linux")]
+        let (args, streams) = match args {
+            [_, _, input, output, error] => (
+                &args[..2],
+                Some([slot(input)?, slot(output)?, slot(error)?]),
+            ),
+            args => (args, None),
+        };
         let [warrant, report] = args else {
             return Err(format!(
-                "{} takes two arguments, the descriptors its warrant and its report arrive on: \
-                 it is how ral starts its own confined children, never a command to run by hand",
+                "{} takes the warrant and report descriptors, plus three stream descriptors \
+                 under a Linux envelope; it is how ral starts its own confined children, \
+                 never a command to run by hand",
                 Role::Warrant.flag()
             ));
         };
-        let slot = |arg: &OsString| Slot::parse(&shown(arg));
         let (warrant, report) = (slot(warrant)?, slot(report)?);
-        if warrant == report {
-            return Err(format!(
-                "the warrant and the report both name fd {warrant}: they are two descriptors, \
-                 and one would be closed twice"
-            ));
+        let all = vec![warrant, report];
+        #[cfg(target_os = "linux")]
+        let all = all
+            .into_iter()
+            .chain(streams.into_iter().flatten())
+            .collect::<Vec<_>>();
+        for (index, at) in all.iter().enumerate() {
+            if all[..index].contains(at) {
+                return Err(format!(
+                    "two handoff owners name fd {at}; one would be closed twice"
+                ));
+            }
         }
-        Ok(Self { warrant, report })
+        Ok(Self {
+            warrant,
+            report,
+            #[cfg(target_os = "linux")]
+            streams,
+        })
+    }
+
+    /// Install only in the trampoline branch, before the inherited-fd sweep.
+    #[cfg(target_os = "linux")]
+    pub(super) fn install_streams(self) -> Result<(), String> {
+        let Some(streams) = self.streams else {
+            return Ok(());
+        };
+        for (target, source) in [0, 1, 2].into_iter().zip(streams) {
+            // SAFETY: distinct high handoff slots, never the destinations.
+            if unsafe { libc::dup2(source.fd(), target) } < 0 {
+                return Err(format!(
+                    "cannot install payload stream {target} from fd {source}: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -183,8 +232,9 @@ pub(super) fn unwritable(fd: &OwnedFd) -> Result<(), String> {
 
 /// What a confined launch hands its child: copies lifted to free numbers
 /// from [`Slot::FIRST`] up, each crossing at the number it holds here.
-/// Nothing is `dup2`'d, so no descriptor the child still needs — `std`'s
-/// exec-error pipe, a later hook's — can be displaced.
+/// Lending displaces nothing. Stream capture fills reserved slots only, so
+/// no descriptor the child still needs — `std`'s exec-error pipe, a later
+/// hook's — can be displaced.
 #[derive(Default)]
 pub(in crate::authority::sandbox) struct Handoff {
     lent: Vec<OwnedFd>,
@@ -218,6 +268,42 @@ impl Handoff {
         let (copy, at) = lift(fd)?;
         self.kept.push(at);
         Ok((copy, at))
+    }
+
+    /// Reserve the payload's slots now, fill them only after `std` lowers
+    /// stdio at spawn. bwrap's monitor and init sweep all extra fds except
+    /// their own event/status/sync fds (`close_extra_fds` in bubblewrap);
+    /// only its exec branch retains these slots. Never lend them as 0–2.
+    #[cfg(target_os = "linux")]
+    pub(in crate::authority::sandbox) fn streams(
+        &mut self,
+    ) -> Result<(crate::process::launch::EnvelopeStdio, [Slot; 3]), String> {
+        use std::os::fd::AsFd;
+        let null = crate::path::open_discard()
+            .map_err(|e| format!("sandbox: cannot open envelope null streams: {e}"))?;
+        let (input, input_at) = self.keep(null.as_fd())?;
+        let (output, output_at) = self.keep(null.as_fd())?;
+        let (error, error_at) = self.keep(null.as_fd())?;
+        // Unlike a pipe, this remains writable after a detached launch's
+        // parent is gone. It carries only envelope startup diagnostics;
+        // the bounded read in file_said does not bound the file's storage.
+        let diagnostics = std::fs::File::from(
+            rustix::fs::memfd_create("ral-envelope-stderr", rustix::fs::MemfdFlags::CLOEXEC)
+                .map_err(|e| format!("sandbox: cannot open envelope diagnostics: {e}"))?,
+        );
+        // Replacement endpoints stay CLOEXEC: only their dup2 copies at 0–2
+        // belong to bwrap. Lift them away from closed inherited stdio too.
+        let (null, _) = lift(null.as_fd())?;
+        let (writer, _) = lift(diagnostics.as_fd())?;
+        Ok((
+            crate::process::launch::EnvelopeStdio {
+                payload: [input, output, error],
+                null,
+                error: writer,
+                diagnostics,
+            },
+            [input_at, output_at, error_at],
+        ))
     }
 
     /// Hand `cmd`'s child every slot, through one `pre_exec`.
@@ -386,6 +472,115 @@ mod tests {
         assert!(err.contains("fd 101"), "{err}");
         let both = Slots::parse(&args(&["101", "102"])).expect("two slots");
         assert_eq!(both.argv()[1..], ["101", "102"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn payload_stream_slots_cannot_alias_each_other_or_the_warrant_or_report() {
+        let fields = ["101", "102", "103", "104", "105"].map(OsString::from);
+        let slots = Slots::parse(&fields).expect("five distinct owners");
+        assert_eq!(slots.argv()[1..], ["101", "102", "103", "104", "105"]);
+        for target in 2..5 {
+            for source in 0..target {
+                let mut aliased = fields.clone();
+                aliased[target] = fields[source].clone();
+                assert!(Slots::parse(&aliased).is_err(), "{aliased:?}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_closed_inherited_stream_refuses_envelope_preparation() {
+        use crate::process::{Launch, PgidPolicy, Unstarted};
+        let mut handoff = Handoff::default();
+        let (stdio, _) = handoff.streams().expect("reserve stream slots");
+        let mut cmd = Command::new("/bin/sh");
+        handoff.install(&mut cmd);
+        // SAFETY: close is async-signal-safe, and affects only this child.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::close(0);
+                Ok(())
+            });
+        }
+        let mut launch = Launch::from_command(cmd);
+        launch.envelope_stdio(stdio);
+        let result = launch.spawn(
+            PgidPolicy::Inherit,
+            &crate::process::DurableRoot::default().child(),
+        );
+        let Err(Unstarted::Refused(why)) = result else {
+            panic!("a closed stream must refuse preparation");
+        };
+        assert!(why.describe().contains("could not prepare"), "{why}");
+        assert!(why.describe().contains("os error 9"), "{why}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn envelope_stream_capture_precedes_low_nofile_but_obeys_late_redirection() {
+        use crate::process::{Launch, StdioSpec};
+        let mut handoff = Handoff::default();
+        let (stdio, [_, output, error]) = handoff.streams().expect("reserve stream slots");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            &format!(
+                "test \"$(ulimit -n)\" = 64 && test ! -p /proc/self/fd/0 && test ! -p /proc/self/fd/1 || exit 1; \
+             printf OUT > /proc/self/fd/{output}; printf ERR > /proc/self/fd/{error}"
+            ),
+        ]);
+        handoff.install(&mut cmd);
+        let mut launch = Launch::from_command(cmd);
+        launch.envelope_stdio(stdio);
+        launch.stdin(StdioSpec::Null);
+        // Production registers limits before wire_stdio chooses 2>&1. The
+        // high slots must be filled while dup2 can still target them.
+        launch.limit_session(crate::process::ChildLimits {
+            open_files: Some(64),
+            ..Default::default()
+        });
+        launch.dup_stdout_to_stderr();
+        let output = launch.output().expect("spawn the envelope stand-in");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"OUTERR");
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn envelope_diagnostics_survive_a_null_payload_stderr() {
+        use crate::process::{Launch, PgidPolicy, StdioSpec, Unstarted};
+        use std::os::fd::AsFd;
+        let mut handoff = Handoff::default();
+        let (stdio, _) = handoff.streams().expect("reserve stream slots");
+        let (reader, writer) = crate::process::cloexec_socketpair().expect("report socket");
+        let (kept, _) = handoff
+            .keep(writer.as_fd())
+            .expect("keep report until fork");
+        drop(writer);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf ENVELOPE-REFUSED >&2; exit 1"]);
+        handoff.install(&mut cmd);
+        let mut launch = Launch::from_command(cmd);
+        launch.envelope_stdio(stdio);
+        launch.confine(crate::process::launch::Confined {
+            report: crate::process::report::Report::new(reader, kept),
+            envelope: None,
+        });
+        launch
+            .stdin(StdioSpec::Null)
+            .stdout(StdioSpec::Null)
+            .stderr(StdioSpec::Null);
+        let result = launch.spawn(
+            PgidPolicy::Inherit,
+            &crate::process::DurableRoot::default().child(),
+        );
+        let Err(Unstarted::Refused(why)) = result else {
+            panic!("an envelope that never reports must refuse");
+        };
+        assert!(why.describe().contains("ENVELOPE-REFUSED"), "{why}");
     }
 
     /// Every free number below the first slot, held as a host with that

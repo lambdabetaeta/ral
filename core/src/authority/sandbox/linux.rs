@@ -124,7 +124,7 @@ impl<'a> Envelope<'a> {
 }
 
 /// The [`Command`] that runs `env`'s trampoline confined under `policy`:
-/// `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`, every
+/// `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r> <in> <out> <err>`, every
 /// descriptor lent to `handoff` and named by its slot: the options in a
 /// sealed parcel, ral's pin, the seccomp programs, every bind's handle and the
 /// `--info-fd` peer, beside the caller's (the warrant and report, at `slots`,
@@ -133,24 +133,34 @@ impl<'a> Envelope<'a> {
 /// `shown` is the plan the Landlock ruleset was built against, binds and
 /// masks alike.
 ///
-/// The second element of the return is `Kept`'s `--info-fd` peer — see
+/// The third element reserves stream slots for the launch's early capture
+/// hook. The second is `Kept`'s `--info-fd` peer — see
 /// [`InfoFd`].  Refused under a bwrap that builds no envelope or cannot mount
 /// by descriptor.
 pub(crate) fn bwrap_command(
     env: &Envelope<'_>,
     shown: Shown,
     mut handoff: Handoff,
-    slots: Slots,
+    mut slots: Slots,
     policy: &RenderedProjection,
     chdir: Option<&CwdPath>,
     ownership: Ownership,
-) -> Result<(Command, Option<InfoFd>), Error> {
+) -> Result<
+    (
+        Command,
+        Option<InfoFd>,
+        crate::process::launch::EnvelopeStdio,
+    ),
+    Error,
+> {
     if let Builds::Nothing(why) = env.host.builds {
         return Err(unavailable(format!(
             "bwrap at {} cannot build an envelope on this host: {why}",
             crate::path::shown(env.bwrap.arg0())
         )));
     }
+    let (stdio, streams) = handoff.streams().map_err(Error::new)?;
+    slots.streams = Some(streams);
     let binds = Binds::open(env, shown, &mut handoff).map_err(Error::new)?;
     let (info, address) = (ownership == Ownership::Kept)
         .then(|| InfoFd::open(&mut handoff))
@@ -187,7 +197,7 @@ pub(crate) fn bwrap_command(
         .arg(crate::path::proc_fd_path(trampoline.fd()))
         .args(slots.argv());
     handoff.install(&mut c);
-    Ok((c, info))
+    Ok((c, info, stdio))
 }
 
 /// The bwrap options that confine a payload under `policy`: `binds` by

@@ -131,6 +131,7 @@ pub(super) fn launch_thread_stage(
             child.local.audit.install_active_policy(policy);
             let end = child
                 .base(&mooring.home, |child| eval(comp, env, mooring, child))
+                .flush_streams(&mut child.io)
                 .leaving(&child.session.sources);
             settle.send(StageObservation {
                 end,
@@ -212,6 +213,94 @@ mod tests {
         };
         assert_eq!(ix, 0);
         assert!(matches!(obs.end, End::Ok(_)), "echo hi must not fail");
+    }
+
+    #[test]
+    fn a_stage_flushes_both_streams_before_returned_and_preserves_the_first_panic() {
+        use crate::sync::LockExt;
+
+        for (body_panic, stdout_panic, stderr_panic, expected_panic) in [
+            (false, false, false, None),
+            (true, false, false, Some("body-panic")),
+            (true, true, true, Some("body-panic")),
+            (false, true, true, Some("stdout-flush-panic")),
+            (false, false, true, Some("stderr-flush-panic")),
+        ] {
+            let mut shell = crate::test_helper::core_shell();
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let watch = |name: &'static str, panics: bool| {
+                let seen = seen.clone();
+                Sink::Watch {
+                    line: Arc::new(move |line| {
+                        seen.lock_ignore_poison().push((name, line.to_vec()));
+                        assert!(!panics, "{name}-flush-panic");
+                    }),
+                    pending: Vec::new(),
+                }
+            };
+            shell.io.stdout = watch("stdout", stdout_panic);
+            shell.io.stderr = watch("stderr", stderr_panic);
+            let env = shell.env.clone();
+            let group = prepared_group();
+            let mooring = Mooring::adrift();
+            let cx = LaunchCx {
+                mooring: &mooring,
+                shell: &mut shell,
+                env: &env,
+                eval: super::super::StageEval {
+                    run: if body_panic {
+                        |_, _, _, child| {
+                            child.write_stdout(b"out-tail").unwrap();
+                            child.write_stderr(b"err-tail").unwrap();
+                            panic!("body-panic");
+                        }
+                    } else {
+                        |_, _, _, child| {
+                            child.write_stdout(b"out-tail").unwrap();
+                            child.write_stderr(b"err-tail").unwrap();
+                            Ok(crate::shell::runtime::Value::Unit)
+                        }
+                    },
+                    ..crate::shell::evaluator::STAGE_EVAL
+                },
+                group: &group,
+                holds_terminal: false,
+            };
+            let (tx, rx) = std::sync::mpsc::channel();
+            let stage = launch_thread_stage(
+                &compile_one("echo unused"),
+                ByteIn::Parent,
+                ChildOut::Sink(cx.shell.io.stdout.clone()),
+                &cx,
+                Slot { ix: 0, tx },
+            )
+            .expect("launch");
+
+            let super::super::collect::Event::Returned(_, obs) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("stage finalization publishes Returned even when flushing panics")
+            else {
+                panic!("a thread stage must settle as Event::Returned");
+            };
+            assert_eq!(
+                *seen.lock_ignore_poison(),
+                [
+                    ("stdout", b"out-tail".to_vec()),
+                    ("stderr", b"err-tail".to_vec())
+                ],
+                "both stage-local tails must be attempted before publication"
+            );
+            match expected_panic {
+                Some(expected) => assert!(
+                    matches!(&obs.end, End::Panic(text) if text == expected),
+                    "expected {expected}, got {:?}",
+                    obs.end
+                ),
+                None => assert!(matches!(obs.end, End::Ok(_))),
+            }
+            stage.join_after_settled();
+            assert_eq!(seen.lock_ignore_poison().len(), 2, "no tail is retried");
+        }
     }
 
     #[test]

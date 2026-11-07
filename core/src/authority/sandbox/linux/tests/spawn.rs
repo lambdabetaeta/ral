@@ -348,6 +348,60 @@ impl HostPty {
     }
 }
 
+/// A selected owned tty must still be visible to bwrap's console discovery,
+/// even when the test runner's own stdout is a pipe or a file.
+#[test]
+fn an_owned_stdout_terminal_remains_the_envelopes_console() {
+    use crate::process::{PgidPolicy, StdioSpec, WaitOutcome};
+    pin_envelope();
+    let bwrap = match envelope() {
+        Ok(bwrap) => bwrap,
+        Err(why) => {
+            skip(why);
+            return;
+        }
+    };
+    let env = Envelope::probe(bwrap, crate::authority::sandbox::reexec::own().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let policy = deny_within(dir.path(), &[]);
+    let script = if env.host.virtual_dev {
+        "test -t 1 && test /proc/self/fd/1 -ef /dev/console"
+    } else {
+        "test -t 1"
+    };
+    let mut launch = enveloped(
+        &env,
+        &policy,
+        &Image::of(&sh()),
+        &sh_args(script),
+        None,
+        Ownership::Kept,
+    )
+    .expect("build a tty launch");
+    let terminal = HostPty::open();
+    launch
+        .stdin(StdioSpec::Null)
+        .stdout(StdioSpec::from_owned(terminal.slave.try_clone().unwrap()))
+        .stderr(StdioSpec::Null);
+    let spawned = launch
+        .spawn(
+            PgidPolicy::NewLeader,
+            &crate::process::DurableRoot::default().child(),
+        )
+        .expect("spawn with owned tty stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watch = spawned.child.into_watch(tx, std::convert::identity);
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
+    if outcome.is_err() {
+        if let Some(pgid) = spawned.group.owned() {
+            pgid.kill();
+        }
+        watch.kill();
+    }
+    watch.reap().expect("reap tty launch");
+    assert_eq!(outcome, Ok(WaitOutcome::Exited(0)));
+}
+
 /// By hand no host terminal is reachable by name, whether open at render or
 /// opened after it, and none can be allocated; the terminal the payload
 /// inherits, the late one, still works.
@@ -655,6 +709,185 @@ fn a_confined_tools_exec_of_a_program_exiting_128_plus_n_is_an_exit() {
     if let Some(outcome) = ended(&env, &args) {
         assert_eq!(outcome, crate::process::WaitOutcome::Exited(130));
     }
+}
+
+/// The program closes all its streams, then waits for an out-of-band
+/// acknowledgement. EOF and EPIPE must arrive before that acknowledgement,
+/// not only when either the supervisor or bwrap finishes waiting.
+fn assert_program_releases_its_streams(program: &Admitted, prefix: &[&str]) {
+    pin_envelope();
+    let bwrap = match envelope() {
+        Ok(bwrap) => bwrap,
+        Err(why) => {
+            skip(why);
+            return;
+        }
+    };
+    let env = Envelope::probe(
+        bwrap,
+        crate::authority::sandbox::reexec::own().expect("ral pins itself"),
+    );
+    // An installed envelope failing the control is a failure, not a skip
+    // that could hide a broken stream handoff in these regressions.
+    let control = run_confined(&env, &unrestricted(), "echo READY")
+        .expect("installed bwrap must launch the stream control");
+    assert!(control.status.success(), "{control:?}");
+    assert_eq!(control.stdout, b"READY\n");
+    for open_files in [None, Some(64)] {
+        assert_stream_closure(&env, program, prefix, open_files);
+        if env.host.private_pids {
+            let mut shared = env;
+            shared.host.private_pids = false;
+            assert_stream_closure(&shared, program, prefix, open_files);
+        }
+    }
+}
+
+fn assert_stream_closure(
+    env: &Envelope<'_>,
+    program: &Admitted,
+    prefix: &[&str],
+    open_files: Option<u64>,
+) {
+    use crate::process::{PgidPolicy, Spawned, StdioSpec, WaitOutcome};
+    use rustix::fs::{OFlags, fcntl_setfl};
+    use rustix::io::{Errno, read, write};
+    use std::sync::mpsc::{TryRecvError, channel};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("acknowledgement directory");
+    let ack = dir.path().join("ack");
+    let ready = dir.path().join("closed");
+    let script = "printf OUT; printf ERR >&2\n\
+                  exec 0<&- 1>&- 2>&-\n\
+                  : > \"$2\"\n\
+                  while [ ! -e \"$1\" ]; do sleep 0.01; done\n\
+                  exit 139";
+    let args: Vec<String> = prefix
+        .iter()
+        .copied()
+        .chain([
+            script,
+            "stream-closure",
+            ack.to_str().expect("UTF-8 temp path"),
+            ready.to_str().expect("UTF-8 temp path"),
+        ])
+        .map(String::from)
+        .collect();
+    let (input, stdin) = crate::process::cloexec_pipe().expect("stdin pipe");
+    let (stdout, output) = crate::process::cloexec_pipe().expect("stdout pipe");
+    let (stderr, error) = crate::process::cloexec_pipe().expect("stderr pipe");
+    fcntl_setfl(&stdin, OFlags::NONBLOCK).expect("nonblocking stdin writer");
+    fcntl_setfl(&stdout, OFlags::NONBLOCK).expect("nonblocking stdout reader");
+    fcntl_setfl(&stderr, OFlags::NONBLOCK).expect("nonblocking stderr reader");
+    let shell = crate::test_helper::core_shell();
+    let mut launch = enveloped(
+        env,
+        &unrestricted(),
+        &Image::of(program),
+        &args,
+        Some(shell.context.cwd()),
+        Ownership::Kept,
+    )
+    .expect("build confined launch");
+    launch.limit_session(crate::process::ChildLimits {
+        open_files,
+        ..Default::default()
+    });
+    launch
+        .stdin(StdioSpec::from_owned(input))
+        .stdout(StdioSpec::from_owned(output))
+        .stderr(StdioSpec::from_owned(error));
+    let Spawned { child, group, .. } = launch
+        .spawn(PgidPolicy::NewLeader, &shell.scope)
+        .expect("spawn the confined program");
+    let (tx, rx) = channel();
+    let watch = child.into_watch(tx, std::convert::identity);
+    let timeout = Duration::from_secs(5);
+    let mut received = [Vec::new(), Vec::new()];
+    let closed = (|| {
+        let deadline = Instant::now() + timeout;
+        let mut closed = [false; 3];
+        while (closed != [true; 3] || !ready.exists()) && Instant::now() < deadline {
+            if !closed[0] {
+                match write(&stdin, b"x") {
+                    Err(Errno::PIPE) => closed[0] = true,
+                    Ok(_) | Err(Errno::AGAIN | Errno::INTR) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            for ((closed, stream), received) in closed[1..]
+                .iter_mut()
+                .zip([&stdout, &stderr])
+                .zip(&mut received)
+            {
+                if !*closed {
+                    let mut byte = [0];
+                    match read(stream, &mut byte) {
+                        Ok(0) => *closed = true,
+                        Ok(_) => received.extend_from_slice(&byte),
+                        Err(Errno::AGAIN | Errno::INTR) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(closed)
+    })();
+    let reached_close = ready.exists();
+    let still_running = matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    let outcome = if closed == Ok([true; 3]) && reached_close && still_running {
+        std::fs::write(&ack, b"ack")
+            .ok()
+            .and_then(|()| rx.recv_timeout(timeout).ok())
+    } else {
+        None
+    };
+    // Both waits are bounded; kill before reaping on any failure so the
+    // regression itself cannot leave a test hanging on the acknowledgement.
+    if outcome.is_none() {
+        if let Some(pgid) = group.owned() {
+            pgid.kill();
+        }
+        watch.kill();
+    }
+    watch.reap().expect("reap the envelope");
+    assert_eq!(closed, Ok([true; 3]), "stdin EPIPE, stdout EOF, stderr EOF");
+    assert_eq!(
+        received,
+        [b"OUT".to_vec(), b"ERR".to_vec()],
+        "payload streams arrive unchanged"
+    );
+    assert!(
+        reached_close,
+        "the payload reached its out-of-band close marker"
+    );
+    assert!(
+        still_running,
+        "the program must still await acknowledgement"
+    );
+    assert_eq!(
+        outcome,
+        Some(WaitOutcome::Exited(139)),
+        "the report survives"
+    );
+}
+
+#[test]
+fn a_confined_file_releases_its_streams_before_it_exits() {
+    assert_program_releases_its_streams(&sh(), &["-c"]);
+}
+
+#[cfg(feature = "coreutils")]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
+#[test]
+fn a_confined_tool_releases_its_streams_before_it_exits() {
+    let env = admitted(Program::Tool("env"));
+    assert_program_releases_its_streams(&env, &["/bin/sh", "-c"]);
 }
 
 /// Where the host cannot build the namespace, the shared table is

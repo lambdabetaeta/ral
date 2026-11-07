@@ -8,6 +8,7 @@ use super::modules::Modules;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 use crate::authority::policy::{Baseline, GrantStack};
+use crate::error::io_message;
 use crate::host::EnvVars;
 use crate::io::terminal::TerminalState;
 use crate::io::{Io, Source, SourceReader};
@@ -49,20 +50,24 @@ impl Runtime {
     ///
     /// # Errors
     /// A system read that is malformed or whose walk fails, named: a host
-    /// that cannot resolve its own baseline cannot run anything.
+    /// that cannot resolve its own baseline cannot run anything. Also fails
+    /// if acquiring stdin fails for any reason other than closed stdin.
     pub fn bare(terminal: TerminalState) -> Result<Self, Error> {
-        Ok(Self::bare_on(Baseline::of_host()?, terminal))
+        let baseline = Baseline::of_host()?;
+        let stdin = fd0(terminal, dup_stdin)
+            .map_err(|e| Error::new(io_message("could not acquire the process's stdin", &e)))?;
+        Ok(Self::bare_on(baseline, terminal, stdin))
     }
 
-    /// [`bare`](Self::bare) over a baseline already resolved.
-    pub(crate) fn bare_on(baseline: Baseline, terminal: TerminalState) -> Self {
+    /// Assemble a bare runtime from a resolved baseline and acquired stdin.
+    pub(crate) fn bare_on(baseline: Baseline, terminal: TerminalState, stdin: Source) -> Self {
         Self {
             sig: Arc::default(),
             builtins: BuiltinTable::default(),
             base: Vec::new(),
             library_docs: HashMap::new(),
             terminal,
-            stdin: Arc::new(fd0(terminal)),
+            stdin: Arc::new(stdin),
             baseline,
         }
     }
@@ -108,11 +113,28 @@ impl Runtime {
 }
 
 /// fd 0 as a [`Source`], once, so `Terminal` means a terminal.
-fn fd0(terminal: TerminalState) -> Source {
+fn fd0(
+    terminal: TerminalState,
+    duplicate: impl FnOnce() -> std::io::Result<std::fs::File>,
+) -> std::io::Result<Source> {
     if terminal.startup_stdin_tty {
-        return Source::Terminal;
+        return Ok(Source::Terminal);
     }
-    dup_stdin().map_or(Source::Empty, |f| Source::Reader(SourceReader::file(f)))
+    match duplicate() {
+        Ok(file) => Ok(Source::Reader(SourceReader::file(file))),
+        Err(e) if closed_stdin(&e) => Ok(Source::Empty),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn closed_stdin(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EBADF)
+}
+
+#[cfg(windows)]
+fn closed_stdin(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE.cast_signed())
 }
 
 #[cfg(unix)]
@@ -126,8 +148,19 @@ fn dup_stdin() -> std::io::Result<std::fs::File> {
 
 #[cfg(windows)]
 fn dup_stdin() -> std::io::Result<std::fs::File> {
-    use std::os::windows::io::AsHandle;
-    std::io::stdin()
+    use std::os::windows::io::{AsHandle, AsRawHandle};
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_HANDLE, INVALID_HANDLE_VALUE};
+
+    let stdin = std::io::stdin();
+    let handle = stdin.as_raw_handle();
+    // A detached process may have no standard handle. Do not borrow an invalid
+    // sentinel as a live handle; classify it just like DuplicateHandle's refusal.
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::from_raw_os_error(
+            ERROR_INVALID_HANDLE.cast_signed(),
+        ));
+    }
+    stdin
         .as_handle()
         .try_clone_to_owned()
         .map(std::fs::File::from)
@@ -384,16 +417,87 @@ mod tests {
         assert_eq!(shell.session.stack_limit, DEFAULT_STACK_LIMIT);
     }
 
-    /// A run's inherited stdin is the terminal only at a tty; any other fd 0
-    /// is a reader, minted afresh per run.
+    #[test]
+    fn fd0_caches_empty_only_for_closed_stdin() {
+        #[cfg(unix)]
+        let code = libc::EBADF;
+        #[cfg(windows)]
+        let code = windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE.cast_signed();
+
+        let source = fd0(TerminalState::default(), || {
+            Err(std::io::Error::from_raw_os_error(code))
+        })
+        .expect("closed stdin is empty");
+        let runtime = Runtime::bare_on(Baseline::default(), TerminalState::default(), source);
+        assert!(matches!(runtime.stdin(), Ok(Source::Empty)));
+        assert!(matches!(runtime.stdin(), Ok(Source::Empty)));
+    }
+
+    #[test]
+    fn fd0_preserves_acquisition_failures_instead_of_caching_eof() {
+        #[cfg(unix)]
+        let codes = [libc::EMFILE, libc::ENFILE, libc::EACCES, libc::EINTR];
+        #[cfg(windows)]
+        let codes = {
+            use windows_sys::Win32::Foundation::{
+                ERROR_ACCESS_DENIED, ERROR_NOT_ENOUGH_MEMORY, ERROR_TOO_MANY_OPEN_FILES,
+            };
+            [
+                ERROR_TOO_MANY_OPEN_FILES.cast_signed(),
+                ERROR_NOT_ENOUGH_MEMORY.cast_signed(),
+                ERROR_ACCESS_DENIED.cast_signed(),
+            ]
+        };
+
+        for code in codes {
+            let error = fd0(TerminalState::default(), || {
+                Err(std::io::Error::from_raw_os_error(code))
+            })
+            .err()
+            .expect("an acquisition failure must prevent initialization");
+            assert_eq!(error.raw_os_error(), Some(code));
+        }
+        let error = fd0(TerminalState::default(), || {
+            Err(std::io::Error::other("stdin acquisition failed"))
+        })
+        .err()
+        .expect("an unclassified error is not closed stdin");
+        assert_eq!(error.to_string(), "stdin acquisition failed");
+    }
+
+    #[test]
+    fn fd0_readers_preserve_input_after_acquisition() {
+        use std::io::{Read, Seek, Write};
+
+        let mut file = tempfile::tempfile().expect("stdin file");
+        file.write_all(b"ab").expect("stdin bytes");
+        file.rewind().expect("rewind stdin");
+        let source = fd0(TerminalState::default(), || Ok(file)).expect("acquire stdin");
+        let runtime = Runtime::bare_on(Baseline::default(), TerminalState::default(), source);
+        for expected in *b"ab" {
+            let Source::Reader(mut reader) = runtime.stdin().expect("inherit stdin") else {
+                panic!("acquired stdin must stay a reader");
+            };
+            let mut byte = [0];
+            reader.read_exact(&mut byte).expect("read stdin byte");
+            assert_eq!(byte, [expected]);
+        }
+    }
+
+    /// A run's inherited stdin is the terminal only at a tty; any other valid
+    /// fd 0 is a reader, minted afresh per run.
     #[test]
     fn fd0_is_the_terminal_only_at_a_tty() {
         let at_tty = TerminalState {
             startup_stdin_tty: true,
             ..TerminalState::default()
         };
-        assert!(matches!(fd0(at_tty), Source::Terminal));
-        let runtime = Runtime::bare_on(Baseline::default(), TerminalState::default());
+        assert!(matches!(
+            fd0(at_tty, || panic!("terminal stdin is not duplicated")),
+            Ok(Source::Terminal)
+        ));
+        let source = fd0(TerminalState::default(), tempfile::tempfile).expect("acquire stdin");
+        let runtime = Runtime::bare_on(Baseline::default(), TerminalState::default(), source);
         assert!(matches!(runtime.stdin(), Ok(Source::Reader(_))));
         assert!(matches!(runtime.stdin(), Ok(Source::Reader(_))));
     }

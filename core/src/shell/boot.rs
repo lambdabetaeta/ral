@@ -12,6 +12,7 @@
 
 use crate::authority::policy::Baseline;
 use crate::error::Error;
+use crate::io::Source;
 use crate::io::terminal::TerminalState;
 use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::path::CwdPath;
@@ -77,8 +78,13 @@ impl BakedPrelude {
     fn evaluate(&self, baseline: &Baseline) -> Arc<PreludeMap> {
         let cwd =
             crate::host::cwd().expect("the prelude runs in a process with a working directory");
-        let runtime = HostSurface::default()
-            .install(Runtime::bare_on(baseline.clone(), TerminalState::default()));
+        // Shape-vetted Define/Return terms only close values; they cannot read
+        // stdin. This evaluator needs no second acquisition of the process fd 0.
+        let runtime = HostSurface::default().install(Runtime::bare_on(
+            baseline.clone(),
+            TerminalState::default(),
+            Source::Empty,
+        ));
         let mut shell = Shell::root(runtime.into(), cwd);
         let ran = run_phrases(
             &self.comp().phrases,
@@ -243,7 +249,7 @@ impl HostSurface {
     /// Core plus this surface, no prelude: the process half of a session.
     ///
     /// # Errors
-    /// [`Runtime::bare`]'s: the host's baseline cannot be resolved.
+    /// [`Runtime::bare`]'s: the host's baseline or stdin cannot be acquired.
     ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.

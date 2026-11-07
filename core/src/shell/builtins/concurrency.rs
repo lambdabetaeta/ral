@@ -102,9 +102,9 @@ pub(crate) fn legible_title(arg: &Value, verb: &str) -> Settled<String> {
 /// surface live to the host, each labelled.
 ///
 /// A watched worker surfaces on past the run that spawned it, so only a host
-/// that installs a deferred sink installs [`crate::shell::builtins::WATCH_BUILTIN`];
-/// naming `watch` elsewhere is an unknown-name diagnostic, not a runtime
-/// refusal.
+/// that installs a deferred sink installs [`crate::shell::builtins::WATCH_BUILTIN`].
+/// Without that entry or another binding, a bare `watch` head falls back to an
+/// external command, whose arguments cannot include a thunk.
 ///
 /// The child writes through `Sink::Watch`, so each whole line is its own
 /// `` `watch `` surface on the session's deferred sink, stderr's under

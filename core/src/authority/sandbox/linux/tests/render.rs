@@ -59,7 +59,14 @@ fn null_warrant() -> (Handoff, Slots) {
     let mut handoff = Handoff::default();
     let warrant = handoff.lend(null.as_fd()).expect("lends");
     let report = handoff.lend(null.as_fd()).expect("lends");
-    (handoff, Slots { warrant, report })
+    (
+        handoff,
+        Slots {
+            warrant,
+            report,
+            streams: None,
+        },
+    )
 }
 
 /// `policy` rendered over `binds`, kept or surrendered.
@@ -1195,7 +1202,7 @@ fn the_fresh_proc_and_dev_go_over_every_projection_bind() {
 fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
     let pin = stand_in();
     let (handoff, slots) = null_warrant();
-    let (cmd, _info_fd) = bwrap_command(
+    let (cmd, _info_fd, _stdio) = bwrap_command(
         &on(&pin, WHOLE),
         plan(&unrestricted()),
         handoff,
@@ -1213,8 +1220,20 @@ fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
     let args: Vec<_> = (cmd.get_args())
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let [opt, options, dashes, trampoline, flag, warrant, report] = &args[..] else {
-        panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`: {args:?}");
+    let [
+        opt,
+        options,
+        dashes,
+        trampoline,
+        flag,
+        warrant,
+        report,
+        input,
+        output,
+        error,
+    ] = &args[..]
+    else {
+        panic!("not a bwrap warrant launch with three stream slots: {args:?}");
     };
     assert_eq!(
         [opt.as_str(), dashes, flag, warrant, report],
@@ -1227,6 +1246,9 @@ fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
         ],
         "{args:?}"
     );
+    for stream in [input, output, error] {
+        Slot::parse(stream).expect("payload stream names a slot");
+    }
     let options = Slot::parse(options).expect("`--args` names a slot");
     let parcel = std::fs::read(crate::path::proc_fd_path(options.fd()))
         .expect("the options' parcel is open");

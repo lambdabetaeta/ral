@@ -482,11 +482,18 @@ pub(super) struct Chosen {
 }
 
 impl Chosen {
-    /// What chose this directory, for a refusal.
-    fn subject(&self) -> String {
-        match &self.via {
-            Some(Via { var, value }) => format!("{var} is {}", shown(value)),
-            None => format!("default directory {}", shown(&self.dir)),
+    /// What chose this directory, and where it resolved if walked, for a refusal.
+    fn subject(&self, resolved: Option<&RealPath>) -> String {
+        if let Some(Via { var, value }) = &self.via {
+            format!("{var} is {}", shown(value))
+        } else {
+            let written = shown(&self.dir);
+            match resolved.map(ToString::to_string) {
+                Some(real) if real != written => {
+                    format!("default directory {written} resolves to {real}")
+                }
+                _ => format!("default directory {written}"),
+            }
         }
     }
 }
@@ -556,8 +563,11 @@ fn malformed(chosen: &Chosen, holder: &str, why: Error) -> Error {
         Some(Via { var, .. }) => format!("Set {var} to a well-formed absolute path, or unset it."),
         None => "Check its HOME/XDG base.".to_owned(),
     };
-    why.with_context(format!("{}, which {holder} cannot hold", chosen.subject()))
-        .with_hint(fix)
+    why.with_context(format!(
+        "{}, which {holder} cannot hold",
+        chosen.subject(None)
+    ))
+    .with_hint(fix)
 }
 
 /// The directories `toolchain` expands to over an injected environment and
@@ -587,7 +597,7 @@ pub(crate) fn expand_in<W: Polar>(
             };
             refuse_the_world(
                 selector,
-                || chosen.subject(),
+                || chosen.subject(Some(dir.real.followed().real())),
                 advice,
                 dir.real.followed(),
                 home,
@@ -759,6 +769,7 @@ mod tests {
         pairs: &[(&str, &str)],
         home: &Home,
         default: &Path,
+        target: &Path,
         what: &str,
     ) {
         let err = expand_in::<W>(toolchain, env(pairs), Some(home))
@@ -766,7 +777,11 @@ mod tests {
             .expect("a world-sized default must refuse the selector");
         for part in [
             format!("`dir `{}", <&str>::from(toolchain)),
-            format!("default directory {}", shown(default)),
+            format!(
+                "default directory {} resolves to {}",
+                shown(default),
+                crate::test_helper::real(target)
+            ),
             what.to_owned(),
             "default directory or symlink".to_owned(),
             "HOME/XDG base".to_owned(),
@@ -797,8 +812,8 @@ mod tests {
             let target = pick(tmp.path(), &home_path);
             let default = home_path.join(".rustup");
             link_dir(&target, &default);
-            default_refusal::<Trace>(Toolchain::Rustup, &[], &home, &default, what);
-            default_refusal::<Excluded>(Toolchain::Rustup, &[], &home, &default, what);
+            default_refusal::<Trace>(Toolchain::Rustup, &[], &home, &default, &target, what);
+            default_refusal::<Excluded>(Toolchain::Rustup, &[], &home, &default, &target, what);
         }
     }
 
@@ -842,8 +857,8 @@ mod tests {
                     } else {
                         "the home directory itself"
                     };
-                    default_refusal::<Trace>(toolchain, &pairs, &home, &default, what);
-                    default_refusal::<Excluded>(toolchain, &pairs, &home, &default, what);
+                    default_refusal::<Trace>(toolchain, &pairs, &home, &default, target, what);
+                    default_refusal::<Excluded>(toolchain, &pairs, &home, &default, target, what);
                 }
             }
         }
@@ -861,6 +876,7 @@ mod tests {
             &[],
             &home,
             &default,
+            &home_path,
             "the home directory itself",
         );
         default_refusal::<Excluded>(
@@ -868,6 +884,7 @@ mod tests {
             &[],
             &home,
             &default,
+            &home_path,
             "the home directory itself",
         );
     }
@@ -953,6 +970,7 @@ mod tests {
                 &pairs,
                 &home,
                 &default,
+                &home_path,
                 "the home directory itself",
             );
             default_refusal::<Excluded>(
@@ -960,6 +978,7 @@ mod tests {
                 &pairs,
                 &home,
                 &default,
+                &home_path,
                 "the home directory itself",
             );
         }

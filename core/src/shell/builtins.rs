@@ -154,7 +154,7 @@ builtin_registry! {
         doc: "fail <String>  — raise a fresh failure. Use `raise $e` to re-raise an error record.",
         call: |args, _mooring, _shell| Err(misc::builtin_fail(args)), },
     Raise { names: ["raise"], ty: scheme::raise,
-        doc: "raise <ErrorRecord>  — re-raise reason, cmd and site unchanged.",
+        doc: "raise <ErrorRecord>  — re-raise reason, frame and site unchanged.",
         call: |args, _, _| Err(misc::builtin_raise(args)), },
     Describe { names: ["describe"], ty: scheme::describe,
         doc: "describe <ErrorRecord>  — render the failure's text.",
@@ -470,9 +470,9 @@ pub(crate) static CORE_SETS: [&[BuiltinEntry]; 3] =
 /// surface to carry.
 ///
 /// The lines ride the session's deferred sink, which outlives the run, so only
-/// a host that installs a deferred sink installs this; elsewhere naming `watch`
-/// is an unknown-name diagnostic at compile time rather than a builtin that
-/// resolves and then refuses.
+/// a host that installs a deferred sink installs this. Without this entry or
+/// another binding, a bare `watch` head falls back to an external command;
+/// passing it a thunk is then rejected as a non-text external argument.
 static WATCH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     Cow::Borrowed("watch"),
     scheme::watch,

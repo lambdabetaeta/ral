@@ -97,7 +97,7 @@ fn run_trampoline(
         trampoline: own,
         ..*env
     };
-    let (cmd, info) = bwrap_command(
+    let (cmd, info, stdio) = bwrap_command(
         &env,
         plan(policy),
         handoff,
@@ -107,7 +107,7 @@ fn run_trampoline(
         Ownership::Kept,
     )
     .expect("the launch builds");
-    let mut launch = bwrapped(cmd, info, report);
+    let mut launch = bwrapped(cmd, info, stdio, report);
     launch.stdin(crate::process::StdioSpec::Null);
     launch.output()
 }

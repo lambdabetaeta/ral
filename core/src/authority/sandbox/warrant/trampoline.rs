@@ -1,5 +1,6 @@
 //! The trampoline, `ral --warrant <w> <r>`: the confined child's side of a
-//! warrant.  It takes the report socket at `r` and the warrant at `w`, enters
+//! warrant. Linux envelopes append the three payload stream slots.
+//! It takes the report socket at `r` and the warrant at `w`, enters
 //! the confinement, runs the image, and says on the report what became of
 //! it.  Nothing runs unconfined, and nothing is printed: the parent words
 //! what it is told.  Only a call naming no report socket, made by hand, is
@@ -32,7 +33,7 @@ use {
 /// report instead.
 const UNSTARTED: u8 = 126;
 
-/// Serve `ral --warrant <w> <r>`: `args` must be those two slots.
+/// Serve the warrant and report slots, plus a Linux envelope's stream slots.
 pub(crate) fn serve_warrant(args: &[OsString]) -> u8 {
     match received(args) {
         Ok((slots, witness)) => match Warrant::confine(slots) {
@@ -250,6 +251,14 @@ fn start_tool(
 #[cfg(target_os = "linux")]
 fn supervise(witness: Witness, pid: Pid) -> u8 {
     use std::os::unix::process::ExitStatusExt;
+    // The program has inherited its streams; only it may hold up EOF or EPIPE.
+    // The report's handoff slot is above stderr and stays ours until the end.
+    for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: the warrant role is single-threaded, owns no Rust handles for
+        // stdio, and never uses it again. Linux releases even an interrupted
+        // close's descriptor: do not retry, or close a reused number.
+        unsafe { libc::close(fd) };
+    }
     let _ = crate::process::install(libc::SIGPIPE, crate::process::Disposition::Ignore);
     let running = witness.started();
     let Ok(ended) = crate::process::reap(pid) else {
@@ -339,7 +348,7 @@ mod tests {
     use super::*;
 
     /// Refused before any descriptor is touched, so it is safe in-process:
-    /// the trampoline takes two arguments, both slots.
+    /// the trampoline accepts only distinct, well-formed handoff slots.
     #[test]
     fn a_warrant_flag_naming_no_slot_runs_nothing() {
         for args in [

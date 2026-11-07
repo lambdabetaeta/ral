@@ -66,8 +66,12 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
     };
     shell.set_scratch(scratch.as_str());
     if !matches!(root.config, FOValue::Unit) {
+        // Freeze against the receiving root's env without moving its seeds
+        // ahead of the library or changing when the session ledgers arm.
+        let mut env = shell.env_overrides().clone();
+        env.extend(root.env.iter().cloned());
         let layer = shell
-            .decode_grant(&root.config, "the root's ceiling")
+            .decode_grant_with_env(&root.config, "the root's ceiling", env)
             .map_err(|e| e.with_context("exarch engine"))?;
         shell.push_session_capabilities(layer);
     }
@@ -259,6 +263,128 @@ mod tests {
         };
         assert!(reads(&cwd.join("notes")), "the root's cwd is read");
         assert!(!reads(&tmp.join("elsewhere")), "nothing else is");
+    }
+
+    /// A full attach freezes home and command names in the root's effective
+    /// environment, not the overlay the recipe starts with. No process env is
+    /// mutated, and the program fixtures are resolved but never executed.
+    #[cfg(unix)]
+    #[test]
+    fn a_full_attach_freezes_its_ceiling_in_the_roots_effective_environment() {
+        use ral_core::authority::grant::value::LayerValue;
+        use ral_core::carrier::{IdentityTransport, Transport as _};
+        use ral_core::engine::EngineInstaller;
+        use ral_core::error::Error;
+        use ral_core::protocol::Attach;
+        use ral_core::test_helper::Tree;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Supply a deterministic initial overlay at the recipe boundary,
+        // after core has seeded the host env, without mutating process state.
+        fn root_with_initial_env(root: &Root, shell: &mut Shell) -> Result<(), Error> {
+            let ral_core::path::EnginePath::Host(cwd) = &root.cwd else {
+                panic!("the fixture attaches on the host");
+            };
+            for (name, dir) in [("HOME", "initial-home"), ("PATH", "initial-bin")] {
+                let path = cwd.join(dir);
+                shell.set_env_var(name, ral_core::path::utf8(&path).expect("a Unicode path"));
+            }
+            engine_root(root, shell)?;
+            // Running reads its program. These files are outside both the
+            // home read prefix and the scratch write prefix, so this observes
+            // the frozen exec allowance without launching a command. The
+            // outward grant value deliberately preserves a `name` spelling.
+            for (bin, admitted) in [("root-bin", true), ("initial-bin", false)] {
+                let program = cwd.join(bin).join("root-ceiling-tool");
+                assert_eq!(
+                    shell.admits_fs(FsOp::Read, &ral_core::test_helper::trace(program)),
+                    admitted,
+                    "only the root PATH's program is granted"
+                );
+            }
+            Ok(())
+        }
+        static INSTALLERS: [EngineInstaller; 1] = [EngineInstaller {
+            tag: crate::shell_eval::builtins::INSTALLER_TAG,
+            runtime: engine_runtime,
+            root: root_with_initial_env,
+            narrow: crate::policy::base_layer,
+        }];
+
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let tree = Tree::lay(
+            tmp.path(),
+            [
+                "/initial-home/",
+                "/root-home/",
+                "/initial-bin/root-ceiling-tool",
+                "/root-bin/root-ceiling-tool",
+                "/scratch/",
+            ],
+        );
+        for bin in ["initial-bin", "root-bin"] {
+            std::fs::set_permissions(
+                tree.path(&format!("/{bin}/root-ceiling-tool")),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("an executable fixture");
+        }
+        let ceiling: GrantValue = Axes {
+            exec: Some(ExecTable {
+                allow: vec![Target::Name("root-ceiling-tool".into())],
+                ..ExecTable::default()
+            }),
+            fs: Some(FsTable {
+                read: vec![Anchor::Home.place(".")],
+                write: vec![Anchor::Scratch.place(".")],
+                ..FsTable::default()
+            }),
+            ..Axes::default()
+        }
+        .into();
+        let at = EnginePath::Host(tree.root().to_path_buf());
+        let root = Root::new(at.clone())
+            .with_env(vec![
+                (SCRATCH_VAR.into(), tree.at("/scratch")),
+                ("HOME".into(), tree.at("/root-home")),
+                ("PATH".into(), tree.at("/root-bin")),
+            ])
+            .with_config(ceiling.into());
+        let transport = IdentityTransport::boot(
+            &INSTALLERS,
+            &Attach::root(
+                EngineSpec::new(crate::shell_eval::builtins::INSTALLER_TAG, at),
+                root,
+            ),
+        )
+        .expect("the full root attach resolves its ceiling");
+
+        assert_eq!(transport.env_var("HOME"), Ok(Some(tree.at("/root-home"))));
+        assert_eq!(transport.env_var("PATH"), Ok(Some(tree.at("/root-bin"))));
+        let expected: GrantValue = Axes {
+            exec: Some(ExecTable {
+                allow: vec![Target::Name("root-ceiling-tool".into())],
+                ..ExecTable::default()
+            }),
+            fs: Some(FsTable {
+                read: vec![Anchor::Absolute.place(tree.at("/root-home"))],
+                write: vec![Anchor::Absolute.place(tree.at("/scratch"))],
+                ..FsTable::default()
+            }),
+            ..Axes::default()
+        }
+        .into();
+        assert_eq!(
+            transport
+                .grants()
+                .expect("the ceiling probe answers")
+                .layers,
+            [LayerValue {
+                grant: expected.into(),
+                fragment: None,
+            }],
+            "neither the initial home nor its same-named program is granted"
+        );
     }
 
     /// A ceiling the front-end refuses refuses the attach, in the decoder's

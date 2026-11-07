@@ -9,7 +9,8 @@
 //! child in its namespace root, so the logical cwd rides the argv as `--chdir`.
 //!
 //! macOS and Linux share one trampoline: the payload is *ral*, as `ral
-//! --warrant <w> <r>`, and the warrant it reads off slot `w` names both the
+//! --warrant <w> <r>` (plus Linux envelope stream slots), and the warrant
+//! it reads off slot `w` names both the
 //! confinement — macOS's Seatbelt profile, compiled here; Linux's promise of
 //! the Landlock ruleset built here in the host, which the payload inherits —
 //! and the image it runs once inside (`serve_warrant`); slot `r` is the
@@ -184,6 +185,8 @@ pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, 
     let slots = Slots {
         warrant: warrant_at,
         report: report_at,
+        #[cfg(target_os = "linux")]
+        streams: None,
     };
     Ok((slots, Report::new(reader, kept)))
 }
@@ -228,9 +231,9 @@ pub(super) fn enveloped(
     )?;
     let warrant = Warrant::new(Confinement(confinement), image, args);
     let (slots, report) = issue(&warrant, &mut handoff)?;
-    let (cmd, info) =
+    let (cmd, info, stdio) =
         super::linux::bwrap_command(env, shown, handoff, slots, &rendered, chdir, ownership)?;
-    Ok(bwrapped(cmd, info, report))
+    Ok(bwrapped(cmd, info, stdio, report))
 }
 
 /// bwrap's `cmd` as a launch, with the payload's `--info-fd` peer and the
@@ -239,9 +242,11 @@ pub(super) fn enveloped(
 pub(super) fn bwrapped(
     cmd: Command,
     info: Option<super::linux::InfoFd>,
+    stdio: crate::process::launch::EnvelopeStdio,
     report: Report,
 ) -> crate::process::Launch {
     let mut launch = crate::process::Launch::from_command(cmd);
+    launch.envelope_stdio(stdio);
     // A host package rather than part of ral, so it may simply be absent.
     launch.confine(crate::process::launch::Confined {
         report,
@@ -1049,14 +1054,26 @@ mod tests {
                 cmd.get_program()
             );
             let args = argv(&launch);
-            let [opt, options, dashes, trampoline, flag, warrant, report] = &args[..] else {
-                panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`: {args:?}");
+            let [
+                opt,
+                options,
+                dashes,
+                trampoline,
+                flag,
+                warrant,
+                report,
+                input,
+                output,
+                error,
+            ] = &args[..]
+            else {
+                panic!("not a bwrap warrant launch with three stream slots: {args:?}");
             };
             assert_eq!(
                 [opt.as_str(), dashes, flag],
                 ["--args", "--", Role::Warrant.flag()]
             );
-            for at in [options, warrant, report] {
+            for at in [options, warrant, report, input, output, error] {
                 Slot::parse(at).expect("a slot");
             }
             assert!(

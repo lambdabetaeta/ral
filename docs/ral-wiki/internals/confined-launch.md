@@ -1,8 +1,8 @@
 ---
 generated_at_commit: 3e3fbc84
-verified_at_commit: 3e3fbc84
+verified_at_commit: 2793e544
 verified_at_date: 2026-11-07
-anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
+anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, EnvelopeStdio, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -70,9 +70,9 @@ The grant's limit is part of the launch, applied inside the platform's spawn
 
 ## The child is handed its confinement on a descriptor
 
-**Both Unix host backends re-exec ral as `ral --warrant <w> <r>`, and that argv
-names only two descriptors.** The confinement and the program arrive in a
-`Warrant` the parent compiled, on the first; the second is the launch's report
+**Both Unix host backends re-exec ral with warrant and report slots; Linux
+also names three payload stream slots.** The confinement and the program arrive
+in a `Warrant` the parent compiled, on the first; the second is the launch's report
 socket, on which the trampoline says what became of the program
 ([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]).
 
@@ -84,22 +84,38 @@ socket, on which the trampoline says what became of the program
     writer closes before the child exists.
 - **The child refuses anything unexpected:** an unsealed memfd, a non-socket, or
   a warrant not in canonical form. Decoding re-encodes and compares.
-- **On Linux the real argv is `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`.**
+- **On Linux the real argv is `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r> <in> <out> <err>`.**
   `bwrap_argv` is pure in descriptor numbers and returns only bwrap's
   options, which bwrap reads from `--args`. The trampoline is ral's own pin.
 - **Every descriptor a launch hands down crosses at the number it was lent
   at** (`Slot`, from 98 up): bwrap's `--args`, the warrant, `--info-fd` and
   the payload's copy of its writer, the Landlock ruleset, ral's pin, the
   seccomp programs and the mount handles. A `Handoff` lifts each to a free
-  number in the parent, and the child's hook only clears close-on-exec:
-  nothing is `dup2`'d, so no descriptor the child still needs (`std`'s
-  exec-error pipe, `detach`'s handshake) can be displaced. Each number is
+  number in the parent, and its hook clears close-on-exec. Stream slots
+  are reserved there too, before any spawn: later `dup2`s target only these
+  reservations, never `std`'s exec-error pipe or `detach`'s handshake. Each number is
   named as data: to bwrap in its options, the ruleset's in the warrant,
   the warrant's in argv. The report socket's writer crosses at its own slot, which the parent holds open
   until the fork ([[internals/an-external-end-to-end|an-external-end-to-end]]).
   Once confined, the child closes every descriptor above stderr but the
   report's and marks that one close-on-exec, so the program inherits none, and a
   `Kept` launch's read of `--info-fd` ends: the payload's group exists.
+- **Payload pipe lifetime belongs to the payload, not its envelope.**
+  `EnvelopeStdio` captures the resolved standard descriptors after stdio setup,
+  before resource-limit hooks can lower `RLIMIT_NOFILE` below the reserved slots.
+  The launch's final stderr-merge choice is applied by that same capture hook,
+  even when selected after limits were registered. Kept and detached launches
+  use the same ordering. bwrap gets
+  independent null input/output and diagnostic stderr; its monitor and init
+  close the high payload slots. Only the trampoline installs them at 0–2,
+  before confinement's sweep, then releases its own copies after starting the
+  program. The parent's consuming launch releases its copies before returning.
+  Early EOF/EPIPE therefore does not wait for the envelope's exit.
+- **A selected stdout tty is the deliberate exception.** bwrap retains that
+  tty to discover and bind `/dev/console`; the payload receives the same tty.
+  This preserves terminal naming, but makes no early terminal-release promise.
+  A closed inherited standard descriptor refuses preparation rather than
+  leaving a missing slot that bwrap could reuse.
 - **`serve_warrant` runs before `authority::sandbox::boot`.** The trampoline pins and
   opens nothing before it is confined.
 - **The trampoline testifies; it does not exit with a verdict.** The trampoline
@@ -259,8 +275,12 @@ the refusal says the sandbox is why** (`sandbox::unavailable`).
   (`unforked`, on an `Exec` failure), worded as the sandbox being unavailable
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
 - **An envelope that ends before its trampoline speaks is a refusal too**,
-  worded with whatever it left on the command's stderr (`vanished`):
-  on Linux, EOF on the report before any record.
+  worded with its stderr (`vanished`): on Linux this is a separate anonymous
+  diagnostic file, not the payload's stderr, and EOF on the report before any
+  record is the refusal. The parent reads at most 4096 bytes from offset zero,
+  without moving the writer's offset; those contents serve startup refusals,
+  not forwarding of later diagnostics. Detached writers need no living reader.
+  The read limit does not bound the file's storage.
 - **The launch records which envelope it execs** (an `Envelope`, held in its
   `Confined` beside the report, and read back by
   `Confined::launcher`). Only a backend whose envelope is a separate binary sets

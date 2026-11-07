@@ -590,9 +590,12 @@ fn run_framed(
             ending.into_settled(),
             captured.map(|c| c.stdout.bytes).unwrap_or_default(),
         ),
-        RunReport::Static { .. } => {
-            panic!("well-formed source must run, not fail statically: {src}")
-        }
+        RunReport::Static { diagnostics } => panic!(
+            "well-formed source must run, not fail statically: {src}\n{}",
+            diagnostics
+                .render(&crate::shell::runtime::ExitHints::default())
+                .0
+        ),
     }
 }
 
@@ -1439,6 +1442,43 @@ fn watched_lines_surface_one_by_one() {
             pair("job", "two")
         ]
     );
+}
+
+/// A native pipeline stage owns a clone of the watched sink, including its
+/// own pending tail; flushing only the worker's original sink loses that tail.
+#[test]
+fn watched_native_pipeline_flushes_unterminated_stage_output() {
+    let mut shell = crate::HostSurface {
+        statics: vec![crate::shell::builtins::WATCH_BUILTIN],
+        ..crate::HostSurface::default()
+    }
+    .shell(
+        crate::io::terminal::TerminalState::default(),
+        crate::test_helper::process_cwd(),
+    )
+    .expect("a test host resolves its baseline");
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let request = crate::shell::run::RunRequest {
+        deferred: Some(Arc::new(RecDeferred(batches.clone()))),
+        ..crate::protocol::Run::captured(
+            "let h = watch 'job' { to-string 'tail' | !{ let text = from-string; to-string $text } }; await $h",
+            crate::source::SourceOrigin::named("watched-pipeline.ral"),
+        )
+        .into()
+    };
+    run_framed(&mut shell, request)
+        .0
+        .expect("watched native pipeline succeeds");
+
+    let lines: Vec<_> = batches
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .filter_map(WatchEvent::from_surface)
+        .map(|w| (w.label, w.line))
+        .collect();
+    assert_eq!(lines, [("job".to_string(), "tail".to_string())]);
 }
 
 /// The body's own events precede the trailing `` `done ``: the batch carries

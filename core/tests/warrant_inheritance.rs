@@ -231,7 +231,12 @@ mod linux {
         let (extra, _) = invoke(&sealed, &["extra"]);
         denied(&proof, &control, &extra, "ok\n");
         assert_eq!(extra.status, 126, "{extra:?}");
-        assert!(extra.stderr.contains("takes two arguments"), "{extra:?}");
+        assert!(
+            extra
+                .stderr
+                .contains("takes the warrant and report descriptors"),
+            "{extra:?}"
+        );
         assert!(extra.stdout.is_empty(), "{extra:?}");
 
         let (nested, _) = invoke(&parcel(&[b"--warrant", b"98", b"99"], true), &[]);

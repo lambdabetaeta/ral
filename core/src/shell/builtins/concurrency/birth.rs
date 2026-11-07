@@ -116,8 +116,7 @@ where
             let body = work(mooring, child);
             exit_brood(&owner, body, mooring.cleanup_grace, child)
         });
-        let end = flush_worker_stream(end, &mut child.io.stdout);
-        let end = flush_worker_stream(end, &mut child.io.stderr);
+        let end = end.flush_streams(&mut child.io);
         let end = convert_own_stop(end, &child.session.root).leaving(&child.session.sources);
         let receipt = receipt.map(|(started, title, surface)| {
             let outcome = end.done(child);
@@ -155,17 +154,6 @@ where
         None => shell.observe(mooring, Observed::Worker(Worker { id, title })),
     }
     Ok(handle)
-}
-
-fn flush_worker_stream(end: End, sink: &mut Sink) -> End {
-    let flushed = End::of(|| {
-        sink.flush_pending();
-        Ok(Value::Unit)
-    });
-    match (end, flushed) {
-        (panic @ End::Panic(_), _) | (_, panic @ End::Panic(_)) => panic,
-        (end, _) => end,
-    }
 }
 
 /// The worker's switch (I6), applied to its base's ending: a cancel or a

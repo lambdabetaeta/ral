@@ -4,6 +4,7 @@ use super::Shell;
 use super::value::Value;
 use crate::error::{Error, Prov};
 use crate::fact::{Done, Ending, ExitCode, FailureCode};
+use crate::io::Io;
 use crate::process::{CancelCause, Cancellation, Scope, ScopeId};
 use crate::source::{SourceDb, Span};
 use std::num::NonZeroU8;
@@ -240,6 +241,23 @@ impl End {
             Err(Break::Escape(Escape::Exit(code))) => Self::Exited(code),
             Err(Break::Escape(Escape::Stopped(stop))) => Self::Stopped(stop),
         }
+    }
+
+    /// Finalize the thread's own stdout and stderr before publishing its ending.
+    /// Each stream is attempted even if the other panics; an existing panic
+    /// wins, then stdout's, then stderr's.
+    pub(crate) fn flush_streams(mut self, io: &mut Io) -> Self {
+        for sink in [&mut io.stdout, &mut io.stderr] {
+            let flushed = Self::of(|| {
+                sink.flush_pending();
+                Ok(Value::Unit)
+            });
+            self = match (self, flushed) {
+                (panic @ Self::Panic(_), _) | (_, panic @ Self::Panic(_)) => panic,
+                (end, _) => end,
+            };
+        }
+        self
     }
 
     /// The ending leaves the shell `sources` belongs to: every provenance

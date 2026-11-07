@@ -18,7 +18,8 @@
 //! that would break across lines leaves the list to the ordinary layout.
 
 use super::FOValue;
-use crate::syntax::lexer::fence_admits;
+use crate::syntax::lexer::{fence_admits, is_bidi_control, is_ident};
+use crate::syntax::quote::quote_word;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::ops::Deref;
@@ -142,7 +143,11 @@ fn full<V: Printable + ?Sized>(
         }
         Shape::Map { len, entries } if len > 0 => {
             let (mut parts, more) = budgeted(len, entries, budget, String::len, |(k, v)| {
-                format!("{k}: {}", child(&*v, indent, params, budget))
+                format!(
+                    "{}: {}",
+                    label(k, params),
+                    child(&*v, indent, params, budget)
+                )
             });
             parts.extend(more);
             bracketed(&parts, indent, params)
@@ -179,25 +184,41 @@ fn rows<V: Printable + ?Sized>(
     params: &PrintParams,
     budget: &Cell<usize>,
 ) -> Option<String> {
-    let records = (items.iter())
-        .map(|v| match v.shape() {
-            Shape::Map { len, entries } if len > 0 => Some(entries.collect::<Vec<_>>()),
-            _ => None,
+    if !matches!(items.first()?.shape(), Shape::Map { len, .. } if len > 0) {
+        return None;
+    }
+    // Recreate entry views for comparison; retaining every row's cells here
+    // would allocate for rows the rendering budget will never reach.
+    if items
+        .iter()
+        .skip(1)
+        .any(|v| match (items[0].shape(), v.shape()) {
+            (Shape::Map { entries: first, .. }, Shape::Map { entries, .. }) => {
+                !entries.map(|(k, _)| k).eq(first.map(|(k, _)| k))
+            }
+            _ => true,
         })
-        .collect::<Option<Vec<_>>>()?;
-    let first = records[0].iter().map(|(k, _)| k);
-    if (records.iter()).any(|r| !r.iter().map(|(k, _)| k).eq(first.clone())) {
+    {
         return None;
     }
     let before = budget.get();
     let (rows, more) = budgeted(
-        records.len(),
-        records.iter(),
+        items.len(),
+        items.iter(),
         budget,
         |cells: &Vec<String>| cells.iter().map(String::len).sum(),
         |record| {
-            (record.iter())
-                .map(|(k, v)| format!("{k}: {}", child(&**v, indent + 1, params, budget)))
+            let Shape::Map { entries, .. } = record.shape() else {
+                unreachable!("rows have already been checked to be records");
+            };
+            entries
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        label(k, params),
+                        child(&*v, indent + 1, params, budget)
+                    )
+                })
                 .collect()
         },
     );
@@ -291,6 +312,20 @@ fn budgeted<T, P>(
     (parts, None)
 }
 
+/// Labels use the parser's identifier alphabet, not the broader bare-word
+/// grammar. Quoted keys stay whole, regardless of the string elision limit.
+fn label<'a>(key: &'a str, params: &PrintParams) -> Cow<'a, str> {
+    if is_ident(key) {
+        Cow::Borrowed(key)
+    } else if key.chars().any(is_bidi_control) {
+        // Raw quotes cannot carry bidi controls; the shared word quoter
+        // escapes them in a non-interpolating double-quoted string.
+        quote_word(key)
+    } else {
+        Cow::Owned(quote_string(key, params))
+    }
+}
+
 fn quote_string(body: &str, params: &PrintParams) -> String {
     let mut level = params.min_quote_hashes;
     while !fence_admits(body, level) {
@@ -357,6 +392,230 @@ fn stacked(parts: &[String], indent: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax::ast::{Ast, ListElem, RecordEntry};
+    use crate::syntax::parser::parse;
+    use std::rc::Rc;
+
+    fn params() -> PrintParams {
+        PrintParams {
+            max_width: 80,
+            max_string: 4,
+            max_depth: 3,
+            min_quote_hashes: 0,
+            quote_bytes: false,
+            max_bytes: 64 * 1024,
+        }
+    }
+
+    fn record(key: &str, value: i64) -> FOValue {
+        FOValue::Map {
+            entries: vec![(key.to_owned(), FOValue::Int { value })],
+        }
+    }
+
+    fn printed_ast(value: &FOValue, params: &PrintParams) -> Ast {
+        let text = pretty_print(value, 0, params);
+        let mut program = parse(&format!("return {text}")).expect("printed value must parse");
+        let Ast::Return(Some(value)) = program.remove(0).item else {
+            panic!("expected a returned value");
+        };
+        *value.item
+    }
+
+    fn record_keys(ast: &Ast) -> Vec<&str> {
+        let Ast::Record(fields) = ast else {
+            panic!("expected a record, got {ast:?}");
+        };
+        fields
+            .iter()
+            .map(|field| match field {
+                RecordEntry::Field { key, .. } => key.item.as_str(),
+                RecordEntry::Spread(_) => panic!("printed records cannot spread"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn record_and_table_labels_paste_back_without_elision() {
+        let long_key = format!("unsafe key {} tail", "x".repeat(100));
+        for key in [
+            "",
+            "x: 1, y",
+            "a,b",
+            "a.b",
+            "path/to/key",
+            "1",
+            "-1",
+            "true",
+            "false",
+            "if",
+            "a-b_c",
+            "_",
+            "é",
+            "#comment",
+            "...",
+            "$key",
+            "~/key",
+            "it's",
+            "a#'b",
+            "a'#b#'c",
+            "line\nbreak",
+            "~$!\u{202e}",
+            &long_key,
+        ] {
+            for floor in [0, 2] {
+                let params = PrintParams {
+                    min_quote_hashes: floor,
+                    ..params()
+                };
+                assert_eq!(record_keys(&printed_ast(&record(key, 1), &params)), [key]);
+                let table = FOValue::List {
+                    items: vec![record(key, 1), record(key, 12)],
+                };
+                let Ast::List(rows) = printed_ast(&table, &params) else {
+                    panic!("expected a list");
+                };
+                assert_eq!(rows.len(), 2);
+                for row in rows {
+                    let ListElem::Single(row) = row else {
+                        panic!("printed lists cannot spread");
+                    };
+                    assert_eq!(record_keys(&row.item), [key]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsafe_labels_keep_record_and_padded_table_layouts() {
+        let row = |n| FOValue::Map {
+            entries: vec![
+                ("x: 1, y".into(), FOValue::Int { value: n }),
+                ("z".into(), FOValue::Int { value: 2 }),
+            ],
+        };
+        assert_eq!(pretty_print(&row(1), 0, &params()), "['x: 1, y': 1, z: 2]");
+        assert_eq!(
+            pretty_print(
+                &FOValue::List {
+                    items: vec![row(1), row(12)]
+                },
+                0,
+                &params()
+            ),
+            "[\n  ['x: 1, y': 1,  z: 2],\n  ['x: 1, y': 12, z: 2]\n]"
+        );
+        assert_eq!(
+            label(
+                "a.b",
+                &PrintParams {
+                    min_quote_hashes: 2,
+                    ..params()
+                }
+            ),
+            "##'a.b'##"
+        );
+    }
+
+    #[derive(Default)]
+    struct EntryCounts {
+        live: Cell<usize>,
+        peak: Cell<usize>,
+        rendered: Cell<usize>,
+    }
+
+    struct EntryProbe {
+        cells: usize,
+        counts: Rc<EntryCounts>,
+    }
+
+    struct EntryView(EntryProbe);
+
+    impl Deref for EntryView {
+        type Target = EntryProbe;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for EntryView {
+        fn drop(&mut self) {
+            if self.cells == 0 {
+                self.counts.live.set(self.counts.live.get() - 1);
+            }
+        }
+    }
+
+    impl Printable for EntryProbe {
+        type Child<'a> = EntryView;
+
+        fn shape(&self) -> Shape<'_, Self> {
+            if self.cells == 0 {
+                self.counts.rendered.set(self.counts.rendered.get() + 1);
+                return Shape::Atom("1".into());
+            }
+            Shape::Map {
+                len: self.cells,
+                entries: Box::new(
+                    ["a", "b", "c", "d"]
+                        .into_iter()
+                        .take(self.cells)
+                        .map(|key| {
+                            self.counts.live.set(self.counts.live.get() + 1);
+                            self.counts
+                                .peak
+                                .set(self.counts.peak.get().max(self.counts.live.get()));
+                            (
+                                key,
+                                EntryView(Self {
+                                    cells: 0,
+                                    counts: Rc::clone(&self.counts),
+                                }),
+                            )
+                        }),
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn rows_budget_does_not_retain_omitted_cell_views() {
+        let counts = Rc::new(EntryCounts::default());
+        let items: Vec<_> = (0..128)
+            .map(|_| {
+                EntryView(EntryProbe {
+                    cells: 4,
+                    counts: Rc::clone(&counts),
+                })
+            })
+            .collect();
+        for bytes in [0, 1] {
+            counts.peak.set(0);
+            counts.rendered.set(0);
+            let params = PrintParams {
+                max_bytes: bytes,
+                max_depth: 1,
+                ..params()
+            };
+            let budget = Cell::new(params.max_bytes);
+            assert_eq!(
+                rows::<EntryProbe>(&items, 0, &params, &budget).expect("uniform records form rows"),
+                "[\n  [a: 1, b: 1, c: 1, d: 1],\n  …127 more\n]"
+            );
+            assert_eq!(counts.live.get(), 0);
+            assert!(
+                counts.peak.get() <= 2,
+                "discovery must drop cell views as it compares keys"
+            );
+            assert_eq!(
+                counts.rendered.get(),
+                4,
+                "only the mandatory first row renders"
+            );
+            assert_eq!(budget.get(), 0);
+        }
+    }
 
     #[test]
     fn raw_strings_round_trip_at_the_smallest_admitted_fence() {

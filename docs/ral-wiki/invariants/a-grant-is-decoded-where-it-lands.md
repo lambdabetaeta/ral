@@ -1,13 +1,13 @@
 # A grant is decoded where it lands
 
-**A grant crosses every boundary as a *grant value*, plain data, and is resolved
-by the one decoder on the host that enforces it.** No host resolves a grant for
-another, and no second route builds a layer: whoever authors the grant, a
-`GrantLayer` is the output of the decoder walker `decode_capability_map`
-(`core/src/shell/grant/decode.rs`, crate-private), or the ambient root layer
-that says nothing (`GrantLayer::root`, a spawn's `Inherit`), or a decoded
-layer extended by a decoded fragment (`GrantLayer::extend`), and of nothing
-else.
+**Newly authored policy crosses boundaries as a *grant value*, plain data,
+and is resolved by the one decoder on the host that enforces it.** No host
+resolves authored policy for another host. A new `GrantLayer` comes from the
+decoder walker `decode_capability_map` (`core/src/shell/grant/decode.rs`,
+crate-private), the ambient root layer that says nothing (`GrantLayer::root`,
+a spawn's `Inherit`), or a decoded layer extended by a decoded fragment
+(`GrantLayer::extend`). Transfer of already-resolved state on the same host
+is separate from authoring policy.
 
 - **One front-end, many authors.** `grant [...] { body }`
   (`shell/evaluator/machine.rs`), profiles (`shell/load/profile.rs`), a spawn's
@@ -20,7 +20,7 @@ else.
 - **A host writes a grant value only by encoding typed axes.** `GrantValue` is
   made only from `Axes` (`ExecTable`, `FsTable`, `Target`, `Place`) in
   `authority/grant/value.rs`, so no host spells the record by hand.
-- **Every boundary is covered.** synod's ceiling (`ceiling`,
+- **Authored policy uses this boundary.** synod's ceiling (`ceiling`,
   `synod/src/folder/grant.rs`) rides `Root.config` and is decoded by
   `engine_root` (`exarch/src/boot.rs`); exarch's boot grant is its profiles
   through the loader and a root's ceiling through `engine_root`; exarch's
@@ -37,19 +37,25 @@ else.
   that enforces it, so `cwd` and `scratch` places work in it and mean the
   engine's own cwd and scratch: in a synod guest the guest's, never the host's
   (`exarch/src/boot.rs::a_ceiling_resolves_against_the_engines_own_anchor`).
-- **It leaves as it came.** The wire form of a ceiling or a boot grant stays
-  the author's value and is never derived from a layer. What a layer shows of
-  itself is the value that decodes back to it, on the host that decoded it
+- **Resolved state stays on its host.** `Root.grants` transports a resolved
+  `GrantStack` (`core/src/protocol.rs`), not an authored grant value. The engine
+  clones it, reholds its exclusions and installs its layers after the root
+  recipe, without grant-value decoding (`core/src/engine.rs`). These layers
+  are resolved on the engine's host and mean nothing on another; like a sealed
+  child's grants, they are execution state
+  ([[design/engine-protocol|engine-protocol]]), not a second policy front-end.
+- **Authored policy leaves as it came.** The wire form of a ceiling or a boot
+  grant stays the author's value and is never derived from a layer. What a layer
+  shows of itself is the value that decodes back to it, on the host that decoded it
   ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 
 **Why.** A position resolved on one host means nothing on another, and a second
-route is a second set of refusals. The serde route was laxer than the decoder:
-it admitted a file key naming a directory, a path-shaped name, and a spelling
-absolute only on another platform, so what a ral author could not write, a
-host could send. With one front-end the refusals hold everywhere (below), and
-the wire carries spellings, never positions or identities.
+policy front-end is a second set of refusals. With one front-end the refusals
+hold for every author (below), and authored policy crosses hosts as spellings,
+not resolved positions or identities. Same-host resolved-state transfer does
+not reinterpret those spellings.
 
-**What the decoder refuses, on every route.**
+**What the decoder refuses, on every authoring route.**
 
 - **A file key naming a directory** (`file_rules`): it names a binary that
   cannot exist; the hint says `` `dir ``. The root is one such directory, whose
