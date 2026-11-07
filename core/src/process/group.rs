@@ -17,9 +17,9 @@ use super::signal::KILL;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub(crate) use unix::{Survivor, spawn_detached};
+pub use unix::{SpawnError, spawn_with_pgid, spawn_with_pgid_after};
 #[cfg(unix)]
-pub use unix::{spawn_with_pgid, spawn_with_pgid_after};
+pub(crate) use unix::{Survivor, spawn_detached};
 
 #[cfg(windows)]
 mod windows;

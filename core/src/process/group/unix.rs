@@ -34,6 +34,16 @@ impl PgidPolicy {
     }
 }
 
+/// Why a spawn made no process, told by the mark its child makes as the
+/// last step before `execve`.
+#[derive(Debug)]
+pub enum SpawnError {
+    /// One of ral's steps failed: the fork, the placement, a `pre_exec` hook.
+    Prepare(std::io::Error),
+    /// The `execve` failed: the program's own.
+    Exec(std::io::Error),
+}
+
 /// Spawn `cmd` under the one canonical pre-exec discipline.
 ///
 /// Apply `pgid` then [`reset_child_signals`] in the child, and mirror the
@@ -43,47 +53,54 @@ impl PgidPolicy {
 /// `Inherit`) is the whole registration: callers keep it for a later wait
 /// or for the pipeline group.
 ///
-/// `pre_exec` closures run in registration order, so a caller's own hook
-/// (sandbox `RLIMIT`, `2>&1` dup2) runs *before* this one — deliberately, since
-/// the signal reset should be the last thing standing before `execve`.
+/// `pre_exec` closures run in registration order, so a caller's own hooks
+/// (rlimits, the guest jail, `2>&1`) run before this one, whose last step
+/// marks the child cleared for `execve`.
 ///
 /// # Errors
-/// Returns `Err` if the child's `setpgid` / `setsid`, or the `fork` / `exec`
-/// itself, fails.
+/// [`SpawnError::Exec`] if the `execve` fails; [`SpawnError::Prepare`] if
+/// anything before it does: the fork, the placement, or any hook.
 pub fn spawn_with_pgid(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,
-) -> std::io::Result<(std::process::Child, Option<Pgid>)> {
+) -> Result<(std::process::Child, Option<Pgid>), SpawnError> {
     spawn_with_pgid_after(cmd, pgid, || Ok(()))
 }
 
 /// [`spawn_with_pgid`] plus one caller hook, run in the child after the
-/// signal reset and before `execve`.
+/// signal reset and before the mark.
 ///
 /// The hook must therefore keep to async-signal-safe work such as `read`,
 /// `close`, or `dup2` on already-open fds.
 ///
 /// # Errors
-/// Returns `Err` if the child's `setpgid` / `setsid` fails, if `after` returns
-/// an error, or if the `fork` / `exec` itself fails.
+/// As [`spawn_with_pgid`]; `after` failing is [`SpawnError::Prepare`].
 pub fn spawn_with_pgid_after<F>(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,
     after: F,
-) -> std::io::Result<(std::process::Child, Option<Pgid>)>
+) -> Result<(std::process::Child, Option<Pgid>), SpawnError>
 where
     F: Fn() -> std::io::Result<()> + Send + Sync + 'static,
 {
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
+    let (cleared, mark) = crate::process::cloexec_socketpair().map_err(SpawnError::Prepare)?;
+    // SAFETY: async-signal-safe throughout; the closure owns `mark`, so the
+    // fd it writes is open for as long as `cmd` lives.
     unsafe {
         cmd.pre_exec(move || {
             pgid.apply()?;
             reset_child_signals();
             after()?;
+            let byte = 0u8;
+            if libc::write(mark.as_raw_fd(), (&raw const byte).cast(), 1) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
-    let child = crate::process::spawn(cmd)?;
+    let child = crate::process::spawn(cmd).map_err(|e| attributed(e, &cleared))?;
     // The mirror's result is ignored: either the child already applied the
     // policy, and a failure here is the benign post-`execve` `EACCES` race, or
     // its `pre_exec` failed and the spawn above already returned that error.
@@ -106,6 +123,15 @@ where
     Ok((child, leader))
 }
 
+/// `e`, the `execve`'s if the child marked itself cleared before failing.
+/// No wait: the mark precedes the errno `std` already read.
+fn attributed(e: std::io::Error, cleared: &std::os::unix::net::UnixStream) -> SpawnError {
+    match rustix::net::recv(cleared, &mut [0u8], rustix::net::RecvFlags::DONTWAIT) {
+        Ok((1, _)) => SpawnError::Exec(e),
+        _ => SpawnError::Prepare(e),
+    }
+}
+
 /// A detached survivor, which has certainly exec'd: named by its pid, or not.
 #[derive(Debug)]
 pub enum Survivor {
@@ -118,7 +144,8 @@ pub enum Survivor {
 /// *grandchild*, and return it.
 ///
 /// The hook of [`spawn_with_pgid_after`] forks again; the intermediate writes
-/// the grandchild's pid down a pipe and `_exit`s, and is reaped below — already
+/// the grandchild's pid down a pipe and `_exit`s inside the hook, short of the
+/// mark, which only the grandchild makes.  It is reaped below — already
 /// dead, so that wait cannot block and no zombie exists — leaving the
 /// grandchild it orphans to be reparented onto init.
 ///
@@ -135,12 +162,14 @@ pub enum Survivor {
 /// grandchild's shuts only on a successful `execve`.
 ///
 /// # Errors
-/// `Err` if either fork, the `setsid`, or the `execve` fails: nothing was
-/// born.  Every later failure is [`Survivor::Unnamed`]: the survivor runs.
-pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<Survivor> {
+/// Nothing was born: [`SpawnError::Exec`] if the grandchild's `execve`
+/// fails, [`SpawnError::Prepare`] if either fork, the `setsid`, or any step
+/// before them does.  Every later failure is [`Survivor::Unnamed`]: the
+/// survivor runs.
+pub fn spawn_detached(cmd: &mut std::process::Command) -> Result<Survivor, SpawnError> {
     use std::os::fd::AsRawFd;
 
-    let (receipt, handshake) = crate::process::cloexec_pipe()?;
+    let (receipt, handshake) = crate::process::cloexec_pipe().map_err(SpawnError::Prepare)?;
     let fd = handshake.as_raw_fd();
     let (intermediate, _its_pgid) =
         spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
@@ -208,7 +237,39 @@ fn survivor_pid(
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{Survivor, spawn_detached};
+    use super::{Pgid, PgidPolicy, SpawnError, Survivor, spawn_detached, spawn_with_pgid};
+
+    // ── Whose failure ──────────────────────────────────────────────────────
+
+    /// A step of ral's failing before the mark is ral's: no pid reaches
+    /// `i32::MAX`, so no group answers to it.
+    #[test]
+    fn a_join_into_a_group_nobody_leads_is_ral_s_failure() {
+        let nobody = Pgid::from_raw(i32::MAX).expect("positive");
+        let err = spawn_with_pgid(
+            &mut std::process::Command::new("/bin/sh"),
+            PgidPolicy::Join(nobody),
+        )
+        .expect_err("a group nobody leads cannot be joined");
+        assert!(
+            matches!(&err, SpawnError::Prepare(e) if e.raw_os_error() == Some(libc::EPERM)),
+            "{err:?}"
+        );
+    }
+
+    /// Past the mark, only the `execve` is left to fail: the program's own.
+    #[test]
+    fn a_missing_program_is_the_program_s_failure() {
+        let err = spawn_with_pgid(
+            &mut std::process::Command::new("ral-no-such-program-exists"),
+            PgidPolicy::NewLeader,
+        )
+        .expect_err("a program that does not exist cannot be born");
+        assert!(
+            matches!(&err, SpawnError::Exec(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "{err:?}"
+        );
+    }
 
     // ── Detached birth ─────────────────────────────────────────────────────
 
@@ -317,11 +378,16 @@ mod tests {
 
     /// A program that does not exist comes back `NotFound`, not as a pid —
     /// the proof that `std`'s close-on-exec errno pipe survives the second
-    /// fork, so `Ok` really does mean the grandchild exec'd.
+    /// fork, so `Ok` really does mean the grandchild exec'd.  It is the
+    /// program's failure: the grandchild made the mark, as the intermediate
+    /// never does.
     #[test]
     fn detached_missing_program_reports_not_found() {
         let err = spawn_detached(&mut detachable("ral-no-such-program-exists"))
             .expect_err("a program that does not exist cannot be born");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            matches!(&err, SpawnError::Exec(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "{err:?}"
+        );
     }
 }

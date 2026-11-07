@@ -374,9 +374,10 @@ impl Launch {
     /// child lands.
     ///
     /// # Errors
-    /// [`Unstarted`]: the fork, `exec` or pre-exec `setpgid`/`setsid` the
-    /// program's, any failure of the envelope or trampoline, or a stop before
-    /// the trampoline spoke; any child is then killed and reaped.
+    /// [`Unstarted`]: the program's own `execve`; a refusal for the fork,
+    /// any of ral's pre-exec steps, or any failure of the envelope or
+    /// trampoline; or a stop before the trampoline spoke.  Any child is then
+    /// killed and reaped.
     pub(crate) fn spawn(&mut self, pgid: crate::process::PgidPolicy) -> Result<Spawned, Unstarted> {
         let pgid = if self.envelope.is_some() {
             crate::process::PgidPolicy::NewLeader
@@ -444,16 +445,20 @@ impl Launch {
         Ok(survivor)
     }
 
-    /// A spawn that made no child: the program's own failure, unless a
-    /// confining launcher was to run in its place.
-    fn unforked(&self, e: std::io::Error, confined: bool) -> Unstarted {
-        if !confined {
-            return Unstarted::Program(e);
+    /// A spawn that made no child: the program's own `execve` failure,
+    /// unless a confining launcher was to run in its place; ral's, before it.
+    fn unforked(&self, e: crate::process::SpawnError, confined: bool) -> Unstarted {
+        use crate::process::SpawnError::{Exec, Prepare};
+        match (e, confined) {
+            (Exec(e), false) => Unstarted::Program(e),
+            (Prepare(e), false) => Unstarted::Refused(Refusal::Launch(format!(
+                "ral could not prepare the command's process: {e}; the command never ran"
+            ))),
+            (Prepare(e) | Exec(e), true) => Unstarted::Refused(Refusal::Unavailable(format!(
+                "cannot start {}: {e}; the command never ran",
+                self.launcher()
+            ))),
         }
-        Unstarted::Refused(Refusal::Unavailable(format!(
-            "cannot start {}: {e}; the command never ran",
-            self.launcher()
-        )))
     }
 
     /// An envelope that ended before its trampoline spoke; `said`, what it
@@ -529,6 +534,32 @@ fn discarded(mut child: crate::process::ChildHandle, why: Unstarted) -> Unstarte
     let _ = child.kill();
     let _ = child.reap();
     why
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{Launch, Unstarted};
+    use crate::authority::sandbox::Refusal;
+    use crate::process::{Pgid, PgidPolicy};
+
+    /// ral's own step failing refuses the launch; the `execve` failing is
+    /// the program's.
+    #[test]
+    fn ral_s_failed_step_is_refused_and_the_program_s_exec_is_its_own() {
+        let nobody = PgidPolicy::Join(Pgid::from_raw(i32::MAX).expect("positive"));
+        let Err(Unstarted::Refused(Refusal::Launch(why))) = Launch::new("/bin/sh").spawn(nobody)
+        else {
+            panic!("a group nobody leads cannot be joined");
+        };
+        assert!(why.contains("could not prepare"), "{why}");
+
+        let missing = Launch::new("ral-no-such-program-exists").spawn(PgidPolicy::Inherit);
+        assert!(
+            matches!(&missing, Err(Unstarted::Program(e)) if e.kind() == std::io::ErrorKind::NotFound),
+            "{:?}",
+            missing.err()
+        );
+    }
 }
 
 #[cfg(windows)]

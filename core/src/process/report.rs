@@ -248,6 +248,28 @@ mod tests {
         }
     }
 
+    /// A program can stop its supervisor before `started`, leaving the
+    /// report open and silent: the scope's stop ends the wait.
+    #[test]
+    fn a_stop_ends_the_wait_on_an_open_silent_report() {
+        use crate::process::{CancelCause, DurableRoot, POLL_SLICE};
+        let (reader, _writer) = crate::process::cloexec_socketpair().expect("socketpair");
+        let scope = DurableRoot::default().worker();
+        let stopper = scope.clone();
+        let stop = std::thread::spawn(move || {
+            std::thread::sleep(3 * POLL_SLICE);
+            stopper.cancel(CancelCause::Interrupted);
+        });
+        let heard = Testimony(reader).first(Some(&scope), || {
+            panic!("a report whose writer is open has not vanished")
+        });
+        stop.join().expect("the stopper");
+        assert!(
+            matches!(&heard, Err(Unstarted::Stopped(stop)) if stop.cause == CancelCause::Interrupted),
+            "{heard:?}"
+        );
+    }
+
     #[test]
     fn an_overlong_refusal_is_cut_not_refused() {
         let long = "x".repeat(usize::from(u16::MAX) + 7);

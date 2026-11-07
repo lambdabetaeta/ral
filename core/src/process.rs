@@ -59,7 +59,7 @@ pub use spawn_lock::{cloexec_pipe, output, spawn, status};
 #[cfg(unix)]
 pub use foreground::{TerminalLoan, interrupt_foreground_child, termios_snapshot};
 #[cfg(unix)]
-pub use group::{spawn_with_pgid, spawn_with_pgid_after};
+pub use group::{SpawnError, spawn_with_pgid, spawn_with_pgid_after};
 #[cfg(unix)]
 pub use signal::{
     default, ignore, install, install_handlers, install_interrupt_handler, interrupt_handler,
