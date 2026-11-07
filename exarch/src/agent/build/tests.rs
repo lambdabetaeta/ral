@@ -62,7 +62,7 @@ fn parent_terms_lend_launch_policy_or_helper_policy_and_saturating_fuel() {
         assert!(!human.search);
         assert_eq!(human.admission, Admission::Gated);
         assert_eq!(human.returns, returns);
-        assert!(!human.life.is_cancelled());
+        assert!(!human.home.is_cancelled());
 
         for (fuel, expected) in [(0, 0), (4, 3)] {
             let parent = test_agent(
@@ -74,8 +74,8 @@ fn parent_terms_lend_launch_policy_or_helper_policy_and_saturating_fuel() {
                 },
             )
             .unwrap();
-            let life = DurableRoot::default().child();
-            let helper = Parent::Agent(&parent, life.clone()).terms(&fleet.launch, &fleet.registry);
+            let home = DurableRoot::default().child();
+            let helper = Parent::Agent(&parent, home.clone()).terms(&fleet.launch, &fleet.registry);
             assert_eq!(
                 helper.parent.as_ref().map(AgentHandle::id),
                 Some(parent.id())
@@ -89,13 +89,13 @@ fn parent_terms_lend_launch_policy_or_helper_policy_and_saturating_fuel() {
                 }
             );
             assert!(helper.returns);
-            assert!(!helper.life.is_cancelled());
-            life.cancel(CancelCause::Interrupted);
-            assert_eq!(helper.life.cause(), Some(CancelCause::Interrupted));
+            assert!(!helper.home.is_cancelled());
+            home.cancel(CancelCause::Interrupted);
+            assert_eq!(helper.home.cause(), Some(CancelCause::Interrupted));
             assert!(parent.is_live());
         }
         fleet.registry.root.cancel(RootCause::Cancelled);
-        assert_eq!(human.life.cause(), Some(CancelCause::Cancelled));
+        assert_eq!(human.home.cause(), Some(CancelCause::Cancelled));
     }
 }
 

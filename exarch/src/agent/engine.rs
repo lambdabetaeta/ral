@@ -103,8 +103,8 @@ impl Engine {
             .set_deferred_sink(deferred_sink(address, generation));
     }
     pub(crate) fn inherit(&self, outgoing: &Self) {
-        if let Some(life) = outgoing.transport().unbind() {
-            self.transport().bind(life);
+        if let Some(home) = outgoing.transport().unbind() {
+            self.transport().bind(home);
         }
     }
     pub(crate) fn severed(&self) -> Option<Severed> {

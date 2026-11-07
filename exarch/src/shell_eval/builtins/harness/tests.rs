@@ -37,7 +37,7 @@ fn no_children(session: &Agent) {
 }
 
 fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
-    std::iter::once("inherit").chain(crate::policy::SPAWN_BASES)
+    std::iter::once("inherit").chain(crate::policy::spawn_bases())
 }
 
 #[test]

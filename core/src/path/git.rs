@@ -104,10 +104,8 @@ pub(crate) fn common_dir(
         .and_then(|text| text.lines().next())
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map_or_else(
-            || git_dir.to_path_buf(),
-            |line| fold_dots(&against(git_dir, line)),
-        )
+        .and_then(|line| against(git_dir, line))
+        .map_or_else(|| git_dir.to_path_buf(), |named| fold_dots(&named))
 }
 
 /// The `info/exclude` file of the repository whose `.git` entry is `dot_git`,
@@ -130,13 +128,14 @@ fn read_at(
     read: &mut impl FnMut(&LexicalPath) -> io::Result<String>,
     path: &Path,
 ) -> io::Result<String> {
-    let spelled = LexicalPath::absolute(path).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not an absolute path", shown(path)),
-        )
-    })?;
-    read(&spelled)
+    read(&LexicalPath::absolute(path).ok_or_else(|| not_absolute(path))?)
+}
+
+fn not_absolute(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("{} is not an absolute path", shown(path)),
+    )
 }
 
 /// A worktree's `.git` is a file whose body is `gitdir: <path>`, relative to
@@ -153,7 +152,9 @@ fn read_pointer(
         .find_map(|l| l.strip_prefix("gitdir:"))
         .map(str::trim)
         .ok_or(Pointer::NoGitdirLine)?;
-    Ok(fold_dots(&against(parent_or_cwd(dot_git), pointer)))
+    let target = against(parent_or_cwd(dot_git), pointer)
+        .ok_or_else(|| Pointer::Unreadable(not_absolute(dot_git)))?;
+    Ok(fold_dots(&target))
 }
 
 /// Whether `gitdir` names `dot_git`'s working tree as its own, by whichever of
@@ -168,19 +169,21 @@ fn claims(
     read: &mut impl FnMut(&LexicalPath) -> io::Result<String>,
 ) -> bool {
     if let Ok(back) = read_at(read, &gitdir.join("gitdir")) {
-        return same_path(&against(gitdir, back.trim()), dot_git);
+        return against(gitdir, back.trim()).is_some_and(|named| same_path(&named, dot_git));
     }
-    core_worktree(&gitdir.join("config"), read)
-        .is_some_and(|tree| same_path(&against(gitdir, &tree), parent_or_cwd(dot_git)))
+    core_worktree(&gitdir.join("config"), read).is_some_and(|tree| {
+        against(gitdir, &tree).is_some_and(|named| same_path(&named, parent_or_cwd(dot_git)))
+    })
 }
 
 /// `path`, written relative to the directory `dir` (a git pointer or
-/// back-pointer), as the host reads a name there ([`anchor_on`]); still
-/// relative, so naming nothing, where `dir` is no directory a name joins
-/// under.
-fn against(dir: &Path, path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
-    anchor_on(CwdPath::new(dir.to_path_buf()).ok().as_ref(), &path).unwrap_or(path)
+/// back-pointer), as the host reads a name there ([`anchor_on`]); `None`
+/// where `path` is relative and `dir` is no directory a name joins under.
+fn against(dir: &Path, path: &str) -> Option<PathBuf> {
+    anchor_on(
+        CwdPath::new(dir.to_path_buf()).ok().as_ref(),
+        &PathBuf::from(path),
+    )
 }
 
 /// Two spellings of one place: both walked, and the positions their

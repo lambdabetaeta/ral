@@ -242,6 +242,13 @@ impl SandboxProjection {
     /// exec, filtered to the live files no exec or fs exclusion covers, and
     /// joined into the read region as places and into the exec table as file
     /// allows.  A caller launching nothing passes `None`.
+    #[cfg_attr(
+        windows,
+        allow(
+            unused_variables,
+            reason = "support is carried only where exec is enforced"
+        )
+    )]
     pub(crate) fn of(
         grants: &GrantStack,
         baseline: &Baseline,
@@ -257,26 +264,30 @@ impl SandboxProjection {
             .gpu()
             .filter(|_| crate::authority::sandbox::WITHHOLDS_GPU);
 
-        let kernel = rules(grants)
-            .filter(|_| !grants.exec_is_top())
-            .as_ref()
-            .map(ExecRules::for_kernel);
         // Attenuated exec is worth an OS sandbox exactly where a backend
         // carries the rules into the kernel, which is the backends' fact to
         // state and `authority::sandbox::EXEC_ENFORCED`'s to answer.  The in-process guard
         // runs on every platform regardless; the kernel layer is what sees the
         // re-execs it cannot (`sh -c`).
-        let exec_triggers_sandbox = crate::authority::sandbox::EXEC_ENFORCED && kernel.is_some();
+        let kernel = rules(grants)
+            .filter(|_| !grants.exec_is_top() && crate::authority::sandbox::EXEC_ENFORCED)
+            .as_ref()
+            .map(ExecRules::for_kernel);
+        let exec_triggers_sandbox = kernel.is_some();
 
         if regions.is_none() && net.is_none() && gpu.is_none() && !exec_triggers_sandbox {
             return None;
         }
 
+        #[cfg(unix)]
         let live = live_support(
             kernel.as_ref(),
             regions.as_ref().map(|(read, _)| read),
             admitted,
         );
+        // No kernel exec layer to carry support for.
+        #[cfg(windows)]
+        let live = BTreeSet::<RealPath>::new();
         let exec = kernel.map_or(ExecProjection::Unrestricted, |kernel| {
             ExecProjection::Restricted(kernel.with_support(&live))
         });
@@ -350,17 +361,6 @@ fn live_support(
         support.extend(super::carriers::linkers(excluded));
     }
     support
-}
-
-/// No kernel exec layer here ([`crate::authority::sandbox::EXEC_ENFORCED`]), so nothing
-/// to carry.
-#[cfg(windows)]
-fn live_support(
-    _: Option<&KernelRules>,
-    _: Option<&FsRules>,
-    _: Option<&Admitted>,
-) -> BTreeSet<RealPath> {
-    BTreeSet::new()
 }
 
 #[cfg(all(test, unix))]

@@ -24,9 +24,7 @@ use super::{
 #[cfg(any(target_os = "linux", windows))]
 use crate::authority::sandbox::InstallToken;
 use crate::path::lex::{is_absolute, names_a_dir};
-use crate::path::site::Silent;
 use crate::path::{LexicalPath, shown};
-use crate::site::site;
 
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
 pub(super) const MAX_HOPS: usize = 40;
@@ -743,13 +741,10 @@ pub fn exists(path: &str) -> bool {
 /// walk.  `None` where nothing is there, and for a relative one, which reaches
 /// nothing: no cwd is asked.
 pub fn kind_of(path: &str) -> Option<Kind> {
-    walk(&spelled(path)?, LeafMode::Follow).ok()?.trace().kind()
-}
-
-/// `path` as a spelling, where absolute: the one lift of a fixed string.  The
-/// walk then resolves it, so the lift opens nothing.
-pub(crate) fn spelled(path: &str) -> Option<LexicalPath> {
-    LexicalPath::absolute(site!(Silent::StrSpelling, Path::new(path)))
+    walk(&LexicalPath::absolute_str(path)?, LeafMode::Follow)
+        .ok()?
+        .trace()
+        .kind()
 }
 
 /// A grant spelling's transcript: as far as the disk goes, the rest lexical,

@@ -27,7 +27,7 @@ use ral_core::shell::runtime::{
 };
 use ral_core::ty::{Ty, Typed};
 use ral_core::typecheck::Form;
-use ral_core::{Shell, Value, io::terminal};
+use ral_core::{RegisterError, Shell, Value, io::terminal};
 use std::path::PathBuf;
 
 use super::errfmt::report_failed_load;
@@ -259,7 +259,7 @@ impl RcPlan {
     pub(crate) fn apply(self, mooring: &Mooring, shell: &mut Shell) -> Settled<RcSettings> {
         shell
             .set_hooks(self.hooks)
-            .map_err(|e| Error::new(e.to_string()))?;
+            .map_err(RegisterError::into_error)?;
         #[cfg(unix)]
         if let Some(mask) = self.umask {
             rustix::process::umask(mask);

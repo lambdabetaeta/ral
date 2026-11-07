@@ -55,7 +55,7 @@ impl Drop for ReapedChild {
     }
 }
 
-fn raw_child(launch: &mut Launch) -> io::Result<ReapedChild> {
+fn raw_child(launch: Launch) -> io::Result<ReapedChild> {
     match launch.spawn(
         PgidPolicy::Inherit,
         &crate::process::DurableRoot::default().child(),
@@ -161,7 +161,7 @@ fn overlap(fail_creation: bool) {
             // rather than letting ChildStdio's close mask a missing restoration.
             launch.admitted_handles.push(writer.as_raw_handle());
             test_phase::install(raw_reached_tx, raw_continue_rx);
-            let result = raw_child(&mut launch);
+            let result = raw_child(launch);
             let _ = raw_tx.send((result, writer));
         });
         raw_reached
@@ -229,9 +229,7 @@ fn overlap(fail_creation: bool) {
                 .stdin(StdioSpec::Null)
                 .stdout(StdioSpec::Null)
                 .stderr(StdioSpec::Null);
-            raw_child(&mut launch)
-                .expect("subsequent raw launch")
-                .finish();
+            raw_child(launch).expect("subsequent raw launch").finish();
         } else {
             let mut intended = raw_result.expect("raw spawn");
             intended.assert_alive();
@@ -293,7 +291,7 @@ fn inheritance_lock_does_not_span_standard_or_raw_child_waits() {
                 .stdin(StdioSpec::from_owned(stdin))
                 .stdout(StdioSpec::Null)
                 .stderr(StdioSpec::Null);
-            let _ = raw_tx.send(raw_child(&mut launch));
+            let _ = raw_tx.send(raw_child(launch));
         });
         let mut raw = raw_rx
             .recv_timeout(DEADLINE)

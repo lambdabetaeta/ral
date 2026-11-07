@@ -173,7 +173,7 @@ fn was_inherited_ignored(sig: libc::c_int) -> bool {
 /// the POSIX nohup rule — what the parent deliberately ignored has to outlive
 /// ral.  Everything else gets `SIG_DFL`, SIGPIPE unconditionally so that a
 /// pipeline producer dies when its reader closes (`yes | head`).
-pub fn reset_child_signals() {
+pub(crate) fn reset_child_signals() {
     for &sig in MANAGED_SIGNALS {
         let target = if was_inherited_ignored(sig) {
             libc::SIG_IGN

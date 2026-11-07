@@ -17,7 +17,6 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("ral's sandbox has backends for Linux, macOS and Windows only");
 
-use crate::error::Error;
 use crate::path::ObjectId;
 
 #[cfg(unix)]
@@ -100,13 +99,8 @@ pub(crate) use macos::RENDERS_EXEC as EXEC_ENFORCED;
 #[cfg(windows)]
 pub(crate) const EXEC_ENFORCED: bool = false;
 
-/// This host cannot establish the confinement or budget the active grant
-/// asks for: an axis no backend here enforces, an envelope binary that was
-/// not there to pin at boot, an envelope or trampoline that failed.  Nothing
-/// ran, so it is never phrased as the command's fault.
-pub(crate) fn unavailable(why: impl std::fmt::Display) -> Error {
-    Error::new(format!("sandbox confinement unavailable: {why}"))
-}
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) use crate::process::launch::unavailable;
 
 /// Boot-pinned objects the baseline protects against writes under every grant.
 pub(super) fn protected_images() -> Vec<(ObjectId, &'static str)> {

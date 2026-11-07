@@ -90,9 +90,9 @@ impl Report {
     /// that could not be sent), rendered as the same one-liner a run's own
     /// host-level static failure is, so a host never has to know which of the
     /// two it is printing.
-    pub(crate) fn refused(message: impl Into<String>) -> Self {
+    pub(crate) fn refused(message: String) -> Self {
         let (rendered, status) = spanless(
-            &Error::new(Into::<String>::into(message)),
+            &Error::new(message),
             &crate::shell::runtime::ExitHints::default(),
         );
         Self::Static { rendered, status }
@@ -103,9 +103,9 @@ impl Report {
     /// whole, so it is no refusal. Rendered as the same one-liner a refusal is.
     /// Only the wire engine, a unix process, has an outside to fault in.
     #[cfg(unix)]
-    pub(crate) fn faulted(message: impl Into<String>) -> Self {
+    pub(crate) fn faulted(message: String) -> Self {
         let (rendered, status) = spanless(
-            &Error::new(Into::<String>::into(message)),
+            &Error::new(message),
             &crate::shell::runtime::ExitHints::default(),
         );
         Self::Faulted { rendered, status }
@@ -287,7 +287,7 @@ mod static_diagnostic_seam_tests {
     #[cfg(unix)]
     #[test]
     fn a_fault_is_a_faulted_one_liner() {
-        let Report::Faulted { rendered, status } = Report::faulted("worker panicked") else {
+        let Report::Faulted { rendered, status } = Report::faulted("worker panicked".into()) else {
             panic!("a fault must be Report::Faulted");
         };
         assert_eq!(status.get(), 1);

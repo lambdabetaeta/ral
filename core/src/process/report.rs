@@ -6,8 +6,7 @@
 //! pipe: no same-uid process can reopen it through `/proc/<pid>/fd` to forge
 //! a record.
 
-use super::launch::Unstarted;
-use crate::authority::sandbox::unavailable;
+use super::launch::{Unstarted, unavailable};
 use crate::error::Error;
 use crate::process::Scope;
 use std::io::{self, Read, Write};

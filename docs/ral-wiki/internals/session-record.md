@@ -69,7 +69,7 @@ append lock; append checks the latch under its lock. Failed appends advance
 neither the commit count nor the byte cursor, and the owned `File` has no
 user-space buffer to flush on drop.
 
-The latch ends the life supplied by agent construction and bound through
+The latch ends the home supplied by agent construction and bound through
 `Emitter::bind`, from whichever thread latches it. Producers do not announce
 it. After owner drop, terminal finalization announces it once as
 `Transient::Fault` on the independent fleet sink and includes it in
@@ -642,7 +642,7 @@ rewrite runs at the exchange boundary. Context readiness and engine rebirth
 are checked before mutation; preparation failure preserves helpers, queue
 and engine. Then the owner dismisses and joins helpers and commits
 `Transcript::Cleared`. A failed commit ends life through the writer latch and
-retires the unused prepared engine. Success transfers the life binding to
+retires the unused prepared engine. Success transfers the home binding to
 the fresh engine, replaces and retires the outgoing engine once, advances
 batch generation and resets pins, timers and readings. `Txn::clear`
 withdraws queued reports, wakeups and surfaces and retires every booking in

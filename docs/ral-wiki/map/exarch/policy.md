@@ -26,7 +26,7 @@ builds that stack in a fixed order — **a single optional extension adds to
 the ceiling, once, in its own layer; every other attenuation is its own
 pushed layer**:
 
-- resolves the named base (`resolve_base`) as the ceiling;
+- resolves the named base (`resolve_base`, over the `Base` enum: its names, the unknown-base message and the spawnable subset all read off `Base::VARIANTS`) as the ceiling;
 - loads an optional `--extend` file as a `Fragment` and computes
   `base.extend(fragment)` as the ceiling (`◁`: an allowance never removes
   authority, an exclusion always wins, an axis the base leaves unrestricted
@@ -176,7 +176,7 @@ and it fails, naming the tool.
 The consequence for spawning: a base whose `exec` is prefixes alone is
 unusable as a child's `grant`, since the child cannot widen its own ceiling to
 recover `ls`. `minimal` is such a base, and is offered by `--base` only —
-`policy::SPAWN_BASES` withholds it from `` exarch-agents `start ``,
+`Base::spawnable` withholds it from `` exarch-agents `start ``,
 as it does `dangerous` ([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument

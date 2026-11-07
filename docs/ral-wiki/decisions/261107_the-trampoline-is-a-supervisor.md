@@ -3,7 +3,7 @@ status: active
 generated_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
 verified_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
 verified_at_date: 2026-11-07
-anchors: [Confined, supervise, tool_child, outlive_group_signals, die_with, Witness, Running, Testimony, serve_warrant]
+anchors: [Confined, supervise, start_file, start_tool, tool_child, begin, outlive_group_signals, die_with, Witness, Running, Testimony, serve_warrant]
 ---
 
 # The trampoline is a supervisor
@@ -47,7 +47,8 @@ cannot start is `not-found` or `not-runnable`, as an unconfined one is, never
   ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
 - **A launch's failures are blamed by position.** The trampoline's records are
   `refused`, `unstarted(errno)`, `started` and `ended`, mapping onto
-  `Unstarted::Refused` and `Unstarted::Program`
+  `Unstarted::Refused` and `Unstarted::Program`; the trampoline's own fork or
+  setup failing is `refused`, since `unstarted` is a file's `execve` alone
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
 
 ## Costs
@@ -67,8 +68,8 @@ cannot start is `not-found` or `not-runnable`, as an unconfined one is, never
 ## Where
 
 `core/src/authority/sandbox/warrant/trampoline.rs` (`serve_warrant`,
-`Confined::run`, `supervise`, `tool_child`, `outlive_group_signals`,
-`die_with`), `core/src/authority/sandbox/launch.rs` (`issue`),
+`Confined::run`, `start_file`, `start_tool`, `supervise`, `tool_child`,
+`begin`, `outlive_group_signals`, `die_with`), `core/src/authority/sandbox/launch.rs` (`issue`),
 `core/src/process/report.rs` (`Testimony`, `Witness`, `Running`, `Record`),
 `core/src/process/fork.rs` (`fork`, `reap`),
 `core/src/process/child.rs` (`ChildHandle::into_watch`). The narrative is

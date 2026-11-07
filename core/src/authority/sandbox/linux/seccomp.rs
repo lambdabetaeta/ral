@@ -522,7 +522,6 @@ impl When {
     }
 }
 
-#[cfg(seccomp)]
 impl Verdict {
     fn action(self) -> seccompiler::SeccompAction {
         match self {

@@ -91,7 +91,10 @@ fn with_fs(fs: FsPolicy) -> GrantLayer {
 
 /// A layer of exec rules already resolved.
 fn exec_layer(rules: ExecRules) -> GrantLayer {
-    GrantLayer::new(None, Some(rules), None, None, None, None)
+    GrantLayer {
+        exec: Some(rules),
+        ..GrantLayer::root()
+    }
 }
 
 /// A host file at `real`, which exists and is also its launch path.
@@ -1300,8 +1303,11 @@ fn a_root_reached_through_a_symlink_denotes_top() {
     std::fs::create_dir(root.join("work")).unwrap();
     let writes_top = |dir: &str| {
         let writing = FsLayer::new([], [allowing(&spelled(&root.join(dir)))], []);
-        test_helper::stack([GrantLayer::new(Some(writing), None, None, None, None, None)])
-            .fs_is_top()
+        test_helper::stack([GrantLayer {
+            fs: Some(writing),
+            ..GrantLayer::root()
+        }])
+        .fs_is_top()
     };
     assert!(writes_top("root-alias"));
     assert!(!writes_top("work"));

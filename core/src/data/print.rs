@@ -103,7 +103,11 @@ impl Printable for FOValue {
                 label,
                 payload: payload.as_deref(),
             },
-            Self::Ext(_) => unreachable!("a bare `FOValue` holds no extension"),
+            #[allow(
+                clippy::uninhabited_references,
+                reason = "no value of `NoExt` exists to be read"
+            )]
+            Self::Ext(x) => match *x {},
         }
     }
 }

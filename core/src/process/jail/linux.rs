@@ -546,7 +546,6 @@ mod tests {
                 panic!("a program that does not exist is not born");
             };
             assert_eq!(e.kind(), io::ErrorKind::NotFound);
-            drop(failed);
             round_trip();
             let mut abandoned = crate::process::Launch::new("/bin/true");
             abandoned.apply_guest_jail(&shared).unwrap();
@@ -580,7 +579,6 @@ mod tests {
                 panic!("a program that does not exist is not born");
             };
             assert_eq!(e.kind(), io::ErrorKind::NotFound);
-            drop(failed);
             assert!(
                 !kept.cgroup.exists(),
                 "failed kept spawn must remove its leaf"

@@ -915,10 +915,7 @@ impl Machine {
             }
             Resolution::External(head) => {
                 let offer = |e| offer_path_as_text(e, &exec.head, &argv);
-                let mut head = head.admit(mooring, shell).map_err(|b| match b {
-                    Break::Error(refused) => offer(refused).into(),
-                    stop @ Break::Escape(_) => stop,
-                })?;
+                let mut head = head.admit(mooring, shell).map_err(|b| b.map_error(offer))?;
                 head.program = head
                     .program
                     .map_err(|e| if names_no_program(&e) { offer(e) } else { e });

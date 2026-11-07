@@ -13,7 +13,8 @@ case is a claim about blame that the run's error then repeats to the user.
   that fails to exec, a payload process group that cannot be named, the
   trampoline's `refused`, an envelope that died before reporting, and a step of
   ral's own that failed before the `execve` (placement, signal reset, limits,
-  the guest jail, stdio, `detach`'s fork), confined or not (`unprepared`:
+  the guest jail, stdio, `detach`'s fork, and on Linux the trampoline's own
+  fork or `die_with` before the program begins), confined or not (`unprepared`:
   "ral could not prepare the command's process"). Only an `Exec` failure
   depends on confinement.
 - **On Windows only `CreateProcessW`'s own error is `Program`**; a `.bat` or

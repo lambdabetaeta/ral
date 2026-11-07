@@ -10,7 +10,7 @@
 //! as the loader they went through.
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
-use exarch::policy::{Invocation, for_invocation};
+use exarch::policy::{Base, Invocation, for_invocation};
 use ral_core::authority::grant::freeze::Place;
 use ral_core::authority::policy::GrantStack;
 use ral_core::error::Error;
@@ -19,19 +19,9 @@ use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
 use ral_core::shell::runtime::{Break, Settled, Shell};
 use ral_core::test_access::check_file;
 use std::path::{Path, PathBuf};
+use strum::VariantArray;
 
 exarch::pre_main_ctor!();
-
-/// The six bake-ins, in the order the unknown-base message names them: the
-/// list and `resolve_base`'s match arms are pinned to each other below.
-const BASES: [&str; 6] = [
-    "dangerous",
-    "reasonable",
-    "edit-only",
-    "read-only",
-    "minimal",
-    "confined",
-];
 
 /// Where `app` keeps `name` under its state directory: its credentials, which
 /// no attenuated base may read.
@@ -266,7 +256,9 @@ fn no_attenuated_base_can_read_a_credential_file() {
         state_file(EXARCH, "oauth.json"),
     ];
 
-    for base in BASES.into_iter().filter(|b| *b != "dangerous") {
+    for base in Base::VARIANTS.iter().filter(|b| **b != Base::Dangerous) {
+        let base = base.to_string();
+        let base = base.as_str();
         let Invocation { stack, .. } = compose(&dir, base, None, &[]).expect("base composes");
         assert!(!stack.fs_is_top(), "{base} attenuates the filesystem");
         let mut shell = ral_core::test_helper::core_shell();
@@ -478,8 +470,7 @@ fn the_credential_layer_follows_an_fs_restriction() {
 }
 
 /// A misspelt base names every live one back, and each name it offers really
-/// resolves — the message and the match arms pinned to each other in both
-/// directions, so a seventh bake-in cannot arrive unadvertised.
+/// resolves.
 #[test]
 fn an_unknown_base_names_every_base_that_exists() {
     let dir = Scratch::for_test(EXARCH, "unknown-base").expect("scratch dir");
@@ -490,10 +481,15 @@ fn an_unknown_base_names_every_base_that_exists() {
             .to_string(),
         format!(
             "unknown base 'resonable'; expected one of: {}",
-            BASES.join(", ")
+            Base::VARIANTS
+                .iter()
+                .map(Base::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     );
-    for name in BASES {
+    for name in Base::VARIANTS.iter().map(Base::to_string) {
+        let name = name.as_str();
         assert!(
             compose(&dir, name, None, &[]).is_ok(),
             "'{name}' is advertised but does not resolve"

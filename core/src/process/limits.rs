@@ -8,7 +8,7 @@ mod fork_brake;
 
 use super::Launch;
 #[cfg(any(windows, target_os = "macos"))]
-use crate::authority::sandbox::unavailable;
+use super::launch::unavailable;
 use crate::error::Error;
 #[cfg(unix)]
 use rustix::process::Resource;

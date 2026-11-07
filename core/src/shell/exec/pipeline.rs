@@ -76,7 +76,8 @@ impl PipeNode {
 
         // Only the loan is placement's, prepared before even the anchor runs:
         // the anchor leads its own group, and a joined group is lent nothing.
-        let (_, lending) = super::command::placement(shell, mooring, false);
+        let super::command::Placement { loan: lending, .. } =
+            super::command::placement(shell, mooring, false);
         let group = match shell.session.stage.clone() {
             Some(membership) => PipelineGroup::joining(membership),
             None => PipelineGroup::prepare(tx.clone())?,
@@ -141,9 +142,11 @@ pub(crate) fn join_lone(
 ) -> Settled<()> {
     // Declared first, so an unwind kills before it releases.
     #[cfg(windows)]
-    let job = match born.spawned.landing {
-        crate::process::Landing::Owns(leader) => Some(group::Job::owning(leader)),
-        crate::process::Landing::Joins | crate::process::Landing::Shares => None,
+    let job = match born.spawned.group {
+        crate::process::Group::Owns(leader) => Some(group::Job::owning(leader)),
+        crate::process::Group::Enveloped(_)
+        | crate::process::Group::Joins(_)
+        | crate::process::Group::Shares => None,
     };
     let mut collect = CollectState::lone(born, pumps, loan, name, started, shell);
     collect.drive();
@@ -312,7 +315,7 @@ mod tests {
         cmd.args(["-c", &trapper.script()]);
         let (child, _) = crate::process::spawn_with_pgid(
             &mut cmd,
-            crate::process::PgidPolicy::Join(group.leader_pgid()),
+            crate::process::PgidPolicy::Join(group.membership(&frame)),
         )
         .expect("spawn the trapper into the group");
         let mut collect = CollectState::new(

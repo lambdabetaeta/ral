@@ -5,7 +5,7 @@ use crate::path::EnginePath;
 use crate::process::cancel::REQUEST_SERIAL;
 use crate::process::{CancelCause, DurableRoot};
 use crate::protocol::channel::Liveness;
-use crate::protocol::{Ending, Ran};
+use crate::protocol::{Control, Ending, Ran};
 use crate::source::SourceOrigin;
 use crate::test_helper::eventually;
 

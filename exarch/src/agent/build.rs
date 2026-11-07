@@ -64,14 +64,14 @@ const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindin
 /// Whom a new agent answers. Every other difference is in [`Parent::terms`].
 pub(crate) enum Parent<'a> {
     Human,
-    /// The parent and the life the child's is cut from.
+    /// The parent and the home the child's is cut from.
     Agent(&'a AgentHandle, ScopeNode),
 }
 
 /// What a parent lends its child.
 pub(crate) struct Terms {
     pub(crate) parent: Option<AgentHandle>,
-    life: ScopeNode,
+    home: ScopeNode,
     pub(crate) fuel: u32,
     search: bool,
     admission: Admission,
@@ -82,15 +82,15 @@ impl Parent<'_> {
         match self {
             Self::Human => Terms {
                 parent: None,
-                life: registry.root.child(),
+                home: registry.root.child(),
                 fuel: launch.fuel,
                 search: launch.search,
                 admission: launch.admission,
                 returns: launch.returns,
             },
-            Self::Agent(parent, life) => Terms {
+            Self::Agent(parent, home) => Terms {
                 parent: Some(parent.clone()),
-                life,
+                home,
                 fuel: parent.0.fuel.saturating_sub(1),
                 search: parent.0.search,
                 admission: Admission::Parent { idle: launch.idle },
@@ -253,17 +253,17 @@ impl Agent {
     ) -> Self {
         let Terms {
             parent,
-            life,
+            home,
             fuel,
             search,
             admission,
             ..
         } = terms;
-        log.record_emitter().bind(life.clone());
-        engine.transport().bind(life.clone());
+        log.record_emitter().bind(home.clone());
+        engine.transport().bind(home.clone());
         let mailbox = AgentMailbox::new(
             log.id(),
-            life,
+            home,
             log.record_emitter(),
             admission,
             parent.as_ref().map(|parent| parent.0.address.clone()),
@@ -667,7 +667,7 @@ impl TestLaunch {
 impl Drop for Agent {
     fn drop(&mut self) {
         self.body.schedules.clear();
-        // An unwind leaves the fields to end the life and join helpers (A3).
+        // An unwind leaves the fields to end the home and join helpers (A3).
         if !std::thread::panicking() {
             let _unclaimed = self.teardown();
             self.recorder()

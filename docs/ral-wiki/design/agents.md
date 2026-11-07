@@ -68,7 +68,7 @@ human has no model, log or engine.
 
 - `Agent::born` is every fresh birth; `AgentLog::create` opens its log.
   `Parent::terms` is the one construction case split. The human lends the
-  launch's fuel, search, admission and `returns`, with life under the fleet
+  launch's fuel, search, admission and `returns`, with home under the fleet
   root. An agent lends its search and one less fuel, a life under its own,
   `Parent` admission and `returns: true`.
 - The handle holds fixed `parent: Option<AgentHandle>` (`None`: the human).
@@ -189,7 +189,7 @@ snapshots.** Both are born through the same constructor.
   before `Died`. `Gone` follows death. Retained addresses retain no engine.
 - `/clear` preflights context and prepares an eligible identity-root engine
   before mutation. Failure changes nothing. Then it joins helpers, commits
-  `Cleared`, transfers the life binding, replaces and retires the outgoing
+  `Cleared`, transfers the home binding, replaces and retires the outgoing
   engine, resets working memory, retires bookings and withdraws queued
   reports, wakeups and surfaces. Outgoing batches fail the generation check. It keeps every
   queued human input, message and command. A failed commit ends life and

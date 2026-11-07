@@ -64,7 +64,7 @@ authority.
   are cell plumbing. `Status` reads report, debt, job and selected model from
   folds beside live loop observations.
 - `AgentMailbox::next` selects admissible input and mints an exchange
-  `Lease` under life. Commands run without an exchange. `Agent::admit`
+  `Lease` under home. Commands run without an exchange. `Agent::admit`
   rejects stale generations and already-claimed completions before
   `begin` commits `JobOpened`; that commit number names the job.
 - With a job open, queued input is taken in order; human fragments
@@ -151,7 +151,7 @@ authority.
   `Rebirth`, or wire transport with `EngineSpec`. `read` makes rejected probes
   terminal; `end` certifies teardown. Wire end requires `Detach → Ended`.
 - `Engine::install` stamps deferred batches with generation. `inherit`
-  transfers the outgoing transport's life binding to its replacement before
+  transfers the outgoing transport's home binding to its replacement before
   retiring it. Loose ral workers belong to the engine and survive Stop/reply.
 - `App::{own, project, new_run}` persist layout entries in their held parents;
   `Fleet::found` syncs the run after making `sessions/`, and `AgentLog::open_fresh`
@@ -160,10 +160,10 @@ authority.
 - `agent/build.rs::Agent::born` mints the id, computes `Parent::terms`,
   resolves the prompt and opens `AgentLog::create` with `Opening`. Born and
   reopen share private `hatch` and `assemble`, binding writer failure and
-  transport severance to life, then the address to its reserved name.
+  transport severance to home, then the address to its reserved name.
   `Parent::terms` is the one construction case split: human children take
-  launch fuel, search, admission and `returns`, with life under the fleet
-  root; helpers take their parent's search and one less fuel, nested life,
+  launch fuel, search, admission and `returns`, with home under the fleet
+  root; helpers take their parent's search and one less fuel, nested home,
   `Parent` admission and `returns: true`.
   `LaunchConfig` supplies launch policy. `RootEngine::{Identity, Wire}`
   selects engine construction; `RootEngine::guest` adopts guest control
@@ -216,7 +216,7 @@ authority.
   own helper, keeping teardown failures.
 - `Agent::clear` preflights context and prepares a fresh engine without
   mutation, then dismisses helpers and commits `Cleared`. Commit failure
-  retires the prepared engine and ends life. Success transfers the life
+  retires the prepared engine and ends life. Success transfers the home
   binding, replaces/retires the outgoing engine, advances generation, resets
   registers, commits queued-report/wakeup/surface withdrawals and schedule
   retirements through `Txn::clear`, then drops timers and joined `Gone`s.

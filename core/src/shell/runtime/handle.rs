@@ -282,7 +282,7 @@ impl HandleInner {
             HandleState::Running => (Some(completed), None),
             HandleState::Stopping => (None, Some(completed)),
             HandleState::Ended { .. } => {
-                unreachable!("terminal state checked under the same lock")
+                unreachable!("only the sole permit publishes")
             }
         };
         *state = HandleState::Ended { ended, result };

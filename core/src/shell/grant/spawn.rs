@@ -1,7 +1,7 @@
 //! How a spawn's grant reaches a child that has not yet resolved it.
 //!
 //! A restriction record crosses unfrozen: a `cwd` place in a grant names the
-//! cwd of the shell that grant governs — the child's, never the spawn site's —
+//! cwd of the shell that grant governs, the child's and never the spawn site's,
 //! so the freeze belongs where the child's cwd is.  Hence a record here and
 //! not a [`GrantLayer`], whose spellings are resolved by construction.
 
@@ -32,7 +32,7 @@ pub type GrantNarrower = fn(&str, &FreezeCtx) -> Result<GrantLayer, Error>;
 pub enum SpawnGrant {
     /// The parent's authority verbatim: ⊤, a layer that says nothing.
     Inherit,
-    /// A bake-in base, named — core has no lexicon for it, so the host's
+    /// A bake-in base, by name; core has no lexicon for it, so the host's
     /// narrower resolves it.
     Base(String),
     /// A restriction record, unfrozen: frozen against the child's own cwd,
@@ -177,14 +177,10 @@ mod tests {
     }
 
     fn offline() -> GrantLayer {
-        GrantLayer::new(
-            None,
-            None,
-            Some(crate::authority::policy::Net::Offline),
-            None,
-            None,
-            None,
-        )
+        GrantLayer {
+            net: Some(crate::authority::policy::Net::Offline),
+            ..GrantLayer::root()
+        }
     }
 
     /// Only the name `tight` resolves, so the result is the narrower's own.

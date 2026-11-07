@@ -15,9 +15,14 @@ use crate::io::{Sink, Source};
 use crate::ir::{StdinSource, WriteMode};
 use crate::path::Kind;
 use crate::path::{Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing};
-use crate::shell::runtime::{Break, Error, Mooring, Observed, Settled, Shell};
+use crate::shell::runtime::{Error, Mooring, Observed, Settled, Shell};
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _};
+
+/// `name`'s I/O failure as an error.
+fn failed(name: &str) -> impl Fn(io::Error) -> Error + '_ {
+    move |e| Error::new(io_message(name, &e))
+}
 
 /// Cap on the bytes a preview reads, so a large file is never pulled into
 /// memory whole to show a change.
@@ -103,10 +108,13 @@ pub(crate) fn open_write(
     heard: bool,
     shell: &mut Shell,
 ) -> Settled<(File, Option<OpenedWrite>, Option<Vec<u8>>)> {
-    let io = |e: io::Error| Break::from(Error::new(io_message(path, &e)));
     let rp = shell.resolve(path);
     if rp.is_discard() {
-        return Ok((crate::path::open_discard().map_err(io)?, None, None));
+        return Ok((
+            crate::path::open_discard().map_err(failed(path))?,
+            None,
+            None,
+        ));
     }
     let target = shell.locate::<Writing>(&rp)?;
     let streaming = match mode {
@@ -119,18 +127,18 @@ pub(crate) fn open_write(
             .then_some(Streaming::Truncate),
     };
     let (file, mut opened) = if let Some(access) = streaming {
-        let mut streamed = target.open_streaming(access).map_err(io)?;
-        let file = streamed.file().try_clone().map_err(io)?;
+        let mut streamed = target.open_streaming(access).map_err(failed(path))?;
+        let file = streamed.file().try_clone().map_err(failed(path))?;
         (file, OpenedWrite::Stream(streamed))
     } else {
-        let mut staged = target.stage(Visibility::Public).map_err(io)?;
+        let mut staged = target.stage(Visibility::Public).map_err(failed(path))?;
         // The writer's handle shares the staging handle's offset.
-        let file = staged.file().try_clone().map_err(io)?;
+        let file = staged.file().try_clone().map_err(failed(path))?;
         (file, OpenedWrite::Atomic(staged))
     };
     let before = heard.then(|| opened.before(shell)).flatten();
     if let (OpenedWrite::Stream(streamed), Some(Streaming::Truncate)) = (&opened, streaming) {
-        streamed.truncate().map_err(io)?;
+        streamed.truncate().map_err(failed(path))?;
     }
     Ok((file, Some(opened), before))
 }
@@ -143,7 +151,7 @@ fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
     } else {
         shell.locate::<Reading>(&rp)?.read()
     };
-    Ok(opened.map_err(|e| Error::new(io_message(path, &e)))?)
+    Ok(opened.map_err(failed(path))?)
 }
 
 impl Shell {
@@ -160,13 +168,10 @@ impl Shell {
     pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> Settled<()> {
         use std::io::Write as _;
         let (mut file, opened, _) = open_write(path, WriteMode::Write, false, self)?;
-        file.write_all(bytes)
-            .map_err(|e| Error::new(io_message(path, &e)))?;
+        file.write_all(bytes).map_err(failed(path))?;
         drop(file);
         if let Some(OpenedWrite::Atomic(staged)) = opened {
-            staged
-                .publish()
-                .map_err(|e| Error::new(io_message(path, &e)))?;
+            staged.publish().map_err(failed(path))?;
         }
         Ok(())
     }
@@ -204,8 +209,8 @@ pub(crate) fn install_stdin_redirect(
                 .strip_prefix("\r\n")
                 .or_else(|| word.strip_prefix('\n'))
                 .unwrap_or(word);
-            let (reader, mut writer) = crate::process::cloexec_pipe()
-                .map_err(|e| Error::new(io_message("here-string", &e)))?;
+            let (reader, mut writer) =
+                crate::process::cloexec_pipe().map_err(failed("here-string"))?;
             let bytes = body.as_bytes().to_vec();
             std::thread::Builder::new()
                 .name("ral-here-string".into())
@@ -214,7 +219,7 @@ pub(crate) fn install_stdin_redirect(
                     // A broken pipe is the consumer stopping early, not a fault.
                     let _ = writer.write_all(&bytes);
                 })
-                .map_err(|e| Error::new(io_message("here-string", &e)))?;
+                .map_err(failed("here-string"))?;
             Source::Reader(crate::io::SourceReader::pipe(reader))
         }
     };

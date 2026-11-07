@@ -73,7 +73,7 @@ impl DeskAct {
 /// Plain values fixed for one shell call.
 pub(crate) struct Call {
     pub(crate) handle: AgentHandle,
-    pub(crate) life: Scope,
+    pub(crate) home: Scope,
     pub(crate) fleet: Arc<Fleet>,
     pub(crate) kind: EngineKind,
     pub(crate) emit: Emitter,

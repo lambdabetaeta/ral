@@ -786,10 +786,10 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
 #[test]
 fn a_job_settles_when_an_ended_helper_has_no_debt() {
     let mut parent = trunk(false);
-    let life = DurableRoot::default().child();
+    let home = DurableRoot::default().child();
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), life.clone()),
+        TestAgentSpec::child("helper", &parent.handle(), home.clone()),
     )
     .unwrap();
     take_task(&helper, &helper.mailbox);
@@ -806,7 +806,7 @@ fn a_job_settles_when_an_ended_helper_has_no_debt() {
     assert!(parent.mailbox.begin());
     handle.report(ChildStatus::Replied(FOValue::Unit)).unwrap();
     let _report = next_child(&parent);
-    life.cancel(CancelCause::Cancelled);
+    home.cancel(CancelCause::Cancelled);
     assert!(!parent.rest().pending);
     let parent_handle = parent.handle();
     let _timeout = ral_core::process::arm_callback(Duration::from_secs(10), move || {
@@ -1050,11 +1050,11 @@ fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
     assert!(handle.status().unwrap().job.is_none());
     assert!(handle.status().unwrap().owes);
     let pending = handle.0.address.queued_posts();
-    let life = root.mailbox.home();
+    let home = root.mailbox.home();
     handle
         .0
         .address
-        .after_report_commit(move || assert!(life.is_cancelled()));
+        .after_report_commit(move || assert!(home.is_cancelled()));
     assert_eq!(root.teardown().failures, [] as [String; 0]);
     assert_eq!(
         handle.status().unwrap().report,

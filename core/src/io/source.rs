@@ -25,7 +25,7 @@ pub enum Source {
 /// A pipe or file, and for a stage thread's stdin the scope whose cause ends
 /// a blocked read as EOF.  The scope is never handed to a child.
 pub struct SourceReader {
-    fd: File,
+    file: File,
     scope: Option<Scope>,
 }
 
@@ -49,8 +49,8 @@ impl SourceReader {
         Self::file(File::from(Owned::from(r)))
     }
 
-    pub(crate) fn file(fd: File) -> Self {
-        Self { fd, scope: None }
+    pub(crate) fn file(file: File) -> Self {
+        Self { file, scope: None }
     }
 
     /// This reader as one that ends as EOF once `scope` carries a cause; a
@@ -58,8 +58,8 @@ impl SourceReader {
     /// replaced.
     pub(crate) fn interruptible(self, scope: Scope) -> Self {
         Self {
-            fd: self.fd,
             scope: Some(scope),
+            ..self
         }
     }
 
@@ -67,47 +67,27 @@ impl SourceReader {
     /// Returns `Err` if duplicating the pipe or file fails.
     pub(crate) fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
-            fd: self.fd.try_clone()?,
+            file: self.file.try_clone()?,
             scope: self.scope.clone(),
         })
     }
 }
 
-/// The fd read under its scope.
-struct Scoped<'a> {
-    fd: &'a mut File,
-    scope: &'a Scope,
-}
-
-impl Read for Scoped<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        read_interruptible(self.fd, self.scope, buf)
-    }
-}
-
-impl SourceReader {
-    fn with<T>(&mut self, f: impl FnOnce(&mut dyn Read) -> T) -> T {
-        match &self.scope {
-            Some(scope) => f(&mut Scoped {
-                fd: &mut self.fd,
-                scope,
-            }),
-            None => f(&mut self.fd),
-        }
-    }
-}
-
 impl Read for SourceReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.with(|r| r.read(buf))
+        match &self.scope {
+            Some(scope) => read_interruptible(&mut self.file, scope, buf),
+            None => self.file.read(buf),
+        }
     }
 
+    /// An unscoped file keeps `File`'s exact-capacity read; a scoped one
+    /// takes the default loop over [`Self::read`].
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.with(|r| r.read_to_end(buf))
-    }
-
-    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        self.with(|r| r.read_to_string(buf))
+        match self.scope {
+            None => self.file.read_to_end(buf),
+            Some(_) => self.by_ref().take(u64::MAX).read_to_end(buf),
+        }
     }
 }
 
@@ -149,7 +129,7 @@ fn try_read(fd: &mut File, buf: &mut [u8]) -> io::Result<Option<usize>> {
 
 impl From<SourceReader> for crate::process::StdioSpec {
     fn from(r: SourceReader) -> Self {
-        Self::from_owned(r.fd)
+        Self::from_owned(r.file)
     }
 }
 
@@ -229,6 +209,21 @@ mod tests {
             .read_to_end(&mut buf)
             .expect("read_to_end");
         assert_eq!((buf.len(), buf.capacity()), (100_000, 100_000));
+    }
+
+    #[test]
+    fn a_scoped_read_to_end_stops_at_the_cause_with_what_arrived() {
+        let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
+        let scope = DurableRoot::default().child();
+        let mut reader = SourceReader::pipe(r).interruptible(Scope::clone(&scope));
+        let canceller = cancel_after(&scope, 20);
+
+        use std::io::Write;
+        w.write_all(b"hi").expect("write");
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).expect("read_to_end");
+        assert_eq!(buf, b"hi");
+        canceller.join().expect("cancel thread");
     }
 
     #[test]

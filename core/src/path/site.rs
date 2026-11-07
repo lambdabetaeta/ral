@@ -90,9 +90,8 @@ pub(in crate::path) enum Silent {
     /// directory or a pointer file.  It is ral's own repository discovery, not
     /// a name the model gave, so it raises no card.
     GitDotGit,
-    /// `PATHEXT`, the Windows resolver's suffix list, which is no XDG base: a
-    /// PATH-probe environment read.
-    /// It reads a variable and opens no object, so it raises no card.
+    /// `PATHEXT`, the Windows resolver's suffix list: a PATH-probe environment
+    /// read.  It reads a variable and opens no object, so it raises no card.
     #[cfg(windows)]
     Pathext,
     /// A surface already in normal form, lifted as a `Path`: lexical, with no
@@ -152,9 +151,6 @@ pub(in crate::path) enum Silent {
     /// Whether a position has a parent is whether it is a root: a lexical read
     /// of a position the walk already reached.
     RealRoot,
-    /// The string a caller holds, taken as a spelling to walk.  The walk then
-    /// resolves it, so the lift opens nothing.
-    StrSpelling,
     /// A glob's literal components, where its walk starts: a lexical read of
     /// the pattern.
     GlobComponents,

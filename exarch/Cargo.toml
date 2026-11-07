@@ -40,6 +40,7 @@ serde_json = { workspace = true }
 # `record::log` reads a line at whatever depth it was written.
 serde_stacker = { workspace = true }
 clap       = { workspace = true }
+strum      = { version = "0.28", features = ["derive"] }
 shlex      = { workspace = true }
 ratatui      = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm    = { version = "0.29", features = ["bracketed-paste"] }

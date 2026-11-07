@@ -78,14 +78,23 @@ impl Keyed for Excluded {
 /// grant's.
 ///
 /// # Errors
-/// A found file whose walk fails, named.
+/// A found file that no grant can hold (not UTF-8) or whose walk fails, named.
 pub(crate) fn name_rules<W: Keyed>(
     name: &str,
     path: Option<&str>,
     unix_available: bool,
 ) -> Result<Vec<Rule>, Error> {
     let found = path::locate(name, path, None)
-        .and_then(|hit| FrozenPath::freeze(&hit).ok())
+        .map(|hit| {
+            FrozenPath::freeze(&hit).map_err(|why| {
+                Error::new(why).with_context(format!(
+                    "{} is found at '{}' on the PATH",
+                    crate::text::code(&format!("`name {name}")),
+                    path::shown(&hit),
+                ))
+            })
+        })
+        .transpose()?
         .map(GrantPath::<W>::walked)
         .transpose()?;
     W::name(name, crate::uutils::bundled(name, unix_available), found)

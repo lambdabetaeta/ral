@@ -173,7 +173,7 @@ pub(crate) fn evaluate_no_authority(
     let mooring = Mooring::adrift();
     let nothing = shell
         .decode_grant(GrantValue::deny_all().as_ref(), "deny_all")
-        .expect("deny_all names no place, so it resolves on every host");
+        .map_err(|e| e.with_context(format!("{label} {origin}")).plain())?;
     shell
         .with_layer(nothing, |sh| {
             ral_core::shell::load::evaluate_source(&mooring, sh, source, origin, None)

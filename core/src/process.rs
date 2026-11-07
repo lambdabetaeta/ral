@@ -45,8 +45,8 @@ pub(crate) use cancel::{DEFAULT_CLEANUP_GRACE, POLL_SLICE, TEARDOWN_GRACE, wait_
 
 pub use child::ChildHandle;
 pub(crate) use foreground::PreparedTerminalLoan;
-pub(crate) use group::{Group, Landing, Membership};
-pub use group::{Pgid, PgidPolicy};
+pub use group::Pgid;
+pub(crate) use group::{Group, Membership, PgidPolicy};
 #[cfg(unix)]
 pub use limits::ChildLimit;
 pub use limits::ChildLimits;
@@ -64,7 +64,9 @@ pub(crate) use fork::{Forked, fork, reap};
 #[cfg(unix)]
 pub(crate) use group::{SpawnError, spawn_with_pgid};
 #[cfg(unix)]
-pub use signal::{Disposition, install, install_handlers, reset_child_signals};
+pub(crate) use signal::reset_child_signals;
+#[cfg(unix)]
+pub use signal::{Disposition, install, install_handlers};
 
 #[cfg(unix)]
 pub use slot::clobber_slot;
@@ -76,4 +78,4 @@ pub(crate) use group::release_win_group;
 #[cfg(windows)]
 pub use group::{ReapStatus, break_pipeline_group, try_reap_leader};
 #[cfg(windows)]
-pub use signal::{install_handlers, install_interrupt_handler, reset_child_signals};
+pub use signal::{install_handlers, install_interrupt_handler};

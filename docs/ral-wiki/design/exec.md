@@ -181,8 +181,9 @@ the child's source is then wired as it stands.
 - A startup terminal survives only where the child's group can read it: ral's
   own group, or one lent the terminal.
 - A group of its own that is not lent the terminal reads EOF.
-- An interactive enveloped child keeps the terminal as stdin, because
-  readability follows the `Inherit` that `placement` asked for.
+- An interactive enveloped child keeps the terminal as stdin: `placement`
+  decides `readable` with the policy, and an envelope's session has no
+  controlling terminal to stop a read.
 
 | stdout / stderr | arises from | the child sees |
 |---|---|---|
@@ -239,11 +240,17 @@ stopped with `SIGTTIN`.
   |---|---|---|
   | `Join` | inside a pipeline stage | the stage's group, never lent the terminal |
   | `NewLeader` | the run holds the lease, stdout is the terminal or the run is an explicit loan, and no envelope | the terminal is lent to the child's group with `tcsetpgrp`, and taken back at its death |
+  | `NewLeader` | an envelope stands between ral and the program | the envelope's own group, never lent the terminal |
   | `Inherit` | an interactive run otherwise | ral's own group |
   | `NewSession` | a non-interactive run otherwise | own session and group, so a teardown reaches the whole tree |
 
   A pipeline's group is led by its anchor, which takes the `NewLeader` row's
   loan for the whole group.
+
+  A lone child is lent the terminal only after it exists; a `tcsetpgrp` that
+  fails then kills it, since outside the foreground its first tty read would
+  stop it for ever, and the run reports that the terminal could not be handed
+  over.
 
 - **ral has no job control.** The reaper answers every stop with `SIGCONT`, so
   Ctrl-Z suspends nothing and no stopped job ever exists
@@ -443,7 +450,8 @@ resolution of a path that the judgment also reads.
 - **A start is the program's failure only if the program's `execve` failed.**
   Under confinement the `execve` happens in the trampoline, which reports it as
   `unstarted(errno)`; a launcher or envelope that fails to exec, a payload
-  process group that cannot be named, the trampoline's `refused`, an envelope
+  process group that cannot be named, the trampoline's `refused` (its own fork
+  or setup failing included), an envelope
   that died before reporting, and a step of ral's own before the `execve` are
   `raised` refusals, never a failure of the program
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]],

@@ -220,6 +220,13 @@ pub enum RegisterError {
     NoSession,
 }
 
+impl RegisterError {
+    /// The one wording of a refused registration as a shell error.
+    pub fn into_error(self) -> crate::error::Error {
+        crate::error::Error::new(self.to_string())
+    }
+}
+
 impl fmt::Display for RegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

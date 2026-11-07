@@ -4,7 +4,8 @@
 //! `render_dev`'s nodes are: kernel-owned trees no unprivileged process
 //! renames into.
 
-use super::{DenyMask, Options};
+use super::Options;
+use super::shown::DenyMask;
 use crate::path::{LexicalPath, RealPath, basename, utf8};
 use crate::site::{Silent, site};
 

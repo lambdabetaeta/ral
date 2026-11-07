@@ -96,7 +96,7 @@ a deny lies, so the enforcers cannot place one differently
 
 **On Linux the two kernel consumers of a deny read one plan.** Each fs deny is
 read from the disk once, at planning (`Shown::of`, `Deny::read`,
-`authority/sandbox/linux.rs`), into the mask its kind needs and the position it
+`authority/sandbox/linux/shown.rs`), into the mask its kind needs and the position it
 led to. bwrap renders those planned masks (`bwrap_argv` reads nothing for them)
 and Landlock keeps its exec ruleset out of the planned scratch masks. Two reads
 could disagree: a deny that changed kind between them would get a tmpfs the

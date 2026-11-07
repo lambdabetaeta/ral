@@ -18,6 +18,14 @@ record is believed.
   longer; that is safe because the trampoline is the only writer, so nothing
   can interleave with it, and the reader reads exactly the length the record
   states. A cut or unknown record is an error, never an end.
+- **`unstarted` is the program's own `execve` and nothing else.** On Linux
+  the trampoline's child says whether it began (`die_with` for a file, signal
+  defaults, mask and `die_with` for a bundled tool) on a close-on-exec pipe
+  before `execve` or the tool's entry; the supervisor says `started` only
+  after that word. A failed `fork` or spawn, or a child that cannot begin, is
+  `refused`, and a file's spawn error is `unstarted` only when its child said
+  it began. So a failure of ral's own never reads as `not-runnable`, nor as
+  the program having `exited 126`.
 - **The trampoline's end is typed by what it may still say.** `Witness` can say
   `refused` or `unstarted`; `started` consumes it and yields `Running`, whose
   `ended` is the only way to write `ended` (Linux), so a record out of order

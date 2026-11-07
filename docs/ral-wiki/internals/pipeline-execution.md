@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
 verified_at_date: 2026-11-06
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, join_lone, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Landing, Job, Job::drain, JailCgroup::kill]
+anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, Placement, member_policy, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, join_lone, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -157,7 +157,7 @@ waits for it before exposing the group. A key on the lent terminal therefore
 cannot race the anchor's handler installation.
 `PipeNode::run` lends the terminal as soon as the group exists, before
 any edge is opened and so before any stage runs — `placement`, the rule a lone
-command is placed by, prepares the loan (`TerminalLoan::prepare` borrows the
+command is placed by (a `Placement { policy, loan, readable }`), prepares the loan (`TerminalLoan::prepare` borrows the
 `&TerminalLease` and captures the terminal's state before the anchor spawns),
 `PreparedTerminalLoan::lend` hands the foreground to the anchor's pgid, and
 only an owning group is lent anything.
@@ -246,19 +246,19 @@ grant) and runs the same `drive` as any pipeline; `CollectState::settle_lone`
 then settles it as a command ends. No other wait on an external exists: the
 reaper's `Watch` posts its exit as `Event::Ended` and one `cancel_all` tears it
 down, whether the child is a stage, a stage's own child, or a bare command.
-**Where the child landed (`Landing`, from the `PgidPolicy` it was spawned under)
+**Where the child landed (`Group`, from the `PgidPolicy` it was spawned under)
 decides what the collector may address:**
 
 - `Owns`: a group of one, led by the child, with no anchor. The collector holds
-  `Group::Owns` and signals and kills the group whole. An enveloped child is
-  the exception that proves the rule: placed `NewLeader` whatever was asked, it
-  leads its payload's group, and `Launch::spawn` returns that group (a spawn
-  returns a pgid only for a group the child leads), which neither bwrap's pid
-  nor the pipeline's group can reach.
+  `Group::Owns` and signals and kills the group whole. `Enveloped` is the
+  exception that proves the rule: an enveloped child is placed `NewLeader`
+  (`placement` and `member_policy` say so, `Launch::spawn` asserts it), it
+  leads its payload's group, and `Launch::spawn` returns that group, which
+  neither bwrap's pid nor the pipeline's group can reach.
 - `Joins`: the stage's group, as a nested pipeline joins. A `Thread` stage's
   `Io` carries `Some(membership)`, a `Membership` pairing the group's pgid with
   the stage thread's own cancel scope, so any external it spawns, at its own
-  root or nested arbitrarily deep, resolves `PgidPolicy::Join(pgid)`. The
+  root or nested arbitrarily deep, resolves `PgidPolicy::Join(membership)`. The
   collector holds `Group::Joins(membership)`, addresses each external by pid
   alone, and opens with a grace signal only for a cause `Membership::owes`:
   one stronger than the stage scope holds, struck beneath the stage. Every
@@ -565,7 +565,7 @@ cause: one the outer stage holds is the owner's, already sent to every
 member, and the tty's Ctrl-C is ral's own group's, already delivered; and, beside either, each
 confined stage's *envelope*, the payload group bwrap's `--new-session` put in
 a session of its own, which `Launch::spawn` learned from the `--info-fd` and
-`LiveExternal::landing` (`Landing::Owns`) kept. A key the tty already delivered
+`LiveExternal::payload` kept. A key the tty already delivered
 (`pressed() >= cause`) leaves out the pipeline's own addresses, never the
 envelopes: the kernel already gave every member of the foreground group that
 signal, and a second copy would be a second interrupt — but an envelope's

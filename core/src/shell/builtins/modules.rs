@@ -30,11 +30,13 @@ fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled
 
 /// Report the loader's context without changing the failure value.
 fn tag_loader_error(e: Break) -> Break {
-    match e {
-        Break::Error(err) if err.context().is_none() => err.with_context("use").into(),
-        error @ Break::Error(_) => error,
-        other @ Break::Escape(_) => other,
-    }
+    e.map_error(|err| {
+        if err.context().is_none() {
+            err.with_context("use")
+        } else {
+            err
+        }
+    })
 }
 
 /// `use` stays a native (§10.3): it returns a map and binds nothing, so it

@@ -604,7 +604,7 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
             )
             .unwrap();
             desk.call.handle = (*mid).clone();
-            desk.call.life = mid.mailbox.home();
+            desk.call.home = mid.mailbox.home();
             assert!(
                 desk.agent_stop("grandchild").is_ok(),
                 "Stop at rest is harmless"
@@ -692,7 +692,7 @@ fn stop_answers_say_what_they_did_or_why_they_refused() {
             )
             .unwrap();
             desk.call.handle = (*mid).clone();
-            desk.call.life = mid.mailbox.home();
+            desk.call.home = mid.mailbox.home();
             for refused in ["sibling", "mid"] {
                 let message = desk
                     .agent_stop(refused)
@@ -775,7 +775,7 @@ fn message_reaches_a_working_peer_but_a_resting_helper_admits_only_its_parent() 
             )
             .unwrap();
             desk.call.handle = (*mid).clone();
-            desk.call.life = mid.mailbox.home();
+            desk.call.home = mid.mailbox.home();
             desk.ask(message_req("parent", "hi")).unwrap();
             assert!(
                 desk.ask(message_req("mid", "hi"))

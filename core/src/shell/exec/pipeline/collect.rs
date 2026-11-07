@@ -20,54 +20,99 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-/// The shell-touching finish the reaper's posting closure, holding no
-/// `&Shell`, could not give an external's raw outcome: the run's one ending,
-/// less a death by what this collector `sent`, whose stop is its own doing,
-/// consumed as a thread's is.  Siblings share the window from `started`, so
-/// only the deny lines the stage's own `claim` owns are its.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the one shell-touching finish; each argument is a distinct fact of the settlement"
-)]
-fn finish_external_settlement(
-    audit: Option<Box<StageAudit>>,
-    name: &str,
-    outcome: WaitOutcome,
-    cause: Option<CancelCause>,
-    sent: Option<CancelCause>,
-    scope: &Scope,
-    claim: &Claim,
-    shell: &Shell,
+/// What a settlement reads of its collector: the window start for the
+/// sandbox-denial reader, the scope, and the group it owns, if any.
+#[derive(Clone, Copy)]
+struct Window<'a> {
     started: Instant,
-) -> StageObservation {
-    let settled = match outcome.cancelled_by(cause) {
-        Some(cause) if sent == Some(cause) => Ok(()),
-        _ => command::ending(name, outcome, cause, scope, claim, started).map_err(|broke| {
-            match &audit {
-                Some(audit) => broke.claimed_by(|| audit.prov.clone()),
-                None => broke,
-            }
-        }),
-    };
-    // No start: nobody was listening at launch.
-    let fragment = audit
-        .and_then(|audit| {
-            let StageAudit { prov, start, args } = *audit;
-            let mut obs = shell.command_observation(
-                &start?,
-                name,
-                args,
-                CommandOrigin::External,
-                settled.as_ref().err(),
-                AuditIo::default(),
-            );
-            obs.site = prov.site(&shell.session.sources);
-            Some(AuditFragment::from_observations(vec![obs]))
-        })
-        .unwrap_or_else(AuditFragment::empty);
-    StageObservation {
-        end: End::settled(settled.map(|()| Value::Unit)),
-        audit: fragment,
+    scope: &'a Scope,
+    owned: Option<Pgid>,
+}
+
+/// What an external's ending reads once its process and pumps are done.
+struct Settlement {
+    name: String,
+    /// Absent for a lone command, whose own door claims and records.
+    audit: Option<Box<StageAudit>>,
+    /// The deny lines its failure may claim, as its start knew them.
+    claim: Claim,
+}
+
+impl Settlement {
+    /// How the run ended under `cause`; siblings share the window from
+    /// `started`, so only the deny lines the stage's own claim owns are its.
+    fn ending(
+        &self,
+        outcome: WaitOutcome,
+        cause: Option<CancelCause>,
+        window: Window<'_>,
+    ) -> Settled<()> {
+        command::ending(
+            &self.name,
+            outcome,
+            cause,
+            window.scope,
+            &self.claim,
+            window.started,
+        )
+    }
+
+    /// The shell-touching finish the reaper's posting closure, holding no
+    /// `&Shell`, could not give an external's raw outcome: the run's one
+    /// ending, less a death by what this collector `sent`, whose stop is its
+    /// own doing, consumed as a thread's is.
+    fn observe(
+        self,
+        outcome: WaitOutcome,
+        cause: Option<CancelCause>,
+        sent: Option<CancelCause>,
+        window: Window<'_>,
+        shell: &Shell,
+    ) -> StageObservation {
+        let settled = match outcome.cancelled_by(cause) {
+            Some(cause) if sent == Some(cause) => Ok(()),
+            _ => self
+                .ending(outcome, cause, window)
+                .map_err(|broke| match &self.audit {
+                    Some(audit) => broke.claimed_by(|| audit.prov.clone()),
+                    None => broke,
+                }),
+        };
+        let Self { name, audit, .. } = self;
+        // No start: nobody was listening at launch.
+        let fragment = audit
+            .and_then(|audit| {
+                let StageAudit { prov, start, args } = *audit;
+                let mut obs = shell.command_observation(
+                    &start?,
+                    &name,
+                    args,
+                    CommandOrigin::External,
+                    settled.as_ref().err(),
+                    AuditIo::default(),
+                );
+                obs.site = prov.site(&shell.session.sources);
+                Some(AuditFragment::from_observations(vec![obs]))
+            })
+            .unwrap_or_else(AuditFragment::empty);
+        StageObservation {
+            end: End::settled(settled.map(|()| Value::Unit)),
+            audit: fragment,
+        }
+    }
+}
+
+impl ExternalEnd {
+    /// What [`drained`] consumes, and what the ending reads.
+    fn split(self) -> (Option<JailCgroup>, command::Pumps, Settlement) {
+        let Self {
+            name,
+            audit,
+            jail,
+            pumps,
+            claim,
+        } = self;
+        (jail, pumps, Settlement { name, audit, claim })
     }
 }
 
@@ -88,32 +133,14 @@ impl StageEnd {
     /// An external is settled under the cause [`drained`] reads; a key the
     /// tty delivered is attributed through the scope or not at all (ADR
     /// 261016_a-cleanup-is-shielded-within-its-grace).
-    fn settle(
-        self,
-        shell: &Shell,
-        started: Instant,
-        scope: &Scope,
-        owned: Option<Pgid>,
-    ) -> StageObservation {
+    fn settle(self, shell: &Shell, window: Window<'_>) -> StageObservation {
         match self {
             Self::Thread { obs, stage } if obs.names(&stage) => obs.forgiven(),
             Self::Thread { obs, .. } => obs,
-            Self::External {
-                end:
-                    ExternalEnd {
-                        name,
-                        audit,
-                        jail,
-                        pumps,
-                        claim,
-                    },
-                outcome,
-                sent,
-            } => {
-                let cause = drained(jail, pumps, sent, scope, owned);
-                finish_external_settlement(
-                    audit, &name, outcome, cause, sent, scope, &claim, shell, started,
-                )
+            Self::External { end, outcome, sent } => {
+                let (jail, pumps, settlement) = end.split();
+                let cause = drained(jail, pumps, sent, window);
+                settlement.observe(outcome, cause, sent, window, shell)
             }
         }
     }
@@ -130,8 +157,7 @@ fn drained(
     jail: Option<JailCgroup>,
     pumps: command::Pumps,
     sent: Option<CancelCause>,
-    scope: &Scope,
-    owned: Option<Pgid>,
+    Window { scope, owned, .. }: Window<'_>,
 ) -> Option<CancelCause> {
     drop(jail);
     if sent != Some(CancelCause::ReaderGone) {
@@ -389,7 +415,7 @@ impl CollectState {
             spawned:
                 Spawned {
                     mut child,
-                    landing,
+                    group,
                     jail,
                 },
             claim,
@@ -399,7 +425,6 @@ impl CollectState {
         let (tx, rx) = std::sync::mpsc::channel();
         let slot = Slot { ix: 0, tx };
         let watch = slot.watch(child);
-        let group = landing.group(shell.session.stage.as_ref());
         // Not behind an envelope, whose payload leads the group.
         let leads = group
             .owned()
@@ -407,8 +432,8 @@ impl CollectState {
         let pin = leads.then(|| Arc::clone(&watch));
         let stage = LiveExternal {
             watch,
-            // In its collector's group, which is where it landed.
-            landing: crate::process::Landing::Joins,
+            // Its group is its collector's own.
+            payload: None,
             end: ExternalEnd {
                 name,
                 audit: None,
@@ -732,7 +757,7 @@ impl CollectState {
             // Thread stages already published their facts.
             let surface = matches!(&end, Some(StageEnd::External { .. })).then_some(mooring);
             let StageObservation { end, audit } = match end {
-                Some(end) => end.settle(shell, self.started, &self.scope, self.group.owned()),
+                Some(end) => end.settle(shell, self.window()),
                 None => StageObservation::unreported(),
             };
             for observation in audit.into_observations() {
@@ -777,28 +802,25 @@ impl CollectState {
     /// kill addresses its group and the pin goes; then its own ending, whose
     /// stop is the run's.
     pub(super) fn settle_lone(mut self) -> Settled<()> {
-        let Some(Some(StageEnd::External {
-            end:
-                ExternalEnd {
-                    name,
-                    jail,
-                    pumps,
-                    claim,
-                    ..
-                },
-            outcome,
-            sent,
-        })) = self.observed.pop()
-        else {
+        let Some(Some(StageEnd::External { end, outcome, sent })) = self.observed.pop() else {
             // Re-raised, as a panicked stage is.
             std::panic::resume_unwind(Box::new(UNREPORTED.to_owned()));
         };
         if let Some(loan) = self.loan.take() {
             loan.reclaim(outcome.death());
         }
-        let cause = drained(jail, pumps, sent, &self.scope, self.group.owned());
+        let (jail, pumps, settlement) = end.split();
+        let cause = drained(jail, pumps, sent, self.window());
         drop(self.pin.take());
-        command::ending(&name, outcome, cause, &self.scope, &claim, self.started)
+        settlement.ending(outcome, cause, self.window())
+    }
+
+    fn window(&self) -> Window<'_> {
+        Window {
+            started: self.started,
+            scope: &self.scope,
+            owned: self.group.owned(),
+        }
     }
 }
 

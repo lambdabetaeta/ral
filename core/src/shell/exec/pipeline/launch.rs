@@ -12,7 +12,7 @@ use super::thread::launch_thread_stage;
 use crate::error::io_message;
 use crate::fact::AuditIo;
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{PgidPolicy, Scope, Spawned};
+use crate::process::{Group, Scope, Spawned};
 use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use std::sync::Arc;
@@ -133,11 +133,9 @@ fn launch_external_stage_direct(
                 shell,
             )?;
             let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
-            let started = command::start(
-                prepared,
-                PgidPolicy::Join(group.leader_pgid()),
-                &shell.scope,
-            )?;
+            let policy =
+                command::member_policy(group.membership(&shell.scope), prepared.launch.enveloped());
+            let started = command::start(prepared, policy, &shell.scope)?;
             Ok((started, pumps))
         })();
         let (started, pumps) = launched.inspect_err(|broke| {
@@ -161,16 +159,20 @@ fn launch_external_stage_direct(
                     spawned:
                         Spawned {
                             mut child,
-                            landing,
+                            group: landed,
                             jail,
                         },
                     claim,
                 },
         } = started;
         let pumps = pumps.start(&mut child, &shell.scope);
+        let payload = match landed {
+            Group::Enveloped(payload) => Some(payload),
+            Group::Owns(_) | Group::Joins(_) | Group::Shares => None,
+        };
         Ok(LiveExternal {
             watch: slot.watch(child),
-            landing,
+            payload,
             end: ExternalEnd {
                 name: shown,
                 audit: Some(Box::new(StageAudit {
@@ -189,6 +191,7 @@ fn launch_external_stage_direct(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::PgidPolicy;
 
     #[test]
     fn the_terminal_reaches_a_thread_stage_only_when_the_group_holds_it() {
@@ -225,8 +228,8 @@ mod tests {
             let group = crate::process::Pgid::from_raw(1).expect("1 is positive");
             shell.io.stdin = given;
             shell.session.stage = Some(crate::process::Membership::new(group, Scope::clone(&node)));
-            let (policy, lending) = command::placement(&shell, &Mooring::adrift(), false);
-            assert!(matches!(policy, PgidPolicy::Join(_)) && lending.is_none());
+            let placed = command::placement(&shell, &Mooring::adrift(), false);
+            assert!(matches!(placed.policy, PgidPolicy::Join(_)) && placed.loan.is_none());
             // Joined, the lone child and the nested stage read the same source,
             // whatever their group could read.
             for readable in [true, false] {

@@ -44,7 +44,7 @@ impl ExarchDesk {
         let inherited = (spec.memory == Memory::Mnemon).then(|| body.log.inherited_context());
         let child = Agent::born(
             &call.fleet,
-            Parent::Agent(&call.handle, call.life.child()),
+            Parent::Agent(&call.handle, call.home.child()),
             reserved,
             self.fork_engine(fork)?,
             provider,
@@ -127,7 +127,7 @@ impl ExarchDesk {
             ral_core::protocol::Attach::child(engine.clone(), seal),
         )
         .map_err(|lost| match lost {
-            Severed::Refused(why) => why.into_error(),
+            Severed::Refused(why) => why.to_error(),
             lost => Error::new(
                 crate::agent::EngineLost::starting(&lost, s.handle.run_dir()).to_string(),
             ),

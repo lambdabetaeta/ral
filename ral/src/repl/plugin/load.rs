@@ -10,7 +10,7 @@
 //! untouched.  Unloading is the exact inverse.
 
 use ral_core::data::datum::Datum as _;
-use ral_core::error::Error;
+use ral_core::error::{Error, io_message};
 use ral_core::path::{Judged, Located, Reading};
 use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, FrameHandle, HookName, HookSig, Map, Mooring,
@@ -18,7 +18,7 @@ use ral_core::shell::runtime::{
 };
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::typecheck::builtins::scheme;
-use ral_core::{Shell, Value};
+use ral_core::{RegisterError, Shell, Value};
 use std::borrow::Cow;
 
 use super::super::enquiry::{Enquiry, PluginNote};
@@ -30,20 +30,14 @@ fn load_plugin_builtin(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let name = args[0].as_str("load-plugin")?;
     load_plugin(name, &Map::new(), mooring, shell)
         .map(|()| Value::Unit)
-        .map_err(|b| match b {
-            Break::Error(e) => e.with_context(format!("plugin '{name}'")).into(),
-            escape @ Break::Escape(_) => escape,
-        })
+        .map_err(|b| b.map_error(|e| e.with_context(format!("plugin '{name}'"))))
 }
 
 fn unload_plugin_builtin(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let name = args[0].as_str("unload-plugin")?;
     unload_plugin(name, mooring, shell)
         .map(|()| Value::Unit)
-        .map_err(|b| match b {
-            Break::Error(e) => e.with_context(format!("plugin '{name}'")).into(),
-            escape @ Break::Escape(_) => escape,
-        })
+        .map_err(|b| b.map_error(|e| e.with_context(format!("plugin '{name}'"))))
 }
 
 static BUILTINS_ARR: [BuiltinEntry; 2] = [
@@ -70,7 +64,7 @@ fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String
     let read = located.read().and_then(std::io::read_to_string);
     drop(located);
     let source =
-        read.map_err(|e| Error::new(format!("{}: {e}", ral_core::path::shown(file.path()))))?;
+        read.map_err(|e| Error::new(io_message(ral_core::path::shown(file.path()), &e)))?;
     Ok((file, ral_core::source::normalize_source_text(source)))
 }
 
@@ -109,7 +103,7 @@ pub(crate) fn load_plugin(
     };
     if shell
         .plugin_loaded(&entry.name)
-        .map_err(|e| Error::new(e.to_string()))?
+        .map_err(RegisterError::into_error)?
     {
         return Err(Error::new("already loaded").into());
     }
@@ -137,7 +131,7 @@ pub(crate) fn load_plugin(
     }
     Ok(shell
         .commit_plugin(entry)
-        .map_err(|e| Error::new(e.to_string()))?)
+        .map_err(RegisterError::into_error)?)
 }
 
 /// Register a plugin's hook-event and keybinding handlers in the session
@@ -191,7 +185,7 @@ fn register_plugin_hooks(
 pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
     if !shell
         .plugin_loaded(name)
-        .map_err(|e| Error::new(e.to_string()))?
+        .map_err(RegisterError::into_error)?
     {
         return Err(Error::new("not loaded").into());
     }

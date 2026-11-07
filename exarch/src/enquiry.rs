@@ -376,7 +376,7 @@ impl Datum for Grant {
     fn decode(v: &FOValue) -> Result<Self, String> {
         match untag(v) {
             Some(("inherit", None)) => Ok(Self(SpawnGrant::Inherit)),
-            Some((base, None)) if crate::policy::SPAWN_BASES.contains(&base) => {
+            Some((base, None)) if crate::policy::spawn_bases().any(|b| b == base) => {
                 Ok(Self(SpawnGrant::Base(base.to_string())))
             }
             Some(("restrict", Some(record @ FOValue::Map { .. }))) => {
@@ -390,8 +390,9 @@ impl Datum for Grant {
                 "expected `inherit, {}, or `restrict [exec: …, fs: …, net: …, gpu: …, \
                  editor: …, shell: …]: `inherit is how you decline to narrow at all, and `restrict must carry \
                  a capability record of the same shape `grant [...]` takes, every key optional: got {}",
-                crate::policy::SPAWN_BASES
+                crate::policy::spawn_bases()
                     .map(|b| format!("`{b}"))
+                    .collect::<Vec<_>>()
                     .join(", "),
                 v.shape()
             )),
@@ -1619,7 +1620,7 @@ mod tests {
     /// Every bare tag a spawn may grant: the bases, plus `` `inherit ``, which
     /// names none and so is the one tag policy has nothing to resolve.
     fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
-        std::iter::once("inherit").chain(crate::policy::SPAWN_BASES)
+        std::iter::once("inherit").chain(crate::policy::spawn_bases())
     }
 
     #[test]
@@ -1692,7 +1693,7 @@ mod tests {
         let ctx =
             ral_core::authority::grant::freeze::FreezeCtx::at(ral_core::host::EnvVars::new(), cwd)
                 .with_scratch(Some(std::env::temp_dir().to_string_lossy()));
-        for label in crate::policy::SPAWN_BASES {
+        for label in crate::policy::spawn_bases() {
             crate::policy::base_layer(label, &ctx)
                 .unwrap_or_else(|e| panic!("grant `{label} must name a bake-in base: {e}"));
         }
@@ -1706,9 +1707,7 @@ mod tests {
             .split(", ")
             .collect();
         assert!(
-            crate::policy::SPAWN_BASES
-                .iter()
-                .all(|l| offered.contains(l)),
+            crate::policy::spawn_bases().all(|l| offered.contains(l)),
             "every grant base must be one the policy layer offers, got: {offered:?}"
         );
     }

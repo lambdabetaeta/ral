@@ -14,17 +14,18 @@
 mod base;
 mod load;
 
+pub use base::Base;
 use base::resolve_base;
+pub(crate) use base::spawn_bases;
 use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
-use ral_core::authority::grant::freeze::{Anchor, FreezeCtx, host_absolute};
+use ral_core::authority::grant::freeze::{FreezeCtx, Place, host_absolute};
 use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
 use ral_core::authority::policy::{GrantLayer, GrantStack};
 use ral_core::error::Error;
 use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
-use ral_core::path::{CwdPath, FrozenPath};
+use ral_core::path::CwdPath;
 use ral_core::shell::grant::decode_fragment;
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Compose a session's effective [`GrantStack`], with the restrict files'
@@ -148,16 +149,6 @@ pub struct Invocation {
     pub restricts: Vec<PathBuf>,
 }
 
-/// The bake-in bases a spawn's `grant` may name — a subset of what
-/// [`base::resolve_base`] offers a launching human, kept in step by hand.
-/// `` `inherit `` and `` `restrict `` name no base, so neither appears here.
-///
-/// Each admits the bundled coreutils (`ral_core::uutils`). Those spawn by bare
-/// name, so a base that states its exec admissions as directory prefixes alone
-/// denies every one of them, and a child that cannot run `ls` cannot widen its
-/// own grant to get it back.
-pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only", "reasonable"];
-
 /// Resolve a bake-in base for a spawned child — the layer a caller pushes onto
 /// the parent's stack, and the narrower every spawn grant naming a base
 /// resolves through.
@@ -182,15 +173,12 @@ pub fn base_layer(base_name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, Error>
 /// A path [`host_absolute`] refuses fails the layer whole: a deny that named
 /// nothing would fail open.
 fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
-    let held = paths
+    let deny = paths
         .iter()
-        .map(|p| held(p))
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .map(|p| host_absolute(p).map(|held| Place::from(&held)))
+        .collect::<Result<_, _>>()?;
     let fs = FsTable {
-        deny: held
-            .into_iter()
-            .map(|p| Anchor::Absolute.place(p))
-            .collect(),
+        deny,
         ..FsTable::default()
     };
     carve_out(
@@ -213,7 +201,7 @@ fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, Error> 
         )
     })?;
     let exec = ExecTable {
-        deny: vec![Target::File(Anchor::Absolute.place(held(exe)?))],
+        deny: vec![Target::File(Place::from(&host_absolute(exe)?))],
         ..ExecTable::default()
     };
     carve_out(
@@ -223,11 +211,6 @@ fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, Error> 
         },
         ctx,
     )
-}
-
-/// The `absolute` spelling a held path freezes to.
-fn held(path: &Path) -> Result<String, Error> {
-    host_absolute(path).map(FrozenPath::into_string)
 }
 
 /// `t ⊕ excluded`: every request less what `excluded` denies, read as an
@@ -241,10 +224,13 @@ fn carve_out(excluded: Axes, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::authority::grant::freeze::Place;
+    #[cfg(unix)]
+    use ral_core::authority::grant::freeze::Anchor;
     use ral_core::authority::grant::value::LayerValue;
     use ral_core::authority::policy::Net;
     use ral_core::data::FOValue;
+    #[cfg(unix)]
+    use ral_core::data::datum::untag;
 
     /// The scratch spelling every test here freezes `scratch` places against:
     /// no test makes anything in it.
@@ -444,6 +430,36 @@ mod tests {
             .collect()
     }
 
+    /// `layer` without the exec allowances that name a host directory outside
+    /// the fixture, which no golden can pin.
+    #[cfg(unix)]
+    fn pinnable(mut layer: LayerValue) -> LayerValue {
+        const FIXTURE: &str = "/fixture/";
+        let fixed = |target: &FOValue| match untag(target) {
+            Some(("dir", Some(place))) => match untag(place) {
+                Some(("absolute", Some(path))) => {
+                    path.as_str().is_none_or(|p| p.starts_with(FIXTURE))
+                }
+                _ => true,
+            },
+            _ => true,
+        };
+        let FOValue::Map { entries } = &mut layer.grant else {
+            return layer;
+        };
+        for (_, exec) in entries.iter_mut().filter(|(key, _)| key == "exec") {
+            let FOValue::Map { entries } = exec else {
+                continue;
+            };
+            for (_, list) in entries.iter_mut().filter(|(key, _)| key == "allow") {
+                if let FOValue::List { items } = list {
+                    items.retain(fixed);
+                }
+            }
+        }
+        layer
+    }
+
     /// What the agent reads of exarch's default boot grant, pinned, on a host
     /// all fixture: cwd, scratch, home and the credential under `/fixture`,
     /// the `PATH` a stub of every name `reasonable` names.  A selector or a
@@ -454,7 +470,6 @@ mod tests {
     fn the_default_boot_grant_reads_as_pinned() {
         use ral_core::protocol::probe::Grants;
         use std::os::unix::fs::PermissionsExt;
-        const FIXTURE: &str = "/fixture/";
         let bin = tempfile::tempdir().expect("a stub bin");
         for name in names(include_str!("../data/reasonable.exarch.ral")) {
             let stub = bin.path().join(name);
@@ -476,30 +491,14 @@ mod tests {
         let own = Path::new("/fixture/bin/exarch");
         let Invocation { stack, .. } =
             compose(&ctx, "reasonable", None, &[], &[credential], Some(own)).unwrap();
-        let pinnable = |mut axes: Axes| {
-            if let Some(exec) = &mut axes.exec {
-                exec.allow.retain(|target| match target {
-                    Target::Dir(Place {
-                        anchor: Anchor::Absolute,
-                        payload,
-                    }) => payload.starts_with(FIXTURE),
-                    _ => true,
-                });
-            }
-            axes
-        };
-        let shown = stack.layers().filter(|layer| layer.is_shown());
-        let layers = shown.map(|layer| LayerValue {
-            grant: GrantValue::from(pinnable(layer.axes())).into(),
-            ..layer.value()
-        });
+        let grants = Grants::of(&stack);
         crate::prompt::pin_grant_section(
             Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/policy/golden/default-boot-grant.md"
             )),
             &Grants {
-                layers: layers.collect(),
+                layers: grants.layers.into_iter().map(pinnable).collect(),
                 withholds_gpu: true,
             },
         );

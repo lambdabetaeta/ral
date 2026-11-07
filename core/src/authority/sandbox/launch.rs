@@ -138,9 +138,7 @@ pub(crate) fn interpreter_of(admitted: &Admitted) -> Option<PathBuf> {
     )
 )]
 pub(crate) fn sandboxed_command(
-    // A Unix build renders it at once; a Windows launch keeps it for its spawn.
-    #[cfg(unix)] projection: &SandboxProjection,
-    #[cfg(windows)] projection: SandboxProjection,
+    projection: &SandboxProjection,
     image: &Image,
     args: &[String],
     ownership: Ownership,
@@ -164,7 +162,7 @@ pub(crate) fn sandboxed_command(
         };
         let mut launch = image.launch(args)?;
         launch.confine(crate::process::launch::Confined {
-            projection,
+            projection: projection.clone(),
             image: loaded,
         });
         Ok(launch)

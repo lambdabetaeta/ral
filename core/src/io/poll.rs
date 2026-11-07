@@ -44,7 +44,8 @@ pub(crate) fn interrupt<T>(thread: &std::thread::JoinHandle<T>) {
 }
 
 /// Whether `e` is a call [`interrupt`] aborted.  An aborted pipe read took
-/// nothing; an aborted write may have delivered a prefix it cannot report.
+/// nothing, so it is retried; an aborted write may have delivered a prefix it
+/// cannot report, so it never is.
 #[cfg(windows)]
 pub(crate) fn aborted(e: &io::Error) -> bool {
     e.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED.cast_signed())

@@ -164,8 +164,8 @@ impl BroodGuard {
     /// The halt rule (I4) with its drain (I4′): stop every child, then wait up
     /// to `grace` for all of them to reach a terminal state.
     pub(crate) fn end(&self, grace: Duration) {
-        self.close();
-        stop_and_drain(&self.children(), grace);
+        self.stop();
+        self.drain(grace);
     }
 
     #[cfg(test)]

@@ -9,7 +9,7 @@ use super::thread::ThreadStage;
 #[cfg(test)]
 use crate::process::Scope;
 use crate::process::jail::JailCgroup;
-use crate::process::{CancelCause, Landing, Pgid, WaitOutcome, Watch};
+use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
 use crate::shell::runtime::{AuditStart, Prov};
 use std::sync::Arc;
 
@@ -28,9 +28,9 @@ pub(super) struct StageHandle {
 /// watch and hands the rest on as an [`ExternalEnd`].
 pub(super) struct LiveExternal {
     pub(super) watch: Arc<Watch>,
-    /// Where it sits against its collector's group: in it (`Joins`), or
-    /// apart, behind a confining envelope, in its payload's own (`Owns`).
-    pub(super) landing: Landing,
+    /// Apart from its collector's group, behind a confining envelope: its
+    /// payload's own.
+    pub(super) payload: Option<Pgid>,
     pub(super) end: ExternalEnd,
 }
 
@@ -107,11 +107,8 @@ impl StageHandle {
     /// payload's, which no signal to the collector's group reaches.
     pub(super) fn own_group(&self) -> Option<Pgid> {
         match &self.kind {
-            StageKind::External(LiveExternal {
-                landing: Landing::Owns(group),
-                ..
-            }) => Some(*group),
-            StageKind::External(_) | StageKind::Thread(_) => None,
+            StageKind::External(e) => e.payload,
+            StageKind::Thread(_) => None,
         }
     }
 
@@ -172,7 +169,7 @@ impl StageHandle {
         Self::new(
             StageKind::External(LiveExternal {
                 watch: slot.watch(child),
-                landing: Landing::Joins,
+                payload: None,
                 end: ExternalEnd {
                     name: "test".to_string(),
                     audit: None,
@@ -200,7 +197,7 @@ impl StageHandle {
         Self::new(
             StageKind::External(LiveExternal {
                 watch,
-                landing: Landing::Joins,
+                payload: None,
                 end: ExternalEnd {
                     name: "fake".to_string(),
                     audit: None,

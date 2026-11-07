@@ -23,7 +23,7 @@ use crate::error::Error;
 use crate::path::{Kind, RealPath, Trace, is_absolute, join_slash, path_entries, shown};
 use crate::path::{XdgKind, resolve_xdg_in};
 use crate::text::code;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
 /// A package manager, or `system`: the selector names `dir` takes.
@@ -75,7 +75,7 @@ pub enum Toolchain {
 
 /// The system-wide prefixes outside any home: world-readable trees of the
 /// standing of `/usr`, so system reads include them.
-pub const SYSTEM_READS: [Toolchain; 4] = [
+const SYSTEM_READS: [Toolchain; 4] = [
     Toolchain::Homebrew,
     Toolchain::Macports,
     Toolchain::Nix,
@@ -467,10 +467,11 @@ impl Base {
 }
 
 /// The variable that chose a directory, and its value as given.
-type Via = (&'static str, PathBuf);
-
-/// A directory walked, beside the override that chose it.
-type Found<W> = (GrantPath<W>, Option<Via>);
+#[derive(Debug, PartialEq, Eq)]
+struct Via {
+    var: &'static str,
+    value: PathBuf,
+}
 
 /// A directory a location chooses, before anything is walked: and, where the
 /// environment chose it, the variable that did and its value as given.
@@ -478,6 +479,16 @@ type Found<W> = (GrantPath<W>, Option<Via>);
 pub(super) struct Chosen {
     pub(super) dir: PathBuf,
     via: Option<Via>,
+}
+
+impl Chosen {
+    /// What chose this directory, for a refusal.
+    fn subject(&self) -> String {
+        match &self.via {
+            Some(Via { var, value }) => format!("{var} is {}", shown(value)),
+            None => format!("default directory {}", shown(&self.dir)),
+        }
+    }
 }
 
 impl Location {
@@ -494,7 +505,10 @@ impl Location {
         let dir = join_slash(&value, over.sub());
         vec![Chosen {
             dir,
-            via: Some((over.var(), value)),
+            via: Some(Via {
+                var: over.var(),
+                value,
+            }),
         }]
     }
 }
@@ -523,32 +537,26 @@ fn walked<'a, W: Polar>(
     holder: &str,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&str>,
-) -> Result<Vec<Found<W>>, Error> {
+) -> Result<Vec<(GrantPath<W>, Chosen)>, Error> {
     (chosen(locations, env, home).into_iter())
-        .filter_map(|Chosen { dir, via }| {
-            host_absolute(&dir)
-                .map_err(|why| malformed(&dir, via.as_ref(), holder, why))
+        .filter_map(|chosen| {
+            host_absolute(&chosen.dir)
+                .map_err(|why| malformed(&chosen, holder, why))
                 .and_then(GrantPath::<W>::walked)
-                .map(|w| w.real.followed().kind().is_some().then_some((w, via)))
+                .map(|w| w.real.followed().kind().is_some().then_some((w, chosen)))
                 .transpose()
         })
         .collect()
 }
 
-/// A chosen `dir` that `holder` cannot hold, [`host_absolute`] having
+/// A `chosen` directory that `holder` cannot hold, [`host_absolute`] having
 /// refused it for `why`: what chose it, and what to change.
-fn malformed(dir: &Path, via: Option<&Via>, holder: &str, why: Error) -> Error {
-    let (subject, fix) = match via {
-        Some((var, value)) => (
-            format!("{var} is {}", shown(value)),
-            format!("Set {var} to a well-formed absolute path, or unset it."),
-        ),
-        None => (
-            format!("default directory {}", shown(dir)),
-            "Check its HOME/XDG base.".to_owned(),
-        ),
+fn malformed(chosen: &Chosen, holder: &str, why: Error) -> Error {
+    let fix = match &chosen.via {
+        Some(Via { var, .. }) => format!("Set {var} to a well-formed absolute path, or unset it."),
+        None => "Check its HOME/XDG base.".to_owned(),
     };
-    why.with_context(format!("{subject}, which {holder} cannot hold"))
+    why.with_context(format!("{}, which {holder} cannot hold", chosen.subject()))
         .with_hint(fix)
 }
 
@@ -572,34 +580,21 @@ pub(crate) fn expand_in<W: Polar>(
     walked::<W>(toolchain.locations(), &holder, env, spelled)?
         .into_iter()
         .filter(|(dir, _)| dir.real.followed().kind() == Some(Kind::Dir))
-        .map(|(dir, via)| {
-            let (subject, advice) = provenance(&dir, via);
-            refuse_the_world(selector, &subject, &advice, dir.real.followed(), home)?;
+        .map(|(dir, chosen)| {
+            let advice = || match &chosen.via {
+                Some(Via { var, .. }) => format!("Is {var} set correctly?"),
+                None => "Check the default directory or symlink and its HOME/XDG base.".to_owned(),
+            };
+            refuse_the_world(
+                selector,
+                || chosen.subject(),
+                advice,
+                dir.real.followed(),
+                home,
+            )?;
             W::grant(dir)
         })
         .collect()
-}
-
-/// What chose `dir`, and what to check, for a refusal.
-fn provenance<W: Polar>(dir: &GrantPath<W>, via: Option<Via>) -> (String, String) {
-    if let Some((var, value)) = via {
-        (
-            format!("{var} is {}", shown(&value)),
-            format!("Is {var} set correctly?"),
-        )
-    } else {
-        let written = dir.written.shown();
-        let real = dir.real.followed().real().to_string();
-        let subject = if written == real {
-            format!("default directory {written}")
-        } else {
-            format!("default directory {written} resolves to {real}")
-        };
-        (
-            subject,
-            "Check the default directory or symlink and its HOME/XDG base.".into(),
-        )
-    }
 }
 
 /// [`expand_in`] over the host environment and filesystem, as the spellings
@@ -764,7 +759,6 @@ mod tests {
         pairs: &[(&str, &str)],
         home: &Home,
         default: &Path,
-        target: &Path,
         what: &str,
     ) {
         let err = expand_in::<W>(toolchain, env(pairs), Some(home))
@@ -773,7 +767,6 @@ mod tests {
         for part in [
             format!("`dir `{}", <&str>::from(toolchain)),
             format!("default directory {}", shown(default)),
-            format!("resolves to {}", crate::test_helper::real(target)),
             what.to_owned(),
             "default directory or symlink".to_owned(),
             "HOME/XDG base".to_owned(),
@@ -804,8 +797,8 @@ mod tests {
             let target = pick(tmp.path(), &home_path);
             let default = home_path.join(".rustup");
             link_dir(&target, &default);
-            default_refusal::<Trace>(Toolchain::Rustup, &[], &home, &default, &target, what);
-            default_refusal::<Excluded>(Toolchain::Rustup, &[], &home, &default, &target, what);
+            default_refusal::<Trace>(Toolchain::Rustup, &[], &home, &default, what);
+            default_refusal::<Excluded>(Toolchain::Rustup, &[], &home, &default, what);
         }
     }
 
@@ -849,8 +842,8 @@ mod tests {
                     } else {
                         "the home directory itself"
                     };
-                    default_refusal::<Trace>(toolchain, &pairs, &home, &default, target, what);
-                    default_refusal::<Excluded>(toolchain, &pairs, &home, &default, target, what);
+                    default_refusal::<Trace>(toolchain, &pairs, &home, &default, what);
+                    default_refusal::<Excluded>(toolchain, &pairs, &home, &default, what);
                 }
             }
         }
@@ -868,7 +861,6 @@ mod tests {
             &[],
             &home,
             &default,
-            &home_path,
             "the home directory itself",
         );
         default_refusal::<Excluded>(
@@ -876,7 +868,6 @@ mod tests {
             &[],
             &home,
             &default,
-            &home_path,
             "the home directory itself",
         );
     }
@@ -962,7 +953,6 @@ mod tests {
                 &pairs,
                 &home,
                 &default,
-                &home_path,
                 "the home directory itself",
             );
             default_refusal::<Excluded>(
@@ -970,7 +960,6 @@ mod tests {
                 &pairs,
                 &home,
                 &default,
-                &home_path,
                 "the home directory itself",
             );
         }

@@ -15,12 +15,11 @@ use std::time::{Duration, Instant};
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
 use crate::error::Error;
-use crate::process::{POLL_SLICE, RootCause, Scope};
+use crate::process::{POLL_SLICE, RootCause, Scope, wait_ended};
 use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
-    Attach, Control, DispatchId, EnquiryId, Event, Frame, Origin, Report, Root, Run, SessionEvent,
-    WireError,
+    Attach, DispatchId, EnquiryId, Event, Frame, Origin, Report, Root, Run, SessionEvent, WireError,
 };
 use crate::shell::runtime::{Break, DeferredSink, EnquiryDesk, Fork, Settled};
 use crate::site::{Silent, site};
@@ -113,8 +112,6 @@ impl Default for Patience {
 /// bound leaves its staged `.ral-write-` sibling behind.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-const SETTLE_POLL: Duration = Duration::from_millis(50);
-
 /// Every live enquiry park, keyed by the id its answer will carry. Session
 /// wide, so no id repeats across dispatches: a late answer to a park that gave
 /// up finds nothing, never a successor's park. Every mutation is a whole-entry
@@ -172,7 +169,7 @@ impl EnquiryDesk for WireDesk {
         // in hand outranks a cancel pending beside it, and an enquiry raised
         // under an already-cancelled scope returns without parking at all. The
         // park converts the scope's cancellation to the evaluator's stop.
-        let raised = |e: WireError| Break::from(e.into_error());
+        let raised = |e: WireError| Break::from(e.to_error());
         loop {
             match rx.try_recv() {
                 Ok(answer) => return answer.map_err(raised),
@@ -210,7 +207,7 @@ fn refusal(probing: bool, why: &str) -> Event {
     if probing {
         Event::Reading(Err(why.to_string()))
     } else {
-        Event::Report(Report::refused(why))
+        Event::Report(Report::refused(why.to_owned()))
     }
 }
 
@@ -220,7 +217,7 @@ fn fault(probing: bool, why: &str) -> Event {
     if probing {
         Event::Reading(Err(why.to_string()))
     } else {
-        Event::Report(Report::faulted(why))
+        Event::Report(Report::faulted(why.to_owned()))
     }
 }
 
@@ -366,7 +363,7 @@ fn engine_session(
         let scopes = engine.scopes().clone();
         crate::process::forward_ambient(move |ambient| {
             if let crate::process::Ambient::Root(cause) = ambient {
-                scopes.apply(Control::End(cause));
+                scopes.end(cause);
             }
         })
     };
@@ -545,9 +542,7 @@ fn engine_session(
     scopes.end(RootCause::Cancelled);
     drop(run_tx);
     let settle_by = Instant::now() + SETTLE_TIMEOUT;
-    while !worker.is_finished() && Instant::now() < settle_by {
-        std::thread::sleep(SETTLE_POLL);
-    }
+    wait_ended(settle_by, || worker.is_finished());
     if !worker.is_finished() || worker.join().is_err() || !workers.is_drained() {
         return 1;
     }
@@ -775,6 +770,7 @@ mod engine_session_tests {
     use crate::path::EnginePath;
     use crate::process::CancelCause;
     use crate::process::cancel::REQUEST_SERIAL;
+    use crate::protocol::Control;
     use crate::protocol::Ran;
 
     const WAIT: Duration = Duration::from_secs(20);

@@ -176,6 +176,9 @@ fn reader_gone(stage: &ScopeId) -> WriteFault {
 /// landed or not, a dead edge is the stage's reader-gone stop: judged after
 /// landing, not refused before, so the sentinel hears the write; and a chunk
 /// that cannot land on one (the pipe full, nobody draining) is the stop too.
+/// On Windows an `interrupt` aborts a blocked write, delivering a prefix it
+/// cannot report: a retry would repeat that prefix, so the abort is a stop
+/// under the scope's cause, else an error under a shield.
 fn write_sliced(
     w: &os_pipe::PipeWriter,
     edge: &Edge,
@@ -185,8 +188,17 @@ fn write_sliced(
 ) -> Result<(), WriteFault> {
     while !bytes.is_empty() {
         scope.poll()?;
-        if let Some(n) = try_chunk(w, bytes)? {
-            bytes = &bytes[n..];
+        match try_chunk(w, bytes) {
+            Ok(Some(n)) => bytes = &bytes[n..],
+            Ok(None) => {}
+            #[cfg(windows)]
+            Err(e) if super::aborted(&e) => {
+                scope.poll()?;
+                return Err(WriteFault::Io(io::Error::other(
+                    "the write was aborted by a teardown; how much of its chunk landed is unknown",
+                )));
+            }
+            Err(e) => return Err(e.into()),
         }
         if edge.is_dead() {
             return Err(reader_gone(stage));
@@ -218,14 +230,11 @@ fn try_chunk(w: &os_pipe::PipeWriter, bytes: &[u8]) -> io::Result<Option<usize>>
 #[cfg(windows)]
 const PIPE_CHUNK: usize = 4096;
 
-/// Write one chunk; `None` if an `interrupt` aborted it, so the loop re-reads
-/// the scope and the edge, and under a shield retries it.
+/// Write one chunk, blocking until it lands; an `interrupt` aborts it as an
+/// error [`aborted`](super::aborted) recognises.
 #[cfg(windows)]
 fn try_chunk(w: &os_pipe::PipeWriter, bytes: &[u8]) -> io::Result<Option<usize>> {
-    match (&*w).write(&bytes[..bytes.len().min(PIPE_CHUNK)]) {
-        Err(e) if super::aborted(&e) => Ok(None),
-        r => r.map(Some),
-    }
+    (&*w).write(&bytes[..bytes.len().min(PIPE_CHUNK)]).map(Some)
 }
 
 impl Sink {
@@ -727,9 +736,9 @@ mod tests {
         assert!(pump.is_none());
         drop(sink);
 
-        let mut child = crate::process::Launch::new("/bin/echo")
-            .arg("hi")
-            .stdout(stdio)
+        let mut launch = crate::process::Launch::new("/bin/echo");
+        launch.arg("hi").stdout(stdio);
+        let mut child = launch
             .spawn(
                 crate::process::PgidPolicy::Inherit,
                 &DurableRoot::default().child(),
@@ -758,9 +767,9 @@ mod tests {
         };
         let (stdio, _) = sink.child_stdio(OutFd::Stdout).expect("stdio");
 
-        let mut child = crate::process::Launch::new("/bin/echo")
-            .arg("hi")
-            .stdout(stdio)
+        let mut launch = crate::process::Launch::new("/bin/echo");
+        launch.arg("hi").stdout(stdio);
+        let mut child = launch
             .spawn(
                 crate::process::PgidPolicy::Inherit,
                 &DurableRoot::default().child(),
@@ -935,5 +944,68 @@ mod tests {
             assert!(pumped(&buffer, fd));
             assert!(pumped(&tee, fd));
         }
+    }
+
+    /// Block a write of one chunk on a pipe already holding a prefix's worth,
+    /// then `interrupt` it until it returns: what `scope` makes of the abort.
+    #[cfg(windows)]
+    fn aborted_write(
+        node: &crate::process::ScopeNode,
+        scope: crate::process::Scope,
+    ) -> Result<(), super::WriteFault> {
+        use std::io::Write as _;
+        use std::time::Duration;
+        let (_reader, writer) = crate::process::cloexec_pipe().expect("pipe");
+        (&writer).write_all(&[0; 1024]).expect("a prefix's worth");
+        let mut sink = Sink::Pipe {
+            writer: Arc::new(writer),
+            edge: Edge::new(),
+            stage: node.id(),
+        };
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            send.send(sink.write_under(&scope, &[1; 4096])).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let verdict = loop {
+            crate::io::interrupt(&worker);
+            if let Ok(verdict) = receive.recv_timeout(Duration::from_millis(50)) {
+                break verdict;
+            }
+        };
+        worker.join().unwrap();
+        verdict
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_aborted_write_under_a_cause_is_that_stop() {
+        let node = DurableRoot::default().child();
+        let canceller = {
+            let node = node.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                node.cancel(crate::process::CancelCause::Interrupted);
+            })
+        };
+        let verdict = aborted_write(&node, crate::process::Scope::clone(&node));
+        canceller.join().unwrap();
+        assert!(matches!(
+            verdict,
+            Err(super::WriteFault::Stopped(stop)) if stop.cause == crate::process::CancelCause::Interrupted
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_aborted_write_under_a_shield_is_an_error_not_a_retry() {
+        let node = DurableRoot::default().child();
+        node.cancel(crate::process::CancelCause::Interrupted);
+        let shielded =
+            crate::process::Scope::clone(&node).shielded(std::time::Duration::from_secs(30));
+        assert!(matches!(
+            aborted_write(&node, shielded),
+            Err(super::WriteFault::Io(_))
+        ));
     }
 }

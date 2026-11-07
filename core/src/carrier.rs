@@ -88,7 +88,7 @@ impl std::fmt::Display for Severed {
             Self::Refused(why) => write!(
                 f,
                 "the engine refused to attach: {}",
-                why.clone().into_error().plain()
+                why.to_error().plain()
             ),
             Self::Closed(msg) => write!(f, "the connection to the engine closed: {msg}"),
             Self::Silent(d) => write!(
@@ -615,7 +615,7 @@ impl ControlSender {
                     self.strike(id, CancelCause::Interrupted);
                 }
             }
-            Ambient::Root(cause) => self.send(Control::End(cause)),
+            Ambient::Root(cause) => self.end(cause),
         }
     }
 

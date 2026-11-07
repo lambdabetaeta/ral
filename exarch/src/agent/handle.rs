@@ -55,7 +55,7 @@ impl AgentHandle {
     pub(crate) fn stop(&self, job: JobId) -> Result<Option<Vec<String>>, Unavailable> {
         self.0.address.stop(job)
     }
-    /// End this life and every descendant; teardown remains the owner's work.
+    /// End this home and every descendant; teardown remains the owner's work.
     pub(crate) fn end(&self) {
         self.0.address.end(CancelCause::Cancelled);
     }

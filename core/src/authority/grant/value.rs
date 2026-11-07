@@ -2,7 +2,7 @@
 //!
 //! One host hands a grant to another in it, decoded where it lands by
 //! [`decode_grant`](crate::shell::grant::decode_grant); a layer shows itself
-//! in it ([`LayerValue`]); ral's value printer shows it ([`printed`]).
+//! in it ([`LayerValue`]); ral's value printer shows it ([`printed`], [`LayerValue`]'s `Display`).
 
 use super::freeze::Place;
 use crate::authority::policy::{EditorVerb, Gpu, Net, ShellVerb};
@@ -119,6 +119,23 @@ crate::record!(LayerValue {
     fragment: "fragment",
 });
 
+/// As `grant` writes it, or, where no grant spells it, its grant extended by
+/// its fragment.
+impl std::fmt::Display for LayerValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `grant`'s bracket is the form's: the empty grant is `[]`.
+        let grant = match &self.grant {
+            FOValue::Map { entries } if entries.is_empty() => "[]".into(),
+            grant => printed(grant),
+        };
+        write!(f, "grant {grant}")?;
+        match &self.fragment {
+            None => Ok(()),
+            Some(fragment) => write!(f, " extended by {}", printed(fragment)),
+        }
+    }
+}
+
 /// Whole: a rule elided would predict the wrong denial.
 const PRINT: PrintParams = PrintParams {
     max_width: 100,
@@ -165,10 +182,10 @@ fn record<'a>(entries: impl IntoIterator<Item = (&'a str, FOValue)>) -> FOValue 
 /// `[read: []]`, as `grant` writes the empty table.
 fn table<const N: usize>(lists: [(&str, FOValue); N]) -> FOValue {
     let first = lists[0].0;
-    let listed = lists
+    let listed: Vec<_> = lists
         .into_iter()
-        .filter(|(_, list)| list.as_list() != Some(&[]));
-    let listed: Vec<_> = listed.collect();
+        .filter(|(_, list)| list.as_list() != Some(&[]))
+        .collect();
     if listed.is_empty() {
         record([(first, Vec::<FOValue>::new().encode())])
     } else {

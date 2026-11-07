@@ -1,14 +1,14 @@
-//! Per-shell pipeline I/O state.
+//! A shell's three streams.
 
 use super::{Sink, Source};
 
-/// A shell's three streams.
 pub(crate) struct Io {
+    /// Where the running computation reads.
     pub stdin: Source,
     /// Where the running computation writes.
     pub stdout: Sink,
-    /// `spawn` installs a buffer sink here, so a worker's errors are held in
-    /// its handle and replayed by `await`, never interleaved with the parent's.
+    /// Where its diagnostics go; `spawn` gives a worker a buffer sink here,
+    /// replayed by `await`, so they never interleave with the parent's.
     pub stderr: Sink,
 }
 

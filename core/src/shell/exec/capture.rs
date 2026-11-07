@@ -7,14 +7,14 @@ use super::redirect::Prior;
 use crate::fact::AuditIo;
 use crate::io::{Retained, Sink, Streams, new_buffer, tee_with_buffer};
 use crate::shell::runtime::Shell;
-use std::mem::replace;
+use std::mem::{replace, take};
 
 const AUDIT_BUFFER_CAP: usize = 1024 * 1024;
 
 /// Restores the sinks it replaced on `Drop`, panic included.
 struct SinkScope<'a> {
     shell: &'a mut Shell,
-    prior: Option<Prior>,
+    prior: Prior,
 }
 
 impl<'a> SinkScope<'a> {
@@ -24,18 +24,13 @@ impl<'a> SinkScope<'a> {
             stderr: stderr.map(|sink| replace(&mut shell.io.stderr, sink)),
             ..Prior::default()
         };
-        Self {
-            shell,
-            prior: Some(prior),
-        }
+        Self { shell, prior }
     }
 }
 
 impl Drop for SinkScope<'_> {
     fn drop(&mut self) {
-        if let Some(prior) = self.prior.take() {
-            prior.restore(self.shell);
-        }
+        take(&mut self.prior).restore(self.shell);
     }
 }
 

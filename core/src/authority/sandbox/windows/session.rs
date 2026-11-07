@@ -38,7 +38,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::authority::policy::FsAllow;
 use crate::authority::sandbox::carve;
-use crate::authority::sandbox::{FsLists, SandboxProjection, unavailable};
+use crate::authority::sandbox::{SandboxProjection, unavailable};
 use crate::error::{Error, io_message};
 use crate::path::{Installing, Located, RealPath, Walked, shown};
 use crate::process::Unstarted;
@@ -51,8 +51,8 @@ use super::appcontainer::{
 };
 use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 
-/// One fs projection's identity, as [`FsLists`]
-/// carries it, which names the profile its launches run under: launches the
+/// One fs projection's identity, as
+/// [`FsLists`](crate::authority::sandbox::FsLists) carries it, which names the profile its launches run under: launches the
 /// fs grants tell apart never share a named-object namespace. It decides no
 /// capability, since a token names its own launch's grants alone, network
 /// ones included.
@@ -198,9 +198,10 @@ pub(crate) fn confine(
     // an unattenuated projection grants nothing but the image and rests on the
     // ambient ALL APPLICATION PACKAGES grants.
     let lists = projection.fs.lists().cloned().unwrap_or_default();
+    let excluding = !lists.deny.is_empty();
     let (read, write) = (
-        positions(&lists.read, &lists)?,
-        positions(&lists.write, &lists)?,
+        positions(&lists.read, excluding)?,
+        positions(&lists.write, excluding)?,
     );
     // The followed position alone: carving never grants a link entry, and
     // `ensure_unreachable` would refuse a link's own.
@@ -379,13 +380,13 @@ fn ensure_grant(
 /// path it would narrow to one drive and stamp that whole.  An exclusion of
 /// the root is already no exclusion (`deny_all`), and never reaches here.
 /// Run before anything is stamped, so the guard alone judges.
-fn positions<'a>(region: &'a [FsAllow], lists: &FsLists) -> Result<Vec<&'a RealPath>, Error> {
+fn positions(region: &[FsAllow], excluding: bool) -> Result<Vec<&RealPath>, Error> {
     let positions: Option<Vec<_>> = region.iter().map(FsAllow::real).collect();
     positions.ok_or_else(|| {
-        let allows = if lists.deny.is_empty() {
-            "every path"
-        } else {
+        let allows = if excluding {
             "every path except some exclusions"
+        } else {
+            "every path"
         };
         unavailable(format!(
             "this grant allows {allows}, which Windows cannot enforce: a sandboxed program \

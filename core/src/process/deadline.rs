@@ -123,8 +123,11 @@ impl Deadline {
 
     /// `None` if this call disarmed the entry, so it never fires; `Some` if
     /// the daemon claimed it first, its action landing momentarily.
+    ///
+    /// # Panics
+    /// Never: only the consuming methods and `Drop` take the entry.
     pub fn disarm(mut self) -> Option<Claimed> {
-        let Entry { armed, fired } = self.0.take()?;
+        let Entry { armed, fired } = self.0.take().expect("a live handle holds its entry");
         let disarmed = armed.swap(false, Ordering::AcqRel);
         (!disarmed).then_some(Claimed(fired))
     }

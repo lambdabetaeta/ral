@@ -328,7 +328,7 @@ impl From<Unavailable> for io::Error {
 pub(crate) struct Log {
     inner: Mutex<Inner>,
     syncing: Mutex<Syncing>,
-    /// The writer's first failure: it ends the life bound to it.
+    /// The writer's first failure: it ends the home bound to it.
     failure: Fatal<Unavailable>,
     /// The record file, as messages name it.
     record: Option<PathBuf>,
@@ -549,7 +549,7 @@ impl Log {
         Ok(snapshot)
     }
 
-    /// Latch `cause` unless a failure stands, ending the bound life.
+    /// Latch `cause` unless a failure stands, ending the bound home.
     pub(super) fn fail(&self, cause: io::Error) -> Unavailable {
         self.failure
             .latch(Unavailable::new(self.record.clone(), cause))
@@ -560,9 +560,9 @@ impl Log {
             .latch(Unavailable(Arc::new(Failure::CellPoisoned(why))))
     }
 
-    /// End `life` when this writer fails, at once if it has.
-    pub(super) fn bind(&self, life: ScopeNode) {
-        self.failure.bind(life);
+    /// End `home` when this writer fails, at once if it has.
+    pub(super) fn bind(&self, home: ScopeNode) {
+        self.failure.bind(home);
     }
 
     /// Observe without the append lock, latching poison when first met.

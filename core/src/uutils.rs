@@ -178,12 +178,17 @@ pub(crate) fn serve(tool: &std::ffi::OsStr, args: Vec<std::ffi::OsString>) -> u8
         init_signal_dispositions();
         return u8::try_from(invoke(tool, args)).unwrap_or(u8::MAX);
     }
-    #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
-    drop(args);
     // `{tool:?}`, not `.display()`: `Display` would paper over a name that is
     // not Unicode with the very U+FFFD substitution it avoids.
     #[allow(clippy::unnecessary_debug_formatting)]
+    #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
     let unbundled = format!("{tool:?} is not a bundled tool");
+    #[allow(clippy::unnecessary_debug_formatting)]
+    #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
+    let unbundled = {
+        drop(args);
+        format!("{tool:?}: no bundled tools are available in this build")
+    };
     crate::io::terminal::cmd_error("ral", &unbundled);
     127
 }

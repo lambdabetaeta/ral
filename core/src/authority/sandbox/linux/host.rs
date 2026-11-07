@@ -74,7 +74,7 @@ impl Builds {
             // Leaked once: the probe runs once a process, and keeps the fact `Copy`.
             return Self::Nothing(why.leak());
         }
-        let Ok(Some(root)) = super::open_dir_nofollow(&RealPath::universal()) else {
+        let Ok(Some(root)) = super::shown::open_dir_nofollow(&RealPath::universal()) else {
             return Self::Nothing("ral cannot open / to lend bwrap a descriptor");
         };
         // Outer: whether ral lent `/`, which fails with `lift`'s `ulimit -n`

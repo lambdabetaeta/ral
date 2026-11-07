@@ -119,8 +119,8 @@ socket, on which the trampoline says what became of the program
 before it believes the program started.** The life of a launch from the parent's
 side is [[internals/an-external-end-to-end|an-external-end-to-end]]; this is the
 trampoline's. Its code is `core/src/authority/sandbox/warrant/trampoline.rs`;
-`warrant.rs` is the codec and the handoff only, and the warrant carries the
-`Image` verbatim.
+`warrant.rs` is the codec only (`warrant/handoff.rs` holds the descriptors
+handed down), and the warrant carries the `Image` verbatim.
 
 - **The records** are `refused(message)`, `unstarted(errno)`, `started` and
   `ended(status)`. `refused` is the warrant's failure to be received or its

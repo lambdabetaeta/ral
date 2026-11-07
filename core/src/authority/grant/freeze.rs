@@ -366,9 +366,10 @@ impl FreezeCtx {
         &self.cwd
     }
 
-    /// The environment a freeze reads, for the `PATH` a bare name is found on.
-    pub(crate) fn env(&self) -> &EnvVars {
-        &self.env
+    /// `key` as a freeze reads it: the anchor's overlay, then the host.  The
+    /// one environment `name`, `` `dir `path `` and every toolchain selector share.
+    pub(crate) fn var(&self, key: &str) -> Option<String> {
+        self.env.get_or_host(key)
     }
 
     fn home(&self) -> Option<String> {
@@ -438,8 +439,8 @@ impl FreezeCtx {
     }
 
     /// The directories a selector names, each walked as polarity `W` walks.
-    /// Selectors read the host, not the anchor, save for the home; they sit
-    /// here so that one resolver freezes every grant path.
+    /// Selectors read the anchor's environment as [`var`](Self::var) does; they
+    /// sit here so that one resolver freezes every grant path.
     ///
     /// # Errors
     /// `path` over a `$PATH` with no absolute entry, or a `$PATH` entry or
@@ -450,10 +451,11 @@ impl FreezeCtx {
     ) -> Result<Vec<GrantPath<W::Grant>>, Error> {
         let home = self.home_dir()?;
         match selector {
-            Selector::Path => path_dirs::<W>(home.as_ref()),
-            Selector::Toolchain(t) => {
-                toolchains::expand_in::<W>(t, crate::host::var, home.as_ref())
+            Selector::Path => {
+                let path = self.var("PATH").unwrap_or_default();
+                path_dirs_in::<W>(OsStr::new(&path), home.as_ref())
             }
+            Selector::Toolchain(t) => toolchains::expand_in::<W>(t, |k| self.var(k), home.as_ref()),
         }
     }
 
@@ -470,33 +472,35 @@ impl FreezeCtx {
     /// `xdg-*` grant unanswerable, an absolute `XDG_*_HOME` included, since
     /// there would then be nothing to contain it.
     fn xdg<W: Polar>(&self, kind: XdgKind, sub: &str) -> Result<Placed<W>, Error> {
-        let spelled = self.home();
-        let (Some(spelled), Some(base)) = (
-            spelled.as_deref(),
-            resolve_xdg_in(|k| self.env.get_or_host(k), kind, spelled.as_deref()),
-        ) else {
-            return Err(home_unknown());
-        };
+        let home = self.home_dir()?.ok_or_else(home_unknown)?;
+        let base =
+            resolve_xdg_in(|k| self.var(k), kind, Some(&home.spelled)).ok_or_else(home_unknown)?;
         let tag = Anchor::Xdg(kind).tag();
         let resolved = GrantPath::<W>::walked(anchored(&tag, join_sub(base, sub)?)?)?;
         let lands = resolved.real.followed().real();
-        let home = Home::of(spelled)?;
         if home.real.as_ref().is_some_and(|home| home.contains(lands)) {
             return Ok(Placed::Walked(resolved));
         }
+        Err(self.outside_home(kind, &home, &resolved))
+    }
+
+    /// The refusal of an `xdg-*` place whose walk lands outside `home`.
+    fn outside_home<W: Polar>(&self, kind: XdgKind, home: &Home, resolved: &GrantPath<W>) -> Error {
+        let tag = Anchor::Xdg(kind).tag();
+        let lands = resolved.real.followed().real();
         let var = kind.env_var();
-        let val = self.env.get_or_host(var).unwrap_or_default();
+        let val = self.var(var).unwrap_or_default();
         let written = resolved.written.shown();
         let clause = if val.is_empty() {
             format!(
                 "{var} is unset, so the default ({written}) was used. Is HOME ({}) set correctly?",
-                shown(spelled),
+                shown(&home.spelled),
             )
         } else {
             format!(
                 "{var}={val}: set it to a subpath of HOME ({}), unset it to use the \
                  default, or replace {} in the policy with an {} path.",
-                shown(spelled),
+                shown(&home.spelled),
                 code(&format!("`{tag}")),
                 code("`absolute"),
             )
@@ -506,10 +510,10 @@ impl FreezeCtx {
         } else {
             format!(" (written '{written}', which is a symbolic link)")
         };
-        Err(Error::new(format!(
+        Error::new(format!(
             "{} resolves to '{lands}'{via}, outside HOME; refusing to widen the grant.  {clause}",
             code(&format!("`{tag}")),
-        )))
+        ))
     }
 }
 
@@ -601,7 +605,8 @@ fn live_under(raw: &str, rules: PathRules) -> Result<bool, GrantRefusal> {
 /// or system-read directory) or holds (exarch's carve-outs).
 ///
 /// Classified by [`live_under`] under the host's rules on its native text,
-/// and frozen in its native form, never re-read through a payload string.  A
+/// and frozen in its native form; a grant's `absolute` place for it is
+/// `Place::from(&frozen)`, the one conversion.  A
 /// held path has no other platform to be live on, so where a payload would be
 /// the dead grant this one is refused, as one absolute under neither
 /// platform's rules is: a deny that named nothing would fail open.  The
@@ -785,21 +790,22 @@ fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, Error> {
 pub(super) fn the_world(dir: &RealPath, home: Option<&RealPath>) -> Option<&'static str> {
     match home {
         _ if dir.is_root() => Some("the filesystem root"),
-        Some(home) if dir.contains(home) && home.contains(dir) => Some("the home directory itself"),
+        Some(home) if dir == home => Some("the home directory itself"),
         Some(home) if dir.contains(home) => Some("an ancestor of the home directory"),
         _ => None,
     }
 }
 
 /// A directory chosen for `selector` that is [`the_world`], judged where its
-/// walk landed.  `subject` says what chose it; `advice` says what to check.
+/// walk landed.  `subject` says what chose it; `advice` says what to check;
+/// each is asked only for a refusal.
 ///
 /// # Errors
 /// `dir` is a filesystem root, the home or an ancestor of it.
 pub(super) fn refuse_the_world(
     selector: Selector,
-    subject: &str,
-    advice: &str,
+    subject: impl FnOnce() -> String,
+    advice: impl FnOnce() -> String,
     dir: &Trace,
     home: Option<&Home>,
 ) -> Result<(), Error> {
@@ -808,14 +814,10 @@ pub(super) fn refuse_the_world(
     };
     let selector = code(&format!("`dir `{}", selector.name()));
     Err(Error::new(format!(
-        "{subject}, {what}, so {selector} would run and read all of it. {advice}"
+        "{}, {what}, so {selector} would run and read all of it. {}",
+        subject(),
+        advice(),
     )))
-}
-
-/// [`path_dirs_in`] over the host's `$PATH`.
-fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W::Grant>>, Error> {
-    let path = crate::host::var_os("PATH").unwrap_or_default();
-    path_dirs_in::<W>(&path, home)
 }
 
 /// The absolute entries of `path` as written, each classified on its raw
@@ -833,18 +835,19 @@ fn path_dirs_in<W: Polar>(
     let dirs: Vec<_> = crate::path::path_entries(path)
         .filter(|entry| crate::path::is_absolute(entry))
         .map(|entry| {
-            let subject = format!("PATH holds {}", shown(&entry));
+            let subject = || format!("PATH holds {}", shown(&entry));
             let held = host_absolute(&entry).map_err(|e| {
                 e.with_context(format!(
-                    "{subject}, which {} cannot hold",
+                    "{}, which {} cannot hold",
+                    subject(),
                     code("`dir `path")
                 ))
             })?;
             let dir = GrantPath::<W>::walked(held)?;
             refuse_the_world(
                 Selector::Path,
-                &subject,
-                "Is PATH set correctly?",
+                subject,
+                || "Is PATH set correctly?".to_owned(),
                 dir.real.followed(),
                 home,
             )?;

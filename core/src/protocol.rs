@@ -351,7 +351,7 @@ pub enum SessionEvent {
 /// nothing else.
 ///
 /// Both carriers pass every refusal through [`WireError::of`] and back
-/// through [`WireError::into_error`], so a refusal reads the same under
+/// through [`WireError::to_error`], so a refusal reads the same under
 /// either. The enquiring builtin supplies the engine-side provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireError {
@@ -371,10 +371,12 @@ impl WireError {
 
     /// The error this refusal was, on the far side.
     #[must_use]
-    pub fn into_error(self) -> Error {
+    pub fn to_error(&self) -> Error {
         self.hints
-            .into_iter()
-            .fold(Error::new(self.message), Error::with_hint)
+            .iter()
+            .fold(Error::new(self.message.as_str()), |error, hint| {
+                error.with_hint(hint.as_str())
+            })
     }
 }
 
@@ -510,7 +512,7 @@ mod ending_wire_round_trip_tests {
         let Frame::Answer(_, Err(refusal)) = decoded else {
             panic!("the refusal must survive the wire")
         };
-        let error = refusal.into_error();
+        let error = refusal.to_error();
         assert_eq!(
             error.reason,
             Reason::Raised("enquire: the desk refused".into())

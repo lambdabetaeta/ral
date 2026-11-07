@@ -141,6 +141,15 @@ impl<A: Allows, D: Denies<A>> Table<A, D> {
             None => (!self.supports(s)).then_some(Withheld::MissingAllowance),
         }
     }
+
+    /// [`withheld`](Self::withheld) as a judgment: `Ok` exactly when `s` has
+    /// positive evidence alone.
+    ///
+    /// # Errors
+    /// What withholds `s`.
+    pub(crate) fn admits(&self, s: A::Subject<'_>) -> Result<(), Withheld<D>> {
+        self.withheld(s).map_or(Ok(()), Err)
+    }
 }
 
 /// `∧`, pointwise on evidence: denies join; an allow survives where both

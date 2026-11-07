@@ -70,6 +70,14 @@ impl ExitCode for Break {
 }
 
 impl Break {
+    /// Rewrites a catchable error; an escape passes through untouched.
+    pub fn map_error(self, f: impl FnOnce(Error) -> Error) -> Self {
+        match self {
+            Self::Error(e) => Self::Error(f(e)),
+            escape @ Self::Escape(_) => escape,
+        }
+    }
+
     /// The one slot a failure's provenance lives in; an `exit` has none.
     fn prov_slot(&mut self) -> Option<&mut Option<Prov>> {
         match self {
@@ -308,6 +316,19 @@ mod tests {
                 owner: Some(owner),
                 at: None,
             })) if owner == root.id()
+        ));
+    }
+
+    #[test]
+    fn map_error_rewrites_an_error_and_spares_an_escape() {
+        let tagged = |b: Break| b.map_error(|e| e.with_context("ctx"));
+        let Break::Error(e) = tagged(Error::new("x").into()) else {
+            panic!("an error stays an error");
+        };
+        assert_eq!(e.context(), Some("ctx"));
+        assert!(matches!(
+            tagged(Break::Escape(Escape::Exit(3))),
+            Break::Escape(Escape::Exit(3))
         ));
     }
 

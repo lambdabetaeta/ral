@@ -1046,7 +1046,7 @@ mod stdio {
 
 mod foreground {
     use super::super::*;
-    use crate::process::{DurableRoot, Membership, Pgid, TerminalLease};
+    use crate::process::{DurableRoot, Membership, Pgid, Scope, TerminalLease};
 
     /// A session owning a terminal lease plus a `Leased` mooring: the REPL, or
     /// a terminal-launched script.  Stdout defaults to `Sink::Terminal`.
@@ -1067,22 +1067,31 @@ mod foreground {
         shell.io.stdout = crate::io::new_buffer().0;
     }
 
-    /// Never foreground: no loan, and the group `interactive` leaves it in.
-    fn assert_background(placed: (PgidPolicy, Option<PreparedTerminalLoan>), interactive: bool) {
-        let (policy, loan) = placed;
-        assert!(loan.is_none(), "a background child is lent nothing");
+    /// Never foreground: no loan, and the group `interactive` leaves it in,
+    /// where only an interactive run's terminal is readable.
+    fn assert_background(placed: &Placement, interactive: bool) {
+        let policy = &placed.policy;
+        assert!(placed.loan.is_none(), "a background child is lent nothing");
         if interactive {
             assert!(matches!(policy, PgidPolicy::Inherit), "{policy:?}");
         } else {
             assert!(matches!(policy, PgidPolicy::NewSession), "{policy:?}");
         }
+        assert_eq!(placed.readable, interactive);
     }
 
     #[cfg(unix)]
-    fn assert_foreground(placed: (PgidPolicy, Option<PreparedTerminalLoan>)) {
-        let (policy, loan) = placed;
-        assert!(matches!(policy, PgidPolicy::NewLeader), "{policy:?}");
-        assert!(loan.is_some(), "a foreground child is lent the terminal");
+    fn assert_foreground(placed: &Placement) {
+        assert!(
+            matches!(placed.policy, PgidPolicy::NewLeader),
+            "{:?}",
+            placed.policy
+        );
+        assert!(
+            placed.loan.is_some(),
+            "a foreground child is lent the terminal"
+        );
+        assert!(placed.readable, "a lent child reads the terminal");
     }
 
     /// A joined group is never lent: dropping a loan restores the terminal,
@@ -1092,19 +1101,36 @@ mod foreground {
         let (mut shell, mooring) = leased_shell();
         let group = Pgid::from_raw(1).expect("1 is positive");
         shell.session.stage = Some(Membership::new(group, shell.scope.clone()));
-        let (policy, loan) = placement(&shell, &mooring, false);
+        let placed = placement(&shell, &mooring, false);
         assert!(
-            matches!(policy, PgidPolicy::Join(g) if g == group),
-            "{policy:?}"
+            matches!(&placed.policy, PgidPolicy::Join(m) if m.group() == group),
+            "{:?}",
+            placed.policy
         );
-        assert!(loan.is_none());
+        assert!(placed.loan.is_none());
+    }
+
+    /// An envelope leads a group of its own, whatever its pipeline's: the
+    /// one place the rule lives, for a lone command and a stage alike.
+    #[test]
+    fn an_enveloped_member_leads_its_own_group() {
+        let group = Pgid::from_raw(1).expect("1 is positive");
+        let stage = Membership::new(group, Scope::clone(&DurableRoot::default().child()));
+        assert!(matches!(
+            member_policy(stage.clone(), true),
+            PgidPolicy::NewLeader
+        ));
+        assert!(matches!(
+            member_policy(stage, false),
+            PgidPolicy::Join(m) if m.group() == group
+        ));
     }
 
     #[test]
     #[cfg(unix)]
     fn a_leased_terminal_bound_child_foregrounds() {
         let (shell, mooring) = leased_shell();
-        assert_foreground(placement(&shell, &mooring, false));
+        assert_foreground(&placement(&shell, &mooring, false));
     }
 
     /// A capture's sink is a buffer, not the terminal, so it must not steal the
@@ -1113,7 +1139,7 @@ mod foreground {
     fn a_leased_captured_child_stays_in_the_background() {
         let (mut shell, mooring) = leased_shell();
         captured(&mut shell);
-        assert_background(placement(&shell, &mooring, false), true);
+        assert_background(&placement(&shell, &mooring, false), true);
     }
 
     /// The loan foregrounds despite the buffer sink, a lone command as a
@@ -1125,7 +1151,7 @@ mod foreground {
         let (mut shell, mut mooring) = leased_shell();
         captured(&mut shell);
         mooring.terminal_access = TerminalAccess::ExplicitLoan;
-        assert_foreground(placement(&shell, &mooring, false));
+        assert_foreground(&placement(&shell, &mooring, false));
     }
 
     /// A terminal-launched script holds `Leased` exactly like the REPL: gating on
@@ -1135,7 +1161,7 @@ mod foreground {
     fn a_terminal_scripts_leased_child_foregrounds() {
         let (mut shell, mooring) = leased_shell();
         shell.session.interactive = false;
-        assert_foreground(placement(&shell, &mooring, false));
+        assert_foreground(&placement(&shell, &mooring, false));
     }
 
     /// A headless background child leads a session of its own.
@@ -1144,15 +1170,52 @@ mod foreground {
         let (mut shell, mooring) = leased_shell();
         shell.session.interactive = false;
         captured(&mut shell);
-        assert_background(placement(&shell, &mooring, false), false);
+        assert_background(&placement(&shell, &mooring, false), false);
     }
 
+    /// Its session has no controlling terminal: lent nothing, led as a group
+    /// of its own, and the terminal readable as in ral's own group.
     #[test]
-    fn an_enveloped_child_never_foregrounds() {
-        let (shell, mut mooring) = leased_shell();
-        assert_background(placement(&shell, &mooring, true), true);
+    fn an_enveloped_child_is_never_lent_the_terminal() {
+        let (mut shell, mut mooring) = leased_shell();
+        let enveloped = |shell: &Shell, mooring: &Mooring| {
+            let placed = placement(shell, mooring, true);
+            assert!(matches!(placed.policy, PgidPolicy::NewLeader));
+            assert!(placed.loan.is_none());
+            placed.readable
+        };
+        assert!(enveloped(&shell, &mooring));
         mooring.terminal_access = TerminalAccess::ExplicitLoan;
-        assert_background(placement(&shell, &mooring, true), true);
+        assert!(enveloped(&shell, &mooring));
+        shell.session.interactive = false;
+        assert!(!enveloped(&shell, &mooring));
+    }
+
+    /// The handoff fails where stdin is no terminal: the child, outside the
+    /// foreground, would stop on its first tty read, so it is killed and the
+    /// refusal is the verdict.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_the_terminal_cannot_be_lent_to_is_killed() {
+        if rustix::termios::tcgetpgrp(rustix::stdio::stdin()).is_ok() {
+            return;
+        }
+        let (mut shell, mooring) = leased_shell();
+        let head = Head::resolve(&CommandName::Path("/bin/sleep".into()), &shell.context)
+            .admit(&mooring, &mut shell)
+            .expect("an unrestricted shell admits sleep");
+        let started = std::time::Instant::now();
+        let Err(Break::Error(refusal)) = run(head, &[Value::string("30")], &mooring, &shell) else {
+            panic!("a failed handoff must refuse the command");
+        };
+        assert!(
+            refusal.describe().contains("could not hand the terminal"),
+            "{refusal}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the child must be killed, not waited out"
+        );
     }
 
     /// A `Denied` mooring never foregrounds even though the session owns a lease
@@ -1165,7 +1228,7 @@ mod foreground {
             shell.session.terminal_lease.is_some(),
             "session owns a lease"
         );
-        assert_background(placement(&shell, &mooring, false), true);
+        assert_background(&placement(&shell, &mooring, false), true);
     }
 
     /// A launch that never owned the terminal foreground (backgrounded `ral … &`,
@@ -1174,7 +1237,7 @@ mod foreground {
     fn no_lease_never_foregrounds() {
         let (mut shell, mooring) = leased_shell();
         shell.session.terminal_lease = None;
-        assert_background(placement(&shell, &mooring, false), true);
+        assert_background(&placement(&shell, &mooring, false), true);
     }
 }
 
@@ -1590,7 +1653,12 @@ mod process {
                     prepare(head, &[], Ownership::Kept, shell).expect("the launch builds");
                 let shown = prepared.shown.clone();
                 between();
-                (shown, start(prepared, PgidPolicy::Inherit, &shell.scope))
+                let policy = if prepared.launch.enveloped() {
+                    PgidPolicy::NewLeader
+                } else {
+                    PgidPolicy::Inherit
+                };
+                (shown, start(prepared, policy, &shell.scope))
             })
         }
 

@@ -36,9 +36,9 @@ pub fn load_capabilities_from_str(
     // A profile's dimensions are `grant`'s own options, so the file's returned
     // row is held to the same table the form is.
     let contract = crate::typecheck::contract::declared(crate::typecheck::Form::Grant);
-    let value = super::evaluate_source(mooring, shell, source, origin, Some(contract))
-        .map_err(|e| wrap(format!("capability file {origin}"), e))?;
     let prefix = format!("capability file {origin}");
+    let value = super::evaluate_source(mooring, shell, source, origin, Some(contract))
+        .map_err(|b| b.map_error(|e| e.with_context(&prefix)))?;
     decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }
 
@@ -59,9 +59,10 @@ pub fn load_capabilities_from_path(
     ctx: &FreezeCtx,
 ) -> Settled<GrantLayer> {
     let rp = shell.anchor(path);
-    let located = (shell.locate::<Reading>(&rp)).map_err(|e| wrap("capability file", e))?;
+    let located = (shell.locate::<Reading>(&rp))
+        .map_err(|b| b.map_error(|e| e.with_context("capability file")))?;
     let file = SourceFile::new(located.real().as_path().to_path_buf())
-        .map_err(|e| Error::new(format!("capability file {e}")))?;
+        .map_err(|e| Error::new(e.to_string()).with_context("capability file"))?;
     let source = (located.read().and_then(std::io::read_to_string))
         .map_err(|e| Error::new(io_message(rp.shown(), &e)).with_context("capability file"))?;
     let source = crate::source::normalize_source_text(source);
@@ -130,13 +131,6 @@ pub fn apply_session_profiles(
         shell.push_session_capabilities(layer);
     }
     Ok(())
-}
-
-fn wrap(context: impl std::fmt::Display, e: Break) -> Break {
-    match e {
-        Break::Error(err) => err.with_context(context).into(),
-        other @ Break::Escape(_) => other,
-    }
 }
 
 #[cfg(test)]

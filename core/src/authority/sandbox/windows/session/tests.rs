@@ -1,5 +1,6 @@
-use super::{FsAllow, FsLists, ProjectionKey, profile_name, refuse_deny_meeting_grant};
+use super::{FsAllow, ProjectionKey, profile_name, refuse_deny_meeting_grant};
 use crate::authority::policy::{FsDeny, GrantPath};
+use crate::authority::sandbox::FsLists;
 use crate::authority::sandbox::carve::carve;
 use crate::error::Error;
 use crate::path::{Dir, Excluded, FrozenPath, RealPath, Trace};
@@ -73,8 +74,9 @@ impl Drop for SessionGuard {
 
 /// Both regions' positions, as `confine` asks them.
 fn refuse_universal_prefix(rules: &FsLists) -> Result<(), Error> {
-    super::positions(&rules.read, rules)?;
-    super::positions(&rules.write, rules)?;
+    let excluding = !rules.deny.is_empty();
+    super::positions(&rules.read, excluding)?;
+    super::positions(&rules.write, excluding)?;
     Ok(())
 }
 
@@ -492,7 +494,7 @@ fn assert_reads(
 
 /// Spawn `launch`, a confined file read, and assert it reads `secret` exactly
 /// when `readable`.
-fn assert_launch_reads(mut launch: crate::process::Launch, relative: &str, readable: bool) {
+fn assert_launch_reads(launch: crate::process::Launch, relative: &str, readable: bool) {
     use crate::process::PgidPolicy;
     use std::io::Read;
     let mut child = launch
@@ -771,7 +773,7 @@ fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
             gpu: None,
             exec: ExecProjection::default(),
         };
-        let mut launch = confined(&writable, &w, "echo ok>made.txt").unwrap();
+        let launch = confined(&writable, &w, "echo ok>made.txt").unwrap();
         let mut child = launch
             .spawn(
                 PgidPolicy::Inherit,

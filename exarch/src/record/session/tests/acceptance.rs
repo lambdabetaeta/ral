@@ -7,10 +7,10 @@ use ral_core::process::DurableRoot;
 use std::time::Duration;
 
 fn cell(log: &AgentLog, folds: (Mail, Schedules, Model)) -> AgentMailbox {
-    let life = DurableRoot::default().child();
+    let home = DurableRoot::default().child();
     let journal = log.record_emitter();
-    journal.bind(life.clone());
-    AgentMailbox::new(log.id(), life, journal, Admission::Free, None, folds)
+    journal.bind(home.clone());
+    AgentMailbox::new(log.id(), home, journal, Admission::Free, None, folds)
 }
 
 fn live_root(tag: &str, returns: bool, selected: &Selected) -> (TestDir, AgentLog, AgentMailbox) {

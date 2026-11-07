@@ -29,6 +29,9 @@ fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     Ok(bytes)
 }
 
+const DECODE_VALUE_IN_HAND: &str =
+    "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`";
+
 /// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
 /// argument outright, so this guard is for spread calls, whose arity it
 /// cannot see ([`crate::ir::Argv::positional`] gives up on them).
@@ -36,7 +39,11 @@ fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
     if args.is_empty() {
         return Ok(());
     }
-    Err(Error::new(format!("{name}: takes no arguments; it reads the byte channel")).with_hint("to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`").into())
+    Err(Error::new(format!(
+        "{name}: takes no arguments; it reads the byte channel"
+    ))
+    .with_hint(DECODE_VALUE_IN_HAND)
+    .into())
 }
 
 fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {

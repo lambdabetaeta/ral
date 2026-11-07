@@ -3,7 +3,7 @@ use crate::fact::ExitCode as _;
 use crate::process::CancelCause;
 use crate::process::cancel::TestClock;
 use crate::protocol::Ran;
-use crate::shell::runtime::Escape;
+use crate::shell::runtime::{Break, Escape};
 use crate::source::SourceOrigin;
 use crate::test_helper::SLEEP;
 use std::sync::{Arc, Mutex};

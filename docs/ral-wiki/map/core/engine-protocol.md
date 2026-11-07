@@ -113,7 +113,7 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `WireError { message, hints }` — the one wire form of an `Error`: a refused
   enquiry's `Frame::Answer`, `SessionEvent::Refused` and `Severed::Refused`.
   `WireError::of(&Error)` takes the message line, context included, and the
-  hints; `into_error` folds them back through `with_hint` as a plain
+  hints; `to_error` folds them back through `with_hint` as a plain
   `Reason::Raised`. Both carriers pass every refusal through the pair, so a
   refusal reads the same under either and its hints survive the crossing.
   The record (`ErrorRecord`, `$err`) is untouched: hints stay report facts.
@@ -341,7 +341,7 @@ The wire carrier's engine half: a connection-lived engine process.
   once the first `Ping` arrives (both `HOST_SILENCE_DEADLINE` in production,
   a test gets a brisker pair).
 - The teardown settle — on any loop exit: `Scopes::end`, close the work
-  channel, then wait for the engine thread under `SETTLE_TIMEOUT`/`SETTLE_POLL`.
+  channel, then wait for the engine thread under `SETTLE_TIMEOUT` (`wait_ended`).
   Join includes engine destruction and its roster drain. Only a successful
   join with `WorkerRegistry::is_drained()` may send `Ended`; timeout, panic
   or a surviving worker exits without acknowledging teardown.

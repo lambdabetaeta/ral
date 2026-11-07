@@ -37,7 +37,7 @@ it; macOS, where an exec allow is readable, did not have that gap.
 
 ## Decision
 
-`Binds::open` (`core/src/sandbox/linux.rs`) is the one place a launch opens
+`Binds::open` (`core/src/authority/sandbox/linux/shown.rs`) is the one place a launch opens
 what it mounts. It plans every bind the projection asks for, opens each object
 once with `openat2(O_PATH | O_CLOEXEC, RESOLVE_NO_SYMLINKS)`, and lends one
 copy per bind at `Slot::Mount(i)`, the open-ended run after the fixed slots

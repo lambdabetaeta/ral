@@ -12,10 +12,10 @@ fn spawn_confined(
     crate::process::Pgid,
     crate::shell::runtime::Shell,
 ) {
-    use crate::process::{Landing, PgidPolicy};
+    use crate::process::{Group, PgidPolicy};
     let mut shell = crate::test_helper::core_shell();
     shell.scope = scope.clone();
-    let mut launch = crate::authority::sandbox::sandboxed_command(
+    let launch = crate::authority::sandbox::sandboxed_command(
         &unrestricted(),
         &Image::of(&sh()),
         &sh_args(script),
@@ -26,7 +26,7 @@ fn spawn_confined(
     let spawned = launch
         .spawn(PgidPolicy::NewLeader, scope)
         .expect("spawn confined sh");
-    let Landing::Owns(pgid) = spawned.landing else {
+    let Group::Enveloped(pgid) = spawned.group else {
         panic!("a kept launch names its payload's group");
     };
     (spawned, pgid, shell)
@@ -572,7 +572,7 @@ fn an_enveloped_start_claims_its_running_program_and_not_the_monitor() {
         let Claim::Confined(pids) = &born.claim else {
             panic!("a launch under a grant is confined");
         };
-        let crate::process::Landing::Owns(payload) = born.spawned.landing else {
+        let crate::process::Group::Enveloped(payload) = born.spawned.group else {
             panic!("a kept launch names its payload's group");
         };
         let comm = |pid: &u32| std::fs::read_to_string(format!("/proc/{pid}/comm"));

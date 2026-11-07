@@ -166,7 +166,7 @@ impl<A: Reads> Located<A> {
     /// the object judged, whatever its name holds by now.
     #[cfg(unix)]
     pub(crate) fn interpreter(&self) -> Option<PathBuf> {
-        crate::path::shebang(self.read().ok()?)
+        crate::path::shebang::shebang(self.read().ok()?)
     }
 }
 

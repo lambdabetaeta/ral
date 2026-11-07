@@ -133,12 +133,7 @@ pub struct SessionState {
     /// Running as an interactive REPL, not merely attached to a tty.
     pub(crate) interactive: bool,
     /// The pipeline group this shell's externals join, never leading one of
-    /// their own; `None` outside a stage.  It decides pgid placement (a
-    /// standalone external may lead its own group, so a watchdog cancel can
-    /// `kill(-pgid, …)` the whole subtree), and its absence is one conjunct
-    /// of the foreground gate in `shell/exec/command.rs`; holding
-    /// the session's [`TerminalLease`](crate::process::TerminalLease) is
-    /// another.
+    /// their own; `None` outside a stage, where an external may lead its own.
     pub(crate) stage: Option<crate::process::Membership>,
     /// Named run entry points (rc-declared prompt, startup block, plugin
     /// hooks): a namespace apart from both lexical scope and the handler

@@ -62,18 +62,14 @@ impl<W: Polar> GrantPath<W> {
     /// test's rule, made without a grant value.
     ///
     /// # Errors
-    /// What the decoder refuses of the place, or a dead spelling.
+    /// What the decoder refuses of the place.
+    ///
+    /// # Panics
+    /// On a spelling the decoder drops as dead: no fixture's rule is one.
     #[cfg(test)]
     pub(crate) fn walk(written: FrozenPath) -> Result<GrantPath<W::Grant>, Error> {
-        let raw = written.into_string();
-        let dead = || {
-            Error::new(format!(
-                "'{}' is absolute only under the other platform's rules",
-                crate::path::shown(&raw)
-            ))
-        };
-        super::Placed::<W>::absolute(&raw)?
-            .ok_or_else(dead)?
+        super::Placed::<W>::absolute(&written.into_string())?
+            .expect("a fixture's rule is absolute under this platform's rules")
             .grant()
     }
 
@@ -102,9 +98,8 @@ mod tests {
     /// A spelling the decoder would drop as dead is no fixture's rule.
     #[cfg(unix)]
     #[test]
+    #[should_panic(expected = "absolute under this platform's rules")]
     fn the_fixture_refuses_a_foreign_spelling() {
-        let foreign = FrozenPath::from_surface(r"C:\x");
-        let dead = GrantPath::<Trace>::walk(foreign).unwrap_err();
-        assert!(dead.to_string().contains("other platform"), "{dead}");
+        drop(GrantPath::<Trace>::walk(FrozenPath::from_surface(r"C:\x")));
     }
 }

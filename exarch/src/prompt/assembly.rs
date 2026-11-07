@@ -2,8 +2,9 @@
 //! behind `Workspace`, and the grant section.
 
 use super::*;
-use ral_core::authority::grant::value::{Axes, ExecTable, GrantValue, Target};
+use ral_core::authority::grant::value::{Axes, ExecTable, GrantValue, LayerValue, Target, printed};
 use ral_core::authority::policy::GrantStack;
+use ral_core::data::FOValue;
 use std::fs;
 
 const HEADINGS: [&str; 9] = [
@@ -173,10 +174,11 @@ fn an_extended_layer_is_shown_as_its_grant_extended_by_its_fragment() {
         }),
         ..Axes::default()
     });
-    let shown = layer(&LayerValue {
+    let shown = LayerValue {
         grant: data(Axes::default()),
         fragment: Some(fragment.clone()),
-    });
+    }
+    .to_string();
     assert_eq!(
         shown,
         format!("grant [] extended by {}", printed(&fragment))

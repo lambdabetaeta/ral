@@ -19,7 +19,7 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
 
 **`bus/mailbox.rs` linearises the three control folds and their payloads.**
 
-- `AgentMailbox` is the owner end; `AgentAddress` shares cell and life.
+- `AgentMailbox` is the owner end; `AgentAddress` shares cell and home.
   `Mail`, `Schedules` and `Model` live under one mutex. `transact` lends a
   closure-scoped `Txn`; poison ends life instead of recovering memory that
   may disagree with the log. The port reads fold-backed status, not a copy.
@@ -89,7 +89,7 @@ only the fleet's `Registry` and usage meter, not its launch. The owner is
   `Transient` has no sequence or durable form. The writer owns a `File`
   directly. The first uncommitted append (write, encoding or append-lock
   poison), or durable record refused by the fold, latches `Unavailable`
-  across clones and ends the life supplied by `Emitter::bind`. `emit` returns
+  across clones and ends the home supplied by `Emitter::bind`. `emit` returns
   that failure; `check_available` observes it; `emit_or_end` leaves it to the
   owner. Producers never report it. The owner's terminus announces it once
   as `Transient::Fault` on the independent fleet sink and makes it the outcome.

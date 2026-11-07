@@ -144,8 +144,8 @@ impl LexicalPath {
         is_absolute(path).then(|| Self::from_lexed(path.to_path_buf()))
     }
 
-    /// [`absolute`](Self::absolute) of a path the program spells as text.
-    #[cfg(unix)]
+    /// [`absolute`](Self::absolute) of a path the program spells as text.  The
+    /// walk then resolves it, so the lift opens nothing.
     pub(crate) fn absolute_str(path: &str) -> Option<Self> {
         is_absolute(path).then(|| Self::from_lexed(PathBuf::from(path)))
     }

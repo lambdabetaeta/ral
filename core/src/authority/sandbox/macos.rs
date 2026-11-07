@@ -426,25 +426,23 @@ impl fmt::Display for Clause<'_> {
 /// Mach services the base profile withholds on purpose, each with its reason as
 /// data: a comment cannot reach the agent holding the `EPERM`, and a deliberate
 /// refusal read as an accident is chased instead of worked around.
-fn withheld_services() -> &'static [(&'static str, &'static str)] {
-    &[
-        (
-            "com.apple.SecurityServer",
-            "securityd hands out keychain items, so no profile admits it; cargo's bundled \
+const WITHHELD_SERVICES: [(&str, &str); 3] = [
+    (
+        "com.apple.SecurityServer",
+        "securityd hands out keychain items, so no profile admits it; cargo's bundled \
              git needs it for TLS, so set `net.git-fetch-with-cli` and cargo will fetch \
              through the git binary instead",
-        ),
-        (
-            "com.apple.coreservices.launchservicesd",
-            "launchservicesd spawns `/usr/bin/open`'s target as a child of launchd, outside \
+    ),
+    (
+        "com.apple.coreservices.launchservicesd",
+        "launchservicesd spawns `/usr/bin/open`'s target as a child of launchd, outside \
              this profile: an escape, and for a URL an egress channel under `` net: `offline ``",
-        ),
-        (
-            "com.apple.pasteboard",
-            "the pasteboard is a clipboard no grant mentions",
-        ),
-    ]
-}
+    ),
+    (
+        "com.apple.pasteboard",
+        "the pasteboard is a clipboard no grant mentions",
+    ),
+];
 
 /// Metal's per-user caches, which its compiler writes on a JIT build.
 const GPU_CACHES: [&str; 3] = [
@@ -478,7 +476,7 @@ fn gpu_caches() -> &'static [Rendered] {
 /// Mach name with the instance suffix the lookup carried
 /// (`com.apple.pasteboard.1`, `com.apple.distributed_notifications@Uv3`).
 pub(super) fn withheld_service(name: &str) -> Option<&'static str> {
-    withheld_services()
+    WITHHELD_SERVICES
         .iter()
         .find(|(service, _)| name.starts_with(service))
         .map(|(_, why)| *why)
@@ -539,7 +537,7 @@ unsafe extern "C" {
 mod tests {
     use super::{
         BASE_PROFILE, Clause, Filter, GPU_CACHES, GPU_NAMES, GPU_PROFILE, NET_PROFILE, Profile,
-        RESOLVER_SOCKET, build_profile, gpu_caches, withheld_services,
+        RESOLVER_SOCKET, WITHHELD_SERVICES, build_profile, gpu_caches,
     };
     use crate::authority::policy::{
         ExecAllow, ExecDeny, ExecRules, FsAllow, FsDeny, Gpu, GrantPath, Net, Rule,
@@ -1294,7 +1292,7 @@ mod tests {
         );
         // A service the hint explains must be one no projection opens, or the
         // reason is quoted about a service the child actually holds.
-        for (service, _) in withheld_services() {
+        for (service, _) in WITHHELD_SERVICES {
             assert!(
                 !closed.contains(service) && !rules(&open).contains(service),
                 "{service} carries a withheld-service reason yet some profile admits it"

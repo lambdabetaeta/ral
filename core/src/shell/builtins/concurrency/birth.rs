@@ -7,9 +7,9 @@ use crate::fact::{Reason, Worker};
 use crate::io::{Sink, Streams, new_buffer};
 use crate::process::{DurableRoot, Scope};
 use crate::shell::runtime::{
-    Brood, BroodGuard, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed,
-    HandleInner, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, Value, WatchEvent,
-    WorkerEntry, WorkerId,
+    BroodGuard, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed, HandleInner,
+    Mooring, Observed, Owner, Settled, Shell, SurfaceSink, Value, WatchEvent, WorkerEntry,
+    WorkerId,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,14 +20,6 @@ pub(super) enum Birth {
     Spawn { title: Option<String> },
     /// `watch LABEL BODY`: as `Spawn`, its lines streamed live.
     Watch { label: String },
-}
-
-/// Who settles a worker, read off the cradle once: a gather's brood, which
-/// enrols it, joins or drains it and hears its surface live; or the session,
-/// which is told of it and gets its surface buffered, flushed with one `done`.
-enum Birthplace {
-    Gather(Brood),
-    Session(Option<Arc<DeferredSurface>>),
 }
 
 /// Spawn a child concurrent block on a new OS thread and return its handle.
@@ -56,24 +48,20 @@ where
 
     let Cradle { under, brood } = &shell.local.cradle;
     let node = under.child();
-    let place = match brood {
-        Some(brood) => Birthplace::Gather(brood.clone()),
-        None => Birthplace::Session(
-            mooring
-                .deferred
-                .clone()
-                .map(|d| Arc::new(DeferredSurface::new(d))),
-        ),
-    };
-    // A session worker's surface is taken from the spawning run's mooring, so
-    // the destination outlives that run's teardown.
-    let (owner, surface, flushed) = match &place {
-        Birthplace::Gather(brood) => (brood.owner.into(), mooring.surface.clone(), None),
-        Birthplace::Session(deferred) => (
+    // A gather's brood enrols the worker, joins or drains it and hears its
+    // surface live; the session is told of it and gets its surface buffered,
+    // flushed with one `done`, taken from the spawning run's mooring so the
+    // destination outlives that run's teardown.
+    let gather = brood.clone();
+    let (owner, surface, flushed) = if let Some(brood) = &gather {
+        (brood.owner.into(), mooring.surface.clone(), None)
+    } else {
+        let deferred = (mooring.deferred.clone()).map(|d| Arc::new(DeferredSurface::new(d)));
+        (
             Owner::Session,
             deferred.clone().map(|s| s as SurfaceSink),
-            deferred.clone(),
-        ),
+            deferred,
+        )
     };
     let worker_mooring = Mooring::for_thread(mooring, node.clone(), surface);
     let (title, watched) = match birth {
@@ -156,15 +144,15 @@ where
             handle: handle.clone(),
         },
     );
-    match place {
-        Birthplace::Gather(brood) => brood.enrol(handle.clone()).map_err(|EnrolClosed| {
+    match gather {
+        Some(brood) => brood.enrol(handle.clone()).map_err(|EnrolClosed| {
             Error::new(format!(
                 "{verb}: the enclosing gather has ended; the new worker was cancelled"
             ))
         })?,
         // After the reservation, never before: a cap-refused spawn observes no
         // birth, so no phantom worker reaches an orphan join.
-        Birthplace::Session(_) => shell.observe(mooring, Observed::Worker(Worker { id, title })),
+        None => shell.observe(mooring, Observed::Worker(Worker { id, title })),
     }
     Ok(handle)
 }

@@ -135,11 +135,11 @@ fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
         .message(&parent.handle(), "follow up".into())
         .unwrap();
     let handle = child.handle();
-    let life = child.mailbox.home();
+    let home = child.mailbox.home();
     handle
         .0
         .address
-        .after_report_commit(move || assert!(life.is_cancelled()));
+        .after_report_commit(move || assert!(home.is_cancelled()));
     drop(child);
     assert!(!handle.is_live());
     assert_eq!(

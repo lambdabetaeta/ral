@@ -27,9 +27,9 @@ use unix::gesture_signal;
 #[cfg(target_os = "linux")]
 pub(crate) use unix::ignored;
 #[cfg(unix)]
-pub use unix::{Disposition, install, install_handlers, reset_child_signals};
+pub use unix::{Disposition, install, install_handlers};
 #[cfg(unix)]
-pub(crate) use unix::{KILL, gesture, grace_signal};
+pub(crate) use unix::{KILL, gesture, grace_signal, reset_child_signals};
 
 #[cfg(windows)]
 mod windows;
@@ -38,7 +38,7 @@ use windows::gesture_signal;
 #[cfg(windows)]
 pub(crate) use windows::{KILL, grace_signal};
 #[cfg(windows)]
-pub use windows::{install_handlers, install_interrupt_handler, reset_child_signals};
+pub use windows::{install_handlers, install_interrupt_handler};
 
 /// Every signal a death by which is `cause`'s: its grace signal, its key, and
 /// the kill that ends every teardown.

@@ -122,7 +122,7 @@ impl Emitter {
         self.log.check_available()
     }
 
-    /// Persist every commit preceding this call, or end the bound life.
+    /// Persist every commit preceding this call, or end the bound home.
     pub(crate) fn sync(&self) -> Result<(), Unavailable> {
         self.log.sync()
     }
@@ -137,12 +137,12 @@ impl Emitter {
         self.log.before_sync(before);
     }
 
-    /// End `life` when this writer fails, at once if it has.
-    pub(crate) fn bind(&self, life: ScopeNode) {
-        self.log.bind(life);
+    /// End `home` when this writer fails, at once if it has.
+    pub(crate) fn bind(&self, home: ScopeNode) {
+        self.log.bind(home);
     }
 
-    /// Latch `cause` unless a failure stands, ending the bound life.
+    /// Latch `cause` unless a failure stands, ending the bound home.
     pub(super) fn fail(&self, cause: io::Error) -> Unavailable {
         self.log.fail(cause)
     }
@@ -217,7 +217,7 @@ impl Emitter {
         Ok(folds)
     }
 
-    /// End the bound life when its cell can no longer be trusted.
+    /// End the bound home when its cell can no longer be trusted.
     pub(crate) fn cell_poisoned(&self, why: String) -> Unavailable {
         self.log.cell_poisoned(why)
     }
@@ -234,7 +234,7 @@ impl Emitter {
     }
 
     /// [`Self::emit`] where a failure needs no answer here: it has latched the
-    /// writer and ended the life bound to it, whose owner announces it once.
+    /// writer and ended the home bound to it, whose owner announces it once.
     pub fn emit_or_end(&self, record: impl Into<Record>) {
         drop(self.emit(record));
     }

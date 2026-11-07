@@ -398,7 +398,7 @@ impl Agent {
         Ok(Outcome::Replied)
     }
 
-    /// The exchange halted: its engine was lost, which ended the life, or it
+    /// The exchange halted: its engine was lost, which ended the home, or it
     /// was cancelled. A cancellation's `Forensic::Cancelled` comes from
     /// `quiesce` itself; the view fold draws it.
     fn halted(&mut self) -> Result<Outcome, Fault> {

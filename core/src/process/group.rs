@@ -17,9 +17,7 @@ use super::signal::KILL;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub(crate) use unix::{SpawnError, spawn_with_pgid};
-#[cfg(unix)]
-pub(crate) use unix::{Survivor, spawn_detached};
+pub(crate) use unix::{SpawnError, Survivor, spawn_detached, spawn_with_pgid};
 
 #[cfg(windows)]
 mod windows;
@@ -104,8 +102,8 @@ impl Pgid {
 /// stages `Join`, an interactive background child `Inherit`, a headless child
 /// `NewSession`.  Unix applies the choice in `pre_exec` before `execve`;
 /// Windows maps it onto a Job Object at the launch boundary.
-#[derive(Clone, Copy, Debug)]
-pub enum PgidPolicy {
+#[derive(Clone, Debug)]
+pub(crate) enum PgidPolicy {
     /// Inherit the parent's pgid — no `setpgid` call.
     Inherit,
     /// Lead a fresh group (`setpgid(0, 0)`), keeping the parent's session and
@@ -117,33 +115,9 @@ pub enum PgidPolicy {
     /// reaches the subtree.  Used by a headless child, which never takes a
     /// terminal, and by `detach`'s intermediate.
     NewSession,
-    /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
-    Join(Pgid),
-}
-
-/// Where a spawned child landed, and so what addresses it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Landing {
-    /// A group of its own, or its envelope's payload's: signalled and killed
-    /// whole.
-    Owns(Pgid),
-    /// A pipeline's, whose owner addresses it as a whole.
-    Joins,
-    /// ral's own, where only its pid addresses it.
-    Shares,
-}
-
-impl Landing {
-    /// Who signals the child: the group it owns, the `stage`'s it joined, or
-    /// ral's own, where only its pid addresses it.
-    pub(crate) fn group(self, stage: Option<&Membership>) -> Group {
-        match (self, stage) {
-            (Self::Owns(group), _) => Group::Owns(group),
-            (Self::Joins, Some(stage)) => Group::Joins(stage.clone()),
-            (Self::Shares, _) => Group::Shares,
-            (Self::Joins, None) => unreachable!("a child joins a group only from a stage"),
-        }
-    }
+    /// Join a pipeline's group as a non-leader (`setpgid(0, leader)`), under
+    /// the stage scope its owner delivers for.
+    Join(Membership),
 }
 
 /// A pipeline group joined, and the stage scope whose every cause the
@@ -174,6 +148,11 @@ impl Membership {
 pub(crate) enum Group {
     /// Its own: signalled and killed whole.
     Owns(Pgid),
+    /// A confining envelope's payload's, which the envelope's session keeps
+    /// apart from every group ral addresses: signalled and killed whole.  The
+    /// envelope itself is nobody's to address.
+    #[cfg_attr(windows, allow(dead_code, reason = "Windows has no envelope"))]
+    Enveloped(Pgid),
     /// A pipeline's, whose owner delivers what the stage holds.
     Joins(Membership),
     /// ral's own: never signalled whole, so its children go by pid.
@@ -184,7 +163,7 @@ impl Group {
     /// The group signalled and killed whole, an owner's alone.
     pub(crate) const fn owned(&self) -> Option<Pgid> {
         match self {
-            Self::Owns(group) => Some(*group),
+            Self::Owns(group) | Self::Enveloped(group) => Some(*group),
             Self::Joins(_) | Self::Shares => None,
         }
     }
@@ -194,7 +173,7 @@ impl Group {
     /// interrupt, the tty's Ctrl-C having reached that group whole.
     pub(crate) fn owes(&self, cause: CancelCause) -> bool {
         match self {
-            Self::Owns(_) => true,
+            Self::Owns(_) | Self::Enveloped(_) => true,
             Self::Joins(m) => m.owes(cause),
             Self::Shares => cause != CancelCause::Interrupted,
         }
@@ -250,31 +229,25 @@ mod tests {
         assert!(!member.owes(CancelCause::TimedOut));
     }
 
-    /// A child's group is the one it owns, its stage's where it joined one,
-    /// or ral's own.  Where it lands is its spawn's to say
-    /// (`unix::tests::a_spawn_says_where_its_child_landed`).
     #[test]
-    fn a_landing_names_who_signals_the_child() {
+    fn only_a_group_held_whole_is_owned() {
         let (seven, nine) = (
             Pgid::from_raw(7).expect("positive"),
             Pgid::from_raw(9).expect("positive"),
         );
         let stage = Membership::new(seven, Scope::clone(&DurableRoot::default().child()));
-        assert!(matches!(
-            Landing::Owns(nine).group(Some(&stage)),
-            Group::Owns(g) if g == nine
-        ));
-        assert!(matches!(
-            Landing::Joins.group(Some(&stage)),
-            Group::Joins(m) if m.group() == seven
-        ));
-        assert!(matches!(Landing::Shares.group(None), Group::Shares));
+        assert_eq!(Group::Owns(nine).owned(), Some(nine));
+        assert_eq!(Group::Enveloped(nine).owned(), Some(nine));
+        assert_eq!(Group::Joins(stage).owned(), None);
+        assert_eq!(Group::Shares.owned(), None);
     }
 
     #[test]
     fn an_owner_owes_every_cause() {
-        let group = Group::Owns(Pgid::from_raw(1).expect("1 is positive"));
-        assert!(CancelCause::VARIANTS.iter().all(|&c| group.owes(c)));
+        let pgid = Pgid::from_raw(1).expect("1 is positive");
+        for group in [Group::Owns(pgid), Group::Enveloped(pgid)] {
+            assert!(CancelCause::VARIANTS.iter().all(|&c| group.owes(c)));
+        }
     }
 
     /// The tty's Ctrl-C reached ral's own group whole; every other cause is

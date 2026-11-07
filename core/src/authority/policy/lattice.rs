@@ -331,35 +331,15 @@ impl GrantPath<Trace> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantLayer {
-    fs: Option<FsLayer>,
-    exec: Option<ExecRules>,
-    net: Option<Net>,
-    gpu: Option<Gpu>,
-    editor: Option<BTreeSet<EditorVerb>>,
-    shell: Option<BTreeSet<ShellVerb>>,
+    pub(crate) exec: Option<ExecRules>,
+    pub(crate) fs: Option<FsLayer>,
+    pub(crate) net: Option<Net>,
+    pub(crate) gpu: Option<Gpu>,
+    pub(crate) editor: Option<BTreeSet<EditorVerb>>,
+    pub(crate) shell: Option<BTreeSet<ShellVerb>>,
 }
 
 impl GrantLayer {
-    /// A layer of these axes, each already resolved: what the decoder makes
-    /// of a record.
-    pub(crate) fn new(
-        fs: Option<FsLayer>,
-        exec: Option<ExecRules>,
-        net: Option<Net>,
-        gpu: Option<Gpu>,
-        editor: Option<BTreeSet<EditorVerb>>,
-        shell: Option<BTreeSet<ShellVerb>>,
-    ) -> Self {
-        Self {
-            fs,
-            exec,
-            net,
-            gpu,
-            editor,
-            shell,
-        }
-    }
-
     /// Ambient authority, the lattice top: all axes `None`, no attenuation.
     pub fn root() -> Self {
         Self::default()
@@ -485,7 +465,7 @@ impl GrantStack {
         Self(vec![GrantLayer::root()])
     }
 
-    /// True iff some layer restricts (denotes other than `t`) — what
+    /// True iff some layer restricts (denotes other than `t`): what
     /// `Shell::has_active_capabilities` reports.
     pub fn is_restrictive(&self) -> bool {
         self.0.iter().any(GrantLayer::is_restrictive)

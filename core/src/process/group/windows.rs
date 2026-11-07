@@ -12,7 +12,7 @@
 //! (`shell::exec::pipeline::group`), a pipeline's or a lone external's;
 //! pipeline stages borrow the pipeline's.
 
-use super::{Landing, Pgid, PgidPolicy};
+use super::{Group, Membership, Pgid, PgidPolicy};
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Pipeline-group state ───────────────────────────────────────────────────
@@ -145,7 +145,7 @@ mod win_groups {
             completion_port: HANDLE,
         },
         Join {
-            leader: i32,
+            membership: super::Membership,
             job: HANDLE,
         },
     }
@@ -158,7 +158,7 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the Join arm holds the registry guard across `DuplicateHandle` on purpose: see the comment there"
     )]
-    pub(super) fn prepare(policy: super::PgidPolicy) -> std::io::Result<PreparedGroup> {
+    pub(super) fn prepare(policy: &super::PgidPolicy) -> std::io::Result<PreparedGroup> {
         match policy {
             super::PgidPolicy::Inherit => Ok(PreparedGroup::None),
             super::PgidPolicy::NewLeader | super::PgidPolicy::NewSession => {
@@ -179,8 +179,8 @@ mod win_groups {
                     completion_port,
                 })
             }
-            super::PgidPolicy::Join(group) => {
-                let leader = group.as_raw();
+            super::PgidPolicy::Join(membership) => {
+                let leader = membership.group().as_raw();
                 // `state.job` is the registry's, not ours: the lock is all that
                 // keeps `release` from closing it before the `DuplicateHandle`.
                 let groups = GROUPS.lock_ignore_poison();
@@ -199,7 +199,10 @@ mod win_groups {
                 if job.is_null() {
                     return Err(std::io::Error::last_os_error());
                 }
-                Ok(PreparedGroup::Join { leader, job })
+                Ok(PreparedGroup::Join {
+                    membership: membership.clone(),
+                    job,
+                })
             }
         }
     }
@@ -251,11 +254,11 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the Join arm holds the registry guard across `CloseHandle` on purpose: see the comment there"
     )]
-    pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) -> super::Landing {
+    pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) -> super::Group {
         let child_pid = child.id();
         let child_handle = child.raw_process_handle();
         match prepared {
-            PreparedGroup::None => super::Landing::Shares,
+            PreparedGroup::None => super::Group::Shares,
             PreparedGroup::NewLeader {
                 job,
                 completion_port,
@@ -273,10 +276,10 @@ mod win_groups {
                         all_done: false,
                     },
                 ));
-                super::Pgid::from_raw(leader_pid)
-                    .map_or(super::Landing::Shares, super::Landing::Owns)
+                super::Group::Owns(super::Pgid::from_raw(leader_pid).expect("a pid is positive"))
             }
-            PreparedGroup::Join { leader, job } => {
+            PreparedGroup::Join { membership, job } => {
+                let leader = membership.group().as_raw();
                 // Lock held across the `CloseHandle` below: this duplicate may be
                 // the handle whose close trips `KILL_ON_JOB_CLOSE`, which must not
                 // interleave with a concurrent `release` of the same job.
@@ -291,7 +294,7 @@ mod win_groups {
                 unsafe {
                     CloseHandle(job);
                 }
-                super::Landing::Joins
+                super::Group::Joins(membership)
             }
         }
     }
@@ -557,7 +560,7 @@ pub(crate) fn is_known_group(leader: i32) -> bool {
 
 pub(crate) type PreparedGroup = win_groups::PreparedGroup;
 
-pub(crate) fn prepare_group(policy: PgidPolicy) -> std::io::Result<PreparedGroup> {
+pub(crate) fn prepare_group(policy: &PgidPolicy) -> std::io::Result<PreparedGroup> {
     win_groups::prepare(policy)
 }
 
@@ -573,7 +576,7 @@ pub(crate) fn close_prepared_group(prepared: PreparedGroup) {
 pub(crate) fn register_prepared_group(
     prepared: PreparedGroup,
     child: &crate::process::ChildHandle,
-) -> Landing {
+) -> Group {
     win_groups::register(prepared, child)
 }
 

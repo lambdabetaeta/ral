@@ -60,8 +60,9 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
 pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
     let Some((_, scratch)) = root.env.iter().find(|(name, _)| name == SCRATCH_VAR) else {
         return Err(Error::new(format!(
-            "exarch engine: the root attach names no ${SCRATCH_VAR}: the host owns the scratch and names it in every root attach"
-        )));
+            "the root attach names no ${SCRATCH_VAR}: the host owns the scratch and names it in every root attach"
+        ))
+        .with_context("exarch engine"));
     };
     shell.set_scratch(scratch.as_str());
     if !matches!(root.config, FOValue::Unit) {

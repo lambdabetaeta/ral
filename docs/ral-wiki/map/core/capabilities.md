@@ -214,7 +214,7 @@ spawn adapter live in `shell::grant`.
   (`live_absolute`) adds, as a hint, how a grant writes it; the tags `absolute`,
   `cwd`, `home`, `tempdir`, `scratch`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
   refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
-  the `path` selector (`path_dirs`, over the pure `path_dirs_in`, which
+  the `path` selector (`path_dirs_in`, which
   classifies each absolute `PATH` entry raw, as an `absolute` payload, before
   the freeze folds it), and
   `refuse_the_world`, the guard both it and every kept toolchain directory call, over
@@ -231,9 +231,12 @@ spawn adapter live in `shell::grant`.
   one refused, naming the variable or default and what would hold it), walks
   it by `GrantPath::walked` and drops the absent. `expand_in` keeps the
   directories and checks each followed trace against the world, naming either
-  its override or its default spelling and resolved position in a refusal,
+  its override or its default spelling in a refusal (`Chosen::subject`),
   before `W::grant` retains the allowance position or exclusion objects.
-  `FreezeCtx::selector` calls it with the host environment; the public `expand`
+  `FreezeCtx::selector` calls it with the freeze's environment, overlay then
+  host (`FreezeCtx::var`), the one environment a bare `name`, `dir `path` and
+  every toolchain selector read, so a `PATH` an overlay sets governs all three;
+  the public `expand`
   wrapper returns the surviving spellings as native `PathBuf`s.
   `system_reads_in` walks `LISTED` and the rows of `SYSTEM_READS` (`homebrew`,
   `macports`, `nix`, `pkgsrc`), keeping what exists, a file included, outside
@@ -726,8 +729,8 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   memfd on Linux, checked again after sealing, and on macOS a prefilled
   socketpair whose writer closes before the child exists; the child
   refuses an unsealed memfd or a non-socket. Every descriptor a launch
-  hands down crosses at the number a `Handoff` lifted it to, from 98 up
-  (`Slot`): bwrap's `--args`, the warrant, `--info-fd` (a socketpair,
+  hands down crosses at the number a `Handoff` (`warrant/handoff.rs`) lifted it
+  to, from 98 up (`Slot`): bwrap's `--args`, the warrant, `--info-fd` (a socketpair,
   which unlike a pipe cannot be reopened through `/proc`) and the
   payload's copy of its writer, whose sweep ends the parent's read once
   the payload's group exists, the Landlock ruleset, ral's pin, the

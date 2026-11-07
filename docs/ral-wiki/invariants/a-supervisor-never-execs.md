@@ -17,7 +17,9 @@ platform, and `supervise`).
   the forked tool child, each set `PR_SET_PDEATHSIG(SIGKILL)` and then check
   `getppid` against the supervisor's pid (`die_with`): a supervisor already
   gone before the `prctl` leaves no death signal to hear, and the check turns
-  that into a failure instead of an orphan.
+  that into a failure instead of an orphan. The failure is ral's own: the child
+  tells it on a close-on-exec pipe, and the supervisor reports `refused`, never
+  `unstarted`, which is the file's `execve` alone.
 - **The supervisor itself sets no death signal.** Its life is tied to ral's by
   the envelope: a launch the session keeps passes bwrap `--die-with-parent`
   (with `--info-fd`), so the envelope, and the supervisor inside it, ends when
@@ -37,8 +39,10 @@ platform, and `supervise`).
   a spawned program does: it resets the caught dispositions to their defaults,
   clears the signal mask, sets `PDEATHSIG`, and has closed its copy of the
   report (`tool_child`); the tool's own entry, `uutils::serve`, restores
-  `SIGPIPE`. It is silent: a child that cannot begin exits with the one
-  "never ran" status, 126, and prints nothing. It never returns into the
+  `SIGPIPE`. It is silent, and tells the supervisor whether it began, one
+  word on a close-on-exec pipe, before it runs the tool: the supervisor says
+  `started` only after that word, and a child that cannot begin is `refused`
+  with its errno, never a tool that `exited 126`. It never returns into the
   supervisor's frames, by a panic either.
 - **The trampoline is single-threaded up to that fork.** Its warrant role starts
   no thread, so the forked child may run anything. Landlock's `restrict_self`

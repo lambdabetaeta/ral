@@ -3,7 +3,7 @@
 
 use rustix::process::Pid;
 
-use super::{Landing, Pgid, PgidPolicy};
+use super::{Group, Pgid, PgidPolicy};
 use crate::process::reset_child_signals;
 
 impl PgidPolicy {
@@ -11,19 +11,17 @@ impl PgidPolicy {
     /// allocation and no stdlib lock (`last_os_error` only reads `errno`).  The
     /// failure must not be swallowed — a child left in the wrong group is
     /// invisible to every teardown that addresses the group as a whole.
-    /// Reach this through [`spawn_with_pgid`], the single funnel that also
-    /// mirrors the call in the parent.
     ///
     /// # Errors
     /// Returns `Err` if `setpgid` / `setsid` fails; `Inherit` makes no syscall.
-    pub fn apply(self) -> std::io::Result<()> {
+    fn apply(&self) -> std::io::Result<()> {
         // `setsid` returns the new sid and `setpgid` 0; both fail with `-1`.
         let rc = unsafe {
             match self {
                 Self::Inherit => 0,
                 Self::NewLeader => libc::setpgid(0, 0),
                 Self::NewSession => libc::setsid(),
-                Self::Join(group) => libc::setpgid(0, group.as_raw()),
+                Self::Join(membership) => libc::setpgid(0, membership.group().as_raw()),
             }
         };
         if rc == -1 {
@@ -48,7 +46,7 @@ pub(crate) enum SpawnError {
 /// Apply `pgid` then [`reset_child_signals`] in the child, and mirror the
 /// `setpgid` in the parent so the placement holds whichever side wins the
 /// race.  `NewSession` has no mirror — only a process can `setsid` itself —
-/// and rests on its `pre_exec`.  The [`Landing`] returned is the whole
+/// and rests on its `pre_exec`.  The [`Group`] returned is the whole
 /// registration: what addresses the child from now on.
 ///
 /// `pre_exec` closures run in registration order, so a caller's own hooks
@@ -61,7 +59,7 @@ pub(crate) enum SpawnError {
 pub(crate) fn spawn_with_pgid(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,
-) -> Result<(std::process::Child, Landing), SpawnError> {
+) -> Result<(std::process::Child, Group), SpawnError> {
     spawn_with_pgid_after(cmd, pgid, || Ok(()))
 }
 
@@ -77,18 +75,19 @@ fn spawn_with_pgid_after<F>(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,
     after: F,
-) -> Result<(std::process::Child, Landing), SpawnError>
+) -> Result<(std::process::Child, Group), SpawnError>
 where
     F: Fn() -> std::io::Result<()> + Send + Sync + 'static,
 {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     let (cleared, mark) = crate::process::cloexec_socketpair().map_err(SpawnError::Prepare)?;
+    let step = pgid.clone();
     // SAFETY: async-signal-safe throughout; the closure owns `mark`, so the
     // fd it writes is open for as long as `cmd` lives.
     unsafe {
         cmd.pre_exec(move || {
-            pgid.apply()?;
+            step.apply()?;
             reset_child_signals();
             after()?;
             let byte = 0u8;
@@ -102,23 +101,24 @@ where
     // The mirror's result is ignored: either the child already applied the
     // policy, and a failure here is the benign post-`execve` `EACCES` race, or
     // its `pre_exec` failed and the spawn above already returned that error.
-    let landing = match pgid {
-        PgidPolicy::Inherit => Landing::Shares,
+    let group = match pgid {
+        PgidPolicy::Inherit => Group::Shares,
         PgidPolicy::NewLeader => {
             let pid = Pid::from_child(&child);
             let _ = rustix::process::setpgid(Some(pid), Some(pid));
-            Landing::Owns(Pgid::from_pid(pid))
+            Group::Owns(Pgid::from_pid(pid))
         }
         PgidPolicy::NewSession => {
             // The new session's pgid equals the child's pid.
-            Landing::Owns(Pgid::from_pid(Pid::from_child(&child)))
+            Group::Owns(Pgid::from_pid(Pid::from_child(&child)))
         }
-        PgidPolicy::Join(group) => {
-            let _ = rustix::process::setpgid(Some(Pid::from_child(&child)), Some(group.as_pid()));
-            Landing::Joins
+        PgidPolicy::Join(membership) => {
+            let leader = membership.group().as_pid();
+            let _ = rustix::process::setpgid(Some(Pid::from_child(&child)), Some(leader));
+            Group::Joins(membership)
         }
     };
-    Ok((child, landing))
+    Ok((child, group))
 }
 
 /// `e`, the `execve`'s if the child marked itself cleared before failing.
@@ -147,7 +147,7 @@ pub enum Survivor {
 /// dead, so that wait cannot block and no zombie exists — leaving the
 /// grandchild it orphans to be reparented onto init.
 ///
-/// **The intermediate's [`Landing`] is dropped on the floor, and that
+/// **The intermediate's [`Group`] is dropped on the floor, and that
 /// discard is the point:** nothing in this process holds a pgid naming the
 /// survivor, so no teardown path can reach it with `kill(-pgid, …)`, and its
 /// own `setsid` leaves pid == pgid == sid so the dead intermediate's recyclable
@@ -169,7 +169,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> Result<Survivor, Spawn
 
     let (receipt, handshake) = crate::process::cloexec_pipe().map_err(SpawnError::Prepare)?;
     let fd = handshake.as_raw_fd();
-    let (intermediate, _its_landing) =
+    let (intermediate, _its_group) =
         spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
             // SAFETY: a spawn's hook, async-signal-safe throughout: fork,
             // write, _exit, setsid, fcntl.
@@ -229,7 +229,15 @@ fn survivor_pid(
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{Landing, Pgid, PgidPolicy, SpawnError, Survivor, spawn_detached, spawn_with_pgid};
+    use super::{Group, Pgid, PgidPolicy, SpawnError, Survivor, spawn_detached, spawn_with_pgid};
+    use crate::process::{DurableRoot, Membership, Scope};
+
+    fn joining(group: Pgid) -> PgidPolicy {
+        PgidPolicy::Join(Membership::new(
+            group,
+            Scope::clone(&DurableRoot::default().child()),
+        ))
+    }
 
     // ── Whose failure ──────────────────────────────────────────────────────
 
@@ -238,11 +246,8 @@ mod tests {
     #[test]
     fn a_join_into_a_group_nobody_leads_is_ral_s_failure() {
         let nobody = Pgid::from_raw(i32::MAX).expect("positive");
-        let err = spawn_with_pgid(
-            &mut std::process::Command::new("/bin/sh"),
-            PgidPolicy::Join(nobody),
-        )
-        .expect_err("a group nobody leads cannot be joined");
+        let err = spawn_with_pgid(&mut std::process::Command::new("/bin/sh"), joining(nobody))
+            .expect_err("a group nobody leads cannot be joined");
         assert!(
             matches!(&err, SpawnError::Prepare(e) if e.raw_os_error() == Some(libc::EPERM)),
             "{err:?}"
@@ -273,17 +278,20 @@ mod tests {
             cmd
         };
         let landed = |policy| {
-            let (child, landing) = spawn_with_pgid(&mut sleeper(), policy).expect("spawn");
-            (child.id(), landing, child)
+            let (child, group) = spawn_with_pgid(&mut sleeper(), policy).expect("spawn");
+            (child.id(), group, child)
         };
-        let (leader, landing, mut lead) = landed(PgidPolicy::NewLeader);
+        let (leader, led, mut lead) = landed(PgidPolicy::NewLeader);
         let group = Pgid::from_raw(leader.cast_signed()).expect("a pid is positive");
-        assert_eq!(landing, Landing::Owns(group));
-        let (_, landing, mut member) = landed(PgidPolicy::Join(group));
-        assert_eq!(landing, Landing::Joins);
-        let (_, landing, mut shared) = landed(PgidPolicy::Inherit);
-        assert_eq!(landing, Landing::Shares);
-        for child in [&mut lead, &mut member, &mut shared] {
+        assert!(matches!(led, Group::Owns(g) if g == group), "{led:?}");
+        let (_, joined, mut member) = landed(joining(group));
+        assert!(
+            matches!(&joined, Group::Joins(m) if m.group() == group),
+            "{joined:?}"
+        );
+        let (_, shared, mut inheriting) = landed(PgidPolicy::Inherit);
+        assert!(matches!(shared, Group::Shares), "{shared:?}");
+        for child in [&mut lead, &mut member, &mut inheriting] {
             let _ = child.kill();
             let _ = child.wait();
         }

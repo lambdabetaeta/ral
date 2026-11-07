@@ -63,7 +63,7 @@ impl Agent {
         let source = turn.map_or_else(|| "tool call".to_string(), |turn| format!("turn {turn}"));
         let call = Call {
             handle: self.handle.clone(),
-            life: self.mailbox.home(),
+            home: self.mailbox.home(),
             fleet: self.fleet.clone(),
             kind: self.engine().kind(),
             emit: emit.clone(),

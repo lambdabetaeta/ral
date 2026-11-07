@@ -554,13 +554,13 @@ mod tests {
     fn mailbox() -> (AgentMailbox, AgentLog) {
         let id = AgentId::new(0);
         let (log, mail, schedules, model) = AgentLog::for_test(id, "test-model").unwrap();
-        let life = DurableRoot::default().child();
+        let home = DurableRoot::default().child();
         let journal = log.record_emitter();
-        journal.bind(life.clone());
+        journal.bind(home.clone());
         (
             AgentMailbox::new(
                 id,
-                life,
+                home,
                 journal,
                 crate::agent::Admission::Free,
                 None,

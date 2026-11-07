@@ -43,7 +43,7 @@ pub(super) fn load_fragment_ral(
 }
 
 /// `read`'s failure under `flag`: its words already name the file.
-fn load<T>(flag: &str, read: impl FnOnce() -> Result<T, Break>) -> Result<T, Error> {
+pub(super) fn load<T>(flag: &str, read: impl FnOnce() -> Result<T, Break>) -> Result<T, Error> {
     read().map_err(|e| match e {
         Break::Error(err) => err.with_context(flag),
         escape @ Break::Escape(_) => Error::new(format!("{flag}: {escape}")),

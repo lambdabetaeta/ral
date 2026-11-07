@@ -14,8 +14,8 @@ use ral_core::authority::grant::freeze::FreezeCtx;
 use ral_core::authority::policy::GrantLayer;
 use ral_core::error::Error;
 use ral_core::io::terminal::TerminalState;
-use ral_core::shell::runtime::Break;
 use ral_core::source::SourceOrigin;
+use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 
 const MINIMAL_RAL: &str = include_str!("../../data/minimal.exarch.ral");
 const REASONABLE_RAL: &str = include_str!("../../data/reasonable.exarch.ral");
@@ -27,38 +27,74 @@ const DANGEROUS_RAL: &str = include_str!("../../data/dangerous.exarch.ral");
 #[cfg(all(test, unix))]
 const GIT_EXTENSION_RAL: &str = include_str!("../../examples/git.exarch.ral");
 
+/// A built-in capability base, loosest to tightest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, EnumString, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum Base {
+    Dangerous,
+    Reasonable,
+    EditOnly,
+    ReadOnly,
+    Minimal,
+    Confined,
+}
+
+impl Base {
+    fn source(self) -> &'static str {
+        match self {
+            Self::Dangerous => DANGEROUS_RAL,
+            Self::Reasonable => REASONABLE_RAL,
+            Self::EditOnly => EDIT_ONLY_RAL,
+            Self::ReadOnly => READ_ONLY_RAL,
+            Self::Minimal => MINIMAL_RAL,
+            Self::Confined => CONFINED_RAL,
+        }
+    }
+
+    /// Whether a spawn's `grant` may name this base. Each spawnable base admits
+    /// the bundled coreutils (`ral_core::uutils`), which spawn by bare name: a
+    /// base stating its exec admissions as directory prefixes alone denies
+    /// every one, and a child that cannot run `ls` cannot widen its own grant
+    /// to get it back. `dangerous` narrows nothing and `minimal` names none of those tools.
+    pub(crate) fn spawnable(self) -> bool {
+        !matches!(self, Self::Dangerous | Self::Minimal)
+    }
+}
+
+/// The names of the bases a spawn's `grant` may name.
+pub(crate) fn spawn_bases() -> impl Iterator<Item = &'static str> + Clone {
+    Base::VARIANTS
+        .iter()
+        .filter(|base| base.spawnable())
+        .map(|&base| base.into())
+}
+
 /// Resolve `name` to a [`GrantLayer`], every spelling walked against `ctx`, so
 /// `super::for_invocation` composes on already-resolved bundles.  A bare exec
 /// name this host finds nowhere, and bundles not at all, makes no allowance.
 pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
-    let text = match name {
-        "minimal" => MINIMAL_RAL,
-        "reasonable" => REASONABLE_RAL,
-        "read-only" => READ_ONLY_RAL,
-        "edit-only" => EDIT_ONLY_RAL,
-        "confined" => CONFINED_RAL,
-        "dangerous" => DANGEROUS_RAL,
-        other => {
-            return Err(Error::new(format!(
-                "unknown base '{other}'; \
-                 expected one of: dangerous, reasonable, edit-only, read-only, minimal, confined"
-            )));
-        }
-    };
+    let base: Base = name.parse().map_err(|_| {
+        let offered = Base::VARIANTS
+            .iter()
+            .map(Base::to_string)
+            .collect::<Vec<_>>();
+        Error::new(format!(
+            "unknown base '{name}'; expected one of: {}",
+            offered.join(", ")
+        ))
+    })?;
     let mut shell = ral_core::HostSurface::default()
         .shell(TerminalState::default(), ctx.cwd().clone())
-        .map_err(|e| e.with_context(format!("built-in base '{name}' cannot load")))?;
-    let origin = SourceOrigin::named(format!("<built-in:{name}>"));
-    ral_core::shell::load::profile::load_capabilities_from_str(
-        &ral_core::shell::runtime::Mooring::adrift(),
-        &mut shell,
-        text,
-        &origin,
-        ctx,
-    )
-    .map_err(|e| match e {
-        Break::Error(err) => err.with_context(format!("built-in base '{name}' failed to parse")),
-        other @ Break::Escape(_) => Error::new(format!("built-in base '{name}' failed: {other:?}")),
+        .map_err(|e| e.with_context(format!("built-in base '{base}' cannot load")))?;
+    let origin = SourceOrigin::named(format!("<built-in:{base}>"));
+    super::load::load(&format!("built-in base '{base}'"), || {
+        ral_core::shell::load::profile::load_capabilities_from_str(
+            &ral_core::shell::runtime::Mooring::adrift(),
+            &mut shell,
+            base.source(),
+            &origin,
+            ctx,
+        )
     })
 }
 
@@ -740,21 +776,15 @@ mod tests {
     /// that omits one leaves an agent unable to run it. Every base a *spawn*
     /// may name must therefore settle each bundled tool by literal — `allow`
     /// or `deny`, but never silence, which denies it with no decision recorded.
-    /// The list is [`super::SPAWN_BASES`], the bases a spawn may name, which
-    /// no base; `dangerous` is absent because it declares no exec map to
-    /// restrict.
+    /// The bases are the [`Base::spawnable`] ones.
     #[test]
     fn every_grantable_base_settles_the_bundled_tools() {
         let home = host_home();
         let cwd = std::env::temp_dir();
         let ctx = ctx_at(&home, cwd);
-        for (name, text) in [
-            ("reasonable", REASONABLE_RAL),
-            ("edit-only", EDIT_ONLY_RAL),
-            ("read-only", READ_ONLY_RAL),
-            ("confined", CONFINED_RAL),
-        ] {
-            let exec = exec_of(&load(name, text, &ctx));
+        for base in Base::VARIANTS.iter().filter(|base| base.spawnable()) {
+            let (name, text) = (base.to_string(), base.source());
+            let exec = exec_of(&load(&name, text, &ctx));
             let unsettled: Vec<&str> = ral_core::uutils::bundled_tools()
                 .into_iter()
                 .filter(|tool| {

@@ -382,10 +382,10 @@ lands, when a mask ends, and for a process which write is first dead.
   interrupted (`CancelSynchronousIo`) when the collector writes its node and
   each pass while its chain carries a cause, and a pump each slice of
   `Pumps::join_under` once its scope does; an aborted call re-reads its
-  scope. **Open:** an aborted `WriteFile` reports no count, so a write retried
-  under a shield may repeat a prefix a live reader already took; writes are
-  chunked (`PIPE_CHUNK`, 4 KiB), which narrows it. Exact counts need
-  overlapped pipes, and the write end is shared with children.
+  scope. An aborted `WriteFile` reports no count, so an aborted write is
+  never retried (it would repeat a prefix a live reader already took): a
+  stop under the scope's cause, an error under a shield. Writes are chunked
+  (`PIPE_CHUNK`, 4 KiB), which bounds what one abort leaves unknown.
 - **The Agda**, after the Rust. Already proved: the sort split is one
   pattern match (`βtry-err`/`βtry-esc`); `guard` is one rule for both sorts
   (`βguard-halt`), the shield changing only what the cleanup's polls read;

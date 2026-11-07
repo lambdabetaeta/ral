@@ -58,7 +58,7 @@ use std::sync::Arc;
 /// An agent, owned by the one thread that attends it.
 pub struct Agent {
     handle: AgentHandle,
-    // Drop order: end life, join helpers, drop engine, release name.
+    // Drop order: end home, join helpers, drop engine, release name.
     pub(crate) mailbox: AgentMailbox,
     pub(crate) body: Loanable<Body>,
     engine: Option<Engine>,

@@ -13,6 +13,9 @@
   `Value` implements, so `authority` prints a grant without the shell.
 - `core/tests/layering.rs` enforces it for these modules and `data`: no
   production `crate::shell` path, or `super::` path reaching it, in any of them.
+  The crate root re-exports shell items (`Shell`, `Value`, `Error`, ...), so
+  `crate::Shell` is a shell path too; the test reads that set from the
+  `pub use shell::` lines of `lib.rs`, so it cannot drift.
 - Documentation links and test-only shell fixtures do not create production
   dependencies.
 

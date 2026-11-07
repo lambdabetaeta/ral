@@ -156,7 +156,7 @@ impl crate::shell::runtime::EnquiryDesk for IdentityDesk {
         }
         self.host
             .enquire(req)
-            .map_err(|e| WireError::of(&e).into_error().into())
+            .map_err(|e| WireError::of(&e).to_error().into())
     }
 }
 

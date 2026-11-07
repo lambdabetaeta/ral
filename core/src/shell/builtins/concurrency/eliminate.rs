@@ -138,7 +138,7 @@ pub(crate) fn outlive(shell: &mut Shell) -> Settled<()> {
 
 /// [`join`], for a caller to whom another claimer is `verb`'s failure.
 pub(crate) fn await_handle(handle: &HandleInner, verb: &str, shell: &mut Shell) -> Settled<Value> {
-    Ok(join(handle, shell)?.ok_or_else(|| already_claimed(verb))?)
+    join(handle, shell)?.ok_or_else(|| already_claimed(verb).into())
 }
 
 /// `await <handle>` -- wait for a concurrent block, claim it, and behave as if

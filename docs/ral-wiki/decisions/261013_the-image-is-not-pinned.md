@@ -178,8 +178,10 @@ What the kernel now reports:
 `core/src/authority/policy/exec.rs` (`Program`), `core/src/path/forms.rs`,
 `core/src/shell/exec/command/{head,process}.rs` (`Program::file`, `build_launch`),
 `core/src/process/launch.rs` (`Launch::new`), `core/src/authority/sandbox/launch.rs`,
-`core/src/authority/sandbox/warrant.rs` (`Slot`, `Confined`, `Warrant::confine`),
+`core/src/authority/sandbox/warrant.rs` (`Confined`, `Warrant::confine`),
+`core/src/authority/sandbox/warrant/handoff.rs` (`Slot`),
 `core/src/authority/sandbox/carriers.rs`, `core/src/authority/sandbox/linux.rs`,
+`core/src/authority/sandbox/linux/shown.rs` (`Binds::open`),
 `core/src/authority/sandbox/linux/landlock.rs` (`build`, `admit_exec`); tests in
 `core/src/shell/exec/command/process.rs` (`judged_program`),
 `core/src/authority/sandbox/linux.rs` and `ral/tests/script_name.rs`.

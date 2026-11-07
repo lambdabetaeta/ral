@@ -1,8 +1,9 @@
 //! Directory trees: the one enumeration of a tree ([`Walk`]), the glob
 //! patterns it enumerates ([`Glob`]), and a tree's size ([`bytes`]).
 //!
-//! ral walks, and `ignore` only matches.  Each root and entry is resolved by
-//! [`crate::path::walk()`]; a tree walk only sequences those resolutions.
+//! ral walks, and the `ignore` crate only matches.  The root is resolved by
+//! [`crate::path::walk_dir()`] and each entry through its parent's handle
+//! ([`Dir::open_dir`]); a tree walk only sequences those resolutions.
 //!
 //! A walk lists with [`Dir::read_dir`] and descends with [`Dir::open_dir`],
 //! depth first in name order, and polls the cancel scope at each entry.  The
@@ -26,7 +27,7 @@ use crate::path::sigil::literal_relative;
 use crate::path::site::Silent;
 use crate::path::{
     CwdPath, Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Listing, Located, ObjectId,
-    Reading, Stat, git, shown, walk, walk_dir,
+    Reading, Stat, Unjudged, git, shown, walk, walk_dir,
 };
 use crate::process::{Cancellation, DurableRoot, Scope};
 use crate::site::site;
@@ -600,16 +601,23 @@ impl Entries {
     /// region reads it: its spelling, and whether it is a directory.
     fn dot_git_in(&self, dir: &Dir<Judged<Reading>>) -> Option<(LexicalPath, bool)> {
         let name = EntryName::parse(OsStr::new(".git")).ok()?;
-        let found = self.region.judge(dir.locate(&name, LeafMode::Follow).ok()?);
-        let at = LexicalPath::absolute(&dir.real().as_path().join(".git"))?;
-        Some((at, found.ok()?.trace().kind()? == Kind::Dir))
+        let found = dir.locate(&name, LeafMode::Follow).ok()?;
+        self.dot_git(
+            LexicalPath::absolute(&dir.real().as_path().join(".git"))?,
+            found,
+        )
     }
 
     /// [`dot_git_in`](Self::dot_git_in) of a directory held by name.
     fn dot_git_at(&self, real: &Path) -> Option<(LexicalPath, bool)> {
         let at = LexicalPath::absolute(&real.join(".git"))?;
-        let found = self.region.judge(walk(&at, LeafMode::Follow).ok()?);
-        let is_dir = found.ok()?.trace().kind()? == Kind::Dir;
+        let found = walk(&at, LeafMode::Follow).ok()?;
+        self.dot_git(at, found)
+    }
+
+    /// `found`, the `.git` at `at`, as the region reads it.
+    fn dot_git(&self, at: LexicalPath, found: Located<Unjudged>) -> Option<(LexicalPath, bool)> {
+        let is_dir = self.region.judge(found).ok()?.trace().kind()? == Kind::Dir;
         Some((at, is_dir))
     }
 

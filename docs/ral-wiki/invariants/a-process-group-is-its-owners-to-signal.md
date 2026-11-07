@@ -2,11 +2,11 @@
 
 **A collector signals or kills a process group only if it owns it; every other
 child is addressed by pid.** Ownership is where the child *landed*
-(`Landing`, from the `PgidPolicy` it was spawned under), and the collector
+(`Group`, from the `PgidPolicy` it was spawned under), and the collector
 reads it from nothing else:
 
-- `Owns`: a group of one, led by the child, with no anchor (or its envelope's
-  payload's). The collector holds `Group::Owns` and signals and kills the group
+- `Owns`: a group of one, led by the child, with no anchor; `Enveloped`, its
+  envelope's payload's. The collector holds the group and signals and kills it
   whole.
 - `Joins`: the stage's group, as a nested pipeline joins. The group is the
   stage owner's: the collector addresses its externals by pid, and
@@ -21,9 +21,8 @@ it at once, so a second delivery from a member is a second interrupt, and a
 signal to a group one does not own reaches processes outside one's scope. ral's
 own group contains ral, so a `kill(-pgid)` there would end the shell itself.
 
-Held by `Landing::group`, which turns the landing into a `Group` (`Owns`,
-`Joins` or `Shares`), and by `Group::owned`, `Group::owes` and
-`CollectState::addresses`, which build every address from it (`core/src/process/group.rs`,
+Held by `Group::owned`, `Group::owes` and `CollectState::addresses`, which
+build every address from it (`core/src/process/group.rs`,
 `core/src/shell/exec/pipeline/collect.rs`).
 
 See [[invariants/a-child-lands-once|a-child-lands-once]],

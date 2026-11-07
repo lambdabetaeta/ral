@@ -2,7 +2,7 @@
 generated_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
 verified_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
 verified_at_date: 2026-11-07
-anchors: [prepare, start, start_detached, unstarted_error, ending, with_denials, Started, Born, Claim, payload_pids, Unstarted, Spawned, Landing, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, at_spawn, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
+anchors: [prepare, start, start_detached, unstarted_error, ending, with_denials, Started, Born, Claim, payload_pids, Unstarted, Spawned, Group, Placement, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, at_spawn, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
 ---
 
 # An external, end to end
@@ -48,8 +48,8 @@ an `errno`.** `Launch::spawn` and `spawn_detached` return nothing else.
 
 | case | it is | it arises from |
 |---|---|---|
-| `Program(io::Error)` | the program's own failure to become a process | the `execve` of an unconfined launch; the trampoline's `unstarted(errno)`; on Windows only `CreateProcessW`'s own error |
-| `Refused` | never the program's fault | a launcher or envelope that fails to exec; a payload process group that cannot be named; the trampoline's `refused`; a Linux envelope that died before reporting; a step of ral's own before the `execve`, confined or not (on Windows also a `.bat` or `.cmd`, a NUL in an argument, handle admission) |
+| `Program(io::Error)` | the program's own failure to become a process | the `execve` of an unconfined launch; the trampoline's `unstarted(errno)`, only a file's own `execve`; on Windows only `CreateProcessW`'s own error |
+| `Refused` | never the program's fault | a launcher or envelope that fails to exec; a payload process group that cannot be named; the trampoline's `refused`, which covers its own fork or setup failing; a Linux envelope that died before reporting; a step of ral's own before the `execve`, confined or not (on Windows also a `.bat` or `.cmd`, a NUL in an argument, handle admission) |
 | `Stopped` | the run's stop, seen by the start: before the child is made, before a Windows stamp, or while waiting for the trampoline's first word | `Launch::spawn`'s poll; `dacl::cancelled`; `Testimony::first` |
 
 - **`Program` is read as the program's.** `at_spawn` turns it into the same
@@ -157,11 +157,13 @@ a `Claim` the moment the spawn returns, and `ending` hands `with_denials` the
 
 ## Where the child landed
 
-**A child's `Landing` is computed once, at its birth, and carried.** `Owns`
-names a group of its own (or its envelope's payload's), signalled and killed
-whole; `Joins` a pipeline's, addressed by its owner; `Shares` ral's own, where
-only its pid addresses it. `spawn_with_pgid` returns it with the child, an
-envelope's payload group replaces it, and nothing downstream recomputes it
+**A child's `Group` is computed once, at its birth, and carried.** `Owns`
+names a group of its own, signalled and killed whole; `Enveloped` its
+envelope's payload's; `Joins` a pipeline's, addressed by its owner and
+carrying the `Membership` it was placed by; `Shares` ral's own, where only its
+pid addresses it. `placement` decides the policy once, `spawn_with_pgid`
+returns the group with the child, an envelope's payload group becomes
+`Enveloped`, and nothing downstream recomputes it
 ([[invariants/a-child-lands-once|a-child-lands-once]]). The process limit is a
 property of the launch, applied inside each platform's spawn, so a child never
 runs without the budget its grant states

@@ -144,8 +144,8 @@ pub(crate) mod engine {
         shell.set_interactive(true);
         let terminal = ral_core::Value::from(&shell.terminal());
         shell.set_var("TERMINAL".into(), terminal);
-        crate::repl::external_editor::register(shell).map_err(Error::new)?;
-        boot_builtin::register(shell).map_err(Error::new)
+        crate::repl::external_editor::register(shell)?;
+        boot_builtin::register(shell)
     }
 
     /// The batch session's process half.
@@ -158,7 +158,7 @@ pub(crate) mod engine {
         let config = BatchConfig::decode(&root.config).map_err(Error::new)?;
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_args(config.args);
-        boot_builtin::register(shell).map_err(Error::new)
+        boot_builtin::register(shell)
     }
 
     /// The `batch` installer's `Root.config`.

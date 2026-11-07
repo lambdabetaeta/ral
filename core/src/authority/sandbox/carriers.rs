@@ -108,15 +108,18 @@ fn hops(program: Located) -> Vec<PathBuf> {
 pub(crate) fn trusted_real(path: &Path) -> Option<Located> {
     let me = rustix::process::geteuid().as_raw();
     let at = LexicalPath::absolute(path)?;
-    let located = walk_with(&at, LeafMode::Follow, |v| system_only(v, me)).ok()?;
-    (located.trace().kind() == Some(Kind::File)).then_some(located)
+    regular(walk_with(&at, LeafMode::Follow, |v| system_only(v, me)).ok()?)
 }
 
 /// Hold `path` where it reaches a regular file.
 #[cfg(target_os = "linux")]
 fn file(path: &Path) -> Option<Located> {
     use crate::path::walk;
-    let located = walk(&LexicalPath::absolute(path)?, LeafMode::Follow).ok()?;
+    regular(walk(&LexicalPath::absolute(path)?, LeafMode::Follow).ok()?)
+}
+
+/// `located`, where it is a regular file.
+fn regular(located: Located) -> Option<Located> {
     (located.trace().kind() == Some(Kind::File)).then_some(located)
 }
 

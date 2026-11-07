@@ -54,7 +54,7 @@ See [[internals/seatbelt-profile|seatbelt-profile]] for the full rendering.
 ### Linux binds each onto itself
 
 **Every launch binds each pinned directory, writable, onto its own name
-(`Layer::Spine`, `core/src/authority/sandbox/linux.rs`).** The bind mounts the
+(`Layer::Spine`, `core/src/authority/sandbox/linux/shown.rs`).** The bind mounts the
 handle `Binds::open` holds, as every bind does.
 
 - **A mountpoint cannot be moved.** `rename(2)` and `rmdir(2)` refuse it with

@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-fn capture(launch: &mut Launch) -> std::io::Result<Output> {
+fn capture(launch: Launch) -> std::io::Result<Output> {
     let mut child = match launch.spawn(
         PgidPolicy::Inherit,
         &crate::process::DurableRoot::default().child(),
@@ -31,7 +31,7 @@ fn capture(launch: &mut Launch) -> std::io::Result<Output> {
 }
 
 fn run(projection: &SandboxProjection, cwd: &Path, line: &str) -> Output {
-    capture(&mut confined(projection, cwd, line).expect("confine the matrix probe"))
+    capture(confined(projection, cwd, line).expect("confine the matrix probe"))
         .expect("spawn and capture the matrix probe")
 }
 
@@ -205,7 +205,7 @@ fn a_staged_spawn_keeps_every_sid_owner_alive_through_teardown() {
 
         // Include teardown-before-spawn, independent of the race's scheduling.
         for race in [false, true] {
-            let mut launch = confined(&grant, &a, "type ok.txt").unwrap();
+            let launch = confined(&grant, &a, "type ok.txt").unwrap();
             let (package, filesystem, network) = {
                 use crate::sync::LockExt as _;
                 let guard = super::super::cell().lock_ignore_poison();
@@ -235,13 +235,13 @@ fn a_staged_spawn_keeps_every_sid_owner_alive_through_teardown() {
                         super::super::teardown();
                     });
                     release.write_all(&[1]).unwrap();
-                    let out = capture(&mut launch);
+                    let out = capture(launch);
                     teardown.join().unwrap();
                     out
                 })
             } else {
                 super::super::teardown();
-                capture(&mut launch)
+                capture(launch)
             };
             assert!(package.upgrade().is_some(), "launch lost its package SID");
             assert!(network.upgrade().is_some(), "launch lost its network SIDs");
@@ -250,7 +250,6 @@ fn a_staged_spawn_keeps_every_sid_owner_alive_through_teardown() {
                 Ok(out) => admitted(&proof, &out, "secret"),
                 Err(error) => assert!(error.raw_os_error().is_some(), "{error}"),
             }
-            drop(launch);
             assert!(package.upgrade().is_none());
             assert!(network.upgrade().is_none());
             assert!(filesystem.iter().all(|sid| sid.upgrade().is_none()));

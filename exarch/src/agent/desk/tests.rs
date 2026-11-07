@@ -64,7 +64,7 @@ fn with_fleet_desk<R>(
             loan: loan.clone(),
             call: Call {
                 handle: (*agent).clone(),
-                life: agent.mailbox.home(),
+                home: agent.mailbox.home(),
                 fleet: fleet.clone(),
                 kind: EngineKind::Identity(Arc::new(crate::boot::test_transport())),
                 emit,
@@ -490,7 +490,7 @@ fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
     let recorder = agent.recorder();
     let call = Call {
         handle: agent.handle(),
-        life: agent.mailbox.home(),
+        home: agent.mailbox.home(),
         fleet: agent.fleet.clone(),
         kind: agent.engine().kind(),
         emit: crate::bus::dummy_emitter().0,

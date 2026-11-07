@@ -11,7 +11,7 @@
 
 use super::collect::Event;
 use crate::error::io_message;
-use crate::process::{Group, Landing, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};
+use crate::process::{Group, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};
 use crate::shell::runtime::{Break, Error, Settled};
 use std::sync::mpsc::Sender;
 
@@ -141,6 +141,11 @@ fn anchor_death(_: crate::process::WaitOutcome) -> Event {
     Event::AnchorDied
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
+fn anchor_error(e: std::io::Error) -> Error {
+    Error::new(io_message("pipeline anchor", &e))
+}
+
 /// `Child::drop` neither kills nor reaps, so a child not handed on goes here.
 fn discard(child: &mut crate::process::ChildHandle) {
     let _ = child.kill();
@@ -157,16 +162,14 @@ impl AnchorProcess {
     fn spawn(tx: Sender<Event>) -> Settled<Self> {
         #[cfg(windows)]
         let _ = tx;
-        let (reader, release) = crate::process::cloexec_pipe()
-            .map_err(|e| Error::new(io_message("pipeline anchor", &e)))?;
+        let (reader, release) = crate::process::cloexec_pipe().map_err(anchor_error)?;
         let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::PipelineAnchor)
-            .map_err(|e| Error::new(io_message("pipeline anchor", &e)))?;
+            .map_err(anchor_error)?;
         cmd.stdin(crate::process::StdioSpec::from_owned(reader));
         cmd.stderr(crate::process::StdioSpec::Null);
         #[cfg(unix)]
         let mut report = {
-            let (report, writer) = crate::process::cloexec_pipe()
-                .map_err(|e| Error::new(io_message("pipeline anchor", &e)))?;
+            let (report, writer) = crate::process::cloexec_pipe().map_err(anchor_error)?;
             cmd.stdout(crate::process::StdioSpec::from_owned(writer));
             report
         };
@@ -176,16 +179,15 @@ impl AnchorProcess {
         // sees one.
         let unstoppable = crate::process::DurableRoot::default().child();
         let Spawned {
-            mut child, landing, ..
+            mut child, group, ..
         } = cmd.spawn(PgidPolicy::NewLeader, &unstoppable).map_err(
             |unstarted| match unstarted {
-                Unstarted::Program(e) => Break::from(Error::new(io_message("pipeline anchor", &e))),
+                Unstarted::Program(e) => Break::from(anchor_error(e)),
                 Unstarted::Refused(refusal) => Break::from(refusal),
                 Unstarted::Stopped(stop) => Break::from(stop),
             },
         )?;
-        drop(cmd);
-        let Landing::Owns(pgid) = landing else {
+        let Group::Owns(pgid) = group else {
             discard(&mut child);
             return Err(Error::new("pipeline anchor: failed to establish a process group").into());
         };
@@ -216,7 +218,7 @@ impl AnchorProcess {
                 .spawn(move || read_anchor_reports(report, &report_tx))
                 .map_err(|e| {
                     discard(&mut child);
-                    Error::new(io_message("pipeline anchor", &e))
+                    anchor_error(e)
                 })?;
             (child.into_watch(tx, anchor_death), reporter)
         };

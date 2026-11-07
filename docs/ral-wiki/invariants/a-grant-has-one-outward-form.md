@@ -36,7 +36,7 @@ a grant comes in as a value and goes out as one.
   needs (`GrantLayer::is_shown`: it restricts, or its exec runs something,
   which stays readable under a nested fs restriction) as its `LayerValue`,
   with the host's `withholds_gpu` (`protocol/probe.rs`, `Grants`). exarch's and synod's prompt prints each in
-  `grant` syntax, oldest first, an extension as `grant G extended by F`, under
+  `grant` syntax, oldest first, an extension as `grant G extended by F` (`Display for LayerValue`, `authority/grant/value.rs`), under
   a legend that says only what grants mean (`exarch/data/grant-legend.md`;
   `prompt::grant_section`). A refusal citing an exec exclusion prints it as
   its value (`Display for ExecDeny`), and so does the file-key refusal.

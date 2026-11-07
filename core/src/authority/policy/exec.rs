@@ -95,9 +95,9 @@ impl GrantStack {
 /// Why a supplied exec table withholds `subject`'s run, before what running
 /// it reads is asked.
 fn run_withheld(rules: Option<&ExecRules>, subject: Subject<'_>) -> Result<(), ExecDenial> {
-    rules
-        .and_then(|rules| rules.withheld(subject))
-        .map_or(Ok(()), |why| Err(ExecDenial::Run(why)))
+    rules.map_or(Ok(()), |rules| {
+        rules.admits(subject).map_err(ExecDenial::Run)
+    })
 }
 
 /// What a grant judges, and what the launcher runs.
@@ -311,8 +311,7 @@ impl Allows for ExecAllow {
 
 /// A file allowance holds a program at its own position, and nothing else.
 fn holds_file(real: &RealPath, at: path::Subject<'_>) -> bool {
-    at.position()
-        .is_some_and(|at| real.contains(&at) && at.contains(real))
+    at.position().is_some_and(|at| *real == *at)
 }
 
 /// A directory allowance's own subject: its inside.
@@ -430,19 +429,11 @@ impl ExecRules {
     /// authored `dir /` does.
     pub(crate) fn places(&self) -> impl Iterator<Item = FsAllow> + '_ {
         self.allows().filter_map(|scope| match scope {
-            ExecAllow::Dir(
-                dir @ GrantPath {
-                    real: Extent::Everywhere,
-                    ..
-                },
-            ) => Some(FsAllow::Prefix(dir.clone())),
-            ExecAllow::Dir(GrantPath {
-                real: Extent::Under {
-                    position: place, ..
-                },
-                ..
-            })
-            | ExecAllow::File { real: place, .. } => Some(FsAllow::RunPlace(place.clone())),
+            ExecAllow::Dir(dir) => Some(dir.real.real().map_or_else(
+                || FsAllow::Prefix(dir.clone()),
+                |place| FsAllow::RunPlace(place.clone()),
+            )),
+            ExecAllow::File { real, .. } => Some(FsAllow::RunPlace(real.clone())),
             _ => None,
         })
     }

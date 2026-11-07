@@ -2,7 +2,7 @@
 
 **On Linux each fs deny is read from the disk once, when the launch is planned,
 and every consumer takes that one answer.** `Shown::of`
-(`core/src/authority/sandbox/linux.rs`) reads each deny with `Deny::read` into a
+(`core/src/authority/sandbox/linux/shown.rs`) reads each deny with `Deny::read` into a
 `Deny { name, mask, position }`, sorted by name; nothing after the plan asks the
 disk what stands at a denied name.
 

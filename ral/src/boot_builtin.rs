@@ -17,7 +17,7 @@ use ral_core::shell::runtime::{
 use ral_core::ty::{Row, Scheme, Ty, Typed as _};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
-use ral_core::{Shell, Value};
+use ral_core::{RegisterError, Shell, Value};
 use ral_core::{err, errln};
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -50,10 +50,10 @@ fn scheme(u: &mut Unifier) -> Scheme {
 
 /// Register the builtin as the `Session "boot"` hook, over a shell whose surface
 /// carries [`BUILTINS`].
-pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
+pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
     let entry = shell
         .lookup_builtin(NAME)
-        .ok_or_else(|| format!("this shell's surface has no {NAME}"))?;
+        .ok_or_else(|| Error::new(format!("this shell's surface has no {NAME}")))?;
     shell
         .register_hook(
             hook(),
@@ -63,7 +63,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
             },
             DefaultPolicy::denied(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(RegisterError::into_error)
 }
 
 enum BootAnswer {

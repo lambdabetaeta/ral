@@ -5,8 +5,8 @@
 //! (`crate::authority::guard`) judges an access by the table, the OS projection
 //! (`crate::authority::sandbox::SandboxProjection`) renders its live allows and its
 //! denies.  Agreement
-//! between guard and sandbox profile is then structural — one fold per op,
-//! two consumers — rather than a property two independent folds have to be
+//! between guard and sandbox profile is then structural, one fold per op
+//! and two consumers, rather than a property two independent folds have to be
 //! tested into.
 //!
 //! A restricted read region is the layers' meet joined with the [`Baseline`]:
@@ -270,14 +270,6 @@ impl Baseline {
     }
 }
 
-/// `acc` met with `next`, the first `next` standing alone.
-fn meet_onto<T: Meet>(acc: &mut Option<T>, next: T) {
-    *acc = Some(match acc.take() {
-        Some(held) => held.meet(next),
-        None => next,
-    });
-}
-
 /// The stack's table for `op`: each opining layer's allowances for `op` and
 /// its exclusions, met; for `Read`, each layer also joined with the run places
 /// of the exec meet over it and the layers beneath it (no layer makes anything
@@ -288,23 +280,27 @@ fn meet_onto<T: Meet>(acc: &mut Option<T>, next: T) {
 pub(crate) fn region(grants: &GrantStack, op: FsOp, baseline: &Baseline) -> Option<FsRules> {
     let layers: Vec<&GrantLayer> = grants.layers().collect();
     let last = layers.iter().rposition(|l| l.fs().is_some())?;
-    let mut run: Option<ExecRules> = None;
-    let mut met: Option<FsRules> = None;
-    for layer in &layers[..=last] {
-        if let Some(exec) = layer.exec() {
-            meet_onto(&mut run, exec.clone());
-        }
-        let Some(fs) = layer.fs() else { continue };
-        let table = fs.table(op).clone();
-        meet_onto(
-            &mut met,
-            match op {
-                FsOp::Read => table.join(Table::new(run.iter().flat_map(ExecRules::places), [])),
-                FsOp::Write => table,
-            },
-        );
-    }
-    let met = met?;
+    let met = layers[..=last]
+        .iter()
+        .scan(None::<ExecRules>, |run, layer| {
+            if let Some(exec) = layer.exec().cloned() {
+                *run = Some(match run.take() {
+                    Some(held) => held.meet(exec),
+                    None => exec,
+                });
+            }
+            Some(layer.fs().map(|fs| {
+                let table = fs.table(op).clone();
+                match op {
+                    FsOp::Read => {
+                        table.join(Table::new(run.iter().flat_map(ExecRules::places), []))
+                    }
+                    FsOp::Write => table,
+                }
+            }))
+        })
+        .flatten()
+        .reduce(Meet::meet)?;
     Some(match op {
         FsOp::Read => met.join(Table::new(baseline.allows().cloned(), [])),
         FsOp::Write => met,
@@ -343,10 +339,7 @@ impl Ungoverned {
 
 impl ReadRegion {
     fn withheld(&self, s: Subject<'_>) -> Result<(), Withheld<FsDeny>> {
-        self.0
-            .as_ref()
-            .and_then(|region| region.withheld(s))
-            .map_or(Ok(()), Err)
+        self.0.as_ref().map_or(Ok(()), |region| region.admits(s))
     }
 
     /// Judge `h` for reading.
@@ -490,10 +483,7 @@ impl GrantStack {
 
     /// The write judgment: may the access `trace` be written?
     pub(crate) fn write(&self, baseline: &Baseline, trace: &Trace) -> Result<(), Withheld<FsDeny>> {
-        let region = region(self, FsOp::Write, baseline);
-        region
-            .and_then(|r| r.withheld(Subject::Access(trace)))
-            .map_or(Ok(()), Err)
+        region(self, FsOp::Write, baseline).map_or(Ok(()), |r| r.admits(Subject::Access(trace)))
     }
 
     /// Whether only an exclusion withholds the read of `trace`, which is all a

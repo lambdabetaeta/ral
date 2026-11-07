@@ -80,7 +80,7 @@ pub(crate) enum Drained {
     Model(Pick),
 }
 
-/// Dropping the owner's end ends the life.
+/// Dropping the owner's end ends the home.
 pub(crate) struct AgentMailbox {
     shared: Arc<Shared>,
 }

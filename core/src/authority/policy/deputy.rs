@@ -2,8 +2,8 @@
 //! `exec`-admitted and `fs`-writable, where a binary dropped now is
 //! admitted on the next call.
 //!
-//! Within one projection that is no escalation — the dropped binary is
-//! spawned under the same confinement as the process that wrote it — and
+//! Within one projection that is no escalation: the dropped binary is
+//! spawned under the same confinement as the process that wrote it, and
 //! `cargo build && ./target/debug/app` requires the shape, so this
 //! reports and never denies.  What a finding locates is where a write
 //! becomes runnable; only a runner outside the projection turns that into

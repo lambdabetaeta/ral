@@ -34,11 +34,11 @@ fn recorded_mailbox(admission: Admission, record: Recorder) -> AgentMailbox {
 fn configured_mailbox(
     admission: Admission,
     record: Recorder,
-    life: ScopeNode,
+    home: ScopeNode,
     parent: Option<AgentAddress>,
     returns: bool,
 ) -> AgentMailbox {
-    record.bind(life.clone());
+    record.bind(home.clone());
     let helper = matches!(admission, Admission::Parent { .. });
     let id = AgentId::new(if helper { 8 } else { 7 });
     let folds = record
@@ -52,7 +52,7 @@ fn configured_mailbox(
             at_unix_ms: 0,
         })
         .unwrap();
-    AgentMailbox::new(id, life, record, admission, parent, folds)
+    AgentMailbox::new(id, home, record, admission, parent, folds)
 }
 
 fn helper() -> AgentMailbox {

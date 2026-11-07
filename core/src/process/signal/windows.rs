@@ -42,12 +42,6 @@ pub fn install_interrupt_handler() {
     let _ = ctrlc::set_handler(request_interrupt);
 }
 
-// ── Inherited dispositions / child-signal reset ────────────────────────────
-
-/// No-op: Windows children inherit the parent's console-control handlers, and
-/// Rust's runtime installs none we would need to undo.
-pub fn reset_child_signals() {}
-
 /// The death status a console event leaves, Ctrl-C's and Ctrl-Break's alike.
 const CONSOLE_EVENT: Signal = Signal::new(windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT);
 

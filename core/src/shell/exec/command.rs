@@ -19,8 +19,8 @@ use crate::io::{Edge, OutFd, Sink, Source, Streams};
 use crate::ir::CommandName;
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
 use crate::process::{
-    CancelCause, Launch, POLL_SLICE, PgidPolicy, PreparedTerminalLoan, Scope, Spawned, StdioSpec,
-    TerminalLoan, Unstarted, WaitOutcome,
+    CancelCause, Launch, Membership, POLL_SLICE, PgidPolicy, PreparedTerminalLoan, Scope, Spawned,
+    StdioSpec, TerminalLoan, Unstarted, WaitOutcome,
 };
 use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, TerminalAccess, Value};
 use crate::ty::RefusedArg;
@@ -171,16 +171,18 @@ impl Head {
         let search = matches!(&self.program, Target::Search { .. });
         let shown = self.shown.clone();
         self.select(&shell.context.grants, shell.baseline())
-            .map_err(
-                |Denied { denial, .. }| match shell.exec_refused(*denial, mooring) {
-                    Break::Error(e) if search => e
-                        .with_hint(format!(
+            .map_err(|Denied { denial, .. }| {
+                let refusal = shell.exec_refused(*denial, mooring);
+                if search {
+                    refusal.map_error(|e| {
+                        e.with_hint(format!(
                             "'{shown}' is no program in any PATH directory the grant runs from"
                         ))
-                        .into(),
-                    refusal => refusal,
-                },
-            )
+                    })
+                } else {
+                    refusal
+                }
+            })
     }
 }
 
@@ -328,11 +330,6 @@ fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
 
 // ── vet ───────────────────────────────────────────────────────────────────────
 
-/// The argv shape gate: what a call's argument values become at the exec
-/// boundary, or a focused refusal.  [`Head::admit`] has decided refusal, then
-/// 127/126, before argv shape; [`prepare`] reads that verdict first, never
-/// probing again.
-///
 /// Stringify `args`, refusing any shape the syscall boundary cannot carry.
 fn validate_argv(cmd: &str, args: &[Value]) -> Settled<Vec<String>> {
     args.iter()
@@ -394,21 +391,10 @@ pub(crate) fn prepare(
     Ok(build_launch(shown, admitted, args, ownership, shell)?)
 }
 
-/// Build `admitted`'s launch with `args` under `ownership`, and apply the
-/// shell's scoped env, cwd and limits.  The [`Admitted`] is taken and
-/// dropped here, so the launch holds no judged program nor its directory
-/// handle, only its [`Image`].  Stdio and `pre_exec` hooks are the caller's:
-/// they differ between the standalone and pipeline contexts.
-///
-/// Building only describes: nothing here waits on anything a stop must end,
-/// so the one failure is a refusal.  Two exceptions touch the world: a guest
-/// jail's cgroup, which `JailCgroup::drop` removes if the built launch is
-/// dropped, and the once-per-process bwrap host probe.  What may be stopped
-/// is [`start`]'s.
-///
-/// `ownership` reaches the Linux bwrap backend, which ties the envelope to
-/// this process's death unless the child is being surrendered, and the guest
-/// jail, which seats a surrendered child outside this engine's cgroup tree.
+/// Build `admitted`'s launch with `args` under `ownership` and the shell's
+/// scoped env, cwd and limits; the launch keeps its [`Image`], never the
+/// judged program.  Building waits on nothing a stop must end: what may be
+/// stopped is [`start`]'s.
 fn build_launch(
     shown: String,
     admitted: Admitted,
@@ -432,11 +418,7 @@ fn build_launch(
     drop(admitted);
     // A `grant` body evaluates in this process unconfined; spawned children
     // are the only thing an OS sandbox reaches, and this is where it does.
-    #[cfg(unix)]
-    let held = projection.as_ref();
-    #[cfg(windows)]
-    let held = projection;
-    let mut launch = match held {
+    let mut launch = match projection.as_ref() {
         Some(projection) => crate::authority::sandbox::sandboxed_command(
             projection,
             &image,
@@ -562,6 +544,11 @@ fn stdin_stdio(stdin: &Source) -> Settled<StdioSpec> {
     })
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
+fn pipe_error(e: std::io::Error) -> Error {
+    Error::new(io_message("pipe", &e))
+}
+
 /// Wire the child's stdin, stdout and stderr, returning the sinks its piped
 /// fds must be pumped into.  A `File` or `Pipe` sink is handed to the child
 /// directly; an edge's fate is dropped, the sentinel hearing the child's
@@ -580,11 +567,10 @@ pub(crate) fn wire_stdio(
     stdout: ChildOut,
     stderr: &Sink,
 ) -> Settled<Pumps<Sink>> {
-    let pipe = |e: std::io::Error| Error::new(io_message("pipe", &e));
     command.stdin(stdin_stdio(stdin)?);
     let (out, out_pump, joined) = match stdout {
         ChildOut::Sink(sink) => {
-            let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe)?;
+            let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe_error)?;
             (out, pump, stderr.same_destination(&sink).then_some(sink))
         }
         ChildOut::Edge { writer, .. } => (StdioSpec::from_owned(writer), None, None),
@@ -593,7 +579,7 @@ pub(crate) fn wire_stdio(
     let err_pump = if let Some(sink) = joined {
         join_stderr(command, &sink)?
     } else {
-        let (err, pump) = stderr.child_stdio(OutFd::Stderr).map_err(pipe)?;
+        let (err, pump) = stderr.child_stdio(OutFd::Stderr).map_err(pipe_error)?;
         command.stderr(err);
         pump
     };
@@ -617,12 +603,10 @@ fn join_stderr(command: &mut Launch, stdout: &Sink) -> Settled<Option<Sink>> {
         let owned = std::io::stdout()
             .as_handle()
             .try_clone_to_owned()
-            .map_err(|e| Error::new(io_message("pipe", &e)))?;
+            .map_err(pipe_error)?;
         (StdioSpec::from_owned(owned), None)
     } else {
-        stdout
-            .child_stdio(OutFd::Stderr)
-            .map_err(|e| Error::new(io_message("pipe", &e)))?
+        stdout.child_stdio(OutFd::Stderr).map_err(pipe_error)?
     };
     command.stderr(stdio);
     Ok(pump)
@@ -688,39 +672,79 @@ impl Pumps {
     }
 }
 
-/// The group a child lands in, and the terminal it is lent.
+/// Where a lone command's child lands.
+pub(crate) struct Placement {
+    pub(crate) policy: PgidPolicy,
+    /// Prepared before the spawn; lent the child's group once it exists.
+    pub(crate) loan: Option<PreparedTerminalLoan>,
+    /// Whether the terminal may be the child's stdin: it sits in ral's own
+    /// group or in one the loan lends it.
+    pub(crate) readable: bool,
+}
+
+/// A pipeline member's group: its pipeline's, unless an envelope, which leads
+/// one of its own, stands between ral and the program.
+pub(crate) fn member_policy(group: Membership, enveloped: bool) -> PgidPolicy {
+    if enveloped {
+        PgidPolicy::NewLeader
+    } else {
+        PgidPolicy::Join(group)
+    }
+}
+
+/// The one decision of where a child lands and which terminal it is lent.
 ///
-/// A stage's child joins the stage's group, whose owner holds any loan.
-/// Otherwise it takes the foreground, leading a group lent the terminal, iff
-/// the run holds the session's terminal lease, its stdout is terminal-bound
-/// or the run was lent the terminal explicitly, and it is not `enveloped`.
+/// A stage's child is a member of the stage's group, whose owner holds any
+/// loan.  Otherwise it takes the foreground, leading a group lent the
+/// terminal, iff the run holds the session's terminal lease, its stdout is
+/// terminal-bound or the run was lent the terminal explicitly, and it is not
+/// `enveloped`: bwrap's `--new-session` puts a payload where `tcsetpgrp`
+/// cannot name it, so an envelope leads a group of its own, unlent.
 ///
 /// The lease, not `interactive`, says who owns the terminal: a script
 /// launched at one foregrounds its children as the REPL does.  An explicit
-/// loan's body (`_ed-tui`'s `fzf`) draws on `/dev/tty` whatever its stdout;
-/// bwrap's `--new-session` puts a payload where `tcsetpgrp` cannot name it.
+/// loan's body (`_ed-tui`'s `fzf`) draws on `/dev/tty` whatever its stdout.
 ///
 /// A headless child leads a session of its own, so a cancel kills its whole
 /// subtree and nothing in it can signal the tty's owner; an interactive one
 /// stays in ral's group, where the terminal's Ctrl-C reaches it.
-pub(crate) fn placement(
-    shell: &Shell,
-    mooring: &Mooring,
-    enveloped: bool,
-) -> (PgidPolicy, Option<PreparedTerminalLoan>) {
+pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Placement {
+    let interactive = shell.session.interactive;
     if let Some(stage) = shell.session.stage.as_ref() {
-        return (PgidPolicy::Join(stage.group()), None);
+        return Placement {
+            policy: member_policy(stage.clone(), enveloped),
+            loan: None,
+            readable: false,
+        };
     }
-    let foreground = !enveloped
-        && (matches!(shell.io.stdout, Sink::Terminal)
-            || mooring.terminal_access == TerminalAccess::ExplicitLoan);
+    if enveloped {
+        // A session of its own has no controlling terminal to stop a read.
+        return Placement {
+            policy: PgidPolicy::NewLeader,
+            loan: None,
+            readable: interactive,
+        };
+    }
+    let foreground = matches!(shell.io.stdout, Sink::Terminal)
+        || mooring.terminal_access == TerminalAccess::ExplicitLoan;
     match shell.terminal_lease(mooring).filter(|_| foreground) {
-        Some(lease) => (
-            PgidPolicy::NewLeader,
-            TerminalLoan::prepare(lease, &mooring.home),
-        ),
-        None if shell.session.interactive => (PgidPolicy::Inherit, None),
-        None => (PgidPolicy::NewSession, None),
+        Some(lease) => {
+            let loan = TerminalLoan::prepare(lease, &mooring.home);
+            Placement {
+                policy: PgidPolicy::NewLeader,
+                readable: loan.is_some(),
+                loan,
+            }
+        }
+        None => Placement {
+            policy: if interactive {
+                PgidPolicy::Inherit
+            } else {
+                PgidPolicy::NewSession
+            },
+            loan: None,
+            readable: interactive,
+        },
     }
 }
 
@@ -755,17 +779,15 @@ impl Claim {
     /// moment it started: a direct child, its own pid; an enveloped one, the
     /// envelope's chain while its program runs, whose host pids no process
     /// inside the namespace can see.
-    fn of(confined: bool, enveloped: bool, spawned: &Spawned) -> Self {
-        match (confined, enveloped, spawned.landing) {
-            (false, ..) => Self::Unconfined,
-            (true, false, _) => Self::Confined(HashSet::from([spawned.child.id()])),
-            #[cfg(target_os = "linux")]
-            (true, true, crate::process::Landing::Owns(payload)) => {
-                Self::Confined(crate::authority::sandbox::payload_pids(payload))
-            }
-            // `Launch::spawn` lands an envelope in its payload's group.
-            (true, true, _) => Self::Confined(HashSet::new()),
+    fn of(confined: bool, spawned: &Spawned) -> Self {
+        if !confined {
+            return Self::Unconfined;
         }
+        #[cfg(target_os = "linux")]
+        if let crate::process::Group::Enveloped(payload) = &spawned.group {
+            return Self::Confined(crate::authority::sandbox::payload_pids(*payload));
+        }
+        Self::Confined(HashSet::from([spawned.child.id()]))
     }
 }
 
@@ -773,10 +795,10 @@ impl Claim {
 /// one place a launch is stopped or fails as a program: its confinement is
 /// applied, and its first word awaited, here.
 pub(crate) fn start(prepared: Prepared, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
-    let (confined, enveloped) = (prepared.confined, prepared.launch.enveloped());
+    let confined = prepared.confined;
     started(prepared, |launch| {
         let spawned = launch.spawn(pgid, scope)?;
-        let claim = Claim::of(confined, enveloped, &spawned);
+        let claim = Claim::of(confined, &spawned);
         Ok(Born { spawned, claim })
     })
 }
@@ -788,38 +810,36 @@ fn start_detached(prepared: Prepared, scope: &Scope) -> Settled<Started<Survivor
     started(prepared, |launch| launch.spawn_detached(scope))
 }
 
-/// `prepared`, spawned once by `spawn`.
+/// `prepared`'s launch, spent by `spawn`.
 fn started<T>(
-    mut prepared: Prepared,
-    spawn: impl FnOnce(&mut Launch) -> Result<T, Unstarted>,
+    prepared: Prepared,
+    spawn: impl FnOnce(Launch) -> Result<T, Unstarted>,
 ) -> Settled<Started<T>> {
-    match spawn(&mut prepared.launch) {
-        Ok(born) => Ok(Started {
-            shown: prepared.shown,
-            args: prepared.args,
-            born,
-        }),
-        Err(unstarted) => Err(unstarted_error(&prepared, unstarted)),
-    }
-}
-
-/// The one way a launch that made no child becomes the run's error: the
-/// program's own failure as the same process failure the head's probe
-/// reports, a refusal as itself, a stop as the run's.
-fn unstarted_error(prepared: &Prepared, unstarted: Unstarted) -> Break {
-    match unstarted {
-        Unstarted::Refused(refusal) => refusal.into(),
-        Unstarted::Stopped(stop) => stop.into(),
-        Unstarted::Program(e) => {
-            let interpreter = prepared.interpreter.as_deref();
+    let Prepared {
+        shown,
+        args,
+        launch,
+        image,
+        interpreter,
+        #[cfg(unix)]
+        projection,
+        ..
+    } = prepared;
+    match spawn(launch) {
+        Ok(born) => Ok(Started { shown, args, born }),
+        Err(Unstarted::Refused(refusal)) => Err(refusal.into()),
+        Err(Unstarted::Stopped(stop)) => Err(stop.into()),
+        // The program's own failure, as the same process failure the head's
+        // probe reports.
+        Err(Unstarted::Program(e)) => {
             let withheld = || -> Option<String> {
                 #[cfg(unix)]
-                if let (Some(projection), Some(interpreter)) = (&prepared.projection, interpreter) {
+                if let (Some(projection), Some(interpreter)) = (&projection, &interpreter) {
                     return crate::authority::sandbox::interpreter_hint(projection, interpreter);
                 }
                 None
             };
-            at_spawn(&e, &prepared.image, interpreter, withheld, &prepared.shown).into()
+            Err(at_spawn(&e, &image, interpreter.as_deref(), withheld, &shown).into())
         }
     }
 }
@@ -923,8 +943,11 @@ pub(crate) fn run(
     shell: &Shell,
 ) -> Settled<Value> {
     let mut prepared = prepare(head, args, Ownership::Kept, shell)?;
-    let (policy, lending) = placement(shell, mooring, prepared.launch.enveloped());
-    let readable = lending.is_some() || matches!(policy, PgidPolicy::Inherit);
+    let Placement {
+        policy,
+        loan: lending,
+        readable,
+    } = placement(shell, mooring, prepared.launch.enveloped());
     let pumps = wire_stdio(
         &mut prepared.launch,
         boundary_stdin(shell, readable),
@@ -934,20 +957,38 @@ pub(crate) fn run(
 
     announce_command_title(&prepared.shown, shell);
 
-    // Anchor the denial-log window before the spawn, so a kernel deny the
-    // child logs falls inside what `authority::sandbox::denial_hint` reads back.
+    // Before the spawn, so a kernel deny the child logs falls inside the
+    // window `denial_hint` reads back.
     let started = Instant::now();
-    // `finish_command` builds the `Command{External}` observation from
-    // whatever error reaches it, so a start failure needs no emission of
-    // its own here.
     let Started { shown, born, .. } = start(prepared, policy, &shell.scope)?;
     // Its `Drop` restores ral's pgid on every path out of here, sparing the
     // next REPL tty read an EIO from a background pgroup.
-    let loan = lending.and_then(|loan| loan.lend(born.spawned.child.id().cast_signed()));
+    let loan = match lending {
+        None => None,
+        Some(lending) => match lending.lend(born.spawned.child.id().cast_signed()) {
+            Some(loan) => Some(loan),
+            None => return Err(unlent(born, pumps, shown, started, shell)),
+        },
+    };
 
     // Nothing fallible may run between `start` and here: until the collector
     // holds it the bare child leaks on an early return.
     super::pipeline::join_lone(born, pumps, loan, shown, started, shell).map(|()| Value::Unit)
+}
+
+/// A child whose terminal handoff failed is outside the foreground, where
+/// its tty read stops it for good: killed and settled, and the refusal is the
+/// verdict.  A stop in force stays so for the run's next poll.
+fn unlent(born: Born, pumps: Pumps<Sink>, shown: String, started: Instant, shell: &Shell) -> Break {
+    if let Some(group) = born.spawned.group.owned() {
+        group.kill();
+    }
+    let refusal = Error::new(format!(
+        "could not hand the terminal to '{shown}': tcsetpgrp refused its process group; the \
+         command was killed before it could stop on a terminal read"
+    ));
+    let _ = super::pipeline::join_lone(born, pumps, None, shown, started, shell);
+    refusal.into()
 }
 
 /// Announce the running command via the terminal title (OSC 0).
@@ -961,28 +1002,9 @@ fn announce_command_title(cmd: &str, shell: &Shell) {
 
 // ── detach ────────────────────────────────────────────────────────────────────
 
-/// `detach`: birth a process this session stops owning.  Ordinary
-/// external-command machinery up to the double-fork birth, after which
-/// nothing here can signal, await or reap the survivor — hence a `{pid, desc}`
-/// receipt rather than a handle, and no log file anyone would have to find.
-///
-/// A survivor born inside a `grant` keeps that confinement for life: the
-/// projection is rendered into the launch as for a child we keep, minus the
-/// parent-death tie ([`Ownership::Surrendered`](crate::authority::sandbox::Ownership)),
-/// and nothing later can widen it because nothing later can name the process.
-///
-/// Its standard descriptors are `/dev/null`: our end of an inherited pipe
-/// closes when we exit, and the survivor's next write would take a `SIGPIPE`.
-///
-/// `detach <desc> <cmd> <args…>`, with `desc` already vetted by
-/// [`crate::shell::builtins::concurrency`].  The head is an exec image by
-/// definition: scope bindings are not consulted, and a handler in scope — a
-/// user arm, the catch-all, or a base frame — runs inside this session, so it
-/// is refused: nothing could be detached.  A stub stands in for `detach`
-/// itself.
-///
-/// Two judgments follow resolution: that refusal, then [`Head::admit`] and
-/// [`prepare`]'s vetting.
+/// `detach <desc> <cmd> <args…>`: the double-forked survivor is nobody's to
+/// signal, await or reap, so the result is a `{pid, desc}` receipt, and a
+/// head a handler answers, which would run inside this session, is refused.
 #[cfg(unix)]
 pub(crate) fn detach(
     desc: &str,

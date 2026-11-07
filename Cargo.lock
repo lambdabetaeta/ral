@@ -1962,6 +1962,7 @@ dependencies = [
  "sha2 0.11.0",
  "shlex",
  "similar",
+ "strum",
  "syntect",
  "tempfile",
  "textwrap",

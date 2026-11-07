@@ -35,7 +35,7 @@ fn open_for_drain(session: &Agent) -> crate::bus::Lease {
 }
 
 // The first sync sees TurnStarted; its original recording failure surfaces as
-// Unavailable and ends the life.
+// Unavailable and ends the home.
 #[test]
 fn turn_started_precedes_the_first_sync_and_a_sync_failure_ends_the_life() {
     let mut session = Agent::for_test("system").unwrap();

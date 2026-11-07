@@ -5,9 +5,7 @@ pub mod host;
 
 use crate::policy::Invocation;
 use crate::skill::{self, Boot};
-use ral_core::authority::grant::value::{LayerValue, printed};
 use ral_core::authority::policy::{Baseline, LocateError};
-use ral_core::data::FOValue;
 use ral_core::host::EnvVars;
 use ral_core::path::CwdPath;
 use ral_core::protocol::probe::Grants;
@@ -218,14 +216,14 @@ pub fn host_section(app: crate::app::App) -> String {
 /// syntax, oldest first, and the engine host's word where a withheld GPU is
 /// not held.  The caller appends the `- scratch:` bullet, since exarch names a seeded
 /// env var and host path where synod names the guest's tmpfs.
-pub fn grant_section(grants: &Grants) -> String {
+pub(crate) fn grant_section(grants: &Grants) -> String {
     // The denial legend would describe a runtime event that cannot occur.
     if grants.layers.is_empty() {
         return "Ambient authority: every command, path, network call and GPU access is permitted; \
 the sandbox is the trust boundary.\n\n"
             .into();
     }
-    let layers: Vec<String> = grants.layers.iter().map(layer).collect();
+    let layers: Vec<String> = grants.layers.iter().map(ToString::to_string).collect();
     let mut s = format!(
         "{}\n\n```ral\n{}\n```\n",
         GRANT_LEGEND.trim_end(),
@@ -239,20 +237,6 @@ the sandbox is the trust boundary.\n\n"
     }
     s.push('\n');
     s
-}
-
-/// A layer as `grant` writes it, or, where no grant spells it, its grant
-/// extended by its fragment.
-fn layer(value: &LayerValue) -> String {
-    // `grant`'s bracket is the form's: the empty grant is `[]`.
-    let grant = match &value.grant {
-        FOValue::Map { entries } if entries.is_empty() => "[]".into(),
-        grant => printed(grant),
-    };
-    match &value.fragment {
-        None => format!("grant {grant}"),
-        Some(fragment) => format!("grant {grant} extended by {}", printed(fragment)),
-    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -304,7 +288,9 @@ fn skills_section(skills: &[skill::Skill]) -> String {
 mod tests {
     use super::*;
     use ral_core::authority::grant::freeze::Anchor;
-    use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
+    use ral_core::authority::grant::value::{
+        Axes, ExecTable, FsTable, GrantValue, LayerValue, Target,
+    };
     use ral_core::authority::policy::{EditorVerb, Gpu, Net};
     use ral_core::data::datum::Datum as _;
 

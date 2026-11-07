@@ -19,7 +19,7 @@ use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer
 use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode, arm_lifetime};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
-    Break, DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
+    DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
     Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, Value, panic_text,
 };
 use crate::source::FileId;
@@ -267,12 +267,8 @@ impl Shell {
 
                 let label = name.fault_label();
                 let body = move |m: &Mooring, s: &mut Self| {
-                    crate::shell::evaluator::apply(&hook.binding.value, args, m, s).map_err(|brk| {
-                        match brk {
-                            Break::Error(e) => e.with_context(label).into(),
-                            escape @ Break::Escape(_) => escape,
-                        }
-                    })
+                    crate::shell::evaluator::apply(&hook.binding.value, args, m, s)
+                        .map_err(|brk| brk.map_error(|e| e.with_context(label)))
                 };
                 if hook.policy.aside {
                     let mut aside = self.join_session();

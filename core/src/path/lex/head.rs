@@ -525,7 +525,7 @@ fn share_end(path: &[u8], server: usize) -> usize {
 pub(crate) fn windows_components(p: &[u8]) -> impl Iterator<Item = &[u8]> {
     parse_bytes(p, PathRules::Windows)
         .without_verbatim_prefix()
-        .split(|&b| PathRules::Windows.is_separator(char::from(b)))
+        .split(|&b| is_win_sep(b))
         .filter(|c| !c.is_empty())
 }
 
@@ -537,7 +537,5 @@ pub(crate) fn windows_components(p: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// folded differently would silently unfold a `~`.
 pub(crate) fn windows_head(p: &str) -> &str {
     let rest = parse_bytes(p.as_bytes(), PathRules::Windows).without_verbatim_prefix();
-    // SAFETY: `without_verbatim_prefix` slices `p` at an ASCII prefix boundary,
-    // which cannot land inside a multi-byte UTF-8 sequence.
-    unsafe { std::str::from_utf8_unchecked(rest) }
+    &p[p.len() - rest.len()..]
 }

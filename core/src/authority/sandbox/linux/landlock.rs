@@ -26,7 +26,8 @@
 
 use super::super::unavailable;
 use super::super::warrant::{Handoff, Slot};
-use super::{OpenError, Shown, leaf_fd, open_dir_nofollow, open_nofollow};
+use super::Shown;
+use super::shown::{OpenError, leaf_fd, open_dir_nofollow, open_nofollow};
 use crate::authority::policy::{ExecDeny, KernelRules, Subject};
 use crate::authority::sandbox::{ExecProjection, RenderedFs};
 use crate::error::Error;
@@ -388,8 +389,7 @@ pub(crate) fn build(
     let Some(Plan { handled, scoped }) = plan(exec, landlock)? else {
         return Ok(None);
     };
-    let ruleset = Ruleset::create(handled, scoped)
-        .map_err(|e| Error::new(RulesetError::Create(e).to_string()))?;
+    let ruleset = Ruleset::create(handled, scoped).map_err(|e| refused(RulesetError::Create(e)))?;
     if let Some(table) = kernel_table(exec) {
         admit_exec(&ruleset, table, fs, shown).map_err(Error::new)?;
     }
@@ -397,12 +397,17 @@ pub(crate) fn build(
         admit_sockets(fs, &shown.roots, &mut |admit| {
             ruleset.admit(admit.fd, Rights::RESOLVE_UNIX)
         })
-        .map_err(|e| Error::new(e.to_string()))?;
+        .map_err(refused)?;
     }
     Ok(Some(Landlocked {
         refer_root: handled.contains(Rights::REFER),
         at: handoff.lend(ruleset.as_fd()).map_err(Error::new)?,
     }))
+}
+
+/// `e` as the launch's refusal.
+fn refused(e: RulesetError) -> Error {
+    Error::new(String::from(e))
 }
 
 /// Stated writes alone admit outside sockets; denies are masked by bwrap.

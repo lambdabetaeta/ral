@@ -89,8 +89,10 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   pipe: the thread waiting on the blocked one aborts its call (`interrupt`,
   `CancelSynchronousIo`), the collector a thread stage's and
   `Pumps::join_under` a pump's, and the aborted read or write (`aborted`)
-  re-reads its scope and, under a shield, retries; writes go a 4 KiB chunk
-  at a time, so the sentinel's one read lands one
+  re-reads its scope and, under a shield, retries; an aborted write is never
+  retried, since its delivered prefix is unknown (a stop under a cause, an
+  error under a shield). Writes go a 4 KiB chunk at a time, so the
+  sentinel's one read lands one
   ([[internals/cancellation|cancellation]]).
 - `ansi.rs` — terminal escape vocabulary only: SGR constants, OSC builders,
   and escape-sequence scanning. Whether a sequence may be emitted is
@@ -293,7 +295,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `launch.rs` — the owned launch value and its platform interpreters, and the
   two births, each returning `Unstarted` for a launch that made no child
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]):
-  `spawn`, which hands back a `Spawned` (the child, its `Landing`
+  `spawn`, which hands back a `Spawned` (the child, its `Group`
   ([[invariants/a-child-lands-once|a-child-lands-once]]) and any jail cgroup),
   and the `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
   to init — its pid comes back but nothing else does, so there is no handle,

@@ -116,10 +116,10 @@ fn resumed_roots_keep_their_recorded_report_without_reporting_again() {
         )
         .unwrap();
         let status = ChildStatus::Replied(FOValue::Int { value: 1 });
-        let life = ral_core::process::DurableRoot::default().child();
+        let home = ral_core::process::DurableRoot::default().child();
         let mailbox = crate::bus::AgentMailbox::new(
             log.id(),
-            life,
+            home,
             log.record_emitter(),
             Admission::Free,
             None,

@@ -1,7 +1,8 @@
 use super::landlock::{Abi, Landlock, Landlocked};
+use super::shown::{Bind, CGROUP, open_object, own_cgroup};
 use super::{
-    Bind, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, InfoFd, Layer, Pinned, Shown,
-    bwrap_argv, bwrap_command, envelope, open_object, own_cgroup, pin_envelope,
+    Binds, Builds, Envelope, GpuNodes, HostEnvelope, InfoFd, Layer, Pinned, Shown, bwrap_argv,
+    bwrap_command, envelope, pin_envelope,
 };
 use crate::Role;
 use crate::authority::policy::{

@@ -1,5 +1,5 @@
-//! Decode a capability `Value` — the argument of `grant [...]`, a
-//! `--capabilities` profile, or a grant value one host authored for another —
+//! Decode a capability `Value` (the argument of `grant [...]`, a
+//! `--capabilities` profile, or a grant value one host authored for another)
 //! into a resolved [`GrantLayer`]: the one grant front-end.
 //!
 //! A dimension the record does not name stays `None` and inherits the
@@ -202,16 +202,20 @@ fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer
     Ok(FsLayer::new(read, write, deny))
 }
 
-/// `net` and `gpu` each take their one restriction; omit one to inherit.
-fn decode_veto<V: FromStr>(value: &Value, vocab: &Vocab, err_prefix: &str) -> Result<V, Error> {
-    let at = within(err_prefix);
-    let tag = Tag::of(value).ok_or_else(|| at(untagged(vocab, value)))?;
-    let veto = tag
+/// A nullary tag of `V`: its label names a `V` and carries no payload.
+fn nullary_tag<V: FromStr>(value: &Value, vocab: &Vocab) -> Result<V, Error> {
+    let tag = Tag::of(value).ok_or_else(|| untagged(vocab, value))?;
+    let parsed = tag
         .label
         .parse()
-        .map_err(|_| at(unknown_tag(vocab, tag.label)))?;
-    tag.nullary(vocab).map_err(at)?;
-    Ok(veto)
+        .map_err(|_| unknown_tag(vocab, tag.label))?;
+    tag.nullary(vocab)?;
+    Ok(parsed)
+}
+
+/// `net` and `gpu` each take their one restriction; omit one to inherit.
+fn decode_veto<V: FromStr>(value: &Value, vocab: &Vocab, err_prefix: &str) -> Result<V, Error> {
+    nullary_tag(value, vocab).map_err(within(err_prefix))
 }
 
 /// `editor`/`shell`: a list of verbs, each a nullary tag of `V`.
@@ -224,14 +228,7 @@ fn decode_verbs<V: FromStr + Ord>(
     list_of(value, &format!("{}s", vocab.noun))
         .map_err(&at)?
         .iter()
-        .map(|item| {
-            let tag = Tag::of(&item).ok_or_else(|| untagged(vocab, &item))?;
-            let verb = tag
-                .label
-                .parse()
-                .map_err(|_| unknown_tag(vocab, tag.label))?;
-            tag.nullary(vocab).map(|()| verb)
-        })
+        .map(|item| nullary_tag(&item, vocab))
         .collect::<Result<_, _>>()
         .map_err(at)
 }
@@ -321,7 +318,7 @@ fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, 
         "name" => {
             let name = tag.text(&EXEC_TARGET, "a command name")?;
             bare_name(name)?;
-            let path = ctx.env().get_or_host("PATH");
+            let path = ctx.var("PATH");
             name_rules::<W>(name, path.as_deref(), cfg!(unix))
         }
         "dir" => dir_rules::<W>(&tag, ctx),
@@ -427,7 +424,14 @@ pub(crate) fn decode_capability_map(
             }
         }
     }
-    Ok(GrantLayer::new(fs, exec, net, gpu, editor, shell))
+    Ok(GrantLayer {
+        exec,
+        fs,
+        net,
+        gpu,
+        editor,
+        shell,
+    })
 }
 
 /// `record`, a grant value that crossed as data, resolved against `ctx`:
@@ -734,6 +738,35 @@ mod tests {
                     if *scope == ExecDeny::Name(Veto::of("zz-lost"))
             ))
         );
+    }
+
+    /// `name` and `` `dir `path `` read one environment: an overlay `PATH` is
+    /// the `PATH` of both, and the process `PATH` of neither.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_and_the_path_selector_read_the_same_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, root) = tree();
+        let bin = root.join("opt-tools");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join("tool"), "").unwrap();
+        std::fs::set_permissions(bin.join("tool"), PermissionsExt::from_mode(0o755)).unwrap();
+        let ctx = anchored_at(&root, &root, &[("PATH", &bin)]);
+        let layer = decode_capability_map(
+            &rec(&[(
+                "exec",
+                exec(vec![tagged("name", "tool"), dir(bare("path"))], vec![]),
+            )]),
+            "test",
+            &ctx,
+        )
+        .unwrap();
+        let mut allowed = written(layer.exec().unwrap());
+        allowed.sort();
+        let bin = utf8(&bin).unwrap();
+        let mut expected = [format!("dir {bin}"), format!("{bin}/tool")];
+        expected.sort();
+        assert_eq!(allowed, expected);
     }
 
     #[cfg(unix)]

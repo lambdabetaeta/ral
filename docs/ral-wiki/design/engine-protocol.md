@@ -447,10 +447,10 @@ ends its session, never retries into it: exarch's headless and synod
 front-ends end the conversation on it, showing its sentence once — and first
 cause wins where more than one could apply.
 
-A front-end may bind a life to the severance (`Transport::bind`); whichever
+A front-end may bind a home to the severance (`Transport::bind`); whichever
 thread severs then cancels it — the reader, the heartbeat or a failed write.
 Teardown severs too (the reader on `Ended`, the drop), so a front-end
-replacing an engine under a living life unbinds it first (`Transport::unbind`).
+replacing an engine under a living home unbinds it first (`Transport::unbind`).
 Exarch binds each agent's life, so a lost engine stops its owner's work at once.
 
 The reader thread that watches a wire connection always severs *before* it

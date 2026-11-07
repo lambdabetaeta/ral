@@ -12,7 +12,6 @@
 use super::bindings::BindingLedger;
 use super::workers::Roster;
 use super::{LocalState, Mooring, SessionState, Shell};
-use crate::error::io_message;
 use crate::io::{Io, Sink, Source, Streams};
 use crate::process::{DurableRoot, Membership, Scope};
 use crate::shell::runtime::{Audit, Cradle, Error};
@@ -217,7 +216,7 @@ impl Shell {
                 drop(live);
                 result
             })
-            .map_err(|e| Error::new(io_message(format!("could not start a {kind} thread"), &e)))
+            .map_err(|e| Error::new(format!("could not start a {kind} thread: {e}")))
     }
 }
 

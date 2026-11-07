@@ -119,7 +119,7 @@ pub(crate) struct TestAgentSpec {
     pub(crate) parent: Option<AgentHandle>,
     pub(crate) returns: bool,
     pub(crate) admission: Admission,
-    pub(crate) life: Option<ScopeNode>,
+    pub(crate) home: Option<ScopeNode>,
     pub(crate) elapsed: Duration,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
@@ -132,21 +132,21 @@ impl TestAgentSpec {
             parent: None,
             returns: false,
             admission: Admission::Free,
-            life: None,
+            home: None,
             elapsed: Duration::ZERO,
             fuel: 0,
             search: false,
         }
     }
 
-    pub(crate) fn child(name: &str, parent: &AgentHandle, life: ScopeNode) -> Self {
+    pub(crate) fn child(name: &str, parent: &AgentHandle, home: ScopeNode) -> Self {
         Self {
             parent: Some(parent.clone()),
             returns: true,
             admission: Admission::Parent {
                 idle: crate::agent::fleet::HELPER_IDLE,
             },
-            life: Some(life),
+            home: Some(home),
             fuel: parent.0.fuel.saturating_sub(1),
             search: parent.0.search,
             ..Self::new(name)
@@ -154,7 +154,7 @@ impl TestAgentSpec {
     }
 }
 
-/// The mailbox ends the life before the name is released.
+/// The mailbox ends the home before the name is released.
 pub(crate) struct TestAgent {
     handle: AgentHandle,
     pub(crate) mailbox: AgentMailbox,
@@ -176,7 +176,7 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         parent,
         returns,
         admission,
-        life,
+        home,
         elapsed,
         fuel,
         search,
@@ -186,9 +186,9 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
     let started = Instant::now()
         .checked_sub(elapsed)
         .expect("test birth fits the clock");
-    let life = life.unwrap_or_else(|| fleet.registry.root.child());
+    let home = home.unwrap_or_else(|| fleet.registry.root.child());
     let recorder = crate::record::Emitter::none();
-    recorder.bind(life.clone());
+    recorder.bind(home.clone());
     let folds = recorder
         .begin(crate::record::Started {
             session_id: id,
@@ -202,7 +202,7 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
         .expect("a synthetic agent's head");
     let mailbox = AgentMailbox::new(
         id,
-        life,
+        home,
         recorder,
         admission,
         parent.as_ref().map(|parent| parent.0.address.clone()),

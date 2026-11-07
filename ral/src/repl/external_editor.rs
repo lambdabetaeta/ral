@@ -10,7 +10,7 @@ use ral_core::path::{Dir, EntryName, Kind, LeafMode, Reading, ScopedDir, Visibil
 use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
 };
-use ral_core::{Shell, Value};
+use ral_core::{RegisterError, Shell, Value};
 
 const NAME: &str = "_external-editor";
 
@@ -28,10 +28,10 @@ fn scheme(_u: &mut ral_core::typecheck::Unifier) -> ral_core::ty::Scheme {
     mk_scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::String))))
 }
 
-pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
+pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
     let entry = shell
         .lookup_builtin(NAME)
-        .ok_or_else(|| format!("this shell's surface has no {NAME}"))?;
+        .ok_or_else(|| Error::new(format!("this shell's surface has no {NAME}")))?;
     shell
         .register_hook(
             HookName::session("external-editor"),
@@ -41,7 +41,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
             },
             DefaultPolicy::leased(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(RegisterError::into_error)
 }
 
 fn failure(context: &str, error: impl std::fmt::Display) -> Break {

@@ -38,48 +38,48 @@ mod tests {
 
     #[test]
     fn dropping_an_exchange_cancels_its_node_but_not_its_life_or_siblings() {
-        let life = DurableRoot::default().child();
-        let exchange = Lease::under(&life);
-        let sibling = Lease::under(&life);
+        let home = DurableRoot::default().child();
+        let exchange = Lease::under(&home);
+        let sibling = Lease::under(&home);
         let node = exchange.node();
         assert_eq!(exchange.id(), node.id());
         drop(exchange);
         assert_eq!(node.cause(), Some(CancelCause::Cancelled));
-        assert!(!life.is_cancelled());
+        assert!(!home.is_cancelled());
         assert!(!sibling.is_cancelled());
     }
 
     #[test]
     fn ending_a_life_cancels_existing_and_new_exchange_leases() {
-        let life = DurableRoot::default().child();
-        let exchange = Lease::under(&life);
-        life.cancel(CancelCause::Terminated);
+        let home = DurableRoot::default().child();
+        let exchange = Lease::under(&home);
+        home.cancel(CancelCause::Terminated);
         assert_eq!(exchange.cause(), Some(CancelCause::Terminated));
-        assert_eq!(Lease::under(&life).cause(), Some(CancelCause::Terminated));
+        assert_eq!(Lease::under(&home).cause(), Some(CancelCause::Terminated));
     }
 
     #[test]
     fn a_stronger_exchange_cause_survives_lease_drop() {
-        let life = DurableRoot::default().child();
-        let exchange = Lease::under(&life);
+        let home = DurableRoot::default().child();
+        let exchange = Lease::under(&home);
         let node = exchange.node();
         node.cancel(CancelCause::TimedOut);
         drop(exchange);
         assert_eq!(node.cause(), Some(CancelCause::TimedOut));
-        assert!(!life.is_cancelled());
+        assert!(!home.is_cancelled());
     }
 
     #[test]
     fn unwinding_an_exchange_cancels_the_node_it_published() {
-        let life = DurableRoot::default().child();
+        let home = DurableRoot::default().child();
         let mut node = None;
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let exchange = Lease::under(&life);
+            let exchange = Lease::under(&home);
             node = Some(exchange.node());
             panic!("exchange unwound");
         }));
         assert!(unwind.is_err());
         assert_eq!(node.unwrap().cause(), Some(CancelCause::Cancelled));
-        assert!(!life.is_cancelled());
+        assert!(!home.is_cancelled());
     }
 }

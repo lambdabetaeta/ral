@@ -381,7 +381,7 @@ for what clippy cannot state.**
 - **Each exception is a typed site, surfacing or silent.** `site!`
   (`lint/site.rs`) exempts exactly one call, in one of two shapes:
   `site!(Silent::ArgvBeforeMain, std::fs::read("/proc/self/cmdline"))` or, for a
-  method, `site!(Silent::WhichStat, &candidate => is_file())`. The ban names
+  method, `site!(Silent::GitRoot, cwd => ancestors())`. The ban names
   the call; the site names the place.
   - *The first argument is a variant, and the enums are the manifest.* Each
     crate that has sites includes the shared macro vocabulary in its `site.rs`.

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, join_lone, CollectState::settle_lone, Landing, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, join_lone, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
 # Cancellation
@@ -322,8 +322,10 @@ cover the handles too.
 
 There is no watch table and no wake. Windows pipes cannot be waited on with a
 timeout, so there a blocked thread stage or pump is interrupted
-(`CancelSynchronousIo`) instead, and the aborted call re-reads its scope; a
-write retried under a shield may repeat a prefix, the one open gap
+(`CancelSynchronousIo`) instead, and the aborted call re-reads its scope. An
+aborted read took nothing and is retried; an aborted write may have delivered
+a prefix it cannot report, so it is never retried: under the scope's cause it
+is that stop, under a shield an error naming the unknown delivery
 ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
 
 A computation that never reaches either (a tight Rust loop inside one
@@ -614,10 +616,10 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C / Esc** | exarch TUI, open job | `AgentHandle::stop(JobId)` on the focused address | cancels latest exchange with `Interrupted`, recalls queued human text losslessly ahead of the draft; helpers survive |
 | **Stop / Esc** | synod, open job | `AgentHandle::stop(JobId)` under the mailbox lock | matching job is marked stopped, latest exchange cancelled with `Interrupted`, human text recalled; helpers continue and reports can resume the root within the job |
 | **`reply` / `/clear`** | exarch owner | owner-thread transition | reply reports and clears schedules; clear prepares first, joins helpers and replaces the engine, retaining queued human text/messages/commands |
-| **end / `/close` / dismiss / owner drop** | exarch | life cancellation | ends subtree with `Cancelled`; helpers join before engine retirement |
-| **first failed record append** | exarch | life cancellation | the writer's `Fatal` ends its bound life with `Cancelled`; the owner announces the failure at its end |
-| **engine severance** | exarch | life cancellation | the transport's `Fatal` ends its bound life with `Cancelled` from the severing thread; the owner names the loss at its end |
-| **helper idle timeout** | exarch helper | life cancellation | `TimedOut` under the mailbox lock after resting idle with no admissible input |
+| **end / `/close` / dismiss / owner drop** | exarch | home cancellation | ends subtree with `Cancelled`; helpers join before engine retirement |
+| **first failed record append** | exarch | home cancellation | the writer's `Fatal` ends its bound home with `Cancelled`; the owner announces the failure at its end |
+| **engine severance** | exarch | home cancellation | the transport's `Fatal` ends its bound home with `Cancelled` from the severing thread; the owner names the loss at its end |
+| **helper idle timeout** | exarch helper | home cancellation | `TimedOut` under the mailbox lock after resting idle with no admissible input |
 | **`/quit` / `Host::end` / host drop** | exarch host | fleet-root cancellation | `Cancelled` reaches all lives; host joins all root threads |
 | **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to every live root's `AgentHandle::stop_current` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |

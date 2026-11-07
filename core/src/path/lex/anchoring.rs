@@ -7,11 +7,6 @@ use std::path::{Path, PathBuf};
 use super::head::{HeadKind, is_absolute, is_sep_byte, parse_bytes};
 use crate::path::{CwdPath, PathRules};
 
-/// Resolve `path` against `cwd`: [`anchor`] on a string.
-pub(crate) fn resolve_path(cwd: &CwdPath, path: &str) -> PathBuf {
-    anchor(cwd, &PathBuf::from(path))
-}
-
 /// `input` made absolute against `cwd` as the host reads it.  Unfolded: a
 /// `..` or a trailing separator is the kernel's to read, after the links
 /// before it ([`fold_dots`] is the logical reading).

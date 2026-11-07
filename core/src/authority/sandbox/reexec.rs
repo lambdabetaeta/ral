@@ -33,9 +33,11 @@ use std::sync::OnceLock;
 /// to its environment can choose the file.
 pub(super) struct Pinned {
     arg0: PathBuf,
-    /// What `arg0` reached when it was pinned: the one hold on the binary,
-    /// and the identity everything else reads.
+    /// What `arg0` reached when it was pinned: the one hold on the binary.
     trace: Trace,
+    /// The identity of that leaf, independent of its current name.
+    #[cfg(unix)]
+    id: ObjectId,
     /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode.
     /// Close-on-exec, so no child inherits it: `execve` opens the target
     /// before closing the fd, which suffices for an ELF, never a `#!` script.
@@ -49,17 +51,21 @@ impl Pinned {
     pub(super) fn open(arg0: PathBuf) -> Option<Self> {
         let trace = reach(&arg0).ok()?.trace().clone();
         // An absent name pins nothing.
+        #[cfg(unix)]
+        let id = trace.leaf_id()?;
+        #[cfg(not(unix))]
         trace.leaf_id()?;
         #[cfg(target_os = "linux")]
         let fd = {
             let file = site!(Silent::PinOpen, std::fs::File::open(&arg0)).ok()?;
             // The file opened must be the object `trace` holds.
-            (ObjectId::of(&file).ok() == trace.leaf_id())
-                .then(|| std::os::fd::OwnedFd::from(file))?
+            (ObjectId::of(&file).ok() == Some(id)).then(|| std::os::fd::OwnedFd::from(file))?
         };
         Some(Self {
             arg0,
             trace,
+            #[cfg(unix)]
+            id,
             #[cfg(target_os = "linux")]
             fd,
         })
@@ -119,7 +125,7 @@ impl Pinned {
     /// The held object's identity, independent of its current name.
     #[cfg(unix)]
     pub(super) fn object_id(&self) -> ObjectId {
-        self.trace.last_id()
+        self.id
     }
 
     /// Refuse to spawn a foreign build: macOS execs the trampoline by name,
@@ -148,8 +154,12 @@ impl Pinned {
 
 /// Where the absolute name `arg0` leads now.
 fn reach(arg0: &Path) -> io::Result<Located> {
-    let at = LexicalPath::absolute(arg0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a pinned name is absolute"))?;
+    let at = LexicalPath::absolute(arg0).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a pin is taken from an absolute path, and this name is relative",
+        )
+    })?;
     walk(&at, LeafMode::Follow)
 }
 

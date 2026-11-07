@@ -38,7 +38,7 @@ fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
 /// NUL in an argument are ral's refusals.
 #[test]
 fn only_create_process_s_failure_is_the_program_s() {
-    let refused = |mut launch: Launch| {
+    let refused = |launch: Launch| {
         matches!(
             launch.spawn(
                 PgidPolicy::Inherit,

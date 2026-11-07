@@ -116,8 +116,6 @@ pub(crate) use render::rendered_ancestors;
 pub(crate) use render::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
 pub use resolver::{Resolver, spelled};
 pub(crate) use rules::PathRules;
-#[cfg(unix)]
-pub(crate) use shebang::shebang;
 pub use show::shown;
 pub(crate) use sigil::SigilHead;
 #[cfg(test)]

@@ -4,7 +4,7 @@
 //! of a [`LexicalPath`], which is what a walk takes — so the stage order is
 //! enforced by the types, not by convention.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{CwdPath, LexicalPath, NotACwd, lex, sigil};
 use crate::host::EnvVars;
@@ -57,7 +57,7 @@ impl<'a> Resolver<'a> {
     /// filesystem access, and no fold ([`LexicalPath::folded`]).
     pub fn resolve(&self, raw: &str) -> LexicalPath {
         let expanded = sigil::expand_path_prefix(raw, self.env);
-        LexicalPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
+        LexicalPath::from_lexed(lex::anchor(self.cwd, &PathBuf::from(expanded)))
     }
 
     /// Stage 2 alone, for a path the host already holds, such as a walked

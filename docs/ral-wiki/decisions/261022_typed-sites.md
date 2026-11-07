@@ -42,7 +42,7 @@ were wrong with that.
 
 - **A site wraps one call.** `site!(Silent::ArgvBeforeMain,
   std::fs::read("/proc/self/cmdline"))`; for a method,
-  `site!(Silent::WhichStat, &candidate => is_file())`. The receiver and every
+  `site!(Silent::GitRoot, cwd => ancestors())`. The receiver and every
   argument are evaluated *outside* the exemption, so a banned call nested in an
   argument still fires. The macro's result chains (`site!(…).unwrap()`,
   `site!(…)?`), a chain of banned calls is split into one site each, and `?` and

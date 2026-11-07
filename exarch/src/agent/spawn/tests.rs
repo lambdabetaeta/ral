@@ -100,12 +100,12 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
         grandchild.status().unwrap().job.is_some()
     });
     crate::agent::attend::hooks::panic_on_run(child.id());
-    let life = child.mailbox.home();
+    let home = child.mailbox.home();
     child
         .handle()
         .0
         .address
-        .after_report_commit(move || assert!(life.is_cancelled()));
+        .after_report_commit(move || assert!(home.is_cancelled()));
     let log = child.log_dir().path().join(RECORD);
     let helper = launch_child(&mut parent, child, None, &emit);
     let failures = parent.body.nursery.join(helper.id());

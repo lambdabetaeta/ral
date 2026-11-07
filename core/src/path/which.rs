@@ -87,7 +87,7 @@ fn locate_at(
 /// The first of bare `name`'s `PATH` candidates `judge` takes, each walked
 /// at most once; else what `judge` made of each candidate it passed over,
 /// in `PATH` order.  `judge` takes only a program
-/// ([`Located::is_executable`]): the remembered one is tried first, on the
+/// ([`Located::holds_program`]): the remembered one is tried first, on the
 /// strength of no earlier candidate being one.
 pub(crate) fn search<T, C>(
     name: &str,
@@ -127,6 +127,7 @@ fn fold<T, C>(
         programs[at] = Some(candidate.as_ref().is_some_and(Candidate::holds_program));
         match candidate.map(&mut judge) {
             Some(ControlFlow::Break(it)) => {
+                debug_assert_eq!(programs[at], Some(true), "`judge` takes only a program");
                 taken = Some(it);
                 break;
             }
@@ -324,7 +325,7 @@ pub fn ral_path_entries(env: &EnvVars) -> Vec<PathBuf> {
 /// cwd — the forty-year-old implicit-`.`-on-`PATH` foot-gun — and on Windows a
 /// trailing `;` is ubiquitous noise, so honouring it would put every file of
 /// every directory the user `cd`s into on the search list; off Unix, where
-/// any file is a program ([`Located::is_executable`]), that is every file
+/// any file is a program ([`Located::holds_program`]), that is every file
 /// outright.  A user who wants the cwd searched writes `.`, which
 /// [`path_dirs`] honours deliberately.
 pub fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
@@ -335,7 +336,7 @@ pub fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
 /// [`WINDOWS_EXEC_EXTENSIONS`](crate::path::WINDOWS_EXEC_EXTENSIONS) is its
 /// stripped twin, the agreement pinned below.
 #[cfg(windows)]
-pub(crate) const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
 /// The Windows resolver's `%PATHEXT%` suffixes, leading dots stripped, with
 /// the resolver's own default when the variable is unset.  An entry that is

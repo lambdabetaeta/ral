@@ -63,21 +63,25 @@ impl Shell {
         verdict.map_err(|denial| self.refused(denial))
     }
 
-    /// The stack's verdict on `path` raised: a refusal worded and recorded;
-    /// the walk's failure handed back for the caller to word.
+    /// The stack's verdict on `path` raised: a refusal worded and recorded; a
+    /// walk failure phrased with the name as written.
     fn raised<O: Op, T>(
         &mut self,
         path: &LexicalPath,
         verdict: Result<T, LocateError>,
-    ) -> Settled<io::Result<T>> {
+    ) -> Settled<T> {
         match verdict {
-            Ok(found) => Ok(Ok(found)),
-            Err(LocateError::Io(e)) => Ok(Err(e)),
+            Ok(found) => Ok(found),
+            Err(LocateError::Io(e)) => Err(Self::walk_failure(path, &e)),
             Err(LocateError::Refused(refused)) => {
                 let denial = fs_denial(&self.context.grants, refused, O::FS, path);
                 Err(self.refused(denial))
             }
         }
+    }
+
+    fn walk_failure(path: &LexicalPath, e: &io::Error) -> Break {
+        Error::new(io_message(path.shown(), e)).into()
     }
 
     /// The fs door: walk `path` to the object it names, symlink-free, and
@@ -94,8 +98,7 @@ impl Shell {
     pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<Judged<O>>> {
         check_device_name(path)?;
         let verdict = (self.context.grants).locate::<O, Located>(self.baseline(), path);
-        let located = self.raised::<O, _>(path, verdict)?;
-        located.map_err(|e| Error::new(io_message(path.shown(), &e)).into())
+        self.raised::<O, _>(path, verdict)
     }
 
     /// [`locate`](Self::locate) for a directory entered.
@@ -105,8 +108,7 @@ impl Shell {
     pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
         check_device_name(path)?;
         let verdict = (self.context.grants).locate::<O, Dir>(self.baseline(), path);
-        let dir = self.raised::<O, _>(path, verdict)?;
-        dir.map_err(|e| Error::new(io_message(path.shown(), &e)).into())
+        self.raised::<O, _>(path, verdict)
     }
 
     /// [`locate`](Self::locate) for a probe, which must tell *absent* from
@@ -132,13 +134,12 @@ impl Shell {
             Ok(located) => located,
             Err(e) => {
                 let verdict = (self.context.grants).judge_failure(self.baseline(), O::FS, path, &e);
-                let told = match self.raised::<O, _>(path, verdict)? {
-                    Err(lenient) => Some(lenient),
-                    Ok(()) => is_loop(&e).then_some(e),
+                self.raised::<O, _>(path, verdict)?;
+                return if is_loop(&e) {
+                    Err(Self::walk_failure(path, &e))
+                } else {
+                    Ok(None)
                 };
-                return told.map_or(Ok(None), |error| {
-                    Err(Error::new(io_message(path.shown(), &error)).into())
-                });
             }
         };
         let held = self.judge_named::<O>(located, path)?;
