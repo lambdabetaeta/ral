@@ -259,9 +259,11 @@ fn an_exact_exec_allow_does_not_reopen_a_covering_deny_dir() {
         let out = under(&layer, &ral_core::path::shown(program));
         denied_by_active_grant(&proof, &control, &out, "ran");
         assert!(
-            out.stderr
-                .contains("an allowance cannot override an exclusion"),
-            "the refusal must say no allowance overrides it; stderr:\n{}",
+            out.stderr.contains(
+                "an allowance cannot override an exclusion; remove the exclusion from the \
+                 policy that imposes it"
+            ),
+            "the refusal must say no allowance overrides it, and what does; stderr:\n{}",
             out.stderr
         );
     }

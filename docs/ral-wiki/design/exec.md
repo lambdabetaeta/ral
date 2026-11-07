@@ -508,6 +508,10 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
   the reason's own, signal advice for `signaled`; then the session's
   exit-hints table, keyed on the basename of `program` and the status, for
   `exited` only (`ExitHints`, `core/src/shell/runtime/exit_hints.rs`).
+- **A fix both enforcers suggest is worded once**, in `authority::remedy`
+  (`remove_the_exclusion`, `add_to_fs`, `add_to_exec`). A guard refusal and a
+  kernel-denial hint each word their own cause, then end in that text, so a
+  refusal and a denial of one exclusion give one remedy.
 - **The path-as-text hint (`#'…'#`) is one rule, at the machine's
   `dispatch_exec`** (`offer_path_as_text`). It is offered only to a path head
   given no arguments, which was most likely meant as text: to a refused

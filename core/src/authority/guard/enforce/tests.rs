@@ -235,7 +235,14 @@ mod words {
         let only = exec([dir(&tree.at("/other"))], []);
         let one = refusal(&grants([only.clone()]), &t);
         assert!(one.message.contains("lets it run"), "{}", one.message);
-        assert!(!one.hint.unwrap().contains("enclosing grant"));
+        assert_eq!(
+            one.hint.as_deref(),
+            Some(
+                "add it to the grant's exec `allow` list: `` `name git `` for a command name, \
+                 `` `absolute /path/to/it `` for a file, or `` `dir `absolute /path `` for its \
+                 directory"
+            )
+        );
         let outer = exec([dir(&tree.at("/x"))], []);
         let two = refusal(&grants([outer, only]), &t);
         assert!(
@@ -247,8 +254,8 @@ mod words {
         assert!(two.hint.unwrap().contains("enclosing grant"));
     }
 
-    /// An exclusion is named with its `dir` constructor, and no allowance is
-    /// offered against it.
+    /// An exclusion is named with its `dir` constructor, and its hint is the
+    /// one remedy: no allowance is offered against it.
     #[test]
     fn an_exclusion_is_named_and_no_allowance_is_suggested() {
         let tmp = tempfile::tempdir().unwrap();
@@ -258,12 +265,53 @@ mod words {
         let e = refusal(&grants([both]), &tree.at("/x/t"));
         let named = format!("`dir `absolute {}", crate::path::shown(&x));
         assert!(e.message.contains(&named), "{}", e.message);
-        assert!(
-            e.message.contains("cannot override an exclusion"),
-            "{}",
-            e.message
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(
+                "an allowance cannot override an exclusion; remove the exclusion from the \
+                 policy that imposes it"
+            )
         );
-        assert!(!e.hint.unwrap().contains("--extend"));
+    }
+
+    /// A guard refusal and a kernel denial of one exclusion, on either axis,
+    /// end in the same remedy.
+    #[test]
+    fn a_guard_refusal_and_a_kernel_denial_of_one_exclusion_give_one_remedy() {
+        use crate::authority::sandbox::{SandboxProjection, interpreter_hint};
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = Tree::lay(tmp.path(), &["/x/sh"]);
+        let (x, sh) = (tree.at("/x"), tree.at("/x/sh"));
+        let reads = FsPolicy {
+            read_prefixes: vec![FrozenPath::from_surface(&x)],
+            ..FsPolicy::default()
+        };
+        let by_exec = Capabilities {
+            exec: Some(ExecGrant::of(
+                [dir(&x)],
+                [ExecKey::Path(FrozenPath::from_surface(&sh))],
+            )),
+            fs: Some(reads.clone()),
+            ..Capabilities::default()
+        };
+        let by_fs = Capabilities {
+            fs: Some(FsPolicy {
+                deny_paths: vec![FrozenPath::from_surface(&sh)],
+                ..reads
+            }),
+            ..Capabilities::default()
+        };
+        for caps in [by_exec, by_fs] {
+            let grants = grants([caps]);
+            let guard = refusal(&grants, &sh)
+                .hint
+                .expect("an exclusion's refusal hints");
+            let projection = SandboxProjection::of(&grants, &Baseline::default(), None)
+                .expect("fs is restricted");
+            let kernel = interpreter_hint(&projection, std::path::Path::new(&sh))
+                .expect("the kernel names the exclusion");
+            assert!(kernel.ends_with(&guard), "guard: {guard}\nkernel: {kernel}");
+        }
     }
 
     #[test]
@@ -363,6 +411,10 @@ mod words {
             e.message.contains("may run, but it is not readable"),
             "{}",
             e.message
+        );
+        assert_eq!(
+            e.hint.as_deref(),
+            Some("running a program reads it: add it to the grant's fs `read` list")
         );
         let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t));
         assert!(unrestricted.is_ok());

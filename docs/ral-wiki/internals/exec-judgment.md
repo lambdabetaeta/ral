@@ -168,9 +168,10 @@ the interpreter, which is wrong when an exclusion covers it, and it holds no
 policy to tell; discovery cannot tell either, since it skips a script the user
 can write. So the parent reads the `#!` line for diagnosis only, never as
 evidence, and records in the warrant's `Run::File` the exclusion covering the
-interpreter on either axis, if any; the hint then says `its interpreter '{c}' is
-excluded by {scope}; an allowance cannot override an exclusion`, and otherwise
-keeps the old advice. No dependency resolver is built.
+interpreter on either axis, if any; the hint then says `its interpreter {c} is
+excluded by {scope}`, followed by the remedy a guard refusal of that exclusion
+gives (`remedy::remove_the_exclusion`), and otherwise keeps the old advice. No
+dependency resolver is built.
 
 ## An exclusion is a guardrail, not a wall
 

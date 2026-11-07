@@ -15,7 +15,11 @@
 //! launch's own projection whether it withholds the `#!` interpreter.
 
 #[cfg(unix)]
+use crate::authority::policy::FsOp;
+use crate::authority::remedy::{self, FsList};
+#[cfg(unix)]
 use crate::syntax::quote::quote_word;
+use crate::text::code;
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::fmt::Write;
@@ -314,9 +318,9 @@ pub(crate) fn interpreter_hint(
     let shown = quote_word(&crate::path::shown(interpreter.as_path())).into_owned();
     let excluded = |scope: String| {
         format!(
-            "its interpreter {shown} is excluded by {}; an allowance cannot override an \
-             exclusion",
-            crate::text::code(&scope)
+            "its interpreter {shown} is excluded by {}: {}",
+            code(&scope),
+            remedy::remove_the_exclusion()
         )
     };
     if let Some(Withheld::Excluded { scope, .. }) = &exec {
@@ -331,8 +335,11 @@ pub(crate) fn interpreter_hint(
     matches!(exec, Some(Withheld::MissingAllowance)).then(|| {
         format!(
             "its interpreter {shown} is not admitted by the grant: a script you can edit \
-             carries no interpreter of its own: add `` `absolute {shown} `` to the exec \
-             grant's allow list"
+             carries no interpreter of its own, so {}. {}",
+            remedy::add_to_exec(),
+            written_as(&format!(
+                "grant [ exec: [allow: [`absolute {shown}]] ] {{ … }}"
+            )),
         )
     })
 }
@@ -361,15 +368,32 @@ pub(crate) fn denial_hint(
     if !exit_code.is_some_and(plausible_access_denied_exit) {
         return None;
     }
-    Some(
+    Some(format!(
         "the command failed while an OS sandbox (AppContainer) was active. On Windows a blocked \
          filesystem access surfaces only as an access-denied error on the command, with no kernel \
          log naming the path, so the exact path cannot be shown here. If the command needs a file \
-         or directory the active grant's fs allow-list does not admit, widen the grant's read (or \
-         write) set: the `` grant [ fs: [read: [`absolute …]] ] { … } `` block in ral, or `--extend` for \
-         exarch (unless an exclusion covers it: an allowance cannot override one). A `` net: `offline` `` grant likewise withholds the network capability, so a command that \
-         needs a socket will fail the same way."
-            .to_string(),
+         or directory the active grant's fs allow-list does not admit, {}. {} {} A \
+         `` net: `offline` `` grant likewise withholds the network capability, so a command that \
+         needs a socket will fail the same way.",
+        remedy::add_to_fs("it", FsList::Either),
+        written_as("grant [ fs: [read: [`absolute …]] ] { … }"),
+        if_excluded(),
+    ))
+}
+
+/// Where a widening is written: `block` is the ral `grant` that makes it.
+fn written_as(block: &str) -> String {
+    format!(
+        "In ral that is the {} block, or `--extend` for exarch.",
+        code(block)
+    )
+}
+
+/// The caveat on an allowance the denial cannot tell is excluded.
+fn if_excluded() -> String {
+    format!(
+        "If an exclusion covers it, {}.",
+        remedy::remove_the_exclusion()
     )
 }
 
@@ -386,9 +410,9 @@ pub(super) fn build_hint(denials: &[Record]) -> String {
     if denials.len() > MAX_DENIAL_LINES {
         let _ = write!(out, "\n  ({} more)", denials.len() - MAX_DENIAL_LINES);
     }
-    for remedy in remedies(denials) {
+    for paragraph in remedies(denials) {
         out.push_str("\n\n");
-        out.push_str(&remedy);
+        out.push_str(&paragraph);
     }
     out
 }
@@ -428,10 +452,10 @@ fn remedies(denials: &[Record]) -> Vec<String> {
         out.push(service_remedy(&services));
     }
     if !reads.is_empty() {
-        out.push(path_remedy(&reads, "read"));
+        out.push(path_remedy(&reads, &FsOp::Read));
     }
     if !writes.is_empty() {
-        out.push(path_remedy(&writes, "write"));
+        out.push(path_remedy(&writes, &FsOp::Write));
     }
     if !execs.is_empty() {
         out.push(exec_remedy(&execs));
@@ -446,7 +470,7 @@ fn remedies(denials: &[Record]) -> Vec<String> {
         out.push(GPU_REMEDY.to_string());
     }
     if !unix_sockets.is_empty() {
-        out.push(format!("{UNIX_SOCKET_REMEDY}{}", listing(&unix_sockets)));
+        out.push(unix_socket_remedy(&unix_sockets));
     }
     if out.is_empty() {
         out.push(opaque_remedy(opaque));
@@ -476,10 +500,15 @@ fn listing(items: &[&Inert]) -> String {
     out
 }
 
-/// `set` is the grant's own field, `read` or `write`: a denied write answered
-/// by widening `read` is advice that fails a second time.
+/// `op` names the grant's own list: a denied write answered by widening
+/// `read` is advice that fails a second time.
 #[cfg(unix)]
-fn path_remedy(paths: &[&Inert], set: &str) -> String {
+fn path_remedy(paths: &[&Inert], op: &FsOp) -> String {
+    let set: &str = op.into();
+    let list = match op {
+        FsOp::Read => FsList::Read,
+        FsOp::Write => FsList::Write,
+    };
     let one = paths.len() == 1;
     let mut out = format!(
         "{} outside the active grant's fs.{set}:",
@@ -492,13 +521,23 @@ fn path_remedy(paths: &[&Inert], set: &str) -> String {
     out.push_str(&listing(paths));
     let _ = write!(
         out,
-        "\nAdd {} (or a parent directory) to the grant's {set} set: the \
-         `` grant [ fs: [{set}: [`absolute {}]] ] {{ … }} `` block in ral, or `--extend` for \
-         exarch (unless an exclusion covers it: an allowance cannot override one). The sandbox matches fully-resolved paths, so a path reached through a \
-         symlink inside a granted directory (e.g. ~/.config) needs the resolved path \
-         above, not the link's own.",
-        if one { "it" } else { "each" },
-        quote_word(&paths[0].0)
+        "\nIf the command needs {}, {}. {} {} The sandbox matches fully-resolved paths, so a \
+         path reached through a symlink inside a granted directory (e.g. ~/.config) needs the \
+         resolved path above, not the link's own.",
+        if one { "it" } else { "them" },
+        remedy::add_to_fs(
+            if one {
+                "it (or a parent directory)"
+            } else {
+                "each (or a parent directory)"
+            },
+            list
+        ),
+        written_as(&format!(
+            "grant [ fs: [{set}: [`absolute {}]] ] {{ … }}",
+            quote_word(&paths[0].0)
+        )),
+        if_excluded(),
     );
     out
 }
@@ -511,10 +550,14 @@ fn exec_remedy(paths: &[&Inert]) -> String {
     out.push_str(&listing(paths));
     let _ = write!(
         out,
-        "\nAdmit it as a file or a directory: the `` grant [ exec: [allow: [`absolute {0}]] ] {{ … }} `` \
-         block (or `` `dir `absolute {0} `` for a directory) in ral, or `--extend` for exarch, unless an exclusion covers it: an allowance cannot override one. A re-exec (`sh -c`, `find -exec`) \
-         reaches only this layer, so an in-process admit alone does not carry it.",
-        quote_word(&paths[0].0)
+        "\nIf the command needs it, {}. {} {} A re-exec (`sh -c`, `find -exec`) reaches only \
+         this layer, so an in-process admit alone does not carry it.",
+        remedy::add_to_exec(),
+        written_as(&format!(
+            "grant [ exec: [allow: [`absolute {}]] ] {{ … }}",
+            quote_word(&paths[0].0)
+        )),
+        if_excluded(),
     );
     out
 }
@@ -565,10 +608,23 @@ const GPU_REMEDY: &str = "the GPU was denied: this frame withholds the GPU (`` g
      restores it: run the command where no layer withholds the GPU.";
 
 #[cfg(unix)]
-const UNIX_SOCKET_REMEDY: &str = "a Unix socket was denied: request a stated fs write covering its \
-     path, e.g. `` fs: [write: [`absolute /path/to/socket]] ``; an fs deny still wins. This admits \
-     the daemon's authority outside the sandbox. Unrestricted fs admits no outside socket; \
-     Linux Landlock ABI < 9 does not enforce this pathname-socket limit:";
+fn unix_socket_remedy(sockets: &[&Inert]) -> String {
+    let mut out = String::from("a Unix socket was denied:");
+    out.push_str(&listing(sockets));
+    let _ = write!(
+        out,
+        "\nIf the command needs it, {}. {} {} A stated write admits the daemon's authority \
+         outside the sandbox, and unrestricted fs admits no outside socket. Linux Landlock ABI \
+         < 9 does not enforce this pathname-socket limit.",
+        remedy::add_to_fs("its path", FsList::Write),
+        written_as(&format!(
+            "grant [ fs: [write: [`absolute {}]] ] {{ … }}",
+            quote_word(&sockets[0].0)
+        )),
+        if_excluded(),
+    );
+    out
+}
 
 /// The record names nothing to act on, so the hint says so rather than
 /// guessing at an fs grant — unless a typed deny-set (Linux) has its own words
@@ -584,9 +640,10 @@ fn opaque_remedy(op: Option<&platform::Operation>) -> String {
     );
     format!(
         "{what}, and the kernel record names no operand: so this hint cannot say what to \
-         widen. If the command needs a path the grant does not admit, add it to the grant's \
-         read or write set: the `` grant [ fs: [read: [`absolute …]] ] {{ … }} `` block in ral, or \
-         `--extend` for exarch, unless an exclusion covers it: an allowance cannot override one."
+         widen. If the command needs a path the grant does not admit, {}. {} {}",
+        remedy::add_to_fs("it", FsList::Either),
+        written_as("grant [ fs: [read: [`absolute …]] ] { … }"),
+        if_excluded(),
     )
 }
 
@@ -628,8 +685,11 @@ mod tests {
         ] {
             let inert = Inert::of(&operand);
             assert_eq!(listing(&[&inert]).lines().count(), 2);
-            assert_eq!(path_remedy(&[&inert], "read").matches("\n  ").count(), 1);
-            assert!(!path_remedy(&[&inert], "read").contains("exec allow-list"));
+            assert_eq!(
+                path_remedy(&[&inert], &FsOp::Read).matches("\n  ").count(),
+                1
+            );
+            assert!(!path_remedy(&[&inert], &FsOp::Read).contains("exec allow-list"));
         }
     }
 
@@ -851,7 +911,7 @@ mod tests {
             "a denied socket must name the net bit; got {hint:?}"
         );
         assert!(
-            !hint.contains("read set"),
+            !hint.contains("the grant's fs `"),
             "a denied socket must not be answered with an fs widening; got {hint:?}"
         );
     }
@@ -868,7 +928,7 @@ mod tests {
             "a denied GPU must name the gpu bit; got {hint:?}"
         );
         assert!(
-            !hint.contains("read set"),
+            !hint.contains("the grant's fs `"),
             "a denied GPU must not be answered with an fs widening; got {hint:?}"
         );
     }
@@ -882,7 +942,7 @@ mod tests {
                     network-outbound /private/tmp/com.apple.launchd.x/Listeners";
         let hint = hint(&[line]);
         assert!(
-            hint.contains("fs: [write: [`absolute /path/to/socket]]")
+            hint.contains("fs: [write: [`absolute /private/tmp/com.apple.launchd.x/Listeners]]")
                 && hint.contains("Linux Landlock ABI < 9")
                 && hint.contains("\n  /private/tmp/com.apple.launchd.x/Listeners"),
             "a denied Unix socket must name the write grant and its limit; got {hint:?}"

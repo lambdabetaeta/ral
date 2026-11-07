@@ -3,6 +3,7 @@
 pub mod grant;
 pub mod guard;
 pub mod policy;
+pub(crate) mod remedy;
 pub mod sandbox;
 
 impl policy::Baseline {

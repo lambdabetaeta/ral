@@ -13,6 +13,7 @@ use crate::authority::policy::{
     Admitted, Baseline, ExecDenial, ExecRefused, Flag, FsDeny, FsOp, GrantStack, LocateError,
     Program, Refused, ShellVerb, Withheld,
 };
+use crate::authority::remedy::{self, FsList};
 use crate::fact::{Check, Resource};
 use crate::path::{LexicalPath, MatchedBy, Trace};
 use crate::text::code;
@@ -69,12 +70,10 @@ impl Denial {
 const NESTED: &str = "an enclosing grant may be the one that withholds it, and a nested grant \
                       cannot add authority its caller withholds";
 
-/// The exclusion half of a refusal, which no allowance overrides.
+/// The exclusion half of a refusal; its fix is [`remedy::remove_the_exclusion`].
 fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
     match matched_by {
-        MatchedBy::Name => {
-            format!("{subject} is excluded by {scope}; an allowance cannot override an exclusion")
-        }
+        MatchedBy::Name => format!("{subject} is excluded by {scope}"),
         MatchedBy::FoldedName => format!(
             "{subject} is the denied {scope} under another spelling \
              (case or Unicode form); a deny holds under every spelling"
@@ -116,9 +115,6 @@ impl Display for LocateError {
         }
     }
 }
-
-const EXCLUSION_HINT: &str =
-    "the exclusion belongs to the policy that imposes it; change that policy";
 
 /// Judge a program: the one exec door.
 pub(crate) fn check_exec(
@@ -166,13 +162,7 @@ fn exec_error(
         ExecDenial::Run(Withheld::MissingAllowance) => Refusal::new(format!(
             "{head}: nothing in the grant's exec `allow` list lets it run"
         ))
-        .with_hint(format!(
-            "add it to the grant's exec `allow` list: {} for a command name, {} for a file, \
-                 or {} for its directory",
-            code("`name git"),
-            code("`absolute /path/to/it"),
-            code("`dir `absolute /path"),
-        )),
+        .with_hint(remedy::add_to_exec()),
         ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Refusal::new(format!(
             "{head}: {}",
             excluded(
@@ -181,7 +171,7 @@ fn exec_error(
                 *matched_by
             )
         ))
-        .with_hint(EXCLUSION_HINT),
+        .with_hint(remedy::remove_the_exclusion()),
         ExecDenial::Read(why) => Refusal::new(format!(
             "{head}: {}",
             read_cause(baseline, shown, bundled, why)
@@ -218,10 +208,11 @@ fn read_cause(baseline: &Baseline, shown: &str, bundled: bool, why: &Withheld<Fs
 fn read_hint(why: &Withheld<FsDeny>, layers: usize) -> String {
     match why {
         Withheld::MissingAllowance if layers > 1 => NESTED.to_string(),
-        Withheld::MissingAllowance => {
-            "running a program reads it: let the grant's fs `read` list name it".to_string()
-        }
-        Withheld::Excluded { .. } => EXCLUSION_HINT.to_string(),
+        Withheld::MissingAllowance => format!(
+            "running a program reads it: {}",
+            remedy::add_to_fs("it", FsList::Read)
+        ),
+        Withheld::Excluded { .. } => remedy::remove_the_exclusion().to_string(),
     }
 }
 
@@ -258,12 +249,12 @@ pub(crate) fn fs_denial(
             let hint = if grants.fs().count() > 1 {
                 NESTED.to_string()
             } else {
-                format!(
-                    "add it to the grant's fs `{}` list",
+                remedy::add_to_fs(
+                    "it",
                     match op {
-                        FsOp::Read => "read` or `write",
-                        FsOp::Write => "write",
-                    }
+                        FsOp::Read => FsList::Either,
+                        FsOp::Write => FsList::Write,
+                    },
                 )
             };
             ("denied by grant", None, hint)
@@ -271,7 +262,7 @@ pub(crate) fn fs_denial(
         Refused::Withheld(Withheld::Excluded { scope, .. }) => (
             "denied by grant",
             Some(("deny", scope.to_string())),
-            EXCLUSION_HINT.to_string(),
+            remedy::remove_the_exclusion().to_string(),
         ),
         Refused::Guarded(pinned) => (
             "refused",
