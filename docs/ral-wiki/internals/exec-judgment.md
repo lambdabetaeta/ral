@@ -2,7 +2,7 @@
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-03
-anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, Candidate, holds_program, failure_trace, ReadRegion::judge_file, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
+anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -72,8 +72,9 @@ launch for a direct pipeline stage and `detach`.
   `..` itself, and is handed an absolute path.
 - **Arguments play no part.** An allowed target runs with any arguments, a
   denied one with none. `Admitted` holds only the judged program and its exec
-  table; `Refused` holds the program and its denial. The caller owns argv, and
-  no refusal records it.
+  table; a refusal is its `ExecDenial` alone, the refused program and its
+  handle dropped. The guard words a bundled tool's read refusal by the tool's
+  name. The caller owns argv, and no refusal records it.
 - **A path key** matches the real path by equality, and a directory key by
   containment. Specificity decides nothing: **an exclusion beats every
   allowance**, so an exact file or a deeper directory never reopens an excluded
@@ -96,10 +97,11 @@ launch for a direct pipeline stage and `detach`.
 ## Running reads
 
 **A program that runs must be readable.** After the exec table, `admit` asks
-what running reads (`ExecDenial::Read`): `ReadRegion::judge_file` over the
+what running reads (`ExecDenial::Read`): `ReadRegion::judge` over the
 `read_region(baseline)` fold for a file, which vouches for the handle, and the
 image's read for a bundled tool. `admit_name` makes the same exec and read
-judgments at a failed walk's transcript, without minting a handle.
+judgments at a failed walk's transcript, without minting a handle. A file's
+read is judged once, by the door that mints its handle.
 
 - **A host file** reads its real path. A grant reads what it, and the grants
   enclosing it, let run by path, directory or name (its run places,

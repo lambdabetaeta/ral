@@ -17,6 +17,7 @@ use super::names::{EntryName, RootName};
 use super::trace::{Kind, ObjectId, RealPath, Seen, Stat, Step, Trace};
 // Inverted edge, deliberate: `Verdict`'s field is private to its module.
 use crate::authority::policy::{FsOp, Verdict};
+use crate::path::LexicalPath;
 
 mod directory;
 mod read;
@@ -136,9 +137,9 @@ mod private {
 
 /// Who vouched for a held handle, and so what may be done through it.
 ///
-/// [`Unjudged`]: nobody, what the walk returns.  [`Judged<O>`]: the grant
-/// stack, for the op `O`; made by `Located::judged` and `Dir::judged` against
-/// a [`Verdict<O>`], whose field is private to `capability/fs.rs`.
+/// [`Unjudged`]: nobody, what the walk returns.  [`Judged<O>`]: an fs door,
+/// for the op `O`; made by [`Handle::judged`] against a [`Verdict<O>`], whose
+/// field is private to `authority/policy/fs.rs`.
 /// [`Installing`]: the OS sandbox side, at a position it is installing rules
 /// at; made by the two `RealPath::open_*_nofollow` against an
 /// `InstallToken`, whose field is private to `sandbox.rs`.  What a holder
@@ -206,6 +207,62 @@ impl Op for Reading {
 }
 impl Op for Writing {
     const FS: FsOp = FsOp::Write;
+}
+
+/// A handle the walk returns, unjudged: [`Located`] or [`Dir`].  Each fs door
+/// is written once over the two kinds and mints through
+/// [`judged`](Self::judged) alone.  Sealed.
+pub trait Handle: private::Sealed + Sized {
+    /// This handle under the marker `B`.
+    type As<B: Authority>;
+
+    /// `rp` walked to a handle of this kind: the object it names, its leaf
+    /// followed, or the directory, entered.
+    ///
+    /// # Errors
+    /// The walk's.
+    fn walk(rp: &LexicalPath) -> io::Result<Self>;
+
+    fn trace(&self) -> &Trace;
+
+    /// This handle, vouched for: outside this module, the one way `Unjudged`
+    /// becomes `Judged<O>`.
+    fn judged<O: Op>(self, _: Verdict<O>) -> Self::As<Judged<O>>;
+}
+
+impl private::Sealed for Located {}
+impl private::Sealed for Dir {}
+
+impl Handle for Located {
+    type As<B: Authority> = Located<B>;
+
+    fn walk(rp: &LexicalPath) -> io::Result<Self> {
+        walk(rp, LeafMode::Follow)
+    }
+
+    fn trace(&self) -> &Trace {
+        &self.trace
+    }
+
+    fn judged<O: Op>(self, _: Verdict<O>) -> Located<Judged<O>> {
+        self.marked()
+    }
+}
+
+impl Handle for Dir {
+    type As<B: Authority> = Dir<B>;
+
+    fn walk(rp: &LexicalPath) -> io::Result<Self> {
+        walk_dir(rp)
+    }
+
+    fn trace(&self) -> &Trace {
+        &self.trace
+    }
+
+    fn judged<O: Op>(self, _: Verdict<O>) -> Dir<Judged<O>> {
+        self.marked()
+    }
 }
 
 /// How a child is opened where a host shares by handle: a directory step
@@ -315,12 +372,6 @@ impl<A: Authority> Dir<A> {
         }
     }
 
-    /// This directory, vouched for: the one place `Unjudged` becomes
-    /// `Judged<O>`, through the token only `capability/fs.rs` can make.
-    pub(crate) fn judged<O: Op>(self, _: Verdict<O>) -> Dir<Judged<O>> {
-        self.marked()
-    }
-
     /// The same directory under another marker: this module's own step.
     fn marked<B: Authority>(self) -> Dir<B> {
         Dir {
@@ -419,12 +470,6 @@ impl<A: Authority> Located<A> {
     /// `None` where that name was no link, or was not followed.
     pub(crate) fn linked_to(&self) -> Option<&Path> {
         self.linked.as_deref()
-    }
-
-    /// This object, vouched for: the one place `Unjudged` becomes
-    /// `Judged<O>`, through the token only `capability/fs.rs` can make.
-    pub(crate) fn judged<O: Op>(self, _: Verdict<O>) -> Located<Judged<O>> {
-        self.marked()
     }
 
     /// The same object under another marker: this module's own step.

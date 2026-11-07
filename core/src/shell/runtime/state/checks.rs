@@ -66,7 +66,7 @@ impl Shell {
         path: &LexicalPath,
     ) -> Settled<Located<Judged<O>>> {
         let verdict = (self.context.grants)
-            .judge::<O>(self.baseline(), located)
+            .judge::<O, _>(self.baseline(), located)
             .map_err(|refused| fs_denial(&self.context.grants, refused, &O::FS, path));
         verdict.map_err(|denial| self.refused(denial))
     }
@@ -113,7 +113,7 @@ impl Shell {
         path: &LexicalPath,
     ) -> Settled<io::Result<Located<Judged<O>>>> {
         check_device_name(path).map_err(Error::from)?;
-        let verdict = (self.context.grants).locate::<O>(self.baseline(), path);
+        let verdict = (self.context.grants).locate::<O, Located>(self.baseline(), path);
         self.raised::<O, _>(path, verdict)
     }
 
@@ -123,7 +123,7 @@ impl Shell {
     /// As [`locate`](Self::locate).
     pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
         check_device_name(path).map_err(Error::from)?;
-        let verdict = (self.context.grants).locate_dir::<O>(self.baseline(), path);
+        let verdict = (self.context.grants).locate::<O, Dir>(self.baseline(), path);
         let dir = self.raised::<O, _>(path, verdict)?;
         dir.map_err(|e| Error::io(path.shown(), &e).into())
     }
@@ -196,7 +196,7 @@ impl Shell {
                     continue;
                 }
             };
-            match (self.context.grants).judge::<O>(self.baseline(), located) {
+            match (self.context.grants).judge::<O, _>(self.baseline(), located) {
                 Ok(found) if found.trace().kind() == Some(Kind::File) => return Ok(Some(found)),
                 Ok(_) => {}
                 Err(refused) => {
@@ -215,7 +215,7 @@ impl Shell {
     pub fn locate_if_admitted<O: Op>(&mut self, path: &LexicalPath) -> Option<Located<Judged<O>>> {
         let located = walk(path, LeafMode::Follow).ok()?;
         (self.context.grants)
-            .judge::<O>(self.baseline(), located)
+            .judge::<O, _>(self.baseline(), located)
             .ok()
     }
 

@@ -25,8 +25,8 @@ use super::lattice::{Extent, GrantPath};
 use super::table::{Allows, Denies, Table, Withheld};
 use super::{GrantLayer, GrantStack, Join, Meet};
 use crate::path::{
-    Depth, Dir, DirEntry, Excluded, Judged, LeafMode, LexicalPath, Located, MatchedBy, ObjectId,
-    Op, Reading, RealPath, Subject, Trace, Writing, walk, walk::failure_trace, walk_dir,
+    Depth, DirEntry, Excluded, Handle, Judged, LexicalPath, MatchedBy, ObjectId, Op, Reading,
+    RealPath, Subject, Trace, Writing, walk::failure_trace,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -41,12 +41,12 @@ pub enum FsOp {
     Write,
 }
 
-/// The grant stack's say-so for the op `O`: what turns an unjudged handle into
-/// a judged one.  Its field is private to this module, so [`GrantStack::judge`],
-/// [`ReadRegion`] and [`Ungoverned`] alone make one (the last with a read side
-/// and a write side, which only [`crate::own`] calls), and these are the
-/// constructions to audit.
-pub(crate) struct Verdict<O: Op>(PhantomData<O>);
+/// An fs door's say-so for the op `O`, which [`Handle::judged`] asks for.  Its
+/// field is private to this module, so the doors alone make one, and they are
+/// the constructions to audit: [`GrantStack::judge`], [`ReadRegion::judge`]
+/// and [`Ungoverned`]'s two, its write side crate-private.  `pub` only to stand
+/// in that public signature: this module is private.
+pub struct Verdict<O: Op>(PhantomData<O>);
 
 /// An allowance of an fs table: a prefix as the author wrote it and resolved,
 /// or a place exec runs.  Both are positions, so a place reads as a prefix
@@ -311,9 +311,6 @@ fn fold(grants: &GrantStack, op: &FsOp, baseline: &Baseline) -> Option<Folded> {
     })
 }
 
-/// An object a judgment refused, handed back with what withheld it.
-pub(crate) type Returned = Box<(Located, Withheld<FsDeny>)>;
-
 /// The read and running regions folded once, for a walk that judges many
 /// objects; `None` where no layer held an fs opinion.
 pub struct ReadRegion(Option<Folded>);
@@ -329,18 +326,15 @@ struct Folded {
 
 /// The user's own authority: no grant governs these reads and writes.
 ///
-/// The second minting point beside [`GrantStack::judge`]; clippy bans its
-/// methods except at documented typed sites. Its read side is public; its
-/// write side is crate-private, and [`crate::own`] is its one caller.
+/// A minting point beside [`GrantStack::judge`] and [`ReadRegion::judge`];
+/// clippy bans its methods except at documented typed sites. Its read side is
+/// public; its write side is crate-private, and [`crate::own`] is its one
+/// caller.
 pub struct Ungoverned;
 
 impl Ungoverned {
-    pub fn read(l: Located) -> Located<Judged<Reading>> {
-        l.judged(Verdict(PhantomData))
-    }
-
-    pub fn read_dir(d: Dir) -> Dir<Judged<Reading>> {
-        d.judged(Verdict(PhantomData))
+    pub fn read<H: Handle>(h: H) -> H::As<Judged<Reading>> {
+        h.judged(Verdict(PhantomData))
     }
 
     pub fn region() -> ReadRegion {
@@ -351,13 +345,8 @@ impl Ungoverned {
     /// directories, the files the user writes at its places, and the one new
     /// file a user names. [`crate::own`] is the one caller, with a typed site
     /// documenting why no grant governs it.
-    pub(crate) fn write(l: Located) -> Located<Judged<Writing>> {
-        l.judged(Verdict(PhantomData))
-    }
-
-    /// [`write`](Self::write), for a directory.
-    pub(crate) fn write_dir(d: Dir) -> Dir<Judged<Writing>> {
-        d.judged(Verdict(PhantomData))
+    pub(crate) fn write<H: Handle>(h: H) -> H::As<Judged<Writing>> {
+        h.judged(Verdict(PhantomData))
     }
 }
 
@@ -373,24 +362,16 @@ impl ReadRegion {
         }
     }
 
-    /// Judge the directory `d` for reading.
+    /// Judge `h` for reading.
     ///
     /// # Errors
     /// What withholds it.
-    pub(crate) fn judge(&self, d: Dir) -> Result<Dir<Judged<Reading>>, Withheld<FsDeny>> {
-        self.withheld(Subject::Access(d.trace()))?;
-        Ok(d.judged(Verdict(PhantomData)))
-    }
-
-    /// Judge the object `l` for reading.
-    ///
-    /// # Errors
-    /// What withholds it, with `l` handed back.
-    pub(crate) fn judge_file(&self, l: Located) -> Result<Located<Judged<Reading>>, Returned> {
-        match self.withheld(Subject::Access(l.trace())) {
-            Ok(()) => Ok(l.judged(Verdict(PhantomData))),
-            Err(why) => Err(Box::new((l, why))),
-        }
+    pub(crate) fn judge<H: Handle>(
+        &self,
+        h: H,
+    ) -> Result<H::As<Judged<Reading>>, Withheld<FsDeny>> {
+        self.withheld(Subject::Access(h.trace()))?;
+        Ok(h.judged(Verdict(PhantomData)))
     }
 
     /// A listing entry, judged by what the listing saw of it; one it did not
@@ -465,56 +446,38 @@ impl GrantStack {
         self.refusal_fs(baseline, op, trace).is_ok()
     }
 
-    /// Judge `l` for `O`: [`refusal_fs`](Self::refusal_fs), then, admitted,
-    /// the handle vouched for.  The one place evidence becomes authority, with
-    /// [`ReadRegion`] and [`Ungoverned`].
+    /// Judge `h` for `O`: [`refusal_fs`](Self::refusal_fs), then, admitted,
+    /// the handle vouched for.  The one place the stack's evidence becomes
+    /// authority.
     ///
     /// # Errors
     /// [`Refused`], the veto's or the stack's.
-    pub fn judge<O: Op>(
+    pub fn judge<O: Op, H: Handle>(
         &self,
         baseline: &Baseline,
-        l: Located,
-    ) -> Result<Located<Judged<O>>, Refused> {
-        self.refusal_fs(baseline, &O::FS, l.trace())?;
-        Ok(l.judged(Verdict(PhantomData)))
+        h: H,
+    ) -> Result<H::As<Judged<O>>, Refused> {
+        self.refusal_fs(baseline, &O::FS, h.trace())?;
+        Ok(h.judged(Verdict(PhantomData)))
     }
 
-    /// [`judge`](Self::judge) for a directory.
-    ///
-    /// # Errors
-    /// As [`judge`](Self::judge).
-    pub fn judge_dir<O: Op>(&self, baseline: &Baseline, d: Dir) -> Result<Dir<Judged<O>>, Refused> {
-        self.refusal_fs(baseline, &O::FS, d.trace())?;
-        Ok(d.judged(Verdict(PhantomData)))
-    }
-
-    /// The walk, its failure [judged](Self::judge_failure) before it is told,
-    /// then [`judge`](Self::judge).  The shell's door adds the device-name
-    /// refusal and the audit.
+    /// `rp` walked to an `H`, its failure [judged](Self::judge_failure)
+    /// before it is told, then [`judge`](Self::judge).  The shell's door adds
+    /// the device-name refusal and the audit.
     ///
     /// # Errors
     /// [`LocateError`], keeping the walk's failure apart from the judgment's.
-    pub fn locate<O: Op>(
+    pub fn locate<O: Op, H: Handle>(
         &self,
         baseline: &Baseline,
         rp: &LexicalPath,
-    ) -> Result<Located<Judged<O>>, LocateError> {
-        let located = self.disclosed(baseline, &O::FS, rp, walk(rp, LeafMode::Follow))?;
-        self.judge(baseline, located).map_err(LocateError::Refused)
-    }
-
-    /// [`locate`](Self::locate) for a directory entered.
-    ///
-    /// # Errors
-    /// As [`locate`](Self::locate).
-    pub fn locate_dir<O: Op>(
-        &self,
-        baseline: &Baseline,
-        rp: &LexicalPath,
-    ) -> Result<Dir<Judged<O>>, LocateError> {
-        let dir = self.disclosed(baseline, &O::FS, rp, walk_dir(rp))?;
-        self.judge_dir(baseline, dir).map_err(LocateError::Refused)
+    ) -> Result<H::As<Judged<O>>, LocateError> {
+        let held = H::walk(rp).or_else(|e| {
+            self.judge_failure(baseline, &O::FS, rp, &e)?;
+            Err(LocateError::Io(e))
+        })?;
+        self.judge::<O, H>(baseline, held)
+            .map_err(LocateError::Refused)
     }
 
     /// Judge a walk of `rp` that failed with `error`, at the link it looped
@@ -536,20 +499,6 @@ impl GrantStack {
         let trace = failure_trace(rp, error).map_err(LocateError::Io)?;
         self.refusal_fs(baseline, op, &trace)
             .map_err(LocateError::Refused)
-    }
-
-    /// `walked`, its failure told only once judged.
-    fn disclosed<T>(
-        &self,
-        baseline: &Baseline,
-        op: &FsOp,
-        rp: &LexicalPath,
-        walked: io::Result<T>,
-    ) -> Result<T, LocateError> {
-        walked.or_else(|e| {
-            self.judge_failure(baseline, op, rp, &e)?;
-            Err(LocateError::Io(e))
-        })
     }
 
     /// The write judgment: may the access `trace` be written?
@@ -582,8 +531,8 @@ mod tests {
     use super::*;
     use crate::authority::policy::{Capabilities, ExecDenial, ExecGrant, ExecKey, Program};
     use crate::authority::policy::{Evidence, FsPolicy};
-    use crate::path::FrozenPath;
     use crate::path::utf8;
+    use crate::path::{Dir, FrozenPath, Located};
     use crate::test_helper::{Tree, core_runtime, layer, located, real, stack, trace};
     use std::path::{Path, PathBuf};
 
@@ -1026,7 +975,7 @@ mod tests {
         assert!(reads_nothing.admit(&baseline, program()).is_ok());
         assert!(matches!(
             reads_nothing.admit(&Baseline::default(), program()),
-            Err(refused) if matches!(refused.why, ExecDenial::Read(_))
+            Err(ExecDenial::Read(_))
         ));
     }
 
@@ -1208,28 +1157,32 @@ mod tests {
         crate::path::walk_dir(&spelling).unwrap()
     }
 
-    /// A walk failing under a denied name is refused, not reported absent;
-    /// under an allowance the failure is the walk's.
+    /// A walk failing under a denied name is refused, not reported absent,
+    /// whichever kind the one door walks to; under an allowance the failure
+    /// is the walk's.
     #[test]
     fn locate_refuses_a_denied_name_that_names_nothing() {
+        fn told<H: Handle>(grants: &GrantStack, at: &LexicalPath) -> Option<LocateError> {
+            grants.locate::<Reading, H>(&Baseline::default(), at).err()
+        }
         let (_tmp, root) = tmp();
         made(&root, "secret");
         let grants = reading_all_but(&root, &["secret"]);
-        let baseline = Baseline::default();
         let at = |name: &str| LexicalPath::absolute(&root.join(name)).unwrap();
-        let file = grants
-            .locate::<Reading>(&baseline, &at("secret/gone/f"))
-            .err();
-        assert!(matches!(file, Some(LocateError::Refused(_))), "{file:?}");
-        let dir = grants
-            .locate_dir::<Reading>(&baseline, &at("secret/gone"))
-            .err();
-        assert!(matches!(dir, Some(LocateError::Refused(_))), "{dir:?}");
-        let open = grants.locate::<Reading>(&baseline, &at("gone/f")).err();
-        assert!(
-            matches!(&open, Some(LocateError::Io(e)) if e.kind() == io::ErrorKind::NotFound),
-            "{open:?}"
-        );
+        let kinds: [fn(&GrantStack, &LexicalPath) -> Option<LocateError>; 2] =
+            [told::<Located>, told::<Dir>];
+        for locate in kinds {
+            let denied = locate(&grants, &at("secret/gone/f"));
+            assert!(
+                matches!(denied, Some(LocateError::Refused(_))),
+                "{denied:?}"
+            );
+            let open = locate(&grants, &at("gone/f"));
+            assert!(
+                matches!(&open, Some(LocateError::Io(e)) if e.kind() == io::ErrorKind::NotFound),
+                "{open:?}"
+            );
+        }
     }
 
     #[test]

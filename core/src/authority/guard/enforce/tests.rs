@@ -59,33 +59,33 @@ fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
 
     assert!(
         matches!(
-            open.judge::<Writing>(&baseline, held(&own)),
+            open.judge::<Writing, _>(&baseline, held(&own)),
             Err(Refused::Guarded("ral"))
         ),
         "a write onto the pinned executable must be guarded under an open stack"
     );
     assert!(
-        open.judge::<Reading>(&baseline, held(&own)).is_ok(),
+        open.judge::<Reading, _>(&baseline, held(&own)).is_ok(),
         "the guard is over rewriting, not reading"
     );
     let tmp = tempfile::tempdir().unwrap();
     let other = tmp.path().join("other");
     std::fs::write(&other, "x").unwrap();
     assert!(
-        open.judge::<Writing>(&baseline, held(&other)).is_ok(),
+        open.judge::<Writing, _>(&baseline, held(&other)).is_ok(),
         "an unpinned file is the stack's to decide"
     );
     let link = tmp.path().join("link-to-own");
     if std::fs::hard_link(&own, &link).is_ok() {
         assert!(
             matches!(
-                open.judge::<Writing>(&baseline, held(&link)),
+                open.judge::<Writing, _>(&baseline, held(&link)),
                 Err(Refused::Guarded("ral"))
             ),
             "a hard link names the pinned inode too"
         );
         assert!(
-            open.judge::<Reading>(&baseline, held(&link)).is_ok(),
+            open.judge::<Reading, _>(&baseline, held(&link)).is_ok(),
             "a hard link to the executable is as readable as the executable"
         );
     }
@@ -347,14 +347,11 @@ mod words {
         for layers in [vec![only.clone()], vec![outer, only]] {
             let grants = grants(layers);
             let baseline = Baseline::default();
-            let refused = grants
+            let why = grants
                 .admit(&baseline, file(&link))
                 .expect_err("a link inside an admitted folder admits no outside object");
-            assert!(matches!(
-                refused.why,
-                ExecDenial::Run(Withheld::MissingAllowance)
-            ));
-            let Err(denial) = check_exec(&grants, &baseline, &link, refused.program) else {
+            assert!(matches!(why, ExecDenial::Run(Withheld::MissingAllowance)));
+            let Err(denial) = check_exec(&grants, &baseline, &link, file(&link)) else {
                 panic!("the guard must refuse the same object");
             };
             assert_eq!(denial.check.resource, Resource::Exec);
@@ -442,7 +439,7 @@ mod words {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
         assert!(
-            denial.error.message.contains("built into ral"),
+            denial.error.message.contains("'ls' is built into ral"),
             "{}",
             denial.error.message
         );

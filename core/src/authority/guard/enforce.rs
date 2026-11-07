@@ -10,8 +10,8 @@
 //! so the two cannot drift.
 
 use crate::authority::policy::{
-    Admitted, Baseline, ExecDenial, ExecRefused, Flag, FsDeny, FsOp, GrantStack, LocateError,
-    Program, Refused, ShellVerb, Withheld,
+    Admitted, Baseline, ExecDenial, Flag, FsDeny, FsOp, GrantStack, LocateError, Program, Refused,
+    ShellVerb, Withheld,
 };
 use crate::authority::remedy::{self, FsList};
 use crate::fact::{Check, Resource};
@@ -123,10 +123,12 @@ pub(crate) fn check_exec(
     shown: &str,
     program: Program,
 ) -> Result<Admitted, Denial> {
-    grants.admit(baseline, program).map_err(|refused| {
-        let ExecRefused { program, why } = *refused;
-        let bundled = matches!(program, Program::Tool(_));
-        let error = exec_error(grants, baseline, shown, bundled, &why);
+    let tool = match program {
+        Program::Tool(name) => Some(name),
+        Program::File { .. } => None,
+    };
+    grants.admit(baseline, program).map_err(|why| {
+        let error = exec_error(grants, baseline, shown, tool, &why);
         exec_denial(shown, &why, error)
     })
 }
@@ -139,17 +141,17 @@ pub(crate) fn check_exec_name(
     trace: &Trace,
 ) -> Result<(), Denial> {
     grants.admit_name(baseline, trace).map_err(|why| {
-        let error = exec_error(grants, baseline, shown, false, &why);
+        let error = exec_error(grants, baseline, shown, None, &why);
         exec_denial(shown, &why, error)
     })
 }
 
-/// The words of an exec refusal.
+/// The words of an exec refusal; `tool` names a bundled program.
 fn exec_error(
     grants: &GrantStack,
     baseline: &Baseline,
     shown: &str,
-    bundled: bool,
+    tool: Option<&str>,
     why: &ExecDenial,
 ) -> Refusal {
     let layers = grants.exec().count();
@@ -174,7 +176,7 @@ fn exec_error(
         .with_hint(remedy::remove_the_exclusion()),
         ExecDenial::Read(why) => Refusal::new(format!(
             "{head}: {}",
-            read_cause(baseline, shown, bundled, why)
+            read_cause(baseline, shown, tool, why)
         ))
         .with_hint(read_hint(why, grants.fs().count())),
     }
@@ -182,17 +184,21 @@ fn exec_error(
 
 /// Why running a command is refused for what it reads: a host file, or for a
 /// bundled tool ral's binary, which it runs.
-fn read_cause(baseline: &Baseline, shown: &str, bundled: bool, why: &Withheld<FsDeny>) -> String {
-    let (lead, subject) = if bundled {
-        (
-            format!("'{shown}' is built into ral, and "),
+fn read_cause(
+    baseline: &Baseline,
+    shown: &str,
+    tool: Option<&str>,
+    why: &Withheld<FsDeny>,
+) -> String {
+    let (lead, subject) = match tool {
+        Some(tool) => (
+            format!("'{tool}' is built into ral, and "),
             baseline.image().map_or_else(
                 || "ral's binary".to_string(),
                 |own| format!("ral's binary '{}'", own.real()),
             ),
-        )
-    } else {
-        (String::new(), format!("'{shown}'"))
+        ),
+        None => (String::new(), format!("'{shown}'")),
     };
     match why {
         Withheld::MissingAllowance => {

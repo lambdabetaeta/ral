@@ -112,7 +112,7 @@ impl<'a> Boot<'a> {
     pub(crate) fn read(&self, path: &Path) -> Result<String, LocateError> {
         let held = self
             .grants
-            .locate::<Reading>(self.baseline, &self.resolver.anchor(path))?;
+            .locate::<Reading, Located>(self.baseline, &self.resolver.anchor(path))?;
         let mut text = String::new();
         (held.read().map_err(LocateError::Io)?)
             .read_to_string(&mut text)
@@ -127,12 +127,12 @@ impl Judge for Boot<'_> {
     }
 
     fn file(&mut self, rp: &LexicalPath) -> Option<Located<Judged<Reading>>> {
-        let held = self.grants.locate::<Reading>(self.baseline, rp);
+        let held = self.grants.locate::<Reading, Located>(self.baseline, rp);
         held.ok().filter(is_file)
     }
 
     fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Judged<Reading>>> {
-        self.grants.locate_dir::<Reading>(self.baseline, rp).ok()
+        self.grants.locate::<Reading, Dir>(self.baseline, rp).ok()
     }
 }
 

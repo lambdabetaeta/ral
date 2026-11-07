@@ -436,8 +436,8 @@ for what clippy cannot state.**
   but `vendor/`'s and fails one without `[lints]` with `workspace = true`, since
   a member outside the workspace's lints is outside the bans. The test file
   also pins the files outside `path/` that call the string containment helpers.
-  `clippy::disallowed_methods` bans `Ungoverned::{read, read_dir, region,
-  write, write_dir}`, so each authority mint is a documented typed site.
+  `clippy::disallowed_methods` bans `Ungoverned::{read, region, write}`, each
+  over a file or a directory, so each authority mint is a documented typed site.
 
 A constructor under no site fails clippy, and an allow in place of a site fails
 the scan, so outside the blankets and the one Tauri exception no exemption

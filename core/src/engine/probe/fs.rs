@@ -15,7 +15,7 @@ use std::path::Path;
 fn open(shell: &Shell, dir: &Path) -> Option<(ReadRegion, Dir<Judged<Reading>>)> {
     let entered = walk_dir(&shell.anchor(dir)).ok()?;
     let judged = (shell.context.grants)
-        .judge_dir::<Reading>(shell.baseline(), entered)
+        .judge::<Reading, _>(shell.baseline(), entered)
         .ok()?;
     Some((shell.context.grants.read_region(shell.baseline()), judged))
 }
@@ -37,7 +37,7 @@ pub(super) fn entries(shell: &Shell, dir: &Path) -> Vec<PathEntry> {
                 return None;
             }
             let exec = (dir.locate(entry.name(), LeafMode::Follow).ok())
-                .and_then(|found| region.judge_file(found).ok())
+                .and_then(|found| region.judge(found).ok())
                 .is_some_and(|found| found.is_executable());
             Some(PathEntry {
                 dir: seen.stat.kind == Kind::Dir,

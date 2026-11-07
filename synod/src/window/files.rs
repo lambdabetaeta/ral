@@ -53,10 +53,10 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
     let dir = above
         .iter()
         .try_fold(held, |dir, name| {
-            site!(Silent::ReviewTarget, Ungoverned::read_dir(dir)).open_dir(name)
+            site!(Silent::ReviewTarget, Ungoverned::read(dir)).open_dir(name)
         })
         .map_err(|e| missing(&e))?;
-    let located = site!(Silent::ReviewTarget, Ungoverned::read_dir(dir))
+    let located = site!(Silent::ReviewTarget, Ungoverned::read(dir))
         .locate(last, LeafMode::NoFollow)
         .map(|entry| site!(Silent::ReviewTarget, Ungoverned::read(entry)))
         .map_err(|e| missing(&e))?;

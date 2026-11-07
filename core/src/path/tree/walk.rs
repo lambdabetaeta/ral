@@ -309,8 +309,7 @@ impl Entries {
         } else {
             walk(root, LeafMode::NoFollow).or(followed)
         };
-        let judged =
-            located.and_then(|located| self.region.judge_file(located).map_err(|_| denied()));
+        let judged = located.and_then(|located| self.region.judge(located).map_err(|_| denied()));
         match judged {
             Ok(located) => match located.stat().cloned() {
                 None => Found::Unseen(io::ErrorKind::NotFound.into()),
@@ -500,9 +499,7 @@ impl Entries {
         let depth = rules.depth() + usize::from(named);
         let read = |name: &str| {
             let name = EntryName::parse(OsStr::new(name)).ok()?;
-            let found = self
-                .region
-                .judge_file(dir.locate(&name, LeafMode::Follow).ok()?);
+            let found = self.region.judge(dir.locate(&name, LeafMode::Follow).ok()?);
             slurp(&found.ok()?).ok().map(ignore::text)
         };
         self.assemble(depth, marks, dot_git.as_ref(), within, read)
@@ -569,9 +566,7 @@ impl Entries {
     /// region reads it: its spelling, and whether it is a directory.
     fn dot_git_in(&self, dir: &Dir<Judged<Reading>>) -> Option<(LexicalPath, bool)> {
         let name = EntryName::parse(OsStr::new(".git")).ok()?;
-        let found = self
-            .region
-            .judge_file(dir.locate(&name, LeafMode::Follow).ok()?);
+        let found = self.region.judge(dir.locate(&name, LeafMode::Follow).ok()?);
         let at = LexicalPath::absolute(&dir.real().as_path().join(".git"))?;
         Some((at, found.ok()?.kind()? == Kind::Dir))
     }
@@ -579,7 +574,7 @@ impl Entries {
     /// [`dot_git_in`](Self::dot_git_in) of a directory held by name.
     fn dot_git_at(&self, real: &Path) -> Option<(LexicalPath, bool)> {
         let at = LexicalPath::absolute(&real.join(".git"))?;
-        let found = self.region.judge_file(walk(&at, LeafMode::Follow).ok()?);
+        let found = self.region.judge(walk(&at, LeafMode::Follow).ok()?);
         let is_dir = found.ok()?.kind()? == Kind::Dir;
         Some((at, is_dir))
     }
@@ -588,7 +583,7 @@ impl Entries {
     /// not read.
     fn read_named(&self, path: &LexicalPath) -> io::Result<Vec<u8>> {
         let located = walk(path, LeafMode::Follow)?;
-        slurp(&self.region.judge_file(located).map_err(|_| denied())?)
+        slurp(&self.region.judge(located).map_err(|_| denied())?)
     }
 
     /// [`read_named`](Self::read_named) as the text git discovery reads.

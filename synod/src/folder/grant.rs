@@ -113,7 +113,7 @@ impl Grant {
         let root = dir.real().clone();
 
         // Before a grant exists, test the user's own permission to list the folder.
-        site!(Silent::GrantReadability, Ungoverned::read_dir(dir))
+        site!(Silent::GrantReadability, Ungoverned::read(dir))
             .read_dir()
             .map_err(|e| {
                 format!(

@@ -23,9 +23,7 @@ pub use crate::authority::grant::builder::{Capabilities, ExecGrant, ExecKey, FsP
 pub use deputy::deputy_prefixes;
 #[cfg(unix)]
 pub(crate) use exec::Subject;
-pub(crate) use exec::{
-    Admitted, ExecDenial, ExecRules, Program, Refused as ExecRefused, Rule, rules,
-};
+pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Rule, rules};
 pub(crate) use exec::{ExecAllow, ExecDeny};
 pub use fs::{Baseline, FsDeny, FsOp, LocateError, ReadRegion, Refused, Ungoverned};
 pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region, running_region};

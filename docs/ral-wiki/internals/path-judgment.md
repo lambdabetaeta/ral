@@ -2,7 +2,7 @@
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_date: 2026-11-03
-anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
+anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -81,7 +81,13 @@ vouched for it.**
   it was walked for.
 - **The marker is the voucher.** `Unjudged` is what the walk returns and offers
   its trace and nothing more. `Judged<Reading>` and `Judged<Writing>` are minted
-  by `GrantStack::judge` and nothing else. `Installing` is minted by the two
+  by `Handle::judged` alone, against a `Verdict` only `authority/policy/fs.rs`
+  makes. `Handle` is the sealed trait over the two handle kinds, `Located` and
+  `Dir`: its kind's walk, its trace and that mint. So each fs door is one
+  function over both kinds: `GrantStack::judge` and `GrantStack::locate` for
+  the stack, `ReadRegion::judge` for a walk that judges many objects against
+  one fold, and `Ungoverned::read` and its crate-private `write` for the user's
+  own authority, banned by clippy outside typed sites. `Installing` is minted by the two
   `RealPath::open_*_nofollow` against an `InstallToken` only `authority::sandbox` can
   make. Bytes come out of a judged handle only, and go in through a write-judged
   one only; a stat or a link's target needs a judged or installing one. A
@@ -107,8 +113,9 @@ working regardless of the readability of intermediate links.
   actual link where the budget was spent, without the unresolved continuation;
   otherwise the name walked leniently with `LeafMode::Follow`.
 - **The fs doors judge it for the requested operation `O`** through
-  `GrantStack::judge_failure`, which `GrantStack::locate` and `locate_dir`
-  apply, so a caller with no shell (exarch's boot reader) is held to it too;
+  `GrantStack::judge_failure`, which `GrantStack::locate` applies for either
+  handle kind, so a caller with no shell (exarch's boot reader) is held to it
+  too (`locate_refuses_a_denied_name_that_names_nothing` pins both kinds);
   heads judge it for running through `check_exec_name`.
   A denied absent name reads as denied, just as a present object there would.
 - **`locate_first` judges every candidate before asking its kind**, including

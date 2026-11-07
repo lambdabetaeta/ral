@@ -52,56 +52,36 @@ pub(crate) enum ExecDenial {
     Read(Withheld<FsDeny>),
 }
 
-/// A call the stack refused.
-#[derive(Debug)]
-pub(crate) struct Refused {
-    pub program: Program,
-    pub why: ExecDenial,
-}
-
 impl GrantStack {
     /// `↓run = ↓exec ∧ ↓read` (law 7): the exec table, then what running
-    /// reads, whose judgment vouches for the file held.  A refusal hands the
-    /// program back.
+    /// reads, whose judgment of a file vouches for the handle.  A refused
+    /// program is dropped, its handle with it.
     pub(crate) fn admit(
         &self,
         baseline: &Baseline,
         program: Program,
-    ) -> Result<Admitted, Box<Refused>> {
+    ) -> Result<Admitted, ExecDenial> {
         let rules = rules(self);
-        if let Err(why) = run_withheld(rules.as_ref(), program.subject()) {
-            return Err(Box::new(Refused { program, why }));
-        }
-        let read = match program {
-            Program::Tool(name) => self
-                .tool_read(baseline)
-                .map(|()| Program::Tool(name))
-                .map_err(|why| (Program::Tool(name), why)),
+        run_withheld(rules.as_ref(), program.subject())?;
+        let program = match program {
+            Program::Tool(name) => {
+                self.tool_read(baseline).map_err(ExecDenial::Read)?;
+                Program::Tool(name)
+            }
             Program::File { arg0, located } => {
-                match self.read_region(baseline).judge_file(*located) {
-                    Ok(located) => Ok(Program::File {
-                        arg0,
-                        located: Box::new(located),
-                    }),
-                    Err(denied) => {
-                        let (located, why) = *denied;
-                        let located = Box::new(located);
-                        Err((Program::File { arg0, located }, why))
-                    }
+                let located =
+                    (self.read_region(baseline).judge(*located)).map_err(ExecDenial::Read)?;
+                Program::File {
+                    arg0,
+                    located: Box::new(located),
                 }
             }
         };
-        match read {
-            Ok(program) => Ok(Admitted { program, rules }),
-            Err((program, why)) => Err(Box::new(Refused {
-                program,
-                why: ExecDenial::Read(why),
-            })),
-        }
+        Ok(Admitted { program, rules })
     }
 
-    /// `↓run` (law 7) of a name a walk reached no object at: the exec table,
-    /// then what running would read, both at the name's transcript.
+    /// [`admit`](Self::admit) of a name a walk reached no object at: the same
+    /// two judgments at the name's transcript, minting nothing.
     pub(crate) fn admit_name(&self, baseline: &Baseline, trace: &Trace) -> Result<(), ExecDenial> {
         run_withheld(
             rules(self).as_ref(),

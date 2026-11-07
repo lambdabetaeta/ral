@@ -79,9 +79,12 @@ Submodules:
   assembled in `authority.rs`, without a policy-to-sandbox dependency;
   `ReadRegion`, the read and
   the running regions (run places `P≤L`) folded once for a walk that judges many
-  objects. `GrantStack::judge`, `judge_dir` and `locate` are the one place
-  evidence becomes authority: the pinned-binary veto (`Refused::Guarded`) first, then
-  the fold, then the handle `Judged<O>`; `GrantStack::read` is the read
+  objects. `GrantStack::judge` and `locate`, each one function over the sealed
+  `path::Handle` (`Located` or `Dir`), are where the stack's evidence becomes
+  authority: the pinned-binary veto (`Refused::Guarded`) first, then
+  the fold, then the handle `Judged<O>`, minted by `Handle::judged` against a
+  `Verdict` only this file makes, as `ReadRegion::judge` and `Ungoverned::{read,
+  write}` mint too; `GrantStack::read` is the read
   judgment, `region` then the running region only on a missing allowance;
 - `exec.rs` — the exec instance
   ([[design/authority-tables#Two instances|authority-tables]]) and its judgment: `Program`
@@ -92,10 +95,10 @@ Submodules:
   places. Authored exec targets are resolved by `authority::grant`, not here;
   `GrantStack::admit(baseline, program)` judges the table then reading and is
   the only mint of `Admitted` (`Program<Judged<Reading>>` and the exec table,
-  private fields); a refusal is data, `Refused { program, why:
-  ExecDenial }`, `ExecDenial::{Run(Withheld<ExecDeny>), Read(Withheld<FsDeny>)}`;
+  private fields); a refusal is data, `ExecDenial::{Run(Withheld<ExecDeny>),
+  Read(Withheld<FsDeny>)}`, the refused program dropped;
   `admit` reads through `read_region(baseline)` and vouches for a file through
-  `ReadRegion::judge_file`; it carries no argv. `GrantStack::admit_name`
+  `ReadRegion::judge`; it carries no argv. `GrantStack::admit_name`
   judges a failed walk's `Trace` by the same exec table and `GrantStack::read`,
   without minting a handle.
   `ExecRules::for_kernel(support)` is
@@ -159,8 +162,8 @@ authority and returns domain data, never runtime values or control flow.
   `check_exec_name` returned to a head or `test_access`, records an exec
   refusal against its call's `Mooring` and mints its `Break`.
   `GrantStack::judge_failure` judges `failure_trace` for the requested
-  operation before an error is disclosed; `GrantStack::locate` and `locate_dir`
-  apply it for every caller, and `locate_existing` and `locate_first` judge
+  operation before an error is disclosed; `GrantStack::locate` applies it for
+  every caller and either handle kind, and `locate_existing` and `locate_first` judge
   failed walks through it.
   `From<Refusal> for Error` preserves the message and hint at this boundary.
 
@@ -975,7 +978,7 @@ their crate-root exemptions; test code
 carries one blanket per module. The enums are the list: `core/src/site.rs`
 for cross-domain sites, and domain-local `site.rs` declarations in `path`,
 `host`, `own`, `process` and `sync`, each variant documenting why its place is
-exempt. `Ungoverned::{read, read_dir, region, write, write_dir}`
+exempt. `Ungoverned::{read, region, write}`
 are also clippy-banned, so each authority mint is a documented typed site.
 `core/src/own/site.rs` declares the three own-file authority mints
 (`Silent::{Read, Write, WriteDir}`), used in `own.rs`,

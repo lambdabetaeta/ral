@@ -716,7 +716,6 @@ mod tests {
                     },
                 )
                 .map(drop)
-                .map_err(|refused| refused.why)
         };
         assert!(withheld(&first.join("git")).is_ok());
         assert!(

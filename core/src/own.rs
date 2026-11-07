@@ -74,7 +74,7 @@ fn writing(l: Located) -> Located<Judged<Writing>> {
 
 /// `d`, vouched for as the user's own, for writing.
 fn writing_dir(d: Dir) -> Dir<Judged<Writing>> {
-    site!(Silent::WriteDir, Ungoverned::write_dir(d))
+    site!(Silent::WriteDir, Ungoverned::write(d))
 }
 
 // ── Errors ────────────────────────────────────────────────────────────
