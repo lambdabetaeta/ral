@@ -72,9 +72,10 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   - **The program and the 126/127 verdict come from the judged candidate
     fold's walk.** `Head::resolve` freezes a `Target` without I/O: a bundled
     tool, a launch path, or a bare name with its effective `PATH` and
-    `Context::cwd`. For a bare name, `Head::select` tries the `which::locate`
-    memo hit first, then folds `command_candidates` in `PATH` order unless
-    that probe is admitted and runnable. Each candidate's object, absent leaf or
+    `Context::cwd`. For a bare name, `Head::select` folds the `PATH`
+    candidates in order through `which::search`, which walks each once and
+    hands the judgment a `Candidate`; the memo's remembered program is walked
+    first, its verdict keeping its place. Each candidate's object, absent leaf or
     `failure_trace` is judged before its kind or error is disclosed. The first
     admitted program runs; otherwise the first refusal or 126 says why, and
     only absence yields 127. `Head::admit` records a selected refusal through

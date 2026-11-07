@@ -3,7 +3,7 @@ status: active
 generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
-anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::of_child, final_poll, End, Stop, ExitCode, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Reason::Cancelled, Reason::TimedOut, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
+anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::cancelled, final_poll, End, Stop, ExitCode, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Reason::Cancelled, Reason::TimedOut, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
 ---
 
 # Delimiters are handlers for `poll`
@@ -443,7 +443,7 @@ lands, when a mask ends, and for a process which write is first dead.
 
 ## Where
 
-`Escape`, `Stop`, `End`, `Break::stopped`, `Break::of_child`, `final_poll` in
+`Escape`, `Stop`, `End`, `Break::stopped`, `Break::cancelled`, `final_poll` in
 `core/src/shell/runtime/flow.rs` (`From<Cancellation> for Break` preserves cause
 and owner as a non-catchable stop); `Scope`, `ScopeNode`, `ScopeId`,
 `Cancellation`, `WorkerStop`, `POLL_SLICE`, `resolve` in

@@ -427,15 +427,18 @@ constructor, so no call site can choose "here" for itself**
   `Word::Path`, `ir::CommandName::of`, the walk itself and the grant decoder's
   `` `name `` check all ask it.
 - `path_dirs` is the sole directory list behind `locate` and
-  `command_candidates`; it **drops empty `PATH` elements on every platform**,
+  `search`; it **drops empty `PATH` elements on every platform**,
   so a trailing `;` or `:` never means the cwd. `.` and `./bin` are honoured, as written.
   `locate_in` is a Linux-only, unmemoised search over directories a
   caller already holds (`path_dirs(…, None)` for bwrap's pin, absolute entries alone), so no list is
   re-joined into a string to be split again.
-- `command_candidates` names every candidate in `PATH` order, empty with no
-  `PATH`. `locate` memoises the first executable as an undisclosed ordering
-  probe; `Head::select` judges that hit and, unless it is admitted and runnable,
-  folds all candidates. `vet` reads the judged fold's verdict without probing.
+- `search` walks every candidate in `PATH` order at most once and hands each
+  walk, a `Candidate`, to the judgment; none with no `PATH`. The memo's
+  `Answer` remembers the first candidate whose walk found a program
+  (`Located::holds_program`, the one executable predicate), an undisclosed
+  ordering hint: that candidate is walked first and judged at its `PATH`
+  place. `locate` is the unjudged fold of the same walk. `vet` reads the
+  judged fold's verdict without probing.
 - On Windows, `%PATHEXT%` suffixes **append**: `build.ps1` yields
   `build.ps1`, `build.ps1.EXE`, …, never `build.exe`.
 - Grant construction walks the `PATH` of the decoding environment with

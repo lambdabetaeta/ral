@@ -678,8 +678,10 @@ spelling.
 - **A path or dir key splits its polarities.** The allowance is the position its
   walk reached, never re-read; the exclusion is the objects it held. A bare key
   is resolved where the grant is decoded; a *head* is resolved afresh at each run.
-  `which::locate`'s memo only orders the first probe; the judged candidate fold
-  decides what runs. Two keys naming one file join to Both: `RealPath`'s `Ord`
+  `which::search` walks each `PATH` candidate once and the judged fold
+  decides what runs; its memo remembers the first candidate whose walk found a
+  program (`Located::holds_program`), walks it first, and judges it at its
+  `PATH` place. Two keys naming one file join to Both: `RealPath`'s `Ord`
   is the host's file identity, by components off Windows and by Windows
   identity components on it.
 - **A veto's key folds.** `` deny: [`name bash] `` compiles to a folding exact deny and a
