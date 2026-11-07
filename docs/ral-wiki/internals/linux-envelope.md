@@ -173,19 +173,20 @@ first, and opening stays where it was.
   built there does not run; an excluded path hard-linked to an admitted file
   runs only when the admitted name lies beneath a directory admitted whole;
   the walk refuses an excluded inode under every name it meets.
-- **The walk's excluded-inode set says one thing the table does not.** Let
-  `H` hold an exec exclusion whose leaf id is `L`. A walked object whose last
-  id is `L` matches `H` by identity at either depth, the rule's and the
-  access's remaining names being both empty, so wherever the table speaks it
-  already refuses. It is silent in one place: a file exclusion
-  (`ExecDeny::File`) never judges a directory, so a directory whose id is a
-  file exclusion's held leaf is kept out by the set alone. Only an unheld,
-  deserialized hold whose inode a directory has since reused reaches that
-  case; ral's decoder refuses a file key naming a directory, and a held
-  handle pins the inode. Without the set no hole opens, every admission
-  being gated by the table, but the kernel would enter that directory where
-  the walk now refuses it (`landlock/tests.rs`,
-  `a_directory_a_file_exclusion_holds_is_never_entered`).
+- **The walk asks the table alone about each directory and file.** Identity
+  is the table's: an object whose last id is a held leaf `L` of an exec
+  exclusion matches it at either depth, so a directory is refused by a
+  directory exclusion and a file by either kind. The one object the table
+  does not refuse is a directory whose id is the held leaf of a *file*
+  exclusion, which never judges a directory; it is governed as the table
+  says, admitted whole where the table allows. Only an unheld, deserialized
+  hold whose inode a directory has since reused reaches that case: ral's
+  decoder refuses a file key naming a directory, and a held handle pins the
+  inode. The walk keeps no inode set of its own, so it opens nothing the
+  table withholds: each admission is gated by the table, and the kernel
+  ruleset agrees with the grant table and with macOS
+  (`landlock/tests.rs`,
+  `a_directory_a_file_exclusion_holds_is_governed_by_the_table`).
 
 ## Pathname sockets follow stated writes
 

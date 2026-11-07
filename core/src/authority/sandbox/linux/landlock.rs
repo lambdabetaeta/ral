@@ -536,15 +536,13 @@ fn expand(
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
 ) -> Result<(), Error> {
     let mut holding = BTreeSet::new();
-    let mut excluded = BTreeSet::new();
     for deny in table.denies() {
         let (ExecDeny::Dir(path) | ExecDeny::File(path)) = deny else {
             continue;
         };
         for trace in path.real.holds().map(Hold::trace) {
             let mut ids = trace.spine_ids();
-            if let Some(id) = trace.leaf_id() {
-                excluded.insert(id);
+            if trace.leaf_id().is_some() {
                 ids.next_back();
             }
             holding.extend(ids);
@@ -556,7 +554,6 @@ fn expand(
         masks,
         sink,
         holding,
-        excluded,
         spine: Vec::new(),
     };
     let dirs = table
@@ -595,10 +592,6 @@ struct Walk<'w> {
     masks: &'w [RealPath],
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
     holding: BTreeSet<ObjectId>,
-    /// Each exclusion's held object.  The table refuses these by identity
-    /// too, but for a directory held by a file exclusion, which speaks only
-    /// to programs.
-    excluded: BTreeSet<ObjectId>,
     /// The identity of each directory being listed, so a bind mount looping
     /// back onto one ends the descent there.
     spine: Vec<ObjectId>,
@@ -610,8 +603,7 @@ impl Walk<'_> {
         let at = crate::path::Subject::Access(d.trace());
         let id = d.trace().last_id();
         let masked = self.masks.iter().any(|m| m.contains(d.real()));
-        if masked || self.excluded.contains(&id) || !self.table.evidence(Subject::Dir(at)).permits()
-        {
+        if masked || !self.table.evidence(Subject::Dir(at)).permits() {
             return Ok(());
         }
         if !self.holding.contains(&id)
@@ -635,7 +627,6 @@ impl Walk<'_> {
     fn file(&mut self, f: &Located<Installing>) -> Result<(), Error> {
         let at = crate::path::Subject::Access(f.trace());
         if f.trace().kind() != Some(Kind::File)
-            || self.excluded.contains(&f.trace().last_id())
             || !self.table.evidence(Subject::Program(at)).permits()
         {
             return Ok(());

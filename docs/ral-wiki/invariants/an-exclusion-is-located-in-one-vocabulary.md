@@ -24,10 +24,6 @@ followed one alone. Each reading is therefore a named method on the type that
 knows the answer, and a backend that wants a position picks a method, never
 re-derives one by hand.
 
-One decision stays local on purpose: Landlock's excluded-inode set speaks to a
-case the table cannot, a directory carrying a file exclusion's held leaf
-([[internals/linux-envelope|linux-envelope]]).
-
 See [[invariants/grants-judge-objects|grants-judge-objects]],
 [[internals/holding-a-deny|holding-a-deny]],
 [[design/two-enforcers|two-enforcers]].
