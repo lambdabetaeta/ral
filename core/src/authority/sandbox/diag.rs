@@ -459,10 +459,10 @@ fn remedies(denials: &[Record]) -> Vec<String> {
         out.push(service_remedy(&services));
     }
     if !reads.is_empty() {
-        out.push(path_remedy(&reads, &FsOp::Read));
+        out.push(path_remedy(&reads, FsOp::Read));
     }
     if !writes.is_empty() {
-        out.push(path_remedy(&writes, &FsOp::Write));
+        out.push(path_remedy(&writes, FsOp::Write));
     }
     if !execs.is_empty() {
         out.push(exec_remedy(&execs));
@@ -510,7 +510,7 @@ fn listing(items: &[&Inert]) -> String {
 /// `op` names the grant's own list: a denied write answered by widening
 /// `read` is advice that fails a second time.
 #[cfg(unix)]
-fn path_remedy(paths: &[&Inert], op: &FsOp) -> String {
+fn path_remedy(paths: &[&Inert], op: FsOp) -> String {
     let set: &str = op.into();
     let list = match op {
         FsOp::Read => FsList::Read,
@@ -693,10 +693,10 @@ mod tests {
             let inert = Inert::of(&operand);
             assert_eq!(listing(&[&inert]).lines().count(), 2);
             assert_eq!(
-                path_remedy(&[&inert], &FsOp::Read).matches("\n  ").count(),
+                path_remedy(&[&inert], FsOp::Read).matches("\n  ").count(),
                 1
             );
-            assert!(!path_remedy(&[&inert], &FsOp::Read).contains("exec allow-list"));
+            assert!(!path_remedy(&[&inert], FsOp::Read).contains("exec allow-list"));
         }
     }
 

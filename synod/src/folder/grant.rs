@@ -316,7 +316,7 @@ mod tests {
 
     #[cfg(unix)]
     fn writable(sh: &ral_core::Shell, path: &LexicalPath) -> bool {
-        walk_lenient(path, LeafMode::Follow).is_ok_and(|trace| sh.admits_fs(&FsOp::Write, &trace))
+        walk_lenient(path, LeafMode::Follow).is_ok_and(|trace| sh.admits_fs(FsOp::Write, &trace))
     }
 
     fn refusal(folder: &Path) -> String {

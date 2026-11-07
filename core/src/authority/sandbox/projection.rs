@@ -248,8 +248,8 @@ impl SandboxProjection {
     ) -> Option<Self> {
         // Zipped because the two regions are `Some` on the same condition,
         // some layer held an `fs` opinion, so there is no mixed case to weigh.
-        let regions = region(grants, &FsOp::Read, baseline)
-            .zip(region(grants, &FsOp::Write, baseline))
+        let regions = region(grants, FsOp::Read, baseline)
+            .zip(region(grants, FsOp::Write, baseline))
             .filter(|_| !grants.fs_is_top());
         let net = grants.net();
         let gpu = grants
@@ -534,7 +534,7 @@ mod tests {
         let baseline = Baseline::default();
         let projection = super::SandboxProjection::of(&grants, &baseline, None).unwrap();
         let lists = projection.fs.lists().expect("fs restricted");
-        let table = super::region(&grants, &super::FsOp::Read, &baseline).unwrap();
+        let table = super::region(&grants, super::FsOp::Read, &baseline).unwrap();
         assert!(
             table.live().count() < table.allows().count(),
             "a dead allowance"
@@ -667,7 +667,7 @@ mod tests {
             };
             let grants = stack([layer(caps)]);
             let kernel = super::rules(&grants).map(|exec| exec.for_kernel());
-            let read = super::region(&grants, &super::FsOp::Read, &baseline);
+            let read = super::region(&grants, super::FsOp::Read, &baseline);
             let support = super::live_support(kernel.as_ref(), read.as_ref(), Some(&admitted));
             assert!(
                 !support.contains(&interpreter),

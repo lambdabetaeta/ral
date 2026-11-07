@@ -253,7 +253,7 @@ mod tests {
         let (mut shell, root) = rooted(&cwd, here.into());
         engine_root(&root, &mut shell).expect("the ceiling resolves");
         let reads = |path: &std::path::Path| {
-            shell.admits_fs(&FsOp::Read, &ral_core::test_helper::trace(path))
+            shell.admits_fs(FsOp::Read, &ral_core::test_helper::trace(path))
         };
         assert!(reads(&cwd.join("notes")), "the root's cwd is read");
         assert!(!reads(&tmp.join("elsewhere")), "nothing else is");

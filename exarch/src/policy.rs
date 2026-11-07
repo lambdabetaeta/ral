@@ -281,7 +281,7 @@ mod tests {
         let write = |path: &std::path::Path| {
             stack.admits_fs(
                 runtime.baseline(),
-                &ral_core::authority::policy::FsOp::Write,
+                ral_core::authority::policy::FsOp::Write,
                 &ral_core::test_helper::trace(path),
             )
         };

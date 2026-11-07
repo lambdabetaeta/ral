@@ -73,7 +73,7 @@ impl OpenedWrite {
 
 /// Whether the live grant lets ral read what `trace` names.
 fn admitted(shell: &Shell, trace: &Trace) -> bool {
-    shell.admits_fs(&FsOp::Read, trace)
+    shell.admits_fs(FsOp::Read, trace)
 }
 
 /// `file` whole, from its start.  `None` past [`PREVIEW_CAP`], judged on the

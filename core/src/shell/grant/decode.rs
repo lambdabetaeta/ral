@@ -580,7 +580,7 @@ mod tests {
         layer
             .fs()
             .expect("an fs layer")
-            .table(&FsOp::Read)
+            .table(FsOp::Read)
             .allows()
             .map(|a| match a {
                 FsAllow::Prefix(prefix) => prefix.written.as_str(),
@@ -1164,7 +1164,7 @@ mod tests {
         let root = tagged("absolute", "/");
         let layer = decode(&rec(&[("fs", rec(&[("read", list(vec![root.clone()]))]))])).unwrap();
         let everywhere = FsAllow::Prefix(GrantPath::everywhere());
-        let fs = layer.fs().expect("an fs layer").table(&FsOp::Read);
+        let fs = layer.fs().expect("an fs layer").table(FsOp::Read);
         assert!(fs.allows().any(|a| *a == everywhere), "{fs:?}");
         let rules = rules_of(exec(vec![dir(root.clone())], vec![])).unwrap();
         let everywhere = ExecAllow::Dir(GrantPath::everywhere());

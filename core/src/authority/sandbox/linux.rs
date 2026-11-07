@@ -40,6 +40,7 @@ use super::launch::Ownership;
 use super::reexec::Pinned;
 use super::warrant::{Handoff, Slot, Slots, nul_terminated, parcel};
 use super::{FsProjection, RenderedProjection};
+use crate::authority::policy::FsOp;
 use crate::path::{
     CwdPath, Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered,
     Trace, is_loop, render_real, walk_lenient,
@@ -329,13 +330,6 @@ pub(crate) fn bwrap_argv(
     Ok(c.0)
 }
 
-/// Whether a bind lets the envelope write through to the host.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum Access {
-    ReadOnly,
-    Writable,
-}
-
 /// Where a bind goes in bwrap's order.  `Shown`: the projection's view,
 /// before the envelope's own `/proc` and `/dev`.  `Spine`: each pinned
 /// directory, writable onto its own name, which as a mountpoint no rename or
@@ -352,7 +346,8 @@ enum Layer {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Bind {
     layer: Layer,
-    access: Access,
+    /// `Write` lets the envelope write through to the host.
+    op: FsOp,
     dest: Rendered,
     /// The object's real name, and its position, held when the binds open.
     object: Rendered,
@@ -363,7 +358,7 @@ impl Bind {
     fn read_only(layer: Layer, dest: Rendered, (position, object): (RealPath, Rendered)) -> Self {
         Self {
             layer,
-            access: Access::ReadOnly,
+            op: FsOp::Read,
             dest,
             object,
             position,
@@ -382,7 +377,7 @@ impl Bind {
         }
         Ok(Some(Self {
             layer: Layer::Spine,
-            access: Access::Writable,
+            op: FsOp::Write,
             dest: real.clone(),
             object: real,
             position,
@@ -401,12 +396,10 @@ impl Bind {
     /// is covered too, as bwrap will not mount onto one.
     fn covers(&self, inner: &Self) -> bool {
         if self.dest == inner.dest {
-            return self.access == Access::Writable && inner.access == Access::ReadOnly;
+            return self.op == FsOp::Write && inner.op == FsOp::Read;
         }
         self.shadows(&inner.dest)
-            && (inner.access == Access::ReadOnly
-                || self.spells(inner)
-                || self.access == Access::Writable)
+            && (inner.op == FsOp::Read || self.spells(inner) || self.op == FsOp::Write)
     }
 
     /// Whether this bind's mount hides whatever lay at `name`.
@@ -494,9 +487,9 @@ impl Binds {
 
     fn render(&self, c: &mut Options, layer: Layer) {
         for (slot, bind) in self.layer(layer) {
-            let op = match bind.access {
-                Access::ReadOnly => "--ro-bind-fd",
-                Access::Writable => "--bind-fd",
+            let op = match bind.op {
+                FsOp::Read => "--ro-bind-fd",
+                FsOp::Write => "--bind-fd",
             };
             c.args([op, &slot.fd().to_string(), bind.dest.as_str()]);
         }
@@ -535,8 +528,8 @@ impl Shown {
                 denies: Vec::new(),
             });
         };
-        let mut names: Vec<_> = binds(&lists.read, Access::ReadOnly)
-            .chain(binds(&lists.write, Access::Writable))
+        let mut names: Vec<_> = binds(&lists.read, FsOp::Read)
+            .chain(binds(&lists.write, FsOp::Write))
             .collect();
         names.sort();
         names.dedup();
@@ -596,11 +589,11 @@ impl Deny {
 }
 
 /// `objects`, each by its real name and by every name it is shown at.
-fn binds(objects: &[Object], access: Access) -> impl Iterator<Item = Bind> {
+fn binds(objects: &[Object], op: FsOp) -> impl Iterator<Item = Bind> {
     objects.iter().flat_map(move |object| {
         (object.names()).map(move |dest| Bind {
             layer: Layer::Shown,
-            access,
+            op,
             dest: dest.clone(),
             object: object.real.clone(),
             position: object.position.clone(),

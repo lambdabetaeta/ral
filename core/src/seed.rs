@@ -564,7 +564,7 @@ mod tests {
         let reads = |path: &std::path::Path| {
             grants.admits_fs(
                 &Baseline::default(),
-                &FsOp::Read,
+                FsOp::Read,
                 &crate::test_helper::trace(path),
             )
         };
@@ -614,7 +614,7 @@ mod tests {
             child
                 .context
                 .grants
-                .admits_fs(&Baseline::default(), &FsOp::Read, &access)
+                .admits_fs(&Baseline::default(), FsOp::Read, &access)
         };
         assert!(reads(dir.join("old/f")));
         assert!(!reads(dir.join("new/f")));

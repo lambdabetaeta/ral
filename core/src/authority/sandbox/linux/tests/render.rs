@@ -362,9 +362,9 @@ fn the_launched_file_is_shown_by_the_reads_alone_and_the_cwd_is_entered() {
 }
 
 /// The `Shown` binds beneath `dir`, the baseline left out.
-fn shown_within(binds: &Binds, dir: &std::path::Path) -> Vec<(String, Access)> {
+fn shown_within(binds: &Binds, dir: &std::path::Path) -> Vec<(String, FsOp)> {
     (binds.layer(Layer::Shown))
-        .map(|(_, bind)| (bind.dest.as_str().to_string(), bind.access))
+        .map(|(_, bind)| (bind.dest.as_str().to_string(), bind.op))
         .filter(|(dest, _)| std::path::Path::new(dest).starts_with(dir))
         .collect()
 }
@@ -402,10 +402,10 @@ fn a_bind_is_opened_for_each_name_no_other_bind_shows() {
     assert_eq!(
         shown_within(&binds, &dir),
         [
-            (name(&file), Access::ReadOnly),
-            (name(&ro), Access::ReadOnly),
-            (name(&tools), Access::ReadOnly),
-            (name(&w), Access::Writable),
+            (name(&file), FsOp::Read),
+            (name(&ro), FsOp::Read),
+            (name(&tools), FsOp::Read),
+            (name(&w), FsOp::Write),
         ]
     );
     let opened = held_at(&binds, &file);
@@ -427,16 +427,10 @@ fn a_linked_prefix_shows_its_object_at_both_names() {
     let both = binds(&restricted(&[&link], &[], &[]), WHOLE);
     assert_eq!(
         shown_within(&both, &dir),
-        [
-            (name(&link), Access::ReadOnly),
-            (name(&real), Access::ReadOnly)
-        ]
+        [(name(&link), FsOp::Read), (name(&real), FsOp::Read)]
     );
     let covered = binds(&restricted(&[&dir, &link], &[], &[]), WHOLE);
-    assert_eq!(
-        shown_within(&covered, &dir),
-        [(name(&dir), Access::ReadOnly)]
-    );
+    assert_eq!(shown_within(&covered, &dir), [(name(&dir), FsOp::Read)]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -455,10 +449,10 @@ fn a_write_beneath_a_linked_ancestor_stays_writable() {
     assert_eq!(
         shown_within(&binds, &dir),
         [
-            (name(&link), Access::ReadOnly),
-            (name(&real), Access::ReadOnly),
-            (name(&link.join("target")), Access::Writable),
-            (name(&real.join("target")), Access::Writable),
+            (name(&link), FsOp::Read),
+            (name(&real), FsOp::Read),
+            (name(&link.join("target")), FsOp::Write),
+            (name(&real.join("target")), FsOp::Write),
         ]
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -481,7 +475,7 @@ fn a_write_covering_a_run_place_leaves_one_writable_bind() {
     policy.exec = kernel([dir_rule(&crate::test_helper::real(&bin), true)]);
     let binds = binds(&policy, WHOLE);
     let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
-    assert_eq!(shown_within(&binds, &w), [(name(&w), Access::Writable)]);
+    assert_eq!(shown_within(&binds, &w), [(name(&w), FsOp::Write)]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -472,7 +472,7 @@ fn a_foreign_spelling_is_a_dead_grant_on_every_route() {
         read_prefixes: vec![FrozenPath::from_surface(r"C:\x")],
         ..FsPolicy::default()
     });
-    let reads = foreign.fs().expect("an fs grant").table(&FsOp::Read);
+    let reads = foreign.fs().expect("an fs grant").table(FsOp::Read);
     assert_eq!(reads.allows().count(), 0, "{foreign:?}");
 }
 
@@ -587,7 +587,7 @@ fn decode_rewrites_places_to_concrete_paths() {
     assert!(allowed.contains(&"/h/.local/bin"));
     assert!(allowed.contains(&"/usr/bin"));
     // A list is a set, so it freezes in the written paths' own order.
-    let reads: Vec<&str> = (layer.fs().unwrap().table(&FsOp::Read).allows())
+    let reads: Vec<&str> = (layer.fs().unwrap().table(FsOp::Read).allows())
         .filter_map(|a| match a {
             FsAllow::Prefix(prefix) => Some(prefix.written.as_str()),
             FsAllow::RunPlace(_) => None,
@@ -914,7 +914,7 @@ fn extension_reads_omission_by_role() {
     let extended = GrantLayer::root().extend(positive);
     assert!(!extended.is_restrictive(), "{extended:?}");
     let stack = test_helper::stack([extended]);
-    assert!(stack.admits_fs(&Baseline::default(), &FsOp::Read, &trace(at("/anywhere"))));
+    assert!(stack.admits_fs(&Baseline::default(), FsOp::Read, &trace(at("/anywhere"))));
 }
 
 /// An exclusion in the fragment over an omitted base axis is "every request,
@@ -942,8 +942,8 @@ fn extension_with_an_exclusion_over_an_omitted_axis_is_every_less_it() {
     assert!(!admits(&stack, tree.path("/bad/prog")));
     for op in [FsOp::Read, FsOp::Write] {
         let baseline = Baseline::default();
-        assert!(stack.admits_fs(&baseline, &op, &trace(tree.path("/anywhere"))));
-        assert!(!stack.admits_fs(&baseline, &op, &trace(tree.path("/secret/f"))));
+        assert!(stack.admits_fs(&baseline, op, &trace(tree.path("/anywhere"))));
+        assert!(!stack.admits_fs(&baseline, op, &trace(tree.path("/secret/f"))));
     }
 }
 
@@ -1190,15 +1190,15 @@ fn law_4_extension_invariant_on_fs() {
             rand_layer_of(None, frag.clone()),
         );
         let extended = base_layer.clone().extend(Fragment::of(frag_layer.clone()));
-        let evidence = |layer: &GrantLayer, op: &FsOp, f: &str| {
+        let evidence = |layer: &GrantLayer, op: FsOp, f: &str| {
             let stack = test_helper::stack([layer.clone()]);
             region(&stack, op, &baseline).map(|r| r.evidence(path::Subject::Access(&trace(f))))
         };
         for op in [FsOp::Read, FsOp::Write] {
             for f in &u.files {
-                let fe = evidence(&frag_layer, &op, f).unwrap_or(Evidence::NEITHER);
+                let fe = evidence(&frag_layer, op, f).unwrap_or(Evidence::NEITHER);
                 let permits =
-                    |layer: &GrantLayer| evidence(layer, &op, f).is_none_or(Evidence::permits);
+                    |layer: &GrantLayer| evidence(layer, op, f).is_none_or(Evidence::permits);
                 let (b, e) = (permits(&base_layer), permits(&extended));
                 let msg = format!("{f}\nbase = {base:?}\nfragment = {frag:?}");
                 if fe.negative {
@@ -1225,7 +1225,7 @@ fn law_4_extension_invariant_on_reads_with_run_places() {
         let extended = base.clone().extend(Fragment::of(frag));
         let own = rand_layer_of(frag_exec.clone(), Some(frag_fs.clone().unwrap_or_default()));
         let read = |layer: &GrantLayer, f: &str| {
-            region(&test_helper::stack([layer.clone()]), &FsOp::Read, &baseline)
+            region(&test_helper::stack([layer.clone()]), FsOp::Read, &baseline)
                 .map_or(Evidence::ALLOW, |r| {
                     r.evidence(path::Subject::Access(&trace(f)))
                 })
@@ -1378,7 +1378,7 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
     let baseline = Baseline::default();
     for _ in 0..800 {
         let stack = rand_stack(&u, &mut rng);
-        let full = region(&stack, &FsOp::Read, &baseline);
+        let full = region(&stack, FsOp::Read, &baseline);
         for f in &u.files {
             let access = trace(f);
             let subject = path::Subject::Access(&access);
@@ -1600,7 +1600,7 @@ fn the_root_key_resolves_with_no_walk() {
     let before = crate::test_access::walk_steps();
     let read = decode_capability_map(&fs("read"), "test", &ctx).unwrap();
     assert_eq!(crate::test_access::walk_steps(), before);
-    let reads: Vec<_> = (read.fs().unwrap().table(&FsOp::Read).allows())
+    let reads: Vec<_> = (read.fs().unwrap().table(FsOp::Read).allows())
         .map(|a| match a {
             FsAllow::Prefix(prefix) => &prefix.real,
             FsAllow::RunPlace(_) => panic!("a decoded fs list holds no run place"),

@@ -232,7 +232,7 @@ mod tests {
         let layer = decode_grant(value.as_ref(), "test", &ctx).unwrap();
         let exec = layer.exec().expect("an exec axis");
         assert_eq!((exec.allows().count(), exec.denies().count()), (1, 1));
-        let reads = layer.fs().expect("an fs axis").table(&FsOp::Read);
+        let reads = layer.fs().expect("an fs axis").table(FsOp::Read);
         assert_eq!(reads.allows().count(), 1);
         let stack = crate::test_helper::stack([layer]);
         assert_eq!(stack.net(), Some(Net::Offline));

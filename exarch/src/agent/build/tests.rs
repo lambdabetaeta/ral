@@ -415,7 +415,7 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         assert!(
             !explicit_reads.admits_fs(
                 runtime.baseline(),
-                &ral_core::authority::policy::FsOp::Read,
+                ral_core::authority::policy::FsOp::Read,
                 &ral_core::test_helper::trace(path)
             ),
             "{}",

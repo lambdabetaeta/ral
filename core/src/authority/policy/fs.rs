@@ -37,7 +37,7 @@ use std::marker::PhantomData;
 use strum::IntoStaticStr;
 
 /// Which fs table a check consults: the read or the write one.
-#[derive(IntoStaticStr)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 pub enum FsOp {
     Read,
@@ -107,7 +107,7 @@ impl FsLayer {
         self.write.rehold_with(FsDeny::rehold);
     }
 
-    pub(crate) fn table(&self, op: &FsOp) -> &FsRules {
+    pub(crate) fn table(&self, op: FsOp) -> &FsRules {
         match op {
             FsOp::Read => &self.read,
             FsOp::Write => &self.write,
@@ -285,7 +285,7 @@ fn meet_onto<T: Meet>(acc: &mut Option<T>, next: T) {
 /// exclusion removes.  `None` exactly when no layer held an `fs` opinion, so
 /// the guard is unrestricted and the projection needs no fs rules; a layer
 /// that opined and admitted nothing withholds support beyond the baseline.
-pub(crate) fn region(grants: &GrantStack, op: &FsOp, baseline: &Baseline) -> Option<FsRules> {
+pub(crate) fn region(grants: &GrantStack, op: FsOp, baseline: &Baseline) -> Option<FsRules> {
     let layers: Vec<&GrantLayer> = grants.layers().collect();
     let last = layers.iter().rposition(|l| l.fs().is_some())?;
     let mut run: Option<ExecRules> = None;
@@ -398,7 +398,7 @@ impl GrantStack {
 
     /// The read region, folded now.
     pub fn read_region(&self, baseline: &Baseline) -> ReadRegion {
-        ReadRegion(region(self, &FsOp::Read, baseline))
+        ReadRegion(region(self, FsOp::Read, baseline))
     }
 
     /// The decision on `op` for the access `trace`: under `Write`, first the
@@ -412,7 +412,7 @@ impl GrantStack {
     pub(crate) fn refusal_fs(
         &self,
         baseline: &Baseline,
-        op: &FsOp,
+        op: FsOp,
         trace: &Trace,
     ) -> Result<(), Refused> {
         let withheld = match op {
@@ -429,7 +429,7 @@ impl GrantStack {
 
     /// [`refusal_fs`](Self::refusal_fs) as a plain bool, for a caller with
     /// nothing to audit through or a side read it may forgo.
-    pub fn admits_fs(&self, baseline: &Baseline, op: &FsOp, trace: &Trace) -> bool {
+    pub fn admits_fs(&self, baseline: &Baseline, op: FsOp, trace: &Trace) -> bool {
         self.refusal_fs(baseline, op, trace).is_ok()
     }
 
@@ -444,7 +444,7 @@ impl GrantStack {
         baseline: &Baseline,
         h: H,
     ) -> Result<H::As<Judged<O>>, Refused> {
-        self.refusal_fs(baseline, &O::FS, h.trace())?;
+        self.refusal_fs(baseline, O::FS, h.trace())?;
         Ok(h.judged(Verdict(PhantomData)))
     }
 
@@ -460,7 +460,7 @@ impl GrantStack {
         rp: &LexicalPath,
     ) -> Result<H::As<Judged<O>>, LocateError> {
         let held = H::walk(rp).or_else(|e| {
-            self.judge_failure(baseline, &O::FS, rp, &e)?;
+            self.judge_failure(baseline, O::FS, rp, &e)?;
             Err(LocateError::Io(e))
         })?;
         self.judge::<O, H>(baseline, held)
@@ -476,7 +476,7 @@ impl GrantStack {
     pub(crate) fn judge_failure(
         &self,
         baseline: &Baseline,
-        op: &FsOp,
+        op: FsOp,
         rp: &LexicalPath,
         error: &io::Error,
     ) -> Result<(), LocateError> {
@@ -490,7 +490,7 @@ impl GrantStack {
 
     /// The write judgment: may the access `trace` be written?
     pub(crate) fn write(&self, baseline: &Baseline, trace: &Trace) -> Result<(), Withheld<FsDeny>> {
-        let region = region(self, &FsOp::Write, baseline);
+        let region = region(self, FsOp::Write, baseline);
         region
             .and_then(|r| r.withheld(Subject::Access(trace)))
             .map_or(Ok(()), Err)
@@ -504,7 +504,7 @@ impl GrantStack {
         trace: &Trace,
     ) -> Result<(), Withheld<FsDeny>> {
         let withheld =
-            region(self, &FsOp::Read, baseline).and_then(|r| r.withheld(Subject::Access(trace)));
+            region(self, FsOp::Read, baseline).and_then(|r| r.withheld(Subject::Access(trace)));
         match withheld {
             Some(excluded @ Withheld::Excluded { .. }) => Err(excluded),
             _ => Ok(()),
@@ -803,7 +803,7 @@ mod tests {
 
     /// The region for `op` of one layer allowing `allow` for both ops.
     fn region_of(
-        op: &FsOp,
+        op: FsOp,
         allow: &[FrozenPath],
         deny: &[FrozenPath],
         baseline: &Baseline,
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn the_read_region_admits_the_system_reads_a_layer_never_named() {
         let runtime = core_runtime();
-        let read = region_of(&FsOp::Read, &[lit("/work")], &[], runtime.baseline());
+        let read = region_of(FsOp::Read, &[lit("/work")], &[], runtime.baseline());
         for f in runtime.baseline().allows() {
             assert!(read.evidence(f.own()).permits(), "{f:?}");
         }
@@ -837,7 +837,7 @@ mod tests {
             panic!("the baseline holds prefixes: {f:?}");
         };
         let read = region_of(
-            &FsOp::Read,
+            FsOp::Read,
             &[lit("/work")],
             std::slice::from_ref(&prefix.written),
             runtime.baseline(),
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn the_write_region_admits_no_system_reads_path() {
         let runtime = core_runtime();
-        let write = region_of(&FsOp::Write, &[lit("/work")], &[], runtime.baseline());
+        let write = region_of(FsOp::Write, &[lit("/work")], &[], runtime.baseline());
         for f in runtime.baseline().allows() {
             assert!(!write.evidence(f.own()).permits(), "{f:?}");
         }
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn an_empty_read_admits_exactly_the_system_reads() {
         let runtime = core_runtime();
-        let read = region_of(&FsOp::Read, &[], &[], runtime.baseline());
+        let read = region_of(FsOp::Read, &[], &[], runtime.baseline());
         assert!((runtime.baseline().allows()).all(|f| read.evidence(f.own()).permits()));
         assert_eq!(
             read.evidence(Subject::Access(&at("/no/such/place"))),
@@ -1000,7 +1000,7 @@ mod tests {
         #[cfg(windows)]
         std::fs::remove_dir(&surface).unwrap();
         link_dir(&other, &surface);
-        let read = region(&stack, &FsOp::Read, &Baseline::default()).unwrap();
+        let read = region(&stack, FsOp::Read, &Baseline::default()).unwrap();
         assert!(permits(&read, &trace(real.join("f"))));
         assert!(!permits(&read, &trace(surface.join("f"))));
     }
@@ -1054,7 +1054,7 @@ mod tests {
                 ..FsPolicy::default()
             }),
         ]);
-        let full = region(&stack, &FsOp::Read, &baseline).unwrap();
+        let full = region(&stack, FsOp::Read, &baseline).unwrap();
         for path in ["/x/prog", "/x/tools/ok", "/x/tools/bad", "/work/f", "/y/zz"] {
             let access = at(path);
             assert_eq!(

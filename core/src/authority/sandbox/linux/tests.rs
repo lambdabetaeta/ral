@@ -1,11 +1,11 @@
 use super::landlock::{Abi, Landlock, Landlocked};
 use super::{
-    Access, Bind, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, InfoFd, Layer, Pinned,
-    Shown, bwrap_argv, bwrap_command, envelope, open_object, own_cgroup, pin_envelope,
+    Bind, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, InfoFd, Layer, Pinned, Shown,
+    bwrap_argv, bwrap_command, envelope, open_object, own_cgroup, pin_envelope,
 };
 use crate::Role;
 use crate::authority::policy::{
-    Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Gpu, Net, Program,
+    Admitted, Baseline, Capabilities, FsAllow, FsOp, FsPolicy, Gpu, Net, Program,
 };
 use crate::authority::policy::{ExecAllow, ExecDeny, ExecRules, FsDeny, GrantPath, Rule};
 use crate::authority::sandbox::launch::{Image, Ownership, admitted, enveloped};

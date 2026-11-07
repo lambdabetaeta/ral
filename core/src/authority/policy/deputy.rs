@@ -35,7 +35,7 @@ pub fn deputy_prefixes(stack: &GrantStack, baseline: &Baseline) -> Vec<FrozenPat
     }
     let runs = (stack.exec().map(runnable).reduce(Meet::meet))
         .expect("an exec that restricts is some layer's");
-    let Some(writes) = region(stack, &FsOp::Write, baseline) else {
+    let Some(writes) = region(stack, FsOp::Write, baseline) else {
         return Vec::new();
     };
     let both = runs.meet(writes);

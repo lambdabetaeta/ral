@@ -119,7 +119,7 @@ mod tests {
             .layer(unreachable_narrower, &cwd("/work/proj"))
             .expect("a well-formed restriction record");
         let fs = layer.fs().expect("an fs policy");
-        let read: Vec<_> = (fs.table(&FsOp::Read).allows())
+        let read: Vec<_> = (fs.table(FsOp::Read).allows())
             .map(|allow| match allow {
                 FsAllow::Prefix(gp) => gp.written.as_str(),
                 FsAllow::RunPlace(_) => panic!("a restriction names no run place"),

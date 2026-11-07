@@ -249,7 +249,7 @@ pub(crate) fn check_device_name(path: &LexicalPath) -> Result<(), Refusal> {
 pub(crate) fn fs_denial(
     grants: &GrantStack,
     refused: Refused,
-    op: &FsOp,
+    op: FsOp,
     path: &LexicalPath,
 ) -> Denial {
     let name = <&str>::from(op);

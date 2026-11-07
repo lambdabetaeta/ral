@@ -383,7 +383,7 @@ mod tests {
         let expected = home.path().join("data");
         let pushed = shell.context.grants.layers().last().unwrap();
         let fs = pushed.fs().expect("fs dimension present");
-        assert!(fs.table(&FsOp::Read).allows().any(
+        assert!(fs.table(FsOp::Read).allows().any(
             |a| matches!(a, FsAllow::Prefix(gp) if Path::new(gp.written.as_str()) == expected)
         ));
     }

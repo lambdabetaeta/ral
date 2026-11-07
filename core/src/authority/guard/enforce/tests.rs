@@ -15,7 +15,7 @@ fn stack(fs: FsPolicy) -> GrantStack {
 }
 
 fn admits_read(grants: &GrantStack, path: &std::path::Path) -> bool {
-    grants.admits_fs(&Baseline::default(), &FsOp::Read, &trace(path))
+    grants.admits_fs(&Baseline::default(), FsOp::Read, &trace(path))
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
     };
     let matched_by = |grants: &GrantStack| {
         let access = root.join("d/secrets/f");
-        match grants.refusal_fs(&Baseline::default(), &FsOp::Read, &trace(&access)) {
+        match grants.refusal_fs(&Baseline::default(), FsOp::Read, &trace(&access)) {
             Err(Refused::Withheld(Withheld::Excluded { matched_by, .. })) => matched_by,
             _ => panic!("an exclusion holds the access"),
         }
@@ -164,11 +164,7 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
         ..FsPolicy::default()
     });
     let refused = grants
-        .refusal_fs(
-            &Baseline::default(),
-            &FsOp::Read,
-            &trace(root.join("alias")),
-        )
+        .refusal_fs(&Baseline::default(), FsOp::Read, &trace(root.join("alias")))
         .expect_err("the alias is the denied object");
     assert!(
         matches!(
@@ -462,13 +458,13 @@ mod words {
         let path = crate::path::LexicalPath::absolute(nowhere.real().as_path()).unwrap();
         for op in [FsOp::Read, FsOp::Write] {
             let refused =
-                (grants.refusal_fs(&baseline, &op, &nowhere)).expect_err("no allowance covers it");
+                (grants.refusal_fs(&baseline, op, &nowhere)).expect_err("no allowance covers it");
             assert_eq!(
                 refused.to_string(),
                 "no allowance of the active grant covers it"
             );
             assert_eq!(
-                fs_denial(&grants, refused, &op, &path).error.message,
+                fs_denial(&grants, refused, op, &path).error.message,
                 format!(
                     "fs {} denied by grant: no allowance of the active grant covers {}",
                     <&str>::from(&op),
@@ -506,7 +502,7 @@ fn a_case_variant_spelling_meets_the_deny() {
     });
     let access = trace(root.join("SECRET/key"));
     assert_eq!(access.real().as_path(), secret.join("key"));
-    assert!(!grants.admits_fs(&Baseline::default(), &FsOp::Read, &access));
+    assert!(!grants.admits_fs(&Baseline::default(), FsOp::Read, &access));
 }
 
 /// The fact a refused fs check leaves on the trail: which op, at what path,
@@ -520,7 +516,7 @@ mod fs_facts {
     fn denial_at(
         grants: &GrantStack,
         baseline: &Baseline,
-        op: &FsOp,
+        op: FsOp,
         at: &std::path::Path,
     ) -> crate::authority::guard::Denial {
         let path = LexicalPath::absolute(at).expect("an absolute path");
@@ -535,7 +531,7 @@ mod fs_facts {
         let grants = stack(FsPolicy::default());
         for op in [FsOp::Read, FsOp::Write] {
             let at = std::path::Path::new("/nowhere/x");
-            let denial = denial_at(&grants, &Baseline::default(), &op, at);
+            let denial = denial_at(&grants, &Baseline::default(), op, at);
             let shown = LexicalPath::absolute(at).unwrap().shown();
             assert_eq!(denial.check.resource, Resource::Fs);
             assert_eq!(denial.check.fields["op"], <&str>::from(&op));
@@ -557,9 +553,9 @@ mod fs_facts {
             write_prefixes: vec![spell(&root)],
             deny_paths: vec![spell(&secret)],
         });
-        let denial = denial_at(&grants, &Baseline::default(), &FsOp::Read, &secret);
+        let denial = denial_at(&grants, &Baseline::default(), FsOp::Read, &secret);
         let fields = &denial.check.fields;
-        assert_eq!(fields["op"], <&str>::from(&FsOp::Read));
+        assert_eq!(fields["op"], <&str>::from(FsOp::Read));
         assert_eq!(
             fields["path"],
             LexicalPath::absolute(&secret).unwrap().shown()
@@ -576,12 +572,12 @@ mod fs_facts {
         let denial = denial_at(
             &GrantStack::root(),
             &Baseline::of_host().unwrap(),
-            &FsOp::Write,
+            FsOp::Write,
             &own,
         );
         let fields = &denial.check.fields;
         assert_eq!(denial.check.resource, Resource::Fs);
-        assert_eq!(fields["op"], <&str>::from(&FsOp::Write));
+        assert_eq!(fields["op"], <&str>::from(FsOp::Write));
         assert_eq!(fields["path"], LexicalPath::absolute(&own).unwrap().shown());
         assert_eq!(fields["pinned"], "ral");
         assert!(!fields.contains_key("deny"));

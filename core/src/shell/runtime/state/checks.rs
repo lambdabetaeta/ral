@@ -67,7 +67,7 @@ impl Shell {
     ) -> Settled<Located<Judged<O>>> {
         let verdict = (self.context.grants)
             .judge::<O, _>(self.baseline(), located)
-            .map_err(|refused| fs_denial(&self.context.grants, refused, &O::FS, path));
+            .map_err(|refused| fs_denial(&self.context.grants, refused, O::FS, path));
         verdict.map_err(|denial| self.refused(denial))
     }
 
@@ -82,7 +82,7 @@ impl Shell {
             Ok(found) => Ok(Ok(found)),
             Err(LocateError::Io(e)) => Ok(Err(e)),
             Err(LocateError::Refused(refused)) => {
-                let denial = fs_denial(&self.context.grants, refused, &O::FS, path);
+                let denial = fs_denial(&self.context.grants, refused, O::FS, path);
                 Err(self.refused(denial))
             }
         }
@@ -149,8 +149,7 @@ impl Shell {
         let located = match walk(path, leaf) {
             Ok(located) => located,
             Err(e) => {
-                let verdict =
-                    (self.context.grants).judge_failure(self.baseline(), &O::FS, path, &e);
+                let verdict = (self.context.grants).judge_failure(self.baseline(), O::FS, path, &e);
                 let told = match self.raised::<O, _>(path, verdict)? {
                     Err(lenient) => Some(lenient),
                     Ok(()) => is_loop(&e).then_some(e),
@@ -186,10 +185,10 @@ impl Shell {
                 Ok(located) => located,
                 Err(e) => {
                     let verdict =
-                        (self.context.grants).judge_failure(self.baseline(), &O::FS, &cand, &e);
+                        (self.context.grants).judge_failure(self.baseline(), O::FS, &cand, &e);
                     if let Err(LocateError::Refused(refused)) = verdict {
                         first.get_or_insert_with(|| {
-                            fs_denial(&self.context.grants, refused, &O::FS, &cand)
+                            fs_denial(&self.context.grants, refused, O::FS, &cand)
                         });
                     }
                     continue;
@@ -200,7 +199,7 @@ impl Shell {
                 Ok(_) => {}
                 Err(refused) => {
                     first.get_or_insert_with(|| {
-                        fs_denial(&self.context.grants, refused, &O::FS, &cand)
+                        fs_denial(&self.context.grants, refused, O::FS, &cand)
                     });
                 }
             }
@@ -221,7 +220,7 @@ impl Shell {
     /// Whether the live stack admits `op` on an access already walked — no
     /// audit, no refusal: the question a door asks about a *side* read it
     /// may simply forgo, such as a write's before-image.
-    pub fn admits_fs(&self, op: &FsOp, trace: &Trace) -> bool {
+    pub fn admits_fs(&self, op: FsOp, trace: &Trace) -> bool {
         self.context.grants.admits_fs(self.baseline(), op, trace)
     }
 

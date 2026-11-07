@@ -166,9 +166,9 @@ struct PathBeneathAttr {
 
 /// A set of `LANDLOCK_ACCESS_FS_*` rights.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct Access(u64);
+pub(crate) struct Rights(u64);
 
-impl Access {
+impl Rights {
     const NONE: Self = Self(0);
     pub(crate) const EXECUTE: Self = Self(1 << 0);
     pub(crate) const REFER: Self = Self(1 << 13);
@@ -180,7 +180,7 @@ impl Access {
     }
 }
 
-impl std::ops::BitOr for Access {
+impl std::ops::BitOr for Rights {
     type Output = Self;
     fn bitor(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -203,7 +203,7 @@ impl Scoped {
 struct Ruleset(OwnedFd);
 
 impl Ruleset {
-    fn create(handled: Access, scoped: Scoped) -> io::Result<Self> {
+    fn create(handled: Rights, scoped: Scoped) -> io::Result<Self> {
         let attr = RulesetAttr {
             handled_access_fs: handled.0,
             handled_access_net: 0,
@@ -228,10 +228,10 @@ impl Ruleset {
         }
     }
 
-    /// `access` on `object` and, for a directory, everything beneath it.
-    fn admit(&self, object: BorrowedFd<'_>, access: Access) -> io::Result<()> {
+    /// `rights` on `object` and, for a directory, everything beneath it.
+    fn admit(&self, object: BorrowedFd<'_>, rights: Rights) -> io::Result<()> {
         let attr = PathBeneathAttr {
-            allowed_access: access.0,
+            allowed_access: rights.0,
             parent_fd: object.as_raw_fd(),
         };
         // SAFETY: `attr` is a live `landlock_path_beneath_attr`; both fds are open.
@@ -302,7 +302,7 @@ impl Landlocked {
         if self.refer_root {
             let root = open_dir_nofollow(&RealPath::universal())?
                 .ok_or("landlock: the envelope has no root to admit")?;
-            (ruleset.admit(root.as_fd(), Access::REFER)).map_err(|e| Error::admit("/", e))?;
+            (ruleset.admit(root.as_fd(), Rights::REFER)).map_err(|e| Error::admit("/", e))?;
         }
         Ok(ruleset.restrict_self()?)
     }
@@ -311,7 +311,7 @@ impl Landlocked {
 /// The rights a ruleset handles and the scopes it sets.
 #[derive(Debug, PartialEq, Eq)]
 struct Plan {
-    handled: Access,
+    handled: Rights,
     scoped: Scoped,
 }
 
@@ -355,16 +355,16 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
             )));
         }
     };
-    let when = |condition, access| if condition { access } else { Access::NONE };
+    let when = |condition, rights| if condition { rights } else { Rights::NONE };
     let fs =
-        when(restricted, Access::EXECUTE) | when(abi >= Abi::RESOLVE_UNIX, Access::RESOLVE_UNIX);
-    let handled = fs | when(fs != Access::NONE && abi >= Abi::REFER, Access::REFER);
+        when(restricted, Rights::EXECUTE) | when(abi >= Abi::RESOLVE_UNIX, Rights::RESOLVE_UNIX);
+    let handled = fs | when(fs != Rights::NONE && abi >= Abi::REFER, Rights::REFER);
     let scoped = if abi >= Abi::SCOPES {
         Scoped::ENVELOPE
     } else {
         Scoped::NONE
     };
-    Ok((handled != Access::NONE || scoped != Scoped::NONE).then_some(Plan { handled, scoped }))
+    Ok((handled != Rights::NONE || scoped != Scoped::NONE).then_some(Plan { handled, scoped }))
 }
 
 /// The ruleset for `exec` on a kernel at `landlock`, lent to `handoff`, and
@@ -392,14 +392,14 @@ pub(crate) fn build(
     if let Some(table) = kernel_table(exec) {
         admit_exec(&ruleset, table, fs, shown)?;
     }
-    if handled.contains(Access::RESOLVE_UNIX) {
+    if handled.contains(Rights::RESOLVE_UNIX) {
         admit_sockets(fs, &shown.roots, &mut |admit| {
-            ruleset.admit(admit.fd, Access::RESOLVE_UNIX)
+            ruleset.admit(admit.fd, Rights::RESOLVE_UNIX)
         })
         .map_err(String::from)?;
     }
     Ok(Some(Landlocked {
-        refer_root: handled.contains(Access::REFER),
+        refer_root: handled.contains(Rights::REFER),
         at: handoff.lend(ruleset.as_fd())?,
     }))
 }
@@ -444,7 +444,7 @@ fn admit_exec(
     fs: &RenderedFs,
     shown: &Shown,
 ) -> Result<(), String> {
-    let sink = &mut |admit: Admit<'_>| ruleset.admit(admit.fd, Access::EXECUTE);
+    let sink = &mut |admit: Admit<'_>| ruleset.admit(admit.fd, Rights::EXECUTE);
     admit_files(table, sink)?;
     let walks = vetoes_walk(table, fs);
     expand(table, &shown.roots, &walks, &shown.scratch(), sink)?;

@@ -80,8 +80,8 @@ fn an_exec_restricting_grant_is_refused_without_landlock() {
 
 #[test]
 fn a_restricted_projection_handles_refer_from_abi_two_and_scopes_from_six() {
-    let exec = Access::EXECUTE;
-    let refer = Access::EXECUTE | Access::REFER;
+    let exec = Rights::EXECUTE;
+    let refer = Rights::EXECUTE | Rights::REFER;
     for (abi, handled, scoped) in [
         (Abi::EXEC, exec, Scoped::NONE),
         (Abi::REFER, refer, Scoped::NONE),
@@ -91,10 +91,10 @@ fn a_restricted_projection_handles_refer_from_abi_two_and_scopes_from_six() {
         (Abi(8), refer, Scoped::ENVELOPE),
         (
             Abi::RESOLVE_UNIX,
-            refer | Access::RESOLVE_UNIX,
+            refer | Rights::RESOLVE_UNIX,
             Scoped::ENVELOPE,
         ),
-        (Abi(10), refer | Access::RESOLVE_UNIX, Scoped::ENVELOPE),
+        (Abi(10), refer | Rights::RESOLVE_UNIX, Scoped::ENVELOPE),
     ] {
         assert_eq!(
             plan(&restricted(), Landlock::At(abi)).expect("a kernel with Landlock"),
@@ -114,11 +114,11 @@ fn an_unrestricted_exec_projection_handles_sockets_from_abi_nine() {
         );
     }
     for (abi, handled) in [
-        (Abi::SCOPES, Access::NONE),
-        (Abi(7), Access::NONE),
-        (Abi(8), Access::NONE),
-        (Abi::RESOLVE_UNIX, Access::REFER | Access::RESOLVE_UNIX),
-        (Abi(10), Access::REFER | Access::RESOLVE_UNIX),
+        (Abi::SCOPES, Rights::NONE),
+        (Abi(7), Rights::NONE),
+        (Abi(8), Rights::NONE),
+        (Abi::RESOLVE_UNIX, Rights::REFER | Rights::RESOLVE_UNIX),
+        (Abi(10), Rights::REFER | Rights::RESOLVE_UNIX),
     ] {
         assert_eq!(
             plan(&ExecProjection::Unrestricted, Landlock::At(abi)).expect("plans"),
@@ -598,7 +598,7 @@ fn an_every_table_with_only_name_vetoes_handles_no_exec() {
     assert_eq!(
         plan(&bare, Landlock::At(Abi::SCOPES)).expect("plans"),
         Some(Plan {
-            handled: Access::NONE,
+            handled: Rights::NONE,
             scoped: Scoped::ENVELOPE
         })
     );

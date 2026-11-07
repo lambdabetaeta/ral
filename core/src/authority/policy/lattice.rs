@@ -543,7 +543,7 @@ impl GrantStack {
     pub(crate) fn held_ids(&self) -> Vec<Option<crate::path::ObjectId>> {
         let denies = self
             .fs()
-            .flat_map(|fs| fs.table(&super::FsOp::Read).denies());
+            .flat_map(|fs| fs.table(super::FsOp::Read).denies());
         denies
             .flat_map(|deny| deny.grant().real.held_ids())
             .collect()
