@@ -65,7 +65,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 38): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 39): checked at `Attach`; a mismatch refuses.
   An engine's ceiling rides `Root.config` as a grant value, decoded where it
   lands; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
@@ -170,8 +170,13 @@ The probe vocabulary, typed once for both ends.
   `WorkerState::Ready(Done)` holds the shared worker ending;
   `WorkerState::unclaimed` is `Running | Ready(_)`. A missing row also means
   claimed, so an announcing host requires a present unclaimed row.
-  `Grants` answers the session's `GrantSummary` as opaque bytes in the codec
-  `Root.grants` and a sealed seed ride.
+  `Probe::Grants` answers `Grants`, a `record!`: each layer of the session's
+  stack a reader needs (`GrantLayer::is_shown`: it restricts, or its exec
+  runs something), oldest first, as its `LayerValue` (the grant, and
+  the fragment that extends it where the layer runs every program), and
+  `withholds-gpu`, whether the engine's host holds a withheld GPU. Plain ral
+  data, not the opaque codec `Root.grants` and a sealed seed ride
+  ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 
 ## `core/src/protocol/channel.rs`
 

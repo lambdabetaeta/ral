@@ -363,8 +363,8 @@ A layer is restrictive exactly where some axis does not denote `t`
 (`Axis::is_top`), a stack exactly where some layer is. Exec restricts unless it
 is `every` with no exclusion; fs unless it writes the root and excludes nothing;
 net when `Offline`; a verb set unless it lists every verb. Every reader goes
-through it: the projection, launch hardening, exarch's credential layer and the
-summaries. An `every` table with exclusions activates.
+through it: the projection, launch hardening and exarch's credential and self
+layers. An `every` table with exclusions activates.
 
 ## What a table hands out
 

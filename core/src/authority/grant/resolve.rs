@@ -2,8 +2,8 @@
 
 use super::freeze::PolicyError;
 use super::paths::Polar;
-use crate::authority::policy::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};
-use crate::path::{self, Excluded, FrozenPath, Trace, command_name_key};
+use crate::authority::policy::{ExecAllow, ExecDeny, Extent, GrantPath, Rule, Veto};
+use crate::path::{self, Excluded, FrozenPath, Trace};
 
 /// How a walked key becomes a rule, by the polarity that walked it: an
 /// allowance keeps the position, an exclusion the holds.
@@ -72,7 +72,7 @@ impl Keyed for Excluded {
             .map(Self::grant)
             .transpose()?
             .map(|path| Rule::Deny(Box::new(ExecDeny::File(path))));
-        let veto = Rule::Deny(Box::new(ExecDeny::Name(command_name_key(name))));
+        let veto = Rule::Deny(Box::new(ExecDeny::Name(Veto::of(name))));
         Ok(file.into_iter().chain([veto]).collect())
     }
 }

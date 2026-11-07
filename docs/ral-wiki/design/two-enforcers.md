@@ -282,7 +282,7 @@ start:
     closed. Giving the volume a drive letter and granting that works.
   - Windows has no kernel exec layer; exec is the guard's alone.
   - Windows cannot withhold the GPU; a withheld GPU there neither confines nor
-    refuses, and the summary says so.
+    refuses, and exarch's prompt says so.
 - **The kernel sees no argv.**
 
 **macOS has no stacking.** Landlock layers inside the envelope; Seatbelt
@@ -313,8 +313,10 @@ process braking and loader-variable scrubbing are active when some layer
 restricts: `exec` or `fs` supplied, `net` `offline`, `gpu` `withheld`, or a verb list that omits
 a verb (`is_restrictive`, one predicate per axis). A neutral layer (`()`, a
 full verb list) leaves ral ambient and, inside a restrictive stack, turns
-nothing off; exarch's summary calls a layer ambient by the same predicate
-([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]).
+nothing off ([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]).
+exarch's prompt shows a neutral layer only where its exec runs something
+(`GrantLayer::is_shown`), since what it runs stays readable under a nested fs
+restriction ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 
 **Neither enforcer is the body's to rewrite.** Every launcher pinned at boot —
 on Linux both bwrap and ral's own trampoline, and ral itself wherever else it

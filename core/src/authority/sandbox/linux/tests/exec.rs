@@ -16,9 +16,9 @@ fn file_rule(path: &RealPath, allow: bool) -> Rule {
 }
 
 fn veto_rule(name: &str) -> Rule {
-    Rule::Deny(Box::new(ExecDeny::Name(crate::path::command_name_key(
-        name,
-    ))))
+    Rule::Deny(Box::new(ExecDeny::Name(
+        crate::authority::policy::Veto::of(name),
+    )))
 }
 
 /// The command directories, plus whatever a test adds, by their real

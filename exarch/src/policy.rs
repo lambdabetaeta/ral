@@ -57,6 +57,28 @@ pub fn for_invocation(
     restrict_files: &[PathBuf],
     own: Option<&Path>,
 ) -> Result<Invocation, String> {
+    let ctx = FreezeCtx::at(EnvVars::new(), cwd.clone()).with_scratch(Some(scratch));
+    let credentials = crate::provider::credential_files();
+    compose(
+        &ctx,
+        base_name,
+        extension,
+        restrict_files,
+        &credentials,
+        own,
+    )
+}
+
+/// [`for_invocation`] against `ctx`, carving out `credentials`.
+fn compose(
+    ctx: &FreezeCtx,
+    base_name: &str,
+    extension: Option<&Path>,
+    restrict_files: &[PathBuf],
+    credentials: &[PathBuf],
+    own: Option<&Path>,
+) -> Result<Invocation, String> {
+    let cwd = ctx.cwd();
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
     // the frozen GrantStack returned here.
@@ -64,9 +86,7 @@ pub fn for_invocation(
         .shell(TerminalState::default(), cwd.clone())
         .map_err(|e| format!("the capability loader cannot start: {e}"))?;
 
-    let ctx = FreezeCtx::at(EnvVars::new(), cwd.clone()).with_scratch(Some(scratch));
-
-    let mut ceiling: GrantLayer = resolve_base(base_name, &ctx)?;
+    let mut ceiling: GrantLayer = resolve_base(base_name, ctx)?;
     if let Some(path) = extension {
         let abs = absolute_in(cwd, path);
         ceiling = ceiling.extend(load_fragment_ral(
@@ -74,7 +94,7 @@ pub fn for_invocation(
             &mut load_shell,
             &abs,
             "--extend",
-            &ctx,
+            ctx,
         )?);
     }
 
@@ -88,7 +108,7 @@ pub fn for_invocation(
             &mut load_shell,
             path,
             "--restrict",
-            &ctx,
+            ctx,
         )?);
     }
 
@@ -102,9 +122,9 @@ pub fn for_invocation(
     // the agent, as an `--extend` file is.
     if !stack.fs_is_top() {
         if !restricts.is_empty() {
-            stack.push(deny_layer(&restricts, &ctx)?);
+            stack.push(deny_layer(&restricts, ctx)?);
         }
-        stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
+        stack.push(deny_layer(credentials, ctx)?);
     }
 
     // On the same footing: exec unrestricted asked not to be confined, and an
@@ -112,7 +132,7 @@ pub fn for_invocation(
     // A child a `dangerous` parent narrows thus runs exarch, regaining only the
     // parent's own authority.
     if !stack.exec_is_top() {
-        stack.push(self_layer(own, &ctx)?);
+        stack.push(self_layer(own, ctx)?);
     }
 
     Ok(Invocation { stack, restricts })
@@ -218,7 +238,9 @@ fn carve_out(excluded: Axes, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::authority::grant::value::LayerValue;
     use ral_core::authority::policy::Net;
+    use ral_core::data::FOValue;
 
     /// The scratch spelling every test here freezes `scratch` places against:
     /// no test makes anything in it.
@@ -327,19 +349,27 @@ mod tests {
             Some(&own),
         )
         .expect("the supplied binary can be excluded");
-        let denied: Vec<_> = stack
-            .layers()
-            .filter_map(GrantLayer::summary)
-            .filter_map(|s| s.exec)
-            .flat_map(|exec| exec.denies)
-            .collect();
-        let own_text = ral_core::path::shown(&own);
+        let layers: Vec<&GrantLayer> = stack.layers().collect();
+        let (own_layer, rest) = layers.split_last().expect("a self layer");
+        for layer in rest {
+            let denies = layer.axes().exec.map(|exec| exec.deny);
+            assert!(denies.is_none_or(|d| d.is_empty()), "{layer:?}");
+        }
+        let data = |axes: Axes| FOValue::from(GrantValue::from(axes));
+        let excluded = Axes {
+            exec: Some(ExecTable {
+                deny: vec![Target::File(Place::from(&host_absolute(&own).unwrap()))],
+                ..ExecTable::default()
+            }),
+            ..Axes::default()
+        };
         assert_eq!(
-            denied,
-            [format!(
-                "`absolute {}",
-                ral_core::syntax::quote_word(&own_text)
-            )]
+            own_layer.value(),
+            LayerValue {
+                grant: data(Axes::default()),
+                fragment: Some(data(excluded)),
+            },
+            "every program, less the supplied binary"
         );
 
         let mut shell = ral_core::test_helper::core_shell();
@@ -360,7 +390,7 @@ mod tests {
         let ctx = ctx_at(&std::env::temp_dir());
         let confined = base_layer("confined", &ctx).unwrap();
         assert_eq!(
-            confined.summary().and_then(|s| s.net),
+            confined.axes().net,
             Some(Net::Offline),
             "confined layer has net off"
         );
@@ -376,6 +406,91 @@ mod tests {
         assert!(
             stack.gpu().next().is_some(),
             "naming a looser base must not hand back the GPU"
+        );
+    }
+
+    /// The bare names `profile` allows or denies.
+    #[cfg(unix)]
+    fn names(profile: &str) -> Vec<String> {
+        let mut shell = ral_core::test_helper::core_shell();
+        let value = ral_core::shell::load::evaluate_source(
+            &ral_core::shell::runtime::Mooring::adrift(),
+            &mut shell,
+            profile,
+            &ral_core::source::SourceOrigin::named("<test:names>"),
+            None,
+        )
+        .expect("the profile evaluates");
+        let value = FOValue::try_from(&value).expect("a profile is data");
+        let exec = value.field("exec").expect("the profile restricts exec");
+        let targets = ["allow", "deny"]
+            .into_iter()
+            .filter_map(|key| exec.field(key));
+        let targets = targets.flat_map(|list| list.as_list().unwrap_or_default());
+        targets
+            .filter_map(|target| match ral_core::data::datum::untag(target) {
+                Some(("name", Some(name))) => name.as_str().map(str::to_owned),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the agent reads of exarch's default boot grant, pinned, on a host
+    /// all fixture: cwd, scratch, home and the credential under `/fixture`,
+    /// the `PATH` a stub of every name `reasonable` names.  A selector or a
+    /// literal tool root names the test host's own directories, which no
+    /// golden can pin: those are left out.
+    #[cfg(unix)]
+    #[test]
+    fn the_default_boot_grant_reads_as_pinned() {
+        use ral_core::authority::grant::freeze::Anchor;
+        use ral_core::protocol::probe::Grants;
+        use std::os::unix::fs::PermissionsExt;
+        const FIXTURE: &str = "/fixture/";
+        let bin = tempfile::tempdir().expect("a stub bin");
+        for name in names(include_str!("../data/reasonable.exarch.ral")) {
+            let stub = bin.path().join(name);
+            std::fs::write(&stub, "").expect("a stub");
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = ral_core::path::utf8(bin.path()).expect("a Unicode tempdir");
+        // An empty `XDG_*_HOME` is no override: the default under `HOME`.
+        let xdg = Anchor::all().filter_map(|anchor| match anchor {
+            Anchor::Xdg(kind) => Some((kind.env_var(), "")),
+            _ => None,
+        });
+        let env = [("HOME", "/fixture/home"), ("PATH", path)]
+            .into_iter()
+            .chain(xdg);
+        let cwd = CwdPath::new(PathBuf::from("/fixture/work")).expect("an absolute cwd");
+        let ctx = FreezeCtx::at(env.collect(), cwd).with_scratch(Some("/fixture/scratch"));
+        let credential = PathBuf::from("/fixture/home/.local/state/exarch/credentials.json");
+        let own = Path::new("/fixture/bin/exarch");
+        let Invocation { stack, .. } =
+            compose(&ctx, "reasonable", None, &[], &[credential], Some(own)).unwrap();
+        let pinnable = |mut axes: Axes| {
+            if let Some(exec) = &mut axes.exec {
+                exec.allow.retain(|target| match target {
+                    Target::Dir(Place::Absolute(dir)) => dir.starts_with(FIXTURE),
+                    _ => true,
+                });
+            }
+            axes
+        };
+        let shown = stack.layers().filter(|layer| layer.is_shown());
+        let layers = shown.map(|layer| LayerValue {
+            grant: GrantValue::from(pinnable(layer.axes())).into(),
+            ..layer.value()
+        });
+        crate::prompt::pin_grant_section(
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/policy/golden/default-boot-grant.md"
+            )),
+            &Grants {
+                layers: layers.collect(),
+                withholds_gpu: true,
+            },
         );
     }
 }

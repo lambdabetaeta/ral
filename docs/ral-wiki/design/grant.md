@@ -47,7 +47,8 @@ and the per-backend price.
   backend exists.
 - **`gpu` likewise has no in-process guard**: ``gpu: `withheld`` is the OS
   sandbox's alone, and Windows cannot withhold it: there it confines nothing and
-  refuses nothing, and the grant's summary says the GPU is in reach.
+  refuses nothing, and the grant exarch shows its agent says the GPU is in
+  reach.
 - **The process view is the envelope's, on every projection.** No axis names
   it: a child confined for any reason sees and can signal only the envelope's
   own processes, so `ps` and `kill` under any grant reach the envelope alone,
@@ -63,7 +64,7 @@ exactly where some axis does not denote `t`, so an exec table holding every
 program and no exclusion, or an fs that writes the root and excludes nothing,
 restricts nothing and activates no launch hardening.
 
-## Selectors, refusals and summaries
+## Selectors, refusals and the outward form
 
 - **A selector is a set of locations, and the table is one file.** The names are
   `path`, which reads `$PATH`, and `enum Toolchain` in
@@ -164,18 +165,35 @@ restricts nothing and activates no launch hardening.
   allowance names what it named when granted, and how to grant the new target.
   *Respelled* keeps the explanation for an exclusion reached through case, Unicode
   or a filesystem alias.
-- **Summaries list what was authored.** exarch's prompt, the grant legend and
-  synod's reused summaries list allowances and exclusions as written and compute
-  no effective permission per key (for bare names that would need host
-  resolution). A key with both bits appears in both lists, and the legend says
-  exclusions win. `every` reads "every program, less the exclusions below";
-  allowances beside it add no running but still make what they name readable.
-  A layer is summarised where it restricts *or* where its exec names a run place:
-  a ceiling of `every` beside `File(s)` with fs omitted denotes `t`, yet under a
+- **A grant has one outward form: its value.** Whatever shows a grant shows
+  the grant value, printed by ral's one value printer (`data::print`, beneath
+  `authority`; the shell prints its runtime values through the same): the
+  prompt exarch and synod give their agent, `Probe::Grants`, and a refusal
+  citing an exec exclusion. `GrantLayer::value` is decode's inverse,
+  `decode_grant(value(l)) == l` on the host that decoded `l`, so it computes no
+  effective permission per key: a key with both bits appears in both lists,
+  and the legend says exclusions win. Each rule prints resolved, from its
+  `written` spelling or key: an anchored place as the `absolute` spelling it
+  froze to, since after a `cd` `` `cwd src `` would predict the wrong denial;
+  a selector as the directories it chose; a name, allowed or excluded, as
+  written (a veto keeps the name beside the key it judges by). A list a table
+  leaves empty is left out, as the decoder reads it, and a table listing
+  nothing is written `[allow: []]` or `[read: []]`, as `grant` writes the
+  empty table: `read: []` beside a `write` list would read as "reads
+  nothing". *Every program* has no spelling, and arises only as `t ⊕ fragment` on
+  exec with the fragment's rules beside it, so a layer whose exec holds it
+  shows as its grant, exec left out, extended by `[exec: <those rules>]`; the
+  prompt writes `grant G extended by F`, the self layer
+  `` grant [] extended by [exec: [deny: [`absolute '…/exarch']]] ``.
+  Nothing beside the resolution is kept. A layer is shown where it restricts
+  *or* where its exec runs something (`GrantLayer::is_shown`): a ceiling of
+  every program beside `File(s)` with fs omitted denotes `t`, yet under a
   nested fs-only restriction it makes `s` readable, so the reader needs to be
   told. "Activates confinement" and "says something the reader needs" are two
-  predicates. The self layer is summarised like any exclusion: "every program,
-  less the exclusions below", exarch's binary under `exec deny`.
+  predicates. The prompt shows the layers oldest first, under a legend of
+  semantics alone (layers meet, exclusions win, writing and running read, an
+  extension, the denial wording, the agent cannot start itself)
+  ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 
 ## Policy, extension and the six rules
 
@@ -380,7 +398,8 @@ value*, the record `grant` takes, and the receiving host decodes it with that
 same walker (`decode_grant`, `decode_fragment`, `Shell::decode_grant`): synod's
 ceiling, exarch's boot grant and carve-outs, and `GrantValue::deny_all` alike. A
 host spells the value only by encoding typed `Axes`, and `Capabilities` is a test
-builder over the same. One front-end means one set of refusals,
+builder over the same. A grant leaves as a value too: a layer shows itself as
+the record that decodes to it (above). One front-end means one set of refusals,
 which hold on every route:
 
 - a file key naming a directory (the root included), a path-shaped `` `name ``,

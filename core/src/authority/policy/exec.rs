@@ -12,12 +12,12 @@
 use super::fs::{Baseline, FsAllow, FsDeny};
 use super::lattice::{Extent, GrantPath};
 use super::table::{Allows, Denies, Table, Withheld};
-use super::{ExecSummary, GrantStack, Join, Meet};
+use super::{GrantStack, Join, Meet};
+use crate::authority::grant::value::{ExecTable, Target};
 use crate::path::{
     self, Authority, Depth, Excluded, FrozenPath, Judged, Located, MatchedBy, Reading, RealPath,
     Trace, Unjudged, command_name_key,
 };
-use crate::syntax::quote::quote_word;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -186,17 +186,18 @@ impl ExecAllow {
         }
     }
 
-    /// The key as a grant spells it, `None` for what holds every program.
-    fn spelled(&self) -> Option<String> {
+    /// The key a grant writes, resolved; `None` for every program, which no
+    /// grant writes.
+    fn key(&self) -> Option<Key<'_>> {
         match self {
             Self::Any => None,
-            Self::Dir(dir) => Some(dir_key(&dir.written)),
+            Self::Dir(dir) => Some(Key::Dir(&dir.written)),
             Self::File {
                 found_as: Some(name),
                 ..
             }
-            | Self::Tool(name) => Some(name_key(name)),
-            Self::File { written, .. } => Some(file_key(written)),
+            | Self::Tool(name) => Some(Key::Name(name)),
+            Self::File { written, .. } => Some(Key::File(written)),
         }
     }
 }
@@ -207,11 +208,30 @@ impl ExecAllow {
 /// denied bare name is cited as written before the file it was found as.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ExecDeny {
-    /// The [`command_name_key`] of a bare exclusion: a veto on the name
-    /// everywhere.
-    Name(String),
+    Name(Veto),
     Dir(GrantPath<Excluded>),
     File(GrantPath<Excluded>),
+}
+
+/// A bare exclusion, a veto on the name everywhere: the name as written, and
+/// the [`command_name_key`] it judges by.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct Veto {
+    written: String,
+    key: String,
+}
+
+impl Veto {
+    pub(crate) fn of(name: &str) -> Self {
+        Self {
+            written: name.to_owned(),
+            key: command_name_key(name),
+        }
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
 }
 
 impl ExecDeny {
@@ -221,30 +241,47 @@ impl ExecDeny {
             Self::Name(_) => {}
         }
     }
+
+    /// The key a grant writes, resolved.
+    fn key(&self) -> Key<'_> {
+        match self {
+            Self::Name(veto) => Key::Name(&veto.written),
+            Self::Dir(dir) => Key::Dir(&dir.written),
+            Self::File(file) => Key::File(&file.written),
+        }
+    }
 }
 
-fn dir_key(written: &FrozenPath) -> String {
-    format!("`dir `absolute {}", quote_word(&written.shown()))
-}
-
-fn file_key(written: &FrozenPath) -> String {
-    format!("`absolute {}", quote_word(&written.shown()))
-}
-
-fn name_key(name: &str) -> String {
-    format!("`name {}", quote_word(name))
-}
-
-/// As a grant spells it: a directory under its `dir` constructor, a file as
-/// its `absolute` place, a name under `name`.
+/// As a grant writes it, resolved: `` `dir `absolute '/opt' ``.
 impl std::fmt::Display for ExecDeny {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&match self {
-            Self::Dir(dir) => dir_key(&dir.written),
-            Self::File(file) => file_key(&file.written),
-            Self::Name(name) => name_key(name),
-        })
+        std::fmt::Display::fmt(&self.key().target(), f)
     }
+}
+
+/// A rule's key resolved: a bare name, or the spelling a file or directory
+/// froze to.  Ordered as a grant lists them, names first.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Key<'a> {
+    Name(&'a str),
+    File(&'a FrozenPath),
+    Dir(&'a FrozenPath),
+}
+
+impl Key<'_> {
+    fn target(&self) -> Target {
+        match *self {
+            Self::Name(name) => Target::Name(name.to_owned()),
+            Self::File(written) => Target::File(written.into()),
+            Self::Dir(written) => Target::Dir(written.into()),
+        }
+    }
+}
+
+/// `keys` as a grant lists them: a set, in order.
+fn listed<'a>(keys: impl Iterator<Item = Key<'a>>) -> Vec<Target> {
+    let keys: BTreeSet<_> = keys.collect();
+    keys.iter().map(Key::target).collect()
 }
 
 impl Allows for ExecAllow {
@@ -328,10 +365,10 @@ impl ExecDeny {
                 dir.real.matches(at, Depth::Within)
             }
             (Self::File(file), Subject::Program(at)) => file.real.matches(at, Depth::Exact),
-            (Self::Name(key), Subject::Tool(name)) => vetoes(key, name),
-            (Self::Name(key), Subject::Program(at)) => {
+            (Self::Name(veto), Subject::Tool(name)) => vetoes(veto.key(), name),
+            (Self::Name(veto), Subject::Program(at)) => {
                 let at = at.position()?;
-                vetoes(key, at.name()?)
+                vetoes(veto.key(), at.name()?)
             }
             _ => None,
         }
@@ -415,14 +452,18 @@ impl ExecRules {
         self.rehold_with(ExecDeny::rehold);
     }
 
-    /// What the table shows of itself: each key as a grant spells it.
-    pub(super) fn summary(&self) -> ExecSummary {
-        let sorted = |keys: BTreeSet<String>| keys.into_iter().collect();
-        ExecSummary {
-            every: self.allows().any(|a| matches!(a, ExecAllow::Any)),
-            allows: sorted(self.allows().filter_map(ExecAllow::spelled).collect()),
-            denies: sorted(self.denies().map(ToString::to_string).collect()),
+    /// The table a grant writes, resolved: every rule but every program,
+    /// which only an extension makes.
+    pub(super) fn written(&self) -> ExecTable {
+        ExecTable {
+            allow: listed(self.allows().filter_map(ExecAllow::key)),
+            deny: listed(self.denies().map(ExecDeny::key)),
         }
+    }
+
+    /// Whether this table runs every program.
+    pub(super) fn runs_every(&self) -> bool {
+        self.allows().any(|a| matches!(a, ExecAllow::Any))
     }
 }
 
@@ -435,7 +476,7 @@ impl super::Axis for ExecRules {
     }
 
     fn is_top(&self) -> bool {
-        self.allows().any(|a| matches!(a, ExecAllow::Any)) && self.denies().next().is_none()
+        self.runs_every() && self.denies().next().is_none()
     }
 }
 
@@ -544,7 +585,7 @@ pub(super) mod tests {
     }
 
     fn veto(name: &str) -> Rule {
-        Rule::Deny(Box::new(ExecDeny::Name(command_name_key(name))))
+        Rule::Deny(Box::new(ExecDeny::Name(Veto::of(name))))
     }
 
     fn any() -> Rule {
@@ -654,22 +695,22 @@ pub(super) mod tests {
         assert_eq!(of_file(&met, "/x/t"), Evidence::NEITHER);
     }
 
-    /// An exclusion is cited as its author wrote it, a directory under its
-    /// `dir` marker, apart from a file exclusion at the same place.
+    /// An exclusion is cited as a grant writes it, resolved, and printed as
+    /// ral prints a value: a directory under its `dir` marker, apart from a
+    /// file exclusion at the same place.
     #[test]
     fn a_directory_exclusion_reads_apart_from_a_file_exclusion() {
-        let tools = Tree::nowhere().at("/tools");
-        let tools = path::shown(&tools);
-        let tools = quote_word(&tools);
+        let tools = excluded("/tools");
+        let at = tools.written.shown();
         assert_eq!(
-            ExecDeny::Dir(excluded("/tools")).to_string(),
-            format!("`dir `absolute {tools}")
+            ExecDeny::Dir(tools.clone()).to_string(),
+            format!("`dir `absolute '{at}'")
         );
         assert_eq!(
-            ExecDeny::File(excluded("/tools")).to_string(),
-            format!("`absolute {tools}")
+            ExecDeny::File(tools).to_string(),
+            format!("`absolute '{at}'")
         );
-        assert_eq!(ExecDeny::Name("bash".into()).to_string(), "`name bash");
+        assert_eq!(ExecDeny::Name(Veto::of("Bash")).to_string(), "`name 'Bash'");
     }
 
     /// A file found under a bare name keeps the name it was found as, and the
@@ -712,8 +753,8 @@ pub(super) mod tests {
         assert_eq!(
             denies.denies().map(ToString::to_string).collect::<Vec<_>>(),
             [
-                format!("`name {}", quote_word("zz-found")),
-                format!("`absolute {}", quote_word(&written.shown())),
+                "`name 'zz-found'".to_owned(),
+                format!("`absolute '{}'", written.shown()),
             ]
         );
     }
@@ -1298,7 +1339,7 @@ pub(super) mod tests {
         );
         let deny = name_rules::<Excluded>("tool", Some("bin"), cfg!(unix)).unwrap();
         assert!(
-            matches!(&deny[..], [Rule::Deny(d)] if **d == ExecDeny::Name(command_name_key("tool"))),
+            matches!(&deny[..], [Rule::Deny(d)] if **d == ExecDeny::Name(Veto::of("tool"))),
             "{deny:?}"
         );
     }

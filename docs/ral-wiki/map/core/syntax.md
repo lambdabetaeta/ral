@@ -26,7 +26,7 @@ sees raw bytes and bare words.
   (L0006), a definite error. In a level-`n ≥ 1` raw body, a non-closing `'`
   preceded by at least `n` body `#`s is `LexErrorKind::OpenerInRaw` (L0007),
   also definite. `fence_admits` defines admissible fences for both printers
-  (`quote_word` and `print.rs`'s `quote_string`): neither opener nor closer
+  (`quote_word` and `data/print.rs`'s `quote_string`): neither opener nor closer
   may occur in the body. The bash reflexes `${…}` and `$(cmd args)` are
   refused at `scan_dollar`. Outside `$[…]` a word starting with `&`
   is refused naming `spawn { … }`, one starting `&&` naming `;`, while a `&`

@@ -519,4 +519,5 @@ static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
 #[cfg(unix)]
 pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 
-pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
+pub use crate::data::print::{PrintParams, pretty_print};
+pub use print::REPL_PRINT_PARAMS;

@@ -8,6 +8,11 @@
   values, errors and escapes.
 - Intentional cycles among lower modules are permitted; this is a boundary,
   not a DAG requirement.
+- `data`, which they all use, stays below the shell too: the one value
+  printer (`data::print`) reads a value through a `Printable` view the shell's
+  `Value` implements, so `authority` prints a grant without the shell.
+- No test enforces the boundary; a production `crate::shell` path in one of
+  these modules is the thing to look for.
 - Documentation links and test-only shell fixtures do not create production
   dependencies.
 

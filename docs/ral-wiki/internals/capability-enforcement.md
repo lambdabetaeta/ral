@@ -156,7 +156,7 @@ The [[#Guest jail|guest jail]] is a separate launch branch.
   `Refer` and so governs no device node
   ([[internals/linux-envelope|linux-envelope]]). Windows cannot withhold it: an
   AppContainer reaches Direct3D regardless, so a withheld GPU projects as left
-  on there (`WITHHOLDS_GPU`) and the grant summary says so.
+  on there (`WITHHOLDS_GPU`) and the grant exarch shows its agent says so.
 
 **For host filesystem projections, guard and sandbox read one fold and judge
 it on different evidence.** Both read one fold (`authority/policy/fs.rs`). `region` meets each layer's table

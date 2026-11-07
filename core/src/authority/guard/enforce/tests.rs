@@ -263,7 +263,7 @@ mod words {
         let x = tree.at("/x");
         let both = exec([dir(&x)], [dir(&x)]);
         let e = refusal(&grants([both]), &tree.at("/x/t"));
-        let named = format!("`dir `absolute {}", crate::path::shown(&x));
+        let named = format!("`dir `absolute '{}'", crate::path::shown(&x));
         assert!(e.message.contains(&named), "{}", e.message);
         assert_eq!(
             e.hint.as_deref(),
@@ -372,7 +372,7 @@ mod words {
         }
     }
 
-    /// A name deny is cited as the author wrote it.  The program is a native
+    /// A name deny is cited as a grant writes it.  The program is a native
     /// binary named `sh` that the file `sh` resolved to cannot reach, so only
     /// the name veto fires.
     #[cfg(unix)]
@@ -384,7 +384,7 @@ mod words {
         let deny = exec([ExecKey::Name("sh".into())], [ExecKey::Name("sh".into())]);
         let e = refusal(&grants([deny]), crate::path::utf8(&sh).unwrap());
         assert!(
-            e.message.contains("excluded by `` `name sh ``"),
+            e.message.contains("excluded by `` `name 'sh' ``"),
             "{}",
             e.message
         );

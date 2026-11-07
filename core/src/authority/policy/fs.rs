@@ -24,11 +24,14 @@ use super::exec::ExecRules;
 use super::lattice::{Extent, GrantPath};
 use super::table::{Allows, Denies, Table, Withheld};
 use super::{GrantLayer, GrantStack, Join, Meet};
+use crate::authority::grant::freeze::Place;
+use crate::authority::grant::value::FsTable;
 use crate::path::{
-    Depth, DirEntry, Excluded, Handle, Judged, LexicalPath, MatchedBy, ObjectId, Op, Reading,
-    RealPath, Subject, Trace, Writing, walk::failure_trace,
+    Depth, DirEntry, Excluded, FrozenPath, Handle, Judged, LexicalPath, MatchedBy, ObjectId, Op,
+    Reading, RealPath, Subject, Trace, Writing, walk::failure_trace,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io;
 use std::marker::PhantomData;
 use strum::IntoStaticStr;
@@ -111,21 +114,27 @@ impl FsLayer {
         }
     }
 
-    /// What the layer shows of itself: each table's spellings as written.
-    pub(super) fn summary(&self) -> super::FsSummary {
-        let written = |table: &FsRules| {
-            table
-                .allows()
+    /// The lists a grant writes, resolved: what it reads beyond what it
+    /// writes, what it writes, and what it excludes.
+    pub(super) fn written(&self) -> FsTable {
+        fn prefixes(table: &FsRules) -> BTreeSet<&FrozenPath> {
+            (table.allows())
                 .filter_map(|a| match a {
-                    FsAllow::Prefix(prefix) => Some(prefix.written.shown()),
+                    FsAllow::Prefix(prefix) => Some(&prefix.written),
+                    // Only `region` joins a run place, never a layer.
                     FsAllow::RunPlace(_) => None,
                 })
                 .collect()
-        };
-        super::FsSummary {
-            read: written(&self.read),
-            write: written(&self.write),
-            deny: self.read.denies().map(ToString::to_string).collect(),
+        }
+        fn places<'a>(written: impl IntoIterator<Item = &'a FrozenPath>) -> Vec<Place> {
+            written.into_iter().map(Place::from).collect()
+        }
+        let (read, write) = (prefixes(&self.read), prefixes(&self.write));
+        let denies: BTreeSet<_> = self.read.denies().map(|d| &d.0.written).collect();
+        FsTable {
+            read: places(read.difference(&write).copied()),
+            write: places(write),
+            deny: places(denies),
         }
     }
 }

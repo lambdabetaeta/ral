@@ -430,27 +430,25 @@ fn exec_keys_follow_the_frozen_surface() {
     assert_eq!(linked.exec().expect("exec supplied").allows().count(), 2);
 }
 
-/// A layer shows each key as the grant that wrote it spells it: a directory
-/// keeps its `dir` constructor, distinct from a file at the same path.
+/// A layer writes each key as its grant does, resolved: a directory keeps its
+/// `dir` constructor, distinct from a file at the same path.
 #[cfg(unix)]
 #[test]
-fn a_layer_shows_each_key_as_its_grant_spells_it() {
-    let tools = Tree::nowhere().at("/tools");
-    let shown = with_exec(ExecGrant::of(
+fn a_layer_writes_each_key_as_its_grant_does() {
+    use crate::authority::grant::value::Target;
+    let tools = crate::authority::grant::freeze::Place::from(&nprefix("/tools"));
+    let exec = with_exec(ExecGrant::of(
         [path_key("/tools"), dir_key("/tools")],
         [name("git")],
     ))
-    .summary()
-    .and_then(|s| s.exec)
-    .expect("an exec grant shows itself");
+    .axes()
+    .exec
+    .expect("an exec grant writes itself");
     assert_eq!(
-        shown.allows,
-        [
-            format!("`absolute {tools}"),
-            format!("`dir `absolute {tools}")
-        ]
+        exec.allow,
+        [Target::File(tools.clone()), Target::Dir(tools)]
     );
-    assert!(shown.denies.contains(&"`name git".to_owned()), "{shown:?}");
+    assert!(exec.deny.contains(&Target::Name("git".into())), "{exec:?}");
 }
 
 /// A grant value crossing the wire is read by the grant's own words: a
@@ -612,7 +610,7 @@ fn decode_rejects_directory_as_exec_file() {
         )]),
     )]);
     let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
-    assert!(err.hint.unwrap().contains("`` `dir `absolute /etc ``"));
+    assert!(err.hint.unwrap().contains("`` `dir `absolute '/etc' ``"));
 }
 
 /// Defence in depth: `XDG_DATA_HOME=/etc` must not widen a policy naming
@@ -695,8 +693,11 @@ fn decode_accepts_bare_exec_name() {
         map(vec![("allow", Value::list(vec![tagged("name", "sh")]))]),
     )]);
     let layer = decode_capability_map(&v, "test", &test_ctx("/h")).expect("a bare command name");
-    let exec = layer.summary().and_then(|s| s.exec).expect("exec supplied");
-    assert_eq!(exec.allows, ["`name sh"]);
+    let exec = layer.axes().exec.expect("exec supplied");
+    assert_eq!(
+        exec.allow,
+        [crate::authority::grant::value::Target::Name("sh".into())]
+    );
 }
 
 /// `cwd proj` freezes to an absolute path: the sanctioned "relative to here"
@@ -743,7 +744,7 @@ fn decode_accepts_verb_lists_offline_and_withheld() {
     ]);
     let layer = decode_capability_map(&v, "test", &test_ctx("/h"))
         .expect("verbs, `offline` and `withheld`");
-    let shown = layer.summary().expect("a layer that withholds");
+    let shown = layer.axes();
     assert_eq!(
         shown.editor,
         Some([EditorVerb::Read, EditorVerb::Tui].into())

@@ -133,7 +133,7 @@ pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<Kerne
             path: file.real.followed().real().to_string(),
             allow: false,
         },
-        ExecDeny::Name(name) => KernelExecRule::Name(name.clone()),
+        ExecDeny::Name(veto) => KernelExecRule::Name(veto.key().to_owned()),
     });
     Some(positives.chain(negatives).collect())
 }

@@ -6,7 +6,7 @@ use super::Engine;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::fact::FailureCode as _;
-use crate::protocol::probe::{BindingRow, CompletionNames, HandleRow, Probe};
+use crate::protocol::probe::{BindingRow, CompletionNames, Grants, HandleRow, Probe};
 use crate::shell::runtime::{Shell, Value};
 
 mod fs;
@@ -50,7 +50,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
         Probe::CompletionNames => completion_names(shell).encode(),
         Probe::Bindings => binding_rows(shell).encode(),
         Probe::PathEntries(dir) => fs::entries(shell, dir).encode(),
-        Probe::Grants => shell.context.grants.summary().encode(),
+        Probe::Grants => Grants::of(&shell.context.grants).encode(),
         #[cfg(feature = "test-util")]
         Probe::WorkerCount => shell.worker_count().encode(),
         #[cfg(feature = "test-util")]

@@ -11,7 +11,8 @@
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
-use ral_core::authority::policy::{GrantLayer, GrantStack};
+use ral_core::authority::grant::freeze::Place;
+use ral_core::authority::policy::GrantStack;
 use ral_core::path::XdgKind;
 use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
 use ral_core::shell::runtime::{Break, Settled, Shell};
@@ -106,13 +107,12 @@ fn install(shell: &mut Shell, stack: &GrantStack) {
     }
 }
 
-/// The fs exclusions each layer of `stack` shows, as it spells them.
+/// The fs exclusions each layer of `stack` writes, as ral shows a path.
 fn denies(stack: &GrantStack) -> impl Iterator<Item = Vec<String>> {
-    stack
-        .layers()
-        .filter_map(GrantLayer::summary)
-        .filter_map(|s| s.fs)
-        .map(|fs| fs.deny)
+    let shown = |place: &Place| ral_core::path::shown(place.payload());
+    (stack.layers())
+        .filter_map(|layer| layer.axes().fs)
+        .map(move |fs| fs.deny.iter().map(shown).collect())
 }
 
 /// The extension runs before the meet, so an extended grant the attenuation file

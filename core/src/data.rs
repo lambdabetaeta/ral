@@ -8,6 +8,7 @@ mod byte_encoding;
 mod bytes;
 pub mod datum;
 mod finite;
+pub mod print;
 mod string;
 
 pub use bytes::Bytes;

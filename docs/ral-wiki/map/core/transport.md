@@ -73,6 +73,11 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   `poll`'s polymorphic shape is
   `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`shell::runtime::error`, `shell::runtime::audit`).
+- `data/print.rs` — the one value printer, `pretty_print` over a `Printable`
+  view (`Shape`: one level, children unread), which `FOValue` implements here
+  and the shell's `Value` implements in `shell/builtins/print.rs`; beneath
+  `authority`, so a grant prints without the shell
+  ([[invariants/core-below-shell|core-below-shell]]).
 - `data/string.rs` — `Str`, the shared immutable string, exported as
   `data::Str` for IR and runtime values; `FOValue::String` owns a `String`.
 - `data/byte_encoding.rs` — byte strings serialize to base64 in JSON

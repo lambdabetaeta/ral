@@ -65,7 +65,7 @@ walk as it freezes it. In doing so it:
 - **rejects** every kept selector directory whose walked position is a filesystem
   root, the home or its ancestor, for allowances and exclusions alike. Defaults
   and host overrides share this breadth check; narrow external tool directories
-  remain valid ([[design/grant#Selectors, refusals and summaries|selector rules]]);
+  remain valid ([[design/grant#Selectors, refusals and the outward form|selector rules]]);
 - **rejects** a selector directory absolute to the OS that `` `absolute `` would
   refuse (a `$PATH` entry, or a toolchain override or default, with a malformed
   or mixed head), naming the variable: `host_absolute` is the one classifier of

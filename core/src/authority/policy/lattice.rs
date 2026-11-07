@@ -12,7 +12,8 @@
 //!
 //! A grant is authored as a record, its *grant value*, and resolved by one
 //! front-end, `shell::grant::decode`, on the host that enforces it; a layer
-//! keeps the resolution, never the record.
+//! keeps the resolution, never the record, and shows itself as the record
+//! that resolves to it ([`GrantLayer::value`]).
 //!
 //! Every policy denotes a function from requests to Belnap's four values,
 //! [`Evidence`].  Restriction is truth meet ([`Meet`]), extension information
@@ -26,6 +27,7 @@
 
 use super::exec::ExecRules;
 use super::fs::FsLayer;
+use crate::authority::grant::value::{Axes, GrantValue, LayerValue};
 use crate::path::{FrozenPath, RealPath, Subject, Trace};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -322,8 +324,8 @@ impl GrantPath<Trace> {
 /// A layer in force: its rules, resolved, and the axes that name no path.
 ///
 /// One representation: there is no authored copy beside it, and whatever shows
-/// a layer (exarch's prompt, a refusal) reads `written` off its rules.  `None`
-/// on an axis is no opinion.  Serialises as its traces and deserialises as
+/// a layer reads `written` off its rules ([`value`](Self::value)).  `None` on
+/// an axis is no opinion.  Serialises as its traces and deserialises as
 /// they were, for [`GrantLayer::rehold`] to take hold of again on the receiving
 /// host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +403,14 @@ impl GrantLayer {
             || restricts(self.shell.as_ref())
     }
 
+    /// Whether a reader of the stack needs this layer: it restricts, or its
+    /// exec runs something, which stays readable under a nested fs
+    /// restriction even where the layer denotes `t`.
+    pub fn is_shown(&self) -> bool {
+        let runs = (self.exec.as_ref()).is_some_and(|exec| exec.allows().next().is_some());
+        self.is_restrictive() || runs
+    }
+
     /// Take hold again of every exclusion's objects on this host.
     pub(crate) fn rehold(&mut self) {
         if let Some(fs) = &mut self.fs {
@@ -423,94 +433,38 @@ impl GrantLayer {
         }
     }
 
-    /// What this layer shows of itself, `None` where it has nothing to say: it
-    /// restricts no axis and its exec runs nothing by name.  Under a nested fs
-    /// restriction a run place stays readable, which the reader needs to know
-    /// even of a layer that denotes `t`.
-    pub fn summary(&self) -> Option<LayerSummary> {
-        let exec = self.exec.as_ref().map(ExecRules::summary);
-        let runs = exec
-            .as_ref()
-            .is_some_and(|e| e.every || !e.allows.is_empty());
-        (self.is_restrictive() || runs).then(|| LayerSummary {
-            fs: self.fs.as_ref().map(FsLayer::summary),
-            exec,
+    /// The axes of the grant this layer is the decode of, each rule as
+    /// written and resolved: an anchored place as the absolute spelling it
+    /// froze to.  Exec is left out where it runs every program, which no
+    /// grant spells.
+    pub fn axes(&self) -> Axes {
+        Axes {
+            exec: (self.exec.as_ref())
+                .filter(|exec| !exec.runs_every())
+                .map(ExecRules::written),
+            fs: self.fs.as_ref().map(FsLayer::written),
             net: self.net,
             gpu: self.gpu,
             editor: self.editor.clone(),
             shell: self.shell.clone(),
-        })
-    }
-}
-
-/// A stack as it is shown: each layer's spellings and axes, nothing a host
-/// could judge with, and whether the host that showed it can withhold the GPU.
-///
-/// What `Probe::Grants` answers and what a prompt reads, from a local engine
-/// and a remote one alike.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GrantSummary {
-    layers: Vec<LayerSummary>,
-    withholds_gpu: bool,
-}
-
-impl GrantSummary {
-    pub fn layers(&self) -> &[LayerSummary] {
-        &self.layers
-    }
-
-    /// Whether a `` gpu: `withheld `` among the layers is held by the host
-    /// that showed them; `false` on Windows, where it changes nothing.
-    pub fn withholds_gpu(&self) -> bool {
-        self.withholds_gpu
-    }
-
-    /// A summary crossed from elsewhere, for tests.
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn of(layers: Vec<LayerSummary>, withholds_gpu: bool) -> Self {
-        Self {
-            layers,
-            withholds_gpu,
         }
     }
-}
 
-/// No layers, on this host.
-impl Default for GrantSummary {
-    fn default() -> Self {
-        GrantStack::default().summary()
+    /// This layer as data, decode's inverse on the host that decoded it.
+    /// Every program arises only as `t ⊕ fragment`, beside the fragment's own
+    /// rules, so those rules are the fragment: nothing beside the resolution
+    /// is kept.
+    pub fn value(&self) -> LayerValue {
+        let every = (self.exec.as_ref()).filter(|exec| exec.runs_every());
+        let fragment = every.map(|exec| Axes {
+            exec: Some(exec.written()),
+            ..Axes::default()
+        });
+        LayerValue {
+            grant: GrantValue::from(self.axes()).into(),
+            fragment: fragment.map(|axes| GrantValue::from(axes).into()),
+        }
     }
-}
-
-/// A layer as it is shown: its spellings and axes, nothing a host could judge
-/// with.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LayerSummary {
-    /// `read`, `write`, `deny`: each rule's `written`, shown.
-    pub fs: Option<FsSummary>,
-    /// `every`, and `allows`/`denies` as the grant spells each key —
-    /// `` `name git ``, `` `absolute /usr/bin/git ``, `` `dir `absolute /opt ``.
-    pub exec: Option<ExecSummary>,
-    pub net: Option<Net>,
-    pub gpu: Option<Gpu>,
-    pub editor: Option<BTreeSet<EditorVerb>>,
-    pub shell: Option<BTreeSet<ShellVerb>>,
-}
-
-/// What a layer reads, writes and excludes, as written.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FsSummary {
-    pub read: Vec<String>,
-    pub write: Vec<String>,
-    pub deny: Vec<String>,
-}
-
-/// What a layer runs and excludes, as written.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecSummary {
-    pub every: bool,
-    pub allows: Vec<String>,
-    pub denies: Vec<String>,
 }
 
 /// A shell's stack holds the ambient root at index 0, innermost `grant { ... }`
@@ -573,14 +527,6 @@ impl GrantStack {
 
     pub fn layers(&self) -> impl Iterator<Item = &GrantLayer> {
         self.0.iter()
-    }
-
-    /// What the stack shows of itself: the layers that have something to say.
-    pub fn summary(&self) -> GrantSummary {
-        GrantSummary {
-            layers: self.0.iter().filter_map(GrantLayer::summary).collect(),
-            withholds_gpu: crate::authority::sandbox::WITHHOLDS_GPU,
-        }
     }
 
     /// Take hold again of every exclusion's object on this host: the one walk

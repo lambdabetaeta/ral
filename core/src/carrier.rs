@@ -13,13 +13,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use crate::authority::policy::GrantSummary;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::engine::Scopes;
 use crate::process::{Ambient, CancelCause, Fatal, POLL_SLICE, Scope, ScopeNode, interrupt_epoch};
 use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
-use crate::protocol::probe::{BindingRow, CompletionNames, PathEntry, Probe, WorkerRow};
+use crate::protocol::probe::{BindingRow, CompletionNames, Grants, PathEntry, Probe, WorkerRow};
 use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
 use crate::shell::runtime::DeferredSink;
 use crate::sync::LockExt as _;
@@ -267,13 +266,13 @@ pub trait Transport: Send + Sync {
         read(self, &Probe::EnvVar(name.to_string()))
     }
 
-    /// The engine session's grant stack as it is shown: what every run's
-    /// ceiling is pushed onto, so a forked child's carries its parent's
-    /// authority and its own layer.
+    /// The engine session's grant stack as data: what every run's ceiling is
+    /// pushed onto, so a forked child's carries its parent's authority and its
+    /// own layer.
     ///
     /// # Errors
     /// As [`Self::cwd`].
-    fn grants(&self) -> Result<GrantSummary, ProbeError> {
+    fn grants(&self) -> Result<Grants, ProbeError> {
         read(self, &Probe::Grants)
     }
 

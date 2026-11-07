@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::authority::policy::{GrantStack, GrantSummary};
+use crate::authority::grant::value::LayerValue;
+use crate::authority::policy::{GrantLayer, GrantStack};
 use crate::data::datum::{Datum, tag, untag};
 use crate::data::{Bytes, FOValue, Finite};
 use crate::shell::runtime::{Done, Owner, Sample, Value};
@@ -37,7 +38,7 @@ pub enum Probe {
     Bindings,
     /// The entries of a directory, resolved against the engine's cwd.
     PathEntries(PathBuf),
-    /// The session's grant stack as shown: spellings and axes, never a
+    /// The session's grant stack as data: each layer's value, never a
     /// position or an identity.
     Grants,
     #[cfg(feature = "test-util")]
@@ -192,16 +193,30 @@ impl Datum for GrantStack {
     }
 }
 
-/// Opaque to ral likewise: what `Probe::Grants` answers, in the codec the
-/// stack rides.
-impl Datum for GrantSummary {
-    fn encode(self) -> FOValue {
-        Bytes::from(serde_json::to_vec(&self).expect("a grant summary is plain data")).encode()
-    }
+/// What `Probe::Grants` answers: each layer a reader needs
+/// ([`GrantLayer::is_shown`]), oldest first, as its value, and whether the
+/// answering host holds a `` gpu: `withheld `` (Windows cannot).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grants {
+    pub layers: Vec<LayerValue>,
+    pub withholds_gpu: bool,
+}
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        serde_json::from_slice(&Bytes::decode(v)?)
-            .map_err(|e| format!("expected an encoded grant summary: {e}"))
+record!(Grants {
+    layers: "layers",
+    withholds_gpu: "withholds-gpu",
+});
+
+impl Grants {
+    /// `stack` as this host answers for it.
+    pub fn of(stack: &GrantStack) -> Self {
+        Self {
+            layers: (stack.layers())
+                .filter(|layer| layer.is_shown())
+                .map(GrantLayer::value)
+                .collect(),
+            withholds_gpu: crate::authority::sandbox::WITHHOLDS_GPU,
+        }
     }
 }
 
@@ -281,8 +296,8 @@ mod tests {
         assert_eq!(GrantStack::decode(&stack.clone().encode()), Ok(stack));
     }
 
-    /// A stack of real directories, exclusions and all: restrictive on every
-    /// axis a summary shows.
+    /// A stack of real directories, exclusions and all: restrictive on exec,
+    /// fs and net.
     fn stack_over(root: &std::path::Path) -> GrantStack {
         use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy, Net};
         use crate::path::FrozenPath;
@@ -317,13 +332,42 @@ mod tests {
         assert_eq!(decoded, Ok(stack));
     }
 
-    /// What `Probe::Grants` answers crosses as spellings and axes alone.
+    /// What `Probe::Grants` answers crosses as grant values alone.
     #[test]
-    fn a_grant_summary_round_trips() {
+    fn the_grants_answer_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
-        let summary = stack_over(tmp.path()).summary();
-        assert_eq!(summary.layers().len(), 1, "the ambient root shows nothing");
-        assert_eq!(GrantSummary::decode(&summary.clone().encode()), Ok(summary));
+        let grants = Grants::of(&stack_over(tmp.path()));
+        assert_eq!(grants.layers.len(), 1, "the ambient root states nothing");
+        assert_eq!(Grants::decode(&grants.clone().encode()), Ok(grants));
+    }
+
+    /// A layer that restricts nothing is answered only where its exec runs
+    /// something.
+    #[test]
+    fn the_answer_holds_the_layers_a_reader_needs() {
+        use crate::authority::grant::freeze::FreezeCtx;
+        use crate::authority::policy::{Capabilities, EditorVerb, ExecGrant, ExecKey};
+        use crate::path::FrozenPath;
+        use strum::VariantArray;
+        let tmp = tempfile::tempdir().unwrap();
+        let every_verb = crate::test_helper::layer(Capabilities {
+            editor: Some(EditorVerb::VARIANTS.iter().copied().collect()),
+            ..Capabilities::default()
+        });
+        let dir = FrozenPath::from_surface(crate::path::utf8(tmp.path()).unwrap());
+        let runs = Capabilities {
+            exec: Some(ExecGrant::of([ExecKey::Dir(dir)], [])),
+            ..Capabilities::default()
+        };
+        let ctx = FreezeCtx::at(
+            crate::host::EnvVars::new(),
+            crate::test_helper::process_cwd(),
+        );
+        let fragment = crate::shell::grant::decode_fragment(runs.value().as_ref(), "test", &ctx);
+        let runs = GrantLayer::root().extend(fragment.unwrap());
+        assert!(!every_verb.is_restrictive() && !runs.is_restrictive());
+        let stack = crate::test_helper::stack([every_verb, runs.clone()]);
+        assert_eq!(Grants::of(&stack).layers, [runs.value()]);
     }
 
     /// Every row a new reading answers in survives its own round trip.

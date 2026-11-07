@@ -34,6 +34,10 @@ another, and no second route builds a layer: whoever authors the grant, a
   that enforces it, so `cwd` and `scratch` places work in it and mean the
   engine's own cwd and scratch: in a synod guest the guest's, never the host's
   (`exarch/src/boot.rs::a_ceiling_resolves_against_the_engines_own_anchor`).
+- **It leaves as it came.** The wire form of a ceiling or a boot grant stays
+  the author's value and is never derived from a layer. What a layer shows of
+  itself is the value that decodes back to it, on the host that decoded it
+  ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 
 **Why.** A position resolved on one host means nothing on another, and a second
 route is a second set of refusals. The serde route was laxer than the decoder:
@@ -63,4 +67,5 @@ the wire carries spellings, never positions or identities.
 
 See [[design/capability-freeze|capability-freeze]] (the decode),
 [[design/grant|grant]], [[invariants/no-grant-spells-every-program|no-grant-spells-every-program]],
-[[design/engine-protocol|engine-protocol]] (what crosses).
+[[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]] (the
+way out), [[design/engine-protocol|engine-protocol]] (what crosses).

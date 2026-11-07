@@ -48,7 +48,12 @@ pushed layer**:
 
 `for_invocation(cwd, scratch, base_name, extension, restrict_files, own)` takes
 the binary path explicitly. `lib.rs::run` supplies `sandbox::pinned_arg0()`;
-composition reads no global binary identity. Restricted exec with `own: None`
+composition reads no global binary identity. It reads the two host facts and
+nothing else: the anchor (`FreezeCtx` over the process env, the cwd and the
+scratch) and `provider::credential_files()`, then calls `compose`, which a
+test drives on a host all fixture to pin the grant section the agent reads
+(`policy/golden/default-boot-grant.md`; the host's own tool roots, which a
+selector or literal root chooses, are left out of the golden). Restricted exec with `own: None`
 refuses with the startup pinning diagnostic; an unrestricted `dangerous`
 session composes without a pin. `Invocation` holds only `stack` and `restricts`.
 
@@ -208,7 +213,8 @@ literal on Windows, is discarded — a rendered profile never advertises authori
 the platform cannot back.
 
 The in-module tests pin the load-bearing per-profile properties so a future edit
-can't silently widen a jail:
+can't silently widen a jail, reading each layer as the grant it writes
+(`GrantLayer::axes`, typed `Target`s and `Place`s):
 
 - `dangerous` is the lattice top;
 - `git` admitted in `reasonable`/`read-only` (commit flows work without
@@ -231,5 +237,6 @@ can't silently widen a jail:
 **unions** deny sets — a one-sided veto survives the join, so an overlay stays
 purely additive without re-stating the base's credential denies.
 
-The system-prompt assembly that renders this frozen authority into the `Grant`
-section lives on [[map/exarch|exarch]], which owns `prompt.rs` and `data/`.
+The system-prompt assembly that prints this frozen authority, each layer's value
+in `grant` syntax, lives on [[map/exarch|exarch]], which owns `prompt.rs` and
+`data/` ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).

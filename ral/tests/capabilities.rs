@@ -663,7 +663,10 @@ const RESPELLED: &str =
 /// An absent exclusion keeps its frozen spelling on every volume.
 #[cfg(unix)]
 fn assert_names_the_absent_deny(out: &common::Output, kind: &str, denied: &std::path::Path) {
-    let said = format!("is the denied `` {kind}{} `` {RESPELLED}", denied.display());
+    let said = format!(
+        "is the denied `` {kind}'{}' `` {RESPELLED}",
+        denied.display()
+    );
     assert!(
         out.stderr.contains(&said),
         "the refusal must name the deny and say why: {said}; stderr:\n{}",

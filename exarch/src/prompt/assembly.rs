@@ -1,7 +1,8 @@
 //! The assembled prompt's shape: section order and presence, the file chain
-//! behind `Workspace`, and the grant lines.
+//! behind `Workspace`, and the grant section.
 
 use super::*;
+use ral_core::authority::grant::value::{Axes, ExecTable, GrantValue, Target};
 use ral_core::authority::policy::GrantStack;
 use std::fs;
 
@@ -156,52 +157,47 @@ fn an_agents_file_that_exists_but_cannot_be_read_fails_the_assembly() {
     assert!(error.contains("AGENTS.md"), "{error}");
 }
 
+/// A grant value as it crosses.
+fn data(axes: Axes) -> FOValue {
+    GrantValue::from(axes).into()
+}
+
+/// Every program has no grant spelling, so a layer that runs it is shown as
+/// its grant extended by its fragment, the empty grant as `grant` writes it.
 #[test]
-fn exec_lines_follow_every_and_the_admitted_keys() {
-    let exec = |every, allows: &[&str]| ExecSummary {
-        every,
-        allows: allows.iter().map(ToString::to_string).collect(),
-        denies: Vec::new(),
-    };
-    assert_eq!(exec_line(None), "unrestricted");
-    let every = exec_line(Some(&exec(true, &[])));
-    assert!(every.contains("every"), "{every}");
-    let also = exec_line(Some(&exec(true, &["`name git"])));
-    assert!(
-        also.starts_with(&every) && also.contains("`name git"),
-        "{also}"
-    );
-    assert_eq!(exec_line(Some(&exec(false, &[]))), "(none)");
+fn an_extended_layer_is_shown_as_its_grant_extended_by_its_fragment() {
+    let fragment = data(Axes {
+        exec: Some(ExecTable {
+            deny: vec![Target::Name("bash".into())],
+            ..ExecTable::default()
+        }),
+        ..Axes::default()
+    });
+    let shown = layer(&LayerValue {
+        grant: data(Axes::default()),
+        fragment: Some(fragment.clone()),
+    });
     assert_eq!(
-        exec_line(Some(&exec(false, &["`name git", "`name ls"]))),
-        "`name git, `name ls"
-    );
-    // A directory allowance is shown on its own line, never among the keys.
-    assert_eq!(
-        exec_line(Some(&exec(false, &["`dir `absolute /usr/bin"]))),
-        "(none)"
+        shown,
+        format!("grant [] extended by {}", printed(&fragment))
     );
 }
 
 /// Without a layer there is nothing to describe or to be denied: no legend,
-/// no bullets, where any layer brings both.
+/// no grant, where any layer brings both.
 #[test]
 fn a_stack_without_layers_is_ambient_and_describes_none() {
-    let ambient = grant_summary(&GrantSummary::of(Vec::new(), false));
-    let layer = LayerSummary {
-        fs: None,
-        exec: None,
-        net: None,
-        gpu: None,
-        editor: None,
-        shell: None,
+    let grants = |layers| Grants {
+        layers,
+        withholds_gpu: false,
     };
-    let described = grant_summary(&GrantSummary::of(vec![layer], false));
-    for bullet in ["- exec:", "- net:", "- gpu:"] {
-        assert!(
-            !ambient.contains(bullet) && described.contains(bullet),
-            "{bullet}"
-        );
-    }
-    assert!(described.contains(legend().trim_end()) && !ambient.contains(legend().trim_end()));
+    let ambient = grant_section(&grants(Vec::new()));
+    let empty = LayerValue {
+        grant: data(Axes::default()),
+        fragment: None,
+    };
+    let described = grant_section(&grants(vec![empty]));
+    assert!(described.contains("\ngrant []\n") && !ambient.contains("grant ["));
+    let legend = GRANT_LEGEND.trim_end();
+    assert!(described.contains(legend) && !ambient.contains(legend));
 }

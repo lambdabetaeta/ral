@@ -346,14 +346,20 @@ own surface.
   host's, since a name is what every other agent addresses it by and the
   only way it picks its own row out of a roster — then gives the environment
   snapshot (`host::snapshot`, [[#Bootstrap]]) with the live grant under it:
-  a static legend (`data/grant-legend.md`) over the capability bullets, or
-  one ambient-authority line when nothing is attenuated. The name is a
+  a static legend of what grants mean (`data/grant-legend.md`) over each
+  layer in ral's own `grant` syntax, or one ambient-authority line when
+  nothing is attenuated. The name is a
   second placeholder beside the builtin index (`NAME_PLACEHOLDER`), filled
   per agent by `BuiltinIndex::apply`, because the section is otherwise baked
   once at boot. The grant is a third (`GRANT_PLACEHOLDER`), filled per agent
   by `prompt::with_grant` from its own engine's `Probe::Grants` alone: a
   child's layer is resolved in its own engine (`Shell::child_of`), so only
-  that engine can name it. `grant_summary` renders every layer in order.
+  that engine can name it. `grant_section` prints every layer's value in
+  order with ral's value printer, an extension as `grant G extended by F`
+  ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]);
+  goldens pin it for exarch's default boot grant
+  (`policy/golden/default-boot-grant.md`) and synod's ceiling
+  (`synod/src/folder/golden/ceiling-grant.md`), `RAL_BLESS=1` rewriting them.
 - **`Workspace`** (`read_agents`) collects the `AGENTS.md` instruction files,
   outermost first so the deepest file's recency wins: the operator's
   `<config>/AGENTS.md`, then every repo `AGENTS.md` from the git root down to cwd

@@ -350,9 +350,12 @@ Bodies are grouped by concern, one submodule each:
   head is judged as a launch would be (`Head::select` under the live grant
   stack): a bundled tool reads `bundled`, a refused head `denied by grant`
   naming the path as requested;
-- `print.rs` — the value pretty-printer shared by the REPL and exarch's
-  tool-result rendering (`PrintParams`; a rendering utility, not a registered
-  builtin). One printer, one policy, per-reader numbers: truncation preserves
+- `print.rs` — the shell's runtime values as a `Printable` view onto the one
+  value pretty-printer, which lives beneath the shell in `data/print.rs`
+  (`PrintParams`, `pretty_print`; re-exported here), and the REPL's numbers
+  (`REPL_PRINT_PARAMS`). The REPL, exarch's tool-result rendering and a grant
+  shown to its agent share it; a rendering utility, not a registered
+  builtin. One printer, one policy, per-reader numbers: truncation preserves
   identity — the depth limit summarises (keys and heads) and only the floor
   beneath it counts, a string elides unless it *is* the whole value, and a byte
   budget is spent inside each container, which closes with `…N more`. An elision

@@ -19,9 +19,18 @@ is `t ⊕ fragment` on exec, reached through `GrantLayer::extend`.
   ([[design/authority-tables|authority-tables]]).
 - **`Any` has no negative form.** It is an `ExecAllow` and nothing is an
   `ExecDeny` of it, so "every program" can never be excluded, only lessened.
+- **It shows as the extension that made it.** A table holding `Any` is
+  `t ⊕ f` with `f` its other rules, so the layer's value is its grant with exec
+  left out, then the fragment `[exec: f]`, decoded back as
+  `decode_grant(grant) ◁ decode_fragment(fragment)`; nothing beside the
+  resolution is kept. The prompt writes it `grant G extended by F`
+  ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 - **Tests state it by building it:** `GrantLayer::with_every` is `cfg(test)`,
   because no grant decodes to it
-  (`exec::tests::a_grant_resolves_both_sets_and_spells_no_any`).
+  (`exec::tests::a_grant_resolves_both_sets_and_spells_no_any`). The inverse
+  of a layer's value is tested on decoded layers and their extensions alone,
+  never on `with_every`, whose table need not be any extension's
+  (`value::tests::a_layers_value_decodes_back_to_it`).
 
 **Why.** A flag a surface can set is a second spelling of an omitted axis, and
 the two disagree as soon as a layer is stacked: an omitted exec axis is `t` and

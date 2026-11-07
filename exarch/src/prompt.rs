@@ -5,16 +5,19 @@ pub mod host;
 
 use crate::policy::Invocation;
 use crate::skill::{self, Boot};
-use ral_core::authority::policy::{Baseline, ExecSummary, GrantSummary, LayerSummary, LocateError};
+use ral_core::authority::grant::value::{LayerValue, printed};
+use ral_core::authority::policy::{Baseline, LocateError};
+use ral_core::data::FOValue;
 use ral_core::host::EnvVars;
 use ral_core::path::CwdPath;
-use std::collections::BTreeSet;
+use ral_core::protocol::probe::Grants;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 pub const RAL_REFERENCE: &str = include_str!("../data/ral.md");
 pub const EDIT_REPLACE: &str = include_str!("../data/edit-replace.md");
 const EDIT_HASH: &str = include_str!("../data/edit-hash.md");
+const GRANT_LEGEND: &str = include_str!("../data/grant-legend.md");
 
 /// The stand-in system prompt for `--chat`, which assembles none.
 ///
@@ -127,8 +130,8 @@ pub const GRANT_PLACEHOLDER: &str = "@@EXARCH_GRANT@@";
 
 /// Fill [`GRANT_PLACEHOLDER`] with the grant an agent's every eval runs
 /// under: its engine session's layers.
-pub(crate) fn with_grant(template: &str, grants: &GrantSummary) -> String {
-    template.replace(GRANT_PLACEHOLDER, &grant_summary(grants))
+pub(crate) fn with_grant(template: &str, grants: &Grants) -> String {
+    template.replace(GRANT_PLACEHOLDER, &grant_section(grants))
 }
 
 /// The `AGENTS.md` chain's text, outermost first so the most specific file's
@@ -211,143 +214,70 @@ pub fn host_section(app: crate::app::App) -> String {
 
 /// The grant a stack denotes, as the model reads it.
 ///
-/// A static legend teaching the notation and the runtime denial string, then
-/// each layer a [`GrantSummary`] shows, oldest first, then the net and gpu
-/// lines once. The summary carries the engine host's word on whether a
-/// withheld GPU is held there.
-///
-/// `None` is "unrestricted" (no attenuation at this layer) and an empty
-/// container "(none)".  The caller appends the `- scratch:` bullet, since
-/// exarch names a seeded env var and host path where synod names the guest's
-/// tmpfs.
-fn grant_summary(grants: &GrantSummary) -> String {
-    let layers = grants.layers();
+/// The legend of what grants mean, then each layer in ral's own `grant`
+/// syntax, oldest first, and the engine host's word where a withheld GPU is
+/// not held.  The caller appends the `- scratch:` bullet, since exarch names a seeded
+/// env var and host path where synod names the guest's tmpfs.
+pub fn grant_section(grants: &Grants) -> String {
     // The denial legend would describe a runtime event that cannot occur.
-    if layers.is_empty() {
+    if grants.layers.is_empty() {
         return "Ambient authority: every command, path, network call and GPU access is permitted; \
 the sandbox is the trust boundary.\n\n"
             .into();
     }
-    let mut s = legend();
-    if layers.len() > 1 {
-        let _ = writeln!(
-            s,
-            "The grant is the meet of {} layers, oldest first.",
-            layers.len()
+    let layers: Vec<String> = grants.layers.iter().map(layer).collect();
+    let mut s = format!(
+        "{}\n\n```ral\n{}\n```\n",
+        GRANT_LEGEND.trim_end(),
+        layers.join("\n")
+    );
+    let withheld = grants.layers.iter().any(|l| l.grant.field("gpu").is_some());
+    if withheld && !grants.withholds_gpu {
+        s.push_str(
+            "This platform cannot withhold the GPU: `` gpu: `withheld `` leaves it in reach.\n",
         );
     }
-    for (i, layer) in layers.iter().enumerate() {
-        if layers.len() > 1 {
-            let _ = writeln!(s, "\nLayer {}:", i + 1);
-        }
-        s.push_str(&layer_lines(layer));
-    }
-    let denied = layers.iter().any(|l| l.net.is_some());
-    let _ = writeln!(s, "\n- net: {}", if denied { "deny" } else { "inherit" });
-    let gpu = match (
-        layers.iter().any(|l| l.gpu.is_some()),
-        grants.withholds_gpu(),
-    ) {
-        (false, _) => "inherit",
-        (true, true) => "withheld",
-        (true, false) => "in reach: this platform cannot withhold the GPU",
-    };
-    let _ = writeln!(s, "- gpu: {gpu}");
+    s.push('\n');
     s
 }
 
-fn legend() -> String {
-    format!("{}\n\n", include_str!("../data/grant-legend.md").trim_end())
-}
-
-/// One layer's bullets bar net, gpu and scratch.
-fn layer_lines(layer: &LayerSummary) -> String {
-    let mut s = String::new();
-    let _ = writeln!(s, "- exec: {}", exec_line(layer.exec.as_ref()));
-    let dirs = layer.exec.as_ref().map_or(vec![], allowed_dirs);
-    if !dirs.is_empty() {
-        let _ = writeln!(s, "- exec dirs: {}", dirs.join(", "));
-    }
-    let denies = layer.exec.as_ref().map_or(&[][..], |exec| &exec.denies);
-    if !denies.is_empty() {
-        let _ = writeln!(s, "- exec deny: {}", denies.join(", "));
-    }
-    if let Some(fs) = &layer.fs {
-        let _ = writeln!(s, "- fs read: {}", or_none(&fs.read));
-        let _ = writeln!(s, "- fs write: {}", or_none(&fs.write));
-        if !fs.deny.is_empty() {
-            let _ = writeln!(s, "- fs deny: {}", join_str(&fs.deny));
-        }
-    }
-    if let Some(verbs) = &layer.editor {
-        let _ = writeln!(s, "- editor: {}", verbs_line(verbs));
-    }
-    if let Some(verbs) = &layer.shell {
-        let _ = writeln!(s, "- shell: {}", verbs_line(verbs));
-    }
-    s
-}
-
-/// A directory allowance as a grant spells it.
-const DIR_KEY: &str = "`dir ";
-
-/// Allowed directories, each rendered as its `dir` target.  Empty when
-/// nothing allows by directory.
-fn allowed_dirs(exec: &ExecSummary) -> Vec<&str> {
-    (exec.allows.iter())
-        .map(String::as_str)
-        .filter(|k| k.starts_with(DIR_KEY))
-        .collect()
-}
-
-/// Admitted commands, comma-joined: bare names, then path keys as their
-/// author spelled them.  Directory allowances are surfaced by
-/// [`allowed_dirs`], exclusions by the layer's `exec deny`, so only the other
-/// allowed keys land here.  Beside `every` they add no running, and are
-/// listed as authored.
-fn exec_line(exec: Option<&ExecSummary>) -> String {
-    let Some(exec) = exec else {
-        return "unrestricted".into();
+/// A layer as `grant` writes it, or, where no grant spells it, its grant
+/// extended by its fragment.
+fn layer(value: &LayerValue) -> String {
+    // `grant`'s bracket is the form's: the empty grant is `[]`.
+    let grant = match &value.grant {
+        FOValue::Map { entries } if entries.is_empty() => "[]".into(),
+        grant => printed(grant),
     };
-    let admitted: Vec<&str> = (exec.allows.iter())
-        .map(String::as_str)
-        .filter(|k| !k.starts_with(DIR_KEY))
-        .collect();
-    match (exec.every, admitted.is_empty()) {
-        (true, true) => "every program, less the exclusions below".into(),
-        (true, false) => format!(
-            "every program, less the exclusions below; also named: {}",
-            admitted.join(", ")
-        ),
-        (false, true) => "(none)".into(),
-        (false, false) => admitted.join(", "),
+    match &value.fragment {
+        None => format!("grant {grant}"),
+        Some(fragment) => format!("grant {grant} extended by {}", printed(fragment)),
     }
 }
 
-fn verbs_line<V: Copy>(verbs: &BTreeSet<V>) -> String
-where
-    &'static str: From<V>,
-{
-    let names: Vec<&str> = verbs.iter().map(|&v| v.into()).collect();
-    if names.is_empty() {
-        "(none)".into()
-    } else {
-        names.join(", ")
+/// Pin the grant section `grants` renders to the file `golden`; with
+/// `RAL_BLESS` set, write it there instead.
+///
+/// # Panics
+/// If the section differs from the file, or the file cannot be read or
+/// written.
+#[cfg(any(test, feature = "test-util"))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+pub fn pin_grant_section(golden: &Path, grants: &Grants) {
+    let shown = grant_section(grants);
+    if std::env::var_os("RAL_BLESS").is_some() {
+        std::fs::write(golden, &shown)
+            .unwrap_or_else(|e| panic!("bless {}: {e}", golden.display()));
+        return;
     }
-}
-
-fn or_none<S: AsRef<str>>(v: &[S]) -> String {
-    if v.is_empty() {
-        "(none)".into()
-    } else {
-        join_str(v)
-    }
-}
-
-/// Comma-join any slice whose items borrow as `&str` — the prefix lists hold
-/// `FrozenPath`es, not strings.
-fn join_str<S: AsRef<str>>(v: &[S]) -> String {
-    v.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ")
+    let pinned = std::fs::read_to_string(golden)
+        .unwrap_or_else(|e| panic!("{}: {e}; `RAL_BLESS=1` writes it", golden.display()));
+    assert_eq!(
+        shown,
+        pinned,
+        "the grant section differs from {}",
+        golden.display()
+    );
 }
 
 /// The Skills section: `name: description` per skill, the same
@@ -366,50 +296,60 @@ fn skills_section(skills: &[skill::Skill]) -> String {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::authority::policy::{EditorVerb, FsSummary, Gpu, Net};
+    use ral_core::authority::grant::freeze::Place;
+    use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
+    use ral_core::authority::policy::{EditorVerb, Gpu, Net};
+    use ral_core::data::datum::Datum as _;
 
-    /// A Linux guest's summary as a macOS or Windows host receives it: built
-    /// of spellings and axes, its layers a list on the wire, and the guest's
-    /// word on the GPU beside them.
-    fn crossed(withholds_gpu: bool) -> GrantSummary {
-        let layers = vec![LayerSummary {
-            fs: Some(FsSummary {
-                read: vec!["/work".into()],
-                write: vec!["/work".into()],
-                deny: vec!["/work/.env".into()],
+    /// A Linux guest's grant as a macOS or Windows host receives it: a value,
+    /// its layers a list on the wire, and the guest's word on the GPU beside
+    /// them.
+    fn crossed(withholds_gpu: bool) -> Grants {
+        let work = |sub: &str| Place::Absolute(format!("/work{sub}"));
+        let guest = Axes {
+            fs: Some(FsTable {
+                read: vec![work("")],
+                write: vec![work("")],
+                deny: vec![work("/.env")],
             }),
-            exec: Some(ExecSummary {
-                every: false,
-                allows: vec!["`name git".into(), "`dir `absolute /usr/bin".into()],
-                denies: vec!["`name bash".into()],
+            exec: Some(ExecTable {
+                allow: vec![
+                    Target::Name("git".into()),
+                    Target::Dir(Place::Absolute("/usr/bin".into())),
+                ],
+                deny: vec![Target::Name("bash".into())],
             }),
             net: Some(Net::Offline),
             gpu: Some(Gpu::Withheld),
-            editor: Some(BTreeSet::from([EditorVerb::Read])),
+            editor: Some([EditorVerb::Read].into()),
             shell: None,
-        }];
-        let wire = serde_json::to_string(&layers).expect("a summary is plain data");
-        let layers = serde_json::from_str(&wire).expect("a summary decodes where it crossed to");
-        GrantSummary::of(layers, withholds_gpu)
+        };
+        let layer = LayerValue {
+            grant: GrantValue::from(guest).into(),
+            fragment: None,
+        };
+        let grants = Grants {
+            layers: vec![layer],
+            withholds_gpu,
+        };
+        Grants::decode(&grants.encode()).expect("the answer decodes where it crossed to")
     }
 
-    /// The same lines on every host, whatever the host's own paths look like.
+    /// The guest's spellings, whatever the host's own paths look like.
     #[test]
-    fn a_crossed_summary_renders_the_same_lines_on_every_host() {
+    fn a_crossed_grant_shows_the_guests_spellings_on_every_host() {
         let shown = with_grant(GRANT_PLACEHOLDER, &crossed(true));
-        let lines = "\
-- exec: `name git
-- exec dirs: `dir `absolute /usr/bin
-- exec deny: `name bash
-- fs read: /work
-- fs write: /work
-- fs deny: /work/.env
-- editor: read
-
-- net: deny
-- gpu: withheld
-";
-        assert!(shown.ends_with(lines), "{shown}");
+        for spelled in [
+            "`absolute '/work/.env'",
+            "`dir `absolute '/usr/bin'",
+            "`name 'git'",
+            "`name 'bash'",
+            "net: `offline",
+            "gpu: `withheld",
+        ] {
+            assert!(shown.contains(spelled), "{spelled}:\n{shown}");
+        }
+        assert!(!shown.contains("in reach"), "{shown}");
     }
 
     /// A host that cannot withhold the GPU says so rather than claim it.
@@ -417,23 +357,25 @@ mod tests {
     fn a_gpu_this_platform_cannot_withhold_is_said_to_be_in_reach() {
         let shown = with_grant(GRANT_PLACEHOLDER, &crossed(false));
         assert!(
-            shown.ends_with("- gpu: in reach: this platform cannot withhold the GPU\n"),
+            shown.ends_with(
+                "This platform cannot withhold the GPU: `` gpu: `withheld `` leaves it in reach.\n\n"
+            ),
             "{shown}"
         );
     }
 
     #[test]
     fn a_repeated_layer_is_shown() {
-        let one = crossed(true);
-        let layer = one.layers()[0].clone();
-        let grants = GrantSummary::of(vec![layer.clone(), layer], true);
+        let mut grants = crossed(true);
+        grants.layers.push(grants.layers[0].clone());
         let shown = with_grant(GRANT_PLACEHOLDER, &grants);
-        assert!(shown.contains("the meet of 2 layers"), "{shown}");
-        assert!(
-            shown.contains("Layer 1:") && shown.contains("Layer 2:"),
+        let layers = shown.lines().filter(|line| line.starts_with("grant "));
+        assert_eq!(layers.count(), 2, "{shown}");
+        assert_eq!(
+            shown.matches("`absolute '/work/.env'").count(),
+            2,
             "{shown}"
         );
-        assert_eq!(shown.matches("- fs deny: /work/.env").count(), 2, "{shown}");
     }
 
     /// The `AGENTS.md` chain is read through the stack: a link to a file the

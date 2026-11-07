@@ -177,9 +177,9 @@ fn deny(path: &Path, dir: bool) -> Rule {
 }
 
 fn veto(name: &str) -> Rule {
-    Rule::Deny(Box::new(ExecDeny::Name(crate::path::command_name_key(
-        name,
-    ))))
+    Rule::Deny(Box::new(ExecDeny::Name(
+        crate::authority::policy::Veto::of(name),
+    )))
 }
 
 fn any() -> Rule {

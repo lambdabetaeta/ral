@@ -43,7 +43,7 @@ Submodules:
   holds on the network), `Gpu` (`Withheld`, the one opinion a layer holds on the
   GPU), the verb sets `BTreeSet<EditorVerb>` and
   `BTreeSet<ShellVerb>` (each `Option`: absent inherits), `GrantStack` (with
-  `push`, `remove`, `rehold`, `summary`), `Meet`, `Join`, `Axis` (`join_top`,
+  `push`, `remove`, `rehold`), `Meet`, `Join`, `Axis` (`join_top`,
   `is_top`), `Evidence { positive, negative }` and `Fragment`, the extension
   file's result (`decode_fragment`), consumed only by `GrantLayer::extend` (roles are types: a
   policy's omitted axis is `t`, a fragment's is `⊥`). Behind `cfg(any(test,
@@ -53,9 +53,9 @@ Submodules:
   spells a `GrantValue` and `test_helper::decoded` decodes it, so a test grant
   meets the decoder's refusals. No grant spells every program; `Any` is what `join_top` makes
   ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
-  `GrantSummary` is what
-  crosses hosts: spellings, never a position or an identity, and whether the
-  host that showed it can withhold the GPU (`withholds_gpu`). `Flag`
+  `GrantLayer::value` is what shows a layer: its `LayerValue`, decode's inverse,
+  built from `GrantLayer::axes` through the typed encoder
+  ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]). `Flag`
   (`Editor(EditorVerb)`, `Shell(ShellVerb)`) and `GrantStack::permits(Flag)` are
   the one verb vocabulary: membership, a meet over the layers, silence
   permitting. `is_restrictive` is the denotational activation predicate, each
@@ -107,7 +107,9 @@ Submodules:
   `ExecAllow` holds (a property test); `with_support` joins the live support as
   `File` allows; `allowed_files` the live file allowances the carriers are
   computed over. `ExecDeny::matches` is the one reading both tables give an
-  exclusion. Vetoes key on `path::command_name_key`;
+  exclusion. A veto (`ExecDeny::Name(Veto)`) keeps the name as written, which
+  it shows, beside its `path::command_name_key`, which it judges and renders
+  by;
 - `deputy.rs` — `deputy_prefixes`, the confused-deputy report: the prefixes a
   grant makes both `exec`-admitted and `fs`-writable, the live part of
   `R ∧ W`, the exec region (each exec layer's `Dir` keys with full evidence,
@@ -662,7 +664,7 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
 - `WITHHOLDS_GPU` (`sandbox.rs`) — read by `SandboxProjection::of` and by
-  `GrantStack::summary` into `GrantSummary::withholds_gpu`: the one place the
+  `protocol::probe::Grants::of` into `withholds_gpu`: the one place the
   host's inability to withhold the GPU (Windows) is stated. A withheld GPU
   there projects as left on and refuses nothing.
 - `Refusal` (`sandbox.rs`) — why no confined child exists: nothing ran.

@@ -14,6 +14,7 @@
 //! depth.  Every list denotes a set: a repeat adds nothing and is no error.
 
 use crate::authority::grant::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
+use crate::authority::grant::value::Target;
 use crate::authority::grant::{Keyed, Placed, Polar, name_rules};
 use crate::authority::policy::{
     EditorVerb, ExecRules, Fragment, FsLayer, Gpu, GrantLayer, GrantPath, Net, Rule, ShellVerb,
@@ -285,15 +286,15 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Pol
     if let Placed::Walked(walked) = &placed
         && walked.real.followed().kind() == Some(Kind::Dir)
     {
-        let spelled = format!("`{} {}", place.tag(), quote_word(place.payload()));
+        let cited = |target: Target| code(&target.to_string());
         return Err(PolicyError::new(format!(
             "{} is a directory, so as an exec target it names a binary that \
              cannot exist",
-            code(&spelled)
+            cited(Target::File(place.clone()))
         ))
         .with_hint(format!(
             "did you mean {}?",
-            code(&format!("`dir {spelled}"))
+            cited(Target::Dir(place.clone()))
         )));
     }
     Ok(vec![W::file(placed.grant()?)?])
@@ -469,8 +470,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::authority::policy::{Baseline, ExecDenial, Program, Withheld};
-    use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp};
-    use crate::path::command_name_key;
+    use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp, Veto};
     use crate::path::utf8;
     #[cfg(unix)]
     use crate::test_helper::{located, stack, trace};
@@ -558,7 +558,7 @@ mod tests {
     }
 
     fn vetoed(rules: &ExecRules, name: &str) -> bool {
-        rules.denies().any(|d| *d == ExecDeny::Name(name.into()))
+        rules.denies().any(|d| *d == ExecDeny::Name(Veto::of(name)))
     }
 
     /// The allowed files and directories as written, a directory under `dir`.
@@ -630,7 +630,7 @@ mod tests {
             assert!(allow.is_empty(), "{name}: {allow:?}");
             let deny = name_rules::<Excluded>(name, Some(path), false).unwrap();
             assert!(
-                matches!(&deny[..], [Rule::Deny(d)] if **d == ExecDeny::Name(command_name_key(name))),
+                matches!(&deny[..], [Rule::Deny(d)] if **d == ExecDeny::Name(Veto::of(name))),
                 "{name}: {deny:?}"
             );
         }
@@ -667,7 +667,7 @@ mod tests {
             assert!(lost.is_empty(), "{unix_available}: {lost:?}");
             let veto = name_rules::<Excluded>("zz-lost", path, unix_available).unwrap();
             assert!(
-                matches!(&veto[..], [Rule::Deny(d)] if **d == ExecDeny::Name(command_name_key("zz-lost"))),
+                matches!(&veto[..], [Rule::Deny(d)] if **d == ExecDeny::Name(Veto::of("zz-lost"))),
                 "{unix_available}: {veto:?}"
             );
         }
@@ -729,7 +729,7 @@ mod tests {
             withheld(&later.join("zz-lost")).is_err_and(|denied| matches!(
                 denied,
                 ExecDenial::Run(Withheld::Excluded { scope, .. })
-                    if *scope == ExecDeny::Name(command_name_key("zz-lost"))
+                    if *scope == ExecDeny::Name(Veto::of("zz-lost"))
             ))
         );
     }
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn net_offline_decodes_and_nothing_else_does() {
         let layer = decode(&rec(&[("net", bare("offline"))])).unwrap();
-        assert_eq!(layer.summary().unwrap().net, Some(Net::Offline));
+        assert_eq!(layer.axes().net, Some(Net::Offline));
         for value in [Value::Bool(true), Value::Bool(false)] {
             let e = refusal(&rec(&[("net", value)]));
             assert!(e.message.contains("expected a net mode"), "{}", e.message);
@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn gpu_withheld_decodes_and_nothing_else_does() {
         let layer = decode(&rec(&[("gpu", bare("withheld"))])).unwrap();
-        assert_eq!(layer.summary().unwrap().gpu, Some(Gpu::Withheld));
+        assert_eq!(layer.axes().gpu, Some(Gpu::Withheld));
         for value in [Value::Bool(true), Value::Bool(false)] {
             let e = refusal(&rec(&[("gpu", value)]));
             assert!(e.message.contains("expected a GPU mode"), "{}", e.message);
@@ -1277,7 +1277,7 @@ mod tests {
 
     #[test]
     fn verb_lists_decode_as_sets() {
-        let summary = decode(&rec(&[
+        let axes = decode(&rec(&[
             (
                 "editor",
                 list(vec![bare("read"), bare("tui"), bare("read")]),
@@ -1285,13 +1285,12 @@ mod tests {
             ("shell", list(vec![])),
         ]))
         .unwrap()
-        .summary()
-        .unwrap();
+        .axes();
         assert_eq!(
-            summary.editor,
+            axes.editor,
             Some([EditorVerb::Read, EditorVerb::Tui].into())
         );
-        assert_eq!(summary.shell, Some(BTreeSet::new()));
+        assert_eq!(axes.shell, Some(BTreeSet::new()));
     }
 
     #[test]

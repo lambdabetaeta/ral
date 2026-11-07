@@ -609,7 +609,7 @@ mod tests {
         let ceiling = FOValue::from(grant.ceiling());
         let exec = (ceiling.field("exec")).expect("the office grant restricts exec");
         let allowed = tagged(exec.field("allow"), "name");
-        assert!(tagged(exec.field("deny"), "name").is_empty(), "{exec:?}");
+        assert!(exec.field("deny").is_none(), "{exec:?}");
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
             assert!(
                 allowed.contains(&tool),
@@ -631,5 +631,42 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// What the guest's agent reads of its ceiling, pinned: decoded where every
+    /// toolbox name is found, as on the guest, which withholds the GPU.
+    #[cfg(unix)]
+    #[test]
+    fn the_ceilings_grant_section_reads_as_pinned() {
+        use ral_core::authority::grant::freeze::FreezeCtx;
+        use ral_core::authority::policy::GrantStack;
+        use ral_core::protocol::probe::Grants;
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, grant) = granted("grant-golden");
+        let bin = tempfile::tempdir().expect("a stub bin");
+        for name in TOOLBOX {
+            let stub = bin.path().join(name);
+            std::fs::write(&stub, "").expect("a stub");
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = ral_core::path::utf8(bin.path()).expect("a Unicode tempdir");
+        let cwd = ral_core::path::CwdPath::new(PathBuf::from(guest_abi::layout::WORK)).unwrap();
+        let ctx = FreezeCtx::at(std::iter::once(("PATH", path)).collect(), cwd)
+            .with_scratch(Some(guest_abi::layout::SCRATCH));
+        let ceiling = FOValue::from(grant.ceiling());
+        let layer = ral_core::shell::grant::decode_grant(&ceiling, "the ceiling", &ctx)
+            .expect("the ceiling resolves");
+        let mut stack = GrantStack::root();
+        stack.push(layer);
+        exarch::prompt::pin_grant_section(
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/folder/golden/ceiling-grant.md"
+            )),
+            &Grants {
+                withholds_gpu: true,
+                ..Grants::of(&stack)
+            },
+        );
     }
 }

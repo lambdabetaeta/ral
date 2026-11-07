@@ -205,14 +205,16 @@ payload's shape (the grant value's tables, verb sets as sequences) bumps
 `PROTOCOL_VERSION` and rebuilds the guest media, whose
 manifest the host compares before packaging. Without the bump stale media passes
 the packaging check and the attach handshake and fails decoding the first
-dispatch. **`PROTOCOL_VERSION` is 38.** An authored ceiling crosses as a grant
+dispatch. **`PROTOCOL_VERSION` is 39.** An authored ceiling crosses as a grant
 value, the record `grant` takes, in `Root.config`, and the engine decodes it where
 it lands (`Shell::decode_grant`, against its own anchor) as it decodes any
 grant: unknown keys are refused, a repeat adds nothing, a key may occur in
 both lists, and a file key naming a directory, a path-shaped name and an
 exclusion of the root are refused
 ([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]). Rebuild guest media with `just vm::boot`. A `Fragment` never
-crosses: it lives only between loading and `extend`.
+crosses: it lives only between loading and `extend`. A grant goes back out the
+same way: `Probe::Grants` answers each layer's value, never a summary of key
+strings.
 
 ## The laws of an enquiry
 
@@ -306,9 +308,13 @@ probe cannot disagree about what a probe means. A working directory that cannot
 travel as text answers `None`, as no cwd at all. The answer is its own event,
 `Event::Reading`, not a forged run report. The probes span session state
 (`cwd`, `home`, `env-var`, `builtin-names`, `session-ended`),
-the scope (`bindings`, `completion-names`, the binding counts) and the
-engine's filesystem (`path-bytes`, `path-entries`). What a probe answers is *data*,
-never a handle. An answer outside its class's shape is the engine breaking
+the scope (`bindings`, `completion-names`, the binding counts), the
+engine's filesystem (`path-bytes`, `path-entries`) and its grant stack
+(`grants`: each layer a reader needs, `GrantLayer::is_shown`, as its grant
+value, `LayerValue`,
+and whether the engine's host holds a `` gpu: `withheld ``;
+[[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
+What a probe answers is *data*, never a handle. An answer outside its class's shape is the engine breaking
 the protocol: the typed reading severs the transport `Faulted` itself, which is
 why `Transport::sever` is on the trait, identity included.
 

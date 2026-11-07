@@ -340,7 +340,7 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     let negatives = rules.denies().map(|scope| match scope {
         ExecDeny::Dir(dir) => excluded_clauses(&dir.real, true),
         ExecDeny::File(file) => excluded_clauses(&file.real, false),
-        ExecDeny::Name(name) => Ok(vec![exec_clause(false, Filter::Regex(name))]),
+        ExecDeny::Name(veto) => Ok(vec![exec_clause(false, Filter::Regex(veto.key()))]),
     });
     for clauses in positives.chain(negatives) {
         profile.exec_rules.extend(clauses?);
@@ -577,7 +577,7 @@ mod tests {
     };
     use crate::authority::sandbox::{ExecProjection, FsLists, FsProjection, SandboxProjection};
     use crate::path::proper_ancestors;
-    use crate::path::{Excluded, FrozenPath, Trace, command_name_key, render_real};
+    use crate::path::{Excluded, FrozenPath, Trace, render_real};
     use crate::test_helper::trace;
 
     /// The profile with its commentary dropped — what the kernel reads.  The
@@ -621,7 +621,9 @@ mod tests {
     }
 
     fn veto(name: &str) -> Rule {
-        Rule::Deny(Box::new(ExecDeny::Name(command_name_key(name))))
+        Rule::Deny(Box::new(ExecDeny::Name(
+            crate::authority::policy::Veto::of(name),
+        )))
     }
 
     fn restricted(fs: FsProjection, rules: Vec<Rule>) -> SandboxProjection {

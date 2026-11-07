@@ -151,7 +151,7 @@ fn wrap(origin: impl std::fmt::Display, e: Break) -> Break {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp};
+    use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp, Veto};
 
     fn shell() -> Shell {
         crate::test_helper::core_shell()
@@ -186,15 +186,13 @@ mod tests {
         );
         assert!(exec.denies().next().is_none(), "{exec:?}");
         // `None` is no opinion, so an unmentioned dimension inherits the caller.
-        let summary = layer
-            .summary()
-            .expect("an exec that runs `ls` shows itself");
+        let axes = layer.axes();
         assert!(
-            summary.fs.is_none()
-                && summary.net.is_none()
-                && summary.gpu.is_none()
-                && summary.editor.is_none()
-                && summary.shell.is_none()
+            axes.fs.is_none()
+                && axes.net.is_none()
+                && axes.gpu.is_none()
+                && axes.editor.is_none()
+                && axes.shell.is_none()
         );
     }
 
@@ -211,7 +209,8 @@ mod tests {
         .unwrap();
         let exec = layer.exec().unwrap();
         assert!(
-            exec.denies().any(|d| *d == ExecDeny::Name("bash".into())),
+            exec.denies()
+                .any(|d| *d == ExecDeny::Name(Veto::of("bash"))),
             "{exec:?}"
         );
         assert!(exec.allows().next().is_none(), "{exec:?}");

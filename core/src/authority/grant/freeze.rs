@@ -166,6 +166,14 @@ impl Place {
     }
 }
 
+/// The `absolute` place a frozen spelling decodes back from, shown as ral
+/// shows a path.
+impl From<&FrozenPath> for Place {
+    fn from(written: &FrozenPath) -> Self {
+        Self::Absolute(written.shown())
+    }
+}
+
 /// A set of directories the environment chooses, valid only under `dir`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selector {

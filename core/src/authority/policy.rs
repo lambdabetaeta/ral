@@ -22,7 +22,7 @@ mod lattice_tests;
 pub use crate::authority::grant::builder::{Capabilities, ExecGrant, ExecKey, FsPolicy};
 pub use deputy::deputy_prefixes;
 pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Rule, rules};
-pub(crate) use exec::{ExecAllow, ExecDeny, KernelRules};
+pub(crate) use exec::{ExecAllow, ExecDeny, KernelRules, Veto};
 #[cfg(unix)]
 pub(crate) use exec::{KernelAllow, Subject};
 pub(crate) use fs::Verdict;
@@ -30,7 +30,7 @@ pub use fs::{Baseline, FsDeny, FsOp, LocateError, ReadRegion, Refused, Ungoverne
 pub(crate) use fs::{FsAllow, FsLayer, FsRules, region};
 pub(crate) use lattice::Axis;
 pub use lattice::{
-    EditorVerb, Evidence, ExecSummary, Extent, Flag, Fragment, FsSummary, Gpu, GrantLayer,
-    GrantPath, GrantStack, GrantSummary, Join, LayerSummary, Meet, Net, ShellVerb,
+    EditorVerb, Evidence, Extent, Flag, Fragment, Gpu, GrantLayer, GrantPath, GrantStack, Join,
+    Meet, Net, ShellVerb,
 };
 pub use table::Withheld;

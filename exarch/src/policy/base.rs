@@ -68,14 +68,13 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::authority::grant::freeze::FreezeCtx;
+    use ral_core::authority::grant::freeze::{FreezeCtx, Place};
     #[cfg(unix)]
-    use ral_core::authority::grant::freeze::Place;
-    #[cfg(unix)]
-    use ral_core::authority::policy::FsSummary;
+    use ral_core::authority::grant::value::FsTable;
+    use ral_core::authority::grant::value::{ExecTable, Target};
+    use ral_core::authority::policy::GrantLayer;
     #[cfg(unix)]
     use ral_core::authority::policy::{Capabilities, Fragment, Net};
-    use ral_core::authority::policy::{ExecSummary, GrantLayer};
     #[cfg(unix)]
     use ral_core::path::XdgKind;
     use std::path::PathBuf;
@@ -83,39 +82,36 @@ mod tests {
     #[cfg(unix)]
     use std::path::Path;
 
-    /// The fs spelling a grant shows for the frozen `path`.
-    fn spelled(path: &str) -> String {
-        ral_core::path::shown(ral_core::path::FrozenPath::from_surface(path).as_str())
+    /// The place a grant writes for the frozen `path`.
+    fn absolute(path: &str) -> Place {
+        Place::from(&ral_core::path::FrozenPath::from_surface(path))
     }
 
-    /// The exec key a grant writes for the directory `path`.
-    fn dir_key(path: &str) -> String {
-        format!(
-            "`dir `absolute {}",
-            ral_core::syntax::quote_word(&spelled(path))
-        )
+    /// The exec target a grant writes for the directory `path`.
+    fn dir_key(path: &str) -> Target {
+        Target::Dir(absolute(path))
     }
 
-    /// The exec key a grant writes for the bare `name`.
-    fn name_key(name: &str) -> String {
-        format!("`name {}", ral_core::syntax::quote_word(name))
+    /// The exec target a grant writes for the bare `name`.
+    fn name_key(name: &str) -> Target {
+        Target::Name(name.into())
     }
 
-    /// The fs rules `layer` shows.
+    /// The fs `layer` writes.
     #[cfg(unix)]
-    fn fs_of(layer: &GrantLayer) -> FsSummary {
-        layer
-            .summary()
-            .and_then(|s| s.fs)
-            .expect("the layer declares fs")
+    fn fs_of(layer: &GrantLayer) -> FsTable {
+        layer.axes().fs.expect("the layer declares fs")
     }
 
-    /// The exec rules `layer` shows.
-    fn exec_of(layer: &GrantLayer) -> ExecSummary {
-        layer
-            .summary()
-            .and_then(|s| s.exec)
-            .expect("the layer declares exec")
+    /// What `fs` reads: its reads and, since writing reads, its writes.
+    #[cfg(unix)]
+    fn reads(fs: &FsTable) -> Vec<&Place> {
+        fs.read.iter().chain(&fs.write).collect()
+    }
+
+    /// The exec `layer` writes.
+    fn exec_of(layer: &GrantLayer) -> ExecTable {
+        layer.axes().exec.expect("the layer declares exec")
     }
 
     /// The scratch spelling every test anchor carries: no test makes anything
@@ -282,30 +278,28 @@ mod tests {
         let ctx = ctx_at("/h", "/work/proj");
         let layer = load("confined", CONFINED_RAL, &ctx);
         assert_eq!(
-            layer.summary().and_then(|s| s.net),
+            layer.axes().net,
             Some(Net::Offline),
             "confined must have net off"
         );
-        let bundled: Vec<String> = ral_core::uutils::bundled_tools()
+        let bundled: Vec<Target> = ral_core::uutils::bundled_tools()
             .into_iter()
             .map(name_key)
             .collect();
-        let allows = exec_of(&layer).allows;
-        let host_named: Vec<&str> = (allows.iter())
-            .filter(|key| key.starts_with("`absolute ") || key.starts_with("`name "))
+        let allows = exec_of(&layer).allow;
+        let host_named: Vec<&Target> = (allows.iter())
+            .filter(|key| matches!(key, Target::File(_) | Target::Name(_)))
             .filter(|key| !bundled.contains(key))
-            .map(String::as_str)
             .collect();
         assert!(
             host_named.is_empty(),
             "confined names host binaries {host_named:?}; the build jail admits those by \
              directory prefix, and only the bundled tools (which have no path) are listed"
         );
-        let fs = fs_of(&layer);
-        for prefix in fs.read.iter().chain(&fs.write) {
+        for prefix in reads(&fs_of(&layer)) {
             assert!(
-                !prefix.starts_with("/h"),
-                "confined fs prefix '{prefix}' reaches into home: build jail must not"
+                !prefix.payload().starts_with("/h"),
+                "confined fs prefix {prefix:?} reaches into home: build jail must not"
             );
         }
     }
@@ -319,11 +313,11 @@ mod tests {
         let ctx = ctx_at(&home, "/work/proj");
         let fs = fs_of(&load("read-only", READ_ONLY_RAL, &ctx));
         assert!(
-            !fs.write.contains(&spelled("/work/proj")),
+            !fs.write.contains(&absolute("/work/proj")),
             "read-only must not write the working tree"
         );
         assert!(
-            fs.read.contains(&spelled("/work/proj")),
+            fs.read.contains(&absolute("/work/proj")),
             "read-only must read the working tree"
         );
     }
@@ -344,7 +338,7 @@ mod tests {
         let exec = exec_of(&load("reasonable", REASONABLE_RAL, &ctx));
         let xdg_bin = frozen(&xdg(XdgKind::Bin, "."), &ctx);
         assert!(
-            exec.allows.contains(&dir_key(xdg_bin.as_str())),
+            exec.allow.contains(&dir_key(xdg_bin.as_str())),
             "reasonable should list the resolved xdg-bin ({}) in exec dirs",
             xdg_bin.as_str()
         );
@@ -358,22 +352,21 @@ mod tests {
         let home = host_home();
         let cwd = Path::new("/work/proj");
         let ctx = ctx_at(&home, cwd);
-        let cwd_resolved = spelled(&cwd.to_string_lossy());
-        let scratch_resolved = spelled(&scratch().to_string_lossy());
-        let tokens = [&cwd_resolved, &scratch_resolved];
+        let tokens = [cwd.to_path_buf(), scratch()].map(|p| p.to_string_lossy().into_owned());
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
             let layer = load(name, text, &ctx);
             let exec = exec_of(&layer);
-            for token in tokens {
+            for token in &tokens {
                 assert!(
-                    exec.allows.contains(&dir_key(token)),
+                    exec.allow.contains(&dir_key(token)),
                     "{name} exec missing resolved {token}"
                 );
             }
             let fs = fs_of(&layer);
-            for token in tokens {
-                assert!(fs.read.contains(token), "{name} fs.read missing {token}");
-                assert!(fs.write.contains(token), "{name} fs.write missing {token}");
+            for token in &tokens {
+                let place = absolute(token);
+                assert!(reads(&fs).contains(&&place), "{name} fs reads miss {token}");
+                assert!(fs.write.contains(&place), "{name} fs.write missing {token}");
             }
         }
     }
@@ -414,7 +407,7 @@ mod tests {
         let ctx = ctx_at(&home, "/");
         let layer = load("reasonable", REASONABLE_RAL, &ctx);
         assert!(
-            exec_of(&layer).allows.contains(&dir_key("/opt/homebrew")),
+            exec_of(&layer).allow.contains(&dir_key("/opt/homebrew")),
             "reasonable should list /opt/homebrew in exec dirs when it exists on this host"
         );
         assert!(
@@ -487,7 +480,7 @@ mod tests {
             ("reasonable", REASONABLE_RAL, false),
             ("dangerous", DANGEROUS_RAL, false),
         ] {
-            let gpu = load(name, text, &ctx).summary().and_then(|s| s.gpu);
+            let gpu = load(name, text, &ctx).axes().gpu;
             assert_eq!(gpu.is_some(), withheld, "{name}");
         }
     }
@@ -501,7 +494,7 @@ mod tests {
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
             let fs = fs_of(&load(name, text, &ctx));
             assert!(
-                !fs.write.contains(&spelled(cache.as_str())),
+                !fs.write.contains(&absolute(cache.as_str())),
                 "{name} must not write {}",
                 cache.as_str()
             );
@@ -522,13 +515,13 @@ mod tests {
             let layer = load(name, text, &ctx);
             if let Some(git) = host_real("git") {
                 assert!(
-                    exec_of(&layer).allows.contains(&name_key("git")),
+                    exec_of(&layer).allow.contains(&name_key("git")),
                     "{name} should name git"
                 );
                 assert!(admits(layer.clone(), &git), "{name} should admit git");
             }
             assert!(
-                fs_of(&layer).read.contains(&spelled(gitconfig.as_str())),
+                reads(&fs_of(&layer)).contains(&&absolute(gitconfig.as_str())),
                 "{name} should add resolved ~/.gitconfig ({}) to read prefixes",
                 gitconfig.as_str()
             );
@@ -566,7 +559,7 @@ mod tests {
             load("minimal", MINIMAL_RAL, &ctx).extend(fragment("git-ext", GIT_EXTENSION_RAL, &ctx));
         if let Some(git) = host_real("git") {
             assert!(
-                exec_of(&extended).allows.contains(&name_key("git")),
+                exec_of(&extended).allow.contains(&name_key("git")),
                 "the git extension names git"
             );
             assert!(
@@ -595,15 +588,15 @@ mod tests {
             &ctx,
         ));
         if host_real("git").is_some() {
-            assert!(exec_of(&extended_minimal).allows.contains(&name_key("git")));
+            assert!(exec_of(&extended_minimal).allow.contains(&name_key("git")));
         }
         let fs = fs_of(&extended_minimal);
         assert!(
-            fs.read.contains(&spelled(gitconfig.as_str())),
+            reads(&fs).contains(&&absolute(gitconfig.as_str())),
             "extending minimal should add ~/.gitconfig"
         );
         assert!(
-            fs.read.contains(&spelled(xdg_config_git.as_str())),
+            reads(&fs).contains(&&absolute(xdg_config_git.as_str())),
             "extending minimal should add xdg-config git"
         );
 
@@ -616,7 +609,7 @@ mod tests {
         for denied in ["gh", "op", "gcloud"] {
             let resolved = frozen(&xdg(XdgKind::Config, denied), &ctx);
             assert!(
-                fs.deny.contains(&spelled(resolved.as_str())),
+                fs.deny.contains(&absolute(resolved.as_str())),
                 "extending reasonable should preserve xdg-config {denied} deny ({})",
                 resolved.as_str()
             );
@@ -735,7 +728,7 @@ mod tests {
             for root in &roots {
                 let key = dir_key(ral_core::path::utf8(root).unwrap());
                 assert!(
-                    exec.allows.contains(&key),
+                    exec.allow.contains(&key),
                     "{name} should allow the live system tool root {key}"
                 );
             }
@@ -766,7 +759,7 @@ mod tests {
                 .into_iter()
                 .filter(|tool| {
                     let key = name_key(tool);
-                    !exec.allows.contains(&key) && !exec.denies.contains(&key)
+                    !exec.allow.contains(&key) && !exec.deny.contains(&key)
                 })
                 .collect();
             assert!(

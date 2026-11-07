@@ -5,6 +5,7 @@ use crate::provider::scripted::Script;
 use crate::record::{AgentId, AgentLog, Memory, RECORD, Selected, Voice};
 use genai::chat::ChatMessage;
 use ral_core::process::DurableRoot;
+use ral_core::protocol::probe::Grants;
 use std::fs;
 
 mod clear;
@@ -439,7 +440,7 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
     .unwrap();
     assert_eq!(
         parent.engine().read(|t| t.grants()).unwrap(),
-        grants.summary()
+        Grants::of(&grants)
     );
     let c = format!(
         "`restrict [exec: [allow: [`absolute '{}']], fs: [read: [`cwd ., `absolute '{}']]]",
@@ -457,7 +458,7 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
     }));
     assert_eq!(
         child.engine().read(|t| t.grants()).unwrap(),
-        grants.summary()
+        Grants::of(&grants)
     );
     let (emit, _rx) = crate::bus::dummy_emitter();
     let result = child.ral(
@@ -478,7 +479,7 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
     }));
     assert_eq!(
         grandchild.engine().read(|t| t.grants()).unwrap(),
-        grants.summary()
+        Grants::of(&grants)
     );
 }
 
