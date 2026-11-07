@@ -116,9 +116,8 @@ pub(crate) fn interpreter_of(admitted: &Admitted) -> Option<PathBuf> {
 }
 
 /// Build a [`Launch`](crate::process::Launch) running `image` and its
-/// arguments under the sandbox for `projection`; the caller has already
-/// cleared [`super::projection_enforceable`] and applies env, cwd and limits
-/// after.  A stop on `cancel` ends the confinement's work on Windows, and the
+/// arguments under the sandbox for `projection`; the caller applies env, cwd
+/// and limits after.  A stop on `cancel` ends the confinement's work on Windows, and the
 /// wait for the trampoline's first word elsewhere.
 ///
 /// `cwd` is the logical cwd Linux folds in as `--chdir`, and `ownership`

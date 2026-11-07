@@ -336,7 +336,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   ([[map/core/capabilities|capabilities]]), and child-owned effects are
   kernel-backed at *external dispatch*: when a projection is active,
   `command::build_launch` obtains a confined `process::Launch` via
-  `projection_enforceable` / `sandboxed_command` — per-command Seatbelt /
+  `sandboxed_command` — per-command Seatbelt /
   bwrap confinement on Unix; on Windows the LowBox token of the
   projection's own AppContainer profile, carrying the per-path fs
   capability SIDs its projection names

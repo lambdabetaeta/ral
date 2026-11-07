@@ -6,8 +6,8 @@ use super::super::super::error::{
 use super::super::super::names::{EntryName, RootName, rooted};
 use super::super::super::trace::{Kind, ObjectId, RealPath, Step, Trace};
 use super::super::resolve::{
-    LeafMode, Links, MAX_HOPS, Mode, OnMissing, Vetted, exists, finish, is_dir, kind_of, walk,
-    walk_dir, walk_dir_made, walk_lenient, walk_with,
+    LeafMode, Links, MAX_HOPS, Mode, OnMissing, Vetted, exists, finish, kind_of, walk, walk_dir,
+    walk_dir_made, walk_lenient, walk_with,
 };
 use super::super::{Access, Dir, Judged, Leaf, Located, Streaming, Visibility, Writing, host};
 use super::{writable, writing};
@@ -2277,7 +2277,7 @@ fn rename_acts_in_the_directory_held() {
     assert!(!dir.join("d").exists());
 }
 
-/// `exists`, `is_dir` and `kind_of` are one walk, followed to the end.
+/// `exists` and `kind_of` are one walk, followed to the end.
 #[test]
 fn kind_of_is_what_the_absolute_spelling_reaches() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2295,5 +2295,4 @@ fn kind_of_is_what_the_absolute_spelling_reaches() {
     assert_eq!(kind_of(&at("absent")), None);
     assert_eq!(kind_of("relative/path"), None);
     assert!(exists(&at("f")) && !exists(&at("dangling")));
-    assert!(is_dir(&at("to_d")) && !is_dir(&at("f")));
 }

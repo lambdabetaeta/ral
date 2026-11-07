@@ -73,11 +73,6 @@ pub(crate) use diag::interpreter_hint;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::payload::pids as payload_pids;
 
-/// Whether this platform can enforce `net: false`: Linux via `--unshare-net`,
-/// macOS via deny-default Seatbelt, Windows via an `AppContainer` with no
-/// network capability SID, which cannot open a socket.
-const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
-
 /// Whether this platform can withhold the GPU: macOS by absent `IOKit` and
 /// Metal rules, Linux by absent device nodes.  An `AppContainer` reaches
 /// Direct3D with no capability to withhold, so on Windows a withheld GPU
@@ -134,20 +129,6 @@ impl From<String> for Refusal {
     fn from(why: String) -> Self {
         Self::Launch(why)
     }
-}
-
-/// `Err` when `projection` asks for a restriction this platform cannot
-/// enforce.  Offline is the only such axis: `net: false` must refuse rather
-/// than run somewhere the bit is silently ignored.
-pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(), Refusal> {
-    if !projection.net && !NET_ENFORCED {
-        return Err(Refusal::Unavailable(
-            "offline mode (`` net: `offline` ``) is unsupported on this platform: \
-             no kernel network enforcement exists"
-                .into(),
-        ));
-    }
-    Ok(())
 }
 
 /// Boot-pinned objects the baseline protects against writes under every grant.
@@ -209,20 +190,6 @@ pub fn teardown_session() {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{ExecProjection, FsProjection, SandboxProjection, projection_enforceable};
-
-    #[test]
-    fn projection_enforceable_allows_net_true_on_any_platform() {
-        // `net: true` asks for no restriction, so there is nothing to enforce.
-        let p_net_true = SandboxProjection {
-            fs: FsProjection::default(),
-            net: true,
-            gpu: true,
-            exec: ExecProjection::default(),
-        };
-        assert!(projection_enforceable(&p_net_true).is_ok());
-    }
-
     /// `RealPath::open_nofollow` and `open_dir_nofollow`, which only the sandbox
     /// side may call: it holds the token, so these tests lend it.
     #[cfg(any(target_os = "linux", windows))]

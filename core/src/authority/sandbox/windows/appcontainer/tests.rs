@@ -1,14 +1,8 @@
 use super::*;
 
 #[test]
-fn capability_sids_empty_when_network_denied() {
-    let caps = CapabilitySids::build(false).expect("build never touches the OS when empty");
-    assert_eq!(caps.sids().count(), 0);
-}
-
-#[test]
 fn capability_sids_derives_both_network_capabilities_when_allowed() {
-    let caps = CapabilitySids::build(true).expect(
+    let caps = CapabilitySids::build().expect(
         "internetClient/privateNetworkClientServer are well-known capabilities on any \
          supported Windows version",
     );

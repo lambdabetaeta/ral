@@ -82,9 +82,10 @@ impl FsLists {
 /// nothing, so the profile passes fs through with broad `file-read*`/
 /// `file-write*` on macOS, `--dev-bind / /` on Linux. An empty `Restricted` is
 /// the other extreme: fs was attenuated to nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(any(test, feature = "test-util"), derive(Default))]
 pub enum FsProjection<A = FsAllow, X = FsDeny> {
-    #[default]
+    #[cfg_attr(any(test, feature = "test-util"), default)]
     Unrestricted,
     Restricted(FsLists<A, X>),
 }
@@ -110,9 +111,10 @@ impl<A, X> FsProjection<A, X> {
 /// `Restricted` admits nothing.  Its paths are [`RealPath`]s, frozen at grant,
 /// and stay so until the backend that needs other spellings renders them with
 /// `path::render_real`, which never re-resolves one.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(any(test, feature = "test-util"), derive(Default))]
 pub(crate) enum ExecProjection {
-    #[default]
+    #[cfg_attr(any(test, feature = "test-util"), default)]
     Unrestricted,
     Restricted(KernelRules),
 }
@@ -141,6 +143,7 @@ pub(crate) type RenderedFs = FsProjection<Object, Rendered>;
 #[cfg(target_os = "macos")]
 pub(crate) type RenderedLists = FsLists<Object, Rendered>;
 
+#[cfg(any(test, feature = "test-util"))]
 impl<A, X> Default for SandboxProjection<A, X> {
     fn default() -> Self {
         Self {

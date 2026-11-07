@@ -40,7 +40,7 @@ walk as it freezes it. In doing so it:
   at the shell boundary. `` `tempdir `` reads the host's temp dir;
   `` `scratch `` reads the scratch spelling the context carries, and refuses
   where the host made none. The freeze is `authority/grant/freeze.rs`:
-  `FreezeCtx::place` is the one place a grant's place becomes a `FrozenPath`,
+  `FreezeCtx::walked` is the one place a grant's place becomes a walked path,
   `FreezeCtx::selector` the one place a selector becomes many, and
   `FrozenPath::from_surface` the one minting entry
   ([[decisions/261006_capability-is-data|capability-is-data]]);

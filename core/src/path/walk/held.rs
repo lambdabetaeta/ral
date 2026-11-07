@@ -27,7 +27,7 @@ mod write;
 pub(super) mod resolve;
 
 pub(crate) use read::open_discard;
-pub use resolve::{LeafMode, exists, is_dir, kind_of, walk, walk_dir, walk_lenient};
+pub use resolve::{LeafMode, exists, kind_of, walk, walk_dir, walk_lenient};
 #[cfg(unix)]
 pub(crate) use resolve::{Vetted, walk_with};
 pub(crate) use resolve::{walk_dir_made, walk_dir_made_synced};

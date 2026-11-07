@@ -249,18 +249,15 @@ fn build_launch(
     // A `grant` body evaluates in this process unconfined; spawned children
     // are the only thing an OS sandbox reaches, and this is where it does.
     let mut launch = match &projection {
-        Some(projection) => {
-            crate::authority::sandbox::projection_enforceable(projection)?;
-            crate::authority::sandbox::sandboxed_command(
-                projection,
-                shell.baseline(),
-                &image,
-                &args,
-                ownership,
-                shell.context.cwd(),
-                &shell.scope,
-            )?
-        }
+        Some(projection) => crate::authority::sandbox::sandboxed_command(
+            projection,
+            shell.baseline(),
+            &image,
+            &args,
+            ownership,
+            shell.context.cwd(),
+            &shell.scope,
+        )?,
         None => image.launch(&args)?,
     };
     apply_env(&mut launch, shell);

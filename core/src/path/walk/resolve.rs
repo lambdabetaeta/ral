@@ -739,12 +739,6 @@ pub fn exists(path: &str) -> bool {
     kind_of(path).is_some()
 }
 
-/// Whether the absolute spelling `path` reaches a directory, a link to one
-/// seen through.
-pub fn is_dir(path: &str) -> bool {
-    kind_of(path) == Some(Kind::Dir)
-}
-
 /// What the absolute spelling `path` reaches, a final link followed: its
 /// walk.  `None` where nothing is there, and for a relative one, which reaches
 /// nothing: no cwd is asked.

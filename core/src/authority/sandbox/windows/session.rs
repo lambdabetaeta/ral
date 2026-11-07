@@ -121,7 +121,7 @@ fn ensure_network_caps(
     slot: &mut Option<Arc<CapabilitySids>>,
 ) -> Result<Arc<CapabilitySids>, Refusal> {
     if slot.is_none() {
-        let caps = CapabilitySids::build(true)
+        let caps = CapabilitySids::build()
             .map_err(|e| io_refusal("sandbox: derive network capability SIDs", &e))?;
         *slot = Some(Arc::new(caps));
     }

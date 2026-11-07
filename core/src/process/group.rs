@@ -31,7 +31,7 @@ pub(crate) use windows::{
     release_win_group, set_active_process_limit,
 };
 #[cfg(windows)]
-pub use windows::{ReapStatus, break_pipeline_group, disown_pipeline_group, try_reap_leader};
+pub use windows::{ReapStatus, break_pipeline_group, try_reap_leader};
 
 /// A process-group identifier.
 ///

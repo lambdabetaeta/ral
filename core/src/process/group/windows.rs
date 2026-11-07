@@ -464,8 +464,7 @@ mod win_groups {
     /// Read-modify-write, because one `LimitFlags` word carries every limit the
     /// job has: assigning it would strip `KILL_ON_JOB_CLOSE` off a group's job
     /// and leave [`release`] unable to kill the members it still owns.  Under
-    /// `GROUPS`, as [`disown`]'s clearing is: interleaved, it would re-arm the
-    /// `KILL_ON_JOB_CLOSE` a disown just cleared.
+    /// `GROUPS`, so no other change to the word interleaves.
     #[allow(
         clippy::significant_drop_tightening,
         reason = "the guard is held across the read-modify-write on purpose: see the doc"
@@ -494,29 +493,6 @@ mod win_groups {
                 cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
             ) != 0
         }
-    }
-
-    /// Forget the group and let the orphaned members run on.  Idempotent.
-    pub(crate) fn disown(leader: i32) {
-        {
-            let groups = GROUPS.lock_ignore_poison();
-            if let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader)
-                && !state.job.is_null()
-            {
-                unsafe {
-                    let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                    // A zeroed struct is `LimitFlags = 0` — every limit cleared,
-                    // `KILL_ON_JOB_CLOSE` among them.
-                    SetInformationJobObject(
-                        state.job,
-                        JobObjectExtendedLimitInformation,
-                        (&raw const info).cast(),
-                        cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
-                    );
-                }
-            }
-        }
-        release(leader);
     }
 
     #[cfg(test)]
@@ -633,9 +609,4 @@ pub(crate) fn kill_pipeline_group(pgid: Pgid) {
 /// before escalating to [`kill_pipeline_group`].
 pub fn break_pipeline_group(pgid: Pgid) {
     win_groups::break_group(pgid.as_raw());
-}
-
-/// `disown` analogue: release the group without terminating it.  Idempotent.
-pub fn disown_pipeline_group(pgid: Pgid) {
-    win_groups::disown(pgid.as_raw());
 }

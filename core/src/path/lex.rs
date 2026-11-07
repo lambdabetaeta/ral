@@ -710,9 +710,7 @@ pub(crate) fn fold_dots(path: &Path) -> PathBuf {
 /// spelling does.
 ///
 /// A string, read under either rules from any host: the form a test proves
-/// the head kept in, and the one a guest path, `/`-separated whatever the
-/// host, is folded in by
-/// [`FrozenPath::from_guest`](super::FrozenPath::from_guest).
+/// the head kept in.
 pub(crate) fn fold_dots_under(path: &str, rules: PathRules) -> String {
     String::from_utf8(fold_bytes(path.as_bytes(), rules))
         .expect("a fold cuts UTF-8 only at ASCII separators and joins it with them")

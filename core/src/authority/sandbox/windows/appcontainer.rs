@@ -313,22 +313,17 @@ unsafe impl Sync for CapabilitySids {}
 
 impl CapabilitySids {
     // after mxc appcontainer_runner.rs::AppContainerScriptRunner::spawn_suspended
-    /// The network capabilities when `allow_network`, empty otherwise.
+    /// The network capabilities.
     /// Upstream warns and carries on when a derivation fails; we fail the
     /// build — both names are well known on every supported Windows, so a
     /// failure is real, and under-granting a requested capability silently is
     /// worse than not spawning.
-    pub(crate) fn build(allow_network: bool) -> io::Result<Self> {
-        let mut owned = Vec::new();
-
-        if allow_network {
-            for name in NETWORK_CAPABILITIES {
-                let sid = OwnedCapabilitySid::from_capability_name(name)?;
-                owned.push(sid);
-            }
-        }
-
-        Ok(Self(owned))
+    pub(crate) fn build() -> io::Result<Self> {
+        NETWORK_CAPABILITIES
+            .into_iter()
+            .map(OwnedCapabilitySid::from_capability_name)
+            .collect::<io::Result<_>>()
+            .map(Self)
     }
 
     pub(crate) fn sids(&self) -> impl Iterator<Item = PSID> + '_ {

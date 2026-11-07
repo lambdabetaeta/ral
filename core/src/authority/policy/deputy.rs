@@ -21,18 +21,21 @@ use crate::path::FrozenPath;
 /// the live part of the meet of the two tables, each folded as the guard
 /// folds it, so neither side's exclusions are lost.
 ///
-/// `None` from either side, no layer opining on fs writes or no exec that
-/// restricts, yields no finding: unrestricted is not "everything writable" or
-/// "everything runnable".  A directory wholly excluded on either side holds
+/// No layer opining on fs writes, or no exec that restricts, yields no
+/// finding: unrestricted is not "everything writable" or "everything
+/// runnable".  A directory wholly excluded on either side holds
 /// Both and is dropped; each writable island under a runnable directory is
 /// reported.
+///
+/// # Panics
+/// Never: past `exec_is_top`, some layer restricts exec.
 pub fn deputy_prefixes(stack: &GrantStack, baseline: &Baseline) -> Vec<FrozenPath> {
     if stack.exec_is_top() {
         return Vec::new();
     }
-    let runs = stack.exec().map(runnable).reduce(Meet::meet);
-    let writes = region(stack, &FsOp::Write, baseline);
-    let (Some(runs), Some(writes)) = (runs, writes) else {
+    let runs = (stack.exec().map(runnable).reduce(Meet::meet))
+        .expect("an exec that restricts is some layer's");
+    let Some(writes) = region(stack, &FsOp::Write, baseline) else {
         return Vec::new();
     };
     let both = runs.meet(writes);

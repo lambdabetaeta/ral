@@ -609,6 +609,7 @@ fn provenance<W: Polar>(dir: &GrantPath<W>, via: Option<Via>) -> (String, String
 ///
 /// # Errors
 /// As [`expand_in`]; a home that cannot be walked.
+#[cfg(any(test, feature = "test-util"))]
 pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, PolicyError> {
     let home = home.map(Home::of).transpose()?;
     let kept = expand_in::<Trace>(toolchain, crate::host::var, home.as_ref())?;

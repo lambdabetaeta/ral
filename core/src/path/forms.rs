@@ -11,10 +11,10 @@
 //! [`from_surface`]: FrozenPath::from_surface
 //! [`freeze`]: FrozenPath::freeze
 
+use super::PathRules;
 use super::lex::{is_absolute, is_working_directory, utf8};
 use super::site::Silent;
 use super::walk::EntryName;
-use super::{GuestPath, PathRules};
 use crate::path::shown;
 use crate::site::site;
 use serde::{Deserialize, Serialize};
@@ -272,26 +272,6 @@ impl FrozenPath {
         Self::from_surface("/")
     }
 
-    /// Mint a prefix naming a path inside the Linux guest, whichever host
-    /// mints it.
-    ///
-    /// The in-process guard that matches it runs *inside* the machine, so the
-    /// fold that must agree with the access side is the one under Linux's
-    /// rules ([`fold_dots_under`](super::lex::fold_dots_under)), not this
-    /// process's — hence a [`GuestPath`] here where
-    /// [`from_surface`](Self::from_surface), for prefixes matched on
-    /// *this* computer, takes an `AsRef<Path>`.
-    #[must_use]
-    pub fn from_guest(path: &GuestPath) -> Self {
-        debug_assert!(
-            path.is_absolute(),
-            "a guest prefix must be absolute in the guest's namespace, got {path}"
-        );
-        Self {
-            surface: super::lex::fold_dots_under(path.as_str(), PathRules::Posix),
-        }
-    }
-
     /// The surface form as a `Path`, for [`lexical`](Self::lexical).
     pub(super) fn surface_path(&self) -> &Path {
         site!(Silent::SurfaceLift, Path::new(&self.surface))
@@ -359,7 +339,8 @@ impl PartialEq<String> for FrozenPath {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{FrozenPath, GuestPath};
+    #[cfg(unix)]
+    use super::FrozenPath;
     #[cfg(unix)]
     use crate::authority::policy::GrantPath;
     #[cfg(unix)]
@@ -428,22 +409,6 @@ mod tests {
         let prefix = FrozenPath::from_surface("\\/.");
         assert!(!prefix.is_root(), "{prefix:?}");
         assert_eq!(prefix.as_str(), "\\");
-    }
-
-    /// Asserting on the *bytes* is deliberate: a test that instead checked
-    /// admission of `/work/letter.docx` would pass on Windows even with
-    /// both sides mangled, since the access side folds with the same host
-    /// kernel.  Only the spelling crosses to the guest.
-    #[test]
-    fn a_guest_prefix_is_spelled_the_guests_way_on_every_host() {
-        let guest = |path| FrozenPath::from_guest(&GuestPath::from_static(path));
-        assert_eq!(guest("/work").as_str(), "/work");
-        assert_eq!(guest("/tmp").as_str(), "/tmp");
-        assert_eq!(
-            guest("/work/./letters/../letters").as_str(),
-            "/work/letters",
-            "the folding is still done, only in the right namespace"
-        );
     }
 
     /// A name that is not Unicode orders apart from the U+FFFD spelling it

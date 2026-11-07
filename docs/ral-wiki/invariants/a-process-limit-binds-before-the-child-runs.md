@@ -16,8 +16,7 @@ gate, `has_active_capabilities`, by `Launch::limit_resources`
   for the child alone) before the child, created suspended, enters it and is
   resumed, by `set_active_process_limit`, which holds `GROUPS` across its read-modify-write
   of the job's one `LimitFlags` word. A write outside the lock could strip
-  `KILL_ON_JOB_CLOSE` off a group's job, or re-arm one that `disown` had just
-  cleared.
+  `KILL_ON_JOB_CLOSE` off a group's job.
 - **A budget that cannot be set refuses the spawn** (`unbudgeted`), as a
   `Refusal`: the alternative is a command that runs with no budget while saying
   it has one.

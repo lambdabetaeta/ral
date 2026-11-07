@@ -2,7 +2,7 @@
 generated_at_commit: fea8d9f0
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-03
-anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
+anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -258,8 +258,6 @@ the refusal says the sandbox is why** (`authority::sandbox::Refusal::Unavailable
   `Confined::launcher`). Only a backend whose envelope is a separate binary sets
   one; Windows has none. Blame is read off what the launcher did, not
   re-derived from the shell's state.
-- **An offline request on a backend that cannot enforce it** fails closed at
-  the spawn (`projection_enforceable`).
 
 ## Related rules
 

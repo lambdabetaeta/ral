@@ -454,8 +454,7 @@ constructor, so no call site can choose "here" for itself**
   redirect a bare key.
 
 A `FrozenPath` (`forms.rs`) is a spelling and nothing else: folded, shown,
-ordered; a guest spelling is minted by `from_guest` from a `GuestPath`
-(`namespace.rs`) under the POSIX fold. What it names is the walk's to say, once,
+ordered. What it names is the walk's to say, once,
 when the layer is decoded: `GrantPath { written, real }`.
 [[invariants/grants-judge-objects|Every authority is judged on `real`]]:
 `RealPath::contains` for an allowance, `Excluded::matches` for an exclusion —
@@ -660,16 +659,12 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   support (`sandbox::carriers`); `Admitted` brings only the launched file
   whose carriers are support. It takes no `Shell`;
   `Shell::sandbox_projection` (`shell/runtime/state/checks.rs`) is the entry.
-- `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
-  projection on a backend with no kernel network enforcement, so an unenforceable
-  request fails closed rather than running ignored.
 - `WITHHOLDS_GPU` (`sandbox.rs`) — read by `SandboxProjection::of` and by
   `protocol::probe::Grants::of` into `withholds_gpu`: the one place the
   host's inability to withhold the GPU (Windows) is stated. A withheld GPU
   there projects as left on and refuses nothing.
 - `Refusal` (`sandbox.rs`) — why no confined child exists: nothing ran.
-  `Unavailable` is a confinement this host cannot establish, whether `projection_enforceable` saw it coming,
-  there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
+  `Unavailable` is a confinement this host cannot establish: there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
   first launch that needs it), or the pinned envelope failed to spawn.
 - `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
   image; `build_launch` reaches it directly when no projection is active.

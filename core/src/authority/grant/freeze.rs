@@ -392,6 +392,7 @@ impl<W: Polar> Placed<W> {
     }
 
     /// The spelling, as written and frozen.
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn written(&self) -> FrozenPath {
         match self {
             Self::Root => FrozenPath::root(),
@@ -471,6 +472,7 @@ impl FreezeCtx {
     ///
     /// # Errors
     /// As [`walked`](Self::walked).
+    #[cfg(any(test, feature = "test-util"))]
     pub fn place(&self, place: &Place) -> Result<Option<FrozenPath>, PolicyError> {
         Ok(self.walked::<Trace>(place)?.map(|placed| placed.written()))
     }

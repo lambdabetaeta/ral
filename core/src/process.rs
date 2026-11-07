@@ -76,6 +76,6 @@ pub use foreground::TerminalLoan;
 #[cfg(windows)]
 pub(crate) use group::release_win_group;
 #[cfg(windows)]
-pub use group::{ReapStatus, break_pipeline_group, disown_pipeline_group, try_reap_leader};
+pub use group::{ReapStatus, break_pipeline_group, try_reap_leader};
 #[cfg(windows)]
 pub use signal::{install_handlers, install_interrupt_handler, reset_child_signals};
