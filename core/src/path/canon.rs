@@ -1,5 +1,5 @@
-//! The names one object answers to, for the kernel sandboxes: its firmlink
-//! twins (`match_variants`).  All lexical: what the object is, and where a
+//! The names one object answers to: its firmlink twins ([`twins`]), for the
+//! path matcher and the kernel sandboxes alike.  All lexical: what the object is, and where a
 //! surface reaches it, is the walk's to say.
 
 #[cfg(unix)]
@@ -21,50 +21,32 @@ pub(crate) const FIRMLINKS: &[(&str, &str)] = &[
 #[cfg(not(target_os = "macos"))]
 pub(crate) const FIRMLINKS: &[(&str, &str)] = &[];
 
-/// Every path string by which a kernel sandbox MAC hook might present the VFS
-/// object at `real`, a resolved path: `real` itself and, on macOS, its
-/// firmlink toggle.  Unsorted and possibly repeating — the sole caller,
-/// [`match_variants_paths`], owns order and uniqueness.
+/// `p` and, on macOS, its firmlink toggle: every path string by which the
+/// host, or a kernel sandbox MAC hook, might present the object at `p`.  Just
+/// `[p]` elsewhere, or where `p` starts at no firmlink root.  Unsorted; the
+/// caller owns order and uniqueness.
 ///
 /// The motivation is empirical.  A Seatbelt rule `(subpath "/private/var/select")`
 /// does not match an `lstat` of `/var/select/developer_dir` on every macOS
 /// version, but `(subpath "/var/select")` does; other syscalls behave the
 /// inverse way.  Granting both removes the guess without enlarging the trust
 /// surface — the two names already reach the same inode.
-#[cfg(all(test, unix))]
-pub(crate) fn match_variants(real: &Path) -> Vec<PathBuf> {
-    with_firmlink_twins(vec![real.to_path_buf()])
+pub(crate) fn twins(p: &Path) -> Vec<PathBuf> {
+    let mut out = vec![p.to_path_buf()];
+    out.extend(firmlink_toggle(p));
+    out
 }
 
-/// `names` and the firmlink toggle of each.
+/// The [`twins`] of each path, deduped and refused unless UTF-8.  Dedup keys
+/// on the exact path bytes, never a lossy rendering: two distinct non-UTF-8
+/// paths decode to the same U+FFFD string, and collapsing them would
+/// attribute one path's grant to the other.
 #[cfg(unix)]
-pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
-    let toggles: Vec<PathBuf> = names.iter().filter_map(|q| firmlink_toggle(q)).collect();
-    names.extend(toggles);
-    names
-}
-
-/// [`spelled`] over [`match_variants`], for the tests below: dedup keys on
-/// the exact path bytes, never a lossy rendering, since two distinct
-/// non-UTF-8 paths decode to the same U+FFFD string, and collapsing them
-/// would attribute one path's grant to the other.
-#[cfg(all(test, unix))]
-pub(crate) fn match_variants_paths<'a>(
-    paths: impl Iterator<Item = &'a Path>,
-) -> Result<Vec<String>, String> {
-    spelled(paths, match_variants)
-}
-
-/// The names `variants` gives each path, deduped and refused unless UTF-8.
-#[cfg(unix)]
-pub(crate) fn spelled<'a>(
-    paths: impl Iterator<Item = &'a Path>,
-    variants: impl Fn(&Path) -> Vec<PathBuf>,
-) -> Result<Vec<String>, String> {
+pub(crate) fn spelled<'a>(paths: impl Iterator<Item = &'a Path>) -> Result<Vec<String>, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for p in paths {
-        for v in variants(p) {
+        for v in twins(p) {
             if seen.insert(v.clone()) {
                 // `{v:?}`, not `.display()`: `Display` would paper over the
                 // fault with the very U+FFFD substitution being refused.
@@ -86,7 +68,7 @@ pub(crate) fn spelled<'a>(
 /// direction; `None` otherwise.  A pure byte splice — no filesystem, no UTF-8
 /// round-trip — so it holds on paths that do not exist, inside a sandbox where
 /// `realpath(3)` would fail, and on a tail that is not valid UTF-8.
-pub(crate) fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
+fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
     let bytes = p.as_os_str().as_encoded_bytes();
     for (firm, canon) in FIRMLINKS {
         for (from, to) in [
@@ -119,29 +101,29 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn match_variants_always_includes_input() {
-        let v = match_variants(Path::new("/some/non/existent/path"));
+    fn twins_always_include_input() {
+        let v = twins(Path::new("/some/non/existent/path"));
         assert!(v.iter().any(|p| p == Path::new("/some/non/existent/path")));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn match_variants_toggles_macos_firmlinks() {
-        let v = match_variants(Path::new("/var/select"));
+    fn twins_toggle_macos_firmlinks() {
+        let v = twins(Path::new("/var/select"));
         assert!(v.iter().any(|p| p == Path::new("/var/select")));
         assert!(v.iter().any(|p| p == Path::new("/private/var/select")));
 
-        let v = match_variants(Path::new("/private/var/select"));
+        let v = twins(Path::new("/private/var/select"));
         assert!(v.iter().any(|p| p == Path::new("/var/select")));
         assert!(v.iter().any(|p| p == Path::new("/private/var/select")));
 
-        let v = match_variants(Path::new("/private/var/folders/X/T"));
+        let v = twins(Path::new("/private/var/folders/X/T"));
         assert!(v.iter().any(|p| p == Path::new("/var/folders/X/T")));
     }
 
     #[test]
-    fn match_variants_passes_unrelated_paths_through() {
-        let v = match_variants(Path::new("/Users/nobody/projects/foo"));
+    fn twins_pass_unrelated_paths_through() {
+        let v = twins(Path::new("/Users/nobody/projects/foo"));
         assert!(
             v.iter()
                 .all(|p| p == Path::new("/Users/nobody/projects/foo"))
@@ -178,7 +160,7 @@ mod tests {
     /// same U+FFFD string must not collapse into one entry, which would
     /// attribute one path's grant to the other.
     #[test]
-    fn match_variants_paths_does_not_collide_distinct_non_utf8_paths() {
+    fn spelled_does_not_collide_distinct_non_utf8_paths() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
@@ -193,7 +175,7 @@ mod tests {
 
         let pa = PathBuf::from(OsStr::from_bytes(a));
         let pb = PathBuf::from(OsStr::from_bytes(b));
-        let err = match_variants_paths([pa.as_path(), pb.as_path()].into_iter())
+        let err = spelled([pa.as_path(), pb.as_path()].into_iter())
             .expect_err("non-UTF-8 paths must fail closed, not render lossily");
         assert!(err.contains("not valid UTF-8"), "got {err:?}");
     }
@@ -202,14 +184,14 @@ mod tests {
     /// never a lossy `(subpath …)` rule naming the wrong inode.  Touching no
     /// firmlink root isolates this from the toggle above.
     #[test]
-    fn match_variants_paths_fails_closed_on_non_utf8_variant() {
+    fn spelled_fails_closed_on_non_utf8_variant() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let p = PathBuf::from(OsStr::from_bytes(
             b"/this/should/not/exist/anywhere/\xFFghost",
         ));
-        let err = match_variants_paths([p.as_path()].into_iter())
+        let err = spelled([p.as_path()].into_iter())
             .expect_err("non-UTF-8 grant path must be refused, not lossily rendered");
         assert!(err.contains("not valid UTF-8"), "got {err:?}");
     }

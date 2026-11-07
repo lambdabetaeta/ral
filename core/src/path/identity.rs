@@ -8,26 +8,18 @@
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use icu_casemap::CaseMapper;
 use icu_locale_core::LanguageIdentifier;
 use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::PathRules;
+use super::canon::twins;
 use super::lex::parse_bytes;
 use super::site::Silent;
 use super::walk::{EntryName, Excluded, Hold, Listed, ObjectId, RealPath, Step, Trace};
 use crate::site::site;
-
-/// `p` plus any alternate spelling the host treats as the same file
-/// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere), so a
-/// position recorded in one spelling still holds a subject in the other.
-fn path_aliases(p: &Path) -> Vec<PathBuf> {
-    let mut out = vec![p.to_path_buf()];
-    out.extend(super::canon::firmlink_toggle(p));
-    out
-}
 
 /// Which spellings of a name count as one name.  A positive reading is under
 /// [`Stored`](Self::Stored), a negative one under [`Collision`](Self::Collision).
@@ -108,8 +100,8 @@ impl RealPath {
     /// Read off the first spelling pair that `contains` accepts, so a
     /// firmlink twin's names are as spelled.
     pub fn relative_to(&self, root: &Self) -> Option<Vec<EntryName>> {
-        let qs = path_aliases(root.as_path());
-        let (p, q) = path_aliases(self.as_path()).into_iter().find_map(|p| {
+        let qs = twins(root.as_path());
+        let (p, q) = twins(self.as_path()).into_iter().find_map(|p| {
             let q = qs.iter().find(|q| within_one(&p, q, Identity::Stored))?;
             Some((p, q))
         })?;
@@ -288,8 +280,8 @@ fn normal_names(p: &Path) -> Vec<&OsStr> {
 /// `Rendered::holds_position` for kernel names — and never by a caller holding
 /// two bare paths.
 pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
-    let qs = path_aliases(prefix);
-    path_aliases(path)
+    let qs = twins(prefix);
+    twins(path)
         .iter()
         .any(|p| qs.iter().any(|q| within_one(p, q, identity)))
 }
@@ -462,6 +454,7 @@ pub(crate) fn windows_head(p: &str) -> &str {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn pb(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -571,7 +564,7 @@ mod tests {
             ("/tmp", Some("/private/tmp")),
         ];
         for (path, alias) in rows {
-            let got = path_aliases(Path::new(path));
+            let got = twins(Path::new(path));
             assert!(got.contains(&pb(path)), "{path}");
             match alias.filter(|_| cfg!(target_os = "macos")) {
                 Some(alias) => assert!(got.contains(&pb(alias)), "{path}"),
@@ -612,7 +605,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         // `/opt` (unlike `/tmp`, `/var`, `/etc`) is no firmlink source, so
-        // these never reach `firmlink_toggle`: what is under test is
+        // these never reach `twins`: what is under test is
         // `path_within`'s comparison, not the aliasing.
         let prefix_bytes: &[u8] = b"/opt/\xFFsecret";
         let candidate_bytes: &[u8] = b"/opt/\xFEsecret";
