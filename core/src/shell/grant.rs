@@ -3,10 +3,13 @@
 mod decode;
 mod spawn;
 
-pub use decode::decode_capability_map;
+pub(crate) use decode::decode_capability_map;
+pub use decode::{decode_fragment, decode_grant};
 pub use spawn::{GrantNarrower, SpawnGrant};
 
 use crate::authority::grant::freeze::{FreezeCtx, PolicyError};
+use crate::authority::policy::GrantLayer;
+use crate::data::FOValue;
 use crate::shell::runtime::{Break, Error, Shell};
 
 impl From<PolicyError> for Break {
@@ -27,6 +30,19 @@ impl Shell {
             self.context.cwd().clone(),
         )
         .with_scratch(self.scratch())
+    }
+
+    /// `record`, a grant value that crossed as data, resolved against this
+    /// shell's own anchor.
+    ///
+    /// # Errors
+    /// As [`decode_grant`].
+    pub fn decode_grant(
+        &self,
+        record: &FOValue,
+        err_prefix: &str,
+    ) -> Result<GrantLayer, PolicyError> {
+        decode_grant(record, err_prefix, &self.freeze_ctx())
     }
 }
 

@@ -11,8 +11,8 @@
 //! onto a base ceiling at load time, before any attenuation runs.
 //!
 //! A grant is authored as a record, its *grant value*, and resolved by one
-//! front-end, `shell::grant::decode_capability_map`, on the host that
-//! enforces it; a layer keeps the resolution, never the record.
+//! front-end, `shell::grant::decode`, on the host that enforces it; a layer
+//! keeps the resolution, never the record.
 //!
 //! Every policy denotes a function from requests to Belnap's four values,
 //! [`Evidence`].  Restriction is truth meet ([`Meet`]), extension information
@@ -114,7 +114,7 @@ pub struct Fragment(GrantLayer);
 
 impl Fragment {
     /// `layer` read as an extension: an axis it omits now states nothing.
-    pub fn of(layer: GrantLayer) -> Self {
+    pub(crate) fn of(layer: GrantLayer) -> Self {
         Self(layer)
     }
 }
@@ -690,139 +690,5 @@ impl<V: Ord + VariantArray> Axis for BTreeSet<V> {
 
     fn is_top(&self) -> bool {
         self.len() == V::VARIANTS.len()
-    }
-}
-
-// ── A test's grant, authored ──────────────────────────────────────────────
-
-#[cfg(any(test, feature = "test-util"))]
-pub use builder::{Capabilities, ExecGrant, ExecKey, FsPolicy};
-
-/// A grant a test writes in Rust: it spells a grant value, which the one
-/// front-end resolves as it resolves any other.
-#[cfg(any(test, feature = "test-util"))]
-mod builder {
-    use super::{EditorVerb, Gpu, Net, ShellVerb};
-    use crate::authority::grant::freeze::Place;
-    use crate::data::FOValue;
-    use crate::data::datum::{Datum, tag};
-    use crate::path::FrozenPath;
-    use std::collections::{BTreeMap, BTreeSet};
-
-    /// An exec key: a bare name, a file, or every program beneath a directory.
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    pub enum ExecKey {
-        Name(String),
-        Path(FrozenPath),
-        Dir(FrozenPath),
-    }
-
-    /// Exec authority as written. A key in both sets is Both.
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub struct ExecGrant {
-        allow: BTreeSet<ExecKey>,
-        deny: BTreeSet<ExecKey>,
-    }
-
-    impl ExecGrant {
-        pub fn of(
-            allow: impl IntoIterator<Item = ExecKey>,
-            deny: impl IntoIterator<Item = ExecKey>,
-        ) -> Self {
-            Self {
-                allow: allow.into_iter().collect(),
-                deny: deny.into_iter().collect(),
-            }
-        }
-
-        pub fn allows(&self) -> impl Iterator<Item = &ExecKey> {
-            self.allow.iter()
-        }
-
-        pub fn denies(&self) -> impl Iterator<Item = &ExecKey> {
-            self.deny.iter()
-        }
-    }
-
-    /// Filesystem access as written: `deny_paths` carve out subtrees no
-    /// access may touch, even under a covering prefix.
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub struct FsPolicy {
-        pub read_prefixes: Vec<FrozenPath>,
-        pub write_prefixes: Vec<FrozenPath>,
-        pub deny_paths: Vec<FrozenPath>,
-    }
-
-    /// The per-effect policies as written, `None` inheriting: every path an
-    /// `absolute` spelling, nothing resolved.
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub struct Capabilities {
-        pub exec: Option<ExecGrant>,
-        pub fs: Option<FsPolicy>,
-        pub net: Option<Net>,
-        pub gpu: Option<Gpu>,
-        pub editor: Option<BTreeSet<EditorVerb>>,
-        pub shell: Option<BTreeSet<ShellVerb>>,
-    }
-
-    impl Capabilities {
-        /// The grant value this spells, as an author writes it in ral.
-        pub fn value(self) -> FOValue {
-            let Self {
-                exec,
-                fs,
-                net,
-                gpu,
-                editor,
-                shell,
-            } = self;
-            let entries = [
-                exec.map(|e| {
-                    let targets = |keys: &BTreeSet<ExecKey>| keys.iter().map(target).collect();
-                    (
-                        "exec",
-                        table([("allow", targets(&e.allow)), ("deny", targets(&e.deny))]),
-                    )
-                }),
-                fs.map(|f| {
-                    let places = |paths: &[FrozenPath]| paths.iter().map(place).collect();
-                    let read = ("read", places(&f.read_prefixes));
-                    let write = ("write", places(&f.write_prefixes));
-                    ("fs", table([read, write, ("deny", places(&f.deny_paths))]))
-                }),
-                net.map(|n| ("net", tag(n.into(), None))),
-                gpu.map(|g| ("gpu", tag(g.into(), None))),
-                editor.map(|v| ("editor", verbs(v))),
-                shell.map(|v| ("shell", verbs(v))),
-            ];
-            let entries = entries.into_iter().flatten();
-            (entries.map(|(key, value)| (key.to_owned(), value)))
-                .collect::<BTreeMap<_, _>>()
-                .encode()
-        }
-    }
-
-    fn place(path: &FrozenPath) -> FOValue {
-        Place::Absolute(path.as_str().to_owned()).value()
-    }
-
-    fn target(key: &ExecKey) -> FOValue {
-        match key {
-            ExecKey::Name(name) => tag("name", Some(name.clone().encode())),
-            ExecKey::Path(file) => place(file),
-            ExecKey::Dir(dir) => tag("dir", Some(place(dir))),
-        }
-    }
-
-    fn table<const N: usize>(lists: [(&str, Vec<FOValue>); N]) -> FOValue {
-        (lists.into_iter().map(|(key, list)| (key.to_owned(), list)))
-            .collect::<BTreeMap<_, _>>()
-            .encode()
-    }
-
-    fn verbs<V: Into<&'static str>>(set: BTreeSet<V>) -> FOValue {
-        (set.into_iter().map(|v| tag(v.into(), None)))
-            .collect::<Vec<_>>()
-            .encode()
     }
 }

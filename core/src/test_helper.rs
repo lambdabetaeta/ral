@@ -59,8 +59,8 @@ pub fn layer(caps: crate::authority::policy::Capabilities) -> crate::authority::
 pub fn decoded(
     caps: crate::authority::policy::Capabilities,
 ) -> Result<crate::authority::policy::GrantLayer, crate::authority::grant::freeze::PolicyError> {
-    crate::shell::grant::decode_capability_map(
-        &crate::shell::runtime::Value::from(caps.value()),
+    crate::shell::grant::decode_grant(
+        caps.value().as_ref(),
         "test grant",
         &crate::authority::grant::freeze::FreezeCtx::at(crate::host::EnvVars::new(), process_cwd()),
     )

@@ -57,20 +57,23 @@ impl Polar for Excluded {
 }
 
 impl<W: Polar> GrantPath<W> {
-    /// `written` resolved as its polarity resolves it, the root spelling by
-    /// polarity alone and every other walked: a test's rule, made without a
-    /// grant value.
+    /// `written` resolved as the decoder resolves an `absolute` place: a
+    /// test's rule, made without a grant value.
     ///
     /// # Errors
-    /// A spelling whose walk fails for any reason but an absent or
-    /// unenterable tail, named; what the polarity refuses of the root.
+    /// What the decoder refuses of the place, or a dead spelling.
     #[cfg(test)]
     pub(crate) fn walk(written: FrozenPath) -> Result<GrantPath<W::Grant>, PolicyError> {
-        if written.is_root() {
-            W::root(written)
-        } else {
-            W::grant(Self::walked(written)?)
-        }
+        let raw = written.into_string();
+        let dead = || {
+            PolicyError::new(format!(
+                "'{}' is absolute only under the other platform's rules",
+                crate::path::shown(&raw)
+            ))
+        };
+        super::Placed::<W>::absolute(&raw)?
+            .ok_or_else(dead)?
+            .grant()
     }
 
     /// `written` walked, as far as the disk goes, the root included where
@@ -80,5 +83,28 @@ impl<W: Polar> GrantPath<W> {
         let real =
             W::walk(&written.lexical()).map_err(|e| PolicyError::unwalkable(&written, &e))?;
         Ok(Self { written, real })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+
+    /// The fixture judges the root as the decoder does, by its raw `/`.
+    #[test]
+    fn the_fixture_takes_the_root_by_its_spelling() {
+        let root = GrantPath::<Trace>::walk(FrozenPath::root()).unwrap();
+        assert_eq!(root.real, Extent::Everywhere);
+        assert!(GrantPath::<Excluded>::walk(FrozenPath::root()).is_err());
+    }
+
+    /// A spelling the decoder would drop as dead is no fixture's rule.
+    #[cfg(unix)]
+    #[test]
+    fn the_fixture_refuses_a_foreign_spelling() {
+        let foreign = FrozenPath::from_surface(r"C:\x");
+        let dead = GrantPath::<Trace>::walk(foreign).unwrap_err();
+        assert!(dead.message.contains("other platform"), "{}", dead.message);
     }
 }

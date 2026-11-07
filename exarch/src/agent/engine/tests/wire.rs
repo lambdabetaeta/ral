@@ -263,59 +263,6 @@ fn cancelled_within_settles_an_in_flight_wire_run_promptly() {
     let _ = child.wait();
 }
 
-#[test]
-fn a_wire_root_refuses_resolved_grants_at_founding() {
-    use crate::agent::{Agent, LaunchConfig, RootEngine};
-    use crate::provider::{Bureau, Provider, Toolset};
-    use ral_core::authority::policy::{Capabilities, Net};
-
-    let (transport, mut child) = engine_over_socketpair(Liveness::default());
-    let (spec, root) = crate::boot::test_attach();
-    let grants = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
-        net: Some(Net::Offline),
-        ..Capabilities::default()
-    })]);
-    let run_dir = crate::agent::testkit::tmp("wire-root-grants");
-    let result = Agent::born_for_test(
-        LaunchConfig {
-            system: "system".into(),
-            run_dir: (*run_dir).clone(),
-            returns: false,
-            admission: Admission::Free,
-            helper_idle: crate::agent::fleet::HELPER_IDLE,
-            max_tokens: None,
-            tools: Toolset::offered(false),
-            allow_schedule: false,
-            resume_on_reset: false,
-            disk_warn_bytes: None,
-            fuel: 0,
-            search: true,
-            factory: None,
-            bureau: Arc::new(Bureau::scripted([])),
-            roles: crate::provider::roles::Roles::default(),
-        },
-        RootEngine::Wire {
-            transport: Box::new(transport),
-            attach: ral_core::protocol::Attach::root(spec, root.with_grants(grants)),
-        },
-        Arc::new(Provider::scripted(
-            "test-model",
-            crate::provider::scripted::Script::new(),
-        )),
-    );
-    let _ = child.kill();
-    let _ = child.wait();
-    let Err(why) = result else {
-        panic!("a wire root's resolved grants must be refused");
-    };
-    assert_eq!(
-        why.to_string(),
-        "a wire root's attach carries resolved grants, which name objects on this host, \
-         but its engine may run on another: pass the ceiling unresolved in Root::config, \
-         for the engine's recipe to resolve where it runs"
-    );
-}
-
 /// A wire engine has no recipe to reboot in place, so `/clear` answers in
 /// words rather than panicking. No engine child needed: nothing crosses.
 #[test]

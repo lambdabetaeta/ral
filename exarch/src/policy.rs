@@ -17,15 +17,13 @@ mod load;
 use base::resolve_base;
 use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
 use ral_core::authority::grant::freeze::{FreezeCtx, Place, host_absolute};
-use ral_core::authority::policy::{Fragment, GrantLayer, GrantStack};
-use ral_core::data::FOValue;
-use ral_core::data::datum::Datum as _;
+use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
+use ral_core::authority::policy::{GrantLayer, GrantStack};
 use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::{CwdPath, FrozenPath};
-use ral_core::shell::grant::decode_capability_map;
-use ral_core::shell::runtime::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use ral_core::shell::grant::decode_fragment;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Compose a session's effective [`GrantStack`], with the restrict files'
@@ -165,10 +163,19 @@ pub fn base_layer(base_name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, String
 fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, String> {
     let held = paths
         .iter()
-        .map(|p| host_absolute(p).map(FrozenPath::into_string))
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|e| e.message)?;
-    carve_out(excluding("fs", held), ctx)
+        .map(|p| held(p))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let fs = FsTable {
+        deny: held.into_iter().map(Place::Absolute).collect(),
+        ..FsTable::default()
+    };
+    carve_out(
+        Axes {
+            fs: Some(fs),
+            ..Axes::default()
+        },
+        ctx,
+    )
 }
 
 /// Exclude the boot-pinned binary `own` from exec. Called only when exec is
@@ -179,26 +186,32 @@ fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, String>
         "exarch could not pin its own binary at startup (is it missing or unreadable?), \
          so cannot exclude it from exec",
     )?;
-    let held = host_absolute(exe).map_err(|e| e.message)?.into_string();
-    carve_out(excluding("exec", [held]), ctx)
+    let exec = ExecTable {
+        deny: vec![Target::File(Place::Absolute(held(exe)?))],
+        ..ExecTable::default()
+    };
+    carve_out(
+        Axes {
+            exec: Some(exec),
+            ..Axes::default()
+        },
+        ctx,
+    )
 }
 
-/// The grant value `[axis: [deny: paths]]`, each path an `absolute` place.
-fn excluding(axis: &str, paths: impl IntoIterator<Item = String>) -> FOValue {
-    let denies: Vec<_> = paths
-        .into_iter()
-        .map(|p| Place::Absolute(p).value())
-        .collect();
-    let deny = BTreeMap::from([("deny".to_owned(), denies)]).encode();
-    BTreeMap::from([(axis.to_owned(), deny)]).encode()
+/// The `absolute` spelling a held path freezes to.
+fn held(path: &Path) -> Result<String, String> {
+    host_absolute(path)
+        .map(FrozenPath::into_string)
+        .map_err(|e| e.to_string())
 }
 
-/// `t ⊕ record`: every request less what `record` excludes, the record read
-/// as an extension of the top, as `--extend` reads a fragment.
-fn carve_out(record: FOValue, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
-    let layer =
-        decode_capability_map(&Value::from(record), "exarch", ctx).map_err(|e| e.message)?;
-    Ok(GrantLayer::root().extend(Fragment::of(layer)))
+/// `t ⊕ excluded`: every request less what `excluded` denies, read as an
+/// extension of the top, as `--extend` reads a fragment.
+fn carve_out(excluded: Axes, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+    let fragment = decode_fragment(GrantValue::from(excluded).as_ref(), "exarch", ctx)
+        .map_err(|e| e.to_string())?;
+    Ok(GrantLayer::root().extend(fragment))
 }
 
 #[cfg(test)]
@@ -264,6 +277,16 @@ mod tests {
         )
         .unwrap();
         assert!(!stack.is_restrictive(), "{stack:?}");
+    }
+
+    /// A carve-out the decoder refuses is refused in its words, hint and all.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_carve_out_keeps_the_decoders_hint() {
+        let ctx = ctx_at(&std::env::temp_dir());
+        let why = deny_layer(&[PathBuf::from("/")], &ctx).unwrap_err();
+        assert!(why.contains("filesystem root"), "{why}");
+        assert!(why.contains("\nhint: To withhold every path"), "{why}");
     }
 
     #[test]

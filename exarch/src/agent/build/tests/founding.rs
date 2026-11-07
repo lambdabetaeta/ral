@@ -98,6 +98,31 @@ fn a_chat_prompt_resolves_the_grant_but_teaches_no_family() {
     );
 }
 
+/// A guest root carries its ceiling unresolved in `Root::config`, beside no
+/// grants resolved on this host: the only wire root there is.
+#[cfg(unix)]
+#[test]
+fn a_guest_root_carries_its_ceiling_unresolved() {
+    use std::os::unix::net::UnixStream;
+    let (host, _guest) = UnixStream::pair().unwrap();
+    let ceiling = ral_core::authority::grant::value::GrantValue::deny_all();
+    let engine = RootEngine::guest(
+        host,
+        GuestPath::from_static("/work"),
+        GuestPath::from_static("/tmp"),
+        ceiling.clone(),
+    )
+    .unwrap();
+    let RootEngine::Wire(WireRoot { attach, .. }) = engine else {
+        panic!("a guest engine is a wire engine");
+    };
+    let ral_core::protocol::Origin::Root(root) = attach.origin else {
+        panic!("a guest attach is a root's");
+    };
+    assert!(root.grants.is_empty(), "{:?}", root.grants);
+    assert_eq!(root.config, ral_core::data::FOValue::from(ceiling));
+}
+
 /// The refusal precedes every effect: no run directory content is made.
 #[cfg(unix)]
 #[test]
@@ -109,10 +134,10 @@ fn a_wire_root_with_fuel_needs_an_engine_factory() {
     let (spec, root) = crate::boot::test_attach();
     let Err(error) = Fleet::found(
         launch_config(&dir, 1),
-        RootEngine::Wire {
+        RootEngine::Wire(WireRoot {
             transport: Box::new(transport),
             attach: Attach::root(spec, root),
-        },
+        }),
         &crate::INSTALLERS,
     ) else {
         panic!("a fuelled wire root without a factory must be refused");

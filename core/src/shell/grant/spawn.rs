@@ -7,11 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::decode::decode_capability_map;
+use super::decode::decode_grant;
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::GrantLayer;
 use crate::data::FOValue;
-use crate::shell::runtime::{Shell, Value};
+use crate::shell::runtime::Shell;
 
 /// A base tag and the anchor to freeze it against (the child's cwd and
 /// scratch), in; one [`GrantLayer`] out.
@@ -49,14 +49,7 @@ impl SpawnGrant {
         match self {
             Self::Inherit => Ok(GrantLayer::root()),
             Self::Base(name) => narrow(name, ctx),
-            Self::Restrict(record) => {
-                decode_capability_map(&Value::from(record.clone()), "grant", ctx).map_err(|e| {
-                    match e.hint {
-                        Some(hint) => format!("{}\nhint: {hint}", e.message),
-                        None => e.message,
-                    }
-                })
-            }
+            Self::Restrict(record) => decode_grant(record, "grant", ctx).map_err(|e| e.to_string()),
         }
     }
 
@@ -82,6 +75,8 @@ impl SpawnGrant {
 mod tests {
     use super::*;
     use crate::authority::policy::{FsAllow, FsOp};
+    use crate::shell::grant::decode_capability_map;
+    use crate::shell::runtime::Value;
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
     /// one, and these cases are the other two arms.

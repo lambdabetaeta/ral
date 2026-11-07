@@ -68,10 +68,10 @@ fn a_wire_engine_is_refused_and_the_open_session_is_left_as_it_was() {
     let refused = resume(
         &dir,
         |cfg| cfg,
-        RootEngine::Wire {
+        RootEngine::Wire(WireRoot {
             transport: Box::new(WireTransport::adopt(host, Liveness::default()).unwrap()),
             attach: Attach::root(spec, root),
-        },
+        }),
     );
     assert!(refused.is_err());
     assert_eq!(records_of(&sessions, 0).len(), before);

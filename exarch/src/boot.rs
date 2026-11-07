@@ -66,10 +66,7 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
     if !matches!(root.config, FOValue::Unit) {
         let layer = shell
             .decode_grant(&root.config, "the root's ceiling")
-            .map_err(|e| match e.hint {
-                Some(hint) => format!("exarch engine: {}\nhint: {hint}", e.message),
-                None => format!("exarch engine: {}", e.message),
-            })?;
+            .map_err(|e| format!("exarch engine: {e}"))?;
         shell.push_session_capabilities(layer);
     }
     crate::library::install_agent_library(&ral_core::shell::runtime::Mooring::adrift(), shell)
@@ -163,12 +160,10 @@ mod tests {
     use crate::app::{EXARCH, SCRATCH_VAR, Scratch};
     use ral_core::Shell;
     use ral_core::authority::grant::freeze::Place;
+    use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
     use ral_core::authority::policy::FsOp;
-    use ral_core::data::FOValue;
-    use ral_core::data::datum::Datum as _;
     use ral_core::path::EnginePath;
     use ral_core::protocol::{EngineSpec, Root};
-    use std::collections::BTreeMap;
 
     /// Cargo's own TLS wants a Mach service no profile admits, so a confined session
     /// must hand it the `git` binary instead — invisible in every log, hence
@@ -189,7 +184,7 @@ mod tests {
     /// root's attach alone, so a `within [env: …]` cannot redirect it.
     #[test]
     fn a_shell_carries_the_scratch_its_root_names_whatever_the_overlay_says() {
-        use ral_core::authority::grant::freeze::{FreezeCtx, Place};
+        use ral_core::authority::grant::freeze::FreezeCtx;
         let scratch = std::env::temp_dir().join("a-session-scratch");
         let named = ral_core::path::utf8(&scratch).expect("a test path is Unicode");
         let spec = EngineSpec::new(
@@ -222,7 +217,7 @@ mod tests {
 
     /// A shell at `cwd`, as an engine roots one, and a root there naming the
     /// scratch and carrying `ceiling`.
-    fn rooted(cwd: &std::path::Path, ceiling: FOValue) -> (Shell, Root) {
+    fn rooted(cwd: &std::path::Path, ceiling: GrantValue) -> (Shell, Root) {
         let at = EnginePath::Host(cwd.to_path_buf());
         let spec = EngineSpec::new(crate::shell_eval::builtins::INSTALLER_TAG, at.clone());
         let shell = Shell::root(
@@ -234,14 +229,8 @@ mod tests {
         let scratch = ral_core::path::utf8(cwd).expect("a test path is Unicode");
         let root = Root::new(at)
             .with_env(vec![(SCRATCH_VAR.to_owned(), scratch.to_owned())])
-            .with_config(ceiling);
+            .with_config(ceiling.into());
         (shell, root)
-    }
-
-    /// The grant value `[axis: [list: items]]`.
-    fn grant(axis: &str, list: &str, items: Vec<FOValue>) -> FOValue {
-        let table = BTreeMap::from([(list.to_owned(), items)]).encode();
-        BTreeMap::from([(axis.to_owned(), table)]).encode()
     }
 
     /// The root's ceiling is a grant value, resolved by the one front-end
@@ -254,8 +243,14 @@ mod tests {
             .to_path_buf();
         let cwd = tmp.join("work");
         std::fs::create_dir(&cwd).expect("the root's cwd");
-        let here = grant("fs", "read", vec![Place::Cwd(".".into()).value()]);
-        let (mut shell, root) = rooted(&cwd, here);
+        let here = Axes {
+            fs: Some(FsTable {
+                read: vec![Place::Cwd(".".into())],
+                ..FsTable::default()
+            }),
+            ..Axes::default()
+        };
+        let (mut shell, root) = rooted(&cwd, here.into());
         engine_root(&root, &mut shell).expect("the ceiling resolves");
         let reads = |path: &std::path::Path| {
             shell.admits_fs(&FsOp::Read, &ral_core::test_helper::trace(path))
@@ -270,8 +265,14 @@ mod tests {
     fn a_ceiling_naming_a_directory_as_a_program_is_refused() {
         let tmp = tempfile::tempdir().expect("a temp dir");
         let dir = ral_core::path::utf8(tmp.path()).expect("a test path is Unicode");
-        let program = grant("exec", "allow", vec![Place::Absolute(dir.into()).value()]);
-        let (mut shell, root) = rooted(tmp.path(), program);
+        let program = Axes {
+            exec: Some(ExecTable {
+                allow: vec![Target::File(Place::Absolute(dir.into()))],
+                ..ExecTable::default()
+            }),
+            ..Axes::default()
+        };
+        let (mut shell, root) = rooted(tmp.path(), program.into());
         let Err(why) = engine_root(&root, &mut shell) else {
             panic!("a directory is no program");
         };

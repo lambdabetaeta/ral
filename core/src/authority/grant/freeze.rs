@@ -46,8 +46,6 @@
 use super::Polar;
 use super::toolchains::{self, Toolchain};
 use crate::authority::policy::{GrantPath, Ungoverned};
-use crate::data::FOValue;
-use crate::data::datum::{Datum as _, tag};
 use crate::host::EnvVars;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
@@ -166,12 +164,6 @@ impl Place {
             | Self::Xdg(_, s) => s,
         }
     }
-
-    /// The place as a grant value spells it, for one host to author and
-    /// another to freeze against its own anchor.
-    pub fn value(&self) -> FOValue {
-        tag(&self.tag(), Some(self.payload().to_owned().encode()))
-    }
 }
 
 /// A set of directories the environment chooses, valid only under `dir`.
@@ -270,6 +262,17 @@ impl PolicyError {
     }
 }
 
+/// The message, then the hint on a line of its own.
+impl std::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)?;
+        match &self.hint {
+            Some(hint) => write!(f, "\nhint: {hint}"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// The `gitdir` place's refusals, in the grant's terms.
 impl From<BadPointer> for PolicyError {
     fn from(BadPointer { dot_git, why }: BadPointer) -> Self {
@@ -349,6 +352,26 @@ pub(crate) enum Placed<W: Polar> {
 }
 
 impl<W: Polar> Placed<W> {
+    /// An `absolute` payload.  The root spelling names everywhere on every
+    /// host and is classified by neither host's rules; every other payload is
+    /// classified before it is folded, so no foreign or malformed spelling can
+    /// fold to `/`.  `Ok(None)` is the dead grant.
+    ///
+    /// # Errors
+    /// A payload absolute under neither platform's rules, or whose walk fails.
+    pub(crate) fn absolute(raw: &str) -> Result<Option<Self>, PolicyError> {
+        if raw == "/" {
+            return Ok(Some(Self::Root));
+        }
+        live_absolute(raw, PathRules::HOST)?
+            .then(|| {
+                freeze(raw)
+                    .and_then(GrantPath::<W>::walked)
+                    .map(Self::Walked)
+            })
+            .transpose()
+    }
+
     /// What the polarity makes of it.
     ///
     /// # Errors
@@ -459,22 +482,7 @@ impl FreezeCtx {
         let tag = place.tag();
         let sub = |s| subpath(&tag, s);
         let frozen = match place {
-            Place::Absolute(raw) => {
-                // The root spelling names everywhere on every host and is
-                // classified by neither host's rules; every other payload is
-                // classified before it is folded, so no foreign or malformed
-                // spelling can fold to `/` here.
-                if raw == "/" {
-                    return Ok(Some(Placed::Root));
-                }
-                return live_absolute(raw, PathRules::HOST)?
-                    .then(|| {
-                        freeze(raw)
-                            .and_then(GrantPath::<W>::walked)
-                            .map(Placed::Walked)
-                    })
-                    .transpose();
-            }
+            Place::Absolute(raw) => return Placed::absolute(raw),
             Place::Cwd(s) => join_sub(self.cwd.as_path(), sub(s)?)?,
             Place::Tempdir(s) => join_sub(crate::host::temp_dir(), sub(s)?)?,
             Place::Scratch(s) => {
@@ -973,6 +981,14 @@ mod tests {
 
     fn refusal(place: &Place, ctx: &FreezeCtx) -> String {
         ctx.place(place).unwrap_err().message
+    }
+
+    /// A refusal shows its message, then its hint on a line of its own.
+    #[test]
+    fn a_refusal_shows_its_hint_under_its_message() {
+        assert_eq!(PolicyError::new("no").to_string(), "no");
+        let hinted = PolicyError::new("no").with_hint("try this");
+        assert_eq!(hinted.to_string(), "no\nhint: try this");
     }
 
     #[cfg(unix)]

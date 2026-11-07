@@ -7,7 +7,7 @@ use super::exec::{ExecRules, Subject};
 use super::*;
 use crate::authority::grant::freeze::{FreezeCtx, PolicyError};
 use crate::path::{self, Excluded, FrozenPath, Trace};
-use crate::shell::grant::decode_capability_map;
+use crate::shell::grant::{decode_capability_map, decode_grant};
 use crate::shell::runtime::Value;
 use crate::test_helper::{self, Tree, layer, trace};
 use std::collections::BTreeSet;
@@ -310,8 +310,8 @@ fn every_flag() -> Vec<Flag> {
 /// The `deny_all` grant value, resolved as any other, withholds every axis.
 #[test]
 fn deny_all_withholds_every_verb() {
-    let value = Value::from(crate::authority::grant::deny_all());
-    let nothing = decode_capability_map(&value, "test", &test_ctx("/h")).unwrap();
+    let value = crate::authority::grant::value::GrantValue::deny_all();
+    let nothing = decode_grant(value.as_ref(), "test", &test_ctx("/h")).unwrap();
     assert!(nothing.exec().is_some_and(|e| e.allows().next().is_none()));
     assert!(nothing.fs().is_some_and(|f| !f.is_top()));
     let stack = test_helper::stack([nothing]);
@@ -426,8 +426,8 @@ fn exec_keys_follow_the_frozen_surface() {
         link(&root.join("real"), &root.join(alias));
     }
     let key = |alias: &str| ExecKey::Path(spelled(&root.join(alias).join("x")));
-    let linked = ExecGrant::of([key("a"), key("b")], []);
-    assert_eq!(linked.allows().count(), 2);
+    let linked = with_exec(ExecGrant::of([key("a"), key("b")], []));
+    assert_eq!(linked.exec().expect("exec supplied").allows().count(), 2);
 }
 
 /// A layer shows each key as the grant that wrote it spells it: a directory
@@ -814,8 +814,7 @@ fn evidence_is_a_bilattice_in_the_fragment_ral_uses() {
     );
 }
 
-/// A grant value crosses the wire whole, both sets and all, and resolves on
-/// arrival as it would have where it was written.
+/// A grant value crosses the wire whole, both sets and all.
 #[test]
 fn a_grant_value_round_trips_both_sets() {
     let caps = Capabilities {
@@ -825,11 +824,10 @@ fn a_grant_value_round_trips_both_sets() {
         )),
         ..witness_b()
     };
-    let json = serde_json::to_string(&caps.clone().value()).unwrap();
+    let value = crate::data::FOValue::from(caps.value());
+    let json = serde_json::to_string(&value).unwrap();
     let crossed: crate::data::FOValue = serde_json::from_str(&json).unwrap();
-    let here = FreezeCtx::at(crate::host::EnvVars::new(), test_helper::process_cwd());
-    let resolved = decode_capability_map(&Value::from(crossed), "test", &here).unwrap();
-    assert_eq!(resolved, layer(caps));
+    assert_eq!(crossed, value);
 }
 
 /// The exec table knows only `allow` and `deny`: `every` is no key, so a
@@ -1062,9 +1060,9 @@ fn some(rng: &mut Rng, n: usize) -> bool {
 /// A random exec grant over the universe, and whether its table also holds
 /// every program: one time in four where the grant is a policy and not an
 /// authored fragment.
-fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> (Option<ExecGrant>, bool) {
+fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> Option<(ExecGrant, bool)> {
     if some(rng, 3) {
-        return (None, false);
+        return None;
     }
     let (mut allow, mut deny) = (Vec::new(), Vec::new());
     // Drawn as allowed, excluded, or both; allowed twice as often.
@@ -1093,7 +1091,7 @@ fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> (Option<ExecGrant>,
             place(rng, ExecKey::Name(n.into()));
         }
     }
-    (Some(ExecGrant::of(allow, deny)), every_ok && some(rng, 4))
+    Some((ExecGrant::of(allow, deny), every_ok && some(rng, 4)))
 }
 
 fn rand_fs(u: &Universe, rng: &mut Rng) -> Option<FsPolicy> {
@@ -1115,7 +1113,8 @@ fn rand_fs(u: &Universe, rng: &mut Rng) -> Option<FsPolicy> {
 
 /// The layer of an authored `exec` and `fs`, its exec beside every program
 /// where `every`.
-fn rand_layer_of((exec, every): (Option<ExecGrant>, bool), fs: Option<FsPolicy>) -> GrantLayer {
+fn rand_layer_of(exec: Option<(ExecGrant, bool)>, fs: Option<FsPolicy>) -> GrantLayer {
+    let (exec, every) = exec.map_or((None, false), |(grant, every)| (Some(grant), every));
     let layer = layer(Capabilities {
         exec,
         fs,
@@ -1186,8 +1185,8 @@ fn law_4_extension_invariant_on_fs() {
     for _ in 0..1500 {
         let (base, frag) = (rand_fs(&u, &mut rng), rand_fs(&u, &mut rng));
         let (base_layer, frag_layer) = (
-            rand_layer_of((None, false), base.clone()),
-            rand_layer_of((None, false), frag.clone()),
+            rand_layer_of(None, base.clone()),
+            rand_layer_of(None, frag.clone()),
         );
         let extended = base_layer.clone().extend(Fragment::of(frag_layer.clone()));
         let evidence = |layer: &GrantLayer, op: &FsOp, f: &str| {

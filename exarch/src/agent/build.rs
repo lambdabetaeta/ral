@@ -19,15 +19,15 @@ use crate::provider::{Provider, Toolset};
 use crate::record::Opening;
 use crate::record::{AgentId, AgentLog, Inherited, Mail, Model, Resumed, Schedules, Selected};
 use crate::shell_eval::builtins;
+use ral_core::authority::grant::value::GrantValue;
 use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::{Severed, WireTransport};
-use ral_core::data::FOValue;
 use ral_core::engine::EngineInstaller;
 use ral_core::own::OwnDir;
 use ral_core::path::{CwdPath, EnginePath, GuestPath};
 use ral_core::process::ScopeNode;
 use ral_core::protocol::channel::{Liveness, WireStream};
-use ral_core::protocol::{Attach, EngineSpec, Origin, Root};
+use ral_core::protocol::{Attach, EngineSpec, Root};
 use std::{
     collections::BTreeMap,
     io,
@@ -125,11 +125,17 @@ pub enum RootEngine {
         grants: GrantStack,
         terminal: ral_core::io::terminal::TerminalState,
     },
-    Wire {
-        transport: Box<WireTransport>,
-        attach: Attach,
-    },
+    Wire(WireRoot),
 }
+
+/// A wire engine's control stream and attach, made by [`RootEngine::guest`]:
+/// its ceiling crosses unresolved in `Root::config`, never as grants resolved
+/// on this host, whose objects the engine's host may not have.
+pub struct WireRoot {
+    transport: Box<WireTransport>,
+    attach: Attach,
+}
+
 impl RootEngine {
     /// A guest engine's control stream, its scratch named by `SCRATCH_VAR`,
     /// and `ceiling`, the grant value its recipe resolves where it runs.
@@ -140,21 +146,21 @@ impl RootEngine {
         stream: WireStream,
         cwd: GuestPath,
         scratch: GuestPath,
-        ceiling: FOValue,
+        ceiling: GrantValue,
     ) -> Result<Self, String> {
         let transport = WireTransport::adopt(stream, Liveness::default())
             .map_err(|e| format!("could not take control of the machine: {e}"))?;
         let root = Root::new(EnginePath::Guest(cwd))
             .with_env(guest_scratch_env(&scratch))
-            .with_config(ceiling);
+            .with_config(ceiling.into());
         let attach = Attach::root(
             EngineSpec::new(builtins::INSTALLER_TAG, EnginePath::Guest(scratch)),
             root,
         );
-        Ok(Self::Wire {
+        Ok(Self::Wire(WireRoot {
             transport: Box::new(transport),
             attach,
-        })
+        }))
     }
 }
 impl Fleet {
@@ -180,17 +186,9 @@ impl Fleet {
             bureau,
             roles,
         } = cfg;
-        if matches!(&root_engine, RootEngine::Wire { .. }) && fuel > 0 && factory.is_none() {
+        if matches!(&root_engine, RootEngine::Wire(_)) && fuel > 0 && factory.is_none() {
             return Err(io::Error::other(
                 "a wire root with spawn fuel needs an engine factory to make helper engines with: pass one via LaunchConfig::factory, or build this root with fuel: 0",
-            ));
-        }
-        if let RootEngine::Wire { attach, .. } = &root_engine
-            && let Origin::Root(root) = &attach.origin
-            && !root.grants.is_root()
-        {
-            return Err(io::Error::other(
-                "a wire root's attach carries resolved grants, which name objects on this host, but its engine may run on another: pass the ceiling unresolved in Root::config, for the engine's recipe to resolve where it runs",
             ));
         }
         let sessions_root = run_dir.make_dir("sessions")?;
@@ -203,7 +201,7 @@ impl Fleet {
                 grants,
                 terminal,
             } => Engine::root(installers, cwd, grants, terminal, scratch).map_err(lost)?,
-            RootEngine::Wire { transport, attach } => {
+            RootEngine::Wire(WireRoot { transport, attach }) => {
                 Engine::wire(*transport, attach).map_err(lost)?
             }
         };
@@ -362,7 +360,7 @@ impl Agent {
                 "cannot resume a chat session: chat keeps no resumable harness history",
             ));
         }
-        if matches!(engine, RootEngine::Wire { .. }) {
+        if matches!(engine, RootEngine::Wire(_)) {
             return Err(io::Error::other(
                 "--resume is unavailable for a wire engine: the engine process is gone; resume an identity session instead",
             ));

@@ -3,8 +3,8 @@
 //! into a resolved [`GrantLayer`]: the one grant front-end.
 //!
 //! A dimension the record does not name stays `None` and inherits the
-//! surrounding frame, so an attenuation touches only what it lists.  The
-//! author is the live user, so every malformed shape is a strict error.
+//! surrounding frame, so an attenuation touches only what it lists.  Every
+//! malformed shape is a strict error, whoever authored it.
 //! Two things are dropped as dead rather than failing the whole profile: a
 //! path rooted under a foreign platform's convention, which can never match
 //! an access here, and a bare exec name that finds nothing here, neither a
@@ -16,13 +16,13 @@
 use crate::authority::grant::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
 use crate::authority::grant::{Keyed, Placed, Polar, name_rules};
 use crate::authority::policy::{
-    EditorVerb, ExecRules, FsLayer, Gpu, GrantLayer, GrantPath, Net, Rule, ShellVerb,
+    EditorVerb, ExecRules, Fragment, FsLayer, Gpu, GrantLayer, GrantPath, Net, Rule, ShellVerb,
 };
 use crate::data::FOValue;
 use crate::path::lex::has_drive;
 use crate::path::sigil::SigilHead;
 use crate::path::{Excluded, Kind, PathRules, Trace, names_a_path_for};
-use crate::shell::runtime::{List, Map, Shell, Value, settings_map};
+use crate::shell::runtime::{List, Map, Value, settings_map};
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
 use crate::typecheck::contract::{
@@ -393,19 +393,17 @@ fn unknown_exec_key(key: &str, value: &Value) -> PolicyError {
 /// Walk a capability record into a resolved [`GrantLayer`], walking every
 /// place against `ctx`.
 ///
-/// The single `Value → GrantLayer` constructor for a record, shared by the
-/// `grant [...] { body }` builtin in `evaluator::scope`, the
-/// profile loader in `load::profile`, [`crate::SpawnGrant`]'s
-/// resolver and [`Shell::decode_grant`]; every spelling is walked against `ctx` right here, so "a
-/// `GrantLayer` has every spelling already resolved" holds by construction
-/// whoever comes through.  Unknown keys error here and in each dimension's
-/// decoder rather than being silently dropped; the keyset is `grant`'s own
-/// declared table, so this decoder and the checker cannot drift apart.
+/// The single `Value → GrantLayer` constructor for a record; every spelling
+/// is walked against `ctx` right here, so "a `GrantLayer` has every spelling
+/// already resolved" holds by construction whoever comes through.  Unknown
+/// keys error here and in each dimension's decoder rather than being
+/// silently dropped; the keyset is `grant`'s own declared table, so this
+/// decoder and the checker cannot drift apart.
 ///
 /// # Errors
 /// A [`PolicyError`] naming the key whose shape or value it will not read, or
 /// the place that would not resolve absolute or whose walk failed.
-pub fn decode_capability_map(
+pub(crate) fn decode_capability_map(
     value: &Value,
     err_prefix: &str,
     ctx: &FreezeCtx,
@@ -439,19 +437,30 @@ pub fn decode_capability_map(
     Ok(GrantLayer::new(fs, exec, net, gpu, editor, shell))
 }
 
-impl Shell {
-    /// `record`, a grant value that crossed as data, resolved against this
-    /// shell's own anchor: what the host that enforces it makes of it.
-    ///
-    /// # Errors
-    /// As [`decode_capability_map`].
-    pub fn decode_grant(
-        &self,
-        record: &FOValue,
-        err_prefix: &str,
-    ) -> Result<GrantLayer, PolicyError> {
-        decode_capability_map(&Value::from(record.clone()), err_prefix, &self.freeze_ctx())
-    }
+/// `record`, a grant value that crossed as data, resolved against `ctx`:
+/// what the host that enforces it makes of it.
+///
+/// # Errors
+/// As [`decode_capability_map`].
+pub fn decode_grant(
+    record: &FOValue,
+    err_prefix: &str,
+    ctx: &FreezeCtx,
+) -> Result<GrantLayer, PolicyError> {
+    decode_capability_map(&Value::from(record.clone()), err_prefix, ctx)
+}
+
+/// As [`decode_grant`], read as an extension: an axis it omits states
+/// nothing.
+///
+/// # Errors
+/// As [`decode_capability_map`].
+pub fn decode_fragment(
+    record: &FOValue,
+    err_prefix: &str,
+    ctx: &FreezeCtx,
+) -> Result<Fragment, PolicyError> {
+    decode_grant(record, err_prefix, ctx).map(Fragment::of)
 }
 
 #[cfg(test)]
@@ -515,6 +524,22 @@ mod tests {
 
     fn rules_of(exec_value: Value) -> Result<ExecRules, PolicyError> {
         decode(&rec(&[("exec", exec_value)])).map(|layer| layer.exec().cloned().unwrap())
+    }
+
+    /// Read as a fragment, a grant value leaves what it omits to the base:
+    /// over the top, an exclusion is every program less it, the fs silent.
+    #[test]
+    fn a_fragment_over_the_top_is_every_program_less_its_exclusions() {
+        let veto = exec(vec![], vec![tagged("name", "ral-no-such-tool")]);
+        let record = FOValue::try_from(&rec(&[("exec", veto)])).unwrap();
+        let any = |rules: &ExecRules| rules.allows().any(|a| *a == ExecAllow::Any);
+        let policy = decode_grant(&record, "test", &ctx()).unwrap();
+        assert!(!any(policy.exec().unwrap()), "{policy:?}");
+        let fragment = decode_fragment(&record, "test", &ctx()).unwrap();
+        let carved = GrantLayer::root().extend(fragment);
+        let rules = carved.exec().expect("an exec axis");
+        assert!(any(rules) && vetoed(rules, "ral-no-such-tool"), "{rules:?}");
+        assert!(carved.fs().is_none());
     }
 
     /// The tool and found-file allowances, by the bare name they answer to.

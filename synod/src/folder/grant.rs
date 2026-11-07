@@ -2,11 +2,10 @@
 
 use crate::site::{Silent, site};
 use ral_core::authority::grant::freeze::Place;
+use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
 use ral_core::authority::policy::{Gpu, Ungoverned};
-use ral_core::data::FOValue;
-use ral_core::data::datum::{Datum as _, tag};
 use ral_core::path::{LeafMode, RealPath, shown, spelled, walk_dir, walk_lenient};
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Bare names keep the toolbox independent of additions to image directories.
@@ -212,31 +211,29 @@ impl Grant {
         clippy::unused_self,
         reason = "a ceiling requires an admitted grant even though guest paths are fixed"
     )]
-    pub(crate) fn ceiling(&self) -> FOValue {
+    pub(crate) fn ceiling(&self) -> GrantValue {
         let places = || {
             [guest_abi::layout::WORK, guest_abi::layout::SCRATCH]
-                .map(|p| Place::Absolute(p.to_owned()).value())
+                .map(|p| Place::Absolute(p.to_owned()))
                 .to_vec()
         };
-        let toolbox = TOOLBOX
-            .iter()
-            .map(|name| tag("name", Some((*name).to_owned().encode())))
-            .collect();
-        let table = |lists: Vec<(&str, Vec<FOValue>)>| {
-            (lists.into_iter().map(|(key, list)| (key.to_owned(), list)))
-                .collect::<BTreeMap<_, _>>()
-                .encode()
-        };
-        BTreeMap::from([
-            ("editor".to_owned(), Vec::<FOValue>::new().encode()),
-            ("exec".to_owned(), table(vec![("allow", toolbox)])),
-            (
-                "fs".to_owned(),
-                table(vec![("read", places()), ("write", places())]),
-            ),
-            ("gpu".to_owned(), tag(Gpu::Withheld.into(), None)),
-        ])
-        .encode()
+        Axes {
+            exec: Some(ExecTable {
+                allow: (TOOLBOX.iter())
+                    .map(|name| Target::Name((*name).to_owned()))
+                    .collect(),
+                deny: Vec::new(),
+            }),
+            fs: Some(FsTable {
+                read: places(),
+                write: places(),
+                deny: Vec::new(),
+            }),
+            gpu: Some(Gpu::Withheld),
+            editor: Some(BTreeSet::new()),
+            ..Axes::default()
+        }
+        .into()
     }
 }
 
@@ -313,6 +310,7 @@ mod tests {
     use crate::test_fixture::workshop;
     #[cfg(unix)]
     use ral_core::authority::policy::FsOp;
+    use ral_core::data::FOValue;
     #[cfg(unix)]
     use ral_core::path::{LexicalPath, Reading};
 
@@ -549,8 +547,8 @@ mod tests {
     fn the_policy_admits_the_guest_namespace_and_denies_the_host_one() {
         let (_dir, grant) = granted("grant-fs");
         let mut shell = ral_core::test_helper::core_shell();
-        let layer =
-            (shell.decode_grant(&grant.ceiling(), "the ceiling")).expect("the ceiling resolves");
+        let layer = (shell.decode_grant(grant.ceiling().as_ref(), "the ceiling"))
+            .expect("the ceiling resolves");
         // Probe reads and test writes directly: locate would fail first on these absent paths.
         shell.with_layer(layer, |sh| {
             for admitted in ["/work/letter.docx", "/tmp/draft.docx"] {
@@ -573,15 +571,15 @@ mod tests {
         });
     }
 
-    /// The ceiling's places, as the wire carries them.
-    fn places_of(list: &FOValue) -> Vec<&str> {
-        let FOValue::List { items } = list else {
-            panic!("a list of places: {list:?}");
+    /// The payloads of a list of `label` tags, as the wire carries them.
+    fn tagged<'a>(list: Option<&'a FOValue>, label: &str) -> Vec<&'a str> {
+        let Some(FOValue::List { items }) = list else {
+            panic!("a list of `{label}: {list:?}");
         };
         (items.iter())
             .map(|item| match ral_core::data::datum::untag(item) {
-                Some(("absolute", Some(FOValue::String { value }))) => value.as_str(),
-                other => panic!("an `absolute` place: {other:?}"),
+                Some((tag, Some(FOValue::String { value }))) if tag == label => value.as_str(),
+                other => panic!("a `{label}: {other:?}"),
             })
             .collect()
     }
@@ -592,13 +590,12 @@ mod tests {
     #[test]
     fn the_guest_prefixes_are_spelled_the_guests_way_on_every_host() {
         let (_dir, grant) = granted("grant-guest-spelling");
-        let ceiling = grant.ceiling();
+        let ceiling = FOValue::from(grant.ceiling());
         let fs = (ceiling.field("fs")).expect("the office grant restricts the filesystem");
         let guest = [guest_abi::layout::WORK, guest_abi::layout::SCRATCH];
         for which in ["read", "write"] {
-            let list = fs.field(which).expect("the office grant lists its places");
             assert_eq!(
-                places_of(list),
+                tagged(fs.field(which), "absolute"),
                 guest,
                 "the fs {which} set must name the guest's paths as the guest spells them"
             );
@@ -609,15 +606,13 @@ mod tests {
     #[test]
     fn the_office_toolbox_is_admitted_and_the_developer_one_is_not() {
         let (_dir, grant) = granted("grant-exec");
-        let ceiling = grant.ceiling();
+        let ceiling = FOValue::from(grant.ceiling());
         let exec = (ceiling.field("exec")).expect("the office grant restricts exec");
-        let Some(FOValue::List { items: allowed }) = exec.field("allow") else {
-            panic!("the office grant allows a list: {exec:?}");
-        };
-        assert!(exec.field("deny").is_none(), "{exec:?}");
+        let allowed = tagged(exec.field("allow"), "name");
+        assert!(tagged(exec.field("deny"), "name").is_empty(), "{exec:?}");
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
             assert!(
-                allowed.contains(&tag("name", Some(tool.to_owned().encode()))),
+                allowed.contains(&tool),
                 "the office toolbox must admit {tool}"
             );
         }

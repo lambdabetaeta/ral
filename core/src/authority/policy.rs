@@ -18,6 +18,8 @@ mod table;
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod lattice_tests;
 
+#[cfg(any(test, feature = "test-util"))]
+pub use crate::authority::grant::builder::{Capabilities, ExecGrant, ExecKey, FsPolicy};
 pub use deputy::deputy_prefixes;
 #[cfg(unix)]
 pub(crate) use exec::Subject;
@@ -28,8 +30,6 @@ pub(crate) use exec::{ExecAllow, ExecDeny};
 pub use fs::{Baseline, FsDeny, FsOp, LocateError, ReadRegion, Refused, Ungoverned};
 pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region, running_region};
 pub(crate) use lattice::Axis;
-#[cfg(any(test, feature = "test-util"))]
-pub use lattice::{Capabilities, ExecGrant, ExecKey, FsPolicy};
 pub use lattice::{
     EditorVerb, Evidence, ExecSummary, Extent, Flag, Fragment, FsSummary, Gpu, GrantLayer,
     GrantPath, GrantStack, GrantSummary, Join, LayerSummary, Meet, Net, ShellVerb,

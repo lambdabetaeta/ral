@@ -247,11 +247,7 @@ mod tests {
     fn an_every_layer_does_not_erase_the_findings_of_another() {
         let disk = Disk::new();
         let stack = stack([
-            layer(Capabilities {
-                exec: Some(ExecGrant::default()),
-                ..Capabilities::default()
-            })
-            .with_every(),
+            GrantLayer::root().with_every(),
             layer(Capabilities {
                 exec: Some(disk.exec_dirs(&["/work"], &[])),
                 fs: Some(disk.fs(&["/work/a"], &[])),
