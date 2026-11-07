@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
 verified_at_date: 2026-11-06
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
+anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, join_lone, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Landing, Job, Job::drain, JailCgroup::kill]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -197,7 +197,7 @@ arrives first is the one `step` answers.
 **The anchor ends before the fold.** `join` is `drive`, `end_anchor`,
 `fold`. The tty signals the whole group in one pass, so the anchor's SIGINT
 is pending before any member can die; its handler writes the byte before
-`read(0)` can return EOF; and `finish` drops the release end and joins the
+`read(0)` can return EOF; and `end` drops the release end and joins the
 reporter, which leaves only on the report pipe's EOF. After `end_anchor`,
 then, every report is on the channel, even when every stage ended before
 `drive` read one. `fold` hears them all out — each late key struck on the
@@ -206,8 +206,10 @@ with the cause on the current scope; a key the tty delivered is attributed
 through that scope or not at all. The loan drops with the collector at the
 end of `fold`, returning the terminal and striking nothing: the stages may all
 have trapped the key and exited 0, and the strike already on the node is what
-the run's own poll then reads. Ending the anchor first is safe: `drive`
-returns only with no stage live, so nothing addresses the pgid again.
+the run's own poll then reads. Ending the anchor first is safe: it only ends
+the anchor's witness, and the ended anchor stays a zombie, unreaped until its
+`PipelineGroup` drops, so the pgid stays pinned through every kill the fold's
+pump joins make.
 
 **A launch that fails part-way is rolled back, then joined.** The spawn loop
 stops at the first stage it cannot launch — a head `Head::admit` or `vet`
@@ -220,25 +222,43 @@ struck on the run's node, where `try` cannot absorb it. The launch's failure is
 the verdict, whatever the fold found: the fold's own fallback is the rollback's
 stop, and what the started stages did raced it.
 
-A single-stage pipeline never reaches any of this: the machine's
-`Pipeline` arm reduces it to its inner closure inline, and `PipeNode::run`
-never sees it.
+A single-stage pipeline never reaches `PipeNode::run`: the machine's
+`Pipeline` arm reduces it to its inner closure inline. An external that
+closure runs still reaches the collector, as a pipeline of one (next).
 
-**Every external a stage's own evaluation spawns joins the group.** A `Thread`
-stage's `Io` carries `Some(membership)` as its `stage` — a `Membership`
-pairing the group's pgid with the stage thread's own cancel scope — so any
-external it spawns — at its own root, or nested arbitrarily deep — resolves
-`PgidPolicy::Join(pgid)` and lands in the same group as a `Direct` stage would.
-**A process group is its owner's to signal.** Such an external's waiter holds
-`Group::Joins(membership)`, and its `terminate` opens with a grace signal of
-its own only for a cause `Membership::owes`: one stronger than the stage scope
-holds, struck beneath the stage. Every cause the stage holds is one the owner
-cancelled it with and delivers to the whole group, so the member hears it
-once. An enveloped external is the exception that proves the rule: placed
-`NewLeader` whatever was asked, it leads its payload's group, and
-`Launch::spawn` returns that group — a spawn returns a pgid only for a group
-the child leads — so its waiter holds `Group::Owns` and signals the payload
-itself, which neither bwrap's pid nor the pipeline's group can reach.
+**The collector is every external's one waiter, and a standalone command is
+a pipeline of one.** `command::run` spawns the child, lends the terminal and
+hands both to `pipeline::join_lone`, which builds a collector over that one
+external (`CollectState::lone`: slot 0, no thread stage, so no cleanup grace to
+grant) and runs the same `drive` as any pipeline; `CollectState::settle_lone`
+then settles it as a command ends. No other wait on an external exists: the
+reaper's `Watch` posts its exit as `Event::Ended` and one `cancel_all` tears it
+down, whether the child is a stage, a stage's own child, or a bare command.
+**Where the child landed (`Landing`, from the `PgidPolicy` it was spawned under)
+decides what the collector may address:**
+
+- `Owns`: a group of one, led by the child, with no anchor. The collector holds
+  `Group::Owns` and signals and kills the group whole. An enveloped child is
+  the exception that proves the rule: placed `NewLeader` whatever was asked, it
+  leads its payload's group, and `Launch::spawn` returns that group (a spawn
+  returns a pgid only for a group the child leads), which neither bwrap's pid
+  nor the pipeline's group can reach.
+- `Joins`: the stage's group, as a nested pipeline joins. A `Thread` stage's
+  `Io` carries `Some(membership)`, a `Membership` pairing the group's pgid with
+  the stage thread's own cancel scope, so any external it spawns, at its own
+  root or nested arbitrarily deep, resolves `PgidPolicy::Join(pgid)`. The
+  collector holds `Group::Joins(membership)`, addresses each external by pid
+  alone, and opens with a grace signal only for a cause `Membership::owes`:
+  one stronger than the stage scope holds, struck beneath the stage. Every
+  cause the stage holds is one the owner delivered to the whole group, so the
+  member hears it once.
+- `Shares`: ral's own group (`PgidPolicy::Inherit`), which is no group of the
+  collector's. It holds `Group::Shares`, addresses the child by pid, and never
+  with `kill(-pgid)`. `Group::owes`, total over the three arms, says it owes
+  every cause but `Interrupted`, whose Ctrl-C the
+  terminal delivered to ral's group whole: the child hears it once, from the
+  terminal, and never again by pid ([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]).
+
 A `spawn` worker is outside that evaluation: its `Io` is minted fresh
 with `stage: None`, so the externals it launches lead groups of their
 own and outlive the pipeline without ever touching its pgid. The member that
@@ -246,6 +266,41 @@ outlives a stage is instead a descendant the stage forked
 (`sh -c 'sleep 30 &'`), which the group owns like any other. A stop reaching
 either is answered exactly as any other wait answers one, so neither is parked
 by Ctrl-Z ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+
+**One pin holds a group's id until its last kill.** The pin is the process
+whose pid is the group's id, kept as a zombie after it ends: the pipeline's
+anchor (`PipelineGroup::Owns`, reaped by its `Watch` when `AnchorProcess` drops
+with the group, after the fold), or a lone leader (`CollectState.pin`, an
+`Arc<Watch>` shared with its stage). `StageHandle::file_external_end` reaps a
+filed external through `Arc::try_unwrap` unless a pin still holds it, so the
+zombie outlives its stage's end and a pgid that `kill(-pgid)` may still address
+is never freed for reuse
+([[invariants/a-group-id-is-held-until-its-last-kill|a-group-id-is-held-until-its-last-kill]]).
+Behind an envelope the payload leads the group and the child is only its
+monitor, so there is no pin once the monitor ends.
+
+**A lone command settles in one order, and the terminal comes first.**
+`join_lone` is `drive`, then `settle_lone`:
+
+1. `drive` returns once the child's end is filed; on Windows `Job::drain` has
+   first waited for every member of the job to leave (below);
+2. the loan `reclaim`s the terminal the instant its tenant is dead, with no
+   anchor to have reported a key, so the key the child died of is read from its
+   own `death` and struck on the run's node as `reclaim` hears it;
+3. `drained`: the guest jail's cgroup is finished first (its kill frees a
+   straggler holding a pump's pipe), then the pumps are joined a slice at a
+   time, killing an owned group once if a cause ends the join; a child cut for a
+   dead write detaches them instead; it then reads the cause the child ended
+   under;
+4. the pin is dropped, no kill addressing the group any more;
+5. `command::ending` reads the death against what was `sent` and the current
+   scope, once.
+
+The terminal never waits on a pump
+([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]).
+A pipeline's `fold` runs the same `drained` per external (`StageEnd::settle`),
+its pin being the anchor, held to the group's drop; its loan is held by the
+collector and dropped with it at the end of `fold`.
 
 **A stage thread can itself launch a pipeline, which joins rather than owns.**
 The machine's `Pipeline` arm is `PipeNode`'s only caller and steps identically
@@ -268,7 +323,7 @@ live externals by pid, one signal each, and only for a cause its membership
 owes: whatever the outer stage holds, the owner has already delivered to the
 whole group. That is every cause it can hear — its cancel arrives on the very
 scope its membership reads — so a joining collector signals nothing and waits
-out the owner's delivery; `owes` earns its keep in a member's own waiter,
+out the owner's delivery; `owes` earns its keep in a member's own collector,
 whose scope sits beneath the stage's and can be struck alone.
 
 **A thread stage cuts itself at its own next write; an external is heard by
@@ -295,7 +350,7 @@ under everything in the fold (`rank` 0): its owner is a collector above,
 which will consume it. A child the stage thread spawned holding the edge
 (`!{ sh -c … } | true`) is heard by the sentinel like any external; the
 `Effect::KillStage` that follows writes `ReaderGone` on the stage's node, and
-its `RunningChild::wait` reads it at the next slice, kills the child by pid
+its own collector reads it at the next slice, kills the child by pid
 and mints the same stop. Until that slice the child writes on into the
 sentinel's drain; in a shielded cleanup the stop is masked for the grace, and
 the child runs to completion. A stage that never writes again after
@@ -313,8 +368,8 @@ does the process die: `step` emits `Effect::KillStage(ix)`, and
 records on that handle's own `sent`, joined by `max` with whatever cause the
 collector had already sent it.
 `grace_signal` offers no catchable signal for `ReaderGone`, so wherever a
-reader-gone teardown runs — a stage's own `RunningChild::terminate`, a nested
-pipeline's `cancel_all` — the kill is outright. The kill addresses the stage's
+reader-gone teardown runs — a stage's own child's collector, a nested
+pipeline's, both `cancel_all` — the kill is outright. The kill addresses the stage's
 pid alone, so a descendant the stage forked outlives it and may still hold
 the pipe a pump of that stage reads; an external ended for a dead write
 therefore *detaches* its pumps rather than joining them
@@ -326,7 +381,7 @@ force, kills an owned group once, so a survivor holding the pipe cannot hold
 the run past the stop. A direct external has no node; the collector's own
 record of what it sent (`sent`) is its name, and a death by what was sent is
 consumed as a thread's is, by the collector reading `sent`. The stage's own external child (if
-it has one) is torn down by pid inside that stage's own `RunningChild::wait`.
+it has one) is torn down by pid by that child's own collector.
 A nested pipeline's stages are cancelled transitively the same way, each
 stage's own edge check or sentinel ending only that stage's own write. This
 is also why the kill can never land on a stage that already finished:
@@ -359,7 +414,7 @@ none of that is this collector's problem any more: the process-wide reaper
 `SIGCONT` inside its own scan and posts nothing for it, whether the pid is a
 direct external stage's or the anchor's own. A stage thread's own interior
 wait, for whatever child *it* spawned, still answers a stop inline itself,
-through the same reaper — `RunningChild::wait` receives a slice at a time
+through the same reaper — its own collector receives a slice at a time
 over a channel the reaper's watch feeds, reading its scope between slices.
 `Event` has no `Stopped` variant at all — there is nothing for `step` to
 answer, because nothing a stop does is ever visible above the reaper that
@@ -379,6 +434,16 @@ the group's own Ctrl-Break grace included; every
 external spawned inside a stage thread still joins the Job Object through the
 same `PgidPolicy::Join` resolution, assigned at creation under the suspended
 create → assign → resume path.
+
+**On Windows a group is one owned `Job` value.** The Job Object and its `GROUPS`
+entry are held by exactly one `Job` (`pipeline/group.rs`): `PipelineGroup`'s for
+an owning pipeline, `join_lone`'s for a lone `Owns` child. Its `Drop` releases
+both, killing whatever member is left; `Job::drain` waits, a slice at a time,
+for every member to leave the job, a leader's descendants included, and kills
+the job once if a cause is in force on the scope. `join_lone` declares the job
+before its collector, so an unwind kills before it releases, and drains it
+between `drive` and `settle_lone`, so a lone command's settlement begins only
+with its job empty. A pid address gets no Ctrl-Break: it is killed at once.
 
 **Collection is one channel, a pure fold, and a thin interpreter.** Every
 lifecycle edge — an external's raw exit, a stage settling, a cancel, a
@@ -479,11 +544,12 @@ already covers returns at once; (2) that signal is `grace_signal(cause)` —
 none at all, straight to the kill — sent **once per process**, a thread
 stage's member adding no copy of its own, to every `Address` the
 collector enumerates (`CollectState::addresses`): the whole pgid (then
-`SIGCONT`, since a stopped member cannot act on the first until it runs) for
-`Group::Owns`, or per pid via `Watch::signal` for a joining
-collector, which has no pgid of its own, and only when `Group::owes` the
+`SIGCONT`, since a stopped member cannot act on the first until it runs; every
+group grace signal is followed by it) for
+`Group::Owns`, or per pid via `Watch::signal` for a joining or sharing
+collector, which has no pgid of its own, and only when it `owes` the
 cause: one the outer stage holds is the owner's, already sent to every
-member — and, beside either, each
+member, and the tty's Ctrl-C is ral's own group's, already delivered; and, beside either, each
 confined stage's *envelope*, the payload group bwrap's `--new-session` put in
 a session of its own, which `Launch::spawn` learned from the `--info-fd` and
 `ExternalStage::envelope` kept. A key the tty already delivered
@@ -491,8 +557,8 @@ a session of its own, which `Launch::spawn` learned from the `--info-fd` and
 envelopes: the kernel already gave every member of the foreground group that
 signal, and a second copy would be a second interrupt — but an envelope's
 session was never in that group; (3) a bounded grace of at most
-`TEARDOWN_GRACE` (500 ms, shared with the standalone command's own
-`terminate`), drained a slice at a time, filing every stage's own terminal
+`TEARDOWN_GRACE` (500 ms, the same for a lone command's collector),
+waited out a slice at a time (`drain_until`), filing every stage's own terminal
 event and escalating as it goes — a filed panic to `Aborted`, a stronger cause
 on the scope to itself — a kill for a dead write being moot once the group is
 dying, and the sweep before each wait setting the sentinel unmarked, since a
@@ -504,21 +570,28 @@ by the run's `cleanup_grace`, since a thread stage may be in a shielded
 cleanup whose children share the group; no shield masks `Aborted`, so under it
 that wait would end on its own; (4) the kill — `kill_live`, the same addresses once more: `SIGKILL
 -pgid` for an owned group, else a pid-wise `Watch::kill` over every stage still
-`Some`, a joining collector having no pgid to `SIGKILL` either, and every
-envelope by its own pgid; (5) a
+`Some`, a joining or sharing collector having no pgid to `SIGKILL` either, and every
+envelope by its own pgid, **and the guest jail's cgroup of every live stage**
+(`JailCgroup::kill`), for a member that `setsid()`'d out of the group; (5) a
 further blocking drain, unbounded, for whatever the grace did not already
 account for — a cancelled and killed member having nowhere left to block;
-(6) the anchor last, in `Drop`, after every stage handle has gone: its report
-reader is joined and its own `Watch` dropped, which reaps (the report
-reader's read end closes only once it sees the anchor's own EOF, so it is
-never dropped while the anchor could still `SIGPIPE` on a stray write into
-it).
+(6) the anchor last, when `PipelineGroup` drops, after every stage handle has
+gone: `AnchorProcess` ends (its report reader is joined) and its own `Watch` is
+dropped, which reaps (the report reader's read end closes only once it sees the
+anchor's own EOF, so it is never dropped while the anchor could still `SIGPIPE`
+on a stray write into it).
 
-Because `grace_signal` is the one cause→signal table, and
-`RunningChild::terminate` reads it too, a reader-gone teardown kills outright
+**The kill precedes every join, and a dropped collector joins nothing.** Steps
+(4) and (5) put the kill of the group or pid *and* the jail before any pump
+join, which `fold` or `settle_lone` runs after: a descendant that outlives its
+stage holds a pump's pipe open, and no join returns while it does
+([[invariants/a-teardown-kills-before-it-joins|a-teardown-kills-before-it-joins]]).
+
+Because `grace_signal` is the one cause→signal table, read by every
+collector's `cancel_all`, a reader-gone teardown kills outright
 at every nesting level: `!{ yes | cat } | head -1` ends the inner `yes`
 without a catchable `SIGTERM` ever being attributed to it. What the collector
-sent is read back in `fold`, through `WaitOutcome::classify`, so a
+sent is read back in `fold`, through `WaitOutcome::cancelled_by`, so a
 pipeline external torn down for its own stage is consumed, and the teardown's
 cause — `timed out`, status 124, for a wall — is the pipeline's stop, exactly
 as a standalone external's
@@ -531,34 +604,36 @@ unobserved —
 a condition derived from what the collector already knows, not a flag a
 caller must set — it writes `Terminated` on every live thread stage in one
 sweep, so the joins in the stages' own drops share one grace, then kills the
-owned pgid, or, for a joining collector with no
+owned pgid, or, for a collector with no
 pgid of its own, its own live externals by pid; either way the descendants
 below it die before the handles join. Under a guest
 jail `kill_live` also kills each live external's `JailCgroup` before any
 drain or handle wait, and each `JailCgroup`, live or filed, is finished as
 the collector drops it, so a member that `setsid()`'d out of the group dies
-too. Every stage observed is the ordinary
-end, which a descendant a stage forked outlives.
+too. Nothing joins here, and a pump a dropped stage holds is *detached*, never
+joined: a descendant the kill missed could hold its pipe for ever. Every stage
+observed is the ordinary end, which a descendant a stage forked outlives.
 
 Killing before joining is what makes the joins terminate: a stage's own kill
 reaches its pid alone, and a pumped descendant that survived it would hold the
 pump's pipe open forever. The two graces nest without adding — the group's
-`SIGKILL` ends whatever the standalone command's own `terminate` grace is
-waiting on for a stage's interior child. Descendants of a killed external are
+`SIGKILL` ends whatever grace the collector of a stage's own child is
+waiting on. Descendants of a killed external are
 the group owner's, as for any stage's own kill. A handle drops its hold on its
 outbound edge before it joins its stage (`StageHandle` declares `held` before
 `kind`), so a thread stage blocked writing to that edge fails on the broken
 pipe once its reader's own end closes, instead of holding the join for its
 grace; a forced end has no verdict to protect.
 `PipeNode`'s field order carries the drop half — collector, then group. The collector's
-kill must reach the pgid it named, and it is the live anchor that keeps that
-pgid from being reused; the anchor is waited last precisely so nothing that
+kill must reach the pgid it named, and it is the anchor, alive or its zombie,
+that keeps that pgid from being reused; the anchor is reaped last precisely so nothing that
 could still need its pgid joinable is waiting on it first.
 On Windows the grace is Ctrl-Break to every member of an owned group
 (`break_pipeline_group`: one event per pid on the job's member list, nested
 members included, each stage being its own console-group root), which the
-anchor swallows; a pid gets no grace, the Job Object kill following alone, and
-`Drop` releases the group's `GROUPS` entry once the anchor is reaped.
+anchor swallows; a pid address no event reaches is killed at once, as its
+opening, so there is no grace to wait out, and the group's `Job` is released
+when its owner drops (above).
 
 **The terminal lease never moves for a stop.** A foreground pipeline that
 takes `SIGTSTP` does not become a parked job, and there is nothing for the

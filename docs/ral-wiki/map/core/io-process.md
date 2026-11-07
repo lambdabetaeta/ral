@@ -107,14 +107,14 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 
 ## Process — `core/src/process/`
 
-- `outcome.rs` — `Signal`, `WaitOutcome`, and the user-facing `SpawnFailure` /
-  `CommandFailure` the evaluator surfaces. `WaitOutcome::classify` yields a
-  `ChildEnd`: `Failed(CommandFailure)`, or `Cancelled(CancelCause)` for a death
-  by one of the cause's `signals_of` (grace, key, kill), read off the one
-  reader `WaitOutcome::death`; no death mints a cause, so a torn-down child reports the cause —
-  an expired time limit, a `cancel`, an interrupt, a shutdown — exactly as a
+- `outcome.rs`: `Signal` and `WaitOutcome`. `WaitOutcome::cancelled_by` names
+  the cause for a death by one of the cause's `signals_of` (grace, key, kill),
+  read off the one reader `WaitOutcome::death`, and `WaitOutcome::failure` is
+  the `fact::Failure` of any other end, which `command::process::ending`
+  turns into the run's stop or failure; no death mints a cause, so a torn-down child reports the cause,
+  an expired time limit, a `cancel`, an interrupt or a shutdown, exactly as a
   poll point does, while a signal from outside ral still reports its number
-  ([[internals/cancellation|cancellation]]). `classify` takes `cause: Option<
+  ([[internals/cancellation|cancellation]]). `cancelled_by` takes `cause: Option<
   CancelCause>`, the strongest cause in force when the child ended, joined by `max`
   where two parties each ended it — a cancellation in force outranks the
   collector's reader-gone kill (raised only once the sentinel hears a dead
@@ -224,8 +224,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   installs SIGINT without `SA_RESTART` so the REPL's blocked input can return
   on interruption; it snapshots inherited ignored dispositions before changing
   them. `grace_signal(cause)` is the one
-  cause→signal table both teardowns read (`RunningChild::terminate` and the
-  pipeline collector's `cancel_all`): `Interrupt` → SIGINT,
+  cause→signal table the one teardown reads (the collector's `cancel_all`):
+  `Interrupt` → SIGINT,
   `Explicit`/`Deadline`/`Terminate` → SIGTERM (on Windows all four →
   Ctrl-Break, named by its `STATUS_CONTROL_C_EXIT`), `ReaderGone`/`RootAbort`
   → `None`, straight to the kill
@@ -234,7 +234,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   Windows side carries the console-control ladder in the Unix shape (two
   `request_interrupt()`s, then `ExitProcess`), which signals no process.
 - `child.rs` — `ChildHandle`, the spawned child, and `into_watch`, the one
-  door from it to the reaper. Every Unix child wait goes through the
+  door from it to the reaper, where a Linux child's `Testimony` amends the
+  reaped outcome before any subscriber sees it
+  ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
+  Every Unix child wait goes through the
   reaper's `waitid`, the one funnel
   ([[decisions/260720_total-wait-status|total-wait-status]], superseded on
   the pid side).
@@ -245,8 +248,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `Joins(Membership)`). A pgid is signalled directly by `kill(-pgid, …)`,
   never waited on. On Windows (`group/windows.rs`) a group is a Job Object
   and `break_pipeline_group` is the grace an owned group's teardown sends —
-  `RunningChild::terminate` for `Group::Owns`, the collector's
-  `Address::signal` for a group — before escalating to `kill_pipeline_group`;
+  the collector's `Address::signal` for a group — before escalating to
+  `kill_pipeline_group`;
   a pid gets the kill alone.
 - `foreground.rs` — `TerminalLoan::prepare` takes the `&TerminalLease` and
   run's node (`ScopeNode`) before spawn on every platform, returning a
@@ -266,19 +269,25 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   is checked; the macOS cap respects the inherited hard limit, and
   `limits::failure_hint` offers a conditional process-limit explanation for
   status 128 when no kernel denial was attributed.
-  `Launch::limit_resources` arms the pre-exec half and
-  `ChildHandle::limit_processes` the post-spawn one; a brake that cannot be
-  armed is an `Err`, never a warning. `shell::exec::command::brake` caps the job
-  the child already sits in; when it cannot, the child is killed, any group it
-  leads released, and the launch refused as sandbox-unavailable
+  `Launch::limit_resources` arms the pre-exec half; on Windows the Job Object
+  cap is set at the launch boundary (`launched`, `set_active_process_limit`),
+  on the child's group's job or a job made for it alone. A budget that cannot
+  be armed is an `Err`, never a warning: the launch is refused as
+  sandbox-unavailable
   ([[design/two-enforcers|two-enforcers]]).
 - `tree.rs` — `sample_descendants`, one `ps` sample of the process table,
   which `with_denials` reads only for a sandboxed, uncancelled failure.
+- `report.rs`: a confined launch's report socket: the `Record`s the trampoline
+  writes (`Witness`), and the parent's `Testimony`, which reads the first word
+  under the launch's scope and amends a Linux child's ending
+  ([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]],
+  [[invariants/a-first-word-is-waited-for-under-the-scope|a-first-word-is-waited-for-under-the-scope]]).
 - `launch.rs` — the owned launch value and its platform interpreters, and the
-  two births: `spawn`, which hands back a child this process owns and the
-  pgid of a group it leads — `NewLeader`, `NewSession`, or behind an envelope
-  the payload's own — never one it merely joined or inherited, and the
-  `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
+  two births, each returning `Unstarted` for a launch that made no child
+  ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]):
+  `spawn`, which hands back a `Spawned` (the child, its `Landing`
+  ([[invariants/a-child-lands-once|a-child-lands-once]]) and any jail cgroup),
+  and the `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
   to init — its pid comes back but nothing else does, so there is no handle,
   no wait, and no `JailCgroup` comes back — shared membership never owns one (below). Unix
   lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
@@ -360,8 +369,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `Ownership`: after delegation and before fallible setup, `prepare` constructs
   `Some(JailCgroup)` only for a kept command. Dropping it kills whatever is left
   (`cgroup.kill`) and removes its leaf, so a setup, wiring or spawn failure,
-  pipeline rollback or settled child finishes it once. `Launch`, `RunningChild`
-  and a pipeline stage carry that option uniformly (`None` off a real guest).
+  pipeline rollback or settled child finishes it once. `Launch` and an external
+  stage carry that option uniformly (`None` off a real guest).
   Shared detached membership never constructs a teardown guard: failed
   preparation, failed spawn and abandoned launch cannot kill existing survivors
   or remove their leaf. The shared limits are rewritten idempotently without

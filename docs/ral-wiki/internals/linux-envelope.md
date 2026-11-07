@@ -2,7 +2,7 @@
 generated_at_commit: 1dc7c6e7
 verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 verified_at_date: 2026-10-26
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer]
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer, Shown, Deny::read]
 ---
 
 # The Linux envelope
@@ -99,6 +99,17 @@ spelling is only the destination at which the opened object is bound.
   `/proc`, which bwrap execs the trampoline through, is refused. An `Over`
   bind replaces names beneath its destination with those it shows: a cgroup
   deny outside ral's subtree needs no mask, and one inside follows the re-root.
+- **Each deny is read once, at planning.** `Shown::of` reads what stands at every
+  deny with `Deny::read` into its mask (`DenyMask::of` its kind) and the position
+  it led to, sorted by name. `bwrap_argv` renders those planned masks and reads
+  nothing for them, and `landlock::build` takes the same `Shown`, keeping its exec
+  ruleset out of the scratch masks, the positions planned as `EmptyDir`. The
+  mask follows the kind of the thing denied, and an empty-directory tmpfs is the
+  sandboxed user's own, which it may `chmod` open. Two reads could disagree: a
+  deny that changed kind between them would get that tmpfs from bwrap while
+  Landlock, having read a file, admitted it from above. One read makes the two
+  agree by construction
+  ([[invariants/a-deny-is-read-once|a-deny-is-read-once]]).
 - **An unusable bwrap refuses in its own words.** A bwrap that builds no
   envelope refuses every confined launch. A failed `--ro-bind-fd` probe keeps
   bwrap's own error; only an unknown-option error adds the version question.
@@ -109,6 +120,7 @@ Pinned by `authority::sandbox::linux::tests::render::a_bind_is_opened_for_each_n
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
 `::every_bind_is_a_handle_by_slot_in_layer_order`,
 `::a_write_through_a_link_is_masked_at_both_its_names`,
+`::bwrap_and_landlock_take_each_denys_mask_from_one_read`,
 `::a_denys_spine_is_bound_onto_itself_between_the_binds_and_the_masks`,
 `::a_pinned_directory_turned_link_refuses_the_launch` and, spawning,
 `::a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened`.
@@ -118,7 +130,8 @@ Pinned by `authority::sandbox::linux::tests::render::a_bind_is_opened_for_each_n
 **Landlock rules attach to host objects opened before bwrap starts, and a walk
 from a file inside the envelope meets only the inodes above it in the
 envelope.** So the bind plan, with its objects, is computed before the ruleset
-and passed to `landlock::build`.
+and passed to `landlock::build`: its roots, onto which a directory admission is
+lowered, and its planned deny masks, which no admission may reach from above.
 
 Inside a restricted envelope a bind's root has the envelope's own directories
 above it, so a rule on a host directory above a bind root is off every walk
@@ -131,7 +144,9 @@ first, and opening stays where it was.
   object lies at or above `D`, and a rule on every bind root whose object lies
   inside `D`: an alias (`/alias` bound to `/tools/sub` under `Dir(/tools)`) and
   a canonical sub-bind (a ceiling that reads only `/tools/sub`). Exclusions are
-  subtracted along their spines from each root. Either way the walk from
+  subtracted along their spines from each root, their positions read through
+  `Excluded::holds` as matching reads them
+  ([[invariants/an-exclusion-is-located-in-one-vocabulary|an-exclusion-is-located-in-one-vocabulary]]). Either way the walk from
   `/tools/sub/prog` meets `/tools/sub` and the envelope's own directories, never
   `/tools`; a nested grant that runs `Dir(/tools)` under a ceiling that reads only
   `/tools/sub` cannot widen reading, so `/tools` is not shown.

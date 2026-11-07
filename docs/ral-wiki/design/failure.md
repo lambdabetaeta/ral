@@ -54,6 +54,24 @@ operands and never inspects command success.
 - The exit code is derived from `reason`, never stored beside it. Raised
   text exits 1; scripts choosing a code use top-level `exit n`.
 
+**An external's failures are raised one way per stage, and blame follows where
+the failure arose.** An external's life is `prepare`, `start` and `ending`
+([[internals/an-external-end-to-end|an-external-end-to-end]]):
+
+- `prepare` raises ral's refusals as `raised` text; `start` converts the one
+  `Unstarted` there is, and `ending` the one wait status, so no other path
+  builds a process failure.
+- A start that failed in ral's own step, or in a launcher that is not the
+  program, is a refusal and never `process [program, failure]`: an error names
+  the program only when the program's own `execve` failed
+  ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]],
+  [[invariants/no-mark-ral-s-fault|no-mark-ral-s-fault]]).
+- An `ENOENT` for a file that exists is `missing-interpreter`, not
+  `not-found`; only a permission refusal is `permission-denied`
+  ([[design/exec|exec]], the outcomes table).
+- A confined program's ending is its supervisor's exact word
+  ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
+
 The cleanup forms differ only in what they do with the original failure:
 
 - `try` suppresses it;

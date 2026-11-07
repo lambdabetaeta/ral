@@ -10,7 +10,7 @@ covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 [[map/core/capabilities|ral's capability lattice]] — from the CLI flags. The
 boundary *is* ral's grant: exarch never invents its own sandbox, it just
 hands a frozen `GrantStack` to the host, whose root engine installs it once
-at boot. There is no `Capabilities::meet` — composition is layering, and the
+at boot. There is no meet of two layers into a third: composition is layering, and the
 stack's own per-check fold is the one meet that ever runs
 ([[decisions/260906_object-not-name|object-not-name]],
 [[map/core/capabilities|capabilities]]).
@@ -64,7 +64,7 @@ one `deputy` check per flagged prefix when a grant frame is entered
 Every profile is *resolved* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
 `` `tempdir ``, `` `scratch ``, `` `gitdir ``) and the `dir` selectors against the session's home, working
 directory, scratch, and the host's live tool roots through
-`ral_core::shell::grant::decode_capability_map` (`shell/grant/decode.rs`).
+the one grant decoder (`ral_core::shell::grant`, `decode.rs`).
 Substantive freezing, authored resolution and host system-read discovery stay in
 `authority::grant` (`authority/grant/freeze.rs`); `authority::policy` owns the
 resolved model and judgments. Composition runs entirely on resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
@@ -97,7 +97,7 @@ call: `` `inherit `` is ⊤, a layer the fold leaves no trace of;
 `` `confined ``/`` `read-only ``/`` `edit-only ``/`` `reasonable `` reach
 `base_layer` through the `GrantNarrower` the resolution is handed; and
 `` `restrict R `` hands the record to
-`ral_core::shell::grant::decode_capability_map` — the same walker, off the same
+`ral_core::shell::grant::decode_grant`, the same decoder, off the same
 `Form::Grant` declared table, that `grant [...] { body }` and each bake-in
 profile below already pass through, so one keyset earns one wording.
 `` `dangerous `` is a `--base` name only: at a spawn the lattice top is a layer
@@ -109,7 +109,13 @@ no file on disk for the child to rewrite.
 `deny_layer(paths, ctx)` is a pure constructor, not a mutator: it returns a
 fresh `GrantLayer` holding only those paths as its fs exclusions, for the
 caller to push, rather than folding them into whatever layer already carries
-an `fs` opinion. Each path is frozen by `freeze::host_absolute`, and one it
+an `fs` opinion. It builds typed `Axes` (`FsTable { deny: [Place::Absolute p …] }`),
+and `carve_out(Axes, ctx)` encodes them as a `GrantValue`, decodes that with
+`decode_fragment` and extends the top by the fragment
+(`GrantLayer::root().extend(..)`), as the self layer does: a carve-out is a grant
+value like any other, decoded by the one front-end
+([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]).
+Each path is first held by `freeze::host_absolute`, and one it
 refuses — not UTF-8, or not absolute under this host's rules — fails the
 layer whole, since a deny that named nothing would fail open.
 `for_invocation` pushes two such layers, each making a kind
@@ -123,9 +129,8 @@ neglect and no `--extend` can widen back open — the stack's fold can
 only narrow past it. **Only the user-supplied lexical form is pushed** — both
 capability enforcers expand a deny entry to its canonical (and, on macOS,
 firmlink) variants themselves, so canonicalising here would duplicate, less
-completely, work that belongs to core. Each path is frozen through the same
-lexer the grant decoder uses, so deny entries land as `FrozenPath`es in
-the grant-side normal form. The `--extend` file is *not* denied: it
+completely, work that belongs to core. Each path is an `absolute` place the
+grant decoder walks, so deny entries land as the objects their walks held. The `--extend` file is *not* denied: it
 extends the ceiling, so denying writes to it is a trust-source concern, not a
 self-protection one. The credential deny is pushed only where some layer's fs restricts: for plain
 `dangerous` it would confine a session that asked not to be, against an agent
@@ -222,7 +227,7 @@ can't silently widen a jail:
 
 `exarch/examples/git.exarch.ral` is the canonical `--extend` that lifts
 `minimal`/`confined` into a git-capable shape; a test pins that extending `minimal` with it keeps `git` admitted and adds
-`~/.gitconfig`, and that `FsPolicy::join`
+`~/.gitconfig`, and that extension
 **unions** deny sets — a one-sided veto survives the join, so an overlay stays
 purely additive without re-stating the base's credential denies.
 

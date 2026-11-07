@@ -87,6 +87,22 @@ The remaining limits are explicit:
 
 See [[internals/path-judgment|path-judgment]] for the hold and its lifetime.
 
+**Every enforcer locates an exclusion through the exclusion.** The guard, the
+Unix projection and Landlock's walk read the positions it holds through
+`Excluded::holds`; where an access lands, which the decoder's refusals and the
+Windows DACL side need, is `Walked::followed`. No backend carries a copy of where
+a deny lies, so the enforcers cannot place one differently
+([[invariants/an-exclusion-is-located-in-one-vocabulary|an-exclusion-is-located-in-one-vocabulary]]).
+
+**On Linux the two kernel consumers of a deny read one plan.** Each fs deny is
+read from the disk once, at planning (`Shown::of`, `Deny::read`,
+`authority/sandbox/linux.rs`), into the mask its kind needs and the position it
+led to. bwrap renders those planned masks (`bwrap_argv` reads nothing for them)
+and Landlock keeps its exec ruleset out of the planned scratch masks. Two reads
+could disagree: a deny that changed kind between them would get a tmpfs the
+sandboxed user may `chmod` open from bwrap while Landlock, having read a file,
+admitted it from above ([[invariants/a-deny-is-read-once|a-deny-is-read-once]]).
+
 **Why the guard cannot be the only enforcer.**
 
 - *It is blind to what a child does on its own.* Once ral spawns `sh`, the guard's

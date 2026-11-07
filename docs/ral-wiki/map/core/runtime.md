@@ -58,13 +58,13 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   Direct external stages retain one `Prov` from launch through collection,
   completing errors and stops before the observation is settled.
 - `command.rs` — the External arm: vet the admitted head, launch its
-  admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
+  admitted program, wire stdio from the sinks the call's redirects installed, spawn, and hand the child to the pipeline collector (`pipeline::join_lone`), its one waiter; `Pumps` lives here. `stdio.rs`
   `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps
   `2>&1` a `dup2` when stderr's sink is `same_destination` as stdout's.
   Submodules: `head.rs` (`Head { shown, program }`, a frozen `Target` until
   `Head::admit` supplies `Admission = Result<Admitted, Missing>`), `vet.rs`
-  (reading the 127/126 verdict, then argv shape, yielding a `SpawnPlan` holding
-  `shown`, the `Admitted`, and the caller's argv), `process.rs`, `child.rs`,
+  (`validate_argv`, the argv shape, read by `prepare` after the 127/126
+  verdict), `process.rs` (`prepare`, `start`, `ending`),
   `stdio.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
   for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once:
   `ForegroundDecision(PgidPolicy)`, `NewLeader` being exactly the foreground.
@@ -106,7 +106,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   - **A bundled coreutils/diffutils/ripgrep head is a `Program::Tool`,
     always run as a `ral --ral-bundled-tool <tool>` child** — its inherited
     stdio, env, cwd, process group, and sandbox are the execution context, so it
-    threads the same spawn/`RunningChild`/audit machinery as a host external,
+    threads the same spawn/collector/audit machinery as a host external,
     and behaves identically on Windows where no `.exe` exists to spawn
     ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
     [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
@@ -268,9 +268,9 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     the stage's chain carries a cause — while `join_after_settled` reclaims a
     thread whose `Returned` has already arrived and `Drop` writes `Terminated`
     and joins one never observed a slice at a time; a stage thread's own
-    interior wait, for whatever child *it* spawned, answers a process stop
-    inline exactly as `RunningChild::wait` always does, structurally invisible
-    to the collector); `collect.rs`
+    interior wait, for whatever child *it* spawned, is that child's own
+    collector, whose stops the reaper answers, structurally invisible to the
+    outer one); `collect.rs`
     (`CollectState` owns the
     stage handles from the first one launched, an `mpsc` channel every
     producer feeds — the reaper (through a stage's own `Watch`), a stage
@@ -347,7 +347,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   `process/jail.rs` ([[map/core/io-process|io-process]]) carries the plan,
   and `jail/linux.rs` enforces it before the pgid and detach hooks, since bwrap
   needs the user namespaces the guest boot disables; the in-process guards
-  apply unchanged, and `child.rs` tracks the per-exec `JailCgroup`, so
+  apply unchanged, and the collector's external stage tracks the per-exec `JailCgroup`, so
   cancel and settle kill the whole tree through `cgroup.kill` (a
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
   stays pgid-addressed (`docs/SPEC.md` §12.11).

@@ -2,7 +2,7 @@
 generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-04
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, CapturedBytes::overflowed]
+anchors: [Sink::pump, SINK_BUFFER_CAP, Pumps::join_under, drained, join_lone, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, CapturedBytes::overflowed]
 ---
 
 # Output capture and detachment
@@ -61,11 +61,21 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
 
 - `Sink::pump` spawns a thread running `io::copy(child_pipe, sink)` until the pipe
   reaches end-of-file (`core/src/io/sink.rs`).
-- The pump is joined *after* the child is waited: `WaitedChild` joins the
-  pump handles, and the typestate makes draining-before-waiting unwritable
-  (`core/src/shell/exec/command/child.rs`, [[map/core/runtime|runtime]]). A foreground
-  command returns only once every byte the child wrote has been copied and the
-  pipe has closed.
+- The pump is joined *after* the child is waited, and after the kill: the
+  collector, every external's one waiter, files the child's end, and its
+  settlement then finishes the guest jail, joins the pump handles under the
+  scope, and only then reads the ending (`drained`,
+  `core/src/shell/exec/pipeline/collect.rs`, [[map/core/runtime|runtime]]). A
+  foreground command returns only once every byte the child wrote has been
+  copied and the pipe has closed.
+- The join never delays the terminal: a lone command's lent terminal is
+  reclaimed the instant its tenant is dead, before the pumps are joined
+  ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]).
+- A join under a cause in force kills the owned group once, a slice at a time:
+  a survivor holding the pipe ends the join only when its pipe closes. A child
+  cut for a dead write, and a collector dropped by an unwind, *detach* their
+  pumps instead of joining them, since a descendant the kill missed could hold
+  the pipe for ever ([[invariants/a-teardown-kills-before-it-joins|a-teardown-kills-before-it-joins]]).
 - The release condition is *EOF, not exit*. A pipe closes when its last writer's
   descriptor closes — so a child that has itself exited but left a grandchild
   holding the inherited write end keeps the pump blocked.
@@ -76,7 +86,8 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   never sees EOF and the foreground command blocks indefinitely.
 - The release is the *foreground deadline*. exarch arms a 30 s wall as a
   disarmable entry on the shared `process::deadline` scheduler (deadlines-as-data);
-  on expiry the worker's child-wait loop fires `terminate_group`.
+  on expiry the child's collector, which reads the scope each slice, tears the
+  group down.
 - A non-interactive exarch external leads its own process group
   (`PgidPolicy::NewLeader`, `core/src/shell/exec/command/foreground.rs`, gated by
   [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]),
@@ -229,14 +240,14 @@ that up — the thing to escape is not the session but the parent's *observation
 of the child's pgid.
 
 - Everything up to the birth is the ordinary external-command machinery —
-  `Head::resolve`, `Head::admit`, `vet`, `build_launch`
+  `Head::resolve`, `Head::admit`, `prepare` (the vetting and the launch)
   (`core/src/shell/exec/command/detach.rs`), so the grant judges the call
   exactly as it judges any exec and a head a handler in scope intercepts is
   refused, birthing nothing: a handler runs inside this session, so there is
   nothing to detach (to run the real program, `^name`). Only the last act
   differs: `Launch::spawn_detached` **double-forks**. The intermediate exits at
-  once and hands the grandchild's pid back over a pipe, so no `RunningChild`
-  ever records the pgid both kill paths address. Reaching the same lifetime by
+  once and hands the grandchild's pid back over a pipe, so no collector
+  ever records the pgid its kills address. Reaching the same lifetime by
   hiding a worker outside the session's `DurableRoot` cancel scope was
   rejected: it defeats the signal but leaves the child holding a pipe that
   closes at exit, killing anything that logs.

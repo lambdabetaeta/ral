@@ -240,11 +240,14 @@ stopped with `SIGTTIN`.
 ## Modes
 
 **Every mode performs the same operation; modes differ only in the context
-they wire around it.** Each path ends in `build_launch` and `process::spawn`
-(`core/src/shell/exec/command/process.rs`).
+they wire around it.** Each runs the same three stages, `prepare`, `start` (or
+`start_detached`) and `ending` (`core/src/shell/exec/command/process.rs`), and
+wires its own streams between the first two
+([[internals/an-external-end-to-end|an-external-end-to-end]]).
 
-- **A plain command.** Dispatch admits, vets the argv, wires the streams,
-  decides the group, spawns, waits, joins the pumps and classifies the ending
+- **A plain command.** Dispatch admits; `prepare` vets the argv and builds the
+  launch; the command wires the streams and decides the group; `start` spawns;
+  it waits, joins the pumps and `ending` classifies how the child ended
   (`command::run`).
 - **A pipeline stage.** Only an external is a process; every other stage is a
   thread of ral's own process
@@ -294,9 +297,16 @@ where the kernel can render one.
   program. The child enters the profile and `execve`s the program in place,
   so the program keeps the child's pid ([[internals/seatbelt-profile|seatbelt-profile]]).
 - **Linux.** ral spawns `bwrap`, the *envelope*, whose payload is the same
-  `ral --warrant` trampoline. It enters Landlock and seccomp, then `execve`s
-  the program, a grandchild of ral. bwrap reports its payload's signal death
-  as exit `128 + n` ([[internals/linux-envelope|linux-envelope]]).
+  `ral --warrant` trampoline. It enters Landlock and seccomp, then runs as a
+  *supervisor*: it spawns the program as its child, waits, and reports the
+  exact wait status, since bwrap alone would fold a signal death into exit
+  `128 + n` ([[internals/linux-envelope|linux-envelope]],
+  [[decisions/261107_the-trampoline-is-a-supervisor|the-trampoline-is-a-supervisor]],
+  [[invariants/a-supervisor-never-execs|a-supervisor-never-execs]]).
+- **Both Unix backends testify.** The trampoline writes a few records on a
+  close-on-exec report socket, so a confined program that cannot start is
+  `not-found` or `not-runnable`, never `exited 127` or `exited 126`
+  ([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]).
 - **Windows.** No re-exec: the program's own `CreateProcessW` carries an
   AppContainer token whose capabilities are this launch's grants.
 - The details, including how a denied path is kept denied, are
@@ -336,7 +346,8 @@ Reason     = `process [program: String, failure: Failure]
            | `timed-out | `cancelled | `raised String
 Failure    = `exited Int | `signaled Int | `not-found
            | `not-runnable [found: String, why: Unrunnable]
-Unrunnable = `permission-denied | `directory | `not-executable | `io String
+Unrunnable = `permission-denied | `directory | `not-executable
+           | `missing-interpreter (Option String) | `io String
 ErrorRecord = [reason, frame, site]
 ```
 
@@ -352,14 +363,15 @@ exit code is a projection of the reason (`FailureCode`), never stored.
 | success | the program exits 0 | returns `()` | 0 |
 | `exited n` | the program exits `n ≠ 0` | failure | `n` clamped into 1..255 |
 | `signaled s` | a signal kills it, and no cause in force sent that signal | failure | 128 + `s` |
-| `not-found` | no candidate exists, or the spawn reports `ENOENT` | failure | 127 |
+| `not-found` | no candidate exists, or the spawn reports `ENOENT` for a bundled tool or a file no longer at its real path | failure | 127 |
+| `not-runnable … missing-interpreter` | the spawn reports `ENOENT` for a file that still exists: its `#!` interpreter (named) or loader is missing | failure | 126 |
 | `not-runnable … directory` | a path head names a directory | failure | 126 |
 | `not-runnable … not-executable` | a file without an execute bit, or another non-program at a path head | failure | 126 |
-| `not-runnable … permission-denied` | the spawn reports `EACCES`, or a path head's walk fails other than by absence | failure | 126 |
-| `not-runnable … io m` | any other spawn error | failure | 126 |
+| `not-runnable … permission-denied` | the spawn reports `EACCES`; or a path head's walk is refused; or a confined script's interpreter is hidden by the launch's own projection (`ENOENT` or `EACCES`), with the interpreter hint | failure | 126 |
+| `not-runnable … io m` | any other spawn error, or any other failure of a path head's walk | failure | 126 |
 | grant refusal | the judgment denies the program | failure, `raised` | 1 |
 | argument refusal | an argument is not a word | failure, `raised` | 1 |
-| envelope unavailable | the confinement cannot start | failure, `raised` | 1 |
+| launch refused | ral could not start the launch: the envelope or launcher fails to exec, a step of ral's own before the `execve` fails, the trampoline refuses, or the envelope dies before the program starts | failure, `raised` | 1 |
 | stopped | a death by a signal of a cause in force, or a cause seen before the spawn | stop | 124, 130, 131, 141, 143 |
 | cut at the write | a non-final stage writes after its reader ended | stop, forgiven by its pipeline | none |
 
@@ -376,19 +388,34 @@ resolution of a path that the judgment also reads.
   `directory` and any other present non-program as `not-executable`; at a
   `PATH` candidate only a regular file lacking an execute bit counts, and
   everything else is passed over as absent. Any execute bit counts, whoever
-  owns it. A path-head walk that fails other than by absence is
-  `permission-denied`. Failing every `PATH` candidate, the first that was
+  owns it. A path-head walk that is refused is
+  `permission-denied`; one that fails in any other way but absence is `io`. Failing every `PATH` candidate, the first that was
   refused or not executable says why, else `not-found`.
-- **The spawn** maps an operating-system refusal through
-  `SpawnFailure::from(&io::Error)`: `ENOENT` to `not-found`, `EACCES` to
-  `permission-denied`, everything else to `io`. Typical cases are a script
-  whose `#!` interpreter is missing (`ENOENT`, worded `command not found`
-  although the script exists), an execute bit for another user or a
-  `noexec` mount (`EACCES`), and a script with no `#!` line (`ENOEXEC`, as
-  `io`).
-- **Under confinement the `execve` happens in the trampoline.** It prints the
-  refusal and exits 127 or 126, so the parent sees `exited 127` or
-  `exited 126`, not `not-found` or `not-runnable`.
+- **The spawn** reports what the program's own `execve` met, and the image
+  says what it means (`at_spawn`). `EACCES` is
+  `permission-denied`; everything else but `ENOENT` is `io`. **`ENOENT` for a
+  file still at its real path is `missing-interpreter`**, naming the `#!`
+  interpreter read when the launch was built, or the loader a native image
+  needs; for a bundled tool or a file gone, it is `not-found`. A script with no
+  `#!` line (`ENOEXEC`) is `io`; an execute bit for another user or a `noexec`
+  mount is `EACCES`.
+- **Only a permission refusal is `permission-denied`.** A path head's walk that
+  fails otherwise reads as itself, `io` with the OS's words, and a `PATH`
+  candidate's walk failure is absence.
+- **A confined script whose interpreter the launch's own projection hides is
+  `permission-denied` with the interpreter hint**, whatever `errno` the kernel
+  chose: Seatbelt refuses the exec (`EACCES`), bwrap hides the interpreter
+  (`ENOENT`). The hint comes from this launch's own projection, asked only once the
+  start has failed, about the interpreter read with the image; with no projection (the guest jail) there is no hint and a hidden
+  interpreter reads as missing.
+- **A start is the program's failure only if the program's `execve` failed.**
+  Under confinement the `execve` happens in the trampoline, which reports it as
+  `unstarted(errno)`; a launcher or envelope that fails to exec, a payload
+  process group that cannot be named, the trampoline's `refused`, an envelope
+  that died before reporting, and a step of ral's own before the `execve` are
+  `raised` refusals, never a failure of the program
+  ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]],
+  [[invariants/no-mark-ral-s-fault|no-mark-ral-s-fault]]).
 - **A grant refusal is `raised` text, not a process failure**, because the
   program was never looked at: `command 'curl' denied by active grant: …`
   (`Shell::exec_refused`, `authority/guard`). The refusal is recorded as an
@@ -416,9 +443,10 @@ force** (`WaitOutcome::classify`, `core/src/process/outcome.rs`;
 
 - **A death by any other signal is the program's own** `signaled s`, a
   `SIGSEGV` during a teardown included. **An exit is never a signal**:
-  `exit 130` is the program's choice. Behind the Linux envelope, an exit
-  `128 + n` is read as a death only to attribute a cause; otherwise it stays
-  `exited 128 + n`.
+  `exit 130` is the program's choice. A confined program's end is its
+  supervisor's exact word, so a confined `SIGSEGV` is `signaled 11` and an
+  `exit 139` is `exited 139`
+  ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
 - **Only a terminal ral lent can turn a key into a cancellation.** While a
   command or pipeline holds the terminal, the kernel delivers Ctrl-C to it,
   not to ral; ral hears the key back when it reclaims the terminal and strikes
@@ -462,10 +490,14 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
   failed `let` threw away. The abandoned-tail note is omitted for
   `not-found` and `not-runnable`, and whenever a hint is present.
 - **Hints**, first match wins: a situational hint from the failing site; then
-  the reason's own, signal advice for `signaled` and the path-as-text advice
-  (`#'…'#`) when a path head named a directory or plain file; then the
-  session's exit-hints table, keyed on the basename of `program` and the
-  status, for `exited` only (`ExitHints`, `core/src/shell/runtime/exit_hints.rs`).
+  the reason's own, signal advice for `signaled`; then the session's
+  exit-hints table, keyed on the basename of `program` and the status, for
+  `exited` only (`ExitHints`, `core/src/shell/runtime/exit_hints.rs`).
+- **The path-as-text hint (`#'…'#`) is one rule, at the machine's
+  `dispatch_exec`** (`offer_path_as_text`). It is offered only to a path head
+  given no arguments, which was most likely meant as text: to a refused
+  admission, and to a run that named a directory or plain file. It is appended
+  after the grant's own hints, never before them.
 - A handler's re-raise keeps every hint the record determines and drops the
   rest.
 
@@ -494,6 +526,7 @@ exarch adds an exit tip only when the reason is a process `exited`.
 [[design/pipelines|pipelines]], [[design/capture|capture]],
 [[internals/cancellation|cancellation]],
 [[internals/exec-judgment|exec-judgment]],
+[[internals/an-external-end-to-end|an-external-end-to-end]],
 [[internals/confined-launch|confined-launch]],
 [[map/core/io-process|io-process]],
 [[related/handlers-of-algebraic-effects|handlers-of-algebraic-effects]],

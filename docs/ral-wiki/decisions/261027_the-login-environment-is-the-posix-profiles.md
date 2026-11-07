@@ -4,7 +4,7 @@ generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 generated_at_date: 2026-10-27
 verified_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 verified_at_date: 2026-10-27
-anchors: [adopt_posix_profile, adopts_login_env, EnvReport, indirect, ChildLimits]
+anchors: [adopt_posix_profile, adopts_login_env, EnvReport, collect, ChildLimits]
 ---
 
 # The login environment is the POSIX profiles
@@ -23,7 +23,7 @@ remain ral's bookkeeping. `--norc`/`--noprofile` skips adoption and the rc;
 batch runs and Windows adopt nothing.
 
 The helper execs this same binary as `--ral-env-report` by
-`reexec::indirect`'s canonical path, bypassing a `ral-sh` symlink. Reporter
+its own canonicalised path (`login_env::collect`), bypassing a `ral-sh` symlink. Reporter
 and collector share one NUL-delimited format in `host::login_env`. The report
 is an unnamed file on fd 3, read after the helper exits, so a background job
 inheriting that descriptor cannot hold ral waiting for EOF. ral ignores

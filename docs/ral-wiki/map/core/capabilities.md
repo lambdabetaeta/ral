@@ -16,22 +16,24 @@ narrow.
 
 `authority::policy` owns the resolved model and its judgments: `GrantLayer`
 (one layer, resolved), `GrantStack` (their dynamic composition) and the folds
-over it. `Capabilities` is the authored value; `authority::grant` owns its
-resolution and all construction that reads the host, including the system reads.
+over it. A grant is authored as a *grant value*, a record decoded where it lands
+by `shell::grant::decode_grant` over `decode_capability_map`; `authority::grant` owns the freezing and
+all construction that reads the host, including the system reads
+([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]).
 The in-process guard (`core/src/authority/guard/`) and the OS sandbox
 (`core/src/authority/sandbox/projection.rs`) enforce the resolved model
 ([[decisions/261006_capability-is-data|capability-is-data]]). Every judgment
-combines the layers' *evidence* ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]); there is no `Capabilities::meet`
-([[decisions/260906_object-not-name|object-not-name]]). Why `Capabilities`,
+combines the layers' *evidence* ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]); there is no meet of two layers into a layer
+([[decisions/260906_object-not-name|object-not-name]]). Why the grant value,
 the live judgment, and `SandboxProjection` are distinct and not one is argued in
 [[design/capability-carriers|capability-carriers]].
 
 Submodules:
 
-- `lattice.rs` — the types and their algebra: `Capabilities`, the authored
-  value (over spellings; nothing judges it and no layer keeps it);
-  `GrantLayer`, one layer in force, resolved where it was decoded
-  (constructed in `authority::grant`, or by `shell::grant::decode_capability_map`;
+- `lattice.rs` — the types and their algebra: `GrantLayer`, one layer in force,
+  resolved where it was decoded (by `shell::grant::decode_capability_map`, the one
+  walker, reached through `decode_grant` and `decode_fragment`, which
+  `Shell::decode_grant` applies to a grant value from another host;
   [[design/capability-freeze|freeze boundary]]), holding its rules and nothing
   beside them; `GrantPath<R> { written, real }`, a spelling and what its walk
   made of it, `R` an `Extent` (`Everywhere`, or `Under { position, passed }`: a
@@ -43,14 +45,15 @@ Submodules:
   `BTreeSet<ShellVerb>` (each `Option`: absent inherits), `GrantStack` (with
   `push`, `remove`, `rehold`, `summary`), `Meet`, `Join`, `Axis` (`join_top`,
   `is_top`), `Evidence { positive, negative }` and `Fragment`, the extension
-  file's result, consumed only by `GrantLayer::extend` (roles are types: a
-  policy's omitted axis is `t`, a fragment's is `⊥`); and the authored exec grant
-  `ExecGrant { every, allow, deny }`, private fields: two `BTreeSet<ExecKey>`s
-  built by `ExecGrant::of(allow, deny)`, read through `allows` and `denies`.
-  `ExecKey::{Name, Path, Dir}` is polarity-free; a key in both sets supplies
-  Both. `with_every` sets the flag, read through `every`; it has no negative
-  form. The wire decoder rejects unknown fields and defaults omitted sets to
-  empty. `GrantSummary` is what
+  file's result (`decode_fragment`), consumed only by `GrantLayer::extend` (roles are types: a
+  policy's omitted axis is `t`, a fragment's is `⊥`). Behind `cfg(any(test,
+  feature = "test-util"))`, in `authority/grant/builder.rs`, sit the test builders
+  `Capabilities`, `ExecGrant` (two `BTreeSet<ExecKey>`s, `ExecGrant::of(allow,
+  deny)`), `ExecKey::{Name, Path, Dir}` and `FsPolicy`: `Capabilities::value`
+  spells a `GrantValue` and `test_helper::decoded` decodes it, so a test grant
+  meets the decoder's refusals. No grant spells every program; `Any` is what `join_top` makes
+  ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
+  `GrantSummary` is what
   crosses hosts: spellings, never a position or an identity, and whether the
   host that showed it can withhold the GPU (`withholds_gpu`). `Flag`
   (`Editor(EditorVerb)`, `Shell(ShellVerb)`) and `GrantStack::permits(Flag)` are
@@ -170,8 +173,12 @@ spawn adapter live in `shell::grant`.
 
 - `paths.rs` — `Polar` and grant-path walking: allowances keep positions,
   exclusions hold objects;
-- `resolve.rs` — authored `Capabilities`, filesystem policies and exec keys
-  resolved into layers and tables, including PATH lookup;
+- `resolve.rs` — `Keyed` and `name_rules`: how a walked exec target becomes the
+  rules a layer holds, by polarity, including PATH lookup;
+- `value.rs` — the grant value as typed data: `Axes` (`ExecTable`, `FsTable`,
+  `Target`, `Place`) encodes to a `GrantValue`, the only way a host spells one,
+  and `GrantValue::deny_all` is the value that withholds all positive authority;
+- `builder.rs` — the test builder over `Axes` (`Capabilities`, above);
 - `host.rs` — platform system-read discovery and resolution; `authority.rs`
   attaches the sandbox's boot pins to form the runtime `Baseline`;
 - `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
@@ -221,8 +228,11 @@ spawn adapter live in `shell::grant`.
 and the `PolicyError → Break` conversion; substantive freezing stays in
 `authority::grant::freeze`.
 
-- `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
-  `--capabilities` `Value` map into a resolved `GrantLayer`, one dimension
+- `decode.rs` — `decode_capability_map`, the one grant walker (crate-private),
+  which reads a `grant [...]` / `--capabilities` `Value` map into a resolved
+  `GrantLayer`; `decode_grant` and `decode_fragment` are its public entries for a
+  grant value one host authored for another (`Shell::decode_grant`, in
+  `shell/grant.rs`, applies it against the receiving shell's anchor), one dimension
   decoder per `exec` / `fs` / `net` / `gpu` / `editor` / `shell` key, nested
   tables and verb lists read as sets —
   every one of them authority, none of them a recording switch
@@ -277,7 +287,7 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   digits of the SHA-256 of the cwd's exact OS bytes (UTF-16 units on Windows), so
   two cwds that differ at all key apart: `-Users-x-proj-25cf7293a3713b73`;
 - canon — `canon.rs`, the names one object answers to for the kernel
-  sandboxes: firmlink twins (`match_variants`); what an object is, and where a
+  sandboxes: firmlink twins (`twins`); what an object is, and where a
   spelling reaches it, is the walk's to say;
 - locate — `walk.rs` exports one resolver from `walk/`: `names.rs` validates
   spellings, `trace.rs` holds evidence, and `exclusion.rs` keeps deny anchors.
@@ -650,26 +660,33 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   by the real path the guard judged, its spelling as `argv[0]`, or a
   `Program::Tool`. macOS
   and Linux share one trampoline: the pinned ral itself, whose whole argv is
-  `ral --warrant <fd>` (`Role::Warrant`), the warrant's descriptor. The confinement to enter and the program to
+  `ral --warrant <w> <r>` (`Role::Warrant`), the warrant's descriptor and the
+  report socket's. The confinement to enter and the program to
   run cross in a `Warrant` (`sandbox/warrant.rs`, its fields private) compiled in
   the parent. The confinement is the `Confinement` trait — `spell`, `parse`,
   `enter` — implemented on macOS by `Seatbelt(String)`, the profile
   `macos::build_profile` compiled, and on Linux by `Option<Landlocked>`, spelled
   `unconfined`, `landlock@<fd>` or `landlock+refer@<fd>`, the ruleset's descriptor;
-  the program is a `Run`: a file carries an absolute `LexicalPath`, a tool a
-  `&'static str` from the bundled-tool table. Head resolution and warrant
+  the program is an `Image`: a file carries its real path and `argv[0]`, a tool
+  a `&'static str` from the bundled-tool table. Head resolution and warrant
   decoding use the same lookup; unknown tools and nonabsolute files refuse.
   `Warrant::confine` is the only way to the program: receive and verify the
   warrant, enter the confinement (`macos::apply_profile`, `Landlocked::enter`),
-  sweep every descriptor above stderr, and yield a `Confined`, whose `run`
-  `execve`s the host program or runs the bundled tool in-process (`uutils::run`, shared with
-  the `--ral-bundled-tool` multicall). `serve_warrant` serves the child: a
-  failure before the program starts exits 126, and an `execve` refusal takes its
-  code from `SpawnFailure` (`From<&io::Error>`) — 126, or 127 for a missing
-  program.
-  The encoding is NUL-terminated fields behind a `ral-warrant/4` magic — a
-  `file` is its real path, then its `argv[0]` spelling, then the interpreter read through the judged handle, then the exclusion covering that interpreter (empty if none), then its argv; a `tool`
-  its name, then its argv — canonical (decode re-encodes and compares) and at
+  sweep every descriptor above stderr but the report's, and yield a `Confined`,
+  whose `run` says on the report what became of the program. macOS `execve`s a
+  host file in place and runs a bundled tool here (`uutils::serve`); Linux
+  supervises, spawning the file or forking the tool and reporting the exact
+  wait status
+  ([[invariants/a-supervisor-never-execs|a-supervisor-never-execs]],
+  [[decisions/261107_the-trampoline-is-a-supervisor|the-trampoline-is-a-supervisor]]).
+  `serve_warrant` serves the child and exits with a verdict only where a
+  report cannot carry one: a failure to enter the confinement is a `refused`
+  record, a program that cannot start an `unstarted(errno)`
+  ([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]).
+  The encoding is NUL-terminated fields behind a `ral-warrant/5` magic: a
+  `file` is its real path, then its `argv[0]` spelling, then its argc and argv (the
+  interpreter, read by the parent, stays the parent's); a `tool`
+  its name, then its argc and argv; canonical (decode re-encodes and compares) and at
   most 8 MiB. It rides a descriptor, only its number in argv: a sealed
   memfd on Linux, checked again after sealing, and on macOS a prefilled
   socketpair whose writer closes before the child exists; the child
@@ -692,7 +709,7 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   nothing before the sweep; a `Confined` promises both confinement and stdio alone.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
   (`bwrap_command`), giving the full shape **bwrap → ral trampoline
-  → Landlock → `execve`**. The real argv is `bwrap --args <a> --
+  → Landlock → the program, its child**. The real argv is `bwrap --args <a> --
   /proc/self/fd/<t> --warrant <w>`: `bwrap_argv` is pure in descriptor numbers and returns bwrap's options alone, which
   bwrap takes from `--args`. The order is forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the

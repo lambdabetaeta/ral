@@ -59,9 +59,9 @@ and the per-backend price.
 This is a deliberate mental-model fact, recorded so omission is never mistaken
 for an implicit cross-axis deny: an omitted axis is `t`, the identity of `meet`.
 Activation reads what a policy *denotes*, not what it spells: a layer restricts
-exactly where some axis does not denote `t`, so `every` with no exclusion, or an
-fs that writes the root and excludes nothing, restricts nothing and activates no
-launch hardening.
+exactly where some axis does not denote `t`, so an exec table holding every
+program and no exclusion, or an fs that writes the root and excludes nothing,
+restricts nothing and activates no launch hardening.
 
 ## Selectors, refusals and summaries
 
@@ -173,9 +173,13 @@ layer (restrict files, credential layers, spawned children, `--capabilities`,
 
 - **Roles are types.** An omitted axis denotes the identity of the role it
   plays: `t` in a *policy* (a base, a restriction, the stack), `⊥` in an
-  *extension fragment*. `Capabilities` is a policy; the loader returns a
-  `Fragment`, consumed only by `Capabilities::extend` and never pushable onto a
+  *extension fragment*. `GrantLayer` is a policy; the loader returns a
+  `Fragment`, consumed only by `GrantLayer::extend` and never pushable onto a
   stack. Reading an omission in the wrong role is a type error.
+- **No grant spells every program.** `Any`, the table that runs everything, arises
+  only by extending an omitted exec axis (`t ⊕ fragment`), as `--extend` and
+  exarch's carve-outs do; an `exec` record has `allow` and `deny` and no third
+  key ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
 - **In the extension an allowance never removes authority; only an exclusion
   does.** The extension invariant states it of policy denotations: where `F` has no negative
   evidence at `s`, `B` permitting `s` implies `B ◁ F` permitting it; where `F`
@@ -254,7 +258,10 @@ put in its place later redirects nothing and both enforcers refuse a launch whos
 allowance now meets a link. An exclusion names the object its spelling reached
 when the grant was decoded, the link and its target where it was a link, under
 every name it has or gets and at the position it named, whatever is put there;
-it follows the object, not what is moved out of it. A bare program name is
+it follows the object, not what is moved out of it. Where an exclusion lies is
+asked of the exclusion in one vocabulary, `Excluded::holds` for every position it
+holds and `Walked::followed` for where an access lands, never recomputed per
+backend ([[invariants/an-exclusion-is-located-in-one-vocabulary|an-exclusion-is-located-in-one-vocabulary]]). A bare program name is
 resolved where the grant is decoded.
 
 **Exclusions are guardrails, not walls, where writing meets running.** An
@@ -268,8 +275,8 @@ wrote none, and yields to every exclusion on either axis
 
 - **exec** as allowance or exclusion of a target, regardless of its arguments
   — more expressive than orthodox object-capability, since a base profile can
-  exclude a name a restrict file never mentions; `every` is the one universal
-  allowance, a flag no surface spelling sets, never a key;
+  exclude a name a restrict file never mentions; `Any` is the one universal
+  allowance, which no grant spells and only an extension makes, never a key;
 - **fs** by read/write path prefix with exclusions;
 - **net** as `` `offline `` or nothing;
 - **gpu** as `` `withheld `` or nothing;
@@ -335,7 +342,10 @@ a string could not sit beside a tag. A selector is a different type from a place
 because its expansion has no containment guard, so a write grant on one would
 plant programs where the user's own shell looks. An `absolute` payload is
 classified on the raw string, so a path rooted only on the other platform is a
-dead grant and one profile loads on both. Nested tables are records (`()` stays
+dead grant and one profile loads on both; the root is the raw `/`, tested before
+any classification, so it names everywhere on every host and no foreign spelling
+folds to it. Excluding it is refused: it holds no object to name, and a link to
+it is the root under another name. Nested tables are records (`()` stays
 the empty *profile*, and `exec: [allow: []]` the empty table). `chdir` gates
 `cd` while `within [dir: …]` is judged by `fs` alone. A path in `fs` can name a
 socket: a stated fs write covering its path admits connecting and binding,
@@ -346,10 +356,26 @@ falls back to DNS over IP. See
 
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
-frozen `Capabilities`, so configuration is the grant value written as source,
+resolved `GrantLayer`, so configuration is the grant value written as source,
 not a second schema. That walker resolves every place as it decodes —
 [[design/capability-freeze|the freeze boundary]] — so no unresolved form ever
-reaches the stack or the IPC wire.
+reaches the stack.
+
+**A grant is decoded where it lands.** A grant crosses every boundary as a *grant
+value*, the record `grant` takes, and the receiving host decodes it with that
+same walker (`decode_grant`, `decode_fragment`, `Shell::decode_grant`): synod's
+ceiling, exarch's boot grant and carve-outs, and `GrantValue::deny_all` alike. A
+host spells the value only by encoding typed `Axes`, and `Capabilities` is a test
+builder over the same. One front-end means one set of refusals,
+which hold on every route:
+
+- a file key naming a directory (the root included), a path-shaped `` `name ``,
+  and an exclusion of the root are refused;
+- a spelling absolute only on another platform is a dead grant, dropped, so one
+  profile loads on both;
+- the ceiling is resolved against the engine's own anchor, so `cwd` and
+  `scratch` places work in it, in a guest as on the host
+  ([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]).
 
 This is the boundary [[map/exarch|exarch]] reuses as its sandbox: each agent
 run evaluates under a profile's capabilities pushed onto this same stack.

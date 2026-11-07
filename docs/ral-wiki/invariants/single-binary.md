@@ -16,7 +16,7 @@ serves it; a re-exec is launched from a `Role`, never a string
 
 - the Unix login reporter, `--ral-env-report`, writes the environment on fd 3
   without booting. It is the one role another program (`/bin/sh -l`) execs,
-  through `reexec::indirect`'s canonical self path, so a `ral-sh` symlink
+  through `login_env::collect`'s canonical self path, so a `ral-sh` symlink
   cannot route it through the bridge;
 - a multi-stage pipeline pins its process group's pgid open for the
   pipeline's whole life with a lone anchor, `--ral-pipeline-anchor`

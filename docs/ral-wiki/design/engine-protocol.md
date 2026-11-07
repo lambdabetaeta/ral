@@ -201,14 +201,17 @@ reached it.
 its confined child is one pinned binary at both ends, so a changed encoding
 changes its version string and no old form is decoded. The engine is different:
 the guest end lives in the VM image, built before the host. So any change to a
-payload's shape (an `ExecGrant`'s allowance and exclusion sets, verb
-sets as sequences) bumps `PROTOCOL_VERSION` and rebuilds the guest media, whose
+payload's shape (the grant value's tables, verb sets as sequences) bumps
+`PROTOCOL_VERSION` and rebuilds the guest media, whose
 manifest the host compares before packaging. Without the bump stale media passes
 the packaging check and the attach handshake and fails decoding the first
-dispatch. **`PROTOCOL_VERSION` is 34.** An authored ceiling crosses as a grant
-value, the record `grant` takes, which the engine decodes as it decodes any
-grant: unknown keys are refused, a repeat adds nothing, and a key may occur in
-both lists. Rebuild guest media with `just vm::boot`. A `Fragment` never
+dispatch. **`PROTOCOL_VERSION` is 38.** An authored ceiling crosses as a grant
+value, the record `grant` takes, in `Root.config`, and the engine decodes it where
+it lands (`Shell::decode_grant`, against its own anchor) as it decodes any
+grant: unknown keys are refused, a repeat adds nothing, a key may occur in
+both lists, and a file key naming a directory, a path-shaped name and an
+exclusion of the root are refused
+([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]). Rebuild guest media with `just vm::boot`. A `Fragment` never
 crosses: it lives only between loading and `extend`.
 
 ## The laws of an enquiry

@@ -84,6 +84,14 @@ multi-stage pipeline shares one process group:
   whose buffer takes what `b` writes
   ([[design/capture|grades and capture]]).
 
+**A command is a pipeline of one.** A standalone external is collected as the
+one stage of the group it landed in, by the same collector that waits on a
+multi-stage pipeline: there is a single waiter for every external, so a command
+and a pipeline stage are signalled, killed, settled and reaped by one rule, and
+differ only in where the child landed (a group of its own, its enclosing
+stage's, or ral's) and so in what the collector may address
+([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]).
+
 Only an external is ever isolated by a process boundary. A stage thread's panic
 is caught at the pipeline boundary and folded as that stage's own failure,
 carrying the stage's span, its own stack having none to attribute it to; a Rust
@@ -128,7 +136,7 @@ The terminal-handoff and process-containment machinery is transport detail, not
 surface semantics. Unix uses process groups and a foreground guard claimed
 before any stage runs; ral does not suspend, so a stopped child — by
 `SIGTSTP`, `SIGTTIN`, `SIGTTOU`, or an external `kill -STOP` — is answered
-with `SIGCONT` at once by whoever is waiting on it, the same rule for a
+with `SIGCONT` at once by the reaper, the same rule for a
 direct external and a stage thread's own child alike
 ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). Windows uses
 Job Objects and a creation-time launch path to close its handle-inheritance

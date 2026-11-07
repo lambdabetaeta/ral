@@ -54,7 +54,7 @@ dispositions. Then, per role:
   or runs the bundled tool in-process. Windows refuses it.
 - **Environment reporter** (`--ral-env-report`, Unix) — writes the host
   environment on fd 3 and exits, without pinning or booting anything.
-  `/bin/sh -l` execs it by `reexec::indirect`'s canonical self path.
+  `/bin/sh -l` execs it by `login_env::collect`'s canonical self path.
 - **Pipeline anchor** — `shell::exec::pipeline::anchor::serve` (`--ral-pipeline-anchor`, the
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid
@@ -81,7 +81,7 @@ dispositions. Then, per role:
     no base-tag lexicon to resolve a grant against.
   - **Bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool> …`) —
     then runs the bundled coreutils/ripgrep image in this child process
-    (`uutils::run`), under whatever sandbox the process inherited. Every bundled
+    (`uutils::serve`), under whatever sandbox the process inherited. Every bundled
     head launches as such a child
     ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
     [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]),

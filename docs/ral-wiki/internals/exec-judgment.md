@@ -50,7 +50,7 @@ launch for a direct pipeline stage and `detach`.
   A refused path head offers itself as text. Refusal messages name the shown
   command, and denial records keep that name and any exclusion, never the
   resolved target: a refusal grants no authority to read a link's target.
-  Admission and its 127/126 verdict precede argv shape; `vet` formats the
+  Admission and its 127/126 verdict precede argv shape; `prepare` raises the
   verdict without probing again.
 - **A path head is walked as written**, anchored at the launch cwd: the kernel
   walks a `..` after the links before it and honours a trailing `/`, so a
@@ -68,8 +68,10 @@ launch for a direct pipeline stage and `detach`.
   in the guard and both host kernel projections. Where a distribution links
   commands from `/usr/bin` to another root, `` `system `` names that root
   (`authority/grant/toolchains.rs`).
-- **`every` is a flag, not a key.** It resolves to `ExecAllow::Any`, positive
-  for every program, bundled tools included, and has no negative form.
+- **No grant spells every program.** `ExecAllow::Any`, made only by extending an
+  omitted exec axis, is positive for every program, bundled tools included, and
+  has no negative form
+  ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
 - **A bare key** means the file the decoding env's `PATH` finds. So a planted
   `/tmp/evil/rg` does not inherit ``allow: [`name rg]``.
 - **A bare exclusion** also vetoes the name wherever it resolves. It stops an

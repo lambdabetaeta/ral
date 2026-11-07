@@ -116,11 +116,10 @@ discovery, while `authority/guard/` enforces it without runtime types.
 `shell/grant/` decodes `Value`s and adapts spawn grants;
 `Shell::freeze_ctx` builds a `FreezeCtx::at` from env and logical cwd, then
 adds scratch.
-The model includes: `Capabilities` (authored), `GrantLayer` (resolved),
-`ExecGrant` (allowance and exclusion sets of `ExecKey`, plus `every`), `FsPolicy`,
-`EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<GrantLayer>`, a *stack* of
+The model includes: `GrantLayer` (resolved where decoded from a grant value),
+`EditorVerb` and `ShellVerb` sets, `GrantStack` (`Vec<GrantLayer>`, a *stack* of
 layers rather than a folded aggregate — attenuation is the fold over the
-stack's verdicts, not a `Capabilities::meet`
+stack's verdicts, not a meet of layers into a layer
 ([[decisions/260906_object-not-name|object-not-name]]); a scoped push —
 `with_layer`, `Frame::Grant` — removes its own frames by
 position (`GrantStack::remove`) rather than popping the top, so a session

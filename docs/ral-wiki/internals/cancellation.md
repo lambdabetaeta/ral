@@ -1,7 +1,7 @@
 ---
 verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Signal::of_status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, join_lone, CollectState::settle_lone, Landing, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
 # Cancellation
@@ -273,9 +273,9 @@ in force, at:
 **Sliced waits.** Every blocked operation of ral's own is a sequence of (read
 the scope; wait at most `POLL_SLICE`, 10 ms), the read first so an
 always-ready stream still polls once per chunk: a pipe write
-(`Sink::write_under`) and read (`read_interruptible`), a child's wait
-(`RunningChild::wait`) and its pumps' drain (`WaitedChild::settle`,
-`Pumps::join_under`), the collector's `recv`, the enquiry park, and the
+(`Sink::write_under`) and read (`read_interruptible`), a child's wait (the
+collector's `recv`, every external's one waiter) and its pumps' drain
+(`Pumps::join_under`), the enquiry park, and the
 `await`/`race`/`first-settled` sweep (`first_ready`, which polls the caller's
 scope at the start of the sweep before inspecting any handle, so a pending
 cancellation is never lost to an already-`ready` worker). The slice is the sampling period, not an end-to-end bound: the
@@ -344,13 +344,14 @@ observation.
 ### External children: teardown by cause
 
 The process-wide reaper ([[map/core/io-process|io-process]]) posts a child's
-exit onto `RunningChild::wait`'s own channel, and the wait receives a slice at
-a time, reading the current scope between slices: a cause in force starts the
+exit onto its collector's channel, a lone command's too (`join_lone`), and the
+collector receives a slice at a time, reading the current scope between
+slices: a cause in force starts the
 teardown, and the grace wait inside it is sliced too, ending at once under
 `Aborted`. The teardown is *cause-directed*,
 and `grace_signal(cause)` (`process/signal/unix.rs`, and its Windows twin)
-is the one table that directs it — read by `RunningChild::terminate` and by
-the pipeline collector's `cancel_all` alike:
+is the one table that directs it — read by the collector's `cancel_all`,
+every external's one teardown:
 
 - **`Interrupted`** → SIGINT-first, a bounded `TEARDOWN_GRACE` (500 ms), then a
   group (or, ungrouped, pid-`Watch`) SIGKILL — a child that traps SIGINT
@@ -367,20 +368,39 @@ the pipeline collector's `cancel_all` alike:
   (`break_pipeline_group`: one `CTRL_BREAK_EVENT` per pid on the job's member
   list — every stage is spawned `CREATE_NEW_PROCESS_GROUP`, so each is its
   own console-group root, and a nested member is on the outermost owner's
-  list); a pid gets the kill alone — the Windows `Watch` has no signal, and
+  list); a pid is killed at once in the grace's place, the Windows `Watch` having no signal, and
   an `Inherit` child sits in ral's own console group, where no event reaches
   it without reaching ral. The pipeline anchor swallows every console event,
   so a group's grace never ends the process holding it open.
 
-A process group is its owner's to signal: a child leading its own
-(`Group::Owns`) is signalled and killed whole, while one that joined a
-pipeline's from inside a stage thread (`Group::Joins`) opens with a grace
-signal only for a cause `Membership::owes` — one stronger than the stage's
-scope holds — every cause the stage holds being one the pipeline's owner
-delivers to the whole group once.
+**A process group is its owner's to signal.** The collector addresses a child
+by where it *landed*, and no collector ever signals a group it does not own
+([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]):
 
-Every external wait goes through this one `recv`/`terminate` shape — the
-interactive REPL foreground included. ral does not suspend
+- `Owns`: a child leading its own group, with no anchor, is signalled and
+  killed whole (`Group::Owns`).
+- `Joins`: a child that joined a pipeline's group from inside a stage thread
+  (`Group::Joins`) is addressed by pid, and opens with a grace signal only for
+  a cause `Membership::owes`: one stronger than the stage's scope holds, every
+  cause the stage holds being one the pipeline's owner delivers to the whole
+  group once.
+- `Shares`: a child in ral's own group is addressed by pid, never with
+  `kill(-pgid)`. It is owed every cause but `Interrupted`: Ctrl-C reached it
+  from the terminal, and it gets no second copy by pid.
+
+**One teardown, in a fixed order.** `cancel_all` writes the cause on every live
+stage, sends the grace signal once per address (a group's is followed by
+`SIGCONT`), waits the grace out a slice at a time, then kills the group or pid
+*and* each live stage's guest-jail cgroup, and only then drains. Pumps are
+joined after the kill, in settlement
+([[invariants/a-teardown-kills-before-it-joins|a-teardown-kills-before-it-joins]]);
+a collector dropped mid-flight kills and joins nothing, detaching its pumps. On
+Windows an owned `Job` is the group: its `drain` kills it once under a cause,
+and its `Drop` releases it.
+
+Every external wait goes through this one `recv`/`cancel_all` shape, a lone
+command's included (it is a pipeline of one, `join_lone`), the interactive
+REPL foreground included. ral does not suspend
 ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]): a stop
 never reaches this channel at all, since the reaper answers it with
 `SIGCONT` on its own before any subscriber sees one — a stop is never itself
@@ -455,17 +475,16 @@ record: no `try` sees it.
 
 ### Attribution
 
-A child's death passes through `WaitOutcome::classify(cause, enveloped)`,
-which yields a transient `ChildEnd`: `Failed(CommandFailure)` or
-`Cancelled(CancelCause)`, and `Break::of_child` maps the second to
-`Break::stopped` carrying the join of the current scope, exactly as a poll
-point does. `cause` is the strongest in force on the *current scope* when the
+A child's death passes through `command::ending`, which asks
+`WaitOutcome::cancelled_by(cause)` whether it was a cancellation; if so
+`Break::cancelled` makes it a stop carrying the join of the current scope,
+exactly as a poll point does, and otherwise it is the child's own failure. `cause` is the strongest in force on the *current scope* when the
 death is observed, not only what ral sent: under a shield a key the tenant
 heard is no cause, and the death is a failure.
 
 **A death is a cancellation iff it is by a signal of a cause in force.**
-`WaitOutcome::death(enveloped)` is the one reader of a death — a signal
-death's signal, or an enveloped `Exited(128 + n)`'s `n` — and the death is
+`WaitOutcome::death` is the one reader of a death, a signal
+death's signal, and the death is
 `cause`'s iff that signal lies in `signals_of(cause)`: the cause's
 `grace_signal`, its key `gesture_signal`, and the kill that ends every
 teardown — one function over the platform's three tables. With no cause in
@@ -490,8 +509,10 @@ lent the key reaches the tenant's group and never ral, so the loan hears it
 back from the tenant — `TerminalLoan::hear` — and **strikes it on the node it
 was lent for (`Mooring::home`) as it hears**:
 
-- a **lone command** is heard at `reclaim`, the instant it is dead, from its
-  own `death`; `command.rs` then reads the *current scope* once, so Ctrl-C
+- a **lone command** is heard at `reclaim`, the instant it is dead and before
+  its pumps are joined ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]),
+  from its own `death`, no anchor having reported a key;
+  its collector then reads the *current scope* once, so Ctrl-C
   ends the command stopped with `Interrupted` and the run is stopped — unless
   a shield masks it, when the death is the command's own `` `process [.., failure: `signaled 2] ``
   and the stop follows at the cleanup's first poll after the grace;
@@ -506,7 +527,7 @@ The node the loan strikes is always the run's own, never the current scope:
 neither a stage's child nor a stage's pipeline is lent, so the strike reaches
 every stage through the chain and the run's closing poll alike. What the loan
 cannot settle is an external inside a *stage body*: a `Joins` member whose
-waiter reads its scope as the reaper posts its death, racing the strike.
+collector reads its scope as the reaper posts its death, racing the strike.
 Lose the race and the stage reads `` `signaled 2 `` — a failure ranking under
 the stop the run's own poll then raises, so the run stops either way.
 

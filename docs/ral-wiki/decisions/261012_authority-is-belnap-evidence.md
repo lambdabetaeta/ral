@@ -3,7 +3,7 @@ status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 verified_at_date: 2026-10-25
-anchors: [Evidence, Meet, Join, Axis, Fragment, ExecGrant, Table, Withheld, ExecDenial, Refused, join_top, extend, places, GrantStack]
+anchors: [Evidence, Meet, Join, Axis, Fragment, Table, Withheld, ExecDenial, Refused, join_top, extend, places, GrantStack]
 ---
 
 # Authority is Belnap evidence
@@ -539,3 +539,10 @@ at decode, and also holds its position, so a new name for that object and
 whatever is put at its old name are both caught. `FsRefusal` is `Refused`
 (`Guarded`, `Withheld`); `ExecScope` and `FsScope` are the two `Table`
 instances' key types, `ExecAllow`/`ExecDeny` and `FsAllow`/`FsDeny`.
+
+**Amended 2026-11-07 by [[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]
+and [[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]].**
+"`every` is a flag on `ExecGrant`" and `Capabilities::extend` read: no grant
+spells every program, `Any` is what `ExecRules::join_top` makes, and
+`GrantLayer::extend` consumes the `Fragment`. `ExecGrant` and `Capabilities`
+survive as a test builder only; a grant is a grant value, decoded where it lands.

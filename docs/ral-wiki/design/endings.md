@@ -81,7 +81,7 @@ carets or compact reports; `Panic` draws spanless `run panicked: …`.
 **A failure that reports success is unrepresentable.** Two traits split the
 family by whether success is in range. `FailureCode::failure_code(&self) ->
 NonZeroU8` belongs to what can only fail: `CancelCause`, `Stop`,
-`SpawnFailure`, `CommandFailure`, `Reason`, `Error`, `ErrorRecord`.
+`Failure`, `Reason`, `Error`, `ErrorRecord`.
 `ExitCode::code(&self) -> u8` belongs to what may succeed: an `Ending` (`0`,
 the failure's code, the chosen exit byte, the cause's code, or 101) and a
 `Break`. `Report::code` delegates for `Ran` and reads the nonzero status of
@@ -95,9 +95,9 @@ the failure's code, the chosen exit byte, the cause's code, or 101) and a
 | `raise e` | closed record, trusted unchanged; refuse a failure of `exited 0` and signals outside `1..=127` |
 
 - The clamp's floor is **1**, not 0: Windows `NTSTATUS` read as `i32` may be
-  negative, and a failed command must not become success. `CommandFailure`
-  keeps its raw `i32` for the message, `Failure::Exited` and denial/limit
-  hints; those hints read the raw reason, never `code`.
+  negative, and a failed command must not become success. `Failure::Exited`
+  keeps its raw `i32` for the message and the denial/limit hints; those hints
+  read the raw reason, never `code`.
 - **One failure-code table lives on `Reason`.** `Error`, `ErrorRecord` and
   process failures delegate to it, `process` through `Failure`: `exited` clamps, `signaled` gives 128+s,
   `not-found` 127, `not-runnable` 126, `timed-out` 124, `cancelled` 143,
@@ -114,7 +114,9 @@ the failure's code, the chosen exit byte, the cause's code, or 101) and a
   the two command-audit observers read `Break`'s `code`.
 - Signal handlers call `failure_code` without allocation or locking, widening
   only at `_exit`/`ExitProcess`. `Failure::Signaled` projects `128 + n` through
-  `failure_byte`; `Signal::of_status` decodes an envelope's raw status.
+  `failure_byte`; `Signal::of_status` (bounded to `1..=SIGRTMAX`) decodes a status
+  to a signal only where a supervisor left no word
+  ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
   The utility subprocess's own `i32` clamp in
   `core/src/uutils.rs` is outside the shell ending family and is unchanged.
 

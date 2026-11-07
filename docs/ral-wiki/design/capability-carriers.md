@@ -16,25 +16,30 @@ rule*. Stack all the active rules, intersect them, and surely you get one tidy
 rule you can check everything against? You don't — because whether a given action
 is allowed depends on things no written rule can hold.
 
-## `Capabilities` — the rule you write
+## The grant value: the rule you write
 
-This is permission as *language*: "allow `git`, but only `status` and `log`; let
-me read my home directory but not write it." Two features make it a rule and not
-yet a decision. It can be **silent** — say nothing about the network — so that
-several rules can be layered and combined without each having to mention
-everything. And it can be **composed**: stack two rules and the result is a third
-rule of the same kind. It is the input — what an author writes and what
-[[design/grant|`grant`]] layers narrow. Everything downstream is what becomes of
-it.
+This is permission as *language*: "allow `git`; let me read my home directory but
+not write it." It is a record of tagged values, the *grant value*, and it is what
+an author writes, what [[design/grant|`grant`]] layers narrow, and what a host
+sends another. Two features make it a rule and not yet a decision. It can be
+**silent**, saying nothing about the network, so that several rules can be layered
+without each having to mention everything. And it is **spellings, not
+positions**: `` `cwd src `` means nothing until some host resolves it, so it
+crosses a boundary as data and is decoded where it lands
+([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]).
+Its decoding is a `GrantLayer`, which is already a decision about positions;
+`Capabilities` is only a test builder that spells a grant value. Everything
+downstream is what becomes of the decoded layer.
 
 ## The live judgment — not a smaller rule
 
 You might expect "combine the whole stack into one rule" to produce another
-`Capabilities`. It can't, because the real question — *is this exact action
+layer. It can't, because the real question — *is this exact action
 allowed, right now?* — turns on details a written rule does not contain:
 
-- **the exact command** — "allow `git`, only `status`" cannot be boiled down to a
-  list of files or programs; it depends on the literal words you typed.
+- **the exact program**: a bare name such as `git` means whichever file `PATH`
+  finds, and a program is judged by the file that will run; a rule about it cannot
+  be boiled down to a list of files without choosing one environment.
 - **who is asking, and from where** — the same rule means different concrete
   things checked inside the locked-down sandbox versus outside it.
 - **where paths really point** — symlinks and `..` have to be resolved against

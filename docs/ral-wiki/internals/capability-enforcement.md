@@ -85,8 +85,8 @@ layer reads its own prefixes and the run places of the exec meet over itself
 and the layers beneath it, so pushing a layer appends a conjunct and changes
 none beneath it.
 
-There is no `Capabilities::meet`, because an authored `ExecGrant` is not closed
-under intersection: a bare key means whatever file the decoding env's `PATH` finds
+There is no meet of two layers into a layer, because authored exec keys are not
+closed under intersection: a bare key means whatever file the decoding env's `PATH` finds
 ([[decisions/260906_object-not-name|object-not-name]]). So a layer is resolved
 where it is decoded, and the fold meets what it holds. A `GrantLayer` keeps its
 rules and nothing beside them: every spelling was walked as the layer was made

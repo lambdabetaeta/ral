@@ -110,7 +110,7 @@ application, which is no observation at all.
   — emits from `call_external` (`shell/exec/dispatch.rs`), which wraps the whole
   dispatch and so covers a spawn failure too, since that never reaches
   `wait()` (the card derives ok/bad from the status directly; a spawn failure
-  carries the synthesized 127/126/… code). `detach` (`shell/exec/command/detach.rs`)
+  carries its failure's code, 127/126/…). `detach` (`shell/exec/command/detach.rs`)
   is the second site, and the one that surfaces at the spawn rather than the
   wait: a surrendered process is never waited for, so its observation carries
   `` origin: `detached `` and status `0` meaning *exec'd*, not *succeeded*. A

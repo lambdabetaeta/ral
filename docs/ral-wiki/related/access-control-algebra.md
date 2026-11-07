@@ -2,7 +2,7 @@
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 002c654a
 verified_at_date: 2026-10-13
-anchors: [GrantStack, Capabilities::extend, Fragment, Axis, join_top, Evidence, Table::meet, Table::withheld, region, rules, for_invocation]
+anchors: [GrantStack, GrantLayer::extend, Fragment, Axis, join_top, Evidence, Table::meet, Table::withheld, region, rules, for_invocation]
 against: [design/grant, design/authority-tables, internals/capability-enforcement, design/two-enforcers, decisions/260906_object-not-name]
 ---
 
@@ -31,7 +31,7 @@ Every rule does one of three things to a given command or path: **allow** it,
   layer of the `GrantStack`, and every question folds the layers' answers to the
   access at hand. Nothing flattens two layers into one (see below).
 - **extend** (`--extend`): *join*. The ceiling is the base extended once by the
-  file's fragment (`Capabilities::extend`), producing one layer. Every later
+  file's fragment (`GrantLayer::extend`), producing one layer. Every later
   layer restricts, so **authority is a ceiling, extended once, then only
   restricted**; within ral there is no extension at all.
 
@@ -87,8 +87,8 @@ A PBel policy is total, so an omitted axis must denote something: the identity
 of the role it plays. In a **policy** (a base, a restriction layer, the ceiling,
 the stack) an omitted axis is `t`: it restricts nothing. In an **extension
 fragment** an omitted axis is `⊥`: it states nothing. The two roles are two
-types: `Capabilities` is a policy and the loader returns a `Fragment`, which only
-`Capabilities::extend` consumes and which can never be pushed onto a stack.
+types: `GrantLayer` is a policy and the loader returns a `Fragment`, which only
+`GrantLayer::extend` consumes and which can never be pushed onto a stack.
 Reading an omission in the wrong role is a type error, not a convention.
 
 Extension of base `B` by fragment `F` is `B ◁ F`, per axis:
@@ -253,9 +253,10 @@ built by `join_top` over a fragment of exclusions.
   conjunct per layer and `↓(S ∧ R)` permits nothing `↓S` did not (restriction attenuates).
   Pairing of run places looks *down* the stack, so a pushed layer changes no
   layer beneath it.
-- **extend**: `Capabilities::extend` applies `◁` per axis through
+- **extend**: `GrantLayer::extend` applies `◁` per axis through
   `Axis::{join, join_top}`, over a `Fragment` the loader alone constructs. On
-  exec, `join_top` sets `every` and keeps allowances beside it, so they name run
+  exec, `join_top` puts `Any` among the allows, the one origin of "every program"
+  ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]), and keeps allowances beside it, so they name run
   places without restricting; verbs join by union, fs by union of lists, net by
   `Offline`.
 - **at the point of use**: `GrantStack::admit` and the fs guard
@@ -263,7 +264,7 @@ built by `join_top` over a fragment of exclusions.
   by `Table::withheld`, which cites an exclusion that applies or names the missing
   permission. Any layer's exclusion excludes; any layer's missing allowance
   refuses.
-- **activation**: `Capabilities::is_restrictive` asks each axis whether it
+- **activation**: `GrantLayer::is_restrictive` asks each axis whether it
   denotes `t` (`Axis::is_top`), so a layer that restricts nothing activates
   nothing.
 

@@ -2,7 +2,7 @@
 generated_at_commit: fea8d9f0
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-03
-anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
+anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -13,8 +13,9 @@ instead: the utility and its descendants keep the jail and VM perimeter, but
 receive no per-grant fs/exec projection. Seccomp and, when requested, offline
 network namespaces still apply there.
 
-When `build_launch` (`shell/exec/command/process.rs`) spawns an admitted external or bundled child
-on a host under a restrictive projection, it calls `sandboxed_command`
+When `prepare` builds the launch of an admitted external or bundled child
+(`build_launch`, `shell/exec/command/process.rs`) on a host under a restrictive
+projection, it calls `sandboxed_command`
 (`authority/sandbox/launch.rs`), which confines that one child. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
 
@@ -23,12 +24,15 @@ after `apply_env`, before `limit_resources`. `pre_exec` hooks run in registratio
 order: session limits set only the soft ceiling, preserving the hard ceiling;
 a grant sets soft and hard together afterward and therefore wins. ral's own
 resource limits never change.
+The grant's limit is part of the launch, applied inside the platform's spawn
+([[invariants/a-process-limit-binds-before-the-child-runs|a-process-limit-binds-before-the-child-runs]]).
 
 ## One confinement point per platform
 
 - **Linux hosts** wrap the child in bwrap ([[internals/linux-envelope|linux-envelope]]).
-  The trampoline `execve`s the host file by the real path the guard judged, as
-  macOS does; a `#!` script therefore sees that path as `$0`.
+  The trampoline runs the host file by the real path the guard judged, as macOS
+  does, but as its supervised child and not in its own place; a `#!` script
+  therefore sees that path as `$0`.
 - **macOS** re-execs a small launcher, `ral --warrant`. The warrant carries the
   Seatbelt profile, compiled in the parent, and the program to become: a host
   file, by the real path the guard judged and with the user's spelling as
@@ -46,9 +50,11 @@ resource limits never change.
 
 ## The child is handed its confinement on a descriptor
 
-**Both Unix host backends re-exec ral as `ral --warrant <fd>`, and that argv
-names only a descriptor.** The confinement and the program arrive in a
-`Warrant` the parent compiled, on that descriptor.
+**Both Unix host backends re-exec ral as `ral --warrant <w> <r>`, and that argv
+names only two descriptors.** The confinement and the program arrive in a
+`Warrant` the parent compiled, on the first; the second is the launch's report
+socket, on which the trampoline says what became of the program
+([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]).
 
 - **No other process can write the channel.**
   - On Linux it is a sealed memfd. A same-uid process may reopen any descriptor
@@ -69,14 +75,52 @@ names only a descriptor.** The confinement and the program arrive in a
   nothing is `dup2`'d, so no descriptor the child still needs (`std`'s
   exec-error pipe, `detach`'s handshake) can be displaced. Each number is
   named as data: to bwrap in its options, the ruleset's in the warrant,
-  the warrant's in argv. Once confined, the child closes everything from 98
-  up, so the program inherits none, and a `Kept` launch's read of
-  `--info-fd` ends: the payload's group exists.
+  the warrant's in argv. The report socket's writer crosses at its own slot.
+  Once confined, the child closes every descriptor above stderr but the
+  report's and marks that one close-on-exec, so the program inherits none, and a
+  `Kept` launch's read of `--info-fd` ends: the payload's group exists.
 - **`serve_warrant` runs before `authority::sandbox::boot`.** The trampoline pins and
   opens nothing before it is confined.
-- **Exit codes are honest.** A failure before the program starts exits 126, a
-  missing program 127. An `execve` refusal takes its code from the same
-  `SpawnFailure` the in-process spawn uses.
+- **The trampoline testifies; it does not exit with a verdict.** A failure
+  before the program starts is a `refused` record, a program that cannot start
+  an `unstarted(errno)` that the parent words as an unconfined spawn's failure.
+  A confined program that cannot start is `not-found` or `not-runnable`, never
+  `exited 127` or `exited 126`. The trampoline prints nothing once it holds a
+  report socket; the parent words what it is told. Only a call that names no
+  report socket, made by hand, is refused on stderr.
+
+## The trampoline testifies, and on Linux supervises
+
+**The parent believes only what the report says, and hears the first word
+before it believes the program started.** The life of a launch from the parent's
+side is [[internals/an-external-end-to-end|an-external-end-to-end]]; this is the
+trampoline's. Its code is `core/src/authority/sandbox/warrant/trampoline.rs`;
+`warrant.rs` is the codec and the handoff only, and the warrant carries the
+`Image` verbatim.
+
+- **The records** are `refused(message)`, `unstarted(errno)`, `started` and
+  `ended(status)`. `refused` is the warrant's failure to be received or its
+  confinement to be entered: nothing ran. `unstarted` is the program's own
+  spawn or `execve` failing once the confinement was entered. `started` and
+  `ended` are Linux's.
+- **On macOS the trampoline becomes the program**: a host file is `execve`d in
+  place, and the report's close-on-exec writer closing is the start; a bundled
+  tool runs here, after the report is dropped. The program keeps the child's
+  pid and its exact wait status.
+- **On Linux the trampoline is a supervisor.** It spawns the host file as its
+  child, or forks the bundled tool, says `started`, waits, says `ended` with the
+  exact status, and exits with the program's code or `128 + n`. It never
+  `execve`s, and it is single-threaded up to the fork of a tool. A confined
+  `SIGSEGV` is `signaled 11` and an `exit 139` is `exited 139`.
+  [[invariants/a-supervisor-never-execs|a-supervisor-never-execs]] states the
+  rule and what the supervisor does about signals, its program's death with it,
+  and the forked tool's start; the choice is
+  [[decisions/261107_the-trampoline-is-a-supervisor|the-trampoline-is-a-supervisor]].
+- **The ending is amended at the reaper**, from the testimony the child's
+  handle carries
+  ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
+- **A stop ends the wait for the first word**, and the child is discarded
+  ([[invariants/a-first-word-is-waited-for-under-the-scope|a-first-word-is-waited-for-under-the-scope]]).
 
 ## Failing closed is the whole stance
 
@@ -196,16 +240,24 @@ the refusal says the sandbox is why** (`authority::sandbox::Refusal::Unavailable
 
 - **Some causes show only at spawn.** On Linux the envelope is bwrap, a host
   package, and a host without it fails at the spawn with `ENOENT`.
-- **The `ENOENT` is the envelope's, never the target's.** `vet` has already
-  found the target on `PATH`, and an envelope execs its target itself,
-  reporting a missing one as an exit status. So under an active projection a
-  spawn-time `NotFound` can only be the envelope's, and `spawn_error` says so.
-  Reading it as the target's would accuse the one program known to exist, and
-  make a host without bubblewrap look like a grant that denies everything.
-- **The launch records which envelope it execs** (an `Envelope`, read back by
-  `Launch::confinement`). Only a backend whose envelope is a separate binary
-  sets one; Windows has none. Blame is read off
-  what the launcher did, not re-derived from the shell's state.
+- **A launcher that fails to exec is the envelope's failure, never the
+  target's.** `prepare`'s probe has already found the target on `PATH`, and an envelope
+  execs its target itself, reporting a target that cannot start as an
+  `unstarted(errno)`. So a spawn error of a confined launch's launcher, `ENOENT`
+  included, is `Refused`, worded as the sandbox being unavailable
+  (`unforked`, on an `Exec` failure; a `Prepare` failure is ral's own whatever
+  the launcher). Reading it as the target's would accuse the one program
+  known to exist, and make a host without bubblewrap look like a grant that
+  denies everything
+  ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
+- **An envelope that ends before its trampoline speaks is a refusal too**,
+  worded with whatever it left on the command's stderr (`vanished`):
+  on Linux, EOF on the report before any record.
+- **The launch records which envelope it execs** (an `Envelope`, held in its
+  `Confined` beside the report and the scope, and read back by
+  `Confined::launcher`). Only a backend whose envelope is a separate binary sets
+  one; Windows has none. Blame is read off what the launcher did, not
+  re-derived from the shell's state.
 - **An offline request on a backend that cannot enforce it** fails closed at
   the spawn (`projection_enforceable`).
 

@@ -54,7 +54,7 @@ runtime, System C lifts the same structure into types, toggled term-by-term.
   ([[design/grant|grant]]) — but ral has no single artifact to order: a
   bare-name `exec` literal's meaning depends on where it resolves, so
   `(dirs, literals)` is not closed under intersection and there is no
-  `Capabilities::meet` flattening two grants into a third. The `GrantStack`
+  meet flattening two grants into a third. The `GrantStack`
   holds each pushed layer instead, and a verdict folds the layers' answers only
   at the concrete access, where the question is closed
   ([[decisions/260906_object-not-name|object-not-name]]). The one place a

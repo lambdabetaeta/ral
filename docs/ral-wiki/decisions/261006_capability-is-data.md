@@ -3,7 +3,7 @@ status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
 verified_at_date: 2026-10-27
-anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, PolicyError, Denial, Refusal, refused, record_check, Shell::freeze_ctx, decode_capability_map, SpawnGrant]
+anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, PolicyError, Denial, Refusal, refused, record_check, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, SpawnGrant]
 ---
 
 # Capability is data; the guard and the sandbox are its two consumers
@@ -110,3 +110,9 @@ that took a `Context`.
 
 **Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `respelled` is `MatchedBy` on
 `Withheld::Excluded`: `Name`, `FoldedName` or `Identity`.
+
+**Amended 2026-11-07 by [[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]].**
+`decode_capability_map` is the one front-end for every grant, authored in ral or
+by a host: `Shell::decode_grant` is it against the receiving shell's own anchor
+(`shell/grant/decode.rs`). `Capabilities` is a test builder that spells a grant
+value, not a route into a layer.

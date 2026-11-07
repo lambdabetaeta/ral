@@ -65,9 +65,9 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 35): checked at `Attach`; a mismatch refuses.
-  `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
-  sequences; guest media must be rebuilt with `just vm::boot`.
+- `PROTOCOL_VERSION` (currently 38): checked at `Attach`; a mismatch refuses.
+  An engine's ceiling rides `Root.config` as a grant value, decoded where it
+  lands; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
   against the `proto_version=` line `media-manifest` compiles into the guest
   media; `check-media`, tauri's `beforeBuildCommand`, refuses to package media

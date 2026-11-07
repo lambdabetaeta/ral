@@ -47,7 +47,10 @@ walk as it freezes it. In doing so it:
 - **classifies** an `absolute` payload on the raw string, before any folding,
   host first, so one profile loads on both platforms: a path absolute under the
   host's rules is live, one absolute only under the other platform's is a *dead
-  grant* (`place` answers `None`), and one absolute under neither is refused.
+  grant* (`place` answers `None`), and one absolute under neither is refused. The
+  root is the raw `/`, tested before this classification
+  (`FreezeCtx::walked`, `Placed::Root`), so it is `Extent::Everywhere` on every
+  host;
   A well-formed forward-slash UNC `//server/share/x` is live on both; `\x`,
   `C:x` and malformed UNC roots (`\\` or `//` with no server and share) name
   no path anywhere. Host folding would
@@ -70,7 +73,13 @@ walk as it freezes it. In doing so it:
   readers answer `Option`, and the reason the place cannot be frozen is the
   reason the author is given;
 - **rejects** a `` `gitdir `` whose `.git` pointer file names a directory that
-  does not name the working tree back.
+  does not name the working tree back;
+- **rejects** an exec file key that names a directory, the root included
+  (`file_rules`, `PolicyError::root_program`), so the author is told to write
+  `` `dir ``; a `` `name `` that is path-shaped, since a name is a command name and
+  a path is a place (`bare_name`, judged under Windows rules on every host); and
+  an exclusion of the root, or of a link to it (`Polar` for `Excluded`,
+  `authority/grant/paths.rs`), which would exclude every path.
 
 A bare string or a relative path is no place at all: the checker refuses it
 before the program runs, and the decoder refuses it again for a value that
@@ -78,10 +87,22 @@ arrived untyped. Authors write `` `cwd sub `` to pin "relative to here" once.
 
 The inline grant, profile loader (`core/src/shell/load/profile.rs`) and
 spawn grant (`core/src/shell/grant/spawn.rs`) share this decoder, and so does
-every grant value a host authors (synod's ceiling, exarch's carve-outs,
-`deny_all`), through `Shell::decode_grant` or the decoder itself; `root` /
-`default` construct path-free layers. So *resolved by construction* is
-a visibility fact, not a discipline: no surface admits an unresolved layer.
+every grant value a host authors, through `decode_grant`, `decode_fragment` or
+`Shell::decode_grant` (the only public entries; `decode_capability_map` is
+crate-private): synod's ceiling and exarch's boot grant (`engine_root`,
+`exarch/src/boot.rs`), exarch's carve-outs (`carve_out`,
+`exarch/src/policy.rs`) and `GrantValue::deny_all` (`evaluate_no_authority`,
+`exarch/src/config.rs`). A host spells a grant value only by encoding typed
+`Axes` into a `GrantValue` (`authority/grant/value.rs`); `Capabilities` is a test
+builder over the same (`authority/grant/builder.rs`, `test_helper::decoded`). `root` / `default` construct path-free
+layers. So *resolved by construction* is a visibility fact, not a discipline: no
+surface admits an unresolved layer, and no second route has laxer refusals
+([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]).
+
+**No grant spells "every program".** An `exec` record has `allow` and `deny`;
+`Any` arises only by extending an omitted exec axis (`t ⊕ fragment`,
+`ExecRules::join_top`), as `--extend` and exarch's carve-outs do
+([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
 
 ## What decode pins, and what the access resolves
 
@@ -98,15 +119,22 @@ the walk's to say, once. That makes the algebra a pure function of the layers.
 - **An exclusion is the object its spelling reached.** `walk_excluded` holds the
   object and, where it was a link, its target; the exclusion matches by position
   or by that object, so it holds under any new name the object gets, and a link
-  retargeted later is still the denied link. A bare program name is resolved
+  retargeted later is still the denied link. Its positions are asked of it in one
+  vocabulary: `Excluded::holds` for every position it holds (matching, the Unix
+  projection, Landlock's walk) and `Walked::followed` for where an access lands
+  (the decoder's refusals, Windows placement and `carve`)
+  ([[invariants/an-exclusion-is-located-in-one-vocabulary|an-exclusion-is-located-in-one-vocabulary]]). A bare program name is resolved
   where the grant is decoded, on the decoding environment's `PATH`, absolute
   entries alone.
 - **Resolving refuses a path that is not Unicode** where it is a spelling
   (`FrozenPath::freeze`); a position is kept native and byte-exact.
 - **A guest's grant is resolved on the guest's own filesystem, not the host's.**
   synod sends it as a grant value, unfolded, in the guest engine's
-  `Root.config`; the engine decodes it where the guard that matches it runs. Spellings cross hosts, a position or an identity
-  never does ([[design/authority-tables|authority-tables]]).
+  `Root.config`; the engine decodes it (`Shell::decode_grant`) where the guard
+  that matches it runs, against the engine's own anchor, so `cwd` and `scratch`
+  places work in the ceiling and name the engine's own. Spellings cross hosts, a
+  position or an identity never does
+  ([[design/authority-tables|authority-tables]]).
 - **The access is walked before matching.** A grant of
   `` read: [`home sandbox] `` is not escaped by a `~/sandbox/leak → /etc/passwd`
   link the body plants once the grant has taken force: the walk lands on

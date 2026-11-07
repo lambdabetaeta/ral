@@ -53,7 +53,12 @@ evidence, and what it cost, is
   firmlink-aware; identity is not transitive, and positive containment must be,
   so an allowance cannot hold by identity: the two readings are two traits on
   two types ([[invariants/grants-judge-objects|grants-judge-objects]],
-  [[internals/path-judgment|path-judgment]]).
+  [[internals/path-judgment|path-judgment]]). An exclusion's positions are asked
+  of it in one vocabulary, `Excluded::holds` (every position it holds: matching,
+  the Unix projection, Landlock's walk) and `Walked::followed` (where an access
+  lands: the decoder's refusals, Windows placement, `carve`), so no consumer
+  recomputes where a deny lies
+  ([[invariants/an-exclusion-is-located-in-one-vocabulary|an-exclusion-is-located-in-one-vocabulary]]).
 - **Own subject.** `k̂ = k.own()` is the subject an allowance is itself judged
   at: a prefix's position, a directory's inside, a file itself, a tool's name.
 
@@ -122,7 +127,7 @@ and both instances meet:
 
 Prefixes, run places, tools and `Any` satisfy them; `Name` is negative only.
 Each scope has one polarity by its type, not by masking: a `Name` veto is an
-`ExecDeny` and `Any` an `ExecAllow`, and `every` has no negative form. A future
+`ExecDeny` and `Any` an `ExecAllow`, and `Any` has no negative form. A future
 positive scope that does not nest needs an explicit intersection first.
 
 *Proof sketch.* Fix `s`.
@@ -240,8 +245,8 @@ the loader returns a `Fragment`, and a `Fragment` is consumed only by
 
 `B ◁ F`, per axis: any `B` with omitted `F` is `B`; omitted `B` with supplied
 `Q` is `t ⊕ Q`, every request less `Q`'s exclusions (`Axis::join_top`); supplied
-`P` with supplied `Q` is `P ⊕ Q`. On exec, `join_top` sets `every` and keeps
-`Q`'s allowances, which change nothing about running but still name run places.
+`P` with supplied `Q` is `P ⊕ Q`. On exec, `join_top` puts `Any` among the allows
+and keeps `Q`'s allowances, which change nothing about running but still name run places.
 The shape of every enforced policy is `↓(E₀ ∧ E₁ ∧ … ∧ Eₙ)`: `E₀` elaborates
 the ceiling `B ◁ F`, each `Eᵢ` a restriction, every `⊕` before every `∧`.
 
@@ -400,17 +405,21 @@ reads the resolved one.**
 - The `exec` record of a grant value, `allow` and `deny` lists of targets:
   the grant *as written*. Targets carry no polarity: membership in both lists
   supplies Both. No grant spells every program; `Any` is what extending an
-  omitted exec axis makes, and it has no negative form, so "every program"
-  can never be excluded. (`ExecKey`/`ExecGrant` are a test builder that
-  spells such a record.)
+  omitted exec axis makes (`join_top`), and it has no negative form, so "every
+  program" can never be excluded
+  ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
+  (`ExecKey`/`ExecGrant` are a test builder that spells such a record; a host
+  spells one only by encoding `ExecTable`.)
 - `ExecAllow` and `ExecDeny`: the grant *resolved where it is decoded*
   (in `authority::grant`): a bare name becomes the bundled tool of that name,
   the file the decoding environment's `PATH` finds and, for negative evidence
   alone, a `Name` veto; a path key a `File`, a dir key a `Dir`. A key walks
   as its polarity walks: the positive bit to the position it reached, the
-  negative to the objects it held. `decode_capability_map` walks `allow`
+  negative to the objects it held. The decoder (`decode_capability_map`) walks `allow`
   at `Trace` and `deny` at `Excluded`; a key in both lists yields both
-  entries.
+  entries. The decoder refuses a file key naming a directory, a path-shaped name
+  and an exclusion of the root, on every route a grant arrives by
+  ([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]).
   A name found nowhere makes no allowance and keeps its
   veto. The veto carries only the negative bit, since a
 positive one would assert support for every executable sharing the basename: an

@@ -4,7 +4,7 @@ amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calcu
 generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
 verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 verified_at_date: 2026-10-25
-anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Net, EditorVerb, ShellVerb, Holds, ExecGrant, Flag, drain_nested]
+anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, Net, EditorVerb, ShellVerb, Holds, Flag, drain_nested]
 ---
 
 > **Amended 2026-11-02** by
@@ -480,8 +480,8 @@ Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds
 ## Where
 
 `authority::grant::freeze` (`Place`, `Selector`, `FreezeCtx::place`, `FreezeCtx::selector`),
-`shell::grant` (`decode_capability_map`, `Shell::freeze_ctx`),
-`authority::policy::lattice` (`Net`, `EditorVerb`, `ShellVerb`, `Flag`, `ExecGrant`),
+`shell::grant` (`decode_capability_map`, `Shell::decode_grant`, `Shell::freeze_ctx`),
+`authority::policy::lattice` (`Net`, `EditorVerb`, `ShellVerb`, `Flag`),
 `typecheck::contract` (`Holds`, `drain_nested`). See [[design/grant|grant]],
 [[design/capability-freeze|capability-freeze]],
 [[design/two-enforcers|two-enforcers]] and `docs/SPEC.md` §12.
@@ -490,3 +490,10 @@ Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds
 predicate: a bare exec name that finds neither a file on the decoding `PATH` nor
 a tool this platform bundles makes no allowance and keeps its veto. The
 decoder returns a resolved `GrantLayer`, not a `Capabilities`.
+
+**Amended 2026-11-07 by [[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]
+and [[invariants/no-grant-spells-every-program|no-grant-spells-every-program]].**
+The typed grant value is also what crosses between hosts, decoded by the same
+walker (`Shell::decode_grant`) and refused alike: a file key naming a directory,
+a path-shaped name, an exclusion of the root. `ExecGrant` and `ExecKey` are a
+test builder that spells such a value; no grant spells every program.
