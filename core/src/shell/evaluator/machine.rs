@@ -903,7 +903,8 @@ impl Machine {
                 self.call(entry.thunk.clone(), args, span, shell)
             }
             Resolution::Base(entry) => {
-                let v = dispatch::run_base_frame(&entry, &argv, &redirs, span, mooring, shell)?;
+                self.push_redirect(&redirs, span, mooring, shell)?;
+                let v = dispatch::run_base_frame(&entry, &argv, span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::External(head) => {
@@ -991,7 +992,6 @@ impl Machine {
             }
 
             Frame::Redirect(state) => {
-                let mut state = *state;
                 state.leave(WriteFate::Commit, mooring, shell)?;
                 Ok(Focus::Return(t))
             }
@@ -1085,7 +1085,6 @@ impl Machine {
             }
 
             Frame::Redirect(state) => {
-                let mut state = *state;
                 let _ = state.leave(WriteFate::Abort, mooring, shell);
                 Err(s)
             }

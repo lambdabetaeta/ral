@@ -95,15 +95,12 @@ impl Shell {
 pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
     args: &[Value],
-    redirects: &Redirects<String>,
     span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     entry.framed(span, shell, |shell, frame| {
-        with_redirects(redirects, span, mooring, shell, |shell| {
-            entry.call_body(frame, args, None, mooring, shell)
-        })
+        entry.call_body(frame, args, None, mooring, shell)
     })
 }
 

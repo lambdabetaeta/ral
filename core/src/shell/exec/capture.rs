@@ -3,35 +3,38 @@
 //! buffer, so the bytes become a value; [`with_audit_capture`] *tees*, so bytes
 //! are recorded and still go where they were going.  A write's destination is
 //! settled where the writer stands, so no byte is ever moved after the fact.
+use super::redirect::Prior;
 use crate::fact::AuditIo;
 use crate::io::{Sink, new_buffer, tee_with_buffer};
 use crate::shell::runtime::Shell;
-use std::mem::{replace, swap};
+use std::mem::replace;
 
 const AUDIT_BUFFER_CAP: usize = 1024 * 1024;
 
 /// Restores the sinks it replaced on `Drop`, panic included.
 struct SinkScope<'a> {
     shell: &'a mut Shell,
-    stdout: Sink,
-    stderr: Option<Sink>,
+    prior: Option<Prior>,
 }
 
 impl<'a> SinkScope<'a> {
     fn enter(shell: &'a mut Shell, stdout: Sink, stderr: Option<Sink>) -> Self {
-        Self {
-            stdout: replace(&mut shell.io.stdout, stdout),
+        let prior = Prior {
+            stdout: Some(replace(&mut shell.io.stdout, stdout)),
             stderr: stderr.map(|sink| replace(&mut shell.io.stderr, sink)),
+            ..Prior::default()
+        };
+        Self {
             shell,
+            prior: Some(prior),
         }
     }
 }
 
 impl Drop for SinkScope<'_> {
     fn drop(&mut self) {
-        swap(&mut self.shell.io.stdout, &mut self.stdout);
-        if let Some(saved) = &mut self.stderr {
-            swap(&mut self.shell.io.stderr, saved);
+        if let Some(prior) = self.prior.take() {
+            prior.restore(self.shell);
         }
     }
 }

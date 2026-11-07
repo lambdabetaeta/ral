@@ -10,6 +10,7 @@ pub(crate) mod scope;
 
 use crate::authority::policy::FsOp;
 use crate::fact::Read;
+use crate::io::{Sink, Source};
 use crate::ir::{StdinSource, WriteMode};
 use crate::path::Kind;
 use crate::path::{Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing};
@@ -168,8 +169,8 @@ impl Shell {
 }
 
 /// Park the stdin redirect — `< file` or the here-string `<< str` — on
-/// `shell.io.stdin`, returning a [`StdinRedirectGuard`] that puts back
-/// whatever `Source` was there.
+/// `shell.io.stdin`, returning the `Source` it displaced, `None` when no
+/// stdin redirect is bound.
 ///
 /// `<< str` drops one leading newline, so a body may start on the line below
 /// the command, and pushes the payload through a pipe from a detached thread:
@@ -183,9 +184,9 @@ pub(crate) fn install_stdin_redirect(
     stdin: Option<&StdinSource<String>>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<StdinRedirectGuard> {
+) -> Settled<Option<Source>> {
     let Some(stdin) = stdin else {
-        return Ok(StdinRedirectGuard::Untouched);
+        return Ok(None);
     };
     let source = match stdin {
         StdinSource::File(path) => {
@@ -193,7 +194,7 @@ pub(crate) fn install_stdin_redirect(
             // First, the READ, recorded eagerly so it precedes the body or
             // exec it feeds, as in `cat < a`.
             shell.observe(mooring, Observed::Read(Read { path: path.clone() }));
-            crate::io::Source::Reader(crate::io::SourceReader::file(f))
+            Source::Reader(crate::io::SourceReader::file(f))
         }
         StdinSource::Here(word) => {
             let body = word
@@ -211,23 +212,32 @@ pub(crate) fn install_stdin_redirect(
                     let _ = writer.write_all(&bytes);
                 })
                 .map_err(|e| Error::io("here-string", &e))?;
-            crate::io::Source::Reader(crate::io::SourceReader::pipe(reader))
+            Source::Reader(crate::io::SourceReader::pipe(reader))
         }
     };
-    let prior = std::mem::replace(&mut shell.io.stdin, source);
-    Ok(StdinRedirectGuard::Installed(prior))
+    Ok(Some(std::mem::replace(&mut shell.io.stdin, source)))
 }
 
-/// Restore-on-exit token for [`install_stdin_redirect`].
-pub(crate) enum StdinRedirectGuard {
-    Untouched,
-    Installed(crate::io::Source),
+/// The streams a redirect scope displaced, `Some` only where it installed
+/// its own.
+#[derive(Default)]
+pub(super) struct Prior {
+    pub(super) stdin: Option<Source>,
+    pub(super) stdout: Option<Sink>,
+    pub(super) stderr: Option<Sink>,
 }
 
-impl StdinRedirectGuard {
-    pub(crate) fn restore(self, shell: &mut Shell) {
-        if let Self::Installed(prior) = self {
-            shell.io.stdin = prior;
+impl Prior {
+    /// Puts each displaced stream back.
+    pub(super) fn restore(self, shell: &mut Shell) {
+        if let Some(s) = self.stdin {
+            shell.io.stdin = s;
+        }
+        if let Some(s) = self.stdout {
+            shell.io.stdout = s;
+        }
+        if let Some(s) = self.stderr {
+            shell.io.stderr = s;
         }
     }
 }

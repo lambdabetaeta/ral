@@ -4,7 +4,7 @@
 //! [`with_redirects`] for a synchronous call; the targets themselves are
 //! closed in `machine::close_redirects`, over the machine's own `Env`.
 
-use super::{OpenedWrite, StdinRedirectGuard, install_stdin_redirect, open_write};
+use super::{OpenedWrite, Prior, install_stdin_redirect, open_write};
 use crate::fact::Write;
 use crate::io::Sink;
 use crate::ir::{Redirects, StderrTarget, WriteMode};
@@ -37,17 +37,10 @@ struct WriteIntent {
 /// [`with_redirects`] calls it itself via `catch_unwind`, for a synchronous
 /// call, which pushes no frame of its own.
 pub(crate) struct RedirectState {
-    stdin_guard: Option<StdinRedirectGuard>,
-    prior: PriorSinks,
+    prior: Prior,
     write_intents: Vec<WriteIntent>,
     /// The redirect's own site: every entry it makes carries it.
     span: Option<Span>,
-}
-
-/// The sinks a frame displaced, `Some` only where it installed its own.
-struct PriorSinks {
-    stdout: Option<Sink>,
-    stderr: Option<Sink>,
 }
 
 /// Opens one fd-1/2 write target as an intent the frame settles.  An open
@@ -134,7 +127,7 @@ fn install_sink_redirects(
     mooring: &Mooring,
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
-) -> Settled<PriorSinks> {
+) -> Settled<Prior> {
     let stdout = redirects
         .stdout
         .as_ref()
@@ -150,9 +143,10 @@ fn install_sink_redirects(
         None => None,
     };
 
-    Ok(PriorSinks {
+    Ok(Prior {
         stdout: stdout.map(|s| std::mem::replace(&mut shell.io.stdout, s)),
         stderr: stderr.map(|s| std::mem::replace(&mut shell.io.stderr, s)),
+        ..Prior::default()
     })
 }
 
@@ -177,21 +171,24 @@ impl RedirectState {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Self> {
-        // The stdin guard restores only when told to, and nothing owns it
-        // until the state exists, so the error arm below undoes it by hand.
-        let stdin_guard = install_stdin_redirect(redirects.stdin.as_ref(), mooring, shell)?;
+        // Nothing owns the displaced stdin until the state exists, so the
+        // error arm below restores it by hand.
+        let stdin = install_stdin_redirect(redirects.stdin.as_ref(), mooring, shell)?;
         let mut write_intents = Vec::new();
         let prior = match install_sink_redirects(redirects, mooring, shell, &mut write_intents) {
-            Ok(prior) => prior,
+            Ok(sinks) => Prior { stdin, ..sinks },
             Err(e) => {
                 // An abort cannot fail to commit.
                 let _ = settle(write_intents, WriteFate::Abort, mooring, shell);
-                stdin_guard.restore(shell);
+                Prior {
+                    stdin,
+                    ..Prior::default()
+                }
+                .restore(shell);
                 return Err(e);
             }
         };
         Ok(Self {
-            stdin_guard: Some(stdin_guard),
             prior,
             write_intents,
             span,
@@ -203,43 +200,37 @@ impl RedirectState {
     /// abandoned on `Abort`, and every write is reported.  Returns the first
     /// commit failure.
     pub(crate) fn leave(
-        &mut self,
+        self,
         fate: WriteFate,
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<()> {
-        self.tear_down(shell);
-        let span = self.span;
-        let intents = std::mem::take(&mut self.write_intents);
+        let Self {
+            prior,
+            write_intents,
+            span,
+        } = self;
+        flush_restore(prior, shell);
         shell.at_site("redirect", span, |shell| {
-            settle(intents, fate, mooring, shell).map_err(|b| b.locate("redirect", span, shell))
+            settle(write_intents, fate, mooring, shell)
+                .map_err(|b| b.locate("redirect", span, shell))
         })
-    }
-
-    /// Flushes, then restores the sinks and stdin. Idempotent: a second call
-    /// sees only emptied slots.
-    fn tear_down(&mut self, shell: &mut Shell) {
-        // Flush before swapping the sinks back, or buffered bytes land at
-        // the parent.
-        let _ = shell.io.stdout.flush();
-        let _ = shell.io.stderr.flush();
-        if let Some(s) = self.prior.stdout.take() {
-            shell.io.stdout = s;
-        }
-        if let Some(s) = self.prior.stderr.take() {
-            shell.io.stderr = s;
-        }
-        if let Some(g) = self.stdin_guard.take() {
-            g.restore(shell);
-        }
     }
 
     /// The panic path: undo the sinks and drop the intents, which unlinks
     /// their staging files. No write is observed: a panic never reaches an
     /// audit trail.
-    pub(crate) fn abandon(mut self, shell: &mut Shell) {
-        self.tear_down(shell);
+    pub(crate) fn abandon(self, shell: &mut Shell) {
+        flush_restore(self.prior, shell);
     }
+}
+
+/// Flush before swapping the sinks back, or buffered bytes land at the
+/// parent.
+fn flush_restore(prior: Prior, shell: &mut Shell) {
+    let _ = shell.io.stdout.flush();
+    let _ = shell.io.stderr.flush();
+    prior.restore(shell);
 }
 
 /// Runs `body` with `redirects` installed, always restoring. Atomic commits
@@ -248,6 +239,9 @@ impl RedirectState {
 /// For a synchronous call: it runs to completion inside one machine step, so
 /// the install/teardown pair needs no frame on the machine's own stack — this
 /// is the whole of its panic safety.
+///
+/// An external runs it inside `call_external`'s audit span, so a redirected
+/// stream's bytes stay out of the `Command` record.
 ///
 /// fd 1/2 route through the shell's `Sink`s, never `dup2`: libtest, the
 /// REPL frontend, and sibling ral threads all share the process-global
@@ -265,7 +259,7 @@ pub(crate) fn with_redirects(
     if redirects.is_empty() {
         return body(shell);
     }
-    let mut state = RedirectState::enter(redirects, span, mooring, shell)?;
+    let state = RedirectState::enter(redirects, span, mooring, shell)?;
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shell))) {
         Ok(result) => result,
         Err(payload) => {
