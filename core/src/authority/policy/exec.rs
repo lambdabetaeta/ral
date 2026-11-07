@@ -1115,11 +1115,10 @@ pub(super) mod tests {
         let Some(ExecDeny::Dir(held)) = denied.denies().next() else {
             panic!("a directory exclusion: {denied:?}");
         };
-        assert_eq!(held.real.named().real().as_path(), blocked.as_path());
-        assert_eq!(
-            held.real.target().map(|t| t.real().as_path()),
-            Some(tools.as_path())
-        );
+        let holds: Vec<_> = (held.real.holds())
+            .map(|hold| hold.trace().real().as_path())
+            .collect();
+        assert_eq!(holds, [blocked.as_path(), tools.as_path()]);
         assert!(denied.evidence(program(&prog)).negative);
         assert_eq!(granted.evidence(program(&prog)), ALLOW);
     }

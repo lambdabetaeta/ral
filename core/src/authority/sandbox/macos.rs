@@ -856,7 +856,9 @@ mod tests {
     fn mac_profile_reads_a_place_as_its_frozen_real_path_and_twin() {
         let tmp = tempfile::tempdir().expect("a temp dir");
         let place = crate::test_helper::real(tmp.path());
-        let forms = crate::path::canon::twins(place.as_path());
+        let forms: Vec<_> = crate::path::canon::twins(place.as_path())
+            .map(std::borrow::Cow::into_owned)
+            .collect();
         let profile = build_profile(&SandboxProjection {
             fs: reading(vec![FsAllow::RunPlace(place)]),
             ..SandboxProjection::default()

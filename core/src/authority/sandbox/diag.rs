@@ -10,6 +10,9 @@
 //!
 //! Windows differs in kind: an `AppContainer` denial carries no audit record at
 //! all, so there the hint is gated on the exit code and never names a path.
+//!
+//! A script refused at its start reads no log: `interpreter_hint` asks the
+//! launch's own projection whether it withholds the `#!` interpreter.
 
 #[cfg(not(windows))]
 use crate::syntax::quote::quote_word;

@@ -19,7 +19,8 @@ pub enum Role {
     GuestEngine,
     /// The process that holds a pipeline's pgid open.
     PipelineAnchor,
-    /// A confined re-exec, whose warrant arrives on a descriptor.
+    /// A confined re-exec, handed its warrant and its report socket on two
+    /// descriptors.
     #[cfg(unix)]
     Warrant,
     /// The bundled-tool multicall.
@@ -69,7 +70,7 @@ pub enum Invocation<'a> {
     /// The jail's cgroup root, validated by the guest role.
     #[cfg(seccomp)]
     GuestEngine(&'a [OsString]),
-    /// The warrant descriptor's argument, validated by the trampoline.
+    /// The warrant's and the report's slots, validated by the trampoline.
     #[cfg(unix)]
     Warrant(&'a [OsString]),
     /// The tool's name, then its arguments.

@@ -101,11 +101,11 @@ impl RealPath {
     /// firmlink twin's names are as spelled.
     pub fn relative_to(&self, root: &Self) -> Option<Vec<EntryName>> {
         let qs = twins(root.as_path());
-        let (p, q) = twins(self.as_path()).into_iter().find_map(|p| {
-            let q = qs.iter().find(|q| within_one(&p, q, Identity::Stored))?;
+        let (p, q) = twins(self.as_path()).find_map(|p| {
+            let q = qs.clone().find(|q| within_one(&p, q, Identity::Stored))?;
             Some((p, q))
         })?;
-        let (own, base) = (normal_names(&p), normal_names(q));
+        let (own, base) = (normal_names(&p), normal_names(&q));
         own.get(base.len()..)?
             .iter()
             .map(|n| EntryName::parse(n).ok())
@@ -281,9 +281,7 @@ fn normal_names(p: &Path) -> Vec<&OsStr> {
 /// two bare paths.
 pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
     let qs = twins(prefix);
-    twins(path)
-        .iter()
-        .any(|p| qs.iter().any(|q| within_one(p, q, identity)))
+    twins(path).any(|p| qs.clone().any(|q| within_one(&p, &q, identity)))
 }
 
 /// `p` starts with `q` under `identity`, spellings taken as given: no alias
@@ -564,7 +562,7 @@ mod tests {
             ("/tmp", Some("/private/tmp")),
         ];
         for (path, alias) in rows {
-            let got = twins(Path::new(path));
+            let got: Vec<PathBuf> = twins(Path::new(path)).map(Cow::into_owned).collect();
             assert!(got.contains(&pb(path)), "{path}");
             match alias.filter(|_| cfg!(target_os = "macos")) {
                 Some(alias) => assert!(got.contains(&pb(alias)), "{path}"),

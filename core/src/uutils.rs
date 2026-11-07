@@ -164,54 +164,28 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     }
 }
 
-/// Why [`run`] ran nothing.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Unbundled {
-    Tool(std::ffi::OsString),
-    Build,
-}
-
-impl std::fmt::Display for Unbundled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            // `{tool:?}`, not `.display()`: `Display` would paper over a name
-            // that is not Unicode with the very U+FFFD substitution it avoids.
-            #[allow(clippy::unnecessary_debug_formatting)]
-            Self::Tool(tool) => write!(f, "{tool:?} is not a bundled tool"),
-            Self::Build => f.write_str("no bundled tools are available in this build"),
-        }
-    }
-}
-
 /// The exit code of bundled `tool` run in this process, the body of a re-exec
 /// child: the `Role::BundledTool` multicall, or a confined warrant once
-/// confined.  A name no tool answers to is said on stderr and is 127.
+/// confined.  A name no tool answers to is said on stderr and is 127; a code
+/// outside a byte is 255.  uucore's exit-code cell is process-global: this
+/// runs only in a process of its own.
 pub(crate) fn serve(tool: &std::ffi::OsStr, args: Vec<std::ffi::OsString>) -> u8 {
-    run(tool, args).unwrap_or_else(|e| {
-        crate::io::terminal::cmd_error("ral", &e.to_string());
-        127
-    })
-}
-
-/// uucore's exit-code cell is process-global: this runs only in a process
-/// of its own.
-fn run(tool: &std::ffi::OsStr, args: Vec<std::ffi::OsString>) -> Result<u8, Unbundled> {
     #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-    {
-        let Some(tool) = bundled_name(tool) else {
-            return Err(Unbundled::Tool(tool.to_os_string()));
-        };
+    if let Some(tool) = bundled_name(tool) {
         // Rust's runtime ignores SIGPIPE, which would turn a write to a closed
         // pipe into an error exit.
         #[cfg(unix)]
         init_signal_dispositions();
-        Ok(u8::try_from(invoke(tool, args).clamp(0, 255)).unwrap_or(u8::MAX))
+        return u8::try_from(invoke(tool, args)).unwrap_or(u8::MAX);
     }
     #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
-    {
-        let _ = (tool, args);
-        Err(Unbundled::Build)
-    }
+    drop(args);
+    // `{tool:?}`, not `.display()`: `Display` would paper over a name that is
+    // not Unicode with the very U+FFFD substitution it avoids.
+    #[allow(clippy::unnecessary_debug_formatting)]
+    let unbundled = format!("{tool:?} is not a bundled tool");
+    crate::io::terminal::cmd_error("ral", &unbundled);
+    127
 }
 
 /// `tool`'s exit code, combining `uumain`'s return with the exit-code cell.

@@ -145,14 +145,6 @@ impl Excluded {
         Self { named, target }
     }
 
-    pub(crate) fn named(&self) -> &Trace {
-        self.named.trace()
-    }
-
-    pub(crate) fn target(&self) -> Option<&Trace> {
-        self.target.as_ref().map(Hold::trace)
-    }
-
     /// Recorded and current positions, deduplicated.
     #[cfg(unix)]
     pub(crate) fn positions(&self) -> Vec<RealPath> {
@@ -213,6 +205,6 @@ impl Walked for Excluded {
 
     /// The link's target, else the object at the name.
     fn followed(&self) -> &Trace {
-        self.target().unwrap_or_else(|| self.named())
+        self.target.as_ref().unwrap_or(&self.named).trace()
     }
 }

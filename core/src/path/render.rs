@@ -162,8 +162,7 @@ pub(crate) fn render_objects<'a>(
 /// would be rendered lossily as a different inode; a grant that cannot be
 /// expressed faithfully is refused, not approximated.
 pub(crate) fn render_real(real: &super::RealPath) -> Result<Vec<Rendered>, String> {
-    let names = std::iter::once(real.as_path());
-    Ok(super::canon::spelled(names)?
+    Ok(super::canon::spelled(real.as_path())?
         .into_iter()
         .map(Rendered)
         .collect())

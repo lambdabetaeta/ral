@@ -4,9 +4,6 @@ include!("../../lint/site.rs");
 /// Sites that raise no card.
 #[derive(Clone, Copy)]
 pub(crate) enum Silent {
-    /// Canonical self path for a role exec'd by /bin/sh; startup infrastructure.
-    #[cfg(unix)]
-    IndirectReexec,
     /// The read of git discovery's `.git` pointer file and the reciprocal
     /// `gitdir` file it names (`freeze::ungoverned`), made at session start to
     /// freeze policy, before any grant exists to govern it.  It raises no card:
@@ -103,9 +100,9 @@ pub(crate) enum Silent {
     /// sandbox exe-pinning infrastructure, not the model's data I/O.
     #[cfg(target_os = "linux")]
     PinOpen,
-    /// The `Command` of the sandbox respawn handoff, built for the confined
-    /// re-exec.  It raises no card: the surface card fired before the
-    /// handoff, so the exec itself raises none.
+    /// The confined program's `Command`, built inside the trampoline once its
+    /// confinement is entered.  It raises no card: the surface card fired
+    /// before the handoff, so the exec itself raises none.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     RespawnSpawn,
     /// The `exec` of the sandbox respawn handoff, which replaces this process
@@ -186,10 +183,10 @@ pub(crate) enum Silent {
     DiffRead,
     /// The exit of a process that has served a re-exec role
     /// ([`crate::invocation::exit_if_served`]): the anchor drains a pipe, and
-    /// the sandbox stage has already exec'd or refused.  Nothing is booted in
-    /// such a process, so no lease, watched child or staged write is left
-    /// behind, and in a `#[ctor]` nothing at all exists yet.  It raises no
-    /// card: no shell exists to raise one.
+    /// the trampoline has refused, or its program has ended or failed to
+    /// start.  Nothing is booted in such a process, so no lease, watched
+    /// child or staged write is left behind, and in a `#[ctor]` nothing at
+    /// all exists yet.  It raises no card: no shell exists to raise one.
     ServedRoleExit,
 
     // The Windows DACL ledger and stamp store.

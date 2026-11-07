@@ -4,8 +4,8 @@
 use super::super::super::trace::{Kind, ObjectId, RealPath};
 use super::super::resolve::{LeafMode, walk_excluded, walk_lenient};
 use super::super::{Held, Judged, Leaf, Located, Sharing, Streaming, Visibility, Writing, host};
-use super::LOOKED;
 use super::unix::{id, located_with, name, root, root_user, spelled};
+use super::{LOOKED, named};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -520,7 +520,7 @@ fn an_exclusion_holds_its_leaf_by_the_walks_own_o_evtonly_descriptor() {
         .unwrap()
         .handle_for_test()
         .expect("the leaf is held");
-    assert_eq!(ObjectId::of(held).unwrap(), excluded.named().last_id());
+    assert_eq!(ObjectId::of(held).unwrap(), named(&excluded).last_id());
     std::fs::remove_file(dir.join("secret")).unwrap();
     assert_eq!(held.metadata().unwrap().nlink(), 0, "the vnode is kept");
 }

@@ -1,7 +1,6 @@
 //! The POSIX login helper's environment report, written and read here.
 
 use super::site::Silent;
-use crate::authority::sandbox::reexec;
 use crate::site::site;
 use nix::sys::signal::{self, SigAction, SigHandler, Signal};
 use std::ffi::OsString;
@@ -66,8 +65,10 @@ fn decode(bytes: &[u8]) -> Option<Vec<(OsString, OsString)>> {
 pub fn collect() -> Result<Vec<(OsString, OsString)>, String> {
     let mut report =
         tempfile::tempfile().map_err(|e| format!("cannot create the environment report: {e}"))?;
-    let exe =
-        reexec::indirect().map_err(|e| format!("cannot locate the environment reporter: {e}"))?;
+    // Canonical, so a `ral-sh` link cannot intercept the reporter.
+    let exe = std::env::current_exe()
+        .and_then(|exe| site!(Silent::ReporterPath, std::fs::canonicalize(exe)))
+        .map_err(|e| format!("cannot locate the environment reporter: {e}"))?;
     let mut command = site!(Silent::LoginCommand, Command::new("/bin/sh"));
     command
         .args(["-l", "-c", r#"exec "$0" "$1""#])

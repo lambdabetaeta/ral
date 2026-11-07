@@ -737,11 +737,14 @@ mod tests {
             allowed[0].real.real(),
             Some(&crate::test_helper::real(&target))
         );
-        assert_eq!(excluded[0].real.named().kind(), Some(Kind::Symlink));
-        assert_eq!(
-            excluded[0].real.target().unwrap().real(),
-            &crate::test_helper::real(&target)
-        );
+        let holds: Vec<_> = (excluded[0].real.holds())
+            .map(crate::path::Hold::trace)
+            .collect();
+        let [named, linked] = &holds[..] else {
+            panic!("the name and its link's target: {holds:?}");
+        };
+        assert_eq!(named.kind(), Some(Kind::Symlink));
+        assert_eq!(linked.real(), &crate::test_helper::real(&target));
         #[cfg(unix)]
         {
             let ids = excluded[0].real.held_ids();

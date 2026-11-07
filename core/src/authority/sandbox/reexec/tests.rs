@@ -35,14 +35,6 @@ fn a_pin_that_lost_its_name_no_longer_verifies() {
 }
 
 #[test]
-fn a_pin_reads_its_identity_from_the_trace() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let (path, pin) = pinned_file(dir.path());
-    assert_eq!(pin.trace().leaf_id(), Some(pin.object_id()));
-    assert_eq!(pin.arg0(), path);
-}
-
-#[test]
 fn an_absent_name_pins_nothing() {
     let dir = tempfile::tempdir().expect("temp dir");
     let absent = std::fs::canonicalize(dir.path()).unwrap().join("absent");

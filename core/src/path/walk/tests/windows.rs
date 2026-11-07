@@ -4,7 +4,7 @@ use super::super::super::names::{EntryName, rooted};
 use super::super::super::trace::{Kind, ObjectId};
 use super::super::resolve::{LeafMode, walk, walk_dir, walk_dir_made, walk_excluded, walk_lenient};
 use super::super::{Access, Dir, Judged, Located, Sharing, Streaming, Visibility, Writing, host};
-use super::{writable, writing};
+use super::{named, writable, writing};
 use crate::path::{LexicalPath, Resolver};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -667,7 +667,7 @@ fn a_recreated_file_meets_the_deny_by_position_under_another_id() {
     let secret = tmp.path().join("secret");
     std::fs::write(&secret, "old").unwrap();
     let excluded = walk_excluded(&spelled(&secret)).unwrap();
-    let old = excluded.named().last_id();
+    let old = named(&excluded).last_id();
     std::fs::remove_file(&secret).unwrap();
     std::fs::write(&secret, "new").unwrap();
 

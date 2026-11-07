@@ -26,15 +26,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Canonical self path, so a ral-sh symlink cannot intercept it.
-#[cfg(unix)]
-pub(crate) fn indirect() -> io::Result<PathBuf> {
-    site!(
-        Silent::IndirectReexec,
-        std::fs::canonicalize(std::env::current_exe()?)
-    )
-}
-
 // ── Pinned ───────────────────────────────────────────────────────────────
 
 /// An executable pinned at boot, before any shell exists: the one shape a

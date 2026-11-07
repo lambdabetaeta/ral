@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 
 use super::{Dir, Judged, Located, Writing};
+use crate::path::{Excluded, Trace};
 
 /// Where `walk_excluded` stands around its read of a held link's target.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -68,6 +69,13 @@ pub(super) fn writing(l: Located) -> Located<Judged<Writing>> {
 
 pub(super) fn writable(d: Dir) -> Dir<Judged<Writing>> {
     d.marked()
+}
+
+/// What `excluded` holds at its name.
+fn named(excluded: &Excluded) -> &Trace {
+    (excluded.holds().next())
+        .expect("an exclusion holds its name")
+        .trace()
 }
 
 #[cfg(unix)]

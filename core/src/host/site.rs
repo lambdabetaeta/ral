@@ -36,6 +36,10 @@ pub(super) enum Silent {
     /// ask.  It raises no card: it reads one fact of the host, not an object
     /// a model names.
     HostCwd,
+    /// The canonical path of ral's own binary, which `/bin/sh -l` execs to
+    /// report the login environment; startup infrastructure raises no card.
+    #[cfg(unix)]
+    ReporterPath,
     /// The login helper's command; startup infrastructure raises no exec card.
     #[cfg(unix)]
     LoginCommand,

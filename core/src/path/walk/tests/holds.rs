@@ -2,11 +2,11 @@
 //! name the object takes, by the walk's own descriptor against the
 //! identity's reuse, and by position where the object is gone.
 
-use super::super::super::exclusion::{Excluded, Hold};
+use super::super::super::exclusion::{Excluded, Hold, Walked};
 use super::super::super::trace::Trace;
 use super::super::resolve::{LeafMode, walk_excluded, walk_lenient};
 use super::unix::{entered, root, spelled};
-use super::{Around, LINK_READ};
+use super::{Around, LINK_READ, named};
 use crate::path::{Depth, MatchedBy, Subject};
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
@@ -143,7 +143,7 @@ fn a_deny_through_a_name_folded_away_to_a_link_holds_its_target() {
     symlink("tgt", dir.join("dlink")).unwrap();
     let excluded = deny(&dir.join("missing/../dlink"));
     assert_eq!(excluded, deny(&dir.join("dlink")));
-    assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
+    assert_eq!(excluded.followed().real().as_path(), dir.join("tgt"));
     std::fs::rename(dir.join("tgt"), dir.join("moved")).unwrap();
     assert_eq!(by(&excluded, &dir.join("moved")), Some(MatchedBy::Identity));
 }
@@ -314,7 +314,7 @@ fn a_link_replaced_before_its_target_is_read_holds_the_target_the_held_link_name
         }
     })
     .unwrap();
-    assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
+    assert_eq!(excluded.followed().real().as_path(), dir.join("tgt"));
     assert_eq!(by(&excluded, &dir.join("other")), None);
 }
 
@@ -335,7 +335,7 @@ fn a_link_swapped_out_and_back_around_the_read_holds_the_held_links_target() {
         }
     })
     .unwrap();
-    assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
+    assert_eq!(excluded.followed().real().as_path(), dir.join("tgt"));
     assert_eq!(by(&excluded, &dir.join("other")), None);
 }
 
@@ -353,7 +353,7 @@ fn an_unlinked_link_cannot_anchor_a_deny_to_its_replacement() {
     });
     match excluded {
         Ok(excluded) => {
-            assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
+            assert_eq!(excluded.followed().real().as_path(), dir.join("tgt"));
             assert_eq!(by(&excluded, &dir.join("other")), None);
         }
         #[cfg(target_os = "macos")]
@@ -369,7 +369,7 @@ fn an_unlinked_link_cannot_anchor_a_deny_to_its_replacement() {
 #[test]
 fn the_held_identity_is_not_reused_while_the_deny_stands() {
     let (_tmp, dir, excluded) = secret();
-    let old = excluded.named().last_id();
+    let old = named(&excluded).last_id();
     std::fs::remove_file(dir.join("d/secret")).unwrap();
     let held = excluded
         .holds()
@@ -393,14 +393,14 @@ fn the_held_identity_is_not_reused_while_the_deny_stands() {
 #[test]
 fn rehold_keeps_a_live_handle_after_rename_and_unlink() {
     let (_tmp, dir, mut excluded) = secret();
-    let recorded = excluded.named().clone();
+    let recorded = named(&excluded).clone();
     std::fs::rename(dir.join("d/secret"), dir.join("elsewhere/x")).unwrap();
     excluded.rehold();
     assert_eq!(excluded.held_ids(), [Some(recorded.last_id())]);
     std::fs::remove_file(dir.join("elsewhere/x")).unwrap();
     excluded.rehold();
     assert_eq!(excluded.held_ids(), [Some(recorded.last_id())]);
-    assert_eq!(excluded.named(), &recorded);
+    assert_eq!(named(&excluded), &recorded);
 }
 
 #[test]
@@ -442,14 +442,14 @@ fn current_follows_a_held_file_within_and_across_directories() {
     let (_tmp, dir, excluded) = secret();
     let held = excluded.holds().next().unwrap();
     assert_eq!(held.current().unwrap().as_path(), dir.join("d/secret"));
-    assert_eq!(excluded.positions(), [excluded.named().real().clone()]);
+    assert_eq!(excluded.positions(), [named(&excluded).real().clone()]);
     std::fs::rename(dir.join("d/secret"), dir.join("d/x")).unwrap();
     assert_eq!(held.current().unwrap().as_path(), dir.join("d/x"));
     std::fs::rename(dir.join("d/x"), dir.join("elsewhere/x")).unwrap();
     assert_eq!(held.current().unwrap().as_path(), dir.join("elsewhere/x"));
     let positions = excluded.positions();
     assert_eq!(positions.len(), 2);
-    assert!(positions.contains(excluded.named().real()));
+    assert!(positions.contains(named(&excluded).real()));
     assert!(positions.contains(&held.current().unwrap()));
     std::fs::remove_file(dir.join("elsewhere/x")).unwrap();
     assert_eq!(held.current(), None);
