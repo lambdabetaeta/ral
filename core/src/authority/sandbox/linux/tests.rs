@@ -15,6 +15,7 @@ use crate::test_helper::confinement::skip;
 
 mod exec;
 mod info;
+mod pin;
 mod render;
 mod seccomp;
 mod spawn;

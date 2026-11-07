@@ -2,7 +2,7 @@
 generated_at_commit: 104cb519
 verified_at_commit: 002c654a
 verified_at_date: 2026-10-13
-anchors: [pinned_dirs, build_profile, DenyMask, Binds]
+anchors: [pinned_dirs, build_profile, DenyMask, Binds, Layer, Shown]
 ---
 
 # Holding a deny
@@ -22,42 +22,97 @@ entry lies outside the deny and inside the write prefix's allow. A confined `mv`
 or `rm` could move the ancestor, and carry the denied bytes to a name nothing
 covers.
 
-## macOS pins the ancestors
+## Every enforcer pins the ancestors
 
-**`FsRules::pinned_dirs` (`core/src/authority/sandbox/projection.rs`) collects every
-proper ancestor of a deny that lies within a write prefix**, the write prefix's
-root included.
+**`path::pinned_dirs` (`core/src/path/render.rs`) names every proper ancestor
+of a deny that lies within a write prefix**, the write prefix's root
+included. `SandboxProjection::rendered` derives the set for every Unix
+launch, and both Unix backends read it.
 
 - **It covers every spelling.** The set is the ancestor closure of every
   *rendered* deny name within a rendered write name: the deny's surface
   spelling and its symlink-resolved target. So an alias's chain is pinned
   beside its target's, and a symlink swapped in after the sandbox starts is
   covered too.
+- **Only a pinned directory's own name in its parent is frozen.** Its
+  entries stay changeable.
+- **The price is real, on every platform.** A grant that writes a repo and
+  denies `.git/config` also refuses `mv .git .git.bak` and `rmdir .git`: both
+  `.git` and the repo root are pinned ancestors of the denied entry.
+
+### macOS refuses their unlink
+
 - **`build_profile` (`core/src/authority/sandbox/macos.rs`) emits
   `(deny file-write-unlink (literal "<dir>"))` for each pinned directory**,
   after the write prefix's own allow, since Seatbelt's last match wins.
 - **`literal`, never `subpath`.** That keeps a pinned directory's *entries*
-  changeable. Only its own name in its parent is frozen.
-- **The price is real.** A grant that writes a repo and denies `.git/config`
-  also refuses `mv .git .git.bak` and `rmdir .git`: both `.git` and the repo
-  root are pinned ancestors of the denied entry.
+  changeable.
 
 See [[internals/seatbelt-profile|seatbelt-profile]] for the full rendering.
 
-## Linux needs no pin
+### Linux binds each onto itself
 
-**On Linux a deny is a mount, and a mount is anchored to the inode it covers,
-not to the path that named it** (`DenyMask`, `core/src/authority/sandbox/linux.rs`).
+**Every launch binds each pinned directory, writable, onto its own name
+(`Layer::Spine`, `core/src/authority/sandbox/linux.rs`).** The bind mounts the
+handle `Binds::open` holds, as every bind does.
 
-- **Renaming an ancestor carries the mask along.** It keeps covering the real
-  file at its new place.
-- **Renaming or removing the mountpoint itself fails** with `EBUSY`.
-- **So the invariant holds by construction, and the price is smaller than on
-  macOS.** Only the denied path's own name is frozen. Every ancestor, the write
-  prefix's root included, stays free to rename and remove. `pinned_dirs` goes
-  unused.
+- **A mountpoint cannot be moved.** `rename(2)` and `rmdir(2)` refuse it with
+  `EBUSY`. The kernel asks this of the dentry in the envelope's mount
+  namespace, so every name a bind shows the directory at is refused alike.
+- **Its entries stay writable,** since the bind is.
+- **An absent pinned name gets no bind:** bwrap would make its mountpoint on
+  the host ([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
+- **A pinned name that now goes through a link refuses the launch,** as a
+  linked allowance does. Bound, it would show the link's target on the
+  deny's spine.
+- **The pins go after the shown binds and before `/proc`, `/dev` and every
+  mask.** A bind shows the host's tree, which holds none of the envelope's
+  own mounts, so a pin laid later buries them: a pin of `p` laid after the
+  mask at `p/secret` shows the secret. For the same reason a parent is pinned
+  before its children; `pinned_dirs` is sorted.
+- **Landlock sees nothing new.** A self-bind adds no inode to a path walk,
+  so `Shown::roots` leaves the pins out.
 - **Masks go on after every bind,** because the last mount wins. Each deny is
   masked at every name a bind shows it (`Binds::names`).
+
+Measured on Linux 7.1.3 under bwrap 0.12.0: with `p` bound onto itself,
+`mv p p2` and `rmdir p` fail with `EBUSY`, through a second bind's name too,
+and a new file in `p` is written; with the pin laid after the mask, the
+secret is read.
+
+### Why the mask's own anchor is not enough
+
+**A mask is a mount, and a mount follows its dentry, so renaming an ancestor
+carries the mask along. That holds within one envelope only.** Every launch
+renders its masks afresh, at the positions the deny holds.
+
+- **A later grant loses the object.** After a confined `mv G/p G/p2` under a
+  deny of `G/p/secret`, a grant decoded afterwards walks the deny's name,
+  finds nothing at `G/p/secret`, and masks nothing. Its launches and ral's
+  own reads then reach `G/p2/secret`.
+- **A live hold follows the object** (`Hold::current`), but only while the
+  grant that took it lives.
+- **The pin also closes a race.** A concurrent confined command could swap
+  an ancestor for a symlink between a launch's planning and bwrap's mount,
+  and the mask would land at the link's target. A mountpoint cannot be
+  swapped.
+
+### Windows lists them only
+
+**Carving grants each directory on the way to an exclusion only the listing
+of its own names, with neither `DELETE` nor `FILE_DELETE_CHILD`**, so no
+sandboxed program renames or removes one
+([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
+The price is larger: nothing can be created in it either.
+
+### ral's own builtins
+
+**ral's `mv`, `rm` and `rmdir` are bundled tools, and a bundled tool runs as
+a confined program like any other (`Image::Tool`).** The kernel's pin holds
+them. The guard has no pin of its own, as
+[[decisions/261021_one-path|one-path]] decided: under a grant, ral itself
+renames only a staged file over the file a redirect writes, and removes only
+what it made.
 
 ## The shape of the path picks the mount
 
@@ -206,6 +261,11 @@ spawns the envelope for real:**
 
 - `authority::sandbox::linux::tests::spawn::a_denied_path_refuses_every_access_while_the_body_still_runs`
 - `authority::sandbox::linux::tests::spawn::building_an_envelope_never_creates_a_denied_name_on_the_host`
+- `authority::sandbox::linux::tests::pin::a_denys_spine_cannot_be_moved_and_its_entries_stay_writable`
+- `authority::sandbox::linux::tests::pin::rals_own_mv_and_rm_cannot_move_a_denys_spine`
+- `capabilities::deny_pin_survives_ancestor_rename` (`ral/tests/capabilities.rs`,
+  Linux and macOS): through ral itself, the rename is refused and the denied
+  file stays at its name.
 - `capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix` (macOS)
 
 - `deny_absent::a_host_created_absent_deny_is_visible_only_to_the_running_linux_child`

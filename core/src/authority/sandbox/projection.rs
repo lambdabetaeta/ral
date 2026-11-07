@@ -43,8 +43,9 @@ pub struct FsRules<A = FsAllow, X = GrantPath<Excluded>> {
     pub(crate) write: Vec<A>,
     pub(crate) deny: Vec<X>,
     /// The ancestor closure of every *rendered* `deny` entry that lies within
-    /// some *rendered* write name.  The macOS backend pins each against rename
-    /// and unlink, or a confined child relocates the ancestor directory itself
+    /// some *rendered* write name.  Both Unix backends pin each against rename
+    /// and removal (Seatbelt refuses its unlink; Linux binds it onto itself),
+    /// or a confined child relocates the ancestor directory itself
     /// (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r` when the write
     /// prefix root is the ancestor) and the denied bytes resurface at a name
     /// no deny rule covers.  Derived after rendering, so both a deny's surface

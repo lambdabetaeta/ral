@@ -187,14 +187,6 @@ fn an_admitted_loader_runs_an_unadmitted_file() {
     denied(&proof, &through_loader, &by_kernel, MARKER);
 }
 
-fn pinning_exclusion(target: &Path) -> std::path::PathBuf {
-    // Seatbelt pins ancestors; Linux pins mask mountpoints.
-    #[cfg(target_os = "macos")]
-    return target.join("absent");
-    #[cfg(target_os = "linux")]
-    target.to_path_buf()
-}
-
 #[test]
 fn a_rename_onto_a_pinned_exclusion_target_is_denied() {
     let proof = ral_core::require_confinement!();
@@ -205,7 +197,7 @@ fn a_rename_onto_a_pinned_exclusion_target_is_denied() {
     for path in [&target, &allowed, &replacement] {
         std::fs::create_dir(path).unwrap();
     }
-    let exclusion = pinning_exclusion(&target);
+    let exclusion = target.join("absent");
     let grants = stack([layer(writable(tree.path(), &[&exclusion]))]);
     let rename = |to: &Path| {
         run(
@@ -245,7 +237,7 @@ fn rmdir_of_a_pinned_exclusion_directory_is_denied() {
     for path in [&target, &allowed] {
         std::fs::create_dir(path).unwrap();
     }
-    let exclusion = pinning_exclusion(&target);
+    let exclusion = target.join("absent");
     let grants = stack([layer(writable(tree.path(), &[&exclusion]))]);
     let rmdir = |path: &Path| {
         run(

@@ -44,8 +44,8 @@ cost of saying the second in the first:
   to a name the deny does not cover; every proper ancestor of a deny within a
   write prefix is `(deny file-write-unlink (literal …))` — `literal`, never
   `subpath`, so its entries stay mutable
-  ([[internals/holding-a-deny|holding-a-deny]]). Linux pays
-  nothing here: a mount is anchored to an inode.
+  ([[internals/holding-a-deny|holding-a-deny]]). Linux pays the
+  same price: it binds each pinned directory onto its own name.
 - **Order.** Seatbelt is last-match-wins, so every deny is emitted after every
   allow in the profile, not merely after its own. `Profile` is a record whose
   field order *is* that precedence — fs allows, exec rules, exec ancestors,

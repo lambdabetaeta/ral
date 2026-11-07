@@ -208,11 +208,13 @@ pub(crate) fn render_excluded<'a>(
     Ok(names.into_iter().collect())
 }
 
-/// The directories a deny needs kept traversable to be reachable at all:
-/// every proper ancestor, root excepted, of a position `denies` hold that
-/// lies within some `writes` prefix, rendered with its firmlink twin.  A deny
-/// reached through a symlinked chain pins the chain it resolves to, the one
-/// the kernel walks.
+/// The directories that hold each deny in place: every proper ancestor,
+/// root excepted, of a position `denies` hold that lies within some `writes`
+/// prefix, the prefix's root included, rendered with its firmlink twin;
+/// sorted and deduped.  A deny reached through a symlinked chain pins the
+/// chain it resolves to, the one the kernel walks.  Both Unix backends
+/// freeze a pinned directory's name in its parent and leave its entries
+/// changeable: Seatbelt refuses its unlink, bwrap binds it onto itself.
 ///
 /// # Errors
 ///

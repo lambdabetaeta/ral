@@ -15,7 +15,9 @@
 //! and mounted by that handle ([`Binds`]): bwrap resolves no source name, so
 //! a name swapped for a symlink after the grant was rendered shows nothing
 //! it did not name.  The GPU's nodes and sysfs are the exception, bound by
-//! name as `/dev`'s own nodes are ([`gpu`]).
+//! name as `/dev`'s own nodes are ([`gpu`]).  Each directory that holds a
+//! deny in place is bound onto its own name ([`Layer::Spine`]), so no
+//! confined child moves the deny's object to a name no deny covers.
 //!
 //! The payload is always ral's own trampoline (`super::launch`), which enters
 //! the [`landlock`] ruleset it inherits and only then runs the target, as a
@@ -265,7 +267,10 @@ pub(crate) fn bwrap_argv(
                 c.args(["--perms", "0555", "--tmpfs"]).arg(dir.as_path());
             }
             binds.render(&mut c, Layer::Shown);
-            // After it, or a prefix of `/` or `/proc` re-binds the host's over these.
+            // After the binds it pins, before every mask: a bind shows the
+            // host's tree, so a pin of `p` laid after `p/secret`'s mask buries it.
+            binds.render(&mut c, Layer::Spine);
+            // After the binds, or a prefix of `/` or `/proc` re-binds the host's over these.
             c.args(["--proc", "/proc"]);
             render_dev(&mut c, host);
             if policy.gpu {
@@ -284,9 +289,7 @@ pub(crate) fn bwrap_argv(
         }
     }
     binds.render(&mut c, Layer::Over);
-    // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
-    // unused because a mask is anchored to the inode, so a renamed ancestor
-    // carries it — the pin macOS renders explicitly, Linux gets for free.
+    // Masks go on after every bind: last mount wins.
     if !binds.denies.is_empty() {
         // By stored name, where a mask lands, not folded as an exclusion is;
         // a cwd that resolves nowhere is left to bwrap's `--chdir`.
@@ -334,11 +337,14 @@ enum Access {
 }
 
 /// Where a bind goes in bwrap's order.  `Shown`: the projection's view,
-/// before the envelope's own `/proc` and `/dev`.  `Over`: over everything,
-/// the cgroup tree and the pinned binaries.
+/// before the envelope's own `/proc` and `/dev`.  `Spine`: each pinned
+/// directory, writable onto its own name, which as a mountpoint no rename or
+/// removal moves; it shows every name beneath it at itself.  `Over`: over
+/// everything, the cgroup tree and the pinned binaries.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Layer {
     Shown,
+    Spine,
     Over,
 }
 
@@ -362,6 +368,25 @@ impl Bind {
             object,
             position,
         }
+    }
+
+    /// The pinned directory `name` onto itself; `None` where nothing stands
+    /// there.  A name that now reaches another object refuses the launch:
+    /// bound, it would show that object at `name`.
+    fn pin(name: &Rendered) -> Result<Option<Self>, String> {
+        let Some((position, real)) = object(name.as_str())? else {
+            return Ok(None);
+        };
+        if real != *name {
+            return Err(OpenError::Linked(crate::path::shown(name.as_str())).into());
+        }
+        Ok(Some(Self {
+            layer: Layer::Spine,
+            access: Access::Writable,
+            dest: real.clone(),
+            object: real,
+            position,
+        }))
     }
 
     /// Whether `inner`'s name is the host's own symlink beneath `self`: the
@@ -403,10 +428,10 @@ pub(crate) struct Binds {
 }
 
 impl Binds {
-    /// Plan, open and lend: the one place a launch opens what it mounts, the two
-    /// pins aside, which are open already.  Each object is opened once, and
-    /// each bind lends its own copy, bwrap closing a descriptor after the
-    /// one mount it serves.
+    /// Plan, open and lend: the one place a launch opens what it mounts, the
+    /// two pinned binaries aside, which are open already.  Each object is
+    /// opened once, and each bind lends its own copy, bwrap closing a
+    /// descriptor after the one mount it serves.
     fn open(env: &Envelope<'_>, shown: Shown, handoff: &mut Handoff) -> Result<Self, String> {
         let Shown {
             binds: mut planned,
@@ -497,7 +522,9 @@ impl Shown {
     /// object at its real name and at the name it was granted by, less what
     /// another bind already shows; read-only before writable, each sorted by
     /// name, so a parent precedes its children and a writable prefix inside
-    /// a read-only one wins.  Each deny is read once, for its mask.
+    /// a read-only one wins.  Then each pinned directory onto itself, which
+    /// shows nothing new and so roots nothing.  Each deny is read once, for
+    /// its mask.
     pub(crate) fn of(policy: &RenderedProjection, baseline: &Baseline) -> Result<Self, String> {
         let FsProjection::Restricted(rules) = &policy.fs else {
             let root = open_dir_nofollow(&RealPath::universal())?.ok_or("sandbox: no root")?;
@@ -527,10 +554,16 @@ impl Shown {
             .into_iter()
             .cloned()
             .collect();
+        // Sorted, so a parent is pinned before its children, whose pins it
+        // would bury.  No shown bind lies beneath one to bury: each pinned
+        // directory lies within a writable bind, which covers every bind in it.
+        let spine = (rules.pinned_dirs.iter())
+            .filter_map(|name| Bind::pin(name).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
         let mut denied: Vec<_> = rules.deny.iter().collect();
         denied.sort();
         Ok(Self {
-            binds,
+            binds: binds.into_iter().chain(spine).collect(),
             tolerated,
             roots,
             denies: denied.into_iter().map(Deny::read).collect(),

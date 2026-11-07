@@ -217,7 +217,7 @@ impl RealPath {
     }
 
     /// This position's proper ancestors at or beneath `prefix`, nearest
-    /// first: what the Seatbelt profile pins.
+    /// first: what the Unix backends pin.
     pub(crate) fn ancestors_within<'a>(
         &'a self,
         prefix: &'a Self,

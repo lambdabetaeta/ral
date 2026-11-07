@@ -658,18 +658,18 @@ fn a_file_allowance_and_a_run_place_are_bound_as_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every handle by its slot, in layer order: the projection's view, the
-/// envelope's own `/proc` and `/dev`, what goes over everything (the
-/// cgroup tree, then the pins at their current names), then the masks;
-/// under an unrestricted fs the root, then `/proc`.  No source is a name
-/// bwrap resolves but `/dev/null`.
+/// Every handle by its slot, in layer order: the projection's view, each
+/// pinned directory onto itself, the envelope's own `/proc` and `/dev`, what
+/// goes over everything (the cgroup tree, then the pinned binaries at their
+/// current names), then the masks; under an unrestricted fs the root, then
+/// `/proc`.  No source is a name bwrap resolves but `/dev/null`.
 #[test]
 fn every_bind_is_a_handle_by_slot_in_layer_order() {
     let dir = workdir("argv-order");
     let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
     let (ro, w) = (dir.join("ro"), dir.join("ro/w"));
-    let secret = w.join("secret");
-    std::fs::create_dir_all(&w).unwrap();
+    let secret = w.join("p/secret");
+    std::fs::create_dir_all(w.join("p")).unwrap();
     std::fs::write(&secret, "x").unwrap();
     let policy = restricted(&[&ro], &[&w], &[&secret]);
     let binds = binds(&policy, WHOLE);
@@ -684,6 +684,7 @@ fn every_bind_is_a_handle_by_slot_in_layer_order() {
     let order = [
         by_handle(&args, "--ro-bind-fd", &ro),
         by_handle(&args, "--bind-fd", &w),
+        by_handle(&args, "--bind-fd", &w.join("p")),
         at(&args, &["--proc", "/proc"]),
         at(&args, &["--dev", "/dev"]),
         by_handle(&args, "--ro-bind-fd", std::path::Path::new(CGROUP)),
@@ -705,6 +706,7 @@ fn every_bind_is_a_handle_by_slot_in_layer_order() {
         .map(|w| (w[1].clone(), w[2].as_str()))
         .collect();
     let expected: Vec<_> = (binds.layer(Layer::Shown))
+        .chain(binds.layer(Layer::Spine))
         .chain(binds.layer(Layer::Over))
         .map(|(slot, bind)| (slot.to_string(), bind.dest.as_str()))
         .collect();
@@ -715,6 +717,79 @@ fn every_bind_is_a_handle_by_slot_in_layer_order() {
     assert!(
         !args.iter().any(|a| a == "--bind" || a == "--symlink"),
         "{args:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each directory holding a deny in place, the write prefix's root
+/// included, is bound writable onto itself: after the binds it pins, before
+/// `/proc` and every mask.  A sibling off the spine gets no pin, nor does an
+/// absent directory, whose mountpoint bwrap would make on the host.
+#[test]
+fn a_denys_spine_is_bound_onto_itself_between_the_binds_and_the_masks() {
+    let dir = workdir("pin-argv");
+    let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+    let (p, sibling, absent) = (dir.join("p"), dir.join("q"), dir.join("absent"));
+    let secret = p.join("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let args = options_for(&deny_within(&dir, &[&secret, &absent.join("secret")]));
+    let bound_at = |dest: &std::path::Path| -> Vec<usize> {
+        (args.windows(3).enumerate())
+            .filter(|(_, w)| w[0] == "--bind-fd" && w[2] == dest.to_string_lossy())
+            .map(|(at, _)| at)
+            .collect()
+    };
+    let &[shown, root] = bound_at(&dir).as_slice() else {
+        panic!("the prefix is shown, then pinned: {args:?}");
+    };
+    let &[pinned] = bound_at(&p).as_slice() else {
+        panic!("p is pinned once: {args:?}");
+    };
+    let mask = position_of(
+        &args,
+        &["--perms", "0000", "--tmpfs", &secret.to_string_lossy()],
+    )
+    .expect("the deny's mask");
+    let proc = position_of(&args, &["--proc", "/proc"]).expect("the envelope's /proc");
+    let order = [shown, root, pinned, proc, mask];
+    assert!(order.is_sorted(), "{order:?}: {args:?}");
+    assert!(bound_at(&sibling).is_empty(), "{args:?}");
+    assert!(
+        !args
+            .iter()
+            .any(|a| std::path::Path::new(a).starts_with(&absent)),
+        "{args:?}"
+    );
+    assert!(!absent.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pinned directory turned into a link since the render refuses the
+/// launch in the sentence a linked prefix gets: its pin would show the
+/// link's target on the deny's spine.
+#[test]
+fn a_pinned_directory_turned_link_refuses_the_launch() {
+    let dir = workdir("pin-turned-link");
+    let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+    let (p, elsewhere) = (dir.join("p"), dir.join("elsewhere"));
+    std::fs::create_dir_all(p.join("secret")).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    let rendered = deny_within(&dir, &[&p.join("secret")])
+        .rendered()
+        .expect("ASCII paths render");
+    std::fs::rename(&p, dir.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &p).unwrap();
+    let Err(why) = Shown::of(&rendered, &host_system_reads()) else {
+        panic!("a pin through a link would show its target");
+    };
+    assert_eq!(
+        why,
+        format!(
+            "sandbox: {} now goes through a symbolic link that ral will not follow; \
+             reload the grant or restart ral if you made that change",
+            p.display()
+        )
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

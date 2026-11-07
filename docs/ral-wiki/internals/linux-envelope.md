@@ -2,7 +2,7 @@
 generated_at_commit: 1dc7c6e7
 verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 verified_at_date: 2026-10-26
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer]
 ---
 
 # The Linux envelope
@@ -69,8 +69,11 @@ following a symlink, and lends a copy per bind**
 `bwrap_argv` emits `--ro-bind-fd` or `--bind-fd` from the same vector. The binds
 are: the read-only defaults, the read region (`shown`: every read scope of the
 fs projection, run places and live support among them, written prefixes
-included), the pins of bwrap and the trampoline, bound read-only at their own
-names before the masks, and, over everything, the cgroup tree. The launched
+included), each directory that holds a deny in place, bound writable onto
+its own name after the read region and before the masks
+([[internals/holding-a-deny|holding-a-deny]]), the pins of bwrap and the
+trampoline, bound read-only at their own names before the masks, and, over
+everything, the cgroup tree. The launched
 image is not a bind of its own: the running-reads law puts it in the read
 region, and the table admits it as it admits any file.
 Every allowance is bound as the resolved position the guard judged, opened
@@ -105,7 +108,9 @@ spelling is only the destination at which the opened object is bound.
 Pinned by `authority::sandbox::linux::tests::render::a_bind_is_opened_for_each_name_no_other_bind_shows`,
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
 `::every_bind_is_a_handle_by_slot_in_layer_order`,
-`::a_write_through_a_link_is_masked_at_both_its_names` and, spawning,
+`::a_write_through_a_link_is_masked_at_both_its_names`,
+`::a_denys_spine_is_bound_onto_itself_between_the_binds_and_the_masks`,
+`::a_pinned_directory_turned_link_refuses_the_launch` and, spawning,
 `::a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened`.
 
 ## The exec layer is lowered against the binds

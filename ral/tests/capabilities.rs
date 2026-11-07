@@ -263,14 +263,11 @@ fn seed_secret(dir: &std::path::Path) {
     std::fs::write(ssh.join("id_rsa"), DENY_PIN_SENTINEL).unwrap();
 }
 
-// A Seatbelt deny names a path, so `FsRules::pinned_dirs` pins every
-// ancestor of a deny that lies within a write prefix, and the macOS backend
-// renders each as a `file-write-unlink` deny.  Only that backend needs it:
-// bwrap's deny is an object-anchored mount, which survives the same rename
-// unpinned.  Hence macOS-only.
+// `pinned_dirs` names every ancestor of a deny that lies within a write
+// prefix: Seatbelt refuses its unlink, and bwrap binds it onto itself.
 
-/// The running launch holds the deny through an ancestor rename; macOS also
-/// refuses the rename, while Linux's next launch reads the moved file.
+/// An ancestor of a deny cannot be renamed, so the denied file never reaches
+/// a name a later grant does not deny.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn deny_pin_survives_ancestor_rename() {
@@ -291,20 +288,7 @@ fn deny_pin_survives_ancestor_rename() {
     let control = launch(&format!("mv {d_s}/control {d_s}/moved && cat {d_s}/moved"));
     let out = launch(&format!("mv {d_s}/.ssh {d_s}/x && cat {d_s}/x/id_rsa"));
     denied(&proof, &control, &out, DENY_PIN_SENTINEL);
-    #[cfg(target_os = "macos")]
     let refused = d.join(".ssh").join("id_rsa").exists() && !d.join("x").exists();
-    #[cfg(target_os = "linux")]
-    {
-        assert!(
-            !d.join(".ssh").exists() && d.join("x/id_rsa").exists(),
-            "the ancestor rename must land"
-        );
-        admitted(
-            &proof,
-            &launch(&format!("cat {d_s}/x/id_rsa")),
-            DENY_PIN_SENTINEL,
-        );
-    }
     std::fs::remove_dir_all(&d).ok();
 
     assert!(
@@ -314,7 +298,6 @@ fn deny_pin_survives_ancestor_rename() {
         out.stdout,
         out.stderr
     );
-    #[cfg(target_os = "macos")]
     assert!(refused, "the ancestor rename was not refused");
 }
 
