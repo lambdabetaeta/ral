@@ -177,9 +177,8 @@ impl Shell {
 /// a payload past the kernel buffer would otherwise deadlock, and a consumer
 /// that stops reading merely leaves that thread a broken pipe.
 ///
-/// Routing through `Source` rather than `dup2` is what keeps the cached
-/// `startup_stdin_tty` honest — consumers trust it only when `Source` is
-/// `Terminal`, which then really does mean the inherited fd 0.
+/// Routing through `Source` rather than `dup2` leaves fd 0 untouched, so
+/// `Terminal` keeps meaning the inherited terminal.
 pub(crate) fn install_stdin_redirect(
     stdin: Option<&StdinSource<String>>,
     mooring: &Mooring,

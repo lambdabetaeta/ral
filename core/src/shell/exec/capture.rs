@@ -64,9 +64,8 @@ where
 /// `audit { … }` records a command's bytes without hiding them.
 ///
 /// Installed by `call_external` in `shell::exec::dispatch` around each
-/// standalone external; direct-spawn pipeline stages never reach here, since
-/// their stdout is a kernel pipe to the next stage and `pipeline::collect`
-/// synthesises their node with no bytes.
+/// external.  Byte audit threads every pipeline stage (`resolve_launch`), so
+/// none is spawned direct and untapped.
 pub(crate) fn with_audit_capture<R, F>(shell: &mut Shell, f: F) -> (R, AuditIo)
 where
     F: FnOnce(&mut Shell) -> R,

@@ -12,10 +12,10 @@ use std::os::windows::io::OwnedHandle as Owned;
 /// Where a stage's byte input comes from.
 ///
 /// A `<file` redirect is parked here by `install_stdin_redirect` rather than
-/// `dup2`'d onto fd 0, which keeps the cached `startup_stdin_tty` honest:
-/// consumers consult it only when this is `Terminal`.  `Empty` denies byte
-/// input without denying foreground authority — immediate EOF for readers,
-/// `/dev/null` for a child, never `Terminal`'s fall-through to fd 0.
+/// `dup2`'d onto fd 0, and a session's non-tty fd 0 is a `Reader` from the
+/// start: `Terminal` always means a terminal on the inherited fd 0.  `Empty`
+/// denies byte input without denying foreground authority: immediate EOF for
+/// readers, `/dev/null` for a child, never `Terminal`'s fall-through to fd 0.
 pub enum Source {
     Terminal,
     Empty,

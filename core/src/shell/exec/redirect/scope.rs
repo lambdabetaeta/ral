@@ -247,8 +247,7 @@ fn flush_restore(prior: Prior, shell: &mut Shell) {
 /// REPL frontend, and sibling ral threads all share the process-global
 /// fds, and the runtime's own descriptors — pipes, pinned binaries — are
 /// nobody's redirect target. fd 0 is parked on `shell.io.stdin` by
-/// `install_stdin_redirect`, so the cached `startup_stdin_tty` is
-/// consulted only when stdin really is the inherited terminal.
+/// `install_stdin_redirect`.
 pub(crate) fn with_redirects(
     redirects: &Redirects<String>,
     span: Option<Span>,

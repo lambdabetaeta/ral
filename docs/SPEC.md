@@ -6175,11 +6175,13 @@ the standard-output sink it replaces:
 ```text
 ⟨capture M, Γ⟩ / κ, Σ   ⟶  ⟨M, Γ⟩ / (cap prev) :: κ, Σ[stdout ↦ buf]            Cap-push
 value v / (cap prev) :: κ, Σ  ⟶  value bytes(buf) / κ, Σ[stdout ↦ prev]          Cap-return
-X / (cap prev) :: κ, Σ        ⟶  X / κ, Σ[stdout ↦ prev], buf written to prev     Cap-halt
+X / (cap prev) :: κ, Σ        ⟶  X / κ, Σ[stdout ↦ prev]                          Cap-halt
 ```
 
-`Cap-return` ignores `v`. A buffer that grows past 16 MiB is an error, and it
-halts by `Cap-halt`. Everything the body writes goes to the buffer — a command's
+`Cap-return` ignores `v`. `Cap-halt` drops `buf`: a capture that does not become
+its value commits nothing, and an error halting through it records the number of
+bytes dropped. A buffer that grows past 16 MiB is an error, and it halts by
+`Cap-halt`. Everything the body writes goes to the buffer — a command's
 output, a stand-in's every statement, a pipeline's final stage — because
 everything the body writes is the command's output. A discarded statement writes
 to the current standard output, which inside a capture is the buffer. A captured

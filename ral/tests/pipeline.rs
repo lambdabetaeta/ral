@@ -1349,18 +1349,13 @@ fn pipeline_permission_denied_path_reports_126() {
 
 // ── Audit + redirect: no panic ───────────────────────────────────────────────
 //
-// A stage with `> file` (or `2> file`, or `> file 2>&1`) under
-// `--audit` legitimately has no parent-side pump to tee from — the
-// kernel routed the bytes straight into the file.  Pre-fix
-// `make_audit_capture` panicked here ("audit mode allocates per-stage
-// stdout buffer"); now it stores `None` and the join path records
-// empty captured bytes alongside the redirected file.
+// A stage with `> file` (or `2> file`, or `> file 2>&1`) under `--audit`
+// swaps its sink inside the audit tee, so the bytes reach the file and the
+// audit records none.
 
 #[test]
 fn audited_stdout_and_stderr_redirect_does_not_panic() {
-    // `> file 2>&1` joins both streams into the same file.  Pre-fix
-    // the audited path panicked because both `stdout_buf` and
-    // `stderr_buf` were `None`.
+    // `> file 2>&1` joins both streams into the same file.
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

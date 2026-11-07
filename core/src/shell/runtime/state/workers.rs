@@ -12,9 +12,10 @@
 //! It leaves a [`ReapNotice`] the host drains at its ready boundaries, so a
 //! vanished job still has an answer in the transcript.
 //!
-//! **Flow rule.** [`Shell::spawn_thread`](super::Shell::spawn_thread)
-//! `Arc`-shares the registry into a worker's own `Shell`, so a nested `spawn`
-//! registers into the owning shell's directory; the other children of
+//! **Flow rule.** [`Shell::spawn_worker`](super::Shell::spawn_worker) and
+//! [`Shell::spawn_stage`](super::Shell::spawn_stage) `Arc`-share the registry
+//! into the new thread's `Shell`, so a nested `spawn` registers into the
+//! owning shell's directory; the other children of
 //! [`Shell::child`](super::Shell::child) do not, and a sub-agent fork starts
 //! empty.
 
@@ -475,8 +476,10 @@ impl WorkerRegistry {
     }
 
     /// A live-thread ticket, held by the worker thread's own frame for as long
-    /// as it runs. [`Shell::spawn_thread`](super::Shell::spawn_thread) takes one
-    /// per worker, so no spawn site can forget to.
+    /// as it runs. The one thread-spawn primitive behind
+    /// [`Shell::spawn_worker`](super::Shell::spawn_worker) and
+    /// [`Shell::spawn_stage`](super::Shell::spawn_stage) takes one per thread,
+    /// so no spawn site can forget to.
     pub(crate) fn live_ticket(&self) -> Arc<()> {
         self.0.lock_ignore_poison().live.clone()
     }
