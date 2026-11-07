@@ -22,7 +22,7 @@
 use crate::data::FOValue;
 use crate::data::datum::{Datum, tag, untag};
 use crate::fact::{Done, WorkerId};
-use crate::process::{DEFAULT_CLEANUP_GRACE, TEARDOWN_GRACE};
+use crate::process::{DEFAULT_CLEANUP_GRACE, TEARDOWN_GRACE, wait_ended};
 use crate::protocol::probe::WorkerRow;
 use crate::shell::runtime::handle::compacting::Compacting;
 use crate::shell::runtime::{HandleInner, Sample};
@@ -489,13 +489,13 @@ impl WorkerRegistry {
         self.live_workers() == 0
     }
 
-    /// Wait, up to `deadline`, for every live worker thread to end.
-    /// A cancel lands at the worker's next observation point, and a host that
-    /// exits in the same breath outruns it — orphaning the child under PID 1.
+    /// Wait, up to `deadline`, for every live-thread ticket to drop.  A cancel
+    /// lands at the worker's next observation point, and a host that exits in
+    /// the same breath outruns it, orphaning the child under PID 1.  Tickets,
+    /// not handles: a stage thread has no handle, and a worker's ticket drops
+    /// only after its `done` flush and its shell's drop.
     fn drain(&self, deadline: Instant) {
-        while !self.is_drained() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_ended(deadline, || self.is_drained());
     }
 
     /// Destruction — `/clear`'s arm and the session teardown's: claim and stop

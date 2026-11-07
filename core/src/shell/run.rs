@@ -3,8 +3,7 @@
 //! A run is the unit a host evaluates over a persistent [`Shell`]. The REPL,
 //! exarch's tool evaluator and batch all enter through [`Shell::run`], which
 //! resolves the [`Run`]'s [`Program`] — source text or a registered hook — then
-//! drives [`compile_run`], [`build_run`] and [`run_framed`] to a
-//! [`Settled<Value>`].
+//! drives [`compile_run`], [`build_run`] and [`run_framed`] to an [`End`].
 //!
 //! The frame splits by mutability. What a run fixes once is a [`Mooring`], an
 //! owned local every callee borrows, so the stack unwinding restores an outer
@@ -20,7 +19,7 @@ use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode, arm_li
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
     Break, DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
-    Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, Value, final_poll,
+    Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, Value, panic_text,
 };
 use crate::source::FileId;
 use std::num::NonZeroU8;
@@ -157,8 +156,9 @@ impl Shell {
     /// `dispatch`'s panic arm rolls back does not cover `local.audit`
     /// (`LocalState` partitions it deliberately), so only a scope the panic
     /// cannot skip keeps the opener's close law true at dispatch
-    /// granularity. A panic is an ending — the trail
-    /// closes and is discarded, never attached.
+    /// granularity. A panic is an ending, caught at the run's base or out
+    /// here, and reported one way: the trail closes and is discarded, never
+    /// attached.
     pub(crate) fn run_under(&mut self, under: &Scope, req: RunRequest) -> RunReport {
         // A run is the extent of ral's picture of `PATH`: whatever happened to
         // the filesystem between runs is admitted here, and within a run a
@@ -174,23 +174,26 @@ impl Shell {
 
         let trail = scope.map(|scope| self.local.audit.close(scope));
 
-        match outcome {
+        let text = match outcome {
+            Ok(RunReport::Ran {
+                ending: End::Panic(text),
+                ..
+            }) => text,
             Ok(mut report) => {
                 if let (Some(trail), RunReport::Ran { trail: field, .. }) = (trail, &mut report) {
                     *field = trail;
                 }
-                report
+                return report;
             }
-            Err(payload) => {
-                (self.env, self.context) = checkpoint;
-                RunReport::Ran {
-                    ending: End::Panic(crate::shell::runtime::panic_text(payload.as_ref())),
-                    base,
-                    compact: None,
-                    captured: None,
-                    trail: Vec::new(),
-                }
-            }
+            Err(payload) => panic_text(payload.as_ref()),
+        };
+        (self.env, self.context) = checkpoint;
+        RunReport::Ran {
+            ending: End::Panic(text),
+            base,
+            compact: None,
+            captured: None,
+            trail: Vec::new(),
         }
     }
 
@@ -339,10 +342,10 @@ impl Shell {
             terminal_access,
         };
         let next = build_run(self, sinks, stdin);
-        let result = run_framed(&mooring, self, next, &run, wall, base, body);
+        let ending = run_framed(&mooring, self, next, &run, wall, base, body);
 
         RunReport::Ran {
-            ending: End::settled(result),
+            ending,
             base: base.clone(),
             compact,
             captured: buffers.map(|buffers| buffers.map(|buf| buf.take())),
@@ -485,10 +488,9 @@ fn resolved_base(run: &Run) -> Prov {
     )))
 }
 
-/// Install the built run state, run `body`,
-/// and tear the frame down. Both program arms settle to one [`Settled<Value>`],
-/// so this spine is shared verbatim; the caller keeps the mooring, the limits
-/// and the classification.
+/// Install the built run state, run `body` as the run's base, and tear the
+/// frame down. Both program arms end in one [`End`], so this spine is shared
+/// verbatim; the caller keeps the mooring and the limits.
 pub(crate) fn run_framed(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -497,7 +499,7 @@ pub(crate) fn run_framed(
     wall: Option<Deadline>,
     base: &Prov,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
-) -> Settled<Value> {
+) -> End {
     // Only a source run registers: a hook's spans point into the file the hook
     // was defined in, so an entry for its absent text would name nothing and
     // never be reclaimed — the registry is append-only for the session's life.
@@ -514,34 +516,35 @@ pub(crate) fn run_framed(
 
     // A trail opened by this run reports the deputy prefixes of the stack it runs under.
     shell.audit_deputy_prefixes();
-    let result = body(mooring, shell);
-    let result = if run.last {
-        result.and_then(|v| crate::shell::builtins::concurrency::outlive(shell).map(|()| v))
-    } else {
+    let ending = shell.base(&mooring.home, |shell| {
+        let result = body(mooring, shell);
+        let result = if run.last {
+            result.and_then(|v| crate::shell::builtins::concurrency::outlive(shell).map(|()| v))
+        } else {
+            result
+        };
+        // Before the closing poll the wall is disarmed, and a firing the
+        // daemon has already claimed is waited for (the node may already carry
+        // a weaker cause), so nothing fires after it.
+        if let Some(claimed) = wall.and_then(Deadline::disarm) {
+            claimed.wait();
+        }
         result
-    };
-
-    // The run's last step boundary.  The wall is disarmed first; a firing
-    // the daemon has already claimed is waited for (the node may already
-    // carry a weaker cause), so nothing fires after this poll.
-    if let Some(claimed) = wall.and_then(Deadline::disarm) {
-        claimed.wait();
-    }
-    let result = final_poll(result, &mooring.home)
-        .map_err(|b| b.claimed_by(|| shell.local.audit.call_site().clone()));
+    });
 
     // Ready-boundary housekeeping — reap notices as `` `notice `` surface
     // classes, the large-binding warning onto stderr — must go out while this
     // run's frame is still installed, so each rides this run's own stream and
     // is ordered before its Report. Once `guard` drops there is no sink left.
-    // A hook run is no ready boundary.
-    if boundary {
+    // A hook run is no ready boundary, nor a panicked one, whose checkpoint
+    // `run_under` restores.
+    if boundary && !matches!(ending, End::Panic(_)) {
         shell.emit_ready_boundary_notices(mooring);
     }
 
     drop(guard);
 
-    result
+    ending
 }
 
 impl Shell {

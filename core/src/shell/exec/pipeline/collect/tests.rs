@@ -4,7 +4,7 @@ use crate::fact::FailureCode as _;
 #[cfg(unix)]
 use crate::process::Membership;
 use crate::process::{DurableRoot, Scope};
-use crate::shell::runtime::{AuditStart, Escape, Observed, Stop};
+use crate::shell::runtime::{AuditStart, Error, Escape, Observed, Stop};
 use crate::source::{FileId, Span};
 use std::num::NonZeroU8;
 use std::time::Duration;
@@ -20,6 +20,14 @@ fn stage_audit(shell: &Shell, start: Option<AuditStart>) -> StageAudit {
 
 fn nz(n: u8) -> NonZeroU8 {
     NonZeroU8::new(n).unwrap()
+}
+
+/// A stage that failed with `error`.
+fn failure(error: Error) -> StageObservation {
+    StageObservation {
+        end: End::Err(error),
+        audit: AuditFragment::empty(),
+    }
 }
 
 fn error_break(status: u8) -> Break {
@@ -796,7 +804,7 @@ fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
         &mut state,
         Event::Returned(
             0,
-            StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+            failure(Error::from_reason(crate::fact::Reason::process(
                 "tool",
                 crate::fact::Failure::Exited(3),
             ))),
@@ -860,7 +868,7 @@ fn a_reader_gone_stages_cleanup_halt_is_forwarded() {
         &mut state,
         returned(
             0,
-            StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+            failure(Error::from_reason(crate::fact::Reason::process(
                 "tool",
                 crate::fact::Failure::Exited(7),
             ))),
@@ -878,7 +886,7 @@ fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
         &mut state,
         returned(
             0,
-            StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+            failure(Error::from_reason(crate::fact::Reason::process(
                 "tool",
                 crate::fact::Failure::Exited(7),
             ))),
@@ -1254,7 +1262,7 @@ fn a_stage_halt_outranks_the_teardown_at_the_fold() {
                 50,
                 returned(
                     0,
-                    StageObservation::failure(Error::from_reason(crate::fact::Reason::process(
+                    failure(Error::from_reason(crate::fact::Reason::process(
                         "tool",
                         crate::fact::Failure::Exited(7),
                     ))),
@@ -1359,14 +1367,7 @@ fn a_guard_dropped_while_panicking_settles_its_index() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("the guard settles on unwind");
     match event {
-        Event::Returned(0, obs) => match obs.end {
-            End::Err(err) => assert!(
-                err.describe().contains("without reporting"),
-                "expected the one dead-man's message: {}",
-                err.describe()
-            ),
-            other => panic!("expected an Error break, got {other:?}"),
-        },
+        Event::Returned(0, obs) => assert_unreported(&obs.end),
         _ => panic!("expected Returned(0, _)"),
     }
     let _ = handle.join();
@@ -1389,26 +1390,27 @@ fn a_guard_that_sent_does_not_settle_twice() {
 }
 
 /// A guard dropped with no send made — a stage thread that returned without
-/// filing its own `Returned` — reports a silent end.
+/// filing its own `Returned` — reports the one unreported panic.
 #[test]
-fn a_guard_dropped_without_a_panic_reports_a_silent_end() {
+fn a_guard_dropped_without_a_send_reports_an_unreported_panic() {
     let (tx, rx) = std::sync::mpsc::channel();
     drop(SettleOnDrop::new(Slot { ix: 0, tx }));
     match rx.recv().expect("the guard settles on drop") {
-        Event::Returned(0, obs) => match obs.end {
-            End::Err(err) => assert!(
-                err.describe().contains("without reporting"),
-                "expected the silent-end message: {}",
-                err.describe()
-            ),
-            other => panic!("expected an Error break, got {other:?}"),
-        },
+        Event::Returned(0, obs) => assert_unreported(&obs.end),
         _ => panic!("expected Returned(0, _)"),
     }
 }
 
+/// The one wording of a thread that never reported: a panic.
+fn assert_unreported(end: &End) {
+    match end {
+        End::Panic(text) => assert!(text.contains("without reporting"), "{text}"),
+        other => panic!("expected the unreported panic, got {other:?}"),
+    }
+}
+
 /// `drive` over a producer that unwinds still returns rather than blocking
-/// in `recv` forever, and the panic folds in as an `Error`.
+/// in `recv` forever, and the fold re-raises the panic, as a panicked stage's.
 #[test]
 fn drive_settles_a_stage_whose_producer_unwound() {
     let mut shell = crate::test_helper::core_shell();
@@ -1426,10 +1428,14 @@ fn drive_settles_a_stage_whose_producer_unwound() {
     collect.drive();
     let _ = handle.join();
 
-    match collect.fold(&mooring, &mut shell) {
-        Err(Break::Error(_)) => {}
-        other => panic!("expected the panic to fold in as an Error, got {other:?}"),
-    }
+    let folded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        collect.fold(&mooring, &mut shell)
+    }));
+    let payload = folded.expect_err("the fold re-raises an unreported stage");
+    assert!(
+        crate::shell::runtime::panic_text(payload.as_ref()).contains("without reporting"),
+        "the re-raised panic is the unreported one"
+    );
     drop(group);
 }
 

@@ -403,17 +403,18 @@ honest. Its audit fragment is folded either way: the verdict is the
 collector's doing, what the stage observed still happened. A stage thread's
 end is its own `Event::Returned`, sent as
 its last act; a panic in the body is caught at the stage's base
-(`End::of`) and reported as `Ending::Panic`. `StageObservation.end` is
+(`Shell::base`, which also reads the stage's node once more after the body, so
+a cut landing after its last poll is its ending) and reported as
+`Ending::Panic`. `StageObservation.end` is
 `End = Ending<Value, Error, Stop>`, shared with runs and workers
 ([[design/endings|endings]]). A panic is a defect,
 not a signal: the collector tears the pipeline down with `Aborted`, granting no
 grace, and `fold` re-raises it on the run thread (`resume_unwind`), where the
 top restores its checkpoint and reports a `Panic` ending, status 101.
-A `SettleOnDrop` guard, constructed before the closure runs and moved into it, is each
-index's own dead-man's switch: an unwind anywhere on that thread — even
-before the closure body starts — drops the guard still armed, and the drop
-itself posts the index's `Returned` ("ral pipeline stage ended without
-reporting"). An external
+A `SettleOnDrop` guard, armed as the thread's first act, is each index's own
+dead-man's switch: an unwind anywhere on that thread after it drops the guard
+still armed, and the drop itself posts the index's `Returned` as
+`End::unreported`, a panic the fold re-raises like any stage's. An external
 stage has no waiter thread of its own left to carry a matching guard: the
 reaper posts its exit and the collector's own fold is where anything about
 it can go wrong, not a thread this collector must outlive.
@@ -486,8 +487,8 @@ and dropped once the stages are launched. A `recv` that returns `None` with a
 stage still live — every producer of that index gone without settling it — is
 this collector's own defect, not a panic to recover: `drive` returns, and the
 unobserved stage is `Drop`'s to kill. A stage the fold then finds never
-observed folds as a failure — "ral pipeline stage vanished without reporting" —
-never silently as an absence, so no defect can leave the pipeline reporting
+observed folds as `End::unreported`, re-raised as a panicked stage is, never
+silently as an absence, so no defect can leave the pipeline reporting
 success.
 `step` is pure over `CollectState`: it never blocks, and it performs no kill,
 signal, or cancel — those are the [`Effect`] a thin interpreter

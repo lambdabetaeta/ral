@@ -152,7 +152,7 @@ impl From<Cancellation> for Break {
 /// caret, when it outranks the join or equals it *naming the join's owner*:
 /// an equal-cause stop naming someone else is superseded, or a base's own
 /// switch would convert the wrong owner's stop.  An `exit` has already left.
-pub(crate) fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value> {
+fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value> {
     match (node.in_force(), settled) {
         (_, exit @ Err(Break::Escape(Escape::Exit(_)))) => exit,
         (Some(join), Err(Break::Escape(Escape::Stopped(stop))))
@@ -166,16 +166,41 @@ pub(crate) fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value
     }
 }
 
+impl Shell {
+    /// The one base frame, a run's, a worker's or a stage's: `body` under
+    /// `catch_unwind`, then its return clause's closing poll on `home`, and an
+    /// unlocated failure or stop claimed for the last call site.
+    pub(crate) fn base(
+        &mut self,
+        home: &Scope,
+        body: impl FnOnce(&mut Self) -> Settled<Value>,
+    ) -> End {
+        End::of(|| {
+            let settled = final_poll(body(self), home);
+            settled.map_err(|b| b.claimed_by(|| self.local.audit.call_site().clone()))
+        })
+    }
+}
+
+/// The panic text of [`End::unreported`].
+pub(crate) const UNREPORTED: &str = "ended without reporting how it ended";
+
 /// How a thread's body, or a run, ended.
 pub type End = Ending<Value, Error, Stop>;
 
 impl End {
-    /// The body under `catch_unwind`: a base frame's first half.
     pub(crate) fn of(body: impl FnOnce() -> Settled<Value>) -> Self {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
             Ok(settled) => Self::settled(settled),
             Err(payload) => Self::Panic(panic_text(&*payload)),
         }
+    }
+
+    /// An ending that never reached its reader: a worker or stage thread
+    /// that never ran, or panicked before reporting, or a stage its collector
+    /// never filed.
+    pub(crate) fn unreported() -> Self {
+        Self::Panic(UNREPORTED.into())
     }
 
     pub(crate) fn settled(settled: Settled<Value>) -> Self {
@@ -344,6 +369,35 @@ mod tests {
         assert!(matches!(
             final_poll(Err(Break::Error(Error::raised("x"))), &calm),
             Err(Break::Error(e)) if e.failure_code() == nz(1)
+        ));
+    }
+
+    /// A base reads its node once more after its body, claims the call site
+    /// for an unlocated failure or stop, and ends a panic as `Panic`.
+    #[test]
+    fn a_base_polls_once_more_claims_its_site_and_catches_a_panic() {
+        let mut shell = crate::test_helper::core_shell();
+        let node = DurableRoot::default().child();
+        let ended = shell.base(&node, |_| {
+            node.cancel(C::ReaderGone);
+            Ok(Value::Unit)
+        });
+        assert!(matches!(
+            ended,
+            End::Stopped(Stop {
+                cause: C::ReaderGone,
+                owner: Some(owner),
+                at: Some(_),
+            }) if owner == node.id()
+        ));
+        let calm = DurableRoot::default().child();
+        assert!(matches!(
+            shell.base(&calm, |_| Err(Error::raised("x").into())),
+            End::Err(Error { prov: Some(_), .. })
+        ));
+        assert!(matches!(
+            shell.base(&calm, |_| panic!("boom")),
+            End::Panic(text) if text == "boom"
         ));
     }
 

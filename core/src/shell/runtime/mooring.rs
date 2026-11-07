@@ -238,7 +238,7 @@ impl Mooring {
             deferred: None,
             desk: None,
             fork: None,
-            home: DurableRoot::default().worker(),
+            home: DurableRoot::default().child(),
             cleanup_grace: DEFAULT_CLEANUP_GRACE,
             worker_cap: None,
             worker_title: TitlePolicy::Optional,

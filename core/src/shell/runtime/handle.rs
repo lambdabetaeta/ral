@@ -3,7 +3,7 @@
 //!
 //! **Module invariant.** [`HandleInner::new`] mints the sole
 //! [`CompletionPermit`] for each handle, and terminal publication (`publish` /
-//! `publish_abandoned_if_unfinished`) is private to this module, so a handle's
+//! `publish_abandoned`) is private to this module, so a handle's
 //! terminal transition is written at most once.
 
 use super::flow::End;
@@ -271,8 +271,7 @@ impl HandleInner {
     /// An unfinished [`CompletionPermit`] dropped, so the worker never
     /// reported: its end is a panic.
     fn publish_abandoned(&self) {
-        let end = End::Panic(format!("{}: spawned thread panicked", self.title));
-        self.install_terminal(self.state.lock_ignore_poison(), end);
+        self.install_terminal(self.state.lock_ignore_poison(), End::unreported());
     }
 
     fn install_terminal(&self, mut state: MutexGuard<'_, HandleState>, end: End) -> Stamp {
@@ -296,8 +295,8 @@ impl HandleInner {
 /// The worker's sole completion capability, minted by [`HandleInner::new`].
 ///
 /// Consuming it with [`Self::finish`] publishes the worker's [`End`] and
-/// returns the terminal [`Stamp`].  Dropping it unfinished publishes an
-/// abandoned-thread panic without invoking any host sink.
+/// returns the terminal [`Stamp`].  Dropping it unfinished publishes
+/// [`End::unreported`] without invoking any host sink.
 pub(crate) struct CompletionPermit(Option<HandleInner>);
 
 impl CompletionPermit {
@@ -548,7 +547,7 @@ mod tests {
             Sample::Ready(c) => {
                 assert_eq!(c.written.stdout.bytes, b"partial-out");
                 assert_eq!(c.written.stderr.bytes, b"partial-err");
-                assert!(matches!(c.end, End::Panic(ref s) if s.contains("<handle-test>")));
+                assert!(matches!(c.end, End::Panic(ref s) if s.contains("without reporting")));
             }
             other => panic!("expected Ready from abandoned Running permit, got {other:?}"),
         }

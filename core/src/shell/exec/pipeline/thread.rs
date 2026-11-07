@@ -11,7 +11,7 @@ use crate::ir::Comp;
 use crate::process::{CancelCause, POLL_SLICE, ScopeId, ScopeNode};
 #[cfg(test)]
 use crate::process::{DurableRoot, Scope};
-use crate::shell::runtime::{End, Error, Mooring, Settled};
+use crate::shell::runtime::{Mooring, Settled};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
@@ -129,13 +129,14 @@ pub(super) fn launch_thread_stage(
             // Armed by the thread it guards: a spawn that fails posts nothing.
             let settle = SettleOnDrop::new(slot);
             child.local.audit.install_active_policy(policy);
-            let end = End::of(|| eval(comp, env, mooring, child)).leaving(&child.session.sources);
+            let end = child
+                .base(&mooring.home, |child| eval(comp, env, mooring, child))
+                .leaving(&child.session.sources);
             settle.send(StageObservation {
                 end,
                 audit: child.local.audit.take_fragment(),
             });
-        })
-        .map_err(|e| Error::new(format!("could not start a pipeline stage thread: {e}")))?;
+        })?;
 
     Ok(ThreadStage {
         join: Some(join),
@@ -149,7 +150,7 @@ mod tests {
     use super::*;
     use crate::io::Edge;
     use crate::process::DurableRoot;
-    use crate::shell::runtime::{Stop, TerminalAccess};
+    use crate::shell::runtime::{End, Stop, TerminalAccess};
     use std::io::Read;
     use std::time::{Duration, Instant};
 
@@ -263,6 +264,61 @@ mod tests {
                 })
             ),
             "a cancelled thread ends in the reader-gone stop: {:?}",
+            obs.end
+        );
+    }
+
+    /// A stage's base reads its node once more after its body: a cut that
+    /// lands after the body's last poll is the stage's ending, naming it.
+    #[test]
+    fn a_stage_reads_its_node_once_more_after_its_body() {
+        let mut shell = crate::test_helper::core_shell();
+        let env = shell.env.clone();
+        let group = prepared_group();
+        let (_reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
+        let mooring = Mooring::adrift();
+        let cx = LaunchCx {
+            mooring: &mooring,
+            shell: &mut shell,
+            env: &env,
+            eval: super::super::StageEval {
+                run: |_, _, mooring, _| {
+                    mooring.home.cancel(CancelCause::ReaderGone);
+                    Ok(crate::shell::runtime::Value::Unit)
+                },
+                ..crate::shell::evaluator::STAGE_EVAL
+            },
+            group: &group,
+            holds_terminal: false,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stage = launch_thread_stage(
+            &compile_one("echo unused"),
+            ByteIn::Parent,
+            ChildOut::Edge {
+                writer,
+                edge: Edge::new(),
+            },
+            &cx,
+            Slot { ix: 0, tx },
+        )
+        .expect("launch");
+
+        let super::super::collect::Event::Returned(_, obs) =
+            rx.recv().expect("the stage sends its own Returned")
+        else {
+            panic!("a thread stage must settle as Event::Returned");
+        };
+        assert!(
+            matches!(
+                &obs.end,
+                End::Stopped(Stop {
+                    cause: CancelCause::ReaderGone,
+                    owner: Some(owner),
+                    ..
+                }) if *owner == stage.id()
+            ),
+            "the closing poll ends the stage in its own cut: {:?}",
             obs.end
         );
     }

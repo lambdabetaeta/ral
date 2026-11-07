@@ -169,7 +169,8 @@ checkpoint, since a run never writes it.
   `Shell` the engine runs beside that session — an aside hook,
   [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]), the
   `anchor` a run entered through `Shell::run` nests its foreground frame
-  under — minted once, from the session's own root, so the scope tree is the
+  under — minted once, from the session's own root, and shared by an aside,
+  so the scope tree is the
   LIFO extent it claims to be — the `sources`
   registry rendered against after a run returns (append-only for the session,
   so a nested run's spans can never alias an outer run's `FileId`) and the
@@ -453,8 +454,8 @@ carries `TerminalAccess::Denied` — the safe default for a store that is not
 the session's. Each also starts with stdin `Empty`, no hooks and no control
 counters; what rides along is the scope, context, Σ, builtin table, source
 registry, root file, call site and exit hints. The kinds differ only in their
-`Holding` — cancel root and anchor, roster, lease ledger, fixings, and the
-`Seat` each birth states: its `Io`, interactivity and stage membership. A
+`Holding` — cancel root and anchor, roster, cradle, and the `Seat` each birth
+states: its `Io`, interactivity and stage membership. A
 worker's seat reads nothing, is not interactive and joins no group, so its
 externals lead sessions of their own; a stage's joins its pipeline's group;
 an aside's writes where its parent does:

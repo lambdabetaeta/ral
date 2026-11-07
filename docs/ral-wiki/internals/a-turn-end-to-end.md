@@ -130,15 +130,17 @@ module's framed scaffold:
   halted run keeps every write that landed before the halt and the run
   remains a resume point regardless of completion, error, or `exit`
   ([[invariants/turn-ends-ready|exchange-ends-ready]]). After any `Run.last`
-  return-wait, `run_framed` disarms the wall (waiting on a firing already claimed)
-  and makes the **closing poll**, `final_poll` on the run's node, so a stop
+  return-wait, the run's body disarms the wall (waiting on a firing already
+  claimed), and `Shell::base`, the run's base, makes the **closing poll**,
+  `final_poll` on the run's node, so a stop
   that landed after the body's last poll — a key a terminal loan heard back
   and struck on the node included — is not lost; a stop is an escape no `try`
-  absorbs anyway. It emits ready-boundary notices while the run frame and
-  sinks are still installed. Before the IO guard restores the caller, any
-  unlocated error is completed from the run's own total register.
-- Back in `run_built`, `End::settled` folds the machine result into
-  `Ending<Value, Error, Stop>`: `Ok`, `Err`, `Exited` or `Stopped`.
+  absorbs anyway. The same base completes any unlocated error or stop from
+  the run's own total register, and folds the result into
+  `Ending<Value, Error, Stop>`: `Ok`, `Err`, `Exited`, `Stopped`, or `Panic`
+  for a panic it caught. `run_framed` then emits ready-boundary notices (none
+  for a panicked run) while the run frame and sinks are still installed.
+- Back in `run_built`, the ending goes into the report.
   A wall is a `TimedOut` stop, not a separate flag.
   `RunReport::Ran { ending, base, compact, captured, trail }` carries it home;
   `base`, the run's origin at 1:1 that `run_under` resolves once, sites a

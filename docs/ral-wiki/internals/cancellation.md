@@ -84,7 +84,8 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   owner. A cause the collector writes on a stage that an ancestor already
   carries therefore renames nothing.
 - **Evaluator minting points**, each a frame or a base: the session root
-  (`DurableRoot::new`); the session anchor (`DurableRoot::worker`); a
+  (`DurableRoot::new`); the session anchor (the root's child, minted once by
+  `Shell::construct` and shared by an aside); a
   worker's node, minted under its shell's *cradle* (`Cradle`) — the session
   root in a run outside any gather, else the gather's entry scope: the parent
   worker's own node inside a worker, the run's scope at a `gather`; a
@@ -132,9 +133,10 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
   node descends from a durable root and none is installed as a home. A loose worker born in a run —
   `spawn`, `watch` — hangs under it, so a *foreground* cancel never reaches
   it ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-- `DurableRoot::worker` mints the session anchor, beside a run's own
-  extent. A run's frame nests under the anchor, so cancelling it never
-  reaches a session worker, while cancelling the root reaches both.
+- The session anchor is the one child of the root minted at construction, beside a
+  run's own extent; nothing writes it. A run's frame nests under the anchor,
+  so cancelling it never reaches a session worker, while cancelling the root
+  reaches both.
 - **A gather is a scope over its births.** A shell's `LocalState::cradle`
   says where a birth hangs and who settles it: a run's is loose under the
   root and answers for nothing; inside a *gather* — a worker's body, or a
@@ -242,7 +244,8 @@ signal context. The two are different kinds of proposition.
   its session — a hook whose registered policy says `aside`, as the REPL's
   buffer-change hooks do while readline runs — *shares* the session's
   `DurableRoot` (`Shell::join_session`), so a `cancel_handle` cancel reaches
-  it. It mints its frames under its own anchor, so it can neither absorb an
+  it. It shares the session's anchor too, so its frames are siblings of the
+  struck run's, off its chain: it can neither absorb an
   interrupt that struck the run it was called from nor keep it from that run.
 
 This is the seam the
@@ -271,10 +274,24 @@ in force, at:
 - **pipeline launch** (`shell/exec/pipeline.rs`, `shell/exec/pipeline/launch.rs`) —
   before and between stage spawns;
 - a base's **closing poll** (`final_poll`), the first half of its return
-  clause: the top of a run and a worker read their node once more after the
+  clause: a run, a worker and a stage read their node once more after the
   body settled, so a stop that landed after the last poll is not lost. The
   run's wall is disarmed first, and a firing already claimed is waited for on
   its own `fired` flag, so nothing fires after this poll.
+
+**One base frame.** `Shell::base(home, body) -> End` is every base: the body
+under `catch_unwind`, the closing poll on `home`, and an unlocated failure *or
+stop* claimed for the last call site, so a stop that passes a worker keeps its
+caret as an error does. A thread's ending then leaves its shell
+(`End::leaving`, run by the worker's and the stage's thread, not the run's,
+whose report is read against the session's own registry); the worker adds only
+its switch (`convert_own_stop`, on the `End`). A run's base-caught panic and
+one caught outside it fold to one report, the checkpoint restored and no ready
+boundary held. A thread that never reported (its permit dropped unfinished,
+its `SettleOnDrop` dropped armed, a stage the fold finds unfiled) is
+`End::unreported`, a panic with one wording, which a collector re-raises as it
+does a panicked stage. The one thread-spawn primitive words a refused thread
+once (`could not start a worker thread`, `… a pipeline stage thread`).
 
 **Sliced waits.** Every blocked operation of ral's own is a sequence of (read
 the scope; wait at most `POLL_SLICE`, 10 ms), the read first so an
@@ -286,6 +303,18 @@ collector's `recv`, every external's one waiter) and its pumps' drain
 scope at the start of the sweep before inspecting any handle, so a pending
 cancellation is never lost to an already-`ready` worker). The slice is the sampling period, not an end-to-end bound: the
 latency to a stop is the slice plus the step in progress plus the scheduler.
+**Teardown waits** read no scope, since the waiter's own may be what was
+cancelled: `cancel::wait_ended(deadline, ended)` re-reads its witness each
+`POLL_SLICE`. Two witnesses, both needed. A brood's drain, its halt
+(`ScopeOwner::end`, `close` then `stop_and_drain`) and `race`'s losers wait on
+*published handles* (`Ready` or `Consumed`): what a gather owes is its
+children's endings in hand. The registry's `cancel_all`, the session's end,
+waits on *live-thread tickets*: one per thread `spawn_thread` starts, worker
+and stage alike, dropped only after the thread's `done` flush and its shell's
+drop, so a stage thread (which has no handle) and a worker's tail after its
+publish are covered; a ticket outlives its handle's publish, so the tickets
+cover the handles too.
+
 There is no watch table and no wake. Windows pipes cannot be waited on with a
 timeout, so there a blocked thread stage or pump is interrupted
 (`CancelSynchronousIo`) instead, and the aborted call re-reads its scope; a

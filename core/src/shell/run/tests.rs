@@ -530,8 +530,8 @@ fn a_try_handler_cannot_settle_a_cancelled_run() {
 
 /// An aside — a separate `Shell` beside the session, as the REPL runs plugin
 /// hooks ([`Shell::join_session`]) — can neither absorb an interrupt aimed
-/// at the session's run nor withhold it: the aside mints its frames under
-/// its own anchor, off the struck run's chain.
+/// at the session's run nor withhold it: the aside's frames hang under the
+/// shared anchor as siblings of the struck run's frame, off its chain.
 #[test]
 fn an_aside_cannot_absorb_its_callers_interrupt() {
     let mut runtime = crate::test_helper::core_runtime();

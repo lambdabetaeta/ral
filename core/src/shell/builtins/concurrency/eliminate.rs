@@ -99,7 +99,7 @@ pub(super) fn first_ready<R>(
         if !running {
             return Ok(None);
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(crate::process::POLL_SLICE);
     }
 }
 

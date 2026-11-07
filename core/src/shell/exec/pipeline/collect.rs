@@ -14,7 +14,8 @@ use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalLoan, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Settled, Shell, Stop, Value,
+    AuditFragment, Break, CommandOrigin, End, Escape, Mooring, Settled, Shell, Stop, UNREPORTED,
+    Value,
 };
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -245,12 +246,7 @@ impl SettleOnDrop {
 impl Drop for SettleOnDrop {
     fn drop(&mut self) {
         if let Some(slot) = self.0.take() {
-            slot.send(Event::Returned(
-                slot.ix,
-                StageObservation::failure(Error::new(
-                    "ral pipeline stage ended without reporting".to_string(),
-                )),
-            ));
+            slot.send(Event::Returned(slot.ix, StageObservation::unreported()));
         }
     }
 }
@@ -281,9 +277,10 @@ impl StageObservation {
         }
     }
 
-    pub(super) fn failure(error: Error) -> Self {
+    /// A stage that never reported: a panic, which the fold re-raises.
+    fn unreported() -> Self {
         Self {
-            end: End::Err(error),
+            end: End::unreported(),
             audit: AuditFragment::empty(),
         }
     }
@@ -752,12 +749,9 @@ impl CollectState {
         for end in observed {
             // Thread stages already published their facts.
             let surface = matches!(&end, Some(StageEnd::External { .. })).then_some(mooring);
-            // A stage nobody reported is a failure, not an absence.
             let StageObservation { end, audit } = match end {
                 Some(end) => end.settle(shell, self.started, &self.scope, self.group.owned()),
-                None => StageObservation::failure(Error::new(
-                    "ral pipeline stage vanished without reporting".to_string(),
-                )),
+                None => StageObservation::unreported(),
             };
             for observation in audit.into_observations() {
                 shell.observe_stamped(surface, observation);
@@ -814,7 +808,8 @@ impl CollectState {
             sent,
         })) = self.observed.pop()
         else {
-            return Err(Error::new("ral external vanished without reporting".to_string()).into());
+            // Re-raised, as a panicked stage is.
+            std::panic::resume_unwind(Box::new(UNREPORTED.to_owned()));
         };
         if let Some(loan) = self.loan.take() {
             loan.reclaim(outcome.death());

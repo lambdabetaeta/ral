@@ -41,7 +41,7 @@ pub use cancel::{
     Ambient, AmbientForward, CancelCause, Cancellation, DurableRoot, RootCause, Scope, ScopeId,
     ScopeNode, forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel,
 };
-pub(crate) use cancel::{DEFAULT_CLEANUP_GRACE, POLL_SLICE, TEARDOWN_GRACE};
+pub(crate) use cancel::{DEFAULT_CLEANUP_GRACE, POLL_SLICE, TEARDOWN_GRACE, wait_ended};
 
 pub use child::ChildHandle;
 pub(crate) use foreground::PreparedTerminalLoan;

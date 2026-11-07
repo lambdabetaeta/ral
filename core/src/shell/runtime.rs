@@ -71,7 +71,7 @@ pub use exit_hints::ExitHints;
 
 mod flow;
 pub use flow::{Break, End, Escape, Settled, Stop};
-pub(crate) use flow::{final_poll, panic_text};
+pub(crate) use flow::{UNREPORTED, panic_text};
 
 mod walk;
 pub use walk::AdmittedWalk;

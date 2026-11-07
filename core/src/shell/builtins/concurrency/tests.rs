@@ -111,7 +111,7 @@ fn a_dropped_settler_settles_as_panicked() {
     let handle = handle_with_panicked_worker(b"", b"");
     match handle.snapshot(|completed| completed.end.clone()).state {
         Sample::Ready(End::Panic(text)) => {
-            assert!(text.contains("spawned thread panicked"));
+            assert!(text.contains("without reporting"), "{text}");
         }
         other => panic!("expected a ready panic, got {other:?}"),
     }
@@ -2044,6 +2044,30 @@ fn polling_an_exited_worker_exits() {
     assert!(matches!(err, Break::Escape(Escape::Exit(3))), "{err:?}");
 }
 
+/// A stop the switch passes is located as an error is: the worker's base
+/// claims the call site for its caret.
+#[test]
+fn a_passed_stop_carries_its_caret() {
+    let mut shell = crate::test_helper::core_shell();
+    let foreign = shell.session.root.id();
+    let handle = spawn_child(
+        &Mooring::adrift(),
+        &mut shell,
+        spawned("<a>"),
+        move |_, _| Err(Break::stopped(CancelCause::Terminated, Some(foreign))),
+    )
+    .unwrap();
+    wait_settled(&handle);
+    match handle.snapshot(|completed| completed.end.clone()).state {
+        Sample::Ready(End::Stopped(Stop {
+            cause: CancelCause::Terminated,
+            at: Some(_),
+            ..
+        })) => {}
+        other => panic!("expected a located stop, got {other:?}"),
+    }
+}
+
 /// A stop naming a node that is not the worker's passes the boundary, so
 /// `await` and `poll` re-raise it.
 #[test]
@@ -2101,29 +2125,28 @@ fn a_worker_converts_a_cancel_from_inside_the_session_and_passes_a_root_stop() {
             col: 4,
         },
     )));
-    let converted = convert_own_stop(
-        Err(Escape::Stopped(Stop {
-            cause: CancelCause::Cancelled,
-            owner: Some(parent.id()),
-            at: Some(at.clone()),
-        })
-        .into()),
+    let stop = |cause, owner| Stop {
+        cause,
+        owner,
+        at: Some(at.clone()),
+    };
+    match convert_own_stop(
+        End::Stopped(stop(CancelCause::Cancelled, Some(parent.id()))),
         &root,
-    );
-    match converted {
-        Err(Break::Error(e)) => {
+    ) {
+        End::Err(e) => {
             assert_eq!(e.reason, crate::fact::Reason::Cancelled);
-            assert_eq!(e.prov, Some(at));
+            assert_eq!(e.prov, Some(at.clone()));
         }
         other => panic!("expected the worker's error, got {other:?}"),
     }
     let terminated = convert_own_stop(
-        Err(Break::stopped(CancelCause::Terminated, Some(root.id()))),
+        End::Stopped(stop(CancelCause::Terminated, Some(root.id()))),
         &root,
     );
-    assert!(matches!(terminated, Err(Break::Escape(Escape::Stopped(_)))));
-    let unnamed = convert_own_stop(Err(Break::stopped(CancelCause::Cancelled, None)), &root);
-    assert!(matches!(unnamed, Err(Break::Escape(Escape::Stopped(_)))));
+    assert!(matches!(terminated, End::Stopped(_)));
+    let unnamed = convert_own_stop(End::Stopped(stop(CancelCause::Cancelled, None)), &root);
+    assert!(matches!(unnamed, End::Stopped(_)));
 }
 
 /// A stage's node under a worker's: the join names the outermost node
@@ -2137,8 +2160,8 @@ fn a_stage_inside_a_worker_names_the_worker() {
     let inner = node.child();
     let join = inner.in_force().expect("the chain carries the cause");
     assert_eq!(join.owner, node.id());
-    match convert_own_stop(Err(join.into()), &root) {
-        Err(Break::Error(e)) => assert_eq!(e.reason, crate::fact::Reason::TimedOut),
+    match convert_own_stop(End::settled(Err(join.into())), &root) {
+        End::Err(e) => assert_eq!(e.reason, crate::fact::Reason::TimedOut),
         other => panic!("expected the worker's error, got {other:?}"),
     }
 }

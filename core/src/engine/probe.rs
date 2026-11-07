@@ -43,7 +43,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
             .collect::<Vec<_>>()
             .encode(),
         Probe::SessionEnded => shell
-            .durable_root()
+            .cancel_handle()
             .cause()
             .map(|cause| cause.failure_code().get())
             .encode(),

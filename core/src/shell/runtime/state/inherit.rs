@@ -14,7 +14,7 @@ use super::workers::Roster;
 use super::{LocalState, Mooring, SessionState, Shell};
 use crate::io::{Io, Sink, Source, Streams};
 use crate::process::{DurableRoot, Membership, Scope};
-use crate::shell::runtime::{Audit, Cradle};
+use crate::shell::runtime::{Audit, Cradle, Error};
 use std::sync::Arc;
 
 /// What the three kinds of child differ in.
@@ -23,6 +23,7 @@ struct Holding {
     /// The child's session anchor and its current scope: one node at birth.
     scope: Scope,
     workers: Roster,
+    cradle: Cradle,
     seat: Seat,
 }
 
@@ -46,6 +47,7 @@ impl Shell {
             root,
             scope,
             workers,
+            cradle,
             seat:
                 Seat {
                     io,
@@ -78,7 +80,7 @@ impl Shell {
             local: LocalState {
                 audit: Audit::dispatched_from(self.local.audit.call_site().clone()),
                 workers,
-                cradle: self.local.cradle.clone(),
+                cradle,
                 bindings: BindingLedger::default(),
                 machine_depth: 0,
             },
@@ -89,22 +91,23 @@ impl Shell {
     /// beside it rather than as one — the REPL's hook shell, evaluating
     /// arbitrary plugin code while the session sits at its prompt.
     ///
-    /// It *shares* this session's durable root rather than minting a fresh
-    /// one, so it is inside the session for cancellation.  An interrupt
-    /// aimed at a command the session was already running is older than every
-    /// frame the aside will mint, so the aside can neither absorb it nor keep
-    /// it from the run it was aimed at.
+    /// It *shares* this session's durable root and anchor rather than minting
+    /// fresh ones, so it is inside the session for cancellation.  An interrupt
+    /// aimed at a command the session was already running struck that run's
+    /// frame, a sibling of every frame the aside will mint under the anchor,
+    /// so the aside can neither absorb it nor keep it from the run it was aimed
+    /// at.
     ///
     /// It writes where the session does and reads nothing, so it cannot
     /// `tcgetpgrp` whoever owns the real terminal.
     pub fn join_session(&self) -> Self {
         let root = self.session.root.clone();
-        let scope = Scope::clone(&root.worker());
         let cradle = Cradle::loose(Scope::clone(&root));
-        let mut aside = self.child(Holding {
+        self.child(Holding {
             root,
-            scope,
+            scope: self.session.anchor.clone(),
             workers: self.local.workers.fresh(),
+            cradle,
             seat: Seat {
                 io: Io {
                     stdin: Source::Empty,
@@ -114,9 +117,7 @@ impl Shell {
                 interactive: self.session.interactive,
                 stage: self.session.stage.clone(),
             },
-        });
-        aside.local.cradle = cradle;
-        aside
+        })
     }
 
     /// A worker's thread: it reads nothing, writes `out`, and joins no
@@ -130,7 +131,7 @@ impl Shell {
         mooring: Mooring,
         out: Streams<Sink>,
         f: F,
-    ) -> std::io::Result<std::thread::JoinHandle<R>>
+    ) -> Result<std::thread::JoinHandle<R>, Error>
     where
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
@@ -145,7 +146,7 @@ impl Shell {
             interactive: false,
             stage: None,
         };
-        self.spawn_thread(mooring, seat, "ral spawn worker", f)
+        self.spawn_thread(mooring, seat, "worker", f)
     }
 
     /// A pipeline stage's thread, on `io`, its externals joining `membership`.
@@ -158,7 +159,7 @@ impl Shell {
         io: Io,
         membership: Membership,
         f: F,
-    ) -> std::io::Result<std::thread::JoinHandle<R>>
+    ) -> Result<std::thread::JoinHandle<R>, Error>
     where
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
@@ -168,25 +169,26 @@ impl Shell {
             interactive: self.session.interactive,
             stage: Some(membership),
         };
-        self.spawn_thread(mooring, seat, "ral pipeline stage", f)
+        self.spawn_thread(mooring, seat, "pipeline stage", f)
     }
 
     /// The one and only thread-spawn primitive: `f` runs on a fresh OS thread
     /// with a child shell built here, on the parent's thread. `mooring` is
     /// minted by the caller, since only it has the parent mooring to rebuild
-    /// from; the caller minted its node too, and keeps it.
+    /// from; the caller minted its node too, and keeps it.  `kind` names the
+    /// thread and its refusal.
     ///
     /// The worker registry is `Arc`-shared, not copied, so a nested `spawn`
     /// registers alongside its parent, and the worker's shell dropping cancels
     /// nothing of the parent's.  The cradle is the parent's too: a stage keeps
-    /// it, a worker's base replaces it with its own.
+    /// it, a worker's body replaces it with its own.
     fn spawn_thread<F, R>(
         &self,
         mooring: Mooring,
         seat: Seat,
-        name: &str,
+        kind: &str,
         f: F,
-    ) -> std::io::Result<std::thread::JoinHandle<R>>
+    ) -> Result<std::thread::JoinHandle<R>, Error>
     where
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
@@ -195,11 +197,12 @@ impl Shell {
             root: self.session.root.clone(),
             scope: Scope::clone(&mooring.home),
             workers: self.local.workers.share(),
+            cradle: self.local.cradle.clone(),
             seat,
         });
         let live = self.local.workers.live_ticket();
-        let handle = std::thread::Builder::new()
-            .name(name.into())
+        std::thread::Builder::new()
+            .name(format!("ral {kind}"))
             .stack_size(8 << 20)
             .spawn(move || {
                 // Held across the inner block so reverse local destruction order
@@ -212,8 +215,8 @@ impl Shell {
                 };
                 drop(live);
                 result
-            })?;
-        Ok(handle)
+            })
+            .map_err(|e| Error::io(format!("could not start a {kind} thread"), &e))
     }
 }
 
@@ -414,6 +417,17 @@ mod tests {
         });
         let aside = parent.join_session();
         assert!(!aside.local.bindings.armed());
+    }
+
+    /// An aside is the same session for cancellation: its root and anchor are
+    /// the session's, so its frames are siblings of the session's runs.
+    #[test]
+    fn an_aside_shares_the_session_root_and_anchor() {
+        let parent = crate::test_helper::core_shell();
+        let aside = parent.join_session();
+        assert_eq!(aside.session.root.id(), parent.session.root.id());
+        assert_eq!(aside.session.anchor.id(), parent.session.anchor.id());
+        assert_eq!(aside.scope.id(), parent.session.anchor.id());
     }
 
     /// An aside is the same session: it shares the fixings.

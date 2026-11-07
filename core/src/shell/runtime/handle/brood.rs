@@ -3,10 +3,9 @@
 use super::HandleInner;
 use super::compacting::Compacting;
 use crate::fact::WorkerId;
-use crate::process::Scope;
+use crate::process::{Scope, wait_ended};
 use crate::shell::runtime::Owner;
 use crate::sync::LockExt as _;
-use std::borrow::Borrow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -159,14 +158,14 @@ impl ScopeOwner {
     /// `Stopping`.
     pub(crate) fn drain(&self, grace: Duration) {
         let children = self.children();
-        wait_ended(&children, grace);
+        wait_ended(Instant::now() + grace, || all_ended(&children));
     }
 
     /// The halt rule (I4) with its drain (I4′): stop every child, then wait up
     /// to `grace` for all of them to reach a terminal state.
     pub(crate) fn end(&self, grace: Duration) {
-        self.stop();
-        self.drain(grace);
+        self.close();
+        stop_and_drain(&self.children(), grace);
     }
 
     #[cfg(test)]
@@ -189,24 +188,18 @@ impl Drop for ScopeOwner {
 /// Claim and stop every unclaimed handle in `handles`, then wait up to a
 /// single `grace` deadline for all of `handles` (including ones already
 /// `Stopping`) to reach a terminal state.
-pub(crate) fn stop_and_drain<'a>(
-    handles: impl IntoIterator<Item = &'a HandleInner>,
-    grace: Duration,
-) {
-    let handles: Vec<&HandleInner> = handles.into_iter().collect();
-    for handle in &handles {
+pub(crate) fn stop_and_drain(handles: &[HandleInner], grace: Duration) {
+    for handle in handles {
         handle.claim_and_stop();
     }
-    wait_ended(&handles, grace);
+    wait_ended(Instant::now() + grace, || all_ended(handles));
 }
 
-/// Wait for every handle to reach a terminal state, up to `grace`.  Never
-/// polls: the waiter's own scope may be the thing that was cancelled.
-fn wait_ended<H: Borrow<HandleInner>>(handles: &[H], grace: Duration) {
-    let deadline = Instant::now() + grace;
-    while handles.iter().any(|h| !h.borrow().sample().has_ended()) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-    }
+/// The witness a brood's and a `race`'s drains wait on: every handle published
+/// (`Ready` or `Consumed`), each worker's ending in hand, though its thread may
+/// still be delivering its `done` and dropping its shell.
+fn all_ended(handles: &[HandleInner]) -> bool {
+    handles.iter().all(|h| h.sample().has_ended())
 }
 
 #[cfg(test)]
@@ -278,7 +271,10 @@ mod tests {
             running_permit.finish(End::Ok(Value::Unit));
         });
 
-        stop_and_drain([&already_stopping, &running], Duration::from_secs(1));
+        stop_and_drain(
+            &[already_stopping.clone(), running.clone()],
+            Duration::from_secs(1),
+        );
         assert_eq!(already_stopping.sample(), Sample::Consumed);
         assert_eq!(running.sample(), Sample::Consumed);
         finisher.join().unwrap();

@@ -320,6 +320,19 @@ impl std::error::Error for Cancellation {}
 /// Every sliced wait's period: a blocked wait re-reads its scope this often.
 pub(crate) const POLL_SLICE: Duration = Duration::from_millis(10);
 
+/// A teardown's wait: until `ended` holds or `deadline` passes, `ended` re-read
+/// every [`POLL_SLICE`].  It reads no scope, since the waiter's own may be
+/// what was cancelled.
+pub(crate) fn wait_ended(deadline: Instant, ended: impl Fn() -> bool) {
+    while !ended() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(POLL_SLICE));
+    }
+}
+
 #[derive(Debug)]
 struct Vertex {
     flag: AtomicU8,
@@ -531,8 +544,7 @@ impl DurableRoot {
         Self(ScopeNode(Scope(mint(None, None))))
     }
 
-    /// A node under this root that is *not* a run's frame: a worker's, and
-    /// the anchor a session boots with.
+    #[cfg(test)]
     pub fn worker(&self) -> ScopeNode {
         self.child()
     }
@@ -628,6 +640,28 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(now(), start);
+    }
+
+    /// A teardown's wait ends at its witness, or at its deadline when the
+    /// witness never comes.
+    #[test]
+    fn a_teardown_wait_ends_at_its_witness_or_its_deadline() {
+        let start = Instant::now();
+        wait_ended(start + 3 * POLL_SLICE, || false);
+        assert!(start.elapsed() >= 3 * POLL_SLICE);
+
+        let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let setter = Arc::clone(&ended);
+        let witness = std::thread::spawn(move || {
+            std::thread::sleep(2 * POLL_SLICE);
+            setter.store(true, Ordering::Release);
+        });
+        let start = Instant::now();
+        wait_ended(start + Duration::from_secs(30), || {
+            ended.load(Ordering::Acquire)
+        });
+        assert!(start.elapsed() < Duration::from_secs(5));
+        witness.join().unwrap();
     }
 
     /// The escalation order being total is what makes `fetch_max` on the flag

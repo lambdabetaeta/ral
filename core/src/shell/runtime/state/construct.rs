@@ -292,7 +292,7 @@ impl Shell {
             let baseline = env.all_bindings(&sig).into_iter().map(|(name, _)| name);
             bindings.arm(lease, baseline);
         }
-        let anchor = Scope::clone(&durable.worker());
+        let anchor = Scope::clone(&durable.child());
         let cradle = Cradle::loose(Scope::clone(&durable));
         Self {
             env,
