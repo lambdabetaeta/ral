@@ -37,7 +37,7 @@ pub(crate) fn skill_roots(
 ) -> Vec<PathBuf> {
     std::iter::once(cwd.join(".exarch").join("skills"))
         .chain(
-            ral_core::path::work_tree_chain(cwd)
+            ral_core::path::git::work_tree_chain(cwd)
                 .into_iter()
                 .rev()
                 .map(|dir| dir.join(".agents").join("skills")),

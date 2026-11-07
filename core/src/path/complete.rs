@@ -20,12 +20,12 @@ use super::tilde::TildePath;
 pub struct PartialPath<'a> {
     dir: &'a str,
     needle: &'a str,
-    tilde: Tilde<'a>,
+    reading: TildeReading<'a>,
 }
 
 /// What a leading `~` of the word means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tilde<'a> {
+pub enum TildeReading<'a> {
     /// The home directory, if one is known.
     Home(Option<&'a str>),
     /// A plain character, as inside quotes.
@@ -33,18 +33,22 @@ pub enum Tilde<'a> {
 }
 
 impl<'a> PartialPath<'a> {
-    /// Split `word` after its last separator.  Under [`Tilde::Home`] a lone
+    /// Split `word` after its last separator.  Under [`TildeReading::Home`] a lone
     /// `~` is home as a directory, `~/`.
-    pub fn of(word: &'a str, tilde: Tilde<'a>) -> Self {
-        let word = match tilde {
-            Tilde::Home(_) if word == "~" => "~/",
+    pub fn of(word: &'a str, reading: TildeReading<'a>) -> Self {
+        let word = match reading {
+            TildeReading::Home(_) if word == "~" => "~/",
             _ => word,
         };
         let cut = word
             .rfind(|c| PathRules::HOST.is_separator(c))
             .map_or(0, |at| at + 1);
         let (dir, needle) = word.split_at(cut);
-        Self { dir, needle, tilde }
+        Self {
+            dir,
+            needle,
+            reading,
+        }
     }
 
     /// What the directory's entries are matched against.
@@ -86,17 +90,17 @@ impl<'a> PartialPath<'a> {
         self.expand_by(word, str::to_owned, TildePath::shown)
     }
 
-    /// `word` with its `~` expanded by `tilde` against the home, or taken
+    /// `word` with its `~` expanded by `expand` against the home, or taken
     /// `as_typed` when it has no `~` to expand; `None` when its `~` names an
     /// unknown home.
     fn expand_by<'w, T>(
         &self,
         word: &'w str,
         as_typed: impl FnOnce(&'w str) -> T,
-        tilde: impl FnOnce(&TildePath, &str) -> T,
+        expand: impl FnOnce(&TildePath, &str) -> T,
     ) -> Option<T> {
-        match (self.tilde, TildePath::parse(word)) {
-            (Tilde::Home(home), Some(t)) => home.map(|h| tilde(&t, h)),
+        match (self.reading, TildePath::parse(word)) {
+            (TildeReading::Home(home), Some(t)) => home.map(|h| expand(&t, h)),
             _ => Some(as_typed(word)),
         }
     }
@@ -116,7 +120,7 @@ pub fn spell_entry(name: &str, is_dir: bool) -> String {
 mod tests {
     use super::*;
 
-    const HOME: Tilde<'static> = Tilde::Home(Some("/home/al"));
+    const HOME: TildeReading<'static> = TildeReading::Home(Some("/home/al"));
 
     #[test]
     fn the_word_splits_after_its_last_separator() {
@@ -140,7 +144,7 @@ mod tests {
             ("", Some(PathBuf::from("/home/al/")))
         );
         assert_eq!(p.completed(&spell_entry("src", true)), "~/src/");
-        let literal = PartialPath::of("~", Tilde::Literal);
+        let literal = PartialPath::of("~", TildeReading::Literal);
         assert_eq!((literal.needle(), literal.is_bare()), ("~", true));
     }
 
@@ -148,9 +152,9 @@ mod tests {
     fn a_tilde_expands_only_against_a_known_home() {
         let p = PartialPath::of("~/a b", HOME);
         assert_eq!(p.expand("~/a b.txt").as_deref(), Some("/home/al/a b.txt"));
-        let homeless = PartialPath::of("~/x", Tilde::Home(None));
+        let homeless = PartialPath::of("~/x", TildeReading::Home(None));
         assert_eq!(homeless.listing(), None);
-        let quoted = PartialPath::of("~/x", Tilde::Literal);
+        let quoted = PartialPath::of("~/x", TildeReading::Literal);
         assert_eq!(quoted.listing(), Some(PathBuf::from("~/")));
     }
 

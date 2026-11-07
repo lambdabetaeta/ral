@@ -95,7 +95,8 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   host to `ral-core` reruns the bake, so the schema-evolution hazard has one guard rather than three that must
   agree ([[decisions/260610_host-embedding-api|host-embedding-api]],
   [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
-- `host` reports the process's facts: `cwd`, `user`, `home`, `home_dot`. It is
+- `host` reports the process's facts: `cwd`, `user`, `home`, `layout_home`,
+  `home_dot`, and on macOS `user_cache_dir`. It is
   also the one reader of the host's environment (`var`, `var_os`, `vars_os`,
   `temp_dir`), and of the XDG bases (`xdg`, with the account's home as the
   program's own fallback). `host/login_env.rs` (Unix) writes and reads the

@@ -1,7 +1,7 @@
-//! Path identity: which spellings of a name are one name, and how a rule
-//! holds a subject — a position containing another ([`RealPath::contains`]),
-//! and an exclusion's holds matching an access by position or by the
-//! identities its walk passed ([`Excluded::matches`]).
+//! Path identity: which spellings of a name, a path's or a command's, are
+//! one name, and how a rule holds a subject — a position containing another
+//! ([`RealPath::contains`]), and an exclusion's holds matching an access by
+//! position or by the identities its walk passed ([`Excluded::matches`]).
 //!
 //! The firmlink table lives in [`super::canon`], so the matcher and the
 //! renderers can never see different aliases.
@@ -16,9 +16,9 @@ use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::PathRules;
 use super::canon::twins;
-use super::lex::parse_bytes;
+use super::handle::{EntryName, Excluded, Hold, Listed, ObjectId, RealPath, Step, Trace};
+use super::lex::{WINDOWS_EXEC_EXTENSIONS, windows_components};
 use super::site::Silent;
-use super::walk::{EntryName, Excluded, Hold, Listed, ObjectId, RealPath, Step, Trace};
 use crate::site::site;
 
 /// Which spellings of a name count as one name.  A positive reading is under
@@ -240,7 +240,7 @@ fn encoded_collision_key(name: &[u8]) -> Cow<'_, [u8]> {
 }
 
 /// `collision_key` of a name that is UTF-8.
-pub(super) fn collision_fold(s: &str) -> String {
+fn collision_fold(s: &str) -> String {
     if s.is_ascii() {
         return s.to_ascii_lowercase();
     }
@@ -254,6 +254,25 @@ pub(super) fn collision_fold(s: &str) -> String {
         .normalize(&case.fold_string(&nfd.normalize(&upper)))
         .into_owned();
     nfkd.normalize(&case.fold_string(&once)).into_owned()
+}
+
+/// A command name as a deny holds it: the host's name for it, under every
+/// spelling some filesystem takes for that.
+pub(crate) fn command_name_key(name: &str) -> String {
+    collision_fold(&name_key_on(name, PathRules::HOST))
+}
+
+/// Off Windows the name itself; on Windows ASCII lower-case, a trailing
+/// executable extension stripped.
+fn name_key_on(name: &str, rules: PathRules) -> Cow<'_, str> {
+    if rules == PathRules::Posix {
+        return Cow::Borrowed(name);
+    }
+    let lower = name.to_ascii_lowercase();
+    match lower.rsplit_once('.') {
+        Some((stem, ext)) if WINDOWS_EXEC_EXTENSIONS.contains(&ext) => Cow::Owned(stem.to_string()),
+        _ => Cow::Owned(lower),
+    }
 }
 
 /// The names of `p`, without a head or a root: a verbatim UNC head carries a
@@ -365,10 +384,10 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, rules: PathRules) -
 /// internal normalisation, and folding `//?/C:/work` differently from
 /// `\\?\C:\work` would leave a deny that a differently-spelled access slips
 /// past.  The case fold is ASCII-only, matching
-/// `which`'s `name_key_on` so paths and command names fold alike, and
+/// [`name_key_on`] so paths and command names fold alike, and
 /// erring below the real NTFS `$UpCase` table rather than above it: missing
 /// non-ASCII folds sooner than claiming equivalences the driver would refuse.
-pub(crate) fn windows_identity_components(p: &str) -> Vec<Vec<u8>> {
+fn windows_identity_components(p: &str) -> Vec<Vec<u8>> {
     windows_components(p.as_bytes())
         .map(<[u8]>::to_ascii_lowercase)
         .collect()
@@ -417,35 +436,6 @@ pub(crate) fn windows_stored_components(p: &OsStr) -> Vec<Vec<u8>> {
         drive.make_ascii_lowercase();
     }
     parts
-}
-
-/// A path's components under Windows path identity, past its
-/// [head](windows_head), in the encoding it came in: the bytes of a `str`, or
-/// of an [`OsStr`] as the host encodes it.  The one split
-/// [`windows_identity_components`], [`windows_stored_components`] and
-/// [`starts_with_collision`] share.
-///
-/// Lossless on either encoding: a separator is ASCII, and an ASCII byte in
-/// either stands for that character alone; a head is ASCII, so slicing at its
-/// boundary preserves the encoding of the rest.
-fn windows_components(p: &[u8]) -> impl Iterator<Item = &[u8]> {
-    parse_bytes(p, PathRules::Windows)
-        .without_verbatim_prefix()
-        .split(|&b| PathRules::Windows.is_separator(char::from(b)))
-        .filter(|c| !c.is_empty())
-}
-
-/// A path string past its Windows head: a verbatim prefix stripped, and a
-/// verbatim UNC head's `UNC` with it, so `\\?\UNC\server\share` splits as
-/// `\\server\share` does.  The step [`windows_components`] takes before it
-/// splits, shared with the prompt's home-strip (`super::tilde`), which needs
-/// the head fold without the case fold.  One copy, because a head the two
-/// folded differently would silently unfold a `~`.
-pub(crate) fn windows_head(p: &str) -> &str {
-    let rest = parse_bytes(p.as_bytes(), PathRules::Windows).without_verbatim_prefix();
-    // SAFETY: `without_verbatim_prefix` slices `p` at an ASCII prefix boundary,
-    // which cannot land inside a multi-byte UTF-8 sequence.
-    unsafe { std::str::from_utf8_unchecked(rest) }
 }
 
 #[cfg(test)]
@@ -782,5 +772,32 @@ mod tests {
             relative("/tmp/x/y", "/private/tmp/x"),
             Some(vec!["y".into()])
         );
+    }
+
+    #[test]
+    fn name_key_off_windows_is_the_name() {
+        assert_eq!(name_key_on("Git.exe", PathRules::Posix), "Git.exe");
+    }
+
+    #[test]
+    fn windows_name_key_folds_case_and_strips_an_executable_extension() {
+        for name in [
+            "git", "GIT", "git.exe", "Git.EXE", "git.cmd", "git.com", "git.bat",
+        ] {
+            assert_eq!(name_key_on(name, PathRules::Windows), "git", "{name}");
+        }
+        assert_eq!(name_key_on("git.tool", PathRules::Windows), "git.tool");
+        assert_eq!(name_key_on("gitk.exe", PathRules::Windows), "gitk");
+    }
+
+    /// A deny holds a command name under every spelling, as it holds a path.
+    #[test]
+    fn the_command_name_key_folds_case_and_normalisation() {
+        assert_eq!(command_name_key("SH"), command_name_key("sh"));
+        assert_eq!(
+            command_name_key("caf\u{e9}"),
+            command_name_key("cafe\u{301}")
+        );
+        assert_ne!(command_name_key("shx"), command_name_key("sh"));
     }
 }

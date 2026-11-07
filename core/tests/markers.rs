@@ -7,7 +7,7 @@
 //! with the compiler's complaint beside it; `pass/` holds what must keep
 //! compiling.  These are the `pub` surface, the two tokens unnameable here
 //! included.  What needs a `pub(crate)` door is pinned from inside the crate,
-//! by `path::walk::held::tests::markers`; that each token's field stays
+//! by `path::handle::held::tests::markers`; that each token's field stays
 //! private to its module is left to review.  `installing/` holds the doors of
 //! the OS sandbox side, which exist where a renderer holds a position: not on
 //! macOS.

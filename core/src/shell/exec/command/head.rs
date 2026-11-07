@@ -6,7 +6,7 @@ use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::fact::{Failure, Unrunnable};
 use crate::ir::CommandName;
-use crate::path::walk::failure_trace;
+use crate::path::failure_trace;
 use crate::path::{self, Candidate, CwdPath, Kind};
 use crate::shell::runtime::{Break, Context, Error, Mooring, Settled, Shell};
 use std::io::ErrorKind;
@@ -330,7 +330,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         shell.context.set_env_var("HOME", "/tmp/home");
         let head = Head::resolve(
-            &CommandName::TildePath(crate::path::tilde::TildePath {
+            &CommandName::TildePath(crate::path::TildePath {
                 suffix: Some("/.local/bin/claude".into()),
             }),
             &shell.context,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::data::Finite;
 use crate::ir::Prim;
-use crate::path::tilde::TildePath;
+use crate::path::TildePath;
 use crate::syntax::parser::parse;
 
 /// Head name, argv, and whether the head was written `^name`.

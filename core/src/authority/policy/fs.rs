@@ -28,7 +28,7 @@ use crate::authority::grant::freeze::Place;
 use crate::authority::grant::value::FsTable;
 use crate::path::{
     Depth, DirEntry, Excluded, FrozenPath, Handle, Judged, LexicalPath, MatchedBy, ObjectId, Op,
-    Reading, RealPath, Subject, Trace, Writing, walk::failure_trace,
+    Reading, RealPath, Subject, Trace, Writing, failure_trace,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

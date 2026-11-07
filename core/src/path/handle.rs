@@ -1,4 +1,5 @@
-//! One resolver: a spelling walked to its object, and the transcript a judgment reads.
+//! Handles: a spelling walked through directory handles to its object, and
+//! the transcript a judgment reads.
 //!
 //! A name is never authority. [`walk`] descends through directory handles,
 //! splicing links itself; its [`Trace`] records what it opened. Operations

@@ -326,9 +326,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stack = stack_over(tmp.path());
         let encoded = stack.clone().encode();
-        let before = crate::path::walk::steps_taken();
+        let before = crate::path::steps_taken();
         let decoded = GrantStack::decode(&encoded);
-        assert_eq!(crate::path::walk::steps_taken(), before, "a walk was taken");
+        assert_eq!(crate::path::steps_taken(), before, "a walk was taken");
         assert_eq!(decoded, Ok(stack));
     }
 

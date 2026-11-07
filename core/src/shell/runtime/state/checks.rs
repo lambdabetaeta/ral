@@ -6,8 +6,8 @@
 use crate::authority::guard::{Denial, Refusal, check_device_name, check_flag, fs_denial};
 use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer, LocateError};
 use crate::authority::sandbox::SandboxProjection;
-use crate::path::walk::{Kind, is_loop};
 use crate::path::{Dir, Handle, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
+use crate::path::{Kind, is_loop};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
 use std::collections::BTreeMap;
 use std::io;

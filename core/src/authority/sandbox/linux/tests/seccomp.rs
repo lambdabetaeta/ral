@@ -6,7 +6,7 @@ use super::*;
 
 fn on_path(tool: &str) -> bool {
     let path = std::env::var("PATH").unwrap_or_default();
-    crate::path::which::locate(tool, Some(&path), None).is_some()
+    crate::path::locate(tool, Some(&path), None).is_some()
 }
 
 /// `RC=159` is `128 + SIGSYS`: an `EPERM` here (`RC=32`, the errno for a

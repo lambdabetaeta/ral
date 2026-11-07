@@ -46,7 +46,7 @@ pub enum LeafMode {
 /// refuse the walk (the position is already real, and a link met now is a
 /// redirection).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(in crate::path::walk) enum Links {
+pub(in crate::path::handle) enum Links {
     Splice,
     Refuse,
 }
@@ -55,7 +55,7 @@ pub(in crate::path::walk) enum Links {
 /// where the spelling names a directory and the directory entered is the
 /// object.  Never a caller's choice.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::path::walk) enum Mode {
+pub(in crate::path::handle) enum Mode {
     Follow,
     NoFollow,
     Enter,
@@ -77,7 +77,7 @@ impl From<LeafMode> for Mode {
 /// it ([`Walker::open`]).  A name a link's target spliced in is never made.
 /// `Make` is for [`Mode::Enter`] alone: every name it takes is a directory.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::path::walk) enum OnMissing {
+pub(in crate::path::handle) enum OnMissing {
     Fail,
     Stop,
     Make,
@@ -651,7 +651,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
 /// the last name, `missing` whether a name that cannot be entered fails or
 /// ends the steps, `links` whether a link is spliced or refused, and every
 /// object put to `vet`.  A directory spelling raises `mode` to `Enter`.
-pub(in crate::path::walk) fn finish(
+pub(in crate::path::handle) fn finish(
     rp: &Path,
     mode: Mode,
     missing: OnMissing,

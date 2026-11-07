@@ -21,9 +21,9 @@ pub fn shown(p: impl AsRef<Path>) -> String {
     .into_owned()
 }
 
-/// The separator fold: a Windows path reads `/`-separated unless it opens
-/// with a [namespace head](super::lex::Parsed::has_os_namespace_head) as the OS
-/// returns one, past which `/` is not a separator.
+/// The separator fold: a Windows path reads `/`-separated unless
+/// [`parse_bytes`] finds it opening with a namespace head as the OS returns
+/// one (`Parsed::has_os_namespace_head`), past which `/` is not a separator.
 pub(crate) fn fold_for(s: &str, rules: PathRules) -> Cow<'_, str> {
     match rules {
         PathRules::Windows

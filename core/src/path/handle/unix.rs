@@ -1,6 +1,6 @@
 //! What Linux and macOS read alike: operations on a held directory handle by
 //! entry name, none of which resolves a path.  A host module re-exports these
-//! beside the primitives it writes itself (see the seam in `walk.rs`).
+//! beside the primitives it writes itself (see the seam in `held.rs`).
 
 use super::{Access, EntryName, Kind, ObjectId, Seen, Stat, Visibility, host};
 use crate::path::site::{Silent, Surface};

@@ -2,7 +2,7 @@
 
 use super::{Break, Settled, Shell, sig};
 use crate::path::CwdPath;
-use crate::path::tree::walk::{Entries, Found, Walk, WalkEntry};
+use crate::path::tree::{Entries, Found, Walk, WalkEntry};
 
 /// A walk judged by the shell's live grant, named as its caller asked.
 pub struct AdmittedWalk {

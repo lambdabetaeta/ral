@@ -333,16 +333,12 @@ mod unix {
 
         let (a, steps, again) = with_var("XDG_STATE_HOME", Some(text(first.path())), || {
             let a = OwnDir::xdg("own-test-roots", XdgKind::State).unwrap();
-            let steps = path::walk::steps_taken();
+            let steps = path::steps_taken();
             let again = OwnDir::xdg("own-test-roots", XdgKind::State).unwrap();
             (a, steps, again)
         });
         assert_eq!(a.path(), first.path().join("own-test-roots"));
-        assert_eq!(
-            path::walk::steps_taken(),
-            steps,
-            "a second call opens nothing"
-        );
+        assert_eq!(path::steps_taken(), steps, "a second call opens nothing");
         assert!(Arc::ptr_eq(&a.0, &again.0), "it is the first call's handle");
 
         let moved = with_var("XDG_STATE_HOME", Some(text(second.path())), || {
@@ -363,10 +359,10 @@ mod unix {
             std::fs::rename(cached.path(), base.path().join("moved")).unwrap();
             let replacement = base.make_dir("replacement").unwrap();
             symlink(replacement.path(), cached.path()).unwrap();
-            let steps = path::walk::steps_taken();
+            let steps = path::steps_taken();
             let synced = OwnDir::xdg_synced("own-test-synced", XdgKind::State).unwrap();
             assert!(Arc::ptr_eq(&cached.0, &synced.0));
-            assert_eq!(path::walk::steps_taken(), steps, "sync uses held ancestry");
+            assert_eq!(path::steps_taken(), steps, "sync uses held ancestry");
             synced.append("proof").unwrap();
             assert!(base.path().join("moved/proof").exists());
             assert!(!replacement.path().join("proof").exists());

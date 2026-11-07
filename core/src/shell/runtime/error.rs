@@ -189,13 +189,13 @@ impl Error {
     /// An I/O failure on `what`, in the one phrasing every door shares.  The
     /// OS's errors and ral's own say the fixed string for `NotFound` and
     /// `PermissionDenied`, the same on every host; the exception is the
-    /// directory's refusal of a staged write (`path::walk::directory_refused`),
+    /// directory's refusal of a staged write (`path::directory_refused`),
     /// whose words say whose refusal it is.
     pub fn io(what: impl fmt::Display, e: &std::io::Error) -> Self {
         use std::io::ErrorKind::{NotFound, PermissionDenied};
         match e.kind() {
             NotFound => Self::new(format!("{what}: no such file or directory")),
-            PermissionDenied if crate::path::walk::directory_refused(e) => {
+            PermissionDenied if crate::path::directory_refused(e) => {
                 Self::new(format!("{what}: {e}"))
             }
             PermissionDenied => Self::new(format!("{what}: permission denied")),
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn io_says_the_directorys_refusal_in_its_own_words() {
         assert_eq!(
-            said(&crate::path::walk::directory_refusal_for_test()),
+            said(&crate::path::directory_refusal_for_test()),
             "f: its directory is not writable"
         );
     }

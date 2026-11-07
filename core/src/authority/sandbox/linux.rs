@@ -53,7 +53,7 @@ use std::io::{self, Read};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -950,7 +950,7 @@ impl DenyMask {
 /// What stands at the rendered `name` now, never followed; `None` where it
 /// cannot be walked.
 fn standing(name: &Rendered) -> Option<Trace> {
-    let name = LexicalPath::absolute(&PathBuf::from(name.as_str()))?;
+    let name = LexicalPath::absolute_str(name.as_str())?;
     walk_lenient(&name, LeafMode::NoFollow).ok()
 }
 

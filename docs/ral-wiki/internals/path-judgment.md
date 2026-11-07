@@ -210,7 +210,7 @@ function of its layers.**
   Win32 setter does not preserve this relative-destination form.
 - **A name ral invents** (`temp-dir`, `temp-file`) is an absent child of a
   write-judged directory, judged as that leaf and created exclusively.
-- **ral enumerates.** `path/tree/walk.rs` lists with `Dir::read_dir`, judges every
+- **ral enumerates.** `path/tree.rs` lists with `Dir::read_dir`, judges every
   directory it enters and every file it reads for its own guidance against a
   `ReadRegion`, and uses `ignore` for its matcher alone. Its `Entries` yield
   domain `Cancellation`s (cause and owner), and `WalkEntry::name` returns a

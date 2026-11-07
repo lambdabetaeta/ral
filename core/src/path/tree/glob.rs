@@ -4,7 +4,7 @@
 //! A wildcard never matches a name beginning with `.`; only a literal
 //! component names a dotfile.
 
-use super::walk::Walk;
+use super::Walk;
 use crate::path::site::Silent;
 use crate::path::{LexicalPath, shown};
 use crate::site::site;

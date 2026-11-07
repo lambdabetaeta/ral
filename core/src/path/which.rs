@@ -18,9 +18,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use super::lex::{anchor_on, fold_dots};
 #[cfg(windows)]
 use super::site::Silent;
-use super::{CwdPath, LeafMode, LexicalPath, Located, PathRules, walk};
+use super::{CwdPath, LeafMode, LexicalPath, Located, walk};
 use crate::host::EnvVars;
 #[cfg(windows)]
 use crate::site::site;
@@ -292,40 +293,18 @@ pub fn forget_located_commands() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Whether a command name is a path rather than a name for `PATH` to find:
-/// it bears a separator under the host's rules.
-pub(crate) fn names_a_path(name: &str) -> bool {
-    names_a_path_for(name, PathRules::HOST)
-}
-
-/// [`names_a_path`] under given rules: so `a\b` is a path under Windows
-/// and a bare name, searched on `PATH`, under Posix.
-pub(crate) fn names_a_path_for(name: &str, rules: PathRules) -> bool {
-    name.contains(|c| rules.is_separator(c))
-}
-
-/// Anchor a relative entry to `cwd`, folding `.` and `..` out of the join.
-///
-/// The fold is not cosmetic: a resolved path travels on to the OS sandbox
-/// profile via [`SandboxProjection::of`](crate::authority::sandbox::SandboxProjection::of), which
-/// matches literally, and the `/work/./bin/git` an unfolded `./bin` yields
-/// is covered by no `/work/bin/` the profile names.  With no cwd a relative
-/// entry names nothing: there is no "here" to read it against.
-fn anchor_to_cwd(p: PathBuf, cwd: Option<&CwdPath>) -> Option<PathBuf> {
-    let anchored = match cwd {
-        Some(c) => super::lex::anchor(c, &p),
-        None if super::lex::is_absolute(&p) => p,
-        None => return None,
-    };
-    Some(super::lex::fold_dots(&anchored))
-}
-
 /// The one directory list behind [`locate`] and [`search`]; relative
 /// entries (`./bin`) anchor to `cwd`, and with no cwd are dropped, as a
 /// grant's `path` selector and the bwrap search read `PATH`.
+///
+/// Folded, since a resolved directory travels on to the OS sandbox profile
+/// via [`SandboxProjection::of`](crate::authority::sandbox::SandboxProjection::of),
+/// which matches literally: the `/work/./bin/git` an unfolded `./bin` yields
+/// is covered by no `/work/bin/` the profile names.
 pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: Option<&CwdPath>) -> Vec<PathBuf> {
     path_entries(path_value.as_ref())
-        .filter_map(|dir| anchor_to_cwd(dir, cwd))
+        .filter_map(|dir| anchor_on(cwd, &dir))
+        .map(|dir| fold_dots(&dir))
         .collect()
 }
 
@@ -347,67 +326,16 @@ pub fn ral_path_entries(env: &EnvVars) -> Vec<PathBuf> {
 /// every directory the user `cd`s into on the search list; off Unix, where
 /// any file is a program ([`Located::is_executable`]), that is every file
 /// outright.  A user who wants the cwd searched writes `.`, which
-/// [`anchor_to_cwd`] honours deliberately.
+/// [`path_dirs`] honours deliberately.
 pub fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     std::env::split_paths(path_value).filter(|dir| !dir.as_os_str().is_empty())
 }
 
 /// The resolver's fallback when `%PATHEXT%` is unset;
-/// [`WINDOWS_EXEC_EXTENSIONS`] is its stripped twin, the agreement pinned
-/// below.
+/// [`WINDOWS_EXEC_EXTENSIONS`](crate::path::WINDOWS_EXEC_EXTENSIONS) is its
+/// stripped twin, the agreement pinned below.
 #[cfg(windows)]
 pub(crate) const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
-
-/// The extensions Windows runs a bare name through.  `.bat` and `.cmd` belong
-/// here even though `process::launch` refuses to spawn them: that is a later
-/// refusal of the image, not of the name.
-pub(crate) const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
-
-/// The [`WINDOWS_EXEC_EXTENSIONS`] Windows runs through `cmd.exe`, which
-/// re-parses the command line by its own escaping rules.
-#[cfg(any(windows, test))]
-const WINDOWS_BATCH_EXTENSIONS: &[&str] = &["bat", "cmd"];
-
-/// Whether `program` names a batch image as Windows will run it: once
-/// [Win32 has trimmed](super::device::win32_trimmed) its trailing dots and
-/// blanks, it ends in `.` and one of [`WINDOWS_BATCH_EXTENSIONS`], in any
-/// case, so `run.bat.` and `run.bat ` are batch images too, and `.bat`
-/// alone is one, as `std`'s own check reads it.  Trimmed under a verbatim
-/// head as well, where Win32 would not: a refusal that over-reads fails
-/// closed.
-///
-/// Read on the name's encoded bytes, so nothing is decoded and an ill-formed
-/// name is judged by the suffix it has.
-#[cfg(any(windows, test))]
-pub(crate) fn is_batch_image(program: &OsStr) -> bool {
-    let trimmed = super::device::win32_trimmed(program.as_encoded_bytes());
-    trimmed.iter().rposition(|&b| b == b'.').is_some_and(|dot| {
-        let ext = &trimmed[dot + 1..];
-        WINDOWS_BATCH_EXTENSIONS
-            .iter()
-            .any(|batch| ext.eq_ignore_ascii_case(batch.as_bytes()))
-    })
-}
-
-/// A command name as a deny holds it: the host's name for it, under every
-/// spelling some filesystem takes for that.
-pub(crate) fn command_name_key(name: &str) -> String {
-    super::identity::collision_fold(&name_key_on(name, PathRules::HOST))
-}
-
-/// Off Windows the name itself; on Windows ASCII lower-case, a trailing
-/// executable extension stripped.
-fn name_key_on(name: &str, rules: PathRules) -> std::borrow::Cow<'_, str> {
-    use std::borrow::Cow;
-    if rules == PathRules::Posix {
-        return Cow::Borrowed(name);
-    }
-    let lower = name.to_ascii_lowercase();
-    match lower.rsplit_once('.') {
-        Some((stem, ext)) if WINDOWS_EXEC_EXTENSIONS.contains(&ext) => Cow::Owned(stem.to_string()),
-        _ => Cow::Owned(lower),
-    }
-}
 
 /// The Windows resolver's `%PATHEXT%` suffixes, leading dots stripped, with
 /// the resolver's own default when the variable is unset.  An entry that is
@@ -450,42 +378,6 @@ fn windows_command_candidates(base: &Path, suffixes: &[String]) -> Vec<PathBuf> 
             .map(|ext| super::lex::with_appended_suffix(base, ext.as_str())),
     );
     out
-}
-
-#[cfg(test)]
-mod batch_tests {
-    use super::*;
-
-    #[test]
-    fn a_batch_image_is_named_by_its_extension_in_any_case() {
-        for name in ["run.bat", r"C:\x\RUN.CMD", "a.b.Bat", ".bat"] {
-            assert!(is_batch_image(OsStr::new(name)), "{name}");
-        }
-        for name in ["run.exe", "bat", "run.bat.exe", "run.batch"] {
-            assert!(!is_batch_image(OsStr::new(name)), "{name}");
-        }
-    }
-
-    /// Win32 trims trailing dots and blanks before it runs a name, so a
-    /// batch image spelled with them reaches `cmd.exe` all the same.
-    #[test]
-    fn a_batch_image_is_named_as_win32_trims_it() {
-        for name in ["run.bat.", "run.bat ", "run.CMD. .", r"C:\x\run.bat.."] {
-            assert!(is_batch_image(OsStr::new(name)), "{name:?}");
-        }
-        for name in ["run.exe.", "run.bat.exe ", "bat."] {
-            assert!(!is_batch_image(OsStr::new(name)), "{name:?}");
-        }
-    }
-
-    /// A batch image is one Windows runs by name, so the two lists may only
-    /// drift together.
-    #[test]
-    fn batch_extensions_are_exec_extensions() {
-        for ext in WINDOWS_BATCH_EXTENSIONS {
-            assert!(WINDOWS_EXEC_EXTENSIONS.contains(ext), "{ext}");
-        }
-    }
 }
 
 /// The memo's tests, on every platform — separate from the walk's `tests`
@@ -664,6 +556,7 @@ mod memo_tests {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod windows_tests {
     use super::*;
+    use crate::path::WINDOWS_EXEC_EXTENSIONS;
 
     /// `%PATHEXT%`'s fallback and the name-key strip list are twin copies of
     /// one fact; they may only drift together.
@@ -722,68 +615,6 @@ mod windows_tests {
             path_dirs(r"C:bin;C:.\tool", Some(&cwd)),
             [PathBuf::from(r"C:\w\p\bin"), PathBuf::from(r"C:\w\p\tool")],
         );
-    }
-}
-
-#[cfg(test)]
-mod path_name_tests {
-    use super::*;
-
-    /// `/` makes a path under both rules; `\` only under Windows, so a Posix
-    /// `a\b` is a bare name for `PATH`.
-    #[test]
-    fn a_separator_under_the_rules_makes_a_command_name_a_path() {
-        for (name, posix, windows) in [
-            ("git", false, false),
-            ("./tool", true, true),
-            ("/bin/sh", true, true),
-            (r"a\b", false, true),
-            (r".\tool", false, true),
-            (r"C:\Users\tool", false, true),
-        ] {
-            assert_eq!(
-                names_a_path_for(name, PathRules::Posix),
-                posix,
-                "{name} posix"
-            );
-            assert_eq!(
-                names_a_path_for(name, PathRules::Windows),
-                windows,
-                "{name} windows"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod name_key_tests {
-    use super::*;
-
-    #[test]
-    fn name_key_off_windows_is_the_name() {
-        assert_eq!(name_key_on("Git.exe", PathRules::Posix), "Git.exe");
-    }
-
-    #[test]
-    fn windows_name_key_folds_case_and_strips_an_executable_extension() {
-        for name in [
-            "git", "GIT", "git.exe", "Git.EXE", "git.cmd", "git.com", "git.bat",
-        ] {
-            assert_eq!(name_key_on(name, PathRules::Windows), "git", "{name}");
-        }
-        assert_eq!(name_key_on("git.tool", PathRules::Windows), "git.tool");
-        assert_eq!(name_key_on("gitk.exe", PathRules::Windows), "gitk");
-    }
-
-    /// A deny holds a command name under every spelling, as it holds a path.
-    #[test]
-    fn the_command_name_key_folds_case_and_normalisation() {
-        assert_eq!(command_name_key("SH"), command_name_key("sh"));
-        assert_eq!(
-            command_name_key("caf\u{e9}"),
-            command_name_key("cafe\u{301}")
-        );
-        assert_ne!(command_name_key("shx"), command_name_key("sh"));
     }
 }
 

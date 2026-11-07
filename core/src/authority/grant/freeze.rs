@@ -48,12 +48,10 @@ use super::toolchains::{self, Toolchain};
 use crate::authority::policy::{GrantPath, Ungoverned};
 use crate::host::EnvVars;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
-use crate::path::identity::windows_identity_components;
-use crate::path::lex::relative_suffix;
-use crate::path::sigil::SigilHead;
 use crate::path::{
-    CwdPath, FrozenPath, GrantRefusal, LeafMode, LexicalPath, PathRules, RealPath, SubpathRefusal,
-    Trace, XdgKind, classify_subpath, grant_eligibility, resolve_xdg_in, shown, walk, walk_lenient,
+    CwdPath, FrozenPath, GrantRefusal, LeafMode, LexicalPath, PathRules, RealPath, SigilHead,
+    SubpathRefusal, Trace, XdgKind, classify_subpath, grant_eligibility, relative_suffix,
+    resolve_xdg_in, shown, walk, walk_lenient, windows_components,
 };
 use crate::site::{Silent, site};
 use crate::syntax::quote::quote_word;
@@ -618,7 +616,7 @@ pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, PolicyE
         .admits(rules);
     if live {
         debug_assert!(
-            rules != PathRules::Windows || !windows_identity_components(raw).is_empty(),
+            rules != PathRules::Windows || windows_components(raw.as_bytes()).next().is_some(),
             "a live Windows root must name a component, or it prefixes every path"
         );
     }
@@ -898,9 +896,7 @@ fn path_dirs_in<W: Polar>(
 mod tests {
     use super::*;
     use crate::authority::policy::Extent;
-    use crate::path::Excluded;
-    use crate::path::lex::fold_dots;
-    use crate::path::sigil::expand_path_prefix;
+    use crate::path::{Excluded, expand_path_prefix, fold_dots};
 
     /// A fixture anchor written `/a/b`, as this host spells an absolute path:
     /// itself on Unix, `C:\a\b` on Windows.  Any other spelling is kept.

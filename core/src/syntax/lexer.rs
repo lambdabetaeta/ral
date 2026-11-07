@@ -16,7 +16,7 @@
 //! into the outer file, so diagnostics underline the right columns.
 
 use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp, WriteMode};
-use crate::path::tilde::TildePath;
+use crate::path::TildePath;
 use crate::path::{PathRules, names_a_path_for};
 use crate::source::{FileId, Span, Spanned};
 use crate::syntax::ast::Word;

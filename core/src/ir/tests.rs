@@ -1,6 +1,6 @@
 use super::*;
 use crate::ir::{BinaryOp, Redirects, StderrTarget, WriteMode};
-use crate::path::tilde::TildePath;
+use crate::path::TildePath;
 
 #[test]
 fn synthetic_names_are_outside_the_identifier_alphabet() {

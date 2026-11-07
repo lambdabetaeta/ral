@@ -1213,7 +1213,7 @@ pub(super) mod owner_only {
     /// caller reads a pointer-leading `TOKEN_USER` back out of it. `Vec<u8>`
     /// is byte-aligned *as a type*; counting in `u64` makes that read sound
     /// by construction rather than by allocator luck.
-    pub(in crate::path::walk) fn current_process_owner() -> io::Result<Vec<u64>> {
+    pub(in crate::path::handle) fn current_process_owner() -> io::Result<Vec<u64>> {
         use windows_sys::Win32::Security::GetTokenInformation;
 
         let mut raw_token: HANDLE = std::ptr::null_mut();
@@ -1438,7 +1438,7 @@ pub(super) mod owner_only {
 
     /// The descriptor, the ACL it points at (which this frees) and the owner
     /// SID's buffer, which it also points into.
-    pub(in crate::path::walk) struct OwnerOnly {
+    pub(in crate::path::handle) struct OwnerOnly {
         descriptor: SECURITY_DESCRIPTOR,
         acl: *mut ACL,
         user: Vec<u64>,
@@ -1450,7 +1450,7 @@ pub(super) mod owner_only {
         ///
         /// # Errors
         /// The OS's, as a token, an ACL or a descriptor refuses.
-        pub(in crate::path::walk) fn new(kind: Kind) -> io::Result<Self> {
+        pub(in crate::path::handle) fn new(kind: Kind) -> io::Result<Self> {
             let user = current_process_owner()?;
             // SAFETY: `user` holds a populated `TOKEN_USER` in a `u64` buffer,
             // so aligned for it; the SID points into the heap block `owner`
@@ -1499,7 +1499,7 @@ pub(super) mod owner_only {
 
         /// The descriptor, as the `SecurityDescriptor` of an object's
         /// attributes; good as long as `self` is.
-        pub(in crate::path::walk) fn as_ptr(&self) -> *const SECURITY_DESCRIPTOR {
+        pub(in crate::path::handle) fn as_ptr(&self) -> *const SECURITY_DESCRIPTOR {
             &raw const self.descriptor
         }
     }

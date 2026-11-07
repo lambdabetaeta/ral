@@ -9,7 +9,7 @@
 //! never consults them.
 
 use crate::authority::policy::Ungoverned;
-use crate::path::walk::{Kind, Vetted, walk_with};
+use crate::path::{Kind, Vetted, walk_with};
 use crate::path::{LeafMode, LexicalPath, Located, ObjectId, RealPath, Trace};
 use crate::site::{Silent, site};
 use std::collections::BTreeSet;
@@ -70,9 +70,7 @@ pub(crate) fn linkers(excluded: impl Fn(&Trace) -> bool) -> Vec<RealPath> {
     let scope = crate::process::Scope::clone(&crate::process::DurableRoot::default());
     let found: BTreeSet<RealPath> = PATTERNS
         .iter()
-        .filter_map(|p| {
-            crate::path::tree::glob::Glob::parse(&LexicalPath::absolute(&PathBuf::from(*p))?).ok()
-        })
+        .filter_map(|p| crate::path::tree::Glob::parse(&LexicalPath::absolute_str(p)?).ok())
         .map(std::sync::Arc::new)
         .flat_map(|g| {
             g.walk()
@@ -160,10 +158,9 @@ pub(super) fn shims(program: &RealPath) -> Vec<PathBuf> {
     if program.as_path().as_os_str() == "/bin/sh" {
         return vec![PathBuf::from("/private/var/select/sh")];
     }
-    let real = |name: &str| {
-        LexicalPath::absolute(&PathBuf::from(name)).and_then(|at| RealPath::of(&at).ok())
-    };
-    let (Some(usr_bin), Some(name)) = (real("/usr/bin"), program.as_path().file_name()) else {
+    let real = |name: &str| LexicalPath::absolute_str(name).and_then(|at| RealPath::of(&at).ok());
+    let (Some(usr_bin), Some(name)) = (real("/usr/bin"), crate::path::file_name(program.as_path()))
+    else {
         return Vec::new();
     };
     if program.parent().as_ref() != Some(&usr_bin) {

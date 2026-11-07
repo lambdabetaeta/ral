@@ -1,6 +1,6 @@
-//! The normal-form path types the grant pipeline trusts: [`LexicalPath`] on
-//! the access side, [`FrozenPath`] on the grant side, and [`RealPath`](super::RealPath), the
-//! position a walk ends at and exec authority judges.
+//! The normal-form path types the grant pipeline trusts: [`CwdPath`], what a
+//! relative spelling is read against; [`LexicalPath`] on the access side; and
+//! [`FrozenPath`] on the grant side.
 //!
 //! A [`FrozenPath`] is a spelling and nothing else: folded, shown, ordered.
 //! What it names is the walk's to say, once, when the grant is made
@@ -12,9 +12,9 @@
 //! [`freeze`]: FrozenPath::freeze
 
 use super::PathRules;
+use super::handle::EntryName;
 use super::lex::{is_absolute, is_working_directory, utf8};
 use super::site::Silent;
-use super::walk::EntryName;
 use crate::path::shown;
 use crate::site::site;
 use serde::{Deserialize, Serialize};
@@ -142,6 +142,12 @@ impl LexicalPath {
     /// it must be walked again, such as a `PATH` entry or the running binary.
     pub(crate) fn absolute(path: &Path) -> Option<Self> {
         is_absolute(path).then(|| Self::from_lexed(path.to_path_buf()))
+    }
+
+    /// [`absolute`](Self::absolute) of a path the program spells as text.
+    #[cfg(unix)]
+    pub(crate) fn absolute_str(path: &str) -> Option<Self> {
+        is_absolute(path).then(|| Self::from_lexed(PathBuf::from(path)))
     }
 
     /// The lexical fold, a fixed point of [`fold_dots`](super::lex::fold_dots):

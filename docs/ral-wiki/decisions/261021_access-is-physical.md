@@ -46,7 +46,7 @@ side and the access side now resolve a name by one code path.
 
 ## Where
 
-- **`core/src/path/walk.rs`** — `walk`, `walk_lenient`, the directory-itself
+- **`core/src/path/handle.rs`** — `walk`, `walk_lenient`, the directory-itself
   `Located`.
 - **`core/src/path/forms.rs`** — `LexicalPath::folded`, `FrozenPath::from_surface`.
 

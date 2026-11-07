@@ -9,9 +9,7 @@
 //! [`render_objects`] and [`render_excluded`] all that mint one, each from a
 //! position, never re-resolved, so the gap cannot reopen.
 
-#[cfg(target_os = "linux")]
 use super::site::Silent;
-#[cfg(target_os = "linux")]
 use crate::site::site;
 
 /// One spelling of a VFS object: a member of a fully expanded name class.
@@ -162,14 +160,42 @@ pub(crate) fn render_objects<'a>(
 /// would be rendered lossily as a different inode; a grant that cannot be
 /// expressed faithfully is refused, not approximated.
 pub(crate) fn render_real(real: &super::RealPath) -> Result<Vec<Rendered>, String> {
-    Ok(super::canon::spelled(real.as_path())?
-        .into_iter()
-        .map(Rendered)
-        .collect())
+    super::canon::twins(real.as_path())
+        .map(|twin| {
+            // `{twin:?}`, not `.display()`: `Display` would paper over the
+            // fault with the very U+FFFD substitution being refused.
+            #[allow(clippy::unnecessary_debug_formatting)]
+            let text = site!(Silent::RuleText, &twin => to_str()).ok_or_else(|| {
+                format!(
+                    "ral: sandbox grant path is not valid UTF-8, refusing to render \
+                     it into a sandbox rule that could name the wrong path: {twin:?}"
+                )
+            })?;
+            Ok(Rendered(text.to_owned()))
+        })
+        .collect()
+}
+
+/// Proper ancestors of `paths`, sorted, dedup'd across inputs, root excluded.
+#[cfg(target_os = "macos")]
+pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for path in paths {
+        let path = site!(Silent::ProperAncestors, std::path::Path::new(path));
+        for ancestor in site!(Silent::ProperAncestors, path => ancestors()).skip(1) {
+            if ancestor == site!(Silent::ProperAncestors, std::path::Path::new("/"))
+                || ancestor.as_os_str().is_empty()
+            {
+                break;
+            }
+            out.insert(super::shown(ancestor));
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// Proper ancestors of already-rendered names, themselves rendered — sorted,
-/// deduped, root excluded, exactly as [`proper_ancestors`](super::proper_ancestors)
+/// deduped, root excluded, exactly as [`proper_ancestors`]
 /// leaves them.
 ///
 /// No re-expansion is owed.  An ancestor of a rendered name is a name the
@@ -184,7 +210,7 @@ pub(crate) fn render_real(real: &super::RealPath) -> Result<Vec<Rendered>, Strin
 pub(crate) fn rendered_ancestors<'a>(
     paths: impl IntoIterator<Item = &'a Rendered>,
 ) -> Vec<Rendered> {
-    super::proper_ancestors(paths.into_iter().map(Rendered::as_str))
+    proper_ancestors(paths.into_iter().map(Rendered::as_str))
         .into_iter()
         .map(Rendered)
         .collect()
@@ -266,12 +292,29 @@ mod tests {
         assert!(v.contains(&"/private/tmp/ral-render-probe".to_owned()));
     }
 
+    /// A position the renderer cannot express faithfully must produce an
+    /// `Err`, never a lossy rule naming the wrong inode.  Touching no
+    /// firmlink root isolates this from the toggle.
+    #[test]
+    fn rendering_fails_closed_on_a_position_that_is_not_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let real = super::super::RealPath::off_the_wire(OsStr::from_bytes(
+            b"/this/should/not/exist/anywhere/\xFFghost",
+        ))
+        .expect("a position's spelling");
+        let err = render_real(&real)
+            .expect_err("non-UTF-8 grant path must be refused, not lossily rendered");
+        assert!(err.contains("not valid UTF-8"), "got {err:?}");
+    }
+
     /// A name the renderer cannot express faithfully must be refused, never
     /// lossily rendered into a rule naming the wrong inode.
     ///
     /// Linux-only because APFS validates filenames as UTF-8 and returns
     /// `EILSEQ`, so the situation cannot be staged on macOS; there the
-    /// engine's own refusal tests in `canon` stand in.
+    /// unwalked position above stands in.
     #[cfg(target_os = "linux")]
     #[test]
     fn rendering_refuses_a_position_that_is_not_utf8() {

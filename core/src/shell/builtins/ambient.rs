@@ -10,7 +10,7 @@ pub(super) fn cwd(shell: &Shell) -> Value {
 }
 
 /// Home as ral shows it: the spelling `~` expands to
-/// ([`crate::path::tilde::TildePath::shown`]), so `~/x` and `"!{home}/x"` are
+/// ([`crate::path::TildePath::shown`]), so `~/x` and `"!{home}/x"` are
 /// the same string on every host.
 pub(super) fn home(shell: &Shell) -> Result<Value, Error> {
     let home = shell.context.require_home()?;

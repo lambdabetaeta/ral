@@ -16,7 +16,7 @@ dominates:
   [[design/exarch-config-dir|config dir]], the same root `config.ral` loads from;
   it is absent where the host names no config base.
 - **Then every repo `AGENTS.md` from the git root down to `cwd`**, deepest last.
-  The chain is `path::work_tree_chain`, stopping at the first directory holding
+  The chain is `path::git::work_tree_chain`, stopping at the first directory holding
   a `.git` *entry* — file or directory, so worktrees and submodules count — which bounds discovery to the
   project the agent was launched in.
 - **Outside a git repo, only `cwd/AGENTS.md`.** The bare ancestor chain is *not*

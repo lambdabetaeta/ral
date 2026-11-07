@@ -139,10 +139,7 @@ pub(crate) fn inactive_snapshot(target: &Path) -> io::Result<(Snapshot, crate::a
 }
 
 fn session_target(target: &Path) -> io::Result<&Path> {
-    if target
-        .file_name()
-        .is_some_and(|name| name == crate::app::RECORD)
-    {
+    if ral_core::path::file_name(target).is_some_and(|name| name == crate::app::RECORD) {
         ral_core::path::spelled_parent(target).ok_or_else(|| io::Error::other(UNMANAGED))
     } else {
         Ok(target)

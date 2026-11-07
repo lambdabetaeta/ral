@@ -9,7 +9,7 @@
 
 use crate::data::Finite;
 use crate::ir::{BinaryOp, Pattern, Redirects};
-use crate::path::tilde::TildePath;
+use crate::path::TildePath;
 use crate::source::Spanned;
 use crate::syntax::numeral::{self, Shape};
 use serde::{Deserialize, Serialize};

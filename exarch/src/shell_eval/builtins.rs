@@ -8,8 +8,8 @@ use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ral_core::fact::{Grep, Read};
-use ral_core::path::tree::walk::Walk;
-use ral_core::path::{LeafMode, LexicalPath, Reading};
+use ral_core::path::tree::Walk;
+use ral_core::path::{LeafMode, LexicalPath, Reading, file_name};
 use ral_core::shell::builtins::util::regex_err;
 use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Observed, Settled, sig};
 use ral_core::text::rank;
@@ -431,7 +431,7 @@ fn search_tree(
         .map_err(|e| sig(regex_err(name, pattern, &e.to_string())))?;
     let root = walk_root(shell, name, path)?;
     let tree = if hidden {
-        Walk::all(&root).filter_entry(|p| p.as_path().file_name() != Some(".git".as_ref()))
+        Walk::all(&root).filter_entry(|p| file_name(p.as_path()) != Some(".git".as_ref()))
     } else {
         Walk::respecting_ignores(&root)
     };
@@ -984,7 +984,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     }
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
-    let home_dir = ral_core::host::home_dot("");
+    let home_dir = ral_core::host::layout_home();
     // A root that lacks the skill, or may not be read, is not a miss for the
     // name: walk to the next.
     let on_disk = skill::skill_roots(&cwd, config_dir.as_deref(), home_dir.as_deref())
@@ -1035,7 +1035,7 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let (mut entries, mut errors) = (Vec::new(), Vec::new());
-    let home_dir = ral_core::host::home_dot("");
+    let home_dir = ral_core::host::layout_home();
     for found in skill::discover_all(&cwd, config_dir.as_deref(), home_dir.as_deref(), shell) {
         match skill::parse_skill(&found) {
             Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),

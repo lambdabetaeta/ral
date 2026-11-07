@@ -17,7 +17,7 @@ pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
 
 use crate::data::Finite;
 use crate::data::Str;
-use crate::path::tilde::TildePath;
+use crate::path::TildePath;
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
 

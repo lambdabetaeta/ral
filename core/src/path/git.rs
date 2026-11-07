@@ -11,9 +11,9 @@
 //! file is read through the caller's `read`, which judges it: the freeze's
 //! reads nothing governs, the tree walk's refuses what its region refuses.
 
-use crate::path::lex::{fold_dots, parent_or_cwd};
+use crate::path::lex::{anchor_on, fold_dots, parent_or_cwd};
 use crate::path::site::Silent;
-use crate::path::{LeafMode, LexicalPath, shown, walk};
+use crate::path::{CwdPath, LeafMode, LexicalPath, shown, walk};
 use crate::site::site;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -174,13 +174,13 @@ fn claims(
         .is_some_and(|tree| same_path(&against(gitdir, &tree), parent_or_cwd(dot_git)))
 }
 
-/// `path` as an absolute path: itself when it already is one, else joined onto
-/// `base` — the directory a git pointer or back-pointer is written relative to.
-fn against(base: &Path, path: &str) -> PathBuf {
-    if crate::path::is_absolute(path) {
-        return PathBuf::from(path);
-    }
-    base.join(path)
+/// `path`, written relative to the directory `dir` (a git pointer or
+/// back-pointer), as the host reads a name there ([`anchor_on`]); still
+/// relative, so naming nothing, where `dir` is no directory a name joins
+/// under.
+fn against(dir: &Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    anchor_on(CwdPath::new(dir.to_path_buf()).ok().as_ref(), &path).unwrap_or(path)
 }
 
 /// Two spellings of one place: both walked, and the positions their

@@ -2,10 +2,6 @@
 //! path matcher and the kernel sandboxes alike.  All lexical: what the object
 //! is, and where a surface reaches it, is the walk's to say.
 
-#[cfg(unix)]
-use super::site::Silent;
-#[cfg(unix)]
-use crate::site::site;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
@@ -33,26 +29,6 @@ const FIRMLINKS: &[(&str, &str)] = &[];
 /// surface — the two names already reach the same inode.
 pub(crate) fn twins(p: &Path) -> impl Iterator<Item = Cow<'_, Path>> + Clone {
     std::iter::once(Cow::Borrowed(p)).chain(firmlink_toggle(p).map(Cow::Owned))
-}
-
-/// The [`twins`] of `p` as rule text, refused unless UTF-8: a lossy rendering
-/// could name another path.
-#[cfg(unix)]
-pub(crate) fn spelled(p: &Path) -> Result<Vec<String>, String> {
-    twins(p)
-        .map(|v| {
-            // `{v:?}`, not `.display()`: `Display` would paper over the
-            // fault with the very U+FFFD substitution being refused.
-            #[allow(clippy::unnecessary_debug_formatting)]
-            let s = site!(Silent::RuleText, &v => to_str()).ok_or_else(|| {
-                format!(
-                    "ral: sandbox grant path is not valid UTF-8, refusing to render \
-                     it into a sandbox rule that could name the wrong path: {v:?}"
-                )
-            })?;
-            Ok(s.to_owned())
-        })
-        .collect()
 }
 
 /// The other spelling of `p` if it starts at a [`FIRMLINKS`] root, in either
@@ -145,21 +121,5 @@ mod tests {
             b"/tmp/\xFFghost",
             "got {back:?}"
         );
-    }
-
-    /// A path the renderer cannot express faithfully must produce an `Err`,
-    /// never a lossy `(subpath …)` rule naming the wrong inode.  Touching no
-    /// firmlink root isolates this from the toggle above.
-    #[test]
-    fn spelled_fails_closed_on_non_utf8_variant() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let p = PathBuf::from(OsStr::from_bytes(
-            b"/this/should/not/exist/anywhere/\xFFghost",
-        ));
-        let err =
-            spelled(&p).expect_err("non-UTF-8 grant path must be refused, not lossily rendered");
-        assert!(err.contains("not valid UTF-8"), "got {err:?}");
     }
 }

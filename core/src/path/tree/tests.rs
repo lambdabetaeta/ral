@@ -736,3 +736,15 @@ fn a_link_the_walk_could_not_follow_is_reported() {
         Found::Unentered { stat, why: Unentered::Refused(_) } if stat.kind == Kind::Symlink
     ));
 }
+
+/// A missing directory reads zero rather than failing the fold.
+#[test]
+fn bytes_sums_files_recursively() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("a"), b"12345").unwrap();
+    std::fs::write(root.join("sub/b"), b"123").unwrap();
+    assert_eq!(bytes(root), 8);
+    assert_eq!(bytes(&root.join("missing")), 0);
+}

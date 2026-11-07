@@ -20,9 +20,7 @@ use crate::authority::policy::{
     EditorVerb, ExecRules, Fragment, FsLayer, Gpu, GrantLayer, GrantPath, Net, Rule, ShellVerb,
 };
 use crate::data::FOValue;
-use crate::path::lex::has_drive;
-use crate::path::sigil::SigilHead;
-use crate::path::{Excluded, Kind, PathRules, Trace, names_a_path_for};
+use crate::path::{Excluded, Kind, PathRules, SigilHead, Trace, has_drive, names_a_path_for};
 use crate::shell::runtime::{List, Map, Value, settings_map};
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};

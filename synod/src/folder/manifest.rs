@@ -2,21 +2,15 @@
 
 use crate::site::{Silent, site};
 use ral_core::authority::policy::Ungoverned;
-use ral_core::path::tree::walk::{Found, Unentered, Walk, WalkEntry};
+use ral_core::path::tree::{Found, Unentered, Walk, WalkEntry};
 use ral_core::path::{
-    Kind, LeafMode, LexicalPath, Stat, relative_key, shown, spelled, spelled_parent, utf8, walk,
+    Kind, LeafMode, LexicalPath, Stat, key_within, relative_key, shown, spelled, spelled_parent,
+    utf8, walk,
 };
 use ral_core::process::{CancelCause, DurableRoot, Scope};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-
-pub(crate) fn covers(path: &str, name: &str) -> bool {
-    path == name
-        || path
-            .strip_prefix(name)
-            .is_some_and(|rest| rest.starts_with('/'))
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EntryKind {
@@ -247,7 +241,7 @@ impl Stop {
 
 /// Keep only the minimal set of unread subtree roots.
 fn record_unread(unread: &mut Vec<String>, key: String) {
-    if !unread.iter().any(|root| covers(&key, root)) {
+    if !unread.iter().any(|root| key_within(&key, root)) {
         unread.push(key);
     }
 }
@@ -259,7 +253,7 @@ pub(crate) fn merge_unread(a: &[String], b: &[String]) -> Vec<String> {
     all.iter()
         .filter(|key| {
             !all.iter()
-                .any(|other| *other != **key && covers(key, other))
+                .any(|other| *other != **key && key_within(key, other))
         })
         .map(|key| (*key).clone())
         .collect()
@@ -406,20 +400,6 @@ mod tests {
             return;
         }
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn a_name_covers_itself_and_its_descendants_only() {
-        for (path, name, covered) in [
-            ("scans", "scans", true),
-            ("scans/photo.jpg", "scans", true),
-            ("scans/2026/a.jpg", "scans", true),
-            ("scans2", "scans", false),
-            ("scans2/photo.jpg", "scans", false),
-            ("scan", "scans", false),
-        ] {
-            assert_eq!(covers(path, name), covered, "{path} under {name}");
-        }
     }
 
     #[cfg(unix)]

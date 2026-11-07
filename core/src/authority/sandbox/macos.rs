@@ -13,14 +13,13 @@
 use super::{ExecProjection, FsProjection, RenderedLists, SandboxProjection};
 use crate::authority::policy::{ExecDeny, Gpu, KernelAllow, Net};
 use crate::path::{
-    Excluded, LeafMode, LexicalPath, Object, Rendered, render_excluded, render_real,
+    Excluded, LeafMode, LexicalPath, Object, Rendered, join_slash, render_excluded, render_real,
     rendered_ancestors, walk_lenient,
 };
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::os::raw::{c_char, c_int};
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// Seatbelt profiles do not stack: a process already inside one gets EPERM
@@ -460,38 +459,18 @@ const GPU_CACHES: [&str; 3] = [
 fn gpu_caches() -> &'static [Rendered] {
     static CACHES: OnceLock<Vec<Rendered>> = OnceLock::new();
     CACHES.get_or_init(|| {
-        let Some(dir) = user_cache_dir() else {
+        let Some(dir) = crate::host::user_cache_dir() else {
             return Vec::new();
         };
         GPU_CACHES
             .iter()
             .filter_map(|name| {
-                let at = LexicalPath::absolute(&PathBuf::from(format!("{dir}/{name}")))?;
+                let at = LexicalPath::absolute(&join_slash(&dir, name))?;
                 render_real(walk_lenient(&at, LeafMode::Follow).ok()?.real()).ok()
             })
             .flatten()
             .collect()
     })
-}
-
-/// `confstr(_CS_DARWIN_USER_CACHE_DIR)`, its trailing `/` dropped.
-fn user_cache_dir() -> Option<String> {
-    let mut buf = [0u8; libc::PATH_MAX as usize];
-    // SAFETY: `buf` is writable for the length passed.
-    let n = unsafe {
-        libc::confstr(
-            libc::_CS_DARWIN_USER_CACHE_DIR,
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-        )
-    };
-    let dir = (n > 1 && n <= buf.len()).then(|| &buf[..n - 1])?;
-    Some(
-        std::str::from_utf8(dir)
-            .ok()?
-            .trim_end_matches('/')
-            .to_owned(),
-    )
 }
 
 /// The reason the base profile withholds `name`, for
@@ -851,7 +830,7 @@ mod tests {
     fn mac_profile_reads_a_place_as_its_frozen_real_path_and_twin() {
         let tmp = tempfile::tempdir().expect("a temp dir");
         let place = crate::test_helper::real(tmp.path());
-        let forms: Vec<_> = crate::path::canon::twins(place.as_path())
+        let forms: Vec<_> = crate::path::twins(place.as_path())
             .map(std::borrow::Cow::into_owned)
             .collect();
         let profile = build_profile(&SandboxProjection {

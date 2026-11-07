@@ -5,9 +5,8 @@
 //! renames into.
 
 use super::{DenyMask, Options};
-use crate::path::{LexicalPath, RealPath, utf8};
+use crate::path::{LexicalPath, RealPath, basename, utf8};
 use crate::site::{Silent, site};
-use std::path::PathBuf;
 
 const DRI: &str = "/dev/dri";
 
@@ -81,8 +80,8 @@ fn names(dir: &str) -> Vec<String> {
 
 /// Where `/sys/class/drm/<node>/device` leads.
 fn device_of(node: &str) -> Option<String> {
-    let name = node.rsplit('/').next()?;
-    let link = LexicalPath::absolute(&PathBuf::from(format!("/sys/class/drm/{name}/device")))?;
+    let name = basename(node);
+    let link = LexicalPath::absolute_str(&format!("/sys/class/drm/{name}/device"))?;
     let real = RealPath::of(&link).ok()?;
     Some(utf8(real.as_path()).ok()?.to_owned())
 }

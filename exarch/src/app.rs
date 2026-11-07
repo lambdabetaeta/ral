@@ -570,9 +570,8 @@ pub(crate) fn now_unix_ms() -> u64 {
 /// # Errors
 /// Returns a sentence when the target names a malformed session directory.
 pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
-    let Some(session) = target
-        .file_name()
-        .and_then(|name| name.to_os_string().into_string().ok())
+    let Some(session) =
+        ral_core::path::file_name(target).and_then(|name| name.to_os_string().into_string().ok())
     else {
         return Err(format!(
             "cannot resume {}: the target has no session or run directory name",
@@ -701,9 +700,7 @@ mod tests {
     fn dropping_a_session_scratch_removes_its_directory_and_its_lock() {
         let root = OwnDir::for_test("scratch-drop").expect("a scratch root");
         let scratch = Scratch::in_root(&root).expect("session scratch");
-        let name = scratch
-            .path()
-            .file_name()
+        let name = ral_core::path::file_name(scratch.path())
             .and_then(|name| name.to_str())
             .expect("a Unicode name")
             .to_owned();

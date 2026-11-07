@@ -2,7 +2,7 @@
 
 use crate::path::EntryName;
 use crate::path::shown;
-use crate::path::walk::{Kind, Stat};
+use crate::path::{Kind, Stat};
 use crate::record;
 use std::ffi::OsStr;
 use std::time::SystemTime;

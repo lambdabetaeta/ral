@@ -1,6 +1,7 @@
 //! Stat-only changes distinguish evidence of modification from a timestamp-only touch.
 
-use crate::folder::manifest::{EntryKind, Manifest, covers, merge_unread};
+use crate::folder::manifest::{EntryKind, Manifest, merge_unread};
+use ral_core::path::key_within;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
@@ -76,7 +77,7 @@ pub(crate) fn job_report(before: &Manifest, after: &Manifest) -> JobReport {
     let mut created: Vec<(&str, &EntryKind)> = Vec::new();
 
     for (path, kind) in &before.entries {
-        if unreadable.iter().any(|root| covers(path, root)) {
+        if unreadable.iter().any(|root| key_within(path, root)) {
             continue;
         }
         match after.entries.get(path) {
@@ -94,7 +95,9 @@ pub(crate) fn job_report(before: &Manifest, after: &Manifest) -> JobReport {
         }
     }
     for (path, kind) in &after.entries {
-        if !before.entries.contains_key(path) && !unreadable.iter().any(|root| covers(path, root)) {
+        if !before.entries.contains_key(path)
+            && !unreadable.iter().any(|root| key_within(path, root))
+        {
             created.push((path, kind));
         }
     }

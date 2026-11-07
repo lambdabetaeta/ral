@@ -1,5 +1,6 @@
 //! The host process's facts: its environment, working directory, user and
-//! home, temp directory, XDG bases and ral's dot-files.
+//! home, temp directory, XDG bases, ral's dot-files and, on macOS, the user's
+//! cache directory.
 //!
 //! [`crate::shell::boot`] boots a `Shell` *in* a host process; this only reports on
 //! one.  The free functions read no language state: a `within [env: …]` overlay
@@ -93,9 +94,10 @@ pub fn home() -> Option<String> {
     first_bound(&HOME_VARS, var)
 }
 
-/// The home of ral's own layout: [`home`]'s read, else the account's, so a
-/// program's files resolve where no `HOME` is bound.  A `~` is [`home`]'s.
-fn layout_home() -> Option<String> {
+/// The home of ral's own layout as text: [`home`]'s read, else the
+/// account's, so a program's files resolve where no `HOME` is bound.  A `~`
+/// is [`home`]'s.
+fn layout_home_var() -> Option<String> {
     first_bound(&HOME_VARS, var).or_else(account_home)
 }
 
@@ -113,16 +115,41 @@ pub fn user() -> Option<String> {
 /// units; a `~` in a script is [`home`]'s and never reads it.  `None` when
 /// nothing absolute resolves, a relative `HOME` included.
 pub fn xdg(kind: XdgKind) -> Option<PathBuf> {
-    let home = layout_home();
+    let home = layout_home_var();
     resolve_xdg_in(var, kind, home.as_deref()).filter(|p| is_absolute(p))
 }
 
-/// `~/<name>` (e.g. `home_dot(".ralrc")`), the single-file convention rc
-/// loaders probe as a fallback to the XDG form.  The home is the layout's, as
-/// [`xdg`] reads it: the account's where no `HOME` is bound.
+/// The home of ral's own layout ([`layout_home_var`]), where absolute.
+pub fn layout_home() -> Option<PathBuf> {
+    layout_home_var()
+        .map(PathBuf::from)
+        .filter(|p| is_absolute(p))
+}
+
+/// `~/<name>` (e.g. `home_dot(".ralrc")`) in [`layout_home`], the single-file
+/// convention rc loaders probe as a fallback to the XDG form.
 pub fn home_dot(name: &str) -> Option<PathBuf> {
-    let home = layout_home()?;
-    Some(PathBuf::from(home).join(name)).filter(|p| is_absolute(p))
+    layout_home().map(|home| home.join(name))
+}
+
+/// This user's cache directory on macOS, `confstr(_CS_DARWIN_USER_CACHE_DIR)`,
+/// its trailing `/` dropped; `None` where it names none, or none that is
+/// Unicode.
+#[cfg(target_os = "macos")]
+pub(crate) fn user_cache_dir() -> Option<PathBuf> {
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: `buf` is writable for the length passed.
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_CACHE_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    let dir = (n > 1 && n <= buf.len()).then(|| &buf[..n - 1])?;
+    Some(PathBuf::from(
+        std::str::from_utf8(dir).ok()?.trim_end_matches('/'),
+    ))
 }
 
 #[cfg(test)]

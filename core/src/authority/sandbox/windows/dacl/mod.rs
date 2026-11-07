@@ -68,7 +68,7 @@
 //! boot, deleting its registered profiles.
 
 use crate::own::OwnError;
-use crate::path::lex::is_volume_guid;
+use crate::path::is_volume_guid;
 use crate::path::shown;
 use crate::process::cancel::{CancelCause, Scope};
 use std::fmt::Write as _;
@@ -151,8 +151,6 @@ impl GrantKind {
 }
 
 const _: () = {
-    assert!(RW_MASK == FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE);
-    assert!(RO_MASK == FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
     assert!(
         (RW_MASK & RO_MASK) == RO_MASK,
         "RW must be a superset of RO"

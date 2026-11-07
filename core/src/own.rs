@@ -32,12 +32,11 @@ use strum::IntoStaticStr;
 use self::site::Silent;
 use crate::authority::policy::Ungoverned;
 use crate::host::{self, EnvVars};
-use crate::path::walk::{
-    Access, dangling, sync_dir, sync_dir_chain, unsynced, walk_dir_made, walk_dir_made_synced,
-};
 use crate::path::{
-    Dir, EntryName, Handle, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
-    Visibility, Writing, XdgKind, app_dir, shown, spelled_parent, walk, walk_dir,
+    Access, Dir, EntryName, Handle, Judged, Kind, LeafMode, LexicalPath, Located, Reading,
+    Resolver, Stat, Visibility, Writing, XdgKind, app_dir, dangling, file_name, shown,
+    spelled_parent, sync_dir, sync_dir_chain, unsynced, walk, walk_dir, walk_dir_made,
+    walk_dir_made_synced,
 };
 use crate::site::site;
 use crate::sync::LockExt as _;
@@ -972,7 +971,7 @@ impl UserFile {
         let spelling = anchored(&self.path)?;
         let (Some(dir), Some(name)) = (
             spelled_parent(spelling.as_path()).and_then(LexicalPath::absolute),
-            spelling.as_path().file_name(),
+            file_name(spelling.as_path()),
         ) else {
             let error = io::Error::new(io::ErrorKind::InvalidInput, "it names no file");
             return Err(io_at(Act::Open, &self.path, error));

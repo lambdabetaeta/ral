@@ -47,7 +47,7 @@ guard that judges a canonicalised string and lets the caller re-walk the
 original string with `open(2)` has two walks, and whatever differs between
 them — a dangling link the canonicaliser could not follow, a directory swapped
 for a symlink by a concurrent child — is an object the guard never saw. So the
-guard's fs door is one walk (`Shell::locate`, `path/walk.rs`): from the root
+guard's fs door is one walk (`Shell::locate`, `path/handle.rs`): from the root
 through directory handles, no symlink ever followed by the kernel, each link
 spliced into the name and re-walked, the verdict taken on the object landed
 on, and the open, stat, staging and rename done relative to that directory

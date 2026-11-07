@@ -310,7 +310,7 @@ too: exarch has four, ral one and synod two.
 ## Where
 
 `core/src/own.rs` (`OwnDir`, `UserFile`, the named functions, `OwnError`);
-`core/src/path/walk.rs` and its host modules (`walk_dir_made`, `Dir::target`,
+`core/src/path/handle.rs` and its host modules (`walk_dir_made`, `Dir::target`,
 `Visibility`, `remove`, `rename`); `core/src/authority/policy/fs.rs` (`Ungoverned`);
 `core/src/host.rs` (`var`, `var_os`, `vars_os`, `temp_dir`, and the account-home
 fallback in `xdg`); `core/src/sync.rs` (`lock_strict`); `core/src/authority/grant/freeze.rs`

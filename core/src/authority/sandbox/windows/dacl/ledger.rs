@@ -247,7 +247,7 @@ fn generate_run_id() -> String {
 fn current_image_basename() -> OsString {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.file_name().map(OsStr::to_os_string))
+        .and_then(|p| crate::path::file_name(&p).map(OsStr::to_os_string))
         .unwrap_or_else(|| "ral.exe".into())
 }
 
@@ -287,9 +287,7 @@ fn process_alive_with_image(
         return false;
     }
     let full = PathBuf::from(OsString::from_wide(&buf[..sz as usize]));
-    if !full
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case(expected_image))
+    if !crate::path::file_name(&full).is_some_and(|name| name.eq_ignore_ascii_case(expected_image))
     {
         return false;
     }

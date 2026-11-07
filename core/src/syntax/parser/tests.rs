@@ -1,6 +1,6 @@
 use super::*;
 use crate::ir::{CompareOp, EqOp, StderrTarget};
-use crate::path::tilde::TildePath;
+use crate::path::TildePath;
 use crate::syntax::ast::ScopeAst;
 
 fn plain(s: &str) -> Ast {

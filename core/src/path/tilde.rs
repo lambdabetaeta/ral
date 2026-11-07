@@ -125,10 +125,10 @@ fn windows_home_tail<'a>(path: &'a str, home: &str) -> Option<Vec<&'a str>> {
     if !super::identity::starts_with_identity(path, home, PathRules::Windows) {
         return None;
     }
-    let home_depth = super::identity::windows_identity_components(home).len();
+    let home_depth = super::lex::windows_components(home.as_bytes()).count();
     // The head fold without the case fold: the displayed tail must keep
     // `path`'s own casing, not `home`'s.
-    let head = super::identity::windows_head(path);
+    let head = super::lex::windows_head(path);
     Some(
         head.split(|c| PathRules::Windows.is_separator(c))
             .filter(|c| !c.is_empty())

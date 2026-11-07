@@ -226,7 +226,7 @@ pub fn wire_read_frame(channel: &mut WireChannel) -> std::io::Result<Option<Fram
 /// far: what a test reads to show that something walked nothing, or walked
 /// once.
 pub fn walk_steps() -> usize {
-    crate::path::walk::steps_taken()
+    crate::path::steps_taken()
 }
 
 /// The engine's answer to one probe, read straight off `shell`.

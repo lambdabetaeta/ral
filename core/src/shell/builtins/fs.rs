@@ -8,10 +8,10 @@
 //! gate.
 
 use crate::fact::{DirEntry, FileInfo};
-use crate::path::shown;
-use crate::path::tree::glob::Glob;
-use crate::path::walk::Kind;
-use crate::path::{Dir, EntryName, Judged, LeafMode, Located, Reading, Visibility, Writing};
+use crate::path::tree::Glob;
+use crate::path::{
+    Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
+};
 use crate::shell::runtime::{Break, Settled, Shell, Value, sig};
 use std::io;
 use std::path::Path;
@@ -147,7 +147,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
         .then(|| located.read_link().ok())
         .flatten()
         .map(|p| shown(&p));
-    let name = path.file_name().unwrap_or(path.as_os_str());
+    let name = file_name(&path).unwrap_or(path.as_os_str());
     Ok(Value::from_datum(FileInfo::of(name, stat, target)))
 }
 

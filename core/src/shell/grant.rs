@@ -51,8 +51,7 @@ impl Shell {
 mod tests {
     use super::*;
     use crate::authority::grant::freeze::Anchor;
-    use crate::path::CwdPath;
-    use crate::path::lex::fold_dots;
+    use crate::path::{CwdPath, fold_dots};
 
     #[test]
     fn a_shells_context_carries_the_scratch_its_front_end_set() {

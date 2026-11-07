@@ -11,7 +11,7 @@ pub(crate) mod scope;
 use crate::authority::policy::FsOp;
 use crate::fact::Read;
 use crate::ir::{StdinSource, WriteMode};
-use crate::path::walk::Kind;
+use crate::path::Kind;
 use crate::path::{Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing};
 use crate::shell::runtime::{Break, Error, Mooring, Observed, Settled, Shell};
 use std::fs::File;

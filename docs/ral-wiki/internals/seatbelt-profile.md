@@ -32,7 +32,7 @@ cost of saying the second in the first:
   sections, over `rendered_ancestors`). Metadata suffices
   because *search* is all a resolver holds on an ancestor — the kernel's,
   `posix_spawn`'s, and ral's own walk, which opens its intermediates `O_SEARCH`
-  for exactly this reason (the directory step of `path/walk/macos.rs`). A read handle
+  for exactly this reason (the directory step of `path/handle/macos.rs`). A read handle
   there would need `file-read-data`, and a readable ancestor is a listable
   one: `/Users`, a home directory's dotfile names.
 - **Intermediate links.** Holding a symlink with `O_EVTONLY | O_SYMLINK`

@@ -349,8 +349,11 @@ Core's own test engines, booted as every engine is (`BARE`, `boot`, `eval`).
 
 The engine's answers: `Engine::probe` reads one `Probe` off the shell
 (`answer`), rendering rows engine-side — never a live handle.
-`probe/fs.rs` — `entries` (and `path::tree::bytes`, behind `Probe::PathBytes`): read-only
-metadata walks of the engine's own filesystem, under its cwd.
+`probe/fs.rs` — `entries` and `bytes` (behind `Probe::PathEntries` and
+`Probe::PathBytes`): read-only metadata walks of the engine's own filesystem,
+under its cwd, judged for reading under the live grant; `bytes` sizes a
+`path::tree::Walk` (`Granted::bytes`, as `path::tree::bytes` does exarch's
+own trees under no grant).
 
 ## `core/src/shell/grant/spawn.rs`
 

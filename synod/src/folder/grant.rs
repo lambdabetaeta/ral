@@ -197,9 +197,7 @@ impl Grant {
 
     /// The final component exists: open refuses the disk root.
     pub(crate) fn name(&self) -> String {
-        self.root
-            .as_path()
-            .file_name()
+        ral_core::path::file_name(self.root.as_path())
             .map_or_else(|| self.root.to_string(), ral_core::path::shown)
     }
 

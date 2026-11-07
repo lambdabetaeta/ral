@@ -92,7 +92,7 @@ pub fn assemble(
     if !agents.is_empty() {
         sections.push((Some("Workspace"), agents));
     }
-    let home_dir = ral_core::host::home_dot("");
+    let home_dir = ral_core::host::layout_home();
     let skills =
         skill::discover_metadata(cwd.as_path(), config_dir, home_dir.as_deref(), &mut reader);
     if !skills.is_empty() {
@@ -137,7 +137,7 @@ pub(crate) fn with_grant(template: &str, grants: &Grants) -> String {
 /// The `AGENTS.md` chain's text, outermost first so the most specific file's
 /// recency dominates: the operator's `<config>/AGENTS.md` — the trusted XDG
 /// root [`crate::config`] loads `config.ral` from — then every `AGENTS.md`
-/// along [`work_tree_chain`](ral_core::path::work_tree_chain), the repo root
+/// along [`work_tree_chain`](ral_core::path::git::work_tree_chain), the repo root
 /// down to `cwd`.  Outside a repo, only `cwd/AGENTS.md`.
 ///
 /// The repo files sit in the agent's own writable tree, so unlike `config.ral`
@@ -151,7 +151,7 @@ pub(crate) fn with_grant(template: &str, grants: &Grants) -> String {
 fn read_agents(cwd: &Path, config_dir: Option<&Path>, reader: &Boot<'_>) -> Result<String, String> {
     let chain = config_dir
         .into_iter()
-        .chain(ral_core::path::work_tree_chain(cwd));
+        .chain(ral_core::path::git::work_tree_chain(cwd));
     let mut texts = Vec::new();
     for file in chain.map(|dir| dir.join("AGENTS.md")) {
         match reader.read(&file) {

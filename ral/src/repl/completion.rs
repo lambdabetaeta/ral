@@ -24,7 +24,7 @@ use ral_core::carrier::Transport;
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum, exact_keys, field};
 use ral_core::path::CwdPath;
-use ral_core::path::complete::{PartialPath, Tilde, spell_entry};
+use ral_core::path::complete::{PartialPath, TildeReading, spell_entry};
 use ral_core::protocol::probe::PathEntry;
 use ral_core::record;
 use ral_core::source::Span as ByteSpan;
@@ -290,17 +290,18 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
     let home = home();
     // A quoted atom does not expand `~`.
     let (start, partial) = match atom.map(|l| (&l.token, l.span)) {
-        None => (pos, PartialPath::of("", Tilde::Literal)),
+        None => (pos, PartialPath::of("", TildeReading::Literal)),
         Some((Token::Word(_), span)) => (
             span.start as usize,
             PartialPath::of(
                 &line[span.start as usize..span.end as usize],
-                Tilde::Home(home.as_deref()),
+                TildeReading::Home(home.as_deref()),
             ),
         ),
-        Some((Token::SingleQuoted(body), span)) => {
-            (span.start as usize, PartialPath::of(body, Tilde::Literal))
-        }
+        Some((Token::SingleQuoted(body), span)) => (
+            span.start as usize,
+            PartialPath::of(body, TildeReading::Literal),
+        ),
         Some((Token::Variable { name, delimited }, span)) => {
             let pool = sources.cache.variables.iter().map(|v| Item::Name(v));
             return (

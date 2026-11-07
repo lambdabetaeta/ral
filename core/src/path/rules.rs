@@ -22,4 +22,12 @@ impl PathRules {
     pub(crate) fn is_separator(self, c: char) -> bool {
         c == '/' || (self == Self::Windows && c == '\\')
     }
+
+    /// The separator names join with: `/` under Posix, `\` under Windows.
+    pub(crate) const fn separator(self) -> u8 {
+        match self {
+            Self::Posix => b'/',
+            Self::Windows => b'\\',
+        }
+    }
 }

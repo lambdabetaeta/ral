@@ -4,8 +4,8 @@
 //! judged for reading under the live grant.
 
 use crate::authority::policy::ReadRegion;
-use crate::path::walk::Kind;
-use crate::path::{Dir, Judged, LeafMode, Reading, walk_dir};
+use crate::path::tree::Walk;
+use crate::path::{Dir, Judged, Kind, LeafMode, Reading, walk_dir};
 use crate::protocol::probe::PathEntry;
 use crate::shell::runtime::Shell;
 use std::path::Path;
@@ -48,28 +48,13 @@ pub(super) fn entries(shell: &Shell, dir: &Path) -> Vec<PathEntry> {
         .collect()
 }
 
-/// Total bytes of every regular file under `root`, recursively, each
-/// directory judged for reading; zero for what cannot be read.  Symlinks are
-/// not followed (their target may leave the tree) and an unreadable entry
-/// counts zero rather than failing the fold.
+/// Total bytes of every regular file under `root`, links not followed (a
+/// target may leave the tree), judged for reading under the live grant;
+/// what it withholds or cannot be read counts zero.
 pub(super) fn bytes(shell: &Shell, root: &Path) -> u64 {
-    fn under(region: &ReadRegion, dir: &Dir<Judged<Reading>>) -> u64 {
-        let Ok(listing) = dir.read_dir() else {
-            return 0;
-        };
-        listing
-            .map(|entry| match entry.seen().map(|seen| &seen.stat) {
-                Ok(stat) if stat.kind == Kind::File && region.admits(&entry) => stat.len,
-                Ok(stat) if stat.kind == Kind::Dir => dir
-                    .open_dir(entry.name())
-                    .ok()
-                    .and_then(|child| region.judge(child).ok())
-                    .map_or(0, |child| under(region, &child)),
-                _ => 0,
-            })
-            .sum()
-    }
-    open(shell, root).map_or(0, |(region, dir)| under(&region, &dir))
+    Walk::all(&shell.anchor(root))
+        .readable_by(shell.context.grants.read_region(shell.baseline()))
+        .bytes()
 }
 
 #[cfg(test)]

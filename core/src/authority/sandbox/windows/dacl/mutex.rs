@@ -26,7 +26,7 @@ fn fnv1a64(s: &[u8]) -> u64 {
 }
 
 /// The mutex serialising work on `path`, keyed by
-/// [`windows_collision_key`](crate::path::identity::windows_collision_key):
+/// [`windows_collision_key`](crate::path::windows_collision_key):
 /// folded, beyond ASCII and at least as far as NTFS folds a name, where the
 /// [stamp witness](super::stamp::stamp_key) and the
 /// [capability name](super::fs_capability_name) of the same object are not.
@@ -39,7 +39,7 @@ fn fnv1a64(s: &[u8]) -> u64 {
 /// sessions may spell in different case or separators, and its
 /// read-merge-write must serialise all the same.
 fn mutex_name_for(path: &Path) -> String {
-    let key = crate::path::identity::windows_collision_key(path.as_os_str());
+    let key = crate::path::windows_collision_key(path.as_os_str());
     let h = fnv1a64(&key);
     format!("Local\\ral.sandbox.dacl.{h:016x}")
 }

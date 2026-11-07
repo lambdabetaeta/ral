@@ -266,7 +266,12 @@ and the `PolicyError → Break` conversion; substantive freezing stays in
 ## Path resolution
 
 Path resolution is `core/src/path/`: lexical stages, then one walk, plus
-`which.rs` for PATH search.
+`which.rs` for PATH search. `path.rs`'s doc names every module. An item used
+outside `path/` has one path, `crate::path::Item`, re-exported there from a
+private module; the public modules `tree` (`tree::Walk`, `tree::Glob`,
+`tree::bytes`), `git` (`git::Pointer`, `git::work_tree_chain`) and `complete`
+(`complete::PartialPath`, `complete::TildeReading`) are namespaces, whose items
+are named through them and re-exported nowhere.
 
 - expand — `sigil.rs` (run-time `~` and `xdg:` expansion of ordinary paths,
   never in a grant; the places `cwd`, `tempdir`, `scratch`, `gitdir` are policy-only,
@@ -285,15 +290,25 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   component, or a share or namespace head opening it — would re-root the join, so `expand_path_prefix` leaves the whole path as written: it fails
   closed, a prefix matching nothing rather than a fabricated path, while a
   grant refuses the gap outright in `grant::freeze`;
-- lex — `lex.rs`: one structural parser, `parse_bytes`, reading a byte slice under `PathRules` into `Parsed { raw, rules, kind: HeadKind, spelling: HeadSpelling, head_len }`, from which resolution, `.`/`..` folding and every head judgment project. `HeadKind` names the structural head (`Posix`, `Drive { letter, volume }`, `Unc { volume }`, `Driveless`, `DriveRelative { letter }`, `Relative`, `Device` for `\\.\`, and `Malformed` for a two-separator or `\\?\` head that is no well-formed drive, share or device); `HeadSpelling` records the opening separator and namespace facts once (`namespace: Option<Namespace>` — `Verbatim { exact }` for `\\?\`, `Device { exact }` for `\\.\`, `Object` for `\??\`, with `exact` / `Namespace::is_exact` true when all three separator bytes of that 4-byte prefix are `\` — `mixed_opening` for `/\` or `\/`, and `opens_with_slash`). `fold_dots_under` (over `fold_bytes`) is one kernel under either rules from any host, `fold_dots` its host instance on a held path: `head_len` marks where the head ends and only the names past it fold, joined with the rules' separator, so a fold preserves `HeadKind`, `volume` and (save when `..` climbs into the `??` component of a `\??\` driveless path) `HeadSpelling::namespace`; under Windows rules a non-namespace `Drive`, `Unc`, `Driveless`, `DriveRelative` or `Relative` head (`Parsed::respell_head`) is respelled with `\` too (`C:/a/b` folds to `C:\a\b`, `//srv/sh` to `\\srv\sh`), so such a path has one separator throughout, while every head whose kind or meaning turns on its spelling is kept as written: a `Posix` `/` (as `\` it would be `Driveless`), a slash-spelled verbatim head (`//?/C:/x` is a device path Win32 normalises, so its tail past `head_len` folds), and a `Device` or `Malformed` path, or an exact `\\?\` verbatim path (`Namespace::is_exact`, `head_len == raw.len()`: Win32 hands its rest to the kernel uninterpreted, `/` a name byte and `.`/`..` names), all head and kept whole, `..` included; a relative path's drive-shaped first name keeps a `.\` before it; `is_unparsed_head`, a Windows path absolute to the kernel in which `std::path` finds no prefix and so would descend or climb from the current drive, which the walk refuses. Every head predicate projects from `parse_bytes`: whether a path is absolute under either rules set (`absolute_under` / `Parsed::is_absolute`: POSIX, `HeadKind::Posix`; Windows, `Drive`, `Unc`, `Device` or `Malformed`) and on this host (`is_absolute`, `absolute_under` the host's rules, the one absoluteness ral asks, `anchor` included; `Path::is_absolute` is banned in clippy.toml in its favour); `is_working_directory` (`Posix`, or `Drive` / `Unc` under Windows); `is_bare_root` (one separator alone under the given `PathRules`); `has_drive` (non-namespace `Drive` or `DriveRelative`); `Parsed::is_mixed_head` and `Parsed::is_nt_object`, shared by `grant_eligibility` and `classify_subpath` (`SubpathRefusal`), which `grant::freeze` maps to its messages; `is_network` (`HeadKind::Unc`), `is_verbatim_drive` (`Namespace::Verbatim` + `HeadKind::Drive`) and `is_volume_guid` (`has_os_namespace_head` with a `Volume{` `namespace_tail`), which the Windows DACL backend asks rather than parsing prefixes itself; `Parsed::has_os_namespace_head` (`Namespace::is_exact`), what `show` leaves unfolded; `Parsed::without_verbatim_prefix`, what the Windows identity fold slices; and `Parsed::namespace_tail`, what the discard device check reads under `HeadKind::Device`; `utf8`, a path's native spelling as text or `NotUtf8` naming it, the one strict conversion for a path that must travel as a string (`--capabilities` profiles, `SourceFile`), as `shown` is the one lossy conversion, for display only; `spelled_parent`, a path with its last name dropped by spelling alone, for a program's own layout (the folder a file it writes sits in, its install tree, a run folder it made) and never for a name a grant judges, which asks `RealPath::parent`; a final component's `extension`; `relative_suffix` strips a sub-path's leading separators under the rules, and `join_under` joins a sub-path onto a base string one component at a time
+- lex — `lex.rs`, the one surface over `lex/`, split by concern: `head.rs`
+  (the parser and every head judgment, and `windows_components`, a path's
+  names past `windows_head`, the one split every Windows identity takes),
+  `eligibility.rs` (`grant_eligibility`, `classify_subpath`), `anchoring.rs`
+  (`anchor`, and `anchor_on` for a caller that may have no cwd: `PATH` entries,
+  git pointers), `fold.rs`, `join.rs`, `name.rs` (a path's names by spelling:
+  `file_name`, `spelled_parent`, `extension`, `utf8`, `relative_key` and its
+  inverse `key_within`) and `command.rs` (`names_a_path`, the Windows exec
+  extensions, `is_batch_image`). One structural parser, `parse_bytes`, reading a byte slice under `PathRules` into `Parsed { raw, rules, kind: HeadKind, spelling: HeadSpelling, head_len }`, from which resolution, `.`/`..` folding and every head judgment project. `HeadKind` names the structural head (`Posix`, `Drive { letter, volume }`, `Unc { volume }`, `Driveless`, `DriveRelative { letter }`, `Relative`, `Device` for `\\.\`, and `Malformed` for a two-separator or `\\?\` head that is no well-formed drive, share or device); `HeadSpelling` records the opening separator and namespace facts once (`namespace: Option<Namespace>` — `Verbatim { exact }` for `\\?\`, `Device { exact }` for `\\.\`, `Object` for `\??\`, with `exact` / `Namespace::is_exact` true when all three separator bytes of that 4-byte prefix are `\` — `mixed_opening` for `/\` or `\/`, and `opens_with_slash`). `fold_dots_under` (over `fold_bytes`) is one kernel under either rules from any host, `fold_dots` its host instance on a held path: `head_len` marks where the head ends and only the names past it fold, joined with the rules' separator, so a fold preserves `HeadKind`, `volume` and (save when `..` climbs into the `??` component of a `\??\` driveless path) `HeadSpelling::namespace`; under Windows rules a non-namespace `Drive`, `Unc`, `Driveless`, `DriveRelative` or `Relative` head (`Parsed::respell_head`) is respelled with `\` too (`C:/a/b` folds to `C:\a\b`, `//srv/sh` to `\\srv\sh`), so such a path has one separator throughout, while every head whose kind or meaning turns on its spelling is kept as written: a `Posix` `/` (as `\` it would be `Driveless`), a slash-spelled verbatim head (`//?/C:/x` is a device path Win32 normalises, so its tail past `head_len` folds), and a `Device` or `Malformed` path, or an exact `\\?\` verbatim path (`Namespace::is_exact`, `head_len == raw.len()`: Win32 hands its rest to the kernel uninterpreted, `/` a name byte and `.`/`..` names), all head and kept whole, `..` included; a relative path's drive-shaped first name keeps a `.\` before it; `is_unparsed_head`, a Windows path absolute to the kernel in which `std::path` finds no prefix and so would descend or climb from the current drive, which the walk refuses. Every head predicate projects from `parse_bytes`: whether a path is absolute under either rules set (`absolute_under` / `Parsed::is_absolute`: POSIX, `HeadKind::Posix`; Windows, `Drive`, `Unc`, `Device` or `Malformed`) and on this host (`is_absolute`, `absolute_under` the host's rules, the one absoluteness ral asks, `anchor` included; `Path::is_absolute` is banned in clippy.toml in its favour); `is_working_directory` (`Posix`, or `Drive` / `Unc` under Windows); `is_bare_root` (one separator alone under the given `PathRules`); `has_drive` (non-namespace `Drive` or `DriveRelative`); `Parsed::is_mixed_head` and `Parsed::is_nt_object`, shared by `grant_eligibility` and `classify_subpath` (`SubpathRefusal`), which `grant::freeze` maps to its messages; `is_network` (`HeadKind::Unc`), `is_verbatim_drive` (`Namespace::Verbatim` + `HeadKind::Drive`) and `is_volume_guid` (`has_os_namespace_head` with a `Volume{` `namespace_tail`), which the Windows DACL backend asks rather than parsing prefixes itself; `Parsed::has_os_namespace_head` (`Namespace::is_exact`), what `show` leaves unfolded; `Parsed::without_verbatim_prefix`, what the Windows identity fold slices; and `Parsed::namespace_tail`, what the discard device check reads under `HeadKind::Device`; `utf8`, a path's native spelling as text or `NotUtf8` naming it, the one strict conversion for a path that must travel as a string (`--capabilities` profiles, `SourceFile`), as `shown` is the one lossy conversion, for display only; `spelled_parent`, a path with its last name dropped by spelling alone, for a program's own layout (the folder a file it writes sits in, its install tree, a run folder it made) and never for a name a grant judges, which asks `RealPath::parent`; a final component's `extension`; `relative_suffix` strips a sub-path's leading separators under the rules, and `join_under` joins a sub-path onto a base string one component at a time
   with the separator of the given rules, on every host alike (`GuestPath::join`
   is it under Posix rules), and refuses (`Rerooting`) a sub-path naming a volume
   of its own under Windows rules — absolute there, or a drive at any component;
   `join_relative` is it under the host's rules onto a host-held path, and `join_slash` is that
   for a `/`-separated constant subpath the program spells, panicking if one
-  re-roots; `identity.rs`: name identity and containment, `windows_collision_key` naming a kernel object by an absolute path under `collision_key` per component, coarser than NTFS's own fold so a lock merges every spelling NTFS equates; `device.rs`: device names, and `win32_trimmed`, a final component with the trailing dots and blanks Win32 drops, the one copy of that rule (reserved device names, batch images);
+  re-roots; `identity.rs`: name identity and containment, a command name's
+  `command_name_key`, and `windows_collision_key` naming a kernel object by an absolute path under `collision_key` per component, coarser than NTFS's own fold so a lock merges every spelling NTFS equates; `device.rs`: device names, and `win32_trimmed`, a final component with the trailing dots and blanks Win32 drops, the one copy of that rule (reserved device names, batch images);
 - complete — `complete.rs`, the path half of completing a typed word:
-  `PartialPath` splits it into the directory to list and the needle, says
+  `PartialPath` splits it, under a `TildeReading` (home, or a literal `~`
+  inside quotes), into the directory to list and the needle, says
   which entries are offered, and spells a chosen one back as ral shows a path
   (typed `~` kept, `/`-separated; expanded via `TildePath::shown` only when the
   spelling must be quoted);
@@ -303,9 +318,11 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   digits of the SHA-256 of the cwd's exact OS bytes (UTF-16 units on Windows), so
   two cwds that differ at all key apart: `-Users-x-proj-25cf7293a3713b73`;
 - canon — `canon.rs`, the names one object answers to for the kernel
-  sandboxes: firmlink twins (`twins`); what an object is, and where a
-  spelling reaches it, is the walk's to say;
-- locate — `walk.rs` exports one resolver from `walk/`: `names.rs` validates
+  sandboxes: firmlink twins (`twins`), which `render.rs` renders as rule text
+  (`render_real`, refusing a name that is not UTF-8) and whose ancestors it
+  takes (`proper_ancestors`); what an object is, and where a spelling reaches
+  it, is the walk's to say;
+- locate — `handle.rs` exports one resolver from `handle/`: `names.rs` validates
   spellings, `trace.rs` holds evidence, and `exclusion.rs` keeps deny anchors.
   `held.rs` owns private handles and authority conversions; operations in
   `held/`, traversal in `resolve.rs`, and host adapters are its child modules.
@@ -340,7 +357,7 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   parent's listing for that identity, Windows the normalized name checked against
   the parent's path). A `..` is physical, the kernel's rule, even from a link
   target (the user's own path keeps its logical fold); the splice count is
-  bounded by `MAX_HOPS`. `walk/error.rs::failure_trace`, exported by `walk.rs`,
+  bounded by `MAX_HOPS`. `handle/error.rs::failure_trace`, exported by `handle.rs`,
   takes `loop_trace`'s actual failed-link transcript from a spent-budget error,
   else walks the name leniently with `LeafMode::Follow`. The fs doors judge it
   for their operation, heads for running, before disclosing the error. Every
@@ -402,7 +419,7 @@ shell's resolver, and the plugin loader folds it into its own candidates.  The
 name beside the script is `use`'s first candidate; each candidate is judged
 before its kind is asked, a denied one passed over.)
 
-`tree/walk.rs` is the one directory-tree walk, `Walk`: ral enumerates, with
+`tree.rs` is the one directory-tree walk, `tree::Walk`: ral enumerates, with
 `Dir::read_dir` and `Dir::open_dir`, depth first in name order, and `ignore` only
 matches (`tree/ignore.rs` is the rule engine over `ignore::gitignore`, opening
 nothing); `tree/glob.rs` is glob's pattern language, enumerated by it. A `Walk`
@@ -428,7 +445,8 @@ shell's cwd cell, or `None` for a shell-less caller — and `CwdPath` has one
 constructor, so no call site can choose "here" for itself**
 ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
 
-- `names_a_path` is the one answer to "is this command name a path?": it
+- `names_a_path` (`lex/command.rs`, with the rest of the command-name lexing)
+  is the one answer to "is this command name a path?": it
   bears a separator under the host's `PathRules` (`PathRules::is_separator`:
   `/` everywhere, `\` under Windows alone), so off Windows `a\b` is a bare
   name for `PATH`. `names_a_path_for` takes the rules, and the lexer's
@@ -468,7 +486,7 @@ contained.
 
 The set-level algebra over prefixes is not in `path/`: it is
 `authority::policy::table`, which names polarities and never identities, so every
-spelling question stays here. `RealPath` (`walk/trace.rs`) is the position a walk
+spelling question stays here. `RealPath` (`handle/trace.rs`) is the position a walk
 ends at and the identity of a run place, ordered as the host identifies files.
 
 XDG base directories resolve through one resolver, `path/basedir.rs`
@@ -476,7 +494,7 @@ XDG base directories resolve through one resolver, `path/basedir.rs`
 home-joined Linux default on every platform, and `None` where there is neither
 — a host fact answers with an `Option`, so each caller picks its own fallback
 rather than inheriting a fabricated home. For the program's own layout alone
-(`host::xdg` and `host::home_dot`) the home falls back, where no `HOME` is bound, to
+(`host::xdg`, `host::layout_home` and `host::home_dot`) the home falls back, where no `HOME` is bound, to
 the account's own from the user database (the `AccountHome` site), so `app_dir`,
 `OwnDir`, `UserFile` and the credential denies all see the same base; a `~` in a
 script (`host::home`) is unchanged. Where even that fails, `own` refuses with an

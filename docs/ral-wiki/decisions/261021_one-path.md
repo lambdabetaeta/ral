@@ -108,12 +108,12 @@ its authored form beside its resolution, and the two could disagree.
 
 ## Where
 
-- **`core/src/path/walk.rs`** and its host modules: `Trace`, `RealPath`, `Hold`,
+- **`core/src/path/handle.rs`** and its host modules: `Trace`, `RealPath`, `Hold`,
   `Excluded`, `Dir`, `Located`, `walk`, `walk_excluded`.
 - **`core/src/path/identity.rs`** — the two readings.
 - **`core/src/authority/policy/{lattice,fs,exec}.rs`** — `GrantLayer`, `GrantPath`,
   `Extent`, `GrantStack::{judge, rehold}`.
-- **`core/src/path/tree/walk.rs`** — domain enumeration (`Walk`), with
+- **`core/src/path/tree.rs`** — domain enumeration (`Walk`), with
   **`core/src/shell/runtime/walk.rs`** the live-shell adapter (`AdmittedWalk`,
   `Shell::admitted_walk`).
 

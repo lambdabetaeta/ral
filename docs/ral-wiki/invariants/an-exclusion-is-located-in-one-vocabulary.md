@@ -3,7 +3,7 @@
 **Wherever a consumer needs the positions an exclusion occupies, it asks the
 exclusion: `Excluded::holds` for every position it holds, `Walked::followed` for
 the one an access lands on.** No backend keeps its own copy of where a deny lies.
-Both live in `core/src/path/walk/exclusion.rs`.
+Both live in `core/src/path/handle/exclusion.rs`.
 
 - **`Excluded::holds`** is the name's hold and, where the name is a link, its
   target's, the name first. Matching reads it (`Excluded::matches`,
