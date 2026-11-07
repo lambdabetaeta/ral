@@ -20,9 +20,9 @@ let small = yes ral | head -c 1000
 echo !{length $small}
 
 # A spawned worker is the other side of the same cap: its bytes arrive with
-# nobody to refuse them, so the buffer stays bounded and says where it stopped
-# — the first 16 MiB, then the truncation marker once, then nothing.  `poll`
-# reads the buffer as data once the worker has settled.
+# nobody to refuse them, so the buffer stays bounded: exactly the first 16 MiB
+# and no marker, the rest counted and discarded.  `poll` reads that prefix as
+# data once the worker has settled; a replay (`await`) would add a stderr note.
 let h = spawn { yes ral | head -c 20000000 }
 let settle = { |h|
     case !{poll $h} [

@@ -177,7 +177,7 @@ fn moved_exclusions_reach_children_through_the_identity_transport() {
     };
     let (status, output) = dispatch("/bin/cat ok copy; /bin/ls absent");
     assert_eq!(status, 0, "{output:?}");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout.bytes);
     assert!(stdout.contains("ALLOWED-BYTES"), "{output:?}");
     assert!(
         stdout.contains("SECRET-BYTES"),
@@ -189,7 +189,7 @@ fn moved_exclusions_reach_children_through_the_identity_transport() {
     ] {
         let (_, output) = dispatch(body);
         assert!(
-            !String::from_utf8_lossy(&output.stdout).contains(marker),
+            !String::from_utf8_lossy(&output.stdout.bytes).contains(marker),
             "{output:?}"
         );
     }
