@@ -116,7 +116,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `outcome.rs`: `Signal` and `WaitOutcome`. `WaitOutcome::cancelled_by` names
   the cause for a death by one of the cause's `signals_of` (grace, key, kill),
   read off the one reader `WaitOutcome::death`, and `WaitOutcome::failure` is
-  the `fact::Failure` of any other end, which `command::process::ending`
+  the `fact::Failure` of any other end, which `command::ending`
   turns into the run's stop or failure; no death mints a cause, so a torn-down child reports the cause,
   an expired time limit, a `cancel`, an interrupt or a shutdown, exactly as a
   poll point does, while a signal from outside ral still reports its number

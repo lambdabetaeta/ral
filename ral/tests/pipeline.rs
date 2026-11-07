@@ -96,7 +96,7 @@ fn audit_cli_captures_command_stdout() {
 fn pipeline_external_stage_rejects_list_arg_with_hint() {
     // Passing a List as a positional arg to an external stage must error
     // with the same diagnostic command::run produces — `...$xs` hint.
-    // The shared command::vet path is what enforces this — pipeline
+    // The shared command::validate_argv path is what enforces this — pipeline
     // stages and single-command exec both run vet before spawn, so a
     // list arg cannot reach `execve` as a (likely garbled) stringification.
     //

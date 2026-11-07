@@ -8,7 +8,7 @@ anchors: [prepare, start, start_detached, unstarted_error, ending, with_denials,
 # An external, end to end
 
 **An external's life is one path in three named stages, and each stage raises
-its failures one way.** The path is `core/src/shell/exec/command/process.rs`;
+its failures one way.** The path is `core/src/shell/exec/command.rs`;
 the process layer under it is `core/src/process/launch.rs`. A plain command, a
 directly launched pipeline stage and `detach` each wire their own streams
 between the first two stages and share nothing else. What the operation means

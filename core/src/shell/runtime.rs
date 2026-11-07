@@ -19,7 +19,7 @@ mod closure;
 pub use closure::Closure;
 
 // What the exec boundary refuses, declared once for the two sides that read it:
-// the checker before the spawn, `shell::exec::command::vet` at it.
+// the checker before the spawn, `shell::exec::command::validate_argv` at it.
 
 mod handler;
 pub use handler::{FrameHandle, HandlerEntry};

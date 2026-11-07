@@ -33,6 +33,6 @@ text that is ral's own is a `Refusal`.
 How the parent tells the two apart for an unconfined launch is
 [[invariants/no-mark-ral-s-fault|no-mark-ral-s-fault]]. The one conversion of
 `Unstarted` into the run's error is `unstarted_error`
-(`core/src/shell/exec/command/process.rs`); see
+(`core/src/shell/exec/command.rs`); see
 [[internals/an-external-end-to-end|an-external-end-to-end]] and
 [[design/exec|exec]].

@@ -51,7 +51,7 @@ pub use projection::{FsLists, FsProjection, SandboxProjection};
 pub(crate) use projection::{RenderedFs, RenderedProjection};
 pub use reexec::pinned_arg0;
 
-// `shell::exec::command::process::build_launch` routes an external/bundled child
+// `shell::exec::command::build_launch` routes an external/bundled child
 // through `sandboxed_command` when a projection is active and no guest jail
 // already confines it; `serve_warrant` is the trampoline's side, entering the
 // confinement before it runs the program.

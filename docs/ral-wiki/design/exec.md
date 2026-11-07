@@ -91,7 +91,7 @@ writes are not the result: they go to the sinks in the context.
 ## Which heads denote it
 
 **A head's spelling decides whether it is looked up or goes straight to the
-operation.** The classification is in `core/src/shell/exec/command/head.rs`
+operation.** The classification is in `core/src/shell/exec/command.rs`
 (`Head`, `Target`) and `core/src/shell/exec/dispatch.rs` (`resolve`,
 `resolve_command_word`); `docs/SPEC.md` §6.2–§6.3 is normative.
 
@@ -163,7 +163,7 @@ externals the arm runs.
 ### Standard streams
 
 *Sources* and *sinks* are ral's own stream values, lowered onto the child's
-descriptors at the spawn (`core/src/shell/exec/command/stdio.rs`). Only three
+descriptors at the spawn (`core/src/shell/exec/command.rs`). Only three
 streams exist ([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]).
 
 | stdin | arises from |
@@ -233,7 +233,7 @@ stopped with `SIGTTIN`.
   ral owned the foreground at startup.
 - **One rule fixes the process group and the handoff**, for a standalone command
   and a pipeline alike (`placement`,
-  `core/src/shell/exec/command/foreground.rs`):
+  `core/src/shell/exec/command.rs`):
 
   | policy | when | consequence |
   |---|---|---|
@@ -256,7 +256,7 @@ stopped with `SIGTTIN`.
 
 **Every mode performs the same operation; modes differ only in the context
 they wire around it.** Each runs the same three stages, `prepare`, `start` (or
-`start_detached`) and `ending` (`core/src/shell/exec/command/process.rs`), and
+`start_detached`) and `ending` (`core/src/shell/exec/command.rs`), and
 wires its own streams between the first two
 ([[internals/an-external-end-to-end|an-external-end-to-end]]).
 
@@ -294,7 +294,7 @@ wires its own streams between the first two
   ([[design/residency|residency]], `docs/SPEC.md` §11.1).
 - **Detached.** `detach` (a Unix base frame) launches with null streams and
   surrenders ownership, so the process outlives the session
-  (`command/detach.rs`, `docs/SPEC.md` §11.5).
+  (`core/src/shell/exec/command.rs`, `docs/SPEC.md` §11.5).
 - **A host hook.** The REPL's external editor runs `$VISUAL`/`$EDITOR`
   through `Shell::run_external_argv`, which skips bindings and handlers.
   Every other hook, prompt, plugin event or keybinding reaches exec only by
@@ -396,7 +396,7 @@ success.
 ### Found before the spawn, or by it
 
 **Most failures are found by the probe, before any process exists**
-(`Head::select` in `head.rs`; `vet.rs`). A *walk* is the component-by-component
+(`Head::select` and `validate_argv` in `command.rs`). A *walk* is the component-by-component
 resolution of a path that the judgment also reads.
 
 - **The probe** reports absence as `not-found`; at a path head, a directory as

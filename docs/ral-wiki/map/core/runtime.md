@@ -58,16 +58,16 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   Direct external stages retain one `Prov` from launch through collection,
   completing errors and stops before the observation is settled.
 - `command.rs` — the External arm: vet the admitted head, launch its
-  admitted program, wire stdio from the sinks the call's redirects installed, spawn, and hand the child to the pipeline collector (`pipeline::join_lone`), its one waiter; `Pumps` lives here. `stdio.rs`
-  `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps
+  admitted program, wire stdio from the sinks the call's redirects installed, spawn, and hand the child to the pipeline collector (`pipeline::join_lone`), its one waiter; `Pumps` lives here. `wire_stdio`
+  hands a `>` file to the child as its own fd, no pump, and keeps
   `2>&1` a `dup2` when stderr's sink is `same_destination` as stdout's.
-  Submodules: `head.rs` (`Head { shown, program }`, a frozen `Target` until
-  `Head::admit` supplies `Admission = Result<Admitted, Missing>`), `vet.rs`
-  (`validate_argv`, the argv shape, read by `prepare` after the 127/126
-  verdict), `process.rs` (`prepare`, `start`, `ending`),
-  `stdio.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
-  for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once, for a
-  standalone command and a pipeline alike: `placement` returns the `PgidPolicy`
+  The file reads top to bottom as the path does: `Head { shown, program }`, a
+  frozen `Target` until `Head::admit` supplies
+  `Admission = Result<Admitted, Missing>`; `validate_argv` (the argv shape,
+  read by `prepare` after the 127/126 verdict); `prepare`; the stdio wiring and
+  `placement`; `start`; `ending`; `run`; `detach`. `uutils.rs`
+  holds [[map/core/builtins|bundled coreutils]]. `placement` decides once, for a
+  standalone command and a pipeline alike: it returns the `PgidPolicy`
   and the prepared loan, `NewLeader` being exactly the foreground.
   - **The program and the 126/127 verdict come from the judged candidate
     fold's walk.** `Head::resolve` freezes a `Target` without I/O: a bundled
@@ -91,7 +91,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
-  - `detach.rs` is that same machinery — `Head`, `Head::admit`, `vet`,
+  - `detach` is that same machinery — `Head`, `Head::admit`, `vet`,
     `build_launch` — up to the one act that differs: the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.
@@ -112,7 +112,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     and behaves identically on Windows where no `.exe` exists to spawn
     ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
     [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
-  - `foreground.rs`'s `placement` gates the terminal handoff on a held
+  - `placement` gates the terminal handoff on a held
     *terminal lease* (`Shell::terminal_lease` is `Some`), a terminal-bound
     stdout or an explicit loan, and no envelope, not on REPL interactivity —
     so a non-interactive script launched at a terminal holds a `Leased` run and
@@ -124,7 +124,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     unwind. Pipeline preparation likewise precedes anchor spawn, and only an
     owning pipeline (no enclosing stage) prepares: a stage's child joins its
     group unlent, since dropping a prepared loan restores the terminal, so a
-    joined pipeline must never hold one. `stdio.rs`'s `boundary_stdin` is the
+    joined pipeline must never hold one. `boundary_stdin` is the
     one rule for what a child at the boundary reads: a joined group passes its
     owner's source through, a startup tty survives only where the child's group
     can read it, and an unlent owned group reads EOF.

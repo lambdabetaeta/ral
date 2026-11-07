@@ -18,7 +18,7 @@ oversight in either direction:
 
 **One declaration, two readings.** `RefusedArg`
 (`core/src/ty/exec_arg.rs`) names those shapes by a single wildcard-free match
-on a `Head`, `of_head`. The spawn (`shell::exec::command::vet`) reads it through
+on a `Head`, `of_head`. The spawn (`shell::exec::command::validate_argv`) reads it through
 `Value::heads`, the checker's argv rule (`typecheck::infer`) through `of_ty`, and
 one `remedy` per shape means a user meeting either refusal meets one language. A
 new head has to be given a verdict before it compiles, for both sides at once. A second

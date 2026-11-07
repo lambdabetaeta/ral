@@ -204,7 +204,7 @@ It carries *which* boundary it is at — `ArgvBoundary::InShell` or
 `Exec(shown)` — and that is the whole of the difference between them. `Exec`
 sends each written element through `gate_exec_arg`, which reads
 `RefusedArg::of_ty` (`core/src/ty/exec_arg.rs`) — the same declaration
-`shell::exec::command::vet` reads at the spawn — and raises
+`shell::exec::command::validate_argv` reads at the spawn — and raises
 `TypeErrorKind::ExecArgNotText` (T0057) where the resolved shape is refused,
 saying nothing about a type variable or about a spread's elements.
 `explain.rs` composes the message and takes the guidance from

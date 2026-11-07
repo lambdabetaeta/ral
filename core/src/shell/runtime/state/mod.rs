@@ -137,7 +137,7 @@ pub struct SessionState {
     /// their own; `None` outside a stage.  It decides pgid placement (a
     /// standalone external may lead its own group, so a watchdog cancel can
     /// `kill(-pgid, …)` the whole subtree), and its absence is one conjunct
-    /// of the foreground gate in `shell/exec/command/foreground.rs`; holding
+    /// of the foreground gate in `shell/exec/command.rs`; holding
     /// the session's [`TerminalLease`](crate::process::TerminalLease) is
     /// another.
     pub(crate) stage: Option<crate::process::Membership>,

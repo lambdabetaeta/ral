@@ -2,7 +2,7 @@
 
 **A grant's process budget is a property of the `Launch`, applied inside each
 platform's spawn, so a child under a grant never runs without it.**
-`build_launch` (`core/src/shell/exec/command/process.rs`) sets it behind one
+`build_launch` (`core/src/shell/exec/command.rs`) sets it behind one
 gate, `has_active_capabilities`, by `Launch::limit_resources`
 (`core/src/process/limits.rs`); nothing is applied to the child afterward.
 

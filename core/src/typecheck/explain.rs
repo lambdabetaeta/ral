@@ -139,7 +139,7 @@ impl TypeErrorKind {
                      which only a command, an external, or a handler has"
                 )
             }
-            // The wording `shell::exec::command::vet` uses at the spawn, the
+            // The wording `shell::exec::command::validate_argv` uses at the spawn, the
             // refusal being the same refusal one step earlier.
             Self::ExecArgNotText {
                 command,

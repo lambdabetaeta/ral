@@ -1,6 +1,6 @@
 //! What a launch runs ([`Image`]), and confining one external or bundled
 //! child under the platform's OS sandbox.  `build_launch` in
-//! `shell::exec::command::process` routes here whenever a projection is
+//! `shell::exec::command` routes here whenever a projection is
 //! active and no guest jail already confines the child.
 //!
 //! Env, cwd and resource limits are the caller's, layered on the returned

@@ -329,7 +329,7 @@ pub fn boot_shell(
 /// Ral code reads these as `!{env}[KEY]`, so every front end sees one
 /// baseline whoever launched the process.  `SHLVL` is incremented rather than
 /// passed through, as in every other shell.  `PWD` is no variable: it is the
-/// cwd cell, which `apply_env` in `core/src/shell/exec/command/process.rs`
+/// cwd cell, which `apply_env` in `core/src/shell/exec/command.rs`
 /// threads into each child.  A host fact nothing binds stays unbound: seeding
 /// `HOME=.` once made every `~` in the session mean "here".
 pub fn seed_host_env(shell: &mut Shell) {

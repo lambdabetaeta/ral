@@ -5,7 +5,7 @@
 //! reached by [`walk()`](crate::path::walk()) as any other spelling is.  That is a walk per `PATH`
 //! entry, so where the walks find the first program is remembered for the
 //! extent of a run; [`LOCATED`] argues what that costs in freshness.
-//! Dispatch arrives via `shell::exec::command::head`.
+//! Dispatch arrives via `shell::exec::command`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -226,7 +226,7 @@ thread_local! {
     ///
     /// Thread-local and lock-free, because a run's evaluation is
     /// single-threaded on the calling thread.  It hangs off no `Shell` and no
-    /// `Context` on purpose: its callers, `shell::exec::command::head`'s
+    /// `Context` on purpose: its callers, `shell::exec::command`'s
     /// resolution and `authority::grant`'s decode of a bare key, hold no `Shell`.
     ///
     /// A newly installed or newly deleted executable is therefore invisible

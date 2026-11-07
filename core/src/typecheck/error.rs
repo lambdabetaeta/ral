@@ -307,7 +307,7 @@ pub enum TypeErrorKind {
     /// word to give — a list, a map, a block, a handle, bytes.
     ///
     /// Raised on a concrete type only: what a type variable hides here,
-    /// `shell::exec::command::vet` still refuses at the spawn.
+    /// `shell::exec::command::validate_argv` still refuses at the spawn.
     ExecArgNotText {
         command: String,
         ty: Ty,

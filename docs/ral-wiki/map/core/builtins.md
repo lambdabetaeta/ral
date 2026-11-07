@@ -152,7 +152,7 @@ Bodies are grouped by concern, one submodule each:
   the other two live here
   too but reach a session via `WATCH_BUILTIN` / `DETACH_BUILTIN`, not core. `builtin_detach` is the surface discipline
   alone — the birth itself is the ordinary external-command machinery down to
-  the double-fork in `shell/exec/command/detach.rs`
+  the double-fork in `shell/exec/command.rs`
   ([[map/core/runtime|runtime]]), and it yields a `{pid, desc}` receipt, not a
   `Handle`, so none of the eliminators below apply to it. A handle is one
   private lock over a `HandleState`: `Running`, `Stopping` (cancellation

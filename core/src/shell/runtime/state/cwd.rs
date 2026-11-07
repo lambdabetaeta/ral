@@ -3,7 +3,7 @@
 //! `cd` moves the shell-owned [`CwdPath`] on `context.cwd`, never the process cwd:
 //! that one is OS-global, and a worker (`spawn`, `watch`) or a pipeline
 //! stage would see a sibling's `cd` as a sudden reorder.  Children still land right —
-//! `apply_env` in `core/src/shell/exec/command/process.rs` passes [`Shell::cwd`]
+//! `apply_env` in `core/src/shell/exec/command.rs` passes [`Shell::cwd`]
 //! as `Command::current_dir` and exports it as `PWD`.
 
 use super::Shell;

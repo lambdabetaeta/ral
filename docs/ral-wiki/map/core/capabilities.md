@@ -577,7 +577,7 @@ Inside a *guest*, `ral-guest` starts the engine as
 `--guest-engine <cgroup-root>`, named by `guest_abi::layout::ENGINE_FLAG`.
 The daemon and jail share `layout::EXEC_CONTROLLERS`. The role installs the
 [[map/core/io-process|spawn jail]], so `build_launch`
-(`shell/exec/command/process.rs`) uses it for every command: a bounded fresh
+(`shell/exec/command.rs`) uses it for every command: a bounded fresh
 uid and per-exec cgroup, the envelope's seccomp deny-set, and close-on-exec
 marking above stderr. The daemon disables the user namespaces bwrap needs.
 `GrantStack::net`, the stack's one veto, carries any layer's to both the host projection
@@ -687,7 +687,7 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
 - `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
   image; `build_launch` reaches it directly when no projection is active.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_launch`
-  (`shell/exec/command/process.rs`) routes an external or bundled child through here
+  (`shell/exec/command.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
   by the real path the guard judged, its spelling as `argv[0]`, or a

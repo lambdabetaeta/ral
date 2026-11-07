@@ -14,7 +14,7 @@ receive no per-grant fs/exec projection. Seccomp and, when requested, offline
 network namespaces still apply there.
 
 When `prepare` builds the launch of an admitted external or bundled child
-(`build_launch`, `shell/exec/command/process.rs`) on a host under a restrictive
+(`build_launch`, `shell/exec/command.rs`) on a host under a restrictive
 projection, it calls `sandboxed_command`
 (`authority/sandbox/launch.rs`), which confines that one child. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].

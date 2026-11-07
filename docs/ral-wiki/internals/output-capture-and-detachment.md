@@ -89,7 +89,7 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   on expiry the child's collector, which reads the scope each slice, tears the
   group down.
 - A non-interactive exarch external leads its own process group
-  (`PgidPolicy::NewLeader`, `core/src/shell/exec/command/foreground.rs`, gated by
+  (`PgidPolicy::NewLeader`, `core/src/shell/exec/command.rs`, gated by
   [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]),
   so the cancel SIGTERMs then unconditionally SIGKILLs the *whole group* —
   grandchildren included. Every copy of the write end closes, the pump sees EOF,
@@ -242,7 +242,7 @@ of the child's pgid.
 
 - Everything up to the birth is the ordinary external-command machinery —
   `Head::resolve`, `Head::admit`, `prepare` (the vetting and the launch)
-  (`core/src/shell/exec/command/detach.rs`), so the grant judges the call
+  (`core/src/shell/exec/command.rs`), so the grant judges the call
   exactly as it judges any exec and a head a handler in scope intercepts is
   refused, birthing nothing: a handler runs inside this session, so there is
   nothing to detach (to run the real program, `^name`). Only the last act

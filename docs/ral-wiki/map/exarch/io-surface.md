@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 1dc7c6e7
 generated_at_date: 2026-11-01
-covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/handle.rs, core/src/path/handle/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/stream.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
+covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/handle.rs, core/src/path/handle/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/command.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/stream.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -58,7 +58,7 @@ flag: a capability *denial* joins the trail whenever one is open, an *allowed*
 check never does, and no `grant` has a dimension to change either — language
 semantics, not presentation ([[design/audit|audit]]). And only an exec refusal
 surfaces a *structured* denial: `Head::admit`
-(`shell/exec/command/head.rs`) judges the head and `Shell::exec_refused`
+(`shell/exec/command.rs`) judges the head and `Shell::exec_refused`
 (`shell/runtime/state/checks.rs`) records the refusal against its call's `Mooring`. The
 `fs` checks in `authority/guard/enforce.rs` return domain `Denial`s to the same
 adapter, which records them with no `Mooring` and raises their runtime errors,
@@ -110,7 +110,7 @@ application, which is no observation at all.
   — emits from `call_external` (`shell/exec/dispatch.rs`), which wraps the whole
   dispatch and so covers a spawn failure too, since that never reaches
   `wait()` (the card derives ok/bad from the status directly; a spawn failure
-  carries its failure's code, 127/126/…). `detach` (`shell/exec/command/detach.rs`)
+  carries its failure's code, 127/126/…). `detach` (`shell/exec/command.rs`)
   is the second site, and the one that surfaces at the spawn rather than the
   wait: a surrendered process is never waited for, so its observation carries
   `` origin: `detached `` and status `0` meaning *exec'd*, not *succeeded*. A
