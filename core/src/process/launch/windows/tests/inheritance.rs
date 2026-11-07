@@ -56,9 +56,11 @@ impl Drop for ReapedChild {
 }
 
 fn raw_child(launch: &mut Launch) -> io::Result<ReapedChild> {
-    launch
-        .spawn(PgidPolicy::Inherit)
-        .map(|(child, _, _)| ReapedChild(child))
+    match launch.spawn(PgidPolicy::Inherit) {
+        Ok(spawned) => Ok(ReapedChild(spawned.child)),
+        Err(crate::process::Unstarted::Program(e)) => Err(e),
+        Err(crate::process::Unstarted::Refused(why)) => panic!("the launch was refused: {why}"),
+    }
 }
 
 fn phase() -> (Sender<()>, Receiver<()>, Sender<()>, Receiver<()>) {

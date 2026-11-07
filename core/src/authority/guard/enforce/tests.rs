@@ -189,7 +189,7 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
 
 mod words {
     use super::*;
-    use crate::authority::guard::enforce::{Refusal, check_exec, check_fs_exact};
+    use crate::authority::guard::enforce::{Refusal, check_exec, fs_denial};
     use crate::authority::policy::{ExecGrant, ExecKey, Program};
     use crate::fact::Resource;
 
@@ -401,19 +401,32 @@ mod words {
         );
     }
 
-    /// An fs refusal names the missing permission.
+    /// An fs refusal names its op, then says of the path what the refusal
+    /// alone says of "it".
     #[test]
-    fn an_fs_refusal_names_reading_or_writing() {
+    fn an_fs_refusal_names_its_op_in_the_refusals_one_wording() {
         let grants = grants([Capabilities {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
         }]);
         let (baseline, nowhere) = (Baseline::default(), trace("/nowhere/x"));
         let path = crate::path::LexicalPath::absolute(nowhere.real().as_path()).unwrap();
-        let read = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Read, &path);
-        assert!(read.err().unwrap().error.message.contains("reading"));
-        let write = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Write, &path);
-        assert!(write.err().unwrap().error.message.contains("writing"));
+        for op in [FsOp::Read, FsOp::Write] {
+            let refused =
+                (grants.refusal_fs(&baseline, &op, &nowhere)).expect_err("no allowance covers it");
+            assert_eq!(
+                refused.to_string(),
+                "no allowance of the active grant covers it"
+            );
+            assert_eq!(
+                fs_denial(&grants, refused, &op, &path).error.message,
+                format!(
+                    "fs {} denied by grant: no allowance of the active grant covers {}",
+                    <&str>::from(&op),
+                    path.shown()
+                )
+            );
+        }
     }
 }
 
@@ -451,7 +464,7 @@ fn a_case_variant_spelling_meets_the_deny() {
 /// and by which exclusion or pinned binary.
 mod fs_facts {
     use super::*;
-    use crate::authority::guard::enforce::check_fs_exact;
+    use crate::authority::guard::enforce::fs_denial;
     use crate::fact::Resource;
     use crate::path::LexicalPath;
 
@@ -462,9 +475,9 @@ mod fs_facts {
         at: &std::path::Path,
     ) -> crate::authority::guard::Denial {
         let path = LexicalPath::absolute(at).expect("an absolute path");
-        match check_fs_exact(grants, baseline, &trace(at), op, &path) {
+        match grants.refusal_fs(baseline, op, &trace(at)) {
             Ok(()) => panic!("{} should be refused", at.display()),
-            Err(denial) => denial,
+            Err(refused) => fs_denial(grants, refused, op, &path),
         }
     }
 

@@ -4,6 +4,7 @@
 //! `CreateProcessW` itself, because handle admission and Job Object
 //! membership must be creation-time facts.
 
+use crate::authority::sandbox::{Image, Refusal};
 #[cfg(not(windows))]
 use crate::process::site::Surface;
 #[cfg(not(windows))]
@@ -29,16 +30,20 @@ pub(crate) struct Launch {
     /// Owned until a spawn hands it on.
     jail: Option<crate::process::jail::JailCgroup>,
     envelope: Option<Envelope>,
+    /// A confined launch's: what its trampoline says of the program.
+    report: Option<crate::process::report::Report>,
+    /// The scope a confined launch was built under: its stop ends the wait
+    /// for the trampoline's first word.
+    scope: Option<crate::process::Scope>,
+    image: Option<Image>,
 }
 
 #[cfg(not(windows))]
 type PayloadPgid = Box<dyn FnOnce() -> Result<Option<crate::process::Pgid>, String> + Send>;
 
-/// A confinement envelope: a separate binary that execs the target in turn.
-/// Only such a backend declares one — a failure to start the launch is then
-/// the envelope's, not the target's, and the two are otherwise
-/// indistinguishable at the spawn.  Windows has none: its confinement is
-/// creation-time state on the target itself.
+/// A confinement envelope: a separate binary that runs the target in turn,
+/// in a session of its own.  Only such a backend declares one.  Windows has
+/// none: its confinement is creation-time state on the target itself.
 #[cfg(not(windows))]
 pub(crate) struct Envelope {
     pub(crate) program: &'static str,
@@ -46,6 +51,25 @@ pub(crate) struct Envelope {
     /// answering only once the payload is in it or gone; `None` when the
     /// envelope died before reporting; an error kills and reaps it.
     pub(crate) payload_pgid: Option<PayloadPgid>,
+}
+
+/// Why a launch made no child: the program's own failure to become a
+/// process, something that is never the program's fault, or the run's stop
+/// while a confined launch waited to hear its program start.
+#[derive(Debug)]
+pub(crate) enum Unstarted {
+    Program(std::io::Error),
+    Refused(Refusal),
+    #[cfg(unix)]
+    Stopped(crate::process::Cancellation),
+}
+
+/// A child born, and where it landed.
+pub(crate) struct Spawned {
+    pub(crate) child: crate::process::ChildHandle,
+    pub(crate) landing: crate::process::Landing,
+    /// The guest jail's cgroup, whatever `apply_guest_jail` staged.
+    pub(crate) jail: Option<crate::process::jail::JailCgroup>,
 }
 
 #[cfg(windows)]
@@ -61,6 +85,10 @@ pub(crate) struct Launch {
     creation_flags: u32,
     admitted_handles: Vec<std::os::windows::io::RawHandle>,
     security_capabilities: Option<SecurityCapabilitiesAttr>,
+    image: Option<Image>,
+    /// A grant's process budget, set on the child's Job Object while it is
+    /// still suspended.
+    pub(super) process_cap: bool,
 }
 
 /// Owners retained until the launch is dropped, independently of teardown.
@@ -186,6 +214,17 @@ impl StdioSpec {
 }
 
 impl Launch {
+    /// Record `image`, what this launch runs.
+    pub(crate) fn set_image(&mut self, image: Image) -> &mut Self {
+        self.image = Some(image);
+        self
+    }
+
+    /// What this launch runs, where it was built from an admitted program.
+    pub(crate) fn image(&self) -> Option<&Image> {
+        self.image.as_ref()
+    }
+
     /// Today bubblewrap alone, so only the Linux backend has one to declare.
     #[cfg(target_os = "linux")]
     pub(crate) fn envelope(&mut self, envelope: Envelope) -> &mut Self {
@@ -193,18 +232,17 @@ impl Launch {
         self
     }
 
-    /// The envelope binary this launch execs in the target's place, if any.
-    /// `None` means the launch execs the target itself, so a spawn failure is
-    /// the target's to answer for.
-    pub(crate) fn confinement(&self) -> Option<&'static str> {
+    /// Whether an envelope stands between ral and the program, whose payload
+    /// then leads a session of its own.
+    pub(crate) fn enveloped(&self) -> bool {
         #[cfg(windows)]
         {
             let _ = self;
-            None
+            false
         }
         #[cfg(not(windows))]
         {
-            self.envelope.as_ref().map(|e| e.program)
+            self.envelope.is_some()
         }
     }
 }
@@ -213,11 +251,7 @@ impl Launch {
 impl Launch {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         let cmd = site!(Surface::ProcessLaunch, std::process::Command::new(program));
-        Self {
-            cmd,
-            jail: None,
-            envelope: None,
-        }
+        Self::from_command(cmd)
     }
 
     /// Adopt an existing `Command`.  Set stdio and redirections on the
@@ -228,7 +262,24 @@ impl Launch {
             cmd,
             jail: None,
             envelope: None,
+            report: None,
+            scope: None,
+            image: None,
         }
+    }
+
+    /// The report a confined launch's trampoline makes on its program.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn report(&mut self, report: crate::process::report::Report) -> &mut Self {
+        self.report = Some(report);
+        self
+    }
+
+    /// The scope this confined launch was built under.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn under(&mut self, scope: crate::process::Scope) -> &mut Self {
+        self.scope = Some(scope);
+        self
     }
 
     pub(crate) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
@@ -304,62 +355,61 @@ impl Launch {
     pub(crate) fn apply_guest_jail(
         &mut self,
         plan: &crate::process::jail::JailPlan,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), Refusal> {
         let deny = crate::authority::sandbox::Filter::ENVELOPE
             .programs()
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let (cgroup, procs) = crate::process::jail::linux::prepare(plan)?;
+            .map_err(crate::process::jail::refused)?;
+        let (cgroup, procs) =
+            crate::process::jail::linux::prepare(plan).map_err(crate::process::jail::refused)?;
         crate::process::jail::linux::install_pre_exec(&mut self.cmd, plan, procs, deny);
         self.jail = cgroup;
         Ok(())
     }
 
-    /// Lower to a `std::process::Command` and spawn it with the requested
-    /// process-group placement: child, the pgid of a group it leads, and
-    /// whatever jail cgroup `apply_guest_jail` staged.  A child that joins or
-    /// inherits a group leads none, so `None`.
-    ///
-    /// An enveloped launch is placed `NewLeader` whatever was asked: the
-    /// envelope process is nobody's to address, so the group returned is
-    /// the payload's own where the envelope can name it.
+    /// Spawn into `pgid`, and on a confined launch read what its trampoline
+    /// says of the start: the child, where it landed, and whatever jail
+    /// cgroup `apply_guest_jail` staged.  An enveloped launch is placed
+    /// `NewLeader` whatever was asked: the envelope process is nobody's to
+    /// address, and its payload's group, named once it exists, is where the
+    /// child lands.
     ///
     /// # Errors
-    /// The `fork`/`exec` itself, or the pre-exec `setpgid`/`setsid` that
-    /// `process::group::spawn_with_pgid` installs.
-    pub fn spawn(
-        &mut self,
-        pgid: crate::process::PgidPolicy,
-    ) -> std::io::Result<(
-        crate::process::ChildHandle,
-        Option<crate::process::Pgid>,
-        Option<crate::process::jail::JailCgroup>,
-    )> {
+    /// [`Unstarted`]: the fork, `exec` or pre-exec `setpgid`/`setsid` the
+    /// program's, any failure of the envelope or trampoline, or a stop before
+    /// the trampoline spoke; any child is then killed and reaped.
+    pub(crate) fn spawn(&mut self, pgid: crate::process::PgidPolicy) -> Result<Spawned, Unstarted> {
         let pgid = if self.envelope.is_some() {
             crate::process::PgidPolicy::NewLeader
         } else {
             pgid
         };
-        let (child, leader) = crate::process::spawn_with_pgid(&mut self.cmd, pgid)?;
+        let forked = crate::process::spawn_with_pgid(&mut self.cmd, pgid);
+        let report = self
+            .report
+            .take()
+            .map(crate::process::report::Report::forked);
+        let (child, leader) = forked.map_err(|e| self.unforked(e, report.is_some()))?;
         let mut child = crate::process::ChildHandle::from_std(child);
-        let payload = self
-            .envelope
-            .as_mut()
-            .and_then(|e| e.payload_pgid.take())
-            .map(|ask| ask())
-            .transpose();
-        let payload = match payload {
-            Ok(payload) => payload.flatten(),
-            Err(why) => {
-                let _ = child.kill();
-                let _ = child.reap();
-                return Err(std::io::Error::other(why));
-            }
+        let payload = match self.payload_pgid() {
+            Ok(payload) => payload,
+            Err(refusal) => return Err(discarded(child, Unstarted::Refused(refusal))),
         };
-        Ok((
+        if let Some(mut report) = report {
+            let heard = report.first(self.scope.as_ref(), || self.vanished(child.stderr_said()));
+            if let Err(unstarted) = heard {
+                return Err(discarded(child, unstarted));
+            }
+            #[cfg(target_os = "linux")]
+            child.testify(report);
+        }
+        Ok(Spawned {
             child,
-            payload.or_else(|| leader.filter(|_| pgid.leads())),
-            self.jail.take(),
-        ))
+            landing: payload.map_or_else(
+                || crate::process::Landing::of(pgid, leader),
+                crate::process::Landing::Owns,
+            ),
+            jail: self.jail.take(),
+        })
     }
 
     /// Spawn *detached* by double fork: the survivor is this process's
@@ -374,15 +424,111 @@ impl Launch {
     /// launch no teardown authority, even on failure.
     ///
     /// # Errors
-    /// A failed fork or `execve`; a survivor whose pid is lost is `Survivor::Unnamed`.
+    /// [`Unstarted`], as for [`Self::spawn`], but the survivor is never
+    /// killed; a survivor whose pid is lost is `Survivor::Unnamed`.
     #[cfg(unix)]
-    pub(crate) fn spawn_detached(&mut self) -> std::io::Result<crate::process::group::Survivor> {
+    pub(crate) fn spawn_detached(&mut self) -> Result<crate::process::group::Survivor, Unstarted> {
         assert!(
             self.jail.is_none(),
             "a detached launch must not own a kept jail cgroup: its drop would kill the survivor"
         );
-        crate::process::group::spawn_detached(&mut self.cmd)
+        let forked = crate::process::group::spawn_detached(&mut self.cmd);
+        let report = self
+            .report
+            .take()
+            .map(crate::process::report::Report::forked);
+        let survivor = forked.map_err(|e| self.unforked(e, report.is_some()))?;
+        if let Some(mut report) = report {
+            report.first(self.scope.as_ref(), || self.vanished(None))?;
+        }
+        Ok(survivor)
     }
+
+    /// A spawn that made no child: the program's own failure, unless a
+    /// confining launcher was to run in its place.
+    fn unforked(&self, e: std::io::Error, confined: bool) -> Unstarted {
+        if !confined {
+            return Unstarted::Program(e);
+        }
+        Unstarted::Refused(Refusal::Unavailable(format!(
+            "cannot start {}: {e}; the command never ran",
+            self.launcher()
+        )))
+    }
+
+    /// An envelope that ended before its trampoline spoke; `said`, what it
+    /// left on a stderr ral reads.
+    fn vanished(&self, said: Option<String>) -> Refusal {
+        let launcher = self.launcher();
+        Refusal::Unavailable(match said {
+            Some(said) => format!("{launcher} ended before the program started: {said}"),
+            None => format!(
+                "{launcher} ended before the program started; what it said, if anything, went \
+                 to the command's stderr"
+            ),
+        })
+    }
+
+    /// What runs in the program's place on a confined launch.
+    fn launcher(&self) -> &'static str {
+        self.envelope
+            .as_ref()
+            .map_or("ral's sandbox trampoline", |envelope| envelope.program)
+    }
+
+    fn payload_pgid(&mut self) -> Result<Option<crate::process::Pgid>, Refusal> {
+        match self.envelope.as_mut().and_then(|e| e.payload_pgid.take()) {
+            Some(ask) => ask().map_err(Refusal::Launch),
+            None => Ok(None),
+        }
+    }
+
+    /// The command, for a test that reads its argv.
+    #[cfg(test)]
+    pub(crate) fn command(&self) -> &std::process::Command {
+        &self.cmd
+    }
+
+    /// Run to the end, for a test: the streams, and the ending as the
+    /// reaper hands it to every waiter.
+    #[cfg(test)]
+    pub(crate) fn output(mut self) -> Result<std::process::Output, Unstarted> {
+        use std::io::Read;
+        use std::os::unix::process::ExitStatusExt;
+        self.stdout(StdioSpec::piped()).stderr(StdioSpec::piped());
+        let Spawned { mut child, .. } = self.spawn(crate::process::PgidPolicy::Inherit)?;
+        let drain = |pipe: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut bytes);
+                }
+                bytes
+            })
+        };
+        let (stdout, stderr) = (drain(child.take_stdout()), drain(child.take_stderr()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watch = child.into_watch(tx, std::convert::identity);
+        let outcome = rx.recv().expect("the reaper reports every watched exit");
+        let _ = watch.reap();
+        let raw = match outcome {
+            crate::process::WaitOutcome::Exited(code) => code << 8,
+            crate::process::WaitOutcome::Signaled(signal) => signal.number(),
+        };
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(raw),
+            stdout: stdout.join().expect("the stdout drain"),
+            stderr: stderr.join().expect("the stderr drain"),
+        })
+    }
+}
+
+/// `child`, killed and reaped, for `why` it must not run.
+#[cfg(not(windows))]
+fn discarded(mut child: crate::process::ChildHandle, why: Unstarted) -> Unstarted {
+    let _ = child.kill();
+    let _ = child.reap();
+    why
 }
 
 #[cfg(windows)]
@@ -400,6 +546,8 @@ impl Launch {
             creation_flags: 0,
             admitted_handles: Vec::new(),
             security_capabilities: None,
+            image: None,
+            process_cap: false,
         }
     }
 
@@ -511,23 +659,20 @@ impl Launch {
     }
 
     /// Lower through `CreateProcessW` and spawn with the requested
-    /// process-group placement, returning the pgid of a group the child
-    /// leads.  The jail cgroup is always `None` — Linux guests only — and
-    /// stays in the tuple to keep callers uniform.
+    /// process-group placement: the child, and where it landed.  The jail
+    /// cgroup is always `None`: Linux guests only.
     ///
     /// # Errors
-    /// A `.bat`/`.cmd` program (refused), a NUL in any argument, path, or
-    /// environment entry, a failed handle admission or `CreateProcessW`, or a
-    /// failure to place the child in its pipeline Job Object.
-    pub fn spawn(
-        &mut self,
-        pgid: crate::process::PgidPolicy,
-    ) -> std::io::Result<(
-        crate::process::ChildHandle,
-        Option<crate::process::Pgid>,
-        Option<crate::process::jail::JailCgroup>,
-    )> {
-        windows::spawn(self, pgid).map(|(child, led)| (child, led.filter(|_| pgid.leads()), None))
+    /// [`Unstarted`]: a `.bat`/`.cmd` program (refused), a NUL in any
+    /// argument, path, or environment entry, a failed handle admission or
+    /// `CreateProcessW`, the program's; a Job Object that cannot take it or
+    /// its process budget, never the program's.
+    pub(crate) fn spawn(&mut self, pgid: crate::process::PgidPolicy) -> Result<Spawned, Unstarted> {
+        windows::spawn(self, pgid).map(|(child, led)| Spawned {
+            child,
+            landing: crate::process::Landing::of(pgid, led),
+            jail: None,
+        })
     }
 }
 
@@ -612,7 +757,8 @@ mod windows_args {
 
 #[cfg(windows)]
 mod windows {
-    use super::{EnvEdit, Launch, StdioSpec, windows_args};
+    use super::{EnvEdit, Launch, StdioSpec, Unstarted, windows_args};
+    use crate::authority::sandbox::Refusal;
     use crate::process::outcome::KILL_EXIT_CODE;
     use crate::process::{ChildHandle, Pgid, PgidPolicy};
     use std::ffi::{OsStr, OsString};
@@ -624,7 +770,7 @@ mod windows {
         HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
-    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
@@ -643,10 +789,14 @@ mod windows {
     pub(super) fn spawn(
         launch: &mut Launch,
         policy: PgidPolicy,
-    ) -> io::Result<(ChildHandle, Option<Pgid>)> {
-        reject_batch(&launch.program)?;
-        let prepared = crate::process::group::prepare_group(policy)?;
-        match spawn_inner(launch, policy, &prepared) {
+    ) -> Result<(ChildHandle, Option<Pgid>), Unstarted> {
+        reject_batch(&launch.program).map_err(Unstarted::Program)?;
+        let prepared = crate::process::group::prepare_group(policy).map_err(|e| {
+            Unstarted::Refused(Refusal::Launch(format!(
+                "cannot prepare the child's Job Object: {e}"
+            )))
+        })?;
+        match launched(launch, policy, &prepared) {
             Ok(child) => {
                 let pgid = crate::process::group::register_prepared_group(prepared, &child);
                 Ok((child, pgid))
@@ -658,11 +808,99 @@ mod windows {
         }
     }
 
-    fn spawn_inner(
+    /// The child, born suspended where a Job Object must hold it first: its
+    /// group's, or one made for it alone to carry a grant's process budget.
+    fn launched(
         launch: &mut Launch,
         policy: PgidPolicy,
         prepared: &crate::process::group::PreparedGroup,
-    ) -> io::Result<ChildHandle> {
+    ) -> Result<ChildHandle, Unstarted> {
+        let grouped = crate::process::group::prepared_job(prepared);
+        let own = (launch.process_cap && grouped.is_none())
+            .then(own_job)
+            .transpose()?;
+        let job = grouped.or_else(|| own.as_ref().map(|job| job.as_raw_handle() as HANDLE));
+        if let (true, Some(job)) = (launch.process_cap, job)
+            && !crate::process::group::set_active_process_limit(
+                job,
+                crate::process::limits::ACTIVE_PROCESS_CAP,
+            )
+        {
+            return Err(Unstarted::Refused(crate::process::limits::unbudgeted(
+                "cannot cap the child's Job Object",
+            )));
+        }
+        let created = spawn_inner(launch, policy, job.is_some()).map_err(Unstarted::Program)?;
+        if let Some(job) = job {
+            created.enter(job)?;
+        }
+        // An own job outlives this handle: it ends with its last member.
+        drop(own);
+        Ok(created.into_child())
+    }
+
+    fn own_job() -> Result<OwnedHandle, Unstarted> {
+        let job = unsafe { CreateJobObjectW(null(), null()) };
+        if job.is_null() {
+            return Err(Unstarted::Refused(crate::process::limits::unbudgeted(
+                io::Error::last_os_error(),
+            )));
+        }
+        // SAFETY: a fresh owning handle.
+        Ok(unsafe { OwnedHandle::from_raw_handle(job) })
+    }
+
+    /// A process `CreateProcessW` made, suspended where a job must hold it
+    /// before it runs.
+    struct Created {
+        process: OwnedHandle,
+        thread: OwnedHandle,
+        pid: u32,
+        stdout: Option<std::fs::File>,
+        stderr: Option<std::fs::File>,
+    }
+
+    impl Created {
+        /// Put the suspended child in `job`, then let it run; killed if
+        /// either fails.
+        fn enter(&self, job: HANDLE) -> Result<(), Unstarted> {
+            let refused = |what: &str| {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    windows_sys::Win32::System::Threading::TerminateProcess(
+                        self.process.as_raw_handle(),
+                        1,
+                    );
+                }
+                Unstarted::Refused(Refusal::Launch(format!("{what}: {error}")))
+            };
+            if unsafe { AssignProcessToJobObject(job, self.process.as_raw_handle()) } == 0 {
+                return Err(refused(
+                    "could not place the child in its Job Object before start; is ral already \
+                     running in a restrictive Windows Job Object?",
+                ));
+            }
+            if unsafe { ResumeThread(self.thread.as_raw_handle()) } == u32::MAX {
+                return Err(refused("could not resume the child once in its Job Object"));
+            }
+            Ok(())
+        }
+
+        fn into_child(self) -> ChildHandle {
+            ChildHandle::from_windows_raw(RawChild::new(
+                self.process,
+                self.pid,
+                self.stdout,
+                self.stderr,
+            ))
+        }
+    }
+
+    fn spawn_inner(
+        launch: &mut Launch,
+        policy: PgidPolicy,
+        suspended: bool,
+    ) -> io::Result<Created> {
         let stdin = ChildStdio::lower(
             std::mem::replace(&mut launch.stdin, StdioSpec::Null),
             Stream::Stdin,
@@ -741,7 +979,7 @@ mod windows {
         ) {
             flags |= CREATE_NEW_PROCESS_GROUP;
         }
-        if crate::process::group::prepared_job(prepared).is_some() {
+        if suspended {
             flags |= CREATE_SUSPENDED;
         }
 
@@ -773,44 +1011,13 @@ mod windows {
         }
 
         // SAFETY: CreateProcessW returned two fresh owning handles.
-        let process = unsafe { OwnedHandle::from_raw_handle(pi.hProcess) };
-        let thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread) };
-        if let Some(job) = crate::process::group::prepared_job(prepared) {
-            let assigned = unsafe { AssignProcessToJobObject(job, process.as_raw_handle()) };
-            if assigned == 0 {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    windows_sys::Win32::System::Threading::TerminateProcess(
-                        process.as_raw_handle(),
-                        1,
-                    );
-                }
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "could not place pipeline child in its Job Object before start: {error}; is ral already running in a restrictive Windows Job Object?"
-                    ),
-                ));
-            }
-            if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    windows_sys::Win32::System::Threading::TerminateProcess(
-                        process.as_raw_handle(),
-                        1,
-                    );
-                }
-                return Err(error);
-            }
-        }
-
-        drop(thread);
-        Ok(ChildHandle::from_windows_raw(RawChild::new(
-            process,
-            pi.dwProcessId,
-            stdout.parent_stdout.take(),
-            stderr.parent_stderr.take(),
-        )))
+        Ok(Created {
+            process: unsafe { OwnedHandle::from_raw_handle(pi.hProcess) },
+            thread: unsafe { OwnedHandle::from_raw_handle(pi.hThread) },
+            pid: pi.dwProcessId,
+            stdout: stdout.parent_stdout.take(),
+            stderr: stderr.parent_stderr.take(),
+        })
     }
 
     /// Refuse `.bat`/`.cmd` images outright: `cmd.exe` re-interprets the

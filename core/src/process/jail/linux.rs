@@ -538,10 +538,10 @@ mod tests {
             shared.limits = JailLimits::default();
             let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
             failed.apply_guest_jail(&shared).unwrap();
-            assert_eq!(
-                failed.spawn_detached().unwrap_err().kind(),
-                io::ErrorKind::NotFound
-            );
+            let Err(crate::process::Unstarted::Program(e)) = failed.spawn_detached() else {
+                panic!("a program that does not exist is not born");
+            };
+            assert_eq!(e.kind(), io::ErrorKind::NotFound);
             drop(failed);
             round_trip();
             let mut abandoned = crate::process::Launch::new("/bin/true");
@@ -570,14 +570,12 @@ mod tests {
             kept.limits = JailLimits::default();
             let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
             failed.apply_guest_jail(&kept).unwrap();
-            assert_eq!(
-                failed
-                    .spawn(crate::process::PgidPolicy::NewLeader)
-                    .err()
-                    .unwrap()
-                    .kind(),
-                io::ErrorKind::NotFound
-            );
+            let Err(crate::process::Unstarted::Program(e)) =
+                failed.spawn(crate::process::PgidPolicy::NewLeader)
+            else {
+                panic!("a program that does not exist is not born");
+            };
+            assert_eq!(e.kind(), io::ErrorKind::NotFound);
             drop(failed);
             assert!(
                 !kept.cgroup.exists(),

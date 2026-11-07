@@ -4,10 +4,10 @@
 
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
+use crate::fact::{Failure, NotRunnable, Unrunnable};
 use crate::ir::CommandName;
 use crate::path::walk::failure_trace;
 use crate::path::{self, CwdPath, Kind, LeafMode, LexicalPath, walk};
-use crate::process::{SpawnFailure, Unrunnable, path_as_text_hint};
 use crate::shell::runtime::{Break, Context, Error, Mooring, Settled, Shell};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -38,15 +38,12 @@ pub(crate) struct Denied {
     pub(crate) denial: Denial,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum Missing {
     /// No admitted program; `meant` is a runnable Windows sibling's spelling.
     NotFound { meant: Option<String> },
-    /// An admitted non-program; `None` means permission denied.
-    NotExecutable {
-        found: PathBuf,
-        kind: Option<Unrunnable>,
-    },
+    /// A present file or directory that is no program.
+    NotRunnable(NotRunnable),
 }
 
 impl Head {
@@ -150,7 +147,7 @@ impl Head {
                     Break::Error(e) if search => Break::Error(e.prepend_hint(format!(
                         "'{shown}' is no program in any PATH directory the grant runs from"
                     ))),
-                    refusal => path_as_text(refusal, &shown),
+                    refusal => refusal,
                 },
             )
     }
@@ -203,10 +200,9 @@ fn probe(
             return Ok(Err(match (candidate_kind, error.kind()) {
                 (_, ErrorKind::NotFound | ErrorKind::NotADirectory)
                 | (CandidateKind::Search, _) => Missing::NOT_FOUND,
-                (CandidateKind::Path, _) => Missing::NotExecutable {
-                    found: arg0,
-                    kind: None,
-                },
+                (CandidateKind::Path, _) => {
+                    Missing::unstartable(candidate_kind, shown, &arg0, Unrunnable::of_io(&error))
+                }
             }));
         }
     };
@@ -229,28 +225,20 @@ fn probe(
     }
     let missing = match located.kind() {
         Some(kind) if matches!(candidate_kind, CandidateKind::Path) || kind == Kind::File => {
-            Missing::NotExecutable {
-                found: arg0.clone(),
-                kind: Some(if kind == Kind::Dir {
+            Missing::unstartable(
+                candidate_kind,
+                shown,
+                arg0,
+                if kind == Kind::Dir {
                     Unrunnable::Directory
                 } else {
-                    Unrunnable::File
-                }),
-            }
+                    Unrunnable::NotExecutable
+                },
+            )
         }
         _ => Missing::NOT_FOUND,
     };
     Ok(Err(missing))
-}
-
-/// `refusal`, led by the path as text when `shown` is a path head.
-fn path_as_text(refusal: Break, shown: &str) -> Break {
-    match refusal {
-        Break::Error(e) if path::names_a_path(shown) => {
-            Break::Error(e.prepend_hint(path_as_text_hint(shown, None)))
-        }
-        other => other,
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -270,29 +258,27 @@ impl Program {
 impl Missing {
     const NOT_FOUND: Self = Self::NotFound { meant: None };
 
+    /// `arg0`, where the walk stopped, cannot run for `why`.  A path head
+    /// reports the name typed, a bare name the file the `PATH` walk found.
+    fn unstartable(kind: CandidateKind, shown: &str, arg0: &Path, why: Unrunnable) -> Self {
+        let found = match kind {
+            CandidateKind::Path => shown.to_owned(),
+            CandidateKind::Search => path::shown(arg0),
+        };
+        Self::NotRunnable(NotRunnable { found, why })
+    }
+
     /// Format the judged walk's 127/126 verdict without probing again.
-    pub(crate) fn error(&self, shown: &str) -> Error {
+    pub(crate) fn error(self, shown: &str) -> Error {
         match self {
             Self::NotFound { meant } => {
-                let error = Error::spawn_failure(shown, SpawnFailure::NotFound);
+                let error = Error::process(shown, Failure::NotFound);
                 match meant {
                     Some(meant) => error.with_hint(format!("did you mean '{meant}'?")),
                     None => error,
                 }
             }
-            Self::NotExecutable { found, kind } => Error::spawn_failure(
-                shown,
-                match kind {
-                    Some(kind) => SpawnFailure::NotAProgram {
-                        found: (!path::names_a_path(shown))
-                            .then(|| found.clone().into_boxed_path()),
-                        kind: *kind,
-                    },
-                    None => SpawnFailure::PermissionDenied {
-                        found: Some(found.clone().into_boxed_path()),
-                    },
-                },
-            ),
+            Self::NotRunnable(failure) => Error::process(shown, Failure::NotRunnable(failure)),
         }
     }
 }
@@ -551,7 +537,9 @@ mod tests {
             &baseline,
         )
         .unwrap_or_else(|_| panic!("the non-executable file precedes the refusal"));
-        assert!(matches!(first, Err(Missing::NotExecutable { found, .. }) if found == plain));
+        assert!(
+            matches!(first, Err(Missing::NotRunnable(NotRunnable { found, .. })) if found == path::shown(&plain))
+        );
     }
 
     /// A bare name runs what the walk found, never a same-named file in the
@@ -598,7 +586,9 @@ mod tests {
             &CommandName::Bare("zznoexec".into()),
             &shell.context,
         ));
-        assert!(matches!(head.program, Err(Missing::NotExecutable { found, .. }) if found == file));
+        assert!(
+            matches!(head.program, Err(Missing::NotRunnable(NotRunnable { found, .. })) if found == path::shown(&file))
+        );
     }
 
     /// A bundled name is its tool whatever `PATH` holds: no walk is taken.

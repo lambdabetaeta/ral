@@ -23,7 +23,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 36;
+pub const PROTOCOL_VERSION: u32 = 37;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 

@@ -97,7 +97,7 @@ pub(super) fn launch_thread_stage(
     slot: Slot,
 ) -> Settled<ThreadStage> {
     let node = cx.shell.scope.child();
-    let stdin = super::launch::stage_stdin(stdin, cx.shell, &node)?;
+    let stdin = super::launch::stage_stdin(stdin, cx.shell, &node, cx.holds_terminal)?;
     let mooring = Mooring::for_thread(cx.mooring, node.clone(), cx.mooring.surface.clone());
 
     let stdout = match stdout {
@@ -169,11 +169,7 @@ mod tests {
     /// An owning group whose channel nobody reads: these tests watch a single
     /// stage's own reports, never the anchor's.
     fn prepared_group() -> PipelineGroup {
-        PipelineGroup::prepare(
-            &crate::test_helper::core_shell(),
-            std::sync::mpsc::channel().0,
-        )
-        .expect("anchor spawns")
+        PipelineGroup::prepare(std::sync::mpsc::channel().0).expect("anchor spawns")
     }
 
     #[test]

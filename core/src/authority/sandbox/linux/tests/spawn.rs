@@ -10,23 +10,29 @@ fn spawn_confined(
     crate::shell::exec::command::RunningChild,
     crate::process::Pgid,
 ) {
-    use crate::process::{Group, PgidPolicy};
+    use crate::process::{Group, Landing, PgidPolicy, Spawned};
     use crate::shell::exec::command::{Pumps, RunningChild};
     let shell = crate::test_helper::core_shell();
     let mut launch = crate::authority::sandbox::sandboxed_command(
         &unrestricted(),
         &Baseline::default(),
-        &sh(),
+        &Image::of(&sh()),
         &sh_args(script),
         Ownership::Kept,
         shell.context.cwd(),
         scope,
     )
     .expect("build confined launch");
-    let (child, pgid, jail) = launch
+    let Spawned {
+        child,
+        landing: Landing::Owns(pgid),
+        jail,
+    } = launch
         .spawn(PgidPolicy::NewLeader)
-        .expect("spawn confined sh");
-    let pgid = pgid.expect("a kept launch names its payload's group");
+        .expect("spawn confined sh")
+    else {
+        panic!("a kept launch names its payload's group");
+    };
     let running = RunningChild::assemble_with_owner(
         child,
         "sh".to_string(),
@@ -211,11 +217,10 @@ fn a_linked_image_runs_through_the_read_that_shows_its_real_path() {
         String::from_utf8_lossy(&out.stderr)
     );
     let apart = deny_within(&elsewhere, &[]);
-    let out = run_admitted(&env, &apart, &admitted(tool()), &[]).expect("spawn bwrap");
+    let ran = run_admitted(&env, &apart, &admitted(tool()), &[]);
     assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("READY")
-            && String::from_utf8_lossy(&out.stderr).contains(&real),
-        "an image no read shows ran: {out:?}"
+        matches!(ran, Err(Unstarted::Program(_))),
+        "an image no read shows ran: {ran:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&elsewhere);
@@ -266,15 +271,13 @@ fn a_destination_turned_into_a_symlink_after_the_open_runs_nothing() {
     let Some(env) = envelope_launches(&policy) else {
         return;
     };
-    let out = run_after(&env, &policy, &sh(), &sh_args("echo READY"), || {
+    let ran = run_after(&env, &policy, &sh(), &sh_args("echo READY"), || {
         std::fs::rename(&inner, outer.join("moved")).unwrap();
         std::os::unix::fs::symlink("moved", &inner).unwrap();
-    })
-    .expect("spawn bwrap");
+    });
     assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("READY"),
-        "a mount followed a symlinked destination: {}",
-        String::from_utf8_lossy(&out.stderr)
+        matches!(ran, Err(Unstarted::Refused(_))),
+        "a mount followed a symlinked destination: {ran:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -375,11 +378,11 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
     env.host.virtual_dev = false;
     let invoke = |args: &dyn Fn(&str) -> Vec<String>| -> Output {
         let program = admitted(Program::file(std::env::current_exe().unwrap()).unwrap());
-        let (mut command, info) = enveloped(
+        let mut launch = enveloped(
             &env,
             &policy,
             &host_system_reads(),
-            &program,
+            &Image::of(&program),
             &[],
             None,
             Ownership::Kept,
@@ -388,13 +391,12 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
         let late = HostPty::open();
         let args = args(&late.name);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = command
-            .stdin(late.slave.try_clone().unwrap())
-            .env("RAL_TEST_PROBE", probe::request(&args))
-            .output()
-            .unwrap();
-        drop(info);
-        out.into()
+        launch
+            .stdin(crate::process::StdioSpec::from_stdio(
+                late.slave.try_clone().unwrap().into(),
+            ))
+            .env("RAL_TEST_PROBE", probe::request(&args));
+        launch.output().unwrap().into()
     };
     let control = invoke(&|_| vec!["tty".into()]);
     for named in [
@@ -559,7 +561,7 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
     let t0 = std::time::Instant::now();
     let waited = running.wait();
     let elapsed = t0.elapsed();
-    let outcome = waited.outcome.enveloped(true);
+    let outcome = waited.outcome;
     waited.settle(&scope);
     assert!(
         elapsed.as_secs() < 5,
@@ -567,9 +569,70 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
     );
     assert_eq!(
         outcome,
-        crate::process::WaitOutcome::Enveloped(128 + libc::SIGKILL),
-        "the payload must die of the abort's kill"
+        signaled(libc::SIGKILL),
+        "the supervisor, killed with its program, told nothing: bwrap's 137 is its death"
     );
+}
+
+fn signaled(signal: i32) -> crate::process::WaitOutcome {
+    crate::process::WaitOutcome::Signaled(crate::process::Signal::new(signal))
+}
+
+/// The program's end as its supervisor saw it, through the reaper as every
+/// waiter sees it: a signal death and an exit of `128 + n` stay apart.
+fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutcome> {
+    use crate::process::{PgidPolicy, Spawned};
+    envelope_launches(&unrestricted())?;
+    let shell = crate::test_helper::core_shell();
+    let mut launch = crate::authority::sandbox::sandboxed_command(
+        &unrestricted(),
+        &Baseline::default(),
+        &Image::of(program),
+        args,
+        Ownership::Kept,
+        shell.context.cwd(),
+        &shell.scope,
+    )
+    .expect("build confined launch");
+    launch.stdin(crate::process::StdioSpec::null());
+    let Spawned { child, .. } = launch
+        .spawn(PgidPolicy::NewLeader)
+        .expect("spawn the confined program");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watch = child.into_watch(tx, std::convert::identity);
+    let outcome = rx.recv().expect("the reaper reports the envelope's exit");
+    watch.reap().expect("reap the envelope");
+    Some(outcome)
+}
+
+#[test]
+fn a_confined_programs_signal_death_is_reported_as_one() {
+    if let Some(outcome) = ended(&sh(), &sh_args("kill -SEGV $$")) {
+        assert_eq!(outcome, signaled(libc::SIGSEGV));
+    }
+}
+
+#[test]
+fn a_confined_programs_exit_of_128_plus_n_is_an_exit() {
+    if let Some(outcome) = ended(&sh(), &sh_args("exit 139")) {
+        assert_eq!(outcome, crate::process::WaitOutcome::Exited(139));
+    }
+}
+
+/// `env` execs its program in place: the supervisor that reports its end
+/// must not be the process that execs.
+#[cfg(feature = "coreutils")]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
+#[test]
+fn a_confined_tools_exec_of_a_program_exiting_128_plus_n_is_an_exit() {
+    let env = admitted(Program::Tool("env"));
+    let args = ["/bin/sh", "-c", "exit 130"].map(String::from);
+    if let Some(outcome) = ended(&env, &args) {
+        assert_eq!(outcome, crate::process::WaitOutcome::Exited(130));
+    }
 }
 
 /// Where the host cannot build the namespace, the shared table is

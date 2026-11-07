@@ -77,7 +77,7 @@ impl PipeNode {
                 .then(|| shell.terminal_lease(mooring))
                 .flatten()
                 .and_then(|lease| crate::process::TerminalLoan::prepare(lease, &mooring.home));
-            let group = PipelineGroup::prepare(shell, tx.clone())?;
+            let group = PipelineGroup::prepare(tx.clone())?;
             let loan = prepared.and_then(|loan| loan.lend(group.leader_pgid().as_raw()));
             (group, loan)
         };
@@ -278,7 +278,7 @@ mod tests {
         let mooring = Mooring::adrift();
         let frame = crate::process::DurableRoot::default().worker();
         let (tx, rx) = std::sync::mpsc::channel();
-        let group = PipelineGroup::prepare(&shell, tx.clone()).expect("anchor spawns");
+        let group = PipelineGroup::prepare(tx.clone()).expect("anchor spawns");
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.args(["-c", &trapper.script()]);
         let (child, _) = crate::process::spawn_with_pgid(

@@ -286,6 +286,54 @@ pub(crate) fn denial_hint(
     Some(build_hint(&denials))
 }
 
+/// The hint for a script whose `execve` a sandbox under `projection` refused:
+/// its `interpreter`, excluded on either axis or not admitted; `None` where it
+/// is neither, or not absolute.
+#[cfg(unix)]
+pub(crate) fn interpreter_hint(
+    projection: &super::SandboxProjection,
+    interpreter: &std::path::Path,
+) -> Option<String> {
+    use crate::authority::policy::{Subject, Withheld};
+    use crate::path::{Depth, LeafMode, LexicalPath, walk};
+    let interpreter = LexicalPath::absolute(interpreter)?;
+    let walked = walk(&interpreter, LeafMode::Follow).ok()?;
+    let trace = walked.trace();
+    trace.kind()?;
+    let at = crate::path::Subject::Access(trace);
+    let exec = match &projection.exec {
+        super::ExecProjection::Restricted(rules) => rules.withheld(Subject::Program(at)),
+        super::ExecProjection::Unrestricted => None,
+    };
+    let denied = || {
+        (projection.fs.rules()?.deny.iter()).find(|p| p.real.matches(at, Depth::Within).is_some())
+    };
+    let shown = quote_word(&crate::path::shown(interpreter.as_path())).into_owned();
+    let excluded = |scope: String| {
+        format!(
+            "its interpreter {shown} is excluded by {}; an allowance cannot override an \
+             exclusion",
+            crate::text::code(&scope)
+        )
+    };
+    if let Some(Withheld::Excluded { scope, .. }) = &exec {
+        return Some(excluded(scope.to_string()));
+    }
+    if let Some(denied) = denied() {
+        return Some(excluded(format!(
+            "`absolute {}",
+            quote_word(denied.written.as_str())
+        )));
+    }
+    matches!(exec, Some(Withheld::MissingAllowance)).then(|| {
+        format!(
+            "its interpreter {shown} is not admitted by the grant: a script you can edit \
+             carries no interpreter of its own: add `` `absolute {shown} `` to the exec \
+             grant's allow list"
+        )
+    })
+}
+
 /// Exit codes an `AppContainer` denial plausibly produces: the raw Win32
 /// `ERROR_ACCESS_DENIED`, which a child that does not translate its own Win32
 /// failures surfaces verbatim, and the NTSTATUS `STATUS_ACCESS_DENIED`, which

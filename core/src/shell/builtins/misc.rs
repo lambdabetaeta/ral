@@ -315,21 +315,5 @@ mod tests {
         assert!(rendered.contains("SIGKILL"));
         assert!(rendered.contains("a.ral:3:4"));
         assert!(!rendered.contains("here"));
-        let record = ErrorRecord::new(
-            Reason::process(
-                "./text",
-                Failure::NotRunnable(NotRunnable {
-                    found: "./text".into(),
-                    why: Unrunnable::NotExecutable,
-                }),
-            ),
-            "wrapper".into(),
-            site(),
-        );
-        assert!(
-            reraised(&record)
-                .compact(&ExitHints::default())
-                .contains("to use the path as text")
-        );
     }
 }

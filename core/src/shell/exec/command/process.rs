@@ -1,10 +1,15 @@
-//! Turn an [`Admitted`] call into a launchable child, spawn it through the
-//! canonical pgid + sandbox funnel, and render spawn failures as [`Break`]s.
-//! Stdio routing lives in `stdio` and `redirect`, layered on before spawn.
+//! An external's life, below the dispatch: [`prepare`] vets the admitted
+//! call and builds its launch, [`start`] spawns it, and [`ending`] reads how
+//! it ended; each raises its failures one way.  Stdio routing lives in
+//! `stdio` and `redirect`, layered on between the first two.
 
-use crate::authority::policy::{Admitted, Program};
-use crate::authority::sandbox::Refusal;
-use crate::shell::runtime::{Break, Error, Settled, Shell, sig};
+use super::head::{Admission, Head};
+use super::vet::{SpawnPlan, vet};
+use crate::authority::policy::Admitted;
+use crate::authority::sandbox::{Image, Ownership, Refusal};
+use crate::fact::{Failure, NotRunnable, Unrunnable};
+use crate::process::{CancelCause, Launch, PgidPolicy, Scope, Spawned, Unstarted, WaitOutcome};
+use crate::shell::runtime::{Break, Error, Settled, Shell, Value, sig};
 
 impl From<Refusal> for Break {
     fn from(refusal: Refusal) -> Self {
@@ -12,114 +17,247 @@ impl From<Refusal> for Break {
     }
 }
 
-/// Build a launch for the `admitted` call and apply the shell's scoped env
-/// and cwd.  The [`Admitted`] is taken and dropped here, so the launch holds
-/// no judged program nor its directory handle.  Stdio and `pre_exec` hooks
-/// are the caller's: they differ between the standalone and pipeline
-/// contexts.
+/// A vetted call built into its launch, not yet started.  `shown` is the
+/// name diagnostics and audit report; the launch runs with `args`.
+pub(crate) struct Prepared {
+    pub(crate) shown: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) launch: Launch,
+    /// The hint naming the script's `#!` interpreter that the launch's own
+    /// sandbox withholds, where it does.
+    interpreter_hint: Option<String>,
+}
+
+/// Vet the admitted `head` and `args`, and build the launch under `ownership`.
+/// Confinement can run for minutes on Windows, so the run's scope is read
+/// again on the way out: a wall that expired mid-stamp must not be
+/// discovered only once the child is already running.
+pub(crate) fn prepare(
+    head: Head<Admission>,
+    args: &[Value],
+    ownership: Ownership,
+    shell: &Shell,
+) -> Settled<Prepared> {
+    let SpawnPlan {
+        shown,
+        admitted,
+        args,
+    } = vet(head, args)?;
+    let (launch, interpreter_hint) =
+        build_launch(admitted, &args, ownership, shell).map_err(|refusal| match refusal {
+            #[cfg(windows)]
+            Refusal::Cancelled(cause) => Break::cancelled(cause, &shell.scope),
+            other => Break::from(other),
+        })?;
+    shell.poll()?;
+    Ok(Prepared {
+        shown,
+        args,
+        launch,
+        interpreter_hint,
+    })
+}
+
+/// Start `prepared` in `pgid`.
+pub(crate) fn start(prepared: &mut Prepared, pgid: PgidPolicy) -> Settled<Spawned> {
+    prepared
+        .launch
+        .spawn(pgid)
+        .map_err(|unstarted| unstarted_error(prepared, unstarted))
+}
+
+/// Start `prepared` detached, a survivor nothing here can name again.
+#[cfg(unix)]
+pub(crate) fn start_detached(prepared: &mut Prepared) -> Settled<crate::process::group::Survivor> {
+    prepared
+        .launch
+        .spawn_detached()
+        .map_err(|unstarted| unstarted_error(prepared, unstarted))
+}
+
+/// The one way a launch that made no child becomes the run's error: the
+/// program's own failure as the same process failure `vet`'s probe reports,
+/// a refusal as itself, a stop as the run's.
+fn unstarted_error(prepared: &Prepared, unstarted: Unstarted) -> Break {
+    match unstarted {
+        Unstarted::Refused(refusal) => refusal.into(),
+        #[cfg(unix)]
+        Unstarted::Stopped(stop) => stop.into(),
+        Unstarted::Program(e) => unstarted_program(
+            &e,
+            prepared.interpreter_hint.as_deref(),
+            prepared.launch.image(),
+            &prepared.shown,
+        )
+        .into(),
+    }
+}
+
+/// `program`'s own failure to start `image`.  A script whose `#!`
+/// interpreter its sandbox withholds, as `interpreter_hint` says, is denied
+/// permission whether Seatbelt refused the exec or bwrap hid the interpreter
+/// (`ENOENT`); anything else is as [`at_spawn`] reads it.
+fn unstarted_program(
+    e: &std::io::Error,
+    interpreter_hint: Option<&str>,
+    image: Option<&Image>,
+    program: &str,
+) -> Error {
+    use std::io::ErrorKind::{NotFound, PermissionDenied};
+    match interpreter_hint.filter(|_| matches!(e.kind(), PermissionDenied | NotFound)) {
+        Some(hint) => Error::process(program, not_runnable(program, Unrunnable::PermissionDenied))
+            .with_hint(hint),
+        None => Error::process(program, at_spawn(e, image, program)),
+    }
+}
+
+/// What a failed spawn of `image` means for `program`.  `ENOENT` for a file
+/// still at its real path is its missing interpreter or loader; for one gone,
+/// or a bundled tool, it is `program` not found.
+fn at_spawn(e: &std::io::Error, image: Option<&Image>, program: &str) -> Failure {
+    use crate::site::{Silent, site};
+
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return not_runnable(program, Unrunnable::of_io(e));
+    }
+    match image {
+        Some(Image::File {
+            real, interpreter, ..
+        }) if site!(
+            Silent::SpawnedImageStat,
+            std::fs::symlink_metadata(real.as_path())
+        )
+        .is_ok() =>
+        {
+            not_runnable(
+                program,
+                Unrunnable::MissingInterpreter(interpreter.as_deref().map(crate::path::shown)),
+            )
+        }
+        _ => Failure::NotFound,
+    }
+}
+
+fn not_runnable(program: &str, why: Unrunnable) -> Failure {
+    Failure::NotRunnable(NotRunnable {
+        found: program.to_owned(),
+        why,
+    })
+}
+
+/// How the run ended, from how its child did: a death by one of `cause`'s
+/// signals is that cause's stop, success nothing, and any other end the
+/// command's failure, with the kernel's denial hint where a sandbox ran it.
+pub(crate) fn ending(
+    name: &str,
+    outcome: WaitOutcome,
+    cause: Option<CancelCause>,
+    scope: &Scope,
+    shell: &Shell,
+    pids: impl FnOnce() -> std::collections::HashSet<u32>,
+    since: std::time::Instant,
+) -> Settled<()> {
+    if let Some(cause) = outcome.cancelled_by(cause) {
+        return Err(Break::cancelled(cause, scope));
+    }
+    match outcome.failure() {
+        None => Ok(()),
+        Some(failure) => {
+            Err(with_denials(Error::process(name, failure), shell, pids, since).into())
+        }
+    }
+}
+
+/// Build a launch for the `admitted` call and apply the shell's scoped env,
+/// cwd and limits; beside it, the hint for a `#!` interpreter its sandbox
+/// withholds.  The [`Admitted`] is taken and dropped here, so the launch
+/// holds no judged program nor its directory handle, only its [`Image`].
+/// Stdio and `pre_exec` hooks are the caller's: they differ between the
+/// standalone and pipeline contexts.
 ///
 /// `ownership` reaches the Linux bwrap backend, which ties the envelope to
 /// this process's death unless the child is being surrendered, and the guest
 /// jail, which seats a surrendered child outside this engine's cgroup tree.
-pub(crate) fn build_launch(
+fn build_launch(
     admitted: Admitted,
     args: &[String],
-    ownership: crate::authority::sandbox::Ownership,
+    ownership: Ownership,
     shell: &Shell,
-    cancel: &crate::process::cancel::Scope,
-) -> Settled<crate::process::Launch> {
+) -> Result<(Launch, Option<String>), Refusal> {
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
     // The in-process guard in `Head::admit` runs either way.
     let jail = crate::process::jail::guest();
-    let mut cmd = if jail.is_none()
-        && let Some(projection) = crate::authority::sandbox::SandboxProjection::of(
+    let projection = jail.is_none().then(|| {
+        crate::authority::sandbox::SandboxProjection::of(
             &shell.context.grants,
             shell.baseline(),
             Some(&admitted),
-        ) {
-        // A `grant` body evaluates in this process unconfined; spawned children
-        // are the only thing an OS sandbox reaches, and this is where it does.
-        crate::authority::sandbox::projection_enforceable(&projection)?;
-        crate::authority::sandbox::sandboxed_command(
-            &projection,
-            shell.baseline(),
-            &admitted,
-            args,
-            ownership,
-            shell.context.cwd(),
-            cancel,
         )
-        .map_err(|refusal| match refusal {
-            #[cfg(windows)]
-            Refusal::Cancelled(cause) => Break::cancelled(cause, cancel),
-            other => Break::from(other),
-        })?
-    } else {
-        match admitted.program() {
-            Program::File { arg0, located } => {
-                let mut cmd = crate::process::Launch::new(located.real().as_path());
-                cmd.arg0(arg0);
-                cmd.args(args);
-                cmd
-            }
-            Program::Tool(tool) => {
-                let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::BundledTool)
-                    .map_err(|e| sig(format!("bundled tool '{tool}': {e}")))?;
-                cmd.arg(tool);
-                cmd.args(args);
-                cmd
-            }
-        }
-    };
+    });
+    let image = Image::of(&admitted);
     // The judged object and its directory handle end here: a launch holds a
     // name, never the object it was admitted for.
     drop(admitted);
-    apply_env(&mut cmd, shell);
+    // A `grant` body evaluates in this process unconfined; spawned children
+    // are the only thing an OS sandbox reaches, and this is where it does.
+    let (mut launch, interpreter_hint) = match projection.flatten() {
+        Some(projection) => {
+            crate::authority::sandbox::projection_enforceable(&projection)?;
+            let launch = crate::authority::sandbox::sandboxed_command(
+                &projection,
+                shell.baseline(),
+                &image,
+                args,
+                ownership,
+                shell.context.cwd(),
+                &shell.scope,
+            )?;
+            (launch, withheld_interpreter(&projection, &image))
+        }
+        None => (image.launch(args)?, None),
+    };
+    launch.set_image(image);
+    apply_env(&mut launch, shell);
     #[cfg(unix)]
-    cmd.limit_session(shell.session.child_limits);
+    launch.limit_session(shell.session.child_limits);
     // Hooks run in order: a grant's limits apply last and win.
-    #[cfg(unix)]
     if shell.has_active_capabilities() {
-        cmd.limit_resources().map_err(|e| unbraked(&e))?;
+        launch.limit_resources()?;
     }
     #[cfg(seccomp)]
     if let Some(jail) = jail {
-        let plan = jail
-            .plan(ownership, shell.context.grants.net_veto())
-            .map_err(|e| sig(format!("guest jail: {e}")))?;
-        cmd.apply_guest_jail(&plan)
-            .map_err(|e| sig(format!("guest jail: {e}")))?;
+        let plan = (jail.plan(ownership, shell.context.grants.net_veto()))
+            .map_err(crate::process::jail::refused)?;
+        launch.apply_guest_jail(&plan)?;
     }
-    Ok(cmd)
+    Ok((launch, interpreter_hint))
 }
 
-/// Spawn external command `name` into `pgid`, braked under an active grant.
-/// A pipeline stage comes here with `Join`, and its brake caps the group's job.
-pub(crate) fn spawn(
-    cmd: &mut crate::process::Launch,
-    pgid: crate::process::PgidPolicy,
-    name: &str,
-    shell: &Shell,
-) -> Settled<(
-    crate::process::ChildHandle,
-    Option<crate::process::Pgid>,
-    Option<crate::process::jail::JailCgroup>,
-)> {
-    let confinement = cmd.confinement();
-    let (mut child, led, jail) = cmd
-        .spawn(pgid)
-        .map_err(|e| spawn_error(confinement, name, &e))?;
-    if shell.has_active_capabilities() {
-        brake(&mut child, pgid, led)?;
+/// The hint for `image`'s `#!` interpreter, where `projection` withholds it.
+#[cfg_attr(
+    windows,
+    allow(unused_variables, reason = "no Windows image names an interpreter")
+)]
+fn withheld_interpreter(
+    projection: &crate::authority::sandbox::SandboxProjection,
+    image: &Image,
+) -> Option<String> {
+    #[cfg(unix)]
+    if let Image::File {
+        interpreter: Some(interpreter),
+        ..
+    } = image
+    {
+        return crate::authority::sandbox::interpreter_hint(projection, interpreter);
     }
-    Ok((child, led, jail))
+    None
 }
 
 /// `err` with the kernel's denial hint, when a sandboxed child failed on its
 /// own account.  Only then are `pids` sampled: an unsandboxed failure never
 /// pays for the process-table walk.
-pub(crate) fn with_denials(
+fn with_denials(
     err: Error,
     shell: &Shell,
     pids: impl FnOnce() -> std::collections::HashSet<u32>,
@@ -140,57 +278,6 @@ pub(crate) fn with_denials(
         return err.append_hint(hint);
     }
     err
-}
-
-/// Cap `child`'s process tree in the group `pgid` placed it in.  When the cap
-/// cannot be installed nothing the spawn made survives, the group it `led`
-/// included: a child under a grant never runs unbraked.
-pub(crate) fn brake(
-    child: &mut crate::process::ChildHandle,
-    pgid: crate::process::PgidPolicy,
-    led: Option<crate::process::Pgid>,
-) -> Result<(), Refusal> {
-    let joined = match pgid {
-        crate::process::PgidPolicy::Join(group) => Some(group),
-        _ => None,
-    };
-    child.limit_processes(led.or(joined)).map_err(|e| {
-        let _ = child.kill();
-        let _ = child.reap();
-        #[cfg(windows)]
-        if let Some(group) = led {
-            crate::process::release_win_group(group.as_raw());
-        }
-        unbraked(&e)
-    })
-}
-
-fn unbraked(e: &std::io::Error) -> Refusal {
-    Refusal::Unavailable(format!(
-        "{e}, so this command would run with no process budget"
-    ))
-}
-
-/// Render a spawn `io::Error` for command `name` as a [`Break`], through the
-/// same `Error::spawn_failure` `vet`'s pre-spawn probe mints, so the two paths
-/// never disagree about a command that could not start.
-///
-/// With a `confinement` — the envelope binary exec'd in `name`'s place — the
-/// failure is the envelope's, not `name`'s: `vet` resolved `name` before we got
-/// here, and an envelope execs its own target, so a missing one comes back as an
-/// exit status rather than a spawn failure.  Blaming `name` would accuse the one
-/// program we know exists.
-fn spawn_error(confinement: Option<&'static str>, name: &str, e: &std::io::Error) -> Break {
-    use crate::process::SpawnFailure;
-
-    if let Some(envelope) = confinement {
-        let why = Refusal::Unavailable(format!("cannot start {envelope}: {e}"));
-        return Break::Error(Error::new(why.to_string()).with_hint(format!(
-            "The envelope failed to launch, so {name} never ran."
-        )));
-    }
-
-    Break::Error(Error::spawn_failure(name, SpawnFailure::from(e)))
 }
 
 /// Thread the shell's env overrides, logical cwd and `PWD` into the
@@ -243,9 +330,9 @@ fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::{spawn_error, with_denials};
+    use super::with_denials;
     use crate::fact::{Failure, Reason};
-    use crate::shell::runtime::{Break, Error};
+    use crate::shell::runtime::Error;
 
     #[test]
     fn unsandboxed_failures_keep_raw_exits_without_sampling_pids() {
@@ -297,31 +384,6 @@ mod tests {
             }
         });
     }
-
-    fn message(b: &Break) -> std::borrow::Cow<'_, str> {
-        let Break::Error(e) = b else {
-            panic!("spawn_error yields an Error break")
-        };
-        e.describe()
-    }
-
-    /// One `ENOENT` means two different things depending on who the launcher
-    /// exec'd, and the wrong reading turns a failed envelope into a grant that
-    /// appears to deny every command.
-    #[test]
-    fn a_failed_envelope_is_not_reported_as_a_missing_command() {
-        let enoent = std::io::Error::from(std::io::ErrorKind::NotFound);
-
-        let unconfined = spawn_error(None, "pwd", &enoent);
-        assert_eq!(message(&unconfined), "pwd: command not found");
-
-        let confined = spawn_error(Some("bwrap"), "pwd", &enoent);
-        assert!(
-            message(&confined).starts_with("sandbox confinement unavailable: cannot start bwrap"),
-            "{}",
-            message(&confined)
-        );
-    }
 }
 
 /// What runs is the file that was judged, by its real path and under the
@@ -329,15 +391,11 @@ mod tests {
 #[cfg(all(test, unix))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod judged_program {
-    use super::super::{
-        head::Head,
-        vet::{SpawnPlan, vet},
-    };
-    use super::build_launch;
+    use super::super::head::Head;
+    use super::{Prepared, prepare};
+    use crate::authority::sandbox::Ownership;
     use crate::ir::CommandName;
-    use crate::process::{DurableRoot, PgidPolicy, StdioSpec};
     use crate::shell::runtime::{Mooring, Shell, Value};
-    use std::io::Read;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
 
@@ -369,38 +427,19 @@ mod judged_program {
         link
     }
 
-    fn judge(shell: &mut Shell, args: &[&str]) -> SpawnPlan {
+    fn judge(shell: &mut Shell, args: &[&str]) -> Prepared {
         let head = Head::resolve(&CommandName::Path("tools/build".into()), &shell.context);
         let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
-        vet(
-            head.admit(&Mooring::adrift(), shell)
-                .expect("an unrestricted shell admits the file"),
-            &args,
-        )
-        .expect("the file can be run")
+        let admitted = head
+            .admit(&Mooring::adrift(), shell)
+            .expect("an unrestricted shell admits the file");
+        prepare(admitted, &args, Ownership::Kept, shell).expect("the file can be run")
     }
 
-    fn stdout_of(plan: SpawnPlan, shell: &Shell) -> String {
-        let mut cmd = build_launch(
-            plan.admitted,
-            &plan.args,
-            crate::authority::sandbox::Ownership::Kept,
-            shell,
-            &DurableRoot::default().worker(),
-        )
-        .expect("the launch builds");
-        cmd.stdout(StdioSpec::piped());
-        let (mut child, ..) = cmd.spawn(PgidPolicy::Inherit).expect("the file runs");
-        let mut out = String::new();
-        child
-            .take_stdout()
-            .expect("stdout was piped")
-            .read_to_string(&mut out)
-            .unwrap();
-        child.reap().expect("reaps");
-        out
+    fn stdout_of(prepared: Prepared) -> String {
+        let out = prepared.launch.output().expect("the file runs");
+        String::from_utf8(out.stdout).unwrap()
     }
-
     /// The control: the harness tells `a` from `b`, so the next test cannot
     /// pass by the two being alike.
     #[test]
@@ -408,10 +447,7 @@ mod judged_program {
         for who in ["a", "b"] {
             let (tmp, mut shell) = workdir();
             point_build_at(tmp.path(), &plant(tmp.path(), who));
-            assert_eq!(
-                stdout_of(judge(&mut shell, &[]), &shell),
-                format!("{who}\n")
-            );
+            assert_eq!(stdout_of(judge(&mut shell, &[])), format!("{who}\n"));
         }
     }
 
@@ -430,7 +466,7 @@ mod judged_program {
             crate::test_helper::real(&b),
             "the link moved"
         );
-        assert_eq!(stdout_of(plan, &shell), "a\n");
+        assert_eq!(stdout_of(plan), "a\n");
     }
 
     /// A `#!` script reached through a link is handed its real path by the
@@ -453,10 +489,7 @@ mod judged_program {
 
         let plan = judge(&mut shell, &[]);
         let real = std::fs::canonicalize(&tool).unwrap();
-        assert_eq!(
-            stdout_of(plan, &shell),
-            format!("{}\nSIBLING\n", real.display())
-        );
+        assert_eq!(stdout_of(plan), format!("{}\nSIBLING\n", real.display()));
     }
 
     #[test]
@@ -465,7 +498,7 @@ mod judged_program {
         let link = point_build_at(tmp.path(), Path::new("/bin/sh"));
 
         let plan = judge(&mut shell, &["-c", r#"printf %s "$0""#]);
-        assert_eq!(stdout_of(plan, &shell), link.to_string_lossy());
+        assert_eq!(stdout_of(plan), link.to_string_lossy());
     }
 
     /// The residual, stated: a program is started by its real name, so a
@@ -479,6 +512,239 @@ mod judged_program {
         std::fs::copy("/bin/sh", &tool).unwrap();
         let plan = judge(&mut shell, &["-c", "echo admitted"]);
         std::fs::rename(plant(tmp.path(), "replacement"), &tool).unwrap();
-        assert_eq!(stdout_of(plan, &shell), "replacement\n");
+        assert_eq!(stdout_of(plan), "replacement\n");
+    }
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod at_spawn_tests {
+    use super::{at_spawn, unstarted_program};
+    use crate::authority::sandbox::Image;
+    use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
+    use std::io::{Error, ErrorKind};
+    use std::path::Path;
+
+    fn not_runnable(why: Unrunnable) -> Failure {
+        Failure::NotRunnable(NotRunnable {
+            found: "run".into(),
+            why,
+        })
+    }
+
+    /// The image of `real` as built, its `#!` interpreter read then.
+    fn file(real: crate::path::RealPath, interpreter: Option<&str>) -> Image {
+        Image::File {
+            real,
+            arg0: "run".into(),
+            interpreter: interpreter.map(Into::into),
+        }
+    }
+
+    fn enoent(image: Option<&Image>) -> Failure {
+        at_spawn(&Error::from(ErrorKind::NotFound), image, "run")
+    }
+
+    /// The interpreter named is the one read when the image was built, never
+    /// what the file says by the time it failed.
+    #[test]
+    fn a_file_still_there_lacks_the_interpreter_its_image_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        let real = crate::test_helper::real(&script);
+        assert_eq!(
+            enoent(Some(&file(real.clone(), Some("/no/such/interpreter")))),
+            not_runnable(Unrunnable::MissingInterpreter(Some(
+                "/no/such/interpreter".into()
+            )))
+        );
+        assert_eq!(
+            enoent(Some(&file(real, None))),
+            not_runnable(Unrunnable::MissingInterpreter(None))
+        );
+    }
+
+    #[test]
+    fn a_vanished_file_a_tool_or_no_image_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = file(
+            crate::test_helper::place(dir.path().join("gone")),
+            Some("/bin/sh"),
+        );
+        for image in [Some(&gone), Some(&Image::Tool("ls")), None] {
+            assert_eq!(enoent(image), Failure::NotFound, "{image:?}");
+        }
+        assert!(!Path::new(&dir.path().join("gone")).exists());
+    }
+
+    #[test]
+    fn eacces_is_permission_denied_and_the_rest_is_io() {
+        assert_eq!(
+            at_spawn(&Error::from_raw_os_error(libc::EACCES), None, "run"),
+            not_runnable(Unrunnable::PermissionDenied)
+        );
+        let e = Error::from_raw_os_error(libc::E2BIG);
+        assert_eq!(
+            at_spawn(&e, None, "run"),
+            not_runnable(Unrunnable::Io(e.to_string()))
+        );
+    }
+
+    /// An interpreter the launch's own sandbox withholds is denied whether
+    /// Seatbelt refused it (`EACCES`) or bwrap hid it (`ENOENT`); with no
+    /// such verdict, a hidden interpreter reads as missing.
+    #[test]
+    fn a_withheld_interpreter_is_denied_however_the_kernel_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run");
+        std::fs::write(
+            &script,
+            "#!/opt/x/bin/python3
+",
+        )
+        .unwrap();
+        let image = file(
+            crate::test_helper::real(&script),
+            Some("/opt/x/bin/python3"),
+        );
+        let hint = "its interpreter /opt/x/bin/python3 is not admitted by the grant";
+        let started = |e: &Error, verdict| unstarted_program(e, verdict, Some(&image), "run");
+        let reason = |why| Reason::process("run", not_runnable(why));
+
+        for errno in [libc::ENOENT, libc::EACCES] {
+            let denied = started(&Error::from_raw_os_error(errno), Some(hint));
+            assert_eq!(
+                denied.reason,
+                reason(Unrunnable::PermissionDenied),
+                "{errno}"
+            );
+            assert_eq!(denied.hint.as_deref(), Some(hint), "{errno}");
+        }
+        let missing = started(&Error::from_raw_os_error(libc::ENOENT), None);
+        assert_eq!(
+            missing.reason,
+            reason(Unrunnable::MissingInterpreter(Some(
+                "/opt/x/bin/python3".into()
+            )))
+        );
+        assert!(missing.hint.is_none(), "{:?}", missing.hint);
+        let e2big = Error::from_raw_os_error(libc::E2BIG);
+        let other = started(&e2big, Some(hint));
+        assert_eq!(other.reason, reason(Unrunnable::Io(e2big.to_string())));
+        assert!(other.hint.is_none(), "{:?}", other.hint);
+    }
+}
+
+/// A confined launch that cannot start is a process failure, as an
+/// unconfined one is, never a trampoline's exit status.
+#[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod confined_start {
+    use super::super::head::Head;
+    use super::{prepare, start};
+    use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
+    use crate::authority::sandbox::Ownership;
+    use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
+    use crate::ir::CommandName;
+    use crate::path::FrozenPath;
+    use crate::process::PgidPolicy;
+    use crate::shell::runtime::{Break, Error, Mooring};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// `body` as an executable `run` in a fresh directory.
+    fn script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = std::fs::canonicalize(dir.path()).unwrap().join("run");
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, script)
+    }
+
+    /// `script` started under a grant reading its directory and admitting
+    /// `exec`, with `between` run after the launch is built: the error.
+    fn started(script: &Path, exec: Option<ExecGrant>, between: impl FnOnce()) -> (String, Error) {
+        let mut shell = crate::test_helper::core_shell();
+        let layer = crate::test_helper::layer(Capabilities {
+            exec,
+            fs: Some(FsPolicy {
+                read_prefixes: vec![FrozenPath::freeze(script.parent().unwrap()).unwrap()],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        });
+        shell.with_layer(layer, |shell| {
+            let head = Head::resolve(
+                &CommandName::Path(script.to_string_lossy().into_owned()),
+                &shell.context,
+            )
+            .admit(&Mooring::adrift(), shell)
+            .expect("the grant admits the script");
+            let mut prepared =
+                prepare(head, &[], Ownership::Kept, shell).expect("the launch builds");
+            between();
+            let Err(Break::Error(error)) = start(&mut prepared, PgidPolicy::Inherit) else {
+                panic!("the confined launch must not start");
+            };
+            (prepared.shown, error)
+        })
+    }
+
+    fn not_runnable(shown: &str, why: Unrunnable) -> Reason {
+        Reason::process(
+            shown,
+            Failure::NotRunnable(NotRunnable {
+                found: shown.into(),
+                why,
+            }),
+        )
+    }
+
+    #[test]
+    fn a_confined_script_whose_interpreter_is_missing_is_missing_interpreter() {
+        let (_dir, script) = script("#!/no/such/interpreter\n");
+        let (shown, error) = started(&script, None, || ());
+        assert_eq!(
+            error.reason,
+            not_runnable(
+                &shown,
+                Unrunnable::MissingInterpreter(Some("/no/such/interpreter".into()))
+            )
+        );
+    }
+
+    #[test]
+    fn a_confined_file_that_lost_its_execute_bit_is_not_runnable() {
+        let (_dir, script) = script("#!/bin/sh\nexit 0\n");
+        let (shown, error) = started(&script, None, || {
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        });
+        assert_eq!(
+            error.reason,
+            not_runnable(&shown, Unrunnable::PermissionDenied)
+        );
+        assert!(error.hint.is_none(), "{:?}", error.hint);
+    }
+
+    /// The hint names the interpreter read through the judged handle before
+    /// the spawn, not what the script names by the time the kernel refuses.
+    #[test]
+    fn a_refused_interpreters_hint_names_the_one_read_before_the_spawn() {
+        let (_dir, script) = script("#!/bin/sh\n");
+        let exec = ExecGrant::of([ExecKey::Path(FrozenPath::freeze(&script).unwrap())], []);
+        let (shown, error) = started(&script, Some(exec), || {
+            std::fs::write(&script, "#!/usr/bin/false\n").unwrap();
+        });
+        assert_eq!(
+            error.reason,
+            not_runnable(&shown, Unrunnable::PermissionDenied)
+        );
+        let hint = error.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("its interpreter /bin/sh is not admitted"),
+            "{hint}"
+        );
+        assert!(!hint.contains("/usr/bin/false"), "{hint}");
     }
 }

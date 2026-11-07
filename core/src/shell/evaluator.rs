@@ -10,7 +10,7 @@ pub(crate) mod scope;
 pub(crate) mod val;
 
 use crate::ir::{Comp, Pattern, Phrase};
-use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Binding, Break, Env, Mooring, Settled, Shell, Value};
 use crate::source::Spanned;
 use crate::ty::Scheme;
 use std::sync::Arc;
@@ -122,13 +122,7 @@ impl Ran {
         shell: &mut Shell,
     ) -> Settled<Value> {
         let session = matches!(mode, Mode::Session);
-        let v =
-            machine::evaluate(Arc::clone(comp), self.env.clone(), mooring, shell).map_err(|b| {
-                match b {
-                    Break::Error(e) => Break::Error(as_let_text(e, pattern, comp)),
-                    b @ Break::Escape(_) => b,
-                }
-            })?;
+        let v = machine::evaluate(Arc::clone(comp), self.env.clone(), mooring, shell)?;
         for (name, value) in pattern::destructure(pattern, &v)? {
             let scheme = schemes
                 .iter()
@@ -145,22 +139,6 @@ impl Ran {
             shell.env = self.env.clone();
         }
         Ok(Value::Unit)
-    }
-}
-
-/// A `let` whose right-hand side is one bare word naming no program: the
-/// hint says how to bind that word as text.
-fn as_let_text(e: Error, pattern: &Pattern, comp: &Comp) -> Error {
-    let (Pattern::Name(binder), Some(exec), crate::fact::Reason::Process(process)) =
-        (pattern, comp.command(), &e.reason)
-    else {
-        return e;
-    };
-    match (process.is_path_as_text() && exec.argv.is_empty())
-        .then(|| crate::process::path_as_text_hint(&process.program, Some(binder)))
-    {
-        Some(hint) => e.with_hint(hint),
-        None => e,
     }
 }
 

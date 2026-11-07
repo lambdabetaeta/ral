@@ -21,8 +21,7 @@ use crate::shell::runtime::{
 };
 
 use super::head::Head;
-use super::process::build_launch;
-use super::vet::{SpawnPlan, vet};
+use super::process::{Prepared, prepare, start_detached};
 
 /// `detach <desc> <cmd> <args…>`, with `desc` already vetted by
 /// [`crate::shell::builtins::concurrency`].  The head is an exec image by
@@ -32,7 +31,7 @@ use super::vet::{SpawnPlan, vet};
 /// itself.
 ///
 /// Two judgments follow resolution: that refusal, then [`Head::admit`] and
-/// [`vet`].
+/// [`prepare`]'s vetting.
 pub(crate) fn detach(
     desc: &str,
     head: &Value,
@@ -64,31 +63,23 @@ pub(crate) fn detach(
     shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
     // The grant's verdict on the program, then existence (127/126) and argv
     // shape: the same judgments an ordinary external passes, so a bundled
-    // uutils tool falls out as its own image with no special case here.
-    let SpawnPlan {
-        shown,
-        admitted,
-        args,
-    } = vet(
-        Head::resolve(&name, &shell.context).admit(mooring, shell)?,
-        argv,
-    )?;
-
-    // The survivor outlives this run, but confining it happens here, under this
+    // uutils tool falls out as its own image with no special case here.  The
+    // survivor outlives this run, but confining it happens here, under this
     // run's scope: a cancel during the stamp abandons the birth.
-    let mut launch = build_launch(
-        admitted,
-        &args,
+    let head = Head::resolve(&name, &shell.context).admit(mooring, shell)?;
+    let mut prepared = prepare(
+        head,
+        argv,
         crate::authority::sandbox::Ownership::Surrendered,
         shell,
-        &shell.scope,
     )?;
-    launch.stdin(StdioSpec::null());
-    launch.stdout(StdioSpec::null());
-    launch.stderr(StdioSpec::null());
-    let survivor = launch
-        .spawn_detached()
-        .map_err(|e| sig(format!("detach: cannot launch '{shown}': {e}")))?;
+    prepared
+        .launch
+        .stdin(StdioSpec::null())
+        .stdout(StdioSpec::null())
+        .stderr(StdioSpec::null());
+    let survivor = start_detached(&mut prepared)?;
+    let Prepared { shown, args, .. } = prepared;
     shell.observe(
         mooring,
         Observed::Command(Command::new(

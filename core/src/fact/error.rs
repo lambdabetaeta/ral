@@ -62,6 +62,8 @@ pub enum Unrunnable {
     PermissionDenied,
     Directory,
     NotExecutable,
+    /// The `#!` interpreter the file names, when it names one.
+    MissingInterpreter(Option<String>),
     Io(String),
 }
 
@@ -69,8 +71,20 @@ variant!(typed Unrunnable {
     PermissionDenied: "permission-denied",
     Directory: "directory",
     NotExecutable: "not-executable",
+    MissingInterpreter(Option<String>): "missing-interpreter",
     Io(String): "io",
 });
+
+impl Unrunnable {
+    /// What an `io::Error` met launching a program means: a refusal is
+    /// permission denied, anything else is the OS's own words.
+    pub(crate) fn of_io(e: &std::io::Error) -> Self {
+        match e.kind() {
+            std::io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            _ => Self::Io(e.to_string()),
+        }
+    }
+}
 
 /// The failure value: why, the frame it is reported at, and its location.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,16 +130,6 @@ impl Reason {
             _ => None,
         }
     }
-
-    pub(crate) fn from_command(program: &str, failure: crate::process::CommandFailure) -> Self {
-        use crate::process::CommandFailure as C;
-        let failure = match failure {
-            C::ExitCode(n) => Failure::Exited(n),
-            C::Signal(s) => Failure::Signaled(s.number()),
-            C::Spawn(f) => Failure::from_spawn(program, f),
-        };
-        Self::process(program, failure)
-    }
 }
 
 impl Process {
@@ -151,14 +155,15 @@ impl Process {
                     }
                 };
                 match why {
-                    Unrunnable::PermissionDenied if found == program => {
-                        format!("{program}: permission denied")
-                    }
-                    Unrunnable::PermissionDenied => {
-                        format!("{program}: permission denied ({found} is not executable)")
-                    }
+                    Unrunnable::PermissionDenied => format!("{program}: permission denied"),
                     Unrunnable::Directory => names("a directory, not a command"),
                     Unrunnable::NotExecutable => names("a file, not an executable"),
+                    Unrunnable::MissingInterpreter(Some(interpreter)) => {
+                        format!("{program}: its interpreter {interpreter} does not exist")
+                    }
+                    Unrunnable::MissingInterpreter(None) => {
+                        format!("{program}: the interpreter or loader it names does not exist")
+                    }
                     Unrunnable::Io(message) => format!("{program}: {message}"),
                 }
             }
@@ -178,46 +183,8 @@ impl Process {
             Failure::Signaled(n) => Some(format!(
                 "the process terminated from {}", crate::process::Signal::new(n)
             ).into()),
-            _ if self.is_path_as_text() => {
-                Some(crate::process::path_as_text_hint(&self.program, None).into())
-            }
             _ => None,
         }
-    }
-
-    /// `program` is a path to a directory or plain file written where a
-    /// command goes, so it was most likely meant as text.
-    pub(crate) fn is_path_as_text(&self) -> bool {
-        matches!(
-            &self.failure,
-            Failure::NotRunnable(NotRunnable {
-                found,
-                why: Unrunnable::Directory | Unrunnable::NotExecutable,
-            }) if *found == self.program
-        )
-    }
-}
-
-impl Failure {
-    /// `program` stands for the path found when the spawn names none.
-    pub(crate) fn from_spawn(program: &str, failure: crate::process::SpawnFailure) -> Self {
-        use crate::process::{SpawnFailure as S, Unrunnable as U};
-        let (found, why) = match failure {
-            S::NotFound => return Self::NotFound,
-            S::PermissionDenied { found } => (found, Unrunnable::PermissionDenied),
-            S::NotAProgram { found, kind } => (
-                found,
-                match kind {
-                    U::Directory => Unrunnable::Directory,
-                    U::File => Unrunnable::NotExecutable,
-                },
-            ),
-            S::Io(message) => (None, Unrunnable::Io(message.into())),
-        };
-        Self::NotRunnable(NotRunnable {
-            found: found.map_or_else(|| program.to_owned(), crate::path::shown),
-            why,
-        })
     }
 }
 

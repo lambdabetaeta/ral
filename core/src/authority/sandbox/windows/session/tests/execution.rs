@@ -2,7 +2,7 @@ use super::{SessionGuard, Tree, cmd, confined, projection, rules, with_scoped_st
 use crate::authority::policy::{Baseline, Capabilities, FsPolicy};
 use crate::authority::sandbox::{ExecProjection, FsProjection, Refusal, SandboxProjection};
 use crate::path::FrozenPath;
-use crate::process::{Launch, PgidPolicy};
+use crate::process::{Launch, PgidPolicy, Unstarted};
 use crate::test_helper::confinement::{Output, admitted, denied};
 use crate::test_helper::{layer, real, stack};
 use std::io::{Read, Write};
@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn capture(launch: &mut Launch) -> std::io::Result<Output> {
-    let (mut child, _, _) = launch.spawn(PgidPolicy::Inherit)?;
+    let mut child = match launch.spawn(PgidPolicy::Inherit) {
+        Ok(spawned) => spawned.child,
+        Err(Unstarted::Program(e)) => return Err(e),
+        Err(Unstarted::Refused(why)) => panic!("the probe was refused: {why}"),
+    };
     let mut stdout = String::new();
     child.take_stdout().unwrap().read_to_string(&mut stdout)?;
     let mut stderr = String::new();

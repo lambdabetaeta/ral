@@ -15,8 +15,13 @@ use crate::site::site;
 ///
 /// [`Self::into_watch`] is the way to the reaper, which owns the wait on
 /// both platforms; [`Self::reap`] is the blocking wait after a confirmed
-/// kill.
-pub struct ChildHandle(ChildRepr);
+/// kill, whose status every caller discards.
+pub struct ChildHandle {
+    repr: ChildRepr,
+    /// What a Linux supervisor will say of its program's end.
+    #[cfg(target_os = "linux")]
+    testimony: Option<super::report::Testimony>,
+}
 
 enum ChildRepr {
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -28,16 +33,42 @@ enum ChildRepr {
 impl ChildHandle {
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn from_std(child: std::process::Child) -> Self {
-        Self(ChildRepr::Std(child))
+        Self {
+            repr: ChildRepr::Std(child),
+            #[cfg(target_os = "linux")]
+            testimony: None,
+        }
     }
 
     #[cfg(windows)]
     pub(crate) fn from_windows_raw(child: crate::process::launch::RawChild) -> Self {
-        Self(ChildRepr::RawWindows(child))
+        Self {
+            repr: ChildRepr::RawWindows(child),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn testify(&mut self, testimony: super::report::Testimony) {
+        self.testimony = Some(testimony);
+    }
+
+    /// What the dead child left on its piped stderr, never waiting for more;
+    /// `None` where it was not piped or said nothing.
+    #[cfg(unix)]
+    pub(crate) fn stderr_said(&mut self) -> Option<String> {
+        use std::io::Read;
+        let ChildRepr::Std(child) = &mut self.repr;
+        let stderr = child.stderr.take()?;
+        rustix::fs::fcntl_setfl(&stderr, rustix::fs::OFlags::NONBLOCK).ok()?;
+        let mut said = Vec::new();
+        // A descendant still holding the pipe ends this at `WouldBlock`.
+        let _ = stderr.take(4096).read_to_end(&mut said);
+        let said = String::from_utf8_lossy(&said).trim().to_owned();
+        (!said.is_empty()).then_some(said)
     }
 
     pub fn id(&self) -> u32 {
-        match &self.0 {
+        match &self.repr {
             ChildRepr::Std(child) => child.id(),
             #[cfg(windows)]
             ChildRepr::RawWindows(child) => child.id(),
@@ -48,7 +79,7 @@ impl ChildHandle {
     /// Returns `Err` if the platform kill — SIGKILL on Unix,
     /// `TerminateProcess` on Windows — fails.
     pub(crate) fn kill(&mut self) -> std::io::Result<()> {
-        match &mut self.0 {
+        match &mut self.repr {
             ChildRepr::Std(child) => child.kill(),
             #[cfg(windows)]
             ChildRepr::RawWindows(child) => child.kill(),
@@ -56,7 +87,7 @@ impl ChildHandle {
     }
 
     pub(crate) fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        match &mut self.0 {
+        match &mut self.repr {
             ChildRepr::Std(child) => child
                 .stdout
                 .take()
@@ -67,7 +98,7 @@ impl ChildHandle {
     }
 
     pub(crate) fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        match &mut self.0 {
+        match &mut self.repr {
             ChildRepr::Std(child) => child
                 .stderr
                 .take()
@@ -79,7 +110,7 @@ impl ChildHandle {
 
     #[cfg(windows)]
     pub(crate) fn raw_process_handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
-        match &self.0 {
+        match &self.repr {
             ChildRepr::Std(child) => {
                 use std::os::windows::io::AsRawHandle;
                 child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE
@@ -94,7 +125,7 @@ impl ChildHandle {
     /// # Errors
     /// Returns `Err` if the wait fails.
     pub(crate) fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        match &mut self.0 {
+        match &mut self.repr {
             ChildRepr::Std(child) => site!(Silent::ChildReap, child => wait()),
             #[cfg(windows)]
             ChildRepr::RawWindows(child) => child.reap(),
@@ -103,18 +134,24 @@ impl ChildHandle {
 
     /// The one way from a spawned child to a [`Watch`]: consumes the
     /// handle, so no later `wait` on this pid is writable behind the
-    /// reaper's back.  The stdio ends must already be taken.
+    /// reaper's back.  The stdio ends must already be taken.  On Linux the
+    /// outcome every subscriber sees is the supervisor's word on its program.
     pub(crate) fn into_watch<E: Send + 'static>(
         self,
         tx: std::sync::mpsc::Sender<E>,
         f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
     ) -> Watch {
         let pid = self.id();
+        #[cfg(target_os = "linux")]
+        let f = {
+            let testimony = self.testimony;
+            move |outcome| f(testimony.map_or(outcome, |testimony| testimony.amend(outcome)))
+        };
         let watch = watch(pid, tx, f);
         // Dropping a `std::process::Child` neither kills nor reaps on Unix,
         // and on Windows only closes std's own handle — the watch opened its
         // own while registering.
-        drop(self);
+        drop(self.repr);
         watch
     }
 }

@@ -18,9 +18,10 @@
 //! name as `/dev`'s own nodes are ([`gpu`]).
 //!
 //! The payload is always ral's own trampoline (`super::launch`), which enters
-//! the [`landlock`] ruleset it inherits and only then becomes the target:
-//! that order is forced, a Landlock domain handling any fs right forbidding
-//! the `mount(2)` bwrap opens with.
+//! the [`landlock`] ruleset it inherits and only then runs the target, as a
+//! child it supervises so as to report its exact end, which bwrap would fold
+//! into an exit status: that order is forced, a Landlock domain handling any
+//! fs right forbidding the `mount(2)` bwrap opens with.
 
 mod gpu;
 mod host;
@@ -34,9 +35,8 @@ pub(crate) use host::HostEnvelope;
 use super::Refusal;
 use super::launch::Ownership;
 use super::reexec::Pinned;
-use super::warrant::{Handoff, Slot, nul_terminated, parcel};
+use super::warrant::{Handoff, Slot, Slots, nul_terminated, parcel};
 use super::{FsProjection, RenderedProjection};
-use crate::Role;
 use crate::authority::policy::Baseline;
 use crate::path::{
     CwdPath, Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered,
@@ -126,11 +126,11 @@ impl<'a> Envelope<'a> {
 }
 
 /// The [`Command`] that runs `env`'s trampoline confined under `policy`:
-/// `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`, every descriptor
-/// lent to `handoff` and named by its slot: the options in a sealed parcel,
-/// ral's pin, the seccomp programs, every bind's handle and the `--info-fd`
-/// peer, beside the caller's (the warrant, at `warrant`, and the Landlock
-/// ruleset).  bwrap takes options alone from `--args`, so the payload rides
+/// `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`, every
+/// descriptor lent to `handoff` and named by its slot: the options in a
+/// sealed parcel, ral's pin, the seccomp programs, every bind's handle and the
+/// `--info-fd` peer, beside the caller's (the warrant and report, at `slots`,
+/// and the Landlock ruleset).  bwrap takes options alone from `--args`, so the payload rides
 /// its argv, and runs the pinned inode whatever now holds its name.
 /// `shown` is the bind plan the Landlock ruleset was built against.
 ///
@@ -141,7 +141,7 @@ pub(crate) fn bwrap_command(
     env: &Envelope<'_>,
     shown: Shown,
     mut handoff: Handoff,
-    warrant: Slot,
+    slots: Slots,
     policy: &RenderedProjection,
     chdir: Option<&CwdPath>,
     ownership: Ownership,
@@ -186,8 +186,7 @@ pub(crate) fn bwrap_command(
     let mut c = env.bwrap.command();
     c.args(["--args", &args.to_string(), "--"])
         .arg(crate::path::proc_fd_path(trampoline.fd()))
-        .arg(Role::Warrant.flag())
-        .arg(warrant.to_string());
+        .args(slots.argv());
     handoff.install(&mut c);
     Ok((c, info))
 }

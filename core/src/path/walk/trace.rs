@@ -124,9 +124,10 @@ impl Step {
 ///
 /// Each name is spelled as the filesystem stores it.  Made by the walk
 /// ([`Trace::real`]),
-/// and read off the wire by a hand-written `Deserialize` that applies the
-/// lexical check (absolute, parsed root, no `.` or `..`) through a private
-/// constructor.  No `TryFrom` and no `From`: nothing mints a position from a
+/// and read off the wire — by a hand-written `Deserialize`, or a confined
+/// launch's warrant ([`Self::off_the_wire`]) — through one private
+/// constructor that applies the lexical check (absolute, parsed root, no `.`
+/// or `..`).  No `TryFrom` and no `From`: nothing mints a position from a
 /// string.  On the wire it is its `OsString`, serde's lossless form, so a
 /// position that is not Unicode crosses whole.  `Eq` and `Ord` compare
 /// stored components on Windows and components elsewhere.
@@ -169,6 +170,16 @@ impl RealPath {
             ));
         }
         Ok(real)
+    }
+
+    /// The position `raw` spells, read off a wire that carries one, such as
+    /// a warrant: lexically checked as `Deserialize` checks it.
+    ///
+    /// # Errors
+    /// `raw` is not a position's spelling.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn off_the_wire(raw: &OsStr) -> io::Result<Self> {
+        Self::parse(raw)
     }
 
     /// This position's entry `name`.

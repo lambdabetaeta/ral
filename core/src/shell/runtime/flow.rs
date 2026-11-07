@@ -4,7 +4,7 @@ use super::Shell;
 use super::error::{Error, Prov};
 use super::value::Value;
 use crate::fact::{Done, Ending, ExitCode, FailureCode};
-use crate::process::{CancelCause, Cancellation, ChildEnd, Scope, ScopeId};
+use crate::process::{CancelCause, Cancellation, Scope, ScopeId};
 use crate::source::{SourceDb, Span};
 use std::num::NonZeroU8;
 
@@ -109,15 +109,6 @@ impl Break {
             owner,
             at: None,
         }))
-    }
-
-    /// A child's end: `Failed` is the command's error; `Cancelled` is
-    /// [`Self::cancelled`].
-    pub(crate) fn of_child(cmd: &str, end: ChildEnd, scope: &Scope) -> Self {
-        match end {
-            ChildEnd::Failed(failure) => Self::Error(Error::from_command_failure(cmd, failure)),
-            ChildEnd::Cancelled(cause) => Self::cancelled(cause, scope),
-        }
     }
 
     /// A child cancelled under `scope`, the current scope it was waited

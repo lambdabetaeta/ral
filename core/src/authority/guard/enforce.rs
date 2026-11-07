@@ -69,40 +69,42 @@ impl Denial {
 const NESTED: &str = "an enclosing grant may be the one that withholds it, and a nested grant \
                       cannot add authority its caller withholds";
 
-/// What an exclusion says of its subject, which no allowance overrides.
-fn excluded_tail(scope: impl Display, matched_by: MatchedBy) -> String {
+/// The exclusion half of a refusal, which no allowance overrides.
+fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
     match matched_by {
         MatchedBy::Name => {
-            format!("is excluded by {scope}; an allowance cannot override an exclusion")
+            format!("{subject} is excluded by {scope}; an allowance cannot override an exclusion")
         }
         MatchedBy::FoldedName => format!(
-            "is the denied {scope} under another spelling \
+            "{subject} is the denied {scope} under another spelling \
              (case or Unicode form); a deny holds under every spelling"
         ),
-        MatchedBy::Identity => format!("is the denied object {scope} under another name"),
+        MatchedBy::Identity => {
+            format!("{subject} is the denied object {scope} under another name")
+        }
     }
 }
 
-/// The exclusion half of a refusal, which no allowance overrides.
-fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
-    format!("{subject} {}", excluded_tail(scope, matched_by))
+/// What `refused` says of `subject`: the one wording of each fs refusal.
+fn says(refused: &Refused, subject: impl Display) -> String {
+    match refused {
+        Refused::Guarded(pinned) => format!(
+            "{subject} is the {pinned} binary ral pinned at startup, which confines every \
+             command run under a grant"
+        ),
+        Refused::Withheld(Withheld::MissingAllowance) => {
+            format!("no allowance of the active grant covers {subject}")
+        }
+        Refused::Withheld(Withheld::Excluded { scope, matched_by }) => {
+            excluded(subject, scope, *matched_by)
+        }
+    }
 }
 
 /// What a refusal says of its object, which the caller names ahead of it.
 impl Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Guarded(pinned) => write!(
-                f,
-                "it is the {pinned} binary ral pinned at startup, which ral never writes into"
-            ),
-            Self::Withheld(Withheld::MissingAllowance) => {
-                f.write_str("no allowance of the active grant covers it")
-            }
-            Self::Withheld(Withheld::Excluded { scope, matched_by }) => {
-                write!(f, "it {}", excluded_tail(scope, *matched_by))
-            }
-        }
+        f.write_str(&says(self, "it"))
     }
 }
 
@@ -241,20 +243,6 @@ pub(crate) fn check_device_name(path: &LexicalPath) -> Result<(), Refusal> {
         .map_or(Ok(()), |m| Err(Refusal::new(m)))
 }
 
-/// Decide an `op` on the access a walk found: [`GrantStack::refusal_fs`] is
-/// the decision, [`fs_denial`] the wording and the fact around it.
-pub(crate) fn check_fs_exact(
-    grants: &GrantStack,
-    baseline: &Baseline,
-    trace: &Trace,
-    op: &FsOp,
-    path: &LexicalPath,
-) -> Result<(), Denial> {
-    grants
-        .refusal_fs(baseline, op, trace)
-        .map_err(|refused| fs_denial(grants, refused, op, path))
-}
-
 /// Name a refusal by the request, never by a withheld link's target.
 pub(crate) fn fs_denial(
     grants: &GrantStack,
@@ -264,17 +252,10 @@ pub(crate) fn fs_denial(
 ) -> Denial {
     let name = <&str>::from(op);
     let path = path.shown();
-    let layers = grants.fs().count();
-    let (detail, error) = match refused {
+    let said = says(&refused, &path);
+    let (verdict, detail, hint) = match refused {
         Refused::Withheld(Withheld::MissingAllowance) => {
-            let permission = match op {
-                FsOp::Read => "reading",
-                FsOp::Write => "writing",
-            };
-            let error = Refusal::new(format!(
-                "fs {name} denied by grant: no allowance for {permission} {path}"
-            ));
-            let hint = if layers > 1 {
+            let hint = if grants.fs().count() > 1 {
                 NESTED.to_string()
             } else {
                 format!(
@@ -285,29 +266,23 @@ pub(crate) fn fs_denial(
                     }
                 )
             };
-            (None, error.with_hint(hint))
+            ("denied by grant", None, hint)
         }
-        Refused::Withheld(Withheld::Excluded { scope, matched_by }) => (
+        Refused::Withheld(Withheld::Excluded { scope, .. }) => (
+            "denied by grant",
             Some(("deny", scope.to_string())),
-            Refusal::new(format!(
-                "fs {name} denied by grant: {}",
-                excluded(&path, &scope, matched_by)
-            ))
-            .with_hint(EXCLUSION_HINT),
+            EXCLUSION_HINT.to_string(),
         ),
         Refused::Guarded(pinned) => (
+            "refused",
             Some(("pinned", pinned.to_string())),
-            Refusal::new(format!(
-                "fs write refused: {path} is the {pinned} binary ral pinned at startup, which \
-                 confines every command run under a grant"
-            ))
-            .with_hint(
-                "ral never writes into the binary that enforces its grants, whatever the \
-                 grant allows. Install a new one by replacing the file rather than \
-                 rewriting it: a rename leaves this session's pinned copy intact",
-            ),
+            "ral never writes into the binary that enforces its grants, whatever the grant \
+             allows. Install a new one by replacing the file rather than rewriting it: a \
+             rename leaves this session's pinned copy intact"
+                .to_string(),
         ),
     };
+    let error = Refusal::new(format!("fs {name} {verdict}: {said}")).with_hint(hint);
     let fields = [("op", name.to_string()), ("path", path)]
         .into_iter()
         .chain(detail);

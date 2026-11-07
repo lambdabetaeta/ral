@@ -427,12 +427,8 @@ fn a_masked_script_does_not_run() {
     let Some(env) = envelope_launches(&policy) else {
         return;
     };
-    let out = run_admitted(&env, &policy, &program, &[]).unwrap();
-    assert!(!out.status.success() && out.stdout.is_empty(), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains(&*script.to_string_lossy()),
-        "{out:?}"
-    );
+    let ran = run_admitted(&env, &policy, &program, &[]);
+    assert!(trampoline_refused(&ran), "{ran:?}");
 }
 
 /// Under an unrestricted fs, a veto in force or not, the tool the exec
@@ -952,18 +948,16 @@ fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
-        let out = run_admitted(&env, &policy, &admitted, &[]).expect("spawn");
-        let (stdout, stderr) = (
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
+        let ran = run_admitted(&env, &policy, &admitted, &[]);
         assert!(
-            !stdout.contains("INTERP-RAN") && trampoline_refused(&out, &script),
-            "{axis}: an excluded interpreter ran: {stdout} {stderr}"
+            trampoline_refused(&ran),
+            "{axis}: an excluded interpreter ran: {ran:?}"
         );
+        let hint = crate::authority::sandbox::interpreter_hint(&policy, &interp);
         assert!(
-            stderr.contains("interpreter") && stderr.contains("is excluded by"),
-            "{axis}: the hint does not name the exclusion: {stderr}"
+            hint.as_deref()
+                .is_some_and(|hint| hint.contains("interpreter") && hint.contains("is excluded by")),
+            "{axis}: the hint does not name the exclusion: {hint:?}"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -995,12 +989,8 @@ fn a_trusted_script_starts_through_live_supports_reads() {
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
-        let out = run_admitted(&env, &policy, &admitted, &["--help".into()]).expect("spawn");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            !stderr.contains(&format!("ral: {script}:")),
-            "{label}: {stderr}"
-        );
+        let ran = run_admitted(&env, &policy, &admitted, &["--help".into()]);
+        assert!(ran.is_ok(), "{label}: {ran:?}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1175,7 +1165,7 @@ fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
         &on(&stand_in(), host),
         &exec_policy(admitting(&[], &[])),
         &Baseline::default(),
-        &admitted(sh),
+        &Image::of(&admitted(sh)),
         &["-c".to_string(), "echo RAN".to_string()],
         None,
         Ownership::Kept,
@@ -1202,31 +1192,27 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
         refer_root: false,
         at,
     });
-    let parcel = Warrant::new(
+    let warrant = Warrant::new(
         promise,
-        &admitted(sh),
+        &Image::of(&admitted(sh)),
         &["-c".to_string(), "echo RAN".to_string()],
-        &unrestricted(),
-    )
-    .parcel()
-    .expect("parcels");
-    let mut handoff = Handoff::default();
-    let warrant = handoff.lend(parcel.as_fd()).expect("lends");
-    let mut cmd = own.command();
-    cmd.arg(Role::Warrant.flag())
-        .arg(warrant.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    handoff.install(&mut cmd);
-    let out = cmd.output().expect("spawn the trampoline");
-    drop(withheld);
-    let (stdout, stderr) = (
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
     );
-    assert_eq!(out.status.code(), Some(126), "{stdout} {stderr}");
-    assert!(!emitted(&stdout, "RAN"), "the program ran unconfined");
-    assert!(stderr.contains(&format!("fd {at}")), "{stderr}");
+    let mut handoff = Handoff::default();
+    let (slots, report) =
+        crate::authority::sandbox::launch::issue(&warrant, &mut handoff).expect("issues");
+    let mut cmd = own.command();
+    cmd.args(slots.argv());
+    handoff.install(&mut cmd);
+    let mut launch = crate::process::Launch::from_command(cmd);
+    launch
+        .report(report)
+        .stdin(crate::process::StdioSpec::null());
+    let ran = launch.output();
+    drop(withheld);
+    let Err(Unstarted::Refused(why)) = ran else {
+        panic!("the program ran unconfined: {ran:?}");
+    };
+    assert!(why.to_string().contains(&format!("fd {at}")), "{why}");
 }
 
 #[test]
@@ -1290,12 +1276,19 @@ fn a_refused_exec_hint_keeps_the_interpreter_read_before_spawn() {
     let Some(env) = envelope_launches(&policy) else {
         return;
     };
-    let output = run_after(&env, &policy, &admitted, &[], || {
+    let image = Image::of(&admitted);
+    let ran = run_after(&env, &policy, &admitted, &[], || {
         std::fs::write(&script, format!("#!{}\n", other.display())).unwrap();
-    })
-    .unwrap();
-    assert_eq!(output.status.code(), Some(126));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(interpreter.to_str().unwrap()), "{stderr}");
-    assert!(!stderr.contains(other.to_str().unwrap()), "{stderr}");
+    });
+    assert!(trampoline_refused(&ran), "{ran:?}");
+    let Image::File {
+        interpreter: Some(read),
+        ..
+    } = &image
+    else {
+        panic!("a script's image names its interpreter");
+    };
+    let hint = crate::authority::sandbox::interpreter_hint(&policy, read).unwrap_or_default();
+    assert!(hint.contains(interpreter.to_str().unwrap()), "{hint}");
+    assert!(!hint.contains(other.to_str().unwrap()), "{hint}");
 }

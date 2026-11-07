@@ -8,10 +8,9 @@
 //! other member — which only the pipeline's
 //! [`TerminalLoan`](crate::process::TerminalLoan) reads as a key.
 
-use super::super::command;
 use super::collect::Event;
-use crate::process::{Group, Membership, Pgid, PgidPolicy, Scope};
-use crate::shell::runtime::{Error, Settled, Shell, sig};
+use crate::process::{Group, Landing, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};
+use crate::shell::runtime::{Break, Error, Settled, sig};
 use std::sync::mpsc::Sender;
 
 /// Pgid lifecycle for one pipeline: the anchor, finished before the fold or on
@@ -25,8 +24,8 @@ pub(super) struct PipelineGroup {
 impl PipelineGroup {
     /// An owning group: the anchor, spawned and witnessed at once, so no
     /// signal it swallows can land before someone is reading for it.
-    pub(super) fn prepare(shell: &Shell, tx: Sender<Event>) -> Settled<Self> {
-        let anchor = AnchorProcess::spawn(shell, tx)?;
+    pub(super) fn prepare(tx: Sender<Event>) -> Settled<Self> {
+        let anchor = AnchorProcess::spawn(tx)?;
         Ok(Self {
             group: Group::Owns(anchor.pgid),
             anchor: Some(anchor),
@@ -115,7 +114,7 @@ impl AnchorProcess {
     // Taken by value because the Unix arm below moves it into the watch; the
     // Windows arm has no reader thread to give it to.
     #[cfg_attr(windows, allow(clippy::needless_pass_by_value))]
-    fn spawn(shell: &Shell, tx: Sender<Event>) -> Settled<Self> {
+    fn spawn(tx: Sender<Event>) -> Settled<Self> {
         #[cfg(windows)]
         let _ = tx;
         let (reader, release) =
@@ -133,14 +132,18 @@ impl AnchorProcess {
         };
         #[cfg(windows)]
         cmd.stdout(crate::process::StdioSpec::null());
-        let (mut child, leader, _jail) = cmd
+        let Spawned {
+            mut child, landing, ..
+        } = cmd
             .spawn(PgidPolicy::NewLeader)
-            .map_err(|e| Error::io("pipeline anchor", &e))?;
+            .map_err(|unstarted| match unstarted {
+                Unstarted::Program(e) => Break::from(Error::io("pipeline anchor", &e)),
+                Unstarted::Refused(refusal) => Break::from(refusal),
+                #[cfg(unix)]
+                Unstarted::Stopped(stop) => Break::from(stop),
+            })?;
         drop(cmd);
-        if shell.has_active_capabilities() {
-            command::brake(&mut child, PgidPolicy::NewLeader, leader)?;
-        }
-        let Some(pgid) = leader else {
+        let Landing::Owns(pgid) = landing else {
             discard(&mut child);
             return Err(sig("pipeline anchor: failed to establish a process group"));
         };
@@ -231,13 +234,13 @@ mod tests {
 
     /// An owning group whose channel nobody reads — enough for every test
     /// that only wants a real pgid.
-    fn prepared(shell: &Shell) -> PipelineGroup {
-        PipelineGroup::prepare(shell, std::sync::mpsc::channel().0).expect("anchor spawns")
+    fn prepared() -> PipelineGroup {
+        PipelineGroup::prepare(std::sync::mpsc::channel().0).expect("anchor spawns")
     }
 
     #[test]
     fn prepare_yields_a_leader_on_every_platform() {
-        let group = prepared(&crate::test_helper::core_shell());
+        let group = prepared();
         assert!(matches!(group.group(), Group::Owns(_)));
         assert!(group.leader_pgid().as_raw() > 0);
     }
@@ -246,7 +249,7 @@ mod tests {
     /// back its own membership whatever scope it is given.
     #[test]
     fn a_nested_stage_answers_to_the_outermost_owners_stage() {
-        let owner = prepared(&crate::test_helper::core_shell());
+        let owner = prepared();
         let outer = DurableRoot::default().worker();
         let membership = owner.membership(&outer);
         assert_eq!(membership.group(), owner.leader_pgid());
@@ -273,7 +276,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_completed_group_releases_its_windows_job() {
-        let group = prepared(&crate::test_helper::core_shell());
+        let group = prepared();
         let leader = group.leader_pgid().as_raw();
         assert!(crate::process::group::is_known_group(leader));
         drop(group);
@@ -293,9 +296,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_signalled_anchor_reports_the_signal_and_lives_on() {
-        let shell = crate::test_helper::core_shell();
         let (tx, rx) = std::sync::mpsc::channel();
-        let group = PipelineGroup::prepare(&shell, tx).expect("anchor spawns");
+        let group = PipelineGroup::prepare(tx).expect("anchor spawns");
         for signal in [libc::SIGINT, libc::SIGTERM] {
             group
                 .leader_pgid()

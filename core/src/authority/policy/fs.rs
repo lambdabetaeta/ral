@@ -26,7 +26,7 @@ use super::table::{Allows, Denies, Table, Withheld};
 use super::{GrantLayer, GrantStack, Join, Meet};
 use crate::path::{
     Depth, Dir, DirEntry, Excluded, Judged, LeafMode, LexicalPath, Located, MatchedBy, ObjectId,
-    Op, Reading, RealPath, Subject, Trace, Writing, walk, walk_dir,
+    Op, Reading, RealPath, Subject, Trace, Writing, walk, walk::failure_trace, walk_dir,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -415,7 +415,7 @@ pub enum Refused {
 }
 
 /// Why a [`GrantStack::locate`] gave no handle: the walk failed, or the stack
-/// refused what it found.
+/// refused what it found or, where the walk failed, the name.
 #[derive(Debug)]
 pub enum LocateError {
     Io(io::Error),
@@ -489,7 +489,9 @@ impl GrantStack {
         Ok(d.judged(Verdict(PhantomData)))
     }
 
-    /// A caller with no `Shell`: the walk, then [`judge`](Self::judge).
+    /// The walk, its failure [judged](Self::judge_failure) before it is told,
+    /// then [`judge`](Self::judge).  The shell's door adds the device-name
+    /// refusal and the audit.
     ///
     /// # Errors
     /// [`LocateError`], keeping the walk's failure apart from the judgment's.
@@ -498,7 +500,7 @@ impl GrantStack {
         baseline: &Baseline,
         rp: &LexicalPath,
     ) -> Result<Located<Judged<O>>, LocateError> {
-        let located = walk(rp, LeafMode::Follow).map_err(LocateError::Io)?;
+        let located = self.disclosed(baseline, &O::FS, rp, walk(rp, LeafMode::Follow))?;
         self.judge(baseline, located).map_err(LocateError::Refused)
     }
 
@@ -511,8 +513,43 @@ impl GrantStack {
         baseline: &Baseline,
         rp: &LexicalPath,
     ) -> Result<Dir<Judged<O>>, LocateError> {
-        let dir = walk_dir(rp).map_err(LocateError::Io)?;
+        let dir = self.disclosed(baseline, &O::FS, rp, walk_dir(rp))?;
         self.judge_dir(baseline, dir).map_err(LocateError::Refused)
+    }
+
+    /// Judge a walk of `rp` that failed with `error`, at the link it looped
+    /// at or else at the name walked leniently: a denied name that names
+    /// nothing is still denied.  The discard device is exempt.
+    ///
+    /// # Errors
+    /// The stack's refusal; the lenient walk's failure, where it ends no steps.
+    pub(crate) fn judge_failure(
+        &self,
+        baseline: &Baseline,
+        op: &FsOp,
+        rp: &LexicalPath,
+        error: &io::Error,
+    ) -> Result<(), LocateError> {
+        if rp.is_discard() {
+            return Ok(());
+        }
+        let trace = failure_trace(rp, error).map_err(LocateError::Io)?;
+        self.refusal_fs(baseline, op, &trace)
+            .map_err(LocateError::Refused)
+    }
+
+    /// `walked`, its failure told only once judged.
+    fn disclosed<T>(
+        &self,
+        baseline: &Baseline,
+        op: &FsOp,
+        rp: &LexicalPath,
+        walked: io::Result<T>,
+    ) -> Result<T, LocateError> {
+        walked.or_else(|e| {
+            self.judge_failure(baseline, op, rp, &e)?;
+            Err(LocateError::Io(e))
+        })
     }
 
     /// The write judgment: may the access `trace` be written?
@@ -1234,6 +1271,30 @@ mod tests {
     fn held_dir(path: &Path) -> Dir {
         let spelling = LexicalPath::absolute(path).expect("a temp path is absolute");
         crate::path::walk_dir(&spelling).unwrap()
+    }
+
+    /// A walk failing under a denied name is refused, not reported absent;
+    /// under an allowance the failure is the walk's.
+    #[test]
+    fn locate_refuses_a_denied_name_that_names_nothing() {
+        let (_tmp, root) = tmp();
+        made(&root, "secret");
+        let grants = reading_all_but(&root, &["secret"]);
+        let baseline = Baseline::default();
+        let at = |name: &str| LexicalPath::absolute(&root.join(name)).unwrap();
+        let file = grants
+            .locate::<Reading>(&baseline, &at("secret/gone/f"))
+            .err();
+        assert!(matches!(file, Some(LocateError::Refused(_))), "{file:?}");
+        let dir = grants
+            .locate_dir::<Reading>(&baseline, &at("secret/gone"))
+            .err();
+        assert!(matches!(dir, Some(LocateError::Refused(_))), "{dir:?}");
+        let open = grants.locate::<Reading>(&baseline, &at("gone/f")).err();
+        assert!(
+            matches!(&open, Some(LocateError::Io(e)) if e.kind() == io::ErrorKind::NotFound),
+            "{open:?}"
+        );
     }
 
     #[test]

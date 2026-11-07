@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use crate::authority::grant::freeze::FreezeCtx;
-use crate::authority::policy::{Fragment, GrantLayer, LocateError};
+use crate::authority::policy::{Fragment, GrantLayer};
 use crate::path::Reading;
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{Break, Mooring, Settled, Shell, sig};
@@ -49,7 +49,7 @@ pub fn load_capabilities_from_str(
 ///
 /// `path` is anchored against the shell's cwd, not the process's, and the
 /// bytes are read through the very file the source is keyed by, judged for
-/// reading under the shell's stack, so the identity and the text are one file.
+/// reading at the shell's door, so the identity and the text are one file.
 ///
 /// # Errors
 /// Its real path is not UTF-8, the grant refuses the file, it cannot be read,
@@ -61,17 +61,14 @@ pub fn load_capabilities_from_path(
     ctx: &FreezeCtx,
 ) -> Settled<GrantLayer> {
     let display = crate::path::shown(path);
-    let failed = |e: &dyn std::fmt::Display| sig(format!("capability file {display}: {e}"));
     let unread = |e: &std::io::Error| match e.kind() {
         std::io::ErrorKind::NotFound => sig(format!("{NOT_FOUND}: {display}")),
-        _ => failed(e),
+        _ => sig(format!("capability file {display}: {e}")),
     };
-    let located = (shell.context.grants)
-        .locate::<Reading>(shell.baseline(), &shell.anchor(path))
-        .map_err(|e| match &e {
-            LocateError::Io(io) => unread(io),
-            LocateError::Refused(refused) => failed(refused),
-        })?;
+    let rp = shell.anchor(path);
+    let located = (shell.locate_unworded::<Reading>(&rp))
+        .map_err(|e| wrap(&display, e))?
+        .map_err(|e| unread(&e))?;
     let file = SourceFile::new(located.real().as_path().to_path_buf())
         .map_err(|e| sig(format!("capability file {e}")))?;
     let source = (located.read().and_then(std::io::read_to_string)).map_err(|e| unread(&e))?;
@@ -143,7 +140,7 @@ pub fn apply_session_profiles(
     Ok(())
 }
 
-fn wrap(origin: &SourceOrigin, e: Break) -> Break {
+fn wrap(origin: impl std::fmt::Display, e: Break) -> Break {
     match e {
         Break::Error(err) => Break::Error(err.context(format!("capability file {origin}"))),
         other @ Break::Escape(_) => other,
@@ -332,6 +329,41 @@ mod tests {
             Break::Escape(crate::shell::runtime::Escape::Exit(3)) => {}
             other => panic!("expected Escape::Exit(3), got {other:?}"),
         }
+    }
+
+    /// A capability file under a denied name is refused at the shell's door,
+    /// absent or not; elsewhere its absence is said.
+    #[test]
+    fn a_denied_absent_capability_file_is_refused_not_reported_absent() {
+        use crate::authority::policy::{Capabilities, FsPolicy};
+        use crate::path::FrozenPath;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(root.join("secret")).unwrap();
+        let frozen = |p: &Path| FrozenPath::from_surface(crate::path::utf8(p).unwrap());
+        let denying = crate::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![frozen(&root)],
+                deny_paths: vec![frozen(&root.join("secret"))],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        });
+        let load = |shell: &mut Shell, name: &str| {
+            let path = root.join(name);
+            match load_capabilities_from_path(&Mooring::adrift(), shell, &path, &ctx()) {
+                Err(Break::Error(e)) => e.describe().into_owned(),
+                other => panic!("{name} must not load, got {other:?}"),
+            }
+        };
+        shell().with_layer(denying, |shell| {
+            for name in ["secret/p.ral", "secret/gone/p.ral"] {
+                let message = load(shell, name);
+                assert!(message.contains("denied by grant"), "{name}: {message}");
+            }
+            let message = load(shell, "gone/p.ral");
+            assert!(message.starts_with(NOT_FOUND), "{message}");
+        });
     }
 
     /// An env-scoped `HOME` reaches `home` freezing here exactly as it reaches

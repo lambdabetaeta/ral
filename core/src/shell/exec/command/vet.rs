@@ -34,12 +34,12 @@ pub(crate) fn vet(head: Head<Admission>, args: &[Value]) -> Settled<SpawnPlan> {
 
 /// Stringify `args`, refusing any shape the syscall boundary cannot carry.
 fn validate_argv(cmd: &str, args: &[Value]) -> Settled<Vec<String>> {
-    for arg in args {
-        if let Some(sig) = reject_exec_arg(cmd, arg) {
-            return Err(sig);
-        }
-    }
-    Ok(args.iter().map(std::string::ToString::to_string).collect())
+    args.iter()
+        .map(|arg| match reject_exec_arg(cmd, arg) {
+            Some(refusal) => Err(refusal),
+            None => Ok(arg.to_string()),
+        })
+        .collect()
 }
 
 /// Per-argument shape gate: nothing [`RefusedArg`] names can reach `execve(2)`,
@@ -107,6 +107,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn no_exec() -> GrantLayer {
         crate::test_helper::layer(Capabilities {
             exec: Some(ExecGrant::default()),
@@ -268,21 +269,22 @@ mod tests {
         assert!(e.describe().contains("denied by active grant"), "{e:?}");
     }
 
-    /// `let scratch = /tmp` runs a path, which a grant refuses; the refusal is
-    /// still the grant's, and leads with the path as text without telling
-    /// what lies there.
+    /// Only a refused walk is permission denied: a link cycle is reported as
+    /// the OS words it.
+    #[cfg(unix)]
     #[test]
-    fn a_denied_path_head_is_offered_as_text_ahead_of_the_grants_hint() {
+    fn a_looping_path_head_is_not_reported_as_permission_denied() {
         let tmp = tempfile::tempdir().unwrap();
-        let shown = tmp.path().to_string_lossy().into_owned();
+        let looping = tmp.path().join("loop");
+        std::os::unix::fs::symlink("loop", &looping).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        let head = Head::resolve(&CommandName::Path(shown.clone()), &shell.context);
-        let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
-        assert!(e.describe().contains("denied by active grant"), "{e:?}");
-        let hint = e.hint.as_deref().expect("a refusal carries a hint");
-        let (text, grant) = hint.split_once("\n\n").expect("both hints are kept");
-        assert!(text.contains(&format!("#'{shown}'#")), "{hint}");
-        assert!(grant.contains("grant") && !grant.contains("#'"), "{hint}");
+        let head = Head::resolve(
+            &CommandName::Path(looping.to_string_lossy().into_owned()),
+            &shell.context,
+        );
+        let e = refused(head, &mut shell);
+        assert_eq!(e.failure_code().get(), 126, "{e:?}");
+        assert!(!e.describe().contains("permission denied"), "{e:?}");
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub mod lease;
 pub(crate) mod limits;
 pub(crate) mod outcome;
 pub(crate) mod reaper;
+#[cfg(unix)]
+pub(crate) mod report;
 pub(crate) mod signal;
 mod site;
 #[cfg(unix)]
@@ -24,11 +26,9 @@ pub(crate) mod slot;
 pub(crate) mod spawn_lock;
 pub(crate) mod tree;
 
-pub(crate) use outcome::{
-    ChildEnd, CommandFailure, Signal, SpawnFailure, Unrunnable, WaitOutcome, path_as_text_hint,
-};
+pub(crate) use outcome::{Signal, WaitOutcome};
 
-pub(crate) use launch::{Launch, StdioSpec};
+pub(crate) use launch::{Launch, Spawned, StdioSpec, Unstarted};
 pub use lease::{RequestedTerminalAccess, TerminalLease};
 
 pub use deadline::{Deadline, arm_callback, arm_lifetime};
@@ -44,7 +44,7 @@ pub(crate) use cancel::{POLL_SLICE, TEARDOWN_GRACE};
 
 pub use child::ChildHandle;
 pub(crate) use foreground::PreparedTerminalLoan;
-pub(crate) use group::{Group, Membership};
+pub(crate) use group::{Group, Landing, Membership};
 pub use group::{Pgid, PgidPolicy};
 #[cfg(unix)]
 pub use limits::ChildLimit;

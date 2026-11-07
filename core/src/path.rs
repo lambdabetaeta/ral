@@ -30,6 +30,8 @@ mod procfs;
 pub(crate) mod render;
 pub(crate) mod resolver;
 mod rules;
+#[cfg(unix)]
+mod shebang;
 mod show;
 pub mod sigil;
 mod site;
@@ -64,6 +66,8 @@ pub(crate) use render::rendered_ancestors;
 #[cfg(unix)]
 pub(crate) use render::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
 pub use resolver::{Resolver, spelled};
+#[cfg(unix)]
+pub(crate) use shebang::shebang;
 pub(crate) use walk::is_loop;
 pub use walk::{
     Authority, Dir, DirEntry, EntryName, Excluded, Hold, Installing, Judged, Kind, LeafMode,

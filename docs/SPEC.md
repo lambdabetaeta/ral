@@ -2057,7 +2057,8 @@ Reason  = `process [program: String, failure: Failure]
         | `cancelled | `timed-out | `raised String
 Failure = `exited Int | `signaled Int | `not-found
         | `not-runnable [found: String, why: Unrunnable]
-Unrunnable = `permission-denied | `directory | `not-executable | `io String
+Unrunnable = `permission-denied | `directory | `not-executable
+           | `missing-interpreter <`some String | `none> | `io String
 ```
 
 `reason` says why the failure happened. Its process exit code is derived,
@@ -2077,7 +2078,13 @@ A `process` reason takes its code from `failure`:
 | `` `exited n `` | the command exited with nonzero `n` | `n` clamped into `1..=255` |
 | `` `signaled s `` | the command died of signal `s`, not by a cancellation (§8.10) | 128 + `s`, clamped into `1..=255` |
 | `` `not-found `` | no command of that name exists | 127 |
-| `` `not-runnable [found, why] `` | the command could not be started; `found` is the path found, or the typed name | 126 |
+| `` `not-runnable [found, why] `` | the command could not be started; `found` is the path found, or the typed name; `` `missing-interpreter `` is a file that exists whose `#!` interpreter (`` `some ``, when it names one) or loader does not | 126 |
+
+A command confined by a grant reports these exactly as an unconfined one does:
+one that cannot start is `` `not-found `` or `` `not-runnable ``, never an
+exit status, and its own end is its own, `` `signaled `` or `` `exited ``. A
+failure of the confinement itself, before the command could start, is
+`` `raised ``, naming what failed.
 
 Recovery branches on `reason`, not on a status number:
 
@@ -2237,9 +2244,8 @@ it.
 A stop reports the same cause, message and status whether it lands before a
 command starts or while the command runs. An external command that
 dies of the signal ral sends first to tear it down, or of the final kill, is
-reported as the cause in force, also when a sandbox's envelope relays that
-death as `128 + n`. An exit is never read as a signal: `exit 130` is the
-command's choice.
+reported as the cause in force, confined or not. An exit is never read as a
+signal: `exit 130` is the command's choice, confined or not.
 
 Only a terminal ral lent can make a command's failure a cancellation.
 While a command or pipeline holds the terminal, Ctrl-C, Ctrl-\\ or a hangup

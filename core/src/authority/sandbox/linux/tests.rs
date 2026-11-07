@@ -6,12 +6,12 @@ use super::{
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};
 use crate::authority::policy::{ExecAllow, ExecDeny, GrantPath, Join, Rule};
-use crate::authority::sandbox::launch::{Ownership, admitted, enveloped};
-use crate::authority::sandbox::warrant::{Handoff, Slot};
+use crate::authority::sandbox::launch::{Image, Ownership, admitted, enveloped};
+use crate::authority::sandbox::warrant::{Handoff, Slot, Slots};
 use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 use crate::path::{CwdPath, Excluded, FrozenPath, RealPath, Trace};
+use crate::process::Unstarted;
 use crate::test_helper::confinement::skip;
-use std::process::Stdio;
 
 mod exec;
 mod info;
@@ -123,12 +123,11 @@ fn restricted(
     SandboxProjection::of(&stack, &host_system_reads(), None).expect("an fs grant projects")
 }
 
+/// What a confined launch came to: its output, or why it never started.
+type Ran = Result<std::process::Output, Unstarted>;
+
 /// `/bin/sh -c script`, through [`run_admitted`].
-fn run_confined(
-    env: &Envelope<'_>,
-    policy: &SandboxProjection,
-    script: &str,
-) -> Option<std::process::Output> {
+fn run_confined(env: &Envelope<'_>, policy: &SandboxProjection, script: &str) -> Ran {
     run_admitted(env, policy, &sh(), &sh_args(script))
 }
 
@@ -162,17 +161,17 @@ fn run_admitted(
     policy: &SandboxProjection,
     admitted: &Admitted,
     args: &[String],
-) -> Option<std::process::Output> {
+) -> Ran {
     run_after(env, policy, admitted, args, || ())
 }
 
-/// The admitted program's own `execve` was refused, not one of its helpers.
-fn trampoline_refused(out: &std::process::Output, real: &std::path::Path) -> bool {
-    let refused = format!("ral: {}: Permission denied", crate::path::shown(real));
-    out.status.code() == Some(126)
-        && String::from_utf8_lossy(&out.stderr)
-            .lines()
-            .any(|line| line.starts_with(&refused))
+/// The trampoline's own `execve` of the admitted program was refused, as it
+/// reports: a helper's refusal comes from inside a program that started.
+fn trampoline_refused(ran: &Ran) -> bool {
+    matches!(
+        ran,
+        Err(Unstarted::Program(e)) if e.kind() == std::io::ErrorKind::PermissionDenied
+    )
 }
 
 /// [`run_admitted`], built now and spawned after `between`: the window in
@@ -183,23 +182,20 @@ fn run_after(
     admitted: &Admitted,
     args: &[String],
     between: impl FnOnce(),
-) -> Option<std::process::Output> {
-    let (mut cmd, info_fd) = enveloped(
+) -> Ran {
+    let mut launch = enveloped(
         env,
         policy,
         &host_system_reads(),
-        admitted,
+        &Image::of(admitted),
         args,
         None,
         Ownership::Kept,
     )
     .expect("the launch builds");
     between();
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = cmd.output().ok();
-    // Kept open across the fork inside `output()`, whose hook names its copies' numbers.
-    drop(info_fd);
-    out
+    launch.stdin(crate::process::StdioSpec::null());
+    launch.output()
 }
 
 /// This host's pinned bwrap running ral's own pin, where it can build an
@@ -220,14 +216,16 @@ fn envelope_launches(policy: &SandboxProjection) -> Option<Envelope<'static>> {
     let control = run_confined(&env, policy, "echo READY");
     if control
         .as_ref()
-        .is_some_and(|o| emitted(&String::from_utf8_lossy(&o.stdout), "READY"))
+        .is_ok_and(|o| emitted(&String::from_utf8_lossy(&o.stdout), "READY"))
     {
         return Some(env);
     }
-    let why = control.map_or_else(
-        || "the envelope did not spawn".to_string(),
-        |o| String::from_utf8_lossy(&o.stderr).trim().to_string(),
-    );
+    let why = match control {
+        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Err(Unstarted::Refused(refusal)) => refusal.to_string(),
+        Err(Unstarted::Program(e)) => format!("the trampoline could not start /bin/sh: {e}"),
+        Err(Unstarted::Stopped(stop)) => format!("the control was stopped: {stop:?}"),
+    };
     skip(format_args!(
         "this host cannot build a bwrap envelope: {why}"
     ));

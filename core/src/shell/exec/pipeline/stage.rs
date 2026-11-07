@@ -9,7 +9,7 @@ use super::thread::ThreadStage;
 #[cfg(test)]
 use crate::process::Scope;
 use crate::process::jail::JailCgroup;
-use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
+use crate::process::{CancelCause, Landing, Pgid, WaitOutcome, Watch};
 use crate::shell::runtime::Prov;
 use std::sync::Arc;
 
@@ -35,9 +35,8 @@ pub(super) struct ExternalStage {
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
     pub(super) jail: Option<crate::process::jail::JailCgroup>,
     pub(super) pumps: command::Pumps,
-    /// The payload's own process group behind a confining envelope; `None`
-    /// for an unconfined stage, which joined the pipeline's.
-    pub(super) envelope: Option<Pgid>,
+    /// The pipeline's group, or behind a confining envelope its payload's own.
+    pub(super) landing: Landing,
 }
 
 pub(super) enum StageKind {
@@ -88,11 +87,15 @@ impl StageHandle {
         }
     }
 
-    /// `Some` only for an external stage confined behind an envelope.
-    pub(super) fn envelope(&self) -> Option<Pgid> {
+    /// The group this stage leads apart from the pipeline's: an envelope's
+    /// payload's, which no signal to the pipeline's group reaches.
+    pub(super) fn own_group(&self) -> Option<Pgid> {
         match &self.kind {
-            StageKind::External(e) => e.envelope,
-            StageKind::Thread(_) => None,
+            StageKind::External(ExternalStage {
+                landing: Landing::Owns(group),
+                ..
+            }) => Some(*group),
+            StageKind::External(_) | StageKind::Thread(_) => None,
         }
     }
 
@@ -132,7 +135,7 @@ impl StageHandle {
             prov: e.prov,
             name: e.name,
             args: e.args,
-            outcome: outcome.enveloped(e.envelope.is_some()),
+            outcome,
             jail: e.jail,
             pumps: e.pumps,
             sent,
@@ -163,7 +166,7 @@ impl StageHandle {
                 args: Vec::new(),
                 jail: None,
                 pumps: command::Pumps::default(),
-                envelope: None,
+                landing: Landing::Joins,
             }),
             None,
             slot,
@@ -188,7 +191,7 @@ impl StageHandle {
                 args: Vec::new(),
                 jail: None,
                 pumps: command::Pumps::default(),
-                envelope: None,
+                landing: Landing::Joins,
             }),
             None,
             slot,

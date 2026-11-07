@@ -2,7 +2,7 @@
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_date: 2026-11-03
-anchors: [walk, walk_excluded, failure_trace, Shell::walk_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
+anchors: [walk, walk_excluded, failure_trace, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -107,7 +107,9 @@ working regardless of the readability of intermediate links.
   actual link where the budget was spent, without the unresolved continuation;
   otherwise the name walked leniently with `LeafMode::Follow`.
 - **The fs doors judge it for the requested operation `O`** through
-  `Shell::walk_failure`; heads judge it for running through `check_exec_name`.
+  `GrantStack::judge_failure`, which `GrantStack::locate` and `locate_dir`
+  apply, so a caller with no shell (exarch's boot reader) is held to it too;
+  heads judge it for running through `check_exec_name`.
   A denied absent name reads as denied, just as a present object there would.
 - **`locate_first` judges every candidate before asking its kind**, including
   a candidate whose walk failed. It passes over refusals and retains the first

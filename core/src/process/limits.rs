@@ -1,15 +1,17 @@
 //! What a child spawned under an active grant may consume: no core dump, and a
-//! budget of live processes.  A brake that cannot be armed is an `Err`, never a
-//! warning: the child must not run unbraked.
+//! budget of live processes, a property of its launch that each platform's
+//! spawn applies before the child runs.  A budget that cannot be set is a
+//! refusal, never a warning: the child must not run without one.
 
 #[cfg(target_os = "macos")]
 mod fork_brake;
 
-#[cfg(unix)]
 use super::Launch;
-use super::{ChildHandle, Pgid};
+#[cfg(any(windows, target_os = "macos"))]
+use crate::authority::sandbox::Refusal;
 #[cfg(unix)]
 use rustix::process::Resource;
+#[cfg(unix)]
 use std::io;
 
 /// Soft resource ceilings inherited by every child in a session.
@@ -53,7 +55,15 @@ impl ChildLimit {
 /// How many live processes a grant-confined child may add: the fork-bomb cap.
 /// A Job Object limit on Windows; on macOS, headroom over the user's count at launch.
 #[cfg(any(windows, target_os = "macos"))]
-const ACTIVE_PROCESS_CAP: u32 = 512;
+pub(super) const ACTIVE_PROCESS_CAP: u32 = 512;
+
+/// Why a child under a grant was not started: `why` its budget could not be set.
+#[cfg(any(windows, target_os = "macos"))]
+pub(super) fn unbudgeted(why: impl std::fmt::Display) -> Refusal {
+    Refusal::Unavailable(format!(
+        "{why}, so this command would run with no process budget"
+    ))
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn failure_hint(code: i32) -> Option<String> {
@@ -101,17 +111,20 @@ impl Launch {
     /// only calls `setrlimit`.
     ///
     /// # Errors
-    /// Returns `Err` when the budget cannot be measured.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "only macOS can fail: it measures the fork-brake budget"
+    /// macOS: the budget cannot be measured.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            clippy::unnecessary_wraps,
+            reason = "only macOS can fail: it measures the fork-brake budget"
+        )
     )]
-    pub(crate) fn limit_resources(&mut self) -> io::Result<()> {
+    pub(crate) fn limit_resources(&mut self) -> Result<(), crate::authority::sandbox::Refusal> {
         #[cfg(target_os = "macos")]
-        let nproc = fork_brake::limit()
-            .map_err(|e| io::Error::other(format!("cannot count your processes: {e}")))?;
-        #[cfg(target_os = "macos")]
-        self.limit_forks(nproc);
+        self.limit_forks(
+            fork_brake::limit()
+                .map_err(|e| unbudgeted(format_args!("cannot count your processes: {e}")))?,
+        );
         use std::os::unix::process::CommandExt;
         unsafe {
             self.cmd
@@ -142,63 +155,17 @@ fn set_limit(resource: rustix::process::Resource, limit: u64) -> io::Result<()> 
     .map_err(Into::into)
 }
 
-impl ChildHandle {
-    /// Cap the child's process tree after the spawn.  Unix did so before
-    /// `exec` ([`Launch::limit_resources`]); on Windows a Job Object does it,
-    /// the pipeline's own when the child sits in `group`.  Post-spawn, so the
-    /// child runs unconstrained between `CreateProcess` and the assignment.
-    ///
-    /// # Errors
-    /// Returns `Err` when the cap could not be installed.
-    #[cfg(unix)]
+/// Windows: the budget is set on the child's Job Object while the child is
+/// still suspended, so it never runs without one.
+#[cfg(windows)]
+impl Launch {
     #[allow(
         clippy::unnecessary_wraps,
-        clippy::unused_self,
-        reason = "Unix capped the tree before exec; the Windows arm reads both and can fail"
+        reason = "the Unix arms can fail; on Windows a budget that cannot be set refuses the spawn"
     )]
-    pub(crate) fn limit_processes(&self, _group: Option<Pgid>) -> io::Result<()> {
+    pub(crate) fn limit_resources(&mut self) -> Result<(), Refusal> {
+        self.process_cap = true;
         Ok(())
-    }
-
-    /// See the Unix arm.
-    ///
-    /// # Errors
-    /// Returns `Err` when the cap could not be installed.
-    #[cfg(windows)]
-    pub(crate) fn limit_processes(&self, group: Option<Pgid>) -> io::Result<()> {
-        use super::group::{
-            apply_group_active_process_limit, is_known_group, set_active_process_limit,
-        };
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
-
-        // A child inside a pipeline cannot join a second job: the cap lands on
-        // the one it is already in.
-        if let Some(leader) = group.filter(|g| is_known_group(g.as_raw())) {
-            return apply_group_active_process_limit(leader.as_raw(), ACTIVE_PROCESS_CAP)
-                .then_some(())
-                .ok_or_else(|| io::Error::other("cannot cap the pipeline's Job Object"));
-        }
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let armed = if !set_active_process_limit(job, ACTIVE_PROCESS_CAP) {
-                Err(io::Error::other("cannot cap the child's Job Object"))
-            } else if AssignProcessToJobObject(job, self.raw_process_handle()) == 0 {
-                Err(io::Error::other(format!(
-                    "cannot place the child in a capped Job Object ({}); ral itself may be in a job that forbids nesting",
-                    io::Error::last_os_error()
-                )))
-            } else {
-                Ok(())
-            };
-            // The job outlives this handle: it dissolves only once its last
-            // member has exited, so the cap holds for the child's whole tree.
-            CloseHandle(job);
-            armed
-        }
     }
 }
 

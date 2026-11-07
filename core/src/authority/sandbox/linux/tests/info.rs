@@ -2,6 +2,7 @@ use super::*;
 use std::io::{BufRead, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
+use std::process::Stdio;
 
 fn record(bytes: &[u8]) -> InfoFd {
     let (reader, mut writer) = UnixStream::pair().unwrap();
@@ -88,10 +89,9 @@ fn a_truncated_info_record_refuses_spawn_and_reaps_the_envelope() {
             info.payload_pgid()
         })),
     });
-    let why = launch
-        .spawn(PgidPolicy::NewLeader)
-        .err()
-        .expect("spawn must refuse");
+    let Err(crate::process::Unstarted::Refused(why)) = launch.spawn(PgidPolicy::NewLeader) else {
+        panic!("spawn must refuse");
+    };
     assert!(
         why.to_string().contains("malformed bwrap --info-fd"),
         "{why}"

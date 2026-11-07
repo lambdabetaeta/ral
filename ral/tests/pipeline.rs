@@ -1302,7 +1302,7 @@ fn a_workers_external_cannot_open_the_terminal() {
 #[test]
 fn pipeline_path_literal_exec_failure_reports_127() {
     // `/no/such/binary` cannot be spawned.  Direct external launch
-    // rebuilds that as `CommandFailure::Spawn(NotFound)` against the
+    // rebuilds that as `Failure::NotFound` against the
     // real command name and surfaces a "no such file or directory"
     // diagnostic, not a generic pipeline-stage failure.
     let o = run_with_timeout(

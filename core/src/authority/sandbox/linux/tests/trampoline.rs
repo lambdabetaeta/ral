@@ -83,33 +83,33 @@ fn run_trampoline(
     policy: &SandboxProjection,
     admitted: &Admitted,
     args: &[String],
-) -> Option<std::process::Output> {
+) -> Ran {
+    use crate::authority::sandbox::launch::{bwrapped, issue};
     use crate::authority::sandbox::warrant::Warrant;
-    use std::os::fd::AsFd;
-    let parcel = Warrant::new(None, admitted, args, policy)
-        .parcel()
-        .expect("parcels");
     let mut handoff = Handoff::default();
-    let warrant = handoff.lend(parcel.as_fd()).expect("lends");
+    let (slots, report) = issue(
+        &Warrant::new(None, &Image::of(admitted), args),
+        &mut handoff,
+    )
+    .expect("issues");
     let rendered = policy.rendered().expect("renders");
     let env = Envelope {
         trampoline: own,
         ..*env
     };
-    let (mut cmd, info_fd) = bwrap_command(
+    let (cmd, info) = bwrap_command(
         &env,
         plan(policy),
         handoff,
-        warrant,
+        slots,
         &rendered,
         None,
         Ownership::Kept,
     )
     .expect("the launch builds");
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = cmd.output().ok();
-    drop(info_fd);
-    out
+    let mut launch = bwrapped(cmd, info, report);
+    launch.stdin(crate::process::StdioSpec::null());
+    launch.output()
 }
 
 /// Swapped on disk after its pin, the trampoline still runs the pinned
@@ -139,7 +139,7 @@ fn a_trampoline_swapped_by_rename_still_runs_the_pinned_bytes() {
 
 /// Inside, the trampoline's `/proc/self/exe` is the pinned inode, which
 /// after the swap has no name but the one it lost: a bundled tool runs in
-/// the trampoline itself.
+/// a fork of the trampoline, its image unchanged.
 #[cfg(feature = "coreutils")]
 #[cfg_attr(
     ctor_without_argv,

@@ -5,7 +5,7 @@ use super::flow::Stop;
 use crate::compile::CompileError;
 use crate::diagnostic::{Label, Rejection, Report, palette};
 use crate::fact::{Ending, Failure, FailureCode, Reason};
-use crate::process::{CancelCause, CommandFailure, SpawnFailure, WorkerStop};
+use crate::process::{CancelCause, WorkerStop};
 use crate::source::{CallSite, FileId, Source, SourceDb, Span};
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
@@ -207,15 +207,6 @@ impl Error {
         Self::from_reason(owned.into())
     }
 
-    /// A command that never became a process, whether the pre-spawn probe or
-    /// the spawn itself found out.
-    pub(crate) fn spawn_failure(program: &str, failure: SpawnFailure) -> Self {
-        Self::from_reason(Reason::from_command(
-            program,
-            CommandFailure::Spawn(failure),
-        ))
-    }
-
     pub(crate) fn abandoning_tail(mut self) -> Self {
         self.unwound.abandoned_tail = true;
         self
@@ -226,9 +217,10 @@ impl Error {
         self
     }
 
-    /// A bare exit code takes its hint from the session's `exit_hints` table.
-    pub(crate) fn from_command_failure(program: &str, failure: CommandFailure) -> Self {
-        Self::from_reason(Reason::from_command(program, failure))
+    /// A command that ended or never became a process.  A bare exit code
+    /// takes its hint from the session's `exit_hints` table.
+    pub(crate) fn process(program: &str, failure: Failure) -> Self {
+        Self::from_reason(Reason::process(program, failure))
     }
 
     pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {

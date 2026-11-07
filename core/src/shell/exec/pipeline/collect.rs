@@ -8,8 +8,7 @@ use super::super::command;
 use super::stage::StageHandle;
 use crate::fact::{AuditIo, Command, ExitCode};
 use crate::process::{
-    CancelCause, ChildEnd, Group, POLL_SLICE, Pgid, Scope, ScopeId, TerminalLoan, WaitOutcome,
-    Watch,
+    CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, TerminalLoan, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
     AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Observed, Prov, Settled,
@@ -17,14 +16,6 @@ use crate::shell::runtime::{
 };
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
-
-/// A failed stage's error with the kernel's denial hint.  Best-effort:
-/// siblings share the group, so the reader scopes deny lines to a descendant
-/// sample taken at the failure, over the pipeline-wide window from `started`.
-fn augment_stage_failure(err: Error, shell: &Shell, started: Instant) -> Error {
-    let pids = || crate::process::sample_descendants(std::process::id());
-    command::with_denials(err, shell, pids, started)
-}
 
 /// Built whether or not anyone is listening: this phase performs no effects,
 /// and `fold` hands the fragment to the one emission point, which is where the
@@ -49,9 +40,11 @@ fn synth_external_stage_audit(
 }
 
 /// The shell-touching finish the reaper's posting closure, holding no
-/// `&Shell`, could not give an external's raw outcome.  A death by what this
-/// collector `sent` is the external's stop naming its stage, consumed as a
-/// thread's is.
+/// `&Shell`, could not give an external's raw outcome: the run's one ending,
+/// less a death by what this collector `sent`, whose stop is its own doing,
+/// consumed as a thread's is.  The kernel's denial hint is best-effort:
+/// siblings share the group, so deny lines are scoped to a descendant sample
+/// taken at the failure, over the pipeline-wide window from `started`.
 #[allow(
     clippy::too_many_arguments,
     reason = "the one shell-touching finish; each argument is a distinct fact of the settlement"
@@ -67,18 +60,22 @@ fn finish_external_settlement(
     shell: &Shell,
     started: Instant,
 ) -> StageObservation {
-    let broke = match outcome.classify(cause) {
-        Some(ChildEnd::Cancelled(c)) if sent == Some(c) => None,
-        end => end.map(|end| Break::of_child(name, end, scope).claimed_by(|| prov.clone())),
+    let settled = match outcome.cancelled_by(cause) {
+        Some(cause) if sent == Some(cause) => Ok(()),
+        _ => command::ending(
+            name,
+            outcome,
+            cause,
+            scope,
+            shell,
+            || crate::process::sample_descendants(std::process::id()),
+            started,
+        )
+        .map_err(|broke| broke.claimed_by(|| prov.clone())),
     };
-    let audit = synth_external_stage_audit(shell, prov, name, args, broke.as_ref());
-    let settled = match broke {
-        Some(Break::Error(err)) => Err(Break::Error(augment_stage_failure(err, shell, started))),
-        Some(stop) => Err(stop),
-        None => Ok(Value::Unit),
-    };
+    let audit = synth_external_stage_audit(shell, prov, name, args, settled.as_ref().err());
     StageObservation {
-        end: End::settled(settled),
+        end: End::settled(settled.map(|()| Value::Unit)),
         audit,
     }
 }
@@ -607,7 +604,7 @@ impl CollectState {
             .stages
             .iter()
             .flatten()
-            .filter_map(StageHandle::envelope)
+            .filter_map(StageHandle::own_group)
             .map(Address::Group);
         group
             .into_iter()

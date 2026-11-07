@@ -1,6 +1,7 @@
-//! Confining one external or bundled child under the platform's OS sandbox.
-//! `build_launch` in `shell::exec::command::process` routes here whenever a
-//! projection is active and no guest jail already confines the child.
+//! What a launch runs ([`Image`]), and confining one external or bundled
+//! child under the platform's OS sandbox.  `build_launch` in
+//! `shell::exec::command::process` routes here whenever a projection is
+//! active and no guest jail already confines the child.
 //!
 //! Env, cwd and resource limits are the caller's, layered on the returned
 //! launch exactly as on the unsandboxed path so the two cannot drift.  Linux
@@ -8,10 +9,11 @@
 //! child in its namespace root, so the logical cwd rides the argv as `--chdir`.
 //!
 //! macOS and Linux share one trampoline: the payload is *ral*, as `ral
-//! --warrant <fd>`, and the warrant it reads off that descriptor names both
-//! the confinement — macOS's Seatbelt profile, compiled here; Linux's promise
-//! of the Landlock ruleset built here in the host, which the payload inherits
-//! — and the program it becomes once inside ([`serve_warrant`]).  On Linux the
+//! --warrant <w> <r>`, and the warrant it reads off slot `w` names both the
+//! confinement — macOS's Seatbelt profile, compiled here; Linux's promise of
+//! the Landlock ruleset built here in the host, which the payload inherits —
+//! and the image it runs once inside ([`serve_warrant`]); slot `r` is the
+//! report socket it says what became of the program on.  On Linux the
 //! trampoline runs inside the bwrap envelope, which is what makes the Landlock
 //! layer possible at all: a domain handling any fs right forbids `mount(2)`,
 //! bwrap's first act.  Windows has no trampoline — its `LowBox` token is
@@ -22,16 +24,21 @@ use super::linux::Envelope;
 #[cfg(target_os = "macos")]
 use super::warrant::Seatbelt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::warrant::{Handoff, Native, Slot, Warrant};
+use super::warrant::{Handoff, Slot, Slots, Warrant};
 use super::{Refusal, SandboxProjection};
 use crate::Role;
-use crate::authority::policy::{Admitted, Baseline};
-use crate::path::CwdPath;
+use crate::authority::policy::{Admitted, Baseline, Program};
+use crate::path::{CwdPath, RealPath};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::process::report::Report;
 use std::ffi::OsString;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::fd::AsFd;
 #[cfg(all(test, target_os = "macos"))]
 use std::path::Path;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::{os::fd::AsFd, process::Command};
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::process::Command;
 
 /// Whether the session keeps owning what it launches.  Read by the Linux
 /// backend, which decides two ties between the session and the envelope:
@@ -51,10 +58,65 @@ pub(crate) enum Ownership {
     Surrendered,
 }
 
-/// Build a [`Launch`](crate::process::Launch) running the admitted program and
-/// its arguments under the sandbox for `projection`; the caller has already
+/// What a launch runs: a host file by the real path the guard judged, under
+/// the spelling the user wrote, or a bundled tool, run as ral itself.  A
+/// file carries the `#!` interpreter read through the judged handle, to word
+/// a failure to start it; a warrant carries the image without it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Image {
+    File {
+        real: RealPath,
+        arg0: PathBuf,
+        interpreter: Option<PathBuf>,
+    },
+    Tool(&'static str),
+}
+
+impl Image {
+    /// The admitted program's image, read once while its handle is held.
+    pub(crate) fn of(admitted: &Admitted) -> Self {
+        match admitted.program() {
+            Program::File { arg0, located } => Self::File {
+                real: located.real().clone(),
+                arg0: arg0.clone(),
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                interpreter: super::carriers::launched_shebang(located),
+                #[cfg(windows)]
+                interpreter: None,
+            },
+            Program::Tool(tool) => Self::Tool(tool),
+        }
+    }
+
+    /// The plain launch of this image with `args`: unconfined, or for
+    /// Windows to confine at the spawn.
+    pub(crate) fn launch(&self, args: &[String]) -> Result<crate::process::Launch, Refusal> {
+        let mut launch = match self {
+            Self::File { real, arg0, .. } => {
+                let mut launch = crate::process::Launch::new(real.as_path());
+                launch.arg0(arg0);
+                launch
+            }
+            Self::Tool(tool) => {
+                let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {
+                    Refusal::Launch(format!(
+                        "bundled tool '{tool}': cannot resolve ral's own program: {e}"
+                    ))
+                })?;
+                launch.arg(tool);
+                launch
+            }
+        };
+        launch.args(args);
+        Ok(launch)
+    }
+}
+
+/// Build a [`Launch`](crate::process::Launch) running `image` and its
+/// arguments under the sandbox for `projection`; the caller has already
 /// cleared [`super::projection_enforceable`] and applies env, cwd and limits
-/// after.
+/// after.  A stop on `cancel` ends the confinement's work on Windows, and the
+/// wait for the trampoline's first word elsewhere.
 ///
 /// `cwd` is the logical cwd Linux folds in as `--chdir`, and `ownership`
 /// likewise reaches Linux alone, the one backend that builds an
@@ -74,94 +136,45 @@ pub(crate) enum Ownership {
 pub(crate) fn sandboxed_command(
     projection: &SandboxProjection,
     baseline: &Baseline,
-    admitted: &Admitted,
+    image: &Image,
     args: &[String],
     ownership: Ownership,
     cwd: &CwdPath,
     cancel: &crate::process::cancel::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
-    // Only the Windows backend does work here a cancel could interrupt: bwrap
-    // and Seatbelt render a profile in memory, while an `AppContainer` stamps
-    // the projection's prefixes onto the filesystem before the child exists.
-    #[cfg(not(windows))]
-    let _ = cancel;
     #[cfg(target_os = "linux")]
-    {
-        let (cmd, info_fd) =
-            linux_sandboxed_command(projection, baseline, admitted, args, ownership, cwd)?;
-        let mut launch = crate::process::Launch::from_command(cmd);
-        // A host package rather than part of ral, so it may simply be absent.
-        launch.envelope(crate::process::launch::Envelope {
-            program: super::linux::BWRAP,
-            payload_pgid: info_fd.map(|fd| Box::new(move || fd.payload_pgid()) as _),
-        });
-        Ok(launch)
-    }
+    let mut launch = linux_sandboxed_command(projection, baseline, image, args, ownership, cwd)?;
     #[cfg(target_os = "macos")]
+    let mut launch = macos_sandboxed_command(projection, image, args)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        macos_sandboxed_command(projection, admitted, args)
-            .map(crate::process::Launch::from_command)
+        launch.under(cancel.clone());
+        Ok(launch)
     }
     #[cfg(windows)]
     {
-        windows_sandboxed_command(projection, admitted, args, cancel)
+        // The token loads the image at its real path, a bundled tool's being
+        // ral.exe's own; a Windows child has no warrant to enter.
+        let loaded = match image {
+            Image::File { real, .. } => Some(real.clone()),
+            Image::Tool(_) => super::reexec::own_binary().map(|own| own.real().clone()),
+        };
+        let mut launch = image.launch(args)?;
+        super::windows::session::confine(&mut launch, projection, loaded.as_ref(), cancel)?;
+        Ok(launch)
     }
 }
 
-/// Windows: the parent applies the `LowBox` token at spawn time
-/// (`super::windows::session::confine`), so there is no re-exec into the
-/// sandbox as on macOS/Linux.  A bundled tool is therefore a plain
-/// `ral --ral-bundled-tool <tool> …` self-placement carrying no warrant: a
-/// Windows child has nothing to enter, and [`serve_warrant`] refuses one.
-#[cfg(windows)]
-fn windows_sandboxed_command(
-    projection: &SandboxProjection,
-    admitted: &Admitted,
-    args: &[String],
-    cancel: &crate::process::cancel::Scope,
-) -> Result<crate::process::Launch, Refusal> {
-    use crate::authority::policy::Program;
-    // The LowBox token reads only the ALL APPLICATION PACKAGES system paths,
-    // so a user-installed image needs `session::confine` to stamp its path RO,
-    // mirroring the Linux backend binding the program path into the bwrap argv.
-    let (mut launch, image): (crate::process::Launch, Option<crate::path::RealPath>) =
-        match admitted.program() {
-            Program::File { arg0, located } => {
-                let mut launch = crate::process::Launch::new(located.real().as_path());
-                launch.arg0(arg0);
-                launch.args(args);
-                (launch, Some(located.real().clone()))
-            }
-            Program::Tool(tool) => {
-                let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {
-                    Refusal::Launch(format!(
-                        "sandbox: cannot resolve self exe for bundled tool '{tool}': {e}"
-                    ))
-                })?;
-                launch.arg(tool);
-                launch.args(args);
-                // The confined child is ral.exe itself; the token must load
-                // it, at its real path, since a link on the path refuses.
-                let image = super::reexec::own_binary().map(|own| own.real().clone());
-                (launch, image)
-            }
-        };
-    super::windows::session::confine(&mut launch, projection, image.as_ref(), cancel)?;
-    Ok(launch)
-}
-
-/// Issue the warrant for `admitted` under `confinement`, lent to `handoff`;
-/// `projection` is read for its exclusions, to diagnose.
+/// The warrant lent to `handoff`, and the report socket kept for the child:
+/// the trampoline's two slots, and the parent's ends of the report.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn issue(
-    confinement: Native,
-    admitted: &Admitted,
-    args: &[String],
-    projection: &SandboxProjection,
-    handoff: &mut Handoff,
-) -> Result<Slot, Refusal> {
-    let parcel = Warrant::new(confinement, admitted, args, projection).parcel()?;
-    Ok(handoff.lend(parcel.as_fd())?)
+pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, Report), Refusal> {
+    let parcel = warrant.parcel()?;
+    let warrant = handoff.lend(parcel.as_fd())?;
+    let (reader, writer) = crate::process::cloexec_socketpair()
+        .map_err(|e| format!("sandbox: cannot open the confined launch's report socket: {e}"))?;
+    let (writer, report) = handoff.keep(writer.as_fd())?;
+    Ok((Slots { warrant, report }, Report::new(reader, writer)))
 }
 
 /// Linux: the payload is always the trampoline, launched under this host's
@@ -170,11 +183,11 @@ fn issue(
 fn linux_sandboxed_command(
     projection: &SandboxProjection,
     baseline: &Baseline,
-    admitted: &Admitted,
+    image: &Image,
     args: &[String],
     ownership: Ownership,
     cwd: &CwdPath,
-) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
+) -> Result<crate::process::Launch, Refusal> {
     let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
     let own = super::reexec::own()?;
     let env = Envelope::probe(bwrap, own);
@@ -182,7 +195,7 @@ fn linux_sandboxed_command(
         &env,
         projection,
         baseline,
-        admitted,
+        image,
         args,
         Some(cwd),
         ownership,
@@ -197,11 +210,11 @@ pub(super) fn enveloped(
     env: &Envelope<'_>,
     projection: &SandboxProjection,
     baseline: &Baseline,
-    admitted: &Admitted,
+    image: &Image,
     args: &[String],
     chdir: Option<&CwdPath>,
     ownership: Ownership,
-) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
+) -> Result<crate::process::Launch, Refusal> {
     let rendered = projection.rendered()?;
     let shown = super::linux::Shown::of(&rendered, baseline)?;
     let mut handoff = Handoff::default();
@@ -212,8 +225,29 @@ pub(super) fn enveloped(
         env.host.landlock,
         &mut handoff,
     )?;
-    let warrant = issue(confinement, admitted, args, projection, &mut handoff)?;
-    super::linux::bwrap_command(env, shown, handoff, warrant, &rendered, chdir, ownership)
+    let (slots, report) = issue(&Warrant::new(confinement, image, args), &mut handoff)?;
+    let (cmd, info) =
+        super::linux::bwrap_command(env, shown, handoff, slots, &rendered, chdir, ownership)?;
+    Ok(bwrapped(cmd, info, report))
+}
+
+/// bwrap's `cmd` as a launch, with the payload's `--info-fd` peer and the
+/// trampoline's report.
+#[cfg(target_os = "linux")]
+pub(super) fn bwrapped(
+    cmd: Command,
+    info: Option<super::linux::InfoFd>,
+    report: Report,
+) -> crate::process::Launch {
+    let mut launch = crate::process::Launch::from_command(cmd);
+    // A host package rather than part of ral, so it may simply be absent.
+    launch
+        .envelope(crate::process::launch::Envelope {
+            program: super::linux::BWRAP,
+            payload_pgid: info.map(|fd| Box::new(move || fd.payload_pgid()) as _),
+        })
+        .report(report);
+    launch
 }
 
 /// macOS: re-exec the pinned ral, with the compiled profile in its warrant,
@@ -224,42 +258,73 @@ pub(super) fn enveloped(
 #[cfg(target_os = "macos")]
 fn macos_sandboxed_command(
     projection: &SandboxProjection,
-    admitted: &Admitted,
+    image: &Image,
     args: &[String],
-) -> Result<Command, Refusal> {
+) -> Result<crate::process::Launch, Refusal> {
     let own = super::reexec::own()?;
     own.verify()?;
     let profile = super::macos::build_profile(projection)?;
     let mut handoff = Handoff::default();
-    let warrant = issue(Seatbelt(profile), admitted, args, projection, &mut handoff)?;
-    let mut cmd = own.command();
-    cmd.arg(Role::Warrant.flag()).arg(warrant.to_string());
-    handoff.install(&mut cmd);
-    Ok(cmd)
+    let (slots, report) = issue(&Warrant::new(Seatbelt(profile), image, args), &mut handoff)?;
+    Ok(trampoline(own, handoff, slots, report))
 }
 
-/// Serve `ral --warrant <fd>`: `args` must be that one slot.
+/// The pinned ral, summoned to its slots.
+#[cfg(target_os = "macos")]
+pub(super) fn trampoline(
+    own: &super::reexec::Pinned,
+    handoff: Handoff,
+    slots: Slots,
+    report: Report,
+) -> crate::process::Launch {
+    let mut cmd = own.command();
+    cmd.args(slots.argv());
+    handoff.install(&mut cmd);
+    let mut launch = crate::process::Launch::from_command(cmd);
+    launch.report(report);
+    launch
+}
+
+/// Serve `ral --warrant <w> <r>`: `args` must be those two slots.
 ///
-/// Take the warrant the launch left there, enter its
-/// confinement — Seatbelt on macOS, the Landlock layer inside the bwrap
-/// envelope on Linux; sweep every descriptor above stderr, then become its
-/// program.
-///
-/// Nothing runs unconfined: any failure before the program starts is 126, and
-/// so is a host program `execve` refuses for any reason but its absence, which
-/// is 127 — POSIX's two codes, as the in-process spawn assigns them.
+/// Take the report socket at `r` and the warrant the launch left at `w`, enter
+/// its confinement — Seatbelt on macOS, the Landlock layer inside the bwrap
+/// envelope on Linux; sweep every descriptor above stderr but the report,
+/// then run the program and say on the report what became of it.  Nothing
+/// runs unconfined, and nothing is printed: the parent words what it is told.
+/// Only a call naming no report socket, made by hand, is refused on stderr.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn serve_warrant(args: &[OsString]) -> u8 {
-    let confined = match args {
-        [at] => Slot::parse(&crate::path::shown(at)).and_then(Warrant::confine),
+    let slots = match args {
+        [warrant, report] => Slot::parse(&crate::path::shown(warrant)).and_then(|warrant| {
+            Ok(Slots {
+                warrant,
+                report: Slot::parse(&crate::path::shown(report))?,
+            })
+        }),
         _ => Err(format!(
-            "{} takes one argument, the descriptor its warrant arrives on: it is how \
-             ral starts its own confined children, never a command to run by hand",
+            "{} takes two arguments, the descriptors its warrant and its report arrive on: it \
+             is how ral starts its own confined children, never a command to run by hand",
             Role::Warrant.flag()
         )),
     };
-    match confined {
-        Ok(confined) => confined.run(),
+    let witness = slots.and_then(|slots| {
+        let at = slots.report;
+        let fd = at
+            .take()
+            .ok_or_else(|| format!("no report socket at fd {at}"))?;
+        crate::process::report::Witness::new(fd)
+            .map(|witness| (slots, witness))
+            .ok_or_else(|| format!("fd {at} is not ral's report socket"))
+    });
+    match witness {
+        Ok((slots, witness)) => match Warrant::confine(slots) {
+            Ok(confined) => confined.run(witness),
+            Err(why) => {
+                witness.refused(&why);
+                126
+            }
+        },
         Err(e) => {
             crate::io::terminal::cmd_error("ral", &e);
             126
@@ -303,13 +368,19 @@ mod tests {
         Program::file("/bin/sh".into()).expect("/bin/sh exists")
     }
 
+    /// What an unrestricted guard admits of `program`, as a launch runs it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn image(program: Program) -> Image {
+        Image::of(&admitted(program))
+    }
+
     // Needed only by the per-platform launch tests; elsewhere the two
     // refusals are the only tests, and they need no scaffolding.
     #[cfg(target_os = "macos")]
     use crate::authority::policy::{ExecAllow, ExecDeny, Rule};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
-        authority::policy::{FsAllow, GrantPath, Program},
+        authority::policy::{FsAllow, GrantPath},
         authority::sandbox::{ExecProjection, FsProjection, FsRules},
         path::{Excluded, FrozenPath, Trace},
     };
@@ -342,40 +413,45 @@ mod tests {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn argv(cmd: &Command) -> Vec<String> {
-        cmd.get_args()
+    fn argv(launch: &crate::process::Launch) -> Vec<String> {
+        (launch.command().get_args())
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
     }
 
     /// Whatever the child is to run crosses in its warrant, so its argv names
-    /// only the trampoline asking for one and the slot it arrives at.
+    /// only the trampoline asking for one and the slots its warrant and
+    /// report arrive at.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_macos_launch_is_the_warrant_trampoline_alone() {
         for program in [sh(), Program::Tool("ls")] {
-            let cmd = macos_sandboxed_command(&restrictive(), &admitted(program), &["-l".into()])
+            let launch = macos_sandboxed_command(&restrictive(), &image(program), &["-l".into()])
                 .expect("build macOS command");
-            let args = argv(&cmd);
-            let [flag, at] = &args[..] else {
-                panic!("not `--warrant <w>`: {args:?}");
+            let args = argv(&launch);
+            let [flag, warrant, report] = &args[..] else {
+                panic!("not `--warrant <w> <r>`: {args:?}");
             };
             assert_eq!(flag, Role::Warrant.flag());
-            Slot::parse(at).expect("the warrant's slot");
+            for at in [warrant, report] {
+                Slot::parse(at).expect("a slot");
+            }
         }
     }
 
     /// Refused before any descriptor is touched, so it is safe in-process:
-    /// the trampoline takes one argument, a slot.
+    /// the trampoline takes two arguments, both slots.
     #[test]
     fn a_warrant_flag_naming_no_slot_runs_nothing() {
         for args in [
             &[][..],
             &["sh"],
-            &["97"],
-            &["+101"],
-            &["0101"],
+            &["101"],
+            &["97", "101"],
+            &["+101", "102"],
+            &["0101", "102"],
             &["101", "sh"],
+            &["101", "102", "sh"],
         ] {
             let args: Vec<OsString> = args.iter().map(OsString::from).collect();
             assert_eq!(serve_warrant(&args), 126, "{args:?}");
@@ -417,17 +493,20 @@ mod tests {
         dir
     }
 
-    /// Spawn `cmd` confined and report success; stdio is silenced so a denied
-    /// write's diagnostic stays out of the test runner's output.
+    /// `launch` run to its end, stdin empty and the rest captured, so a
+    /// denied write's diagnostic stays out of the test runner's output.
     #[cfg(target_os = "macos")]
-    fn run_confined(mut cmd: Command) -> bool {
-        use std::process::Stdio;
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = cmd.spawn().expect("spawn sandboxed child");
-        let status = child.wait().expect("wait for sandboxed child");
-        status.success()
+    fn confined(
+        mut launch: crate::process::Launch,
+    ) -> Result<std::process::Output, crate::process::Unstarted> {
+        launch.stdin(crate::process::StdioSpec::null());
+        launch.output()
+    }
+
+    /// Whether `launch` started and succeeded.
+    #[cfg(target_os = "macos")]
+    fn run_confined(launch: crate::process::Launch) -> bool {
+        confined(launch).is_ok_and(|out| out.status.success())
     }
 
     /// The in-prefix write is what makes the denial meaningful: it shows
@@ -444,7 +523,7 @@ mod tests {
         let allowed_s = allowed.to_string_lossy().into_owned();
         let ok = macos_sandboxed_command(
             &proj,
-            &admitted(sh()),
+            &image(sh()),
             &["-c".into(), format!("echo x > {allowed_s}")],
         )
         .expect("build host command (inside)");
@@ -456,7 +535,7 @@ mod tests {
         let denied_s = denied.to_string_lossy().into_owned();
         let bad = macos_sandboxed_command(
             &proj,
-            &admitted(sh()),
+            &image(sh()),
             &["-c".into(), format!("echo x > {denied_s}")],
         )
         .expect("build host command (outside)");
@@ -499,7 +578,7 @@ mod tests {
         let mark = work.join("who");
         let cmd = macos_sandboxed_command(
             &write_confined_to(&work.to_string_lossy()),
-            &admitted(judged),
+            &image(judged),
             &[mark.to_string_lossy().into_owned()],
         )
         .expect("build host command");
@@ -523,7 +602,7 @@ mod tests {
         let mark = work.join("argv0");
         let cmd = macos_sandboxed_command(
             &write_confined_to(&work.to_string_lossy()),
-            &admitted(Program::file(link.clone()).expect("the link names a program")),
+            &image(Program::file(link.clone()).expect("the link names a program")),
             &[
                 "-c".into(),
                 format!("printf %s \"$0\" > {}", mark.display()),
@@ -549,7 +628,7 @@ mod tests {
 
         let allowed = work.join("sub");
         let allowed_s = allowed.to_string_lossy().into_owned();
-        let ok = macos_sandboxed_command(&proj, &admitted(Program::Tool("mkdir")), &[allowed_s])
+        let ok = macos_sandboxed_command(&proj, &image(Program::Tool("mkdir")), &[allowed_s])
             .expect("build bundled command (inside)");
         assert!(run_confined(ok), "mkdir into the write prefix must succeed");
         assert!(allowed.is_dir(), "in-prefix mkdir should have landed");
@@ -559,7 +638,7 @@ mod tests {
         let denied_s = denied.to_string_lossy().into_owned();
         let bad = macos_sandboxed_command(
             &proj,
-            &admitted(Program::Tool("mkdir")),
+            &image(Program::Tool("mkdir")),
             std::slice::from_ref(&denied_s),
         )
         .expect("build bundled command (outside)");
@@ -616,31 +695,13 @@ mod tests {
         ExecProjection::Restricted(std::iter::once(Rule::Allow(ExecAllow::Any)).collect())
     }
 
-    /// The exit code and stderr of `cmd` run confined, stdout silenced.
-    #[cfg(target_os = "macos")]
-    fn confined_stderr(mut cmd: Command) -> (Option<i32>, String) {
-        use std::process::Stdio;
-        let out = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn sandboxed child")
-            .wait_with_output()
-            .expect("wait for sandboxed child");
-        (
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
     /// A Mach-O of this user's own, ad-hoc signed so that relocating it is
     /// not what kills it.
     #[cfg(target_os = "macos")]
     fn mach_o(dir: &Path, name: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::copy("/usr/bin/true", &path).expect("copy a Mach-O");
-        let signed = Command::new("codesign")
+        let signed = std::process::Command::new("codesign")
             .args(["--force", "-s", "-"])
             .arg(&path)
             .status()
@@ -662,7 +723,7 @@ mod tests {
             let line = format!("{} && echo > {}", prog.display(), ran.display());
             let cmd = macos_sandboxed_command(
                 &confined_to(read, &[&mark], &[], every()),
-                &admitted(sh()),
+                &image(sh()),
                 &["-c".into(), line],
             )
             .expect("build host command");
@@ -679,9 +740,15 @@ mod tests {
     }
 
     /// A `#!/bin/sh` script, launched with `/bin/sh` excluded by the exec
-    /// table (`fs_deny` empty) or by the fs (`exec` unrestricted by it).
+    /// table (`fs_deny` empty) or by the fs (`exec` unrestricted by it): how
+    /// its start went, and the hint the shell would add.
     #[cfg(target_os = "macos")]
-    fn launch_with_excluded_shell(by_exec: bool) -> (Option<i32>, String) {
+    fn launch_with_excluded_shell(
+        by_exec: bool,
+    ) -> (
+        Result<std::process::Output, crate::process::Unstarted>,
+        Option<String>,
+    ) {
         let work = scratch(if by_exec { "excl_exec" } else { "excl_fs" });
         let script = work.join("run");
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write script");
@@ -703,15 +770,29 @@ mod tests {
         } else {
             confined_to(&[&work, Path::new("/bin")], &[&work], &["/bin/sh"], every())
         };
-        let cmd = macos_sandboxed_command(
-            &projection,
-            &admitted(Program::file(script).expect("a script")),
-            &[],
-        )
-        .expect("build host command");
-        let out = confined_stderr(cmd);
+        let image = image(Program::file(script).expect("a script"));
+        let launch = macos_sandboxed_command(&projection, &image, &[]).expect("build host command");
+        let out = confined(launch);
+        let Image::File {
+            interpreter: Some(interpreter),
+            ..
+        } = &image
+        else {
+            panic!("a script's image names its interpreter");
+        };
+        let hint = super::super::interpreter_hint(&projection, interpreter);
         let _ = std::fs::remove_dir_all(&work);
-        out
+        (out, hint)
+    }
+
+    /// The kernel refusing a script's `execve`, as the trampoline reports it.
+    #[cfg(target_os = "macos")]
+    fn refused(out: &Result<std::process::Output, crate::process::Unstarted>) -> bool {
+        matches!(
+            out,
+            Err(crate::process::Unstarted::Program(e))
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+        )
     }
 
     /// No allowance reopens an excluded interpreter, and the hint says which
@@ -720,11 +801,12 @@ mod tests {
     #[test]
     fn a_script_whose_interpreter_is_excluded_fails_and_the_hint_names_it() {
         for by_exec in [true, false] {
-            let (code, stderr) = launch_with_excluded_shell(by_exec);
-            assert_eq!(code, Some(126), "by exec: {by_exec}; {stderr}");
+            let (out, hint) = launch_with_excluded_shell(by_exec);
+            assert!(refused(&out), "by exec: {by_exec}; {out:?}");
+            let hint = hint.unwrap_or_default();
             assert!(
-                stderr.contains("is excluded by") && stderr.contains("/bin/sh"),
-                "by exec: {by_exec}; {stderr}"
+                hint.contains("is excluded by") && hint.contains("/bin/sh"),
+                "by exec: {by_exec}; {hint}"
             );
         }
     }
@@ -755,12 +837,21 @@ mod tests {
             .admit(&baseline, Program::file(script.clone()).unwrap())
             .unwrap();
         let projection = SandboxProjection::of(&grants, &baseline, Some(&admitted)).unwrap();
-        let cmd = macos_sandboxed_command(&projection, &admitted, &[]).unwrap();
+        let image = Image::of(&admitted);
+        let launch = macos_sandboxed_command(&projection, &image, &[]).unwrap();
         std::fs::write(&script, "#!/usr/bin/false\n").unwrap();
-        let (code, stderr) = confined_stderr(cmd);
-        assert_eq!(code, Some(126), "{stderr}");
-        assert!(stderr.contains("its interpreter /bin/sh"), "{stderr}");
-        assert!(!stderr.contains("/usr/bin/false"), "{stderr}");
+        let out = confined(launch);
+        assert!(refused(&out), "{out:?}");
+        let Image::File {
+            interpreter: Some(interpreter),
+            ..
+        } = &image
+        else {
+            panic!("a script's image names its interpreter");
+        };
+        let hint = super::super::interpreter_hint(&projection, interpreter).unwrap_or_default();
+        assert!(hint.contains("its interpreter /bin/sh"), "{hint}");
+        assert!(!hint.contains("/usr/bin/false"), "{hint}");
     }
 
     /// A system script whose system interpreter lies elsewhere: no grant of
@@ -785,13 +876,13 @@ mod tests {
         })
     }
 
-    /// The stderr of the system script under a restricted fs,
-    /// beside `exec` as given: it starts, through the live support alone.
+    /// How the system script's start went under a restricted fs, beside
+    /// `exec` as given: it starts, through the live support alone.
     #[cfg(target_os = "macos")]
     fn start_system_script(
         script: &Path,
         exec: Option<crate::authority::policy::ExecGrant>,
-    ) -> String {
+    ) -> Result<std::process::Output, crate::process::Unstarted> {
         use crate::authority::policy::{Capabilities, FsPolicy};
         use crate::test_helper::{layer, stack};
         let work = scratch("support");
@@ -812,10 +903,11 @@ mod tests {
             .expect("the grant admits the script");
         let projection = SandboxProjection::of(&stack, &baseline, Some(&admitted))
             .expect("a restricted fs sandboxes");
-        let cmd = macos_sandboxed_command(&projection, &admitted, &[]).expect("build host command");
-        let (_, stderr) = confined_stderr(cmd);
+        let launch = macos_sandboxed_command(&projection, &Image::of(&admitted), &[])
+            .expect("build host command");
+        let out = confined(launch);
         let _ = std::fs::remove_dir_all(&work);
-        stderr
+        out
     }
 
     /// A trusted script starts through its interpreter's support, whether the
@@ -833,15 +925,11 @@ mod tests {
             crate::path::utf8(script.parent().expect("a directory")).expect("a Unicode path"),
         );
         let supplied = ExecGrant::of([ExecKey::Dir(dir)], []);
-        let refused = format!(
-            "ral: {}:",
-            crate::path::shown(crate::test_helper::real(&script).as_path())
-        );
         for exec in [Some(supplied), None] {
-            let stderr = start_system_script(&script, exec.clone());
+            let out = start_system_script(&script, exec.clone());
             assert!(
-                !stderr.contains(&refused),
-                "exec {exec:?}: the script did not start: {stderr}"
+                out.is_ok(),
+                "exec {exec:?}: the script did not start: {out:?}"
             );
         }
     }
@@ -854,7 +942,7 @@ mod tests {
         use crate::authority::policy::{Capabilities, ExecGrant, ExecKey};
         use crate::test_helper::{layer, stack};
         let stub = Path::new("/usr/bin/git");
-        let used = Command::new("xcrun")
+        let used = std::process::Command::new("xcrun")
             .args(["--find", "git"])
             .output()
             .ok()
@@ -885,10 +973,11 @@ mod tests {
             .expect("the grant admits the stub");
         let projection =
             SandboxProjection::of(&stack, &baseline, Some(&admitted)).expect("exec is restricted");
-        let cmd = macos_sandboxed_command(&projection, &admitted, &["--version".into()])
-            .expect("build host command");
-        let (code, stderr) = confined_stderr(cmd);
-        assert_eq!(code, Some(0), "{stderr}");
+        let launch =
+            macos_sandboxed_command(&projection, &Image::of(&admitted), &["--version".into()])
+                .expect("build host command");
+        let out = confined(launch).expect("the stub starts");
+        assert!(out.status.success(), "{out:?}");
     }
 
     /// The baseline, as read scopes.
@@ -914,7 +1003,7 @@ mod tests {
         let cat = Program::file("/bin/cat".into()).expect("/bin/cat exists");
         let args = [file.to_string_lossy().into_owned()];
         run_confined(
-            macos_sandboxed_command(&projection, &admitted(cat), &args).expect("build command"),
+            macos_sandboxed_command(&projection, &image(cat), &args).expect("build command"),
         )
     }
 
@@ -1005,15 +1094,16 @@ mod tests {
             return;
         }
         for program in [sh(), Program::Tool("ls")] {
-            let (cmd, _info_fd) = linux_sandboxed_command(
+            let launch = linux_sandboxed_command(
                 &restrictive(),
                 &Baseline::default(),
-                &admitted(program),
+                &image(program),
                 &["-l".into()],
                 Ownership::Kept,
                 &CwdPath::new("/".into()).expect("absolute cwd"),
             )
             .expect("build Linux command");
+            let cmd = launch.command();
             assert!(
                 cmd.get_program()
                     .to_string_lossy()
@@ -1021,15 +1111,15 @@ mod tests {
                 "the launcher is the fd-pinned envelope, never a name PATH resolves: {:?}",
                 cmd.get_program()
             );
-            let args = argv(&cmd);
-            let [opt, options, dashes, trampoline, flag, warrant] = &args[..] else {
-                panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`: {args:?}");
+            let args = argv(&launch);
+            let [opt, options, dashes, trampoline, flag, warrant, report] = &args[..] else {
+                panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`: {args:?}");
             };
             assert_eq!(
                 [opt.as_str(), dashes, flag],
                 ["--args", "--", Role::Warrant.flag()]
             );
-            for at in [options, warrant] {
+            for at in [options, warrant, report] {
                 Slot::parse(at).expect("a slot");
             }
             assert!(

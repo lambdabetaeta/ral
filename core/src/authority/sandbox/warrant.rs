@@ -1,36 +1,31 @@
-//! The handoff from a launch to the confined re-exec of ral that becomes its
+//! The handoff from a launch to the confined re-exec of ral that runs its
 //! program, and its only owner: the [`Warrant`] — the confinement to enter,
-//! the program to run — on a descriptor no other process can write, and the
+//! the image to run — on a descriptor no other process can write, and the
 //! descriptors every confined launch hands down, each at the number it
 //! already holds ([`Handoff`]).
 //!
-//! The re-exec's whole argv is `ral --warrant <fd>`, the warrant's slot.  The
-//! warrant is NUL-terminated fields, with no length anywhere:
+//! The re-exec's whole argv is `ral --warrant <w> <r>`: the warrant's slot,
+//! then the report socket's ([`crate::process::report`]).  The warrant is
+//! NUL-terminated fields, with no length anywhere:
 //!
 //! ```text
-//! ral-warrant/4  <confinement>  file  <real>  <argv0>  <interpreter>  <excluded>  <argc>  <arg>…
-//! ral-warrant/4  <confinement>  tool  <name>                                      <argc>  <arg>…
+//! ral-warrant/5  <confinement>  file  <real>  <argv0>  <argc>  <arg>…
+//! ral-warrant/5  <confinement>  tool  <name>           <argc>  <arg>…
 //! ```
-//!
-//! The parent read the launched script's `#!` line once through the judged
-//! handle: `<interpreter>` is that interpreter, `<excluded>` the exclusion
-//! covering it, each empty if none. Both are for the child's refusal hint
-//! alone, never evidence.
 //!
 //! The decoder accepts only what the encoder emits, byte for byte, so the
 //! encoding is canonical and injective.
 
+use super::launch::Image;
 #[cfg(target_os = "linux")]
 use super::linux::landlock::Landlocked;
-use super::{ExecProjection, SandboxProjection};
 use crate::Role;
-use crate::authority::policy::{Admitted, Program, Subject, Withheld};
-use crate::fact::{Failure, FailureCode as _};
-use crate::path::{Depth, LeafMode, LexicalPath, shown, walk};
-use crate::process::SpawnFailure;
+use crate::path::{RealPath, shown};
+use crate::process::report::Witness;
 use crate::site::{Silent, site};
-use crate::syntax::quote::quote_word;
 use libc::c_int;
+#[cfg(target_os = "linux")]
+use rustix::process::Pid;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -38,8 +33,9 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::process::ExitStatus;
 
 /// The number a handed-down descriptor holds, the same in parent and child:
 /// from [`Self::FIRST`] up, away from stdio. Only a
@@ -87,16 +83,35 @@ impl fmt::Display for Slot {
     }
 }
 
-const MAGIC: &[u8] = b"ral-warrant/4";
+/// The trampoline's two slots: its warrant's, and its report's.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Slots {
+    pub(super) warrant: Slot,
+    pub(super) report: Slot,
+}
+
+impl Slots {
+    /// `--warrant <warrant> <report>`.
+    pub(super) fn argv(self) -> [String; 3] {
+        [
+            Role::Warrant.flag().to_owned(),
+            self.warrant.to_string(),
+            self.report.to_string(),
+        ]
+    }
+}
+
+const MAGIC: &[u8] = b"ral-warrant/5";
 /// Under macOS's default socket-buffer ceiling, far above either OS's `ARG_MAX`.
 const CAP: usize = 8 << 20;
 
 /// What the confined re-exec enters before it runs anything, spelled as one
-/// field of the warrant.
+/// field of the warrant.  Entering sweeps every descriptor above stderr but
+/// the report's at `keep`.
 pub(super) trait Confinement: Sized {
     fn spell(&self) -> Cow<'_, str>;
     fn parse(field: &str) -> Result<Self, String>;
-    fn enter(&self) -> Result<(), String>;
+    fn enter(&self, keep: Slot) -> Result<(), String>;
 }
 
 /// macOS: the Seatbelt profile the launch compiled.
@@ -114,8 +129,8 @@ impl Confinement for Seatbelt {
         Ok(Self(field.to_owned()))
     }
 
-    fn enter(&self) -> Result<(), String> {
-        close_inherited()?;
+    fn enter(&self, keep: Slot) -> Result<(), String> {
+        close_inherited(keep)?;
         super::macos::apply_profile(&self.0)
             .map_err(|e| format!("cannot enter the Seatbelt sandbox: {e}"))
     }
@@ -156,9 +171,9 @@ impl Confinement for Option<Landlocked> {
         }))
     }
 
-    fn enter(&self) -> Result<(), String> {
+    fn enter(&self, keep: Slot) -> Result<(), String> {
         self.as_ref().map_or(Ok(()), Landlocked::enter)?;
-        close_inherited()
+        close_inherited(keep)
     }
 }
 
@@ -168,173 +183,244 @@ pub(super) type Native = Seatbelt;
 #[cfg(target_os = "linux")]
 pub(super) type Native = Option<Landlocked>;
 
+/// The confinement, and what runs inside it: the image without the
+/// interpreter the parent read, which stays the parent's.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Warrant {
     confinement: Native,
-    run: Run,
-}
-
-/// The program the re-exec becomes inside its confinement: a host file it
-/// `execve`s, by the real path the in-process guard judged and under the
-/// spelling the user wrote, or a bundled tool it runs in-process.  A file
-/// carries the exclusion that covers its script's interpreter, if any, for the
-/// hint after a refused `execve`.
-#[derive(Debug, PartialEq, Eq)]
-enum Run {
-    File {
-        real: LexicalPath,
-        arg0: PathBuf,
-        interpreter: Option<LexicalPath>,
-        excluded: Option<String>,
-        args: Vec<OsString>,
-    },
-    Tool(&'static str, Vec<OsString>),
-}
-
-impl Run {
-    fn of(admitted: &Admitted, args: &[String], projection: &SandboxProjection) -> Self {
-        let args = args.iter().map(OsString::from).collect();
-        match admitted.program() {
-            Program::File { arg0, located } => {
-                let interpreter = super::carriers::launched_shebang(located)
-                    .and_then(|path| LexicalPath::absolute(&path));
-                let excluded = interpreter
-                    .as_ref()
-                    .and_then(|interpreter| interpreter_exclusion(interpreter, projection));
-                Self::File {
-                    real: LexicalPath::absolute(located.real().as_path())
-                        .expect("a walked program has an absolute real path"),
-                    arg0: arg0.clone(),
-                    interpreter,
-                    excluded,
-                    args,
-                }
-            }
-            Program::Tool(tool) => Self::Tool(tool, args),
-        }
-    }
-}
-
-/// The interpreter's exclusion on either axis, for the refusal hint alone.
-fn interpreter_exclusion(
-    interpreter: &LexicalPath,
-    projection: &SandboxProjection,
-) -> Option<String> {
-    let walked = walk(interpreter, LeafMode::Follow).ok()?;
-    let trace = walked.trace();
-    trace.kind()?;
-    let at = crate::path::Subject::Access(trace);
-    let exec = match &projection.exec {
-        ExecProjection::Restricted(rules) => rules.withheld(Subject::Program(at)),
-        ExecProjection::Unrestricted => None,
-    }
-    .and_then(|w| match w {
-        Withheld::Excluded { scope, .. } => Some(scope.to_string()),
-        Withheld::MissingAllowance => None,
-    });
-    exec.or_else(|| {
-        let fs = projection.fs.rules()?;
-        let denied = fs
-            .deny
-            .iter()
-            .find(|p| p.real.matches(at, Depth::Within).is_some());
-        denied.map(|p| format!("`absolute {}", quote_word(p.written.as_str())))
-    })
+    image: Image,
+    args: Vec<OsString>,
 }
 
 /// The program, once its confinement is entered: the only thing a received
 /// warrant yields, so nothing else can run it.
-pub(super) struct Confined(Run);
-
-/// The `arg0`, interpreter and exclusion fields only a file carries.
-type FileFields<'a> = [&'a [u8]; 3];
+pub(super) struct Confined {
+    image: Image,
+    args: Vec<OsString>,
+}
 
 impl Confined {
-    /// Become the program: a host file is `execve`d, which returns only when
-    /// the kernel refuses, as the exit code that says so; a bundled tool
-    /// runs here.
-    pub(super) fn run(self) -> u8 {
-        match self.0 {
-            Run::File {
-                real,
-                arg0,
-                interpreter,
-                excluded,
-                args,
-            } => exec(
-                real.as_path(),
-                &arg0,
-                interpreter.as_ref(),
-                excluded.as_deref(),
-                args,
-            ),
-            Run::Tool(tool, args) => crate::uutils::run(tool.as_ref(), args).unwrap_or_else(|e| {
-                crate::io::terminal::cmd_error("ral", &e.to_string());
-                127
-            }),
+    /// Run the program, and say on `witness` what became of it.  On macOS a
+    /// host file is `execve`d, which returns only when the kernel refuses,
+    /// and a bundled tool runs here.  On Linux either is this process's
+    /// child, waited for: a tool may itself `execve` (`env`), and the
+    /// supervisor never does.
+    pub(super) fn run(self, witness: Witness) -> u8 {
+        let Self { image, args } = self;
+        match image {
+            Image::File { real, arg0, .. } => {
+                let mut program = site!(Silent::RespawnSpawn, Command::new(real.as_path()));
+                program.arg0(arg0).args(args);
+                run_file(program, witness)
+            }
+            Image::Tool(tool) => run_tool(tool, args, witness),
         }
     }
 }
 
-/// Become the host program at `real`, which sees `arg0` as its own name;
-/// returns only when `execve` refuses.
-fn exec(
-    real: &std::path::Path,
-    arg0: &std::path::Path,
-    interpreter: Option<&LexicalPath>,
-    excluded: Option<&str>,
-    args: Vec<OsString>,
-) -> u8 {
-    let mut cmd = site!(Silent::RespawnSpawn, Command::new(real));
-    cmd.arg0(arg0).args(args);
-    let err = site!(Silent::RespawnExec, &mut cmd => exec());
-    // A kernel refusal of a script is most often its interpreter's, which a
-    // script the user can edit cannot carry in with it.
-    let hint = interpreter
-        .filter(|_| err.kind() == io::ErrorKind::PermissionDenied)
-        .map(|interp| {
-            let interp = quote_word(&shown(interp.as_path())).into_owned();
-            match excluded {
-                Some(scope) => format!(
-                    "\nhint: its interpreter {interp} is excluded by {}; an allowance \
-                     cannot override an exclusion",
-                    crate::text::code(scope)
-                ),
-                None => format!(
-                    "\nhint: its interpreter {interp} is not admitted by the grant: a script \
-                     you can edit carries no interpreter of its own: add `` `absolute {interp} `` \
-                     to the exec grant's allow list"
-                ),
-            }
-        });
-    crate::io::terminal::cmd_error(
-        "ral",
-        &format!("{}: {err}{}", shown(real), hint.unwrap_or_default()),
-    );
-    Failure::from_spawn(&shown(real), SpawnFailure::from(&err))
-        .failure_code()
-        .get()
+/// Become `program`: its `execve` closes the close-on-exec report, which
+/// the parent reads as its start.
+#[cfg(target_os = "macos")]
+fn run_file(mut program: Command, witness: Witness) -> u8 {
+    let e = site!(Silent::RespawnExec, &mut program => exec());
+    witness.unstarted(&e);
+    unstarted_code(&e)
+}
+
+/// Spawn `program` as this process's child, and [`supervise`] it.
+#[cfg(target_os = "linux")]
+fn run_file(mut program: Command, witness: Witness) -> u8 {
+    outlive_group_signals();
+    let supervisor = rustix::process::getpid();
+    // SAFETY: `die_with` makes only async-signal-safe syscalls.
+    unsafe {
+        program.pre_exec(move || die_with(supervisor));
+    }
+    match crate::process::spawn(&mut program) {
+        Ok(mut child) => supervise(
+            witness,
+            || site!(Silent::SupervisorWait, &mut child => wait()),
+        ),
+        Err(e) => {
+            witness.unstarted(&e);
+            unstarted_code(&e)
+        }
+    }
+}
+
+/// Run the bundled `tool` here: its start is the report's EOF, and an
+/// `execve` of its own keeps this process's pid, which the parent waits on.
+#[cfg(target_os = "macos")]
+fn run_tool(tool: &'static str, args: Vec<OsString>, witness: Witness) -> u8 {
+    drop(witness);
+    tool_code(tool, args)
+}
+
+/// Fork the bundled `tool` as this process's child, and [`supervise`] it.
+#[cfg(target_os = "linux")]
+fn run_tool(tool: &'static str, args: Vec<OsString>, witness: Witness) -> u8 {
+    let caught = outlive_group_signals();
+    let supervisor = rustix::process::getpid();
+    // SAFETY: the trampoline is single-threaded, its warrant role starting
+    // no thread, so the child may run anything.
+    match unsafe { site!(Silent::SupervisorFork, libc::fork()) } {
+        -1 => {
+            let e = io::Error::last_os_error();
+            witness.unstarted(&e);
+            unstarted_code(&e)
+        }
+        0 => {
+            drop(witness);
+            tool_child(tool, args, &caught, supervisor)
+        }
+        pid => supervise(witness, || reap(pid)),
+    }
+}
+
+/// Tell the program's start and, waited for, its exact end, which bwrap
+/// would fold into an exit status; exit as it did.  What the payload's
+/// group is sent this process outlives, but `SIGKILL`, whose silence the
+/// parent reads as such.
+#[cfg(target_os = "linux")]
+fn supervise(mut witness: Witness, wait: impl FnOnce() -> io::Result<ExitStatus>) -> u8 {
+    use std::os::unix::process::ExitStatusExt;
+    crate::process::ignore(libc::SIGPIPE);
+    witness.started();
+    let Ok(ended) = wait() else {
+        // Unreachable: the program is this process's own child.
+        return 126;
+    };
+    witness.ended(ended);
+    ended
+        .code()
+        .or_else(|| ended.signal().map(|signal| 128 + signal))
+        .and_then(|code| u8::try_from(code).ok())
+        .unwrap_or(u8::MAX)
+}
+
+/// The forked tool's whole life, begun as a spawned program begins; it never
+/// returns to the trampoline's frames, by a panic either.
+#[cfg(target_os = "linux")]
+fn tool_child(tool: &'static str, args: Vec<OsString>, caught: &[c_int], supervisor: Pid) -> ! {
+    let code = match as_spawned(caught, supervisor) {
+        // 101: `std`'s exit for a panicking `main`.
+        Ok(()) => std::panic::catch_unwind(move || tool_code(tool, args)).unwrap_or(101),
+        Err(e) => {
+            crate::io::terminal::cmd_error(
+                "ral",
+                &format!("cannot start the bundled tool {tool} under its supervisor: {e}"),
+            );
+            126
+        }
+    };
+    let _ = (io::stdout().flush(), io::stderr().flush());
+    // SAFETY: `_exit` runs no atexit hook over the trampoline's state.
+    unsafe { libc::_exit(i32::from(code)) }
+}
+
+/// What a spawned program begins with: no signal blocked, each one caught
+/// here and SIGPIPE at its default, and death with its supervisor.
+#[cfg(target_os = "linux")]
+fn as_spawned(caught: &[c_int], supervisor: Pid) -> io::Result<()> {
+    for &signal in caught.iter().chain(&[libc::SIGPIPE]) {
+        crate::process::default(signal);
+    }
+    nix::sys::signal::SigSet::empty().thread_set_mask()?;
+    die_with(supervisor)
+}
+
+/// Be killed when `supervisor`, this process's parent, dies.
+#[cfg(target_os = "linux")]
+fn die_with(supervisor: Pid) -> io::Result<()> {
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
+    // A supervisor gone before the prctl leaves no death to hear.
+    if rustix::process::getppid() != Some(supervisor) {
+        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+    }
+    Ok(())
+}
+
+/// The end of this process's child `pid`, a stop being none.
+#[cfg(target_os = "linux")]
+fn reap(pid: libc::pid_t) -> io::Result<ExitStatus> {
+    use std::os::unix::process::ExitStatusExt;
+    let mut status = 0;
+    // SAFETY: `status` is this frame's to write.
+    while unsafe { libc::waitpid(pid, &raw mut status, 0) } < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+    Ok(ExitStatus::from_raw(status))
+}
+
+/// A no-op handler for each group signal not ignored, which resets to its
+/// default at the program's `execve`; a signal ignored stays so, for the
+/// program to inherit.  The signals given the handler.
+#[cfg(target_os = "linux")]
+fn outlive_group_signals() -> Vec<c_int> {
+    extern "C" fn heard(_: c_int) {}
+    let caught: Vec<c_int> = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
+        .into_iter()
+        .filter(|&signal| {
+            // SAFETY: a null action only reads the disposition.
+            let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+            (unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut was) } == 0)
+                && was.sa_sigaction != libc::SIG_IGN
+        })
+        .collect();
+    for &signal in &caught {
+        crate::process::install(signal, heard);
+    }
+    caught
+}
+
+/// POSIX's two codes for a program that did not start, as the shell's own.
+fn unstarted_code(e: &io::Error) -> u8 {
+    if e.kind() == io::ErrorKind::NotFound {
+        127
+    } else {
+        126
+    }
+}
+
+/// The bundled `tool`'s exit code, run in this process.
+fn tool_code(tool: &'static str, args: Vec<OsString>) -> u8 {
+    crate::uutils::run(tool.as_ref(), args).unwrap_or_else(|e| {
+        crate::io::terminal::cmd_error("ral", &e.to_string());
+        127
+    })
 }
 
 impl Warrant {
-    pub(super) fn new(
-        confinement: Native,
-        admitted: &Admitted,
-        args: &[String],
-        projection: &SandboxProjection,
-    ) -> Self {
+    pub(super) fn new(confinement: Native, image: &Image, args: &[String]) -> Self {
+        let image = match image {
+            Image::File { real, arg0, .. } => Image::File {
+                real: real.clone(),
+                arg0: arg0.clone(),
+                interpreter: None,
+            },
+            Image::Tool(tool) => Image::Tool(tool),
+        };
         Self {
             confinement,
-            run: Run::of(admitted, args, projection),
+            image,
+            args: args.iter().map(OsString::from).collect(),
         }
     }
 
-    /// The warrant the launch left at `at`, its confinement entered and the
-    /// inherited descriptors swept: the program, and nothing before it.
-    pub(super) fn confine(at: Slot) -> Result<Confined, String> {
-        let Self { confinement, run } = Self::receive(at)?;
-        confinement.enter()?;
-        Ok(Confined(run))
+    /// The warrant the launch left at `slots.warrant`, its confinement
+    /// entered and every inherited descriptor but the report swept: the
+    /// program, and nothing before it.
+    pub(super) fn confine(slots: Slots) -> Result<Confined, String> {
+        let Self {
+            confinement,
+            image,
+            args,
+        } = Self::receive(slots.warrant)?;
+        confinement.enter(slots.report)?;
+        Ok(Confined { image, args })
     }
 
     /// This warrant, parcelled for a [`Handoff`].
@@ -367,34 +453,21 @@ impl Warrant {
     }
 
     fn encode(&self) -> Result<Vec<u8>, String> {
-        let (kind, program, file, args): (&[u8], &[u8], Option<FileFields>, _) = match &self.run {
-            Run::File {
-                real,
-                arg0,
-                interpreter,
-                excluded,
-                args,
-            } => (
+        let (kind, program, arg0): (&[u8], &[u8], Option<&[u8]>) = match &self.image {
+            Image::File { real, arg0, .. } => (
                 b"file",
                 real.as_path().as_os_str().as_bytes(),
-                Some([
-                    arg0.as_os_str().as_bytes(),
-                    interpreter
-                        .as_ref()
-                        .map_or(b"", |path| path.as_path().as_os_str().as_bytes()),
-                    excluded.as_deref().unwrap_or_default().as_bytes(),
-                ]),
-                args,
+                Some(arg0.as_os_str().as_bytes()),
             ),
-            Run::Tool(tool, args) => (b"tool", tool.as_bytes(), None, args),
+            Image::Tool(tool) => (b"tool", tool.as_bytes(), None),
         };
         let confinement = self.confinement.spell();
-        let argc = args.len().to_string();
+        let argc = self.args.len().to_string();
         let head = [MAGIC, confinement.as_bytes(), kind, program]
             .into_iter()
-            .chain(file.into_iter().flatten())
+            .chain(arg0)
             .chain([argc.as_bytes()]);
-        let bytes = nul_terminated(head.chain(args.iter().map(|a| a.as_bytes())))?;
+        let bytes = nul_terminated(head.chain(self.args.iter().map(|a| a.as_bytes())))?;
         if bytes.len() > CAP {
             return Err(format!(
                 "the warrant is {} bytes, over its {CAP}-byte cap: is the command line that long?",
@@ -419,16 +492,8 @@ impl Warrant {
         };
         let confinement = Native::parse(text(next("confinement")?)?)?;
         let kind = next("kind")?;
-        let program = next("program")?;
-        let file = (kind == b"file")
-            .then(|| {
-                Ok::<_, String>((
-                    next("argv[0]")?,
-                    next("interpreter")?,
-                    next("interpreter exclusion")?,
-                ))
-            })
-            .transpose()?;
+        let program = OsStr::from_bytes(next("program")?);
+        let arg0 = (kind == b"file").then(|| next("argv[0]")).transpose()?;
         let argc: usize = text(next("argument count")?)?
             .parse()
             .map_err(|e| format!("the warrant's argument count: {e}"))?;
@@ -439,31 +504,26 @@ impl Warrant {
                 args.len()
             ));
         }
-        let run = match (kind, file) {
-            (b"file", Some((arg0, interpreter, excluded))) => Run::File {
-                real: LexicalPath::absolute(&PathBuf::from(OsStr::from_bytes(program)))
-                    .ok_or_else(|| format!(
-                        "the warrant's file program {:?} is not an absolute path; refusing PATH lookup",
-                        shown(OsStr::from_bytes(program))
-                    ))?,
-                arg0: OsStr::from_bytes(arg0).into(),
-                interpreter: (!interpreter.is_empty()).then(|| {
-                    let path = PathBuf::from(OsStr::from_bytes(interpreter));
-                    LexicalPath::absolute(&path).ok_or_else(|| format!(
-                        "the warrant's interpreter {} is not an absolute path", shown(&path)
-                    ))
-                }).transpose()?,
-                excluded: Some(text(excluded)?)
-                    .filter(|scope| !scope.is_empty())
-                    .map(str::to_owned),
-                args,
-            },
-            (b"tool", None) => Run::Tool(
-                crate::uutils::bundled_name(OsStr::from_bytes(program)).ok_or_else(|| {
-                    format!("the warrant names an unknown bundled tool, {:?}", shown(OsStr::from_bytes(program)))
+        let image = match (kind, arg0) {
+            (b"file", Some(arg0)) => Image::File {
+                real: RealPath::off_the_wire(program).map_err(|e| {
+                    format!(
+                        "the warrant's file program {} is not a real path, which is absolute \
+                         and names no link, `.` or `..`: {e}; refusing PATH lookup",
+                        shown(program)
+                    )
                 })?,
-                args,
-            ),
+                arg0: OsStr::from_bytes(arg0).into(),
+                interpreter: None,
+            },
+            (b"tool", None) => {
+                Image::Tool(crate::uutils::bundled_name(program).ok_or_else(|| {
+                    format!(
+                        "the warrant names an unknown bundled tool, {:?}",
+                        shown(program)
+                    )
+                })?)
+            }
             (other, _) => {
                 return Err(format!(
                     "the warrant names an unknown kind of program, {:?}",
@@ -471,7 +531,11 @@ impl Warrant {
                 ));
             }
         };
-        let warrant = Self { confinement, run };
+        let warrant = Self {
+            confinement,
+            image,
+            args,
+        };
         if warrant.encode()? != bytes {
             return Err("the warrant is not in canonical form".to_string());
         }
@@ -612,7 +676,6 @@ impl Handoff {
     ///
     /// # Errors
     /// As [`Self::lend`].
-    #[cfg(target_os = "linux")]
     pub(super) fn keep(&mut self, fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
         let (copy, at) = lift(fd)?;
         self.kept.push(at);
@@ -653,24 +716,28 @@ fn lift(fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
     Ok((copy, at))
 }
 
-/// Close every descriptor above stderr; the warrant role must open nothing before this.
+/// Close every descriptor above stderr but `keep`, which stays close-on-exec;
+/// the warrant role must open nothing before this.
 ///
 /// # Errors
 /// A kernel that cannot sweep: the program would hold the payload's copy
 /// of the `--info-fd` writer, and with it the parent's spawn, for its whole
 /// life.
 #[cfg(target_os = "linux")]
-pub(super) fn close_inherited() -> Result<(), String> {
-    // SAFETY: the warrant role owns no descriptors above stderr here.
+pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
+    let at = libc::c_uint::try_from(keep.fd()).expect("a slot is positive");
+    close_range(3, at - 1)?;
+    close_range(at + 1, libc::c_uint::MAX)?;
+    cloexec(keep)
+}
+
+#[cfg(target_os = "linux")]
+fn close_range(first: libc::c_uint, last: libc::c_uint) -> Result<(), String> {
+    // SAFETY: the warrant role owns no descriptors in the range here.
     let swept = unsafe {
         site!(
             Silent::InheritedSweep,
-            libc::syscall(
-                libc::SYS_close_range,
-                3 as libc::c_uint,
-                libc::c_uint::MAX,
-                0 as libc::c_uint,
-            )
+            libc::syscall(libc::SYS_close_range, first, last, 0 as libc::c_uint)
         )
     };
     if swept == 0 {
@@ -688,9 +755,22 @@ pub(super) fn close_inherited() -> Result<(), String> {
     })
 }
 
-/// Close every descriptor above stderr; the warrant role must open nothing before this.
+/// The report's slot, closed by the program's `execve`.
+fn cloexec(keep: Slot) -> Result<(), String> {
+    // SAFETY: `F_SETFD` only sets the slot's close-on-exec flag.
+    if unsafe { libc::fcntl(keep.fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(format!(
+            "cannot set the report socket at fd {keep} close-on-exec: {}; refusing to run",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Close every descriptor above stderr but `keep`, which stays close-on-exec;
+/// the warrant role must open nothing before this.
 #[cfg(target_os = "macos")]
-pub(super) fn close_inherited() -> Result<(), String> {
+pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
     let mut entries = vec![
         libc::proc_fdinfo {
             proc_fd: 0,
@@ -736,7 +816,7 @@ pub(super) fn close_inherited() -> Result<(), String> {
         );
     };
     for entry in &entries[..count] {
-        if entry.proc_fd <= 2 {
+        if entry.proc_fd <= 2 || entry.proc_fd == keep.fd() {
             continue;
         }
         // SAFETY: the warrant role owns no descriptors above stderr here.
@@ -750,7 +830,7 @@ pub(super) fn close_inherited() -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    cloexec(keep)
 }
 
 #[cfg(test)]
@@ -773,21 +853,14 @@ mod tests {
     }
 
     fn file(real: &[u8], arg0: &[u8], args: &[&[u8]]) -> Warrant {
-        excluding(real, arg0, None, args)
-    }
-
-    fn excluding(real: &[u8], arg0: &[u8], excluded: Option<&str>, args: &[&[u8]]) -> Warrant {
-        let args = args.iter().map(|a| OsStr::from_bytes(a).into()).collect();
         Warrant {
             confinement: confinement(),
-            run: Run::File {
-                real: LexicalPath::absolute(std::path::Path::new(OsStr::from_bytes(real)))
-                    .expect("an absolute program path"),
+            image: Image::File {
+                real: RealPath::off_the_wire(OsStr::from_bytes(real)).expect("a real path"),
                 arg0: OsStr::from_bytes(arg0).into(),
                 interpreter: None,
-                excluded: excluded.map(str::to_owned),
-                args,
             },
+            args: args.iter().map(|a| OsStr::from_bytes(a).into()).collect(),
         }
     }
 
@@ -797,44 +870,37 @@ mod tests {
 
     #[test]
     fn a_warrant_round_trips_bytes_that_are_not_utf8_and_arguments_of_any_shape() {
-        for warrant in [
-            file(
-                b"/opt/\xffbin/tool",
-                b"tools/\xfeb",
-                &[b"-c", b"echo a  b\nc", b"", b"\xfe\xff"],
-            ),
-            excluding(b"/bin/sh", b"sh", Some("`absolute /bin/dash"), &[b"x"]),
-        ] {
-            let bytes = warrant.encode().expect("encodes");
-            assert_eq!(Warrant::decode(&bytes).expect("decodes"), warrant);
-        }
+        let warrant = file(
+            b"/opt/\xffbin/tool",
+            b"tools/\xfeb",
+            &[b"-c", b"echo a  b\nc", b"", b"\xfe\xff"],
+        );
+        let bytes = warrant.encode().expect("encodes");
+        assert_eq!(Warrant::decode(&bytes).expect("decodes"), warrant);
     }
 
+    /// The interpreter the parent read is its own, for wording a failure: it
+    /// never crosses.
     #[test]
-    fn an_interpreter_round_trips_losslessly_and_relative_interpreters_are_refused() {
-        let mut warrant = file(b"/script", b"script", &[]);
-        let Run::File { interpreter, .. } = &mut warrant.run else {
-            unreachable!()
+    fn a_warrant_carries_no_interpreter() {
+        let real = RealPath::off_the_wire(OsStr::new("/script")).expect("a real path");
+        let read = Image::File {
+            real,
+            arg0: "script".into(),
+            interpreter: Some("/bin/sh".into()),
         };
-        *interpreter = Some(
-            LexicalPath::absolute(std::path::Path::new(OsStr::from_bytes(b"/bin/\xffinterp")))
-                .expect("an absolute interpreter path"),
-        );
+        let warrant = Warrant::new(confinement(), &read, &[]);
         assert_eq!(
             Warrant::decode(&warrant.encode().unwrap()).unwrap(),
             warrant
         );
-        let relative = framed(&[
-            MAGIC,
-            CONFINEMENT.as_bytes(),
-            b"file",
-            b"/script",
-            b"script",
-            b"bin/interp",
-            b"",
-            b"0",
-        ]);
-        assert!(Warrant::decode(&relative).is_err());
+        assert!(matches!(
+            warrant.image,
+            Image::File {
+                interpreter: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -842,7 +908,8 @@ mod tests {
         for tool in crate::uutils::bundled_tools() {
             let warrant = Warrant {
                 confinement: Native::parse(NO_CONFINEMENT).expect("a valid confinement"),
-                run: Run::Tool(tool, Vec::new()),
+                image: Image::Tool(tool),
+                args: Vec::new(),
             };
             assert_eq!(
                 Warrant::decode(&warrant.encode().unwrap()).unwrap(),
@@ -857,25 +924,25 @@ mod tests {
         let conf = confinement().spell().into_owned();
         let conf = conf.as_bytes();
         let big = vec![b'a'; CAP];
-        let control = framed(&[
-            MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", b"x",
-        ]);
+        let control = framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x"]);
         let tool = framed(&[MAGIC, conf, b"tool", b"ls", b"0"]);
         for bytes in [&control, &tool] {
             assert!(Warrant::decode(bytes).is_ok(), "the control must decode");
         }
+        let file = |program: &[u8], argc: &[u8], args: &[&[u8]]| {
+            let head = [MAGIC, conf, b"file", program, b"sh", argc];
+            framed(&[&head[..], args].concat())
+        };
         for (case, bytes) in [
             ("empty", Vec::new()),
             (
                 "another version",
                 framed(&[
-                    b"ral-warrant/3",
+                    b"ral-warrant/4",
                     conf,
                     b"file",
                     b"/bin/sh",
                     b"sh",
-                    b"",
-                    b"",
                     b"1",
                     b"x",
                 ]),
@@ -883,32 +950,13 @@ mod tests {
             ("cut short", control[..control.len() - 1].to_vec()),
             (
                 "an unknown kind",
-                framed(&[
-                    MAGIC, conf, b"exec", b"/bin/sh", b"sh", b"", b"", b"1", b"x",
-                ]),
+                framed(&[MAGIC, conf, b"exec", b"/bin/sh", b"sh", b"1", b"x"]),
             ),
-            (
-                "an empty file program",
-                framed(&[MAGIC, conf, b"file", b"", b"sh", b"", b"", b"1", b"x"]),
-            ),
-            (
-                "a relative file program",
-                framed(&[
-                    MAGIC,
-                    conf,
-                    b"file",
-                    b"./bin/sh",
-                    b"sh",
-                    b"",
-                    b"",
-                    b"1",
-                    b"x",
-                ]),
-            ),
-            (
-                "a slashless file program",
-                framed(&[MAGIC, conf, b"file", b"sh", b"sh", b"", b"", b"1", b"x"]),
-            ),
+            ("an empty file program", file(b"", b"1", &[b"x"])),
+            ("a relative file program", file(b"./bin/sh", b"1", &[b"x"])),
+            ("a slashless file program", file(b"sh", b"1", &[b"x"])),
+            ("a doubled separator", file(b"/bin//sh", b"1", &[b"x"])),
+            ("a parent step", file(b"/usr/../bin/sh", b"1", &[b"x"])),
             ("an empty tool", framed(&[MAGIC, conf, b"tool", b"", b"0"])),
             (
                 "an unknown tool",
@@ -920,41 +968,21 @@ mod tests {
             ),
             (
                 "an argument too many",
-                framed(&[
-                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", b"x", b"y",
-                ]),
+                file(b"/bin/sh", b"1", &[b"x", b"y"]),
             ),
-            (
-                "an argument too few",
-                framed(&[
-                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"2", b"x",
-                ]),
-            ),
-            (
-                "a signed count",
-                framed(&[
-                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"+1", b"x",
-                ]),
-            ),
-            (
-                "a padded count",
-                framed(&[
-                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"01", b"x",
-                ]),
-            ),
-            (
-                "over the cap",
-                framed(&[
-                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", &big,
-                ]),
-            ),
+            ("an argument too few", file(b"/bin/sh", b"2", &[b"x"])),
+            ("a signed count", file(b"/bin/sh", b"+1", &[b"x"])),
+            ("a padded count", file(b"/bin/sh", b"01", &[b"x"])),
+            ("over the cap", file(b"/bin/sh", b"1", &[&big])),
             (
                 "a file without its argv[0]",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"", b"", b"1", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"1", b"x"]),
             ),
             (
-                "a file without its exclusion field",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", b"x"]),
+                "a file with the interpreter fields of version 4",
+                framed(&[
+                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", b"x",
+                ]),
             ),
             (
                 "a tool with an argv[0]",
@@ -984,16 +1012,7 @@ mod tests {
             ("101", false),
             ("", false),
         ] {
-            let bytes = framed(&[
-                MAGIC,
-                field.as_bytes(),
-                b"file",
-                b"/bin/sh",
-                b"sh",
-                b"",
-                b"",
-                b"0",
-            ]);
+            let bytes = framed(&[MAGIC, field.as_bytes(), b"file", b"/bin/sh", b"sh", b"0"]);
             assert_eq!(Warrant::decode(&bytes).is_ok(), ok, "{field:?}");
         }
     }
@@ -1015,8 +1034,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_warrant_near_the_socket_ceiling_arrives_or_refuses_before_spawn() {
+        use super::super::{ExecProjection, SandboxProjection};
         use crate::test_helper::confinement::{Output, admitted, denied};
-        use std::os::fd::AsFd;
 
         let proof = crate::require_confinement!();
         let mut bytes = [0_u8; 8];
@@ -1050,16 +1069,18 @@ mod tests {
         };
         let mut warrant = file(b"/bin/echo", b"echo", &[b"warrant-arrived"]);
         warrant.confinement = Seatbelt(super::super::macos::build_profile(&projection).unwrap());
-        let prepare = |warrant: &Warrant| -> Result<Command, String> {
-            let parcel = warrant.parcel()?;
+        let prepare = |warrant: &Warrant| {
             let mut handoff = Handoff::default();
-            let at = handoff.lend(parcel.as_fd())?;
-            let mut cmd = super::super::reexec::own().unwrap().command();
-            cmd.arg(Role::Warrant.flag()).arg(at.to_string());
-            handoff.install(&mut cmd);
-            Ok(cmd)
+            let (slots, report) = super::super::launch::issue(warrant, &mut handoff)?;
+            let own = super::super::reexec::own().unwrap();
+            let mut launch = super::super::launch::trampoline(own, handoff, slots, report);
+            launch.stdin(crate::process::StdioSpec::null());
+            Ok::<_, super::super::Refusal>(launch)
         };
-        let control: Output = prepare(&warrant).unwrap().output().unwrap().into();
+        let ran = |launch: crate::process::Launch| -> Output {
+            launch.output().expect("the prepared warrant spawns").into()
+        };
+        let control = ran(prepare(&warrant).unwrap());
         admitted(&proof, &control, "warrant-arrived\n");
         let original = warrant.encode().unwrap().len();
         let target = ceiling.checked_sub(32 << 10).unwrap();
@@ -1073,11 +1094,9 @@ mod tests {
             .0
             .extend(std::iter::repeat_n('x', target - original - 2));
         match prepare(&warrant) {
-            Ok(mut cmd) => {
-                let arrived = cmd.output().expect("the prepared warrant spawns").into();
-                admitted(&proof, &arrived, "warrant-arrived\n");
-            }
+            Ok(launch) => admitted(&proof, &ran(launch), "warrant-arrived\n"),
             Err(error) => {
+                let error = error.to_string();
                 assert!(
                     error.contains("parcel") || error.contains("byte cap"),
                     "{error}"

@@ -151,13 +151,11 @@ mod linux {
         let exe = std::env::current_exe().unwrap();
         let argc = args.len().to_string();
         let fields = [
-            b"ral-warrant/4".as_slice(),
+            b"ral-warrant/5".as_slice(),
             b"unconfined",
             b"file",
             exe.as_os_str().as_bytes(),
             b"probe",
-            b"",
-            b"",
             argc.as_bytes(),
         ];
         let mut file = std::fs::File::from(
@@ -182,46 +180,64 @@ mod linux {
         rustix::io::fcntl_dupfd_cloexec(&file, 98).unwrap()
     }
 
-    fn invoke(parcel: &std::os::fd::OwnedFd, extra: &[&str]) -> Output {
-        let fd = parcel.as_raw_fd();
+    /// The trampoline run on `parcel` and a report socket: its output, and
+    /// what it said on the report.
+    fn invoke(parcel: &std::os::fd::OwnedFd, extra: &[&str]) -> (Output, Vec<u8>) {
+        use std::io::Read;
+        let (mut said, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = rustix::io::fcntl_dupfd_cloexec(&theirs, 98).unwrap();
+        // Every writer held here must go, or the read below never sees EOF.
+        drop(theirs);
+        let (fd, report) = (parcel.as_raw_fd(), writer.as_raw_fd());
         let mut cmd = Command::new(std::env::current_exe().unwrap());
-        cmd.args(["--warrant", &fd.to_string()])
+        cmd.args(["--warrant", &fd.to_string(), &report.to_string()])
             .args(extra)
             .env("RAL_TEST_PROBE", probe::request(&["fds", "0", "1", "2"]));
-        // SAFETY: the parcel stays open through spawn; fcntl is async-signal-safe.
+        // SAFETY: both stay open through spawn; fcntl is async-signal-safe.
         unsafe {
             cmd.pre_exec(move || {
-                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
+                for at in [fd, report] {
+                    if libc::fcntl(at, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
                 Ok(())
             });
         }
-        cmd.output().expect("the warrant trampoline starts").into()
+        let out = cmd.output().expect("the warrant trampoline starts").into();
+        drop(writer);
+        let mut report = Vec::new();
+        said.read_to_end(&mut report).unwrap();
+        (out, report)
+    }
+
+    /// Whether the report holds `text`, whatever its framing.
+    fn says(report: &[u8], text: &str) -> bool {
+        report.windows(text.len()).any(|w| w == text.as_bytes())
     }
 
     #[test]
     fn malformed_live_handoffs_refuse_before_the_probe_runs() {
         let proof = ral_core::require_confinement!();
         let sealed = parcel(&[], true);
-        let control = invoke(&sealed, &[]);
+        let (control, _) = invoke(&sealed, &[]);
         admitted(&proof, &control, "ok\n");
-        let unsealed = invoke(&parcel(&[], false), &[]);
+        let (unsealed, said) = invoke(&parcel(&[], false), &[]);
         denied(&proof, &control, &unsealed, "ok\n");
         assert_eq!(unsealed.status, 126, "{unsealed:?}");
-        assert!(unsealed.stderr.contains("not sealed"), "{unsealed:?}");
+        assert!(says(&said, "not sealed"), "{said:?}");
         assert!(unsealed.stdout.is_empty(), "{unsealed:?}");
 
-        let extra = invoke(&sealed, &["extra"]);
+        let (extra, _) = invoke(&sealed, &["extra"]);
         denied(&proof, &control, &extra, "ok\n");
         assert_eq!(extra.status, 126, "{extra:?}");
-        assert!(extra.stderr.contains("takes one argument"), "{extra:?}");
+        assert!(extra.stderr.contains("takes two arguments"), "{extra:?}");
         assert!(extra.stdout.is_empty(), "{extra:?}");
 
-        let nested = invoke(&parcel(&[b"--warrant", b"98"], true), &[]);
+        let (nested, _) = invoke(&parcel(&[b"--warrant", b"98", b"99"], true), &[]);
         denied(&proof, &control, &nested, "ok\n");
         assert_eq!(nested.status, 126, "{nested:?}");
-        assert!(nested.stderr.contains("no warrant at fd 98"), "{nested:?}");
+        assert!(nested.stderr.contains("fd 99"), "{nested:?}");
         assert!(nested.stdout.is_empty(), "{nested:?}");
     }
 }

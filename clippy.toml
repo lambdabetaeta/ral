@@ -38,7 +38,11 @@
 # `libc::_exit` is unbanned on purpose, despite `exit` and `abort` below: it is
 # mandatory in a signal handler and in a post-`fork` child, where `exit` would
 # run atexit hooks under a handler or destructors over the parent's state.
-# Both callers are in `core/src/process/signal/unix.rs`.
+# Its callers: the signal handler in `core/src/process/signal/unix.rs`, the
+# post-`fork` children of `core/src/process/group/unix.rs` (detach's
+# intermediate) and `core/src/authority/sandbox/warrant.rs` (the supervised
+# bundled tool), and two test fixtures, in `core/src/process/reaper/unix.rs`
+# and `core/src/authority/sandbox/linux/seccomp/tests.rs`.
 #
 # `allow-invalid` marks an entry that resolves on one OS only, or only where a
 # crate's features reach it (a `windows_sys` function that a crate's

@@ -2,7 +2,7 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::{Head, SpawnPlan};
+use super::super::command::{Head, Prepared};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::{StageLaunch, StageSpec};
@@ -10,33 +10,39 @@ use super::route::{ByteIn, ByteOut, StageRoute};
 use super::stage::{ExternalStage, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{PgidPolicy, Scope};
+use crate::process::{PgidPolicy, Scope, Spawned};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use std::sync::Arc;
 
-/// A thread reads what a child would inherit, except a tty: reading the
-/// controlling terminal from the shell's own process would SIGTTIN the whole
-/// shell, so it sees EOF, as under capture.  A cause on `scope` ends a
-/// blocked read as EOF.
-pub(super) fn stage_stdin(route: ByteIn, shell: &Shell, scope: &Scope) -> Settled<Source> {
+/// A thread stage sees a tty only when its group holds the terminal (its
+/// externals inherit it, `stdin_reader` refuses it); otherwise EOF.
+pub(super) fn stage_stdin(
+    route: ByteIn,
+    shell: &Shell,
+    scope: &Scope,
+    holds_terminal: bool,
+) -> Settled<Source> {
     let reader = match route {
-        ByteIn::Upstream(r) => Some(SourceReader::pipe(r)),
+        ByteIn::Upstream(r) => SourceReader::pipe(r),
         ByteIn::Parent => match &shell.io.stdin {
-            Source::Empty => None,
-            Source::Terminal if shell.io.terminal.startup_stdin_tty => None,
-            Source::Terminal => Some(SourceReader::file(
+            Source::Empty => return Ok(Source::Empty),
+            Source::Terminal if shell.io.terminal.startup_stdin_tty => {
+                return Ok(if holds_terminal {
+                    Source::Terminal
+                } else {
+                    Source::Empty
+                });
+            }
+            Source::Terminal => SourceReader::file(
                 dup_stdin_file().map_err(|e| Error::io("could not duplicate stdin", &e))?,
-            )),
-            Source::Reader(r) => Some(
-                r.try_clone()
-                    .map_err(|e| Error::io("could not duplicate stdin", &e))?,
             ),
+            Source::Reader(r) => r
+                .try_clone()
+                .map_err(|e| Error::io("could not duplicate stdin", &e))?,
         },
     };
-    Ok(reader.map_or(Source::Empty, |r| {
-        Source::Reader(r.interruptible(scope.clone()))
-    }))
+    Ok(Source::Reader(reader.interruptible(scope.clone())))
 }
 
 #[cfg(unix)]
@@ -149,29 +155,20 @@ fn launch_external_stage_direct(
     let holds_terminal = cx.holds_terminal;
     cx.shell.at_site(name, span, |shell| {
         let head = head.admit(mooring, shell)?;
-        let SpawnPlan {
-            shown,
-            admitted,
+        let mut prepared = command::prepare(
+            head,
             args,
-        } = command::vet(head, args)?;
-        let mut cmd = command::build_launch(
-            admitted,
-            &args,
             crate::authority::sandbox::Ownership::Kept,
             shell,
-            &shell.scope,
         )?;
-        // Confinement may have outlived the caller's poll.
-        shell.poll()?;
-        let pumps = wire_stage(&mut cmd, stdin, stdout, holds_terminal, shell)?;
-        let (mut child, leader, jail) = command::spawn(
-            &mut cmd,
-            PgidPolicy::Join(group.leader_pgid()),
-            &shown,
-            shell,
-        )?;
+        let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
+        let Spawned {
+            mut child,
+            landing,
+            jail,
+        } = command::start(&mut prepared, PgidPolicy::Join(group.leader_pgid()))?;
         let pumps = pumps.start(&mut child, &shell.scope);
-        // An envelope's payload leads its own group.
+        let Prepared { shown, args, .. } = prepared;
         Ok(ExternalStage {
             watch: slot.watch(child),
             prov: shell.local.audit.call_site().clone(),
@@ -179,7 +176,25 @@ fn launch_external_stage_direct(
             args,
             jail,
             pumps,
-            envelope: leader,
+            landing,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_startup_tty_reaches_a_thread_stage_only_when_the_group_holds_it() {
+        let mut shell = crate::test_helper::core_shell();
+        shell.io.terminal.startup_stdin_tty = true;
+        shell.io.stdin = Source::Terminal;
+        let scope = shell.scope.child();
+
+        let held = stage_stdin(ByteIn::Parent, &shell, &scope, true).expect("stage_stdin");
+        assert!(matches!(held, Source::Terminal));
+        let denied = stage_stdin(ByteIn::Parent, &shell, &scope, false).expect("stage_stdin");
+        assert!(matches!(denied, Source::Empty));
+    }
 }

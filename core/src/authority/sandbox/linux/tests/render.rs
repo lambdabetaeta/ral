@@ -51,14 +51,15 @@ fn info_slot() -> Slot {
     Slot::parse("98").expect("a slot")
 }
 
-/// A handoff lending `/dev/null` as the warrant: for a launch never
-/// spawned, or refused before its trampoline would read one.
-fn null_warrant() -> (Handoff, Slot) {
+/// A handoff lending `/dev/null` as the warrant and report: for a launch
+/// never spawned, or refused before its trampoline would read one.
+fn null_warrant() -> (Handoff, Slots) {
     use std::os::fd::AsFd;
     let null = std::fs::File::open("/dev/null").expect("open /dev/null");
     let mut handoff = Handoff::default();
-    let at = handoff.lend(null.as_fd()).expect("lends");
-    (handoff, at)
+    let warrant = handoff.lend(null.as_fd()).expect("lends");
+    let report = handoff.lend(null.as_fd()).expect("lends");
+    (handoff, Slots { warrant, report })
 }
 
 /// `policy` rendered over `binds`, kept or surrendered.
@@ -692,13 +693,13 @@ fn a_bwrap_that_cannot_mount_by_descriptor_launches_nothing() {
     let pin = stand_in();
     let path = crate::path::shown(pin.arg0());
     let refusal = |builds| {
-        let (handoff, warrant) = null_warrant();
+        let (handoff, slots) = null_warrant();
         let host = HostEnvelope { builds, ..WHOLE };
         let launch = bwrap_command(
             &on(&pin, host),
             plan(&unrestricted()),
             handoff,
-            warrant,
+            slots,
             &rendered,
             None,
             Ownership::Kept,
@@ -1081,16 +1082,16 @@ fn the_fresh_proc_and_dev_go_over_every_projection_bind() {
 /// The launcher is the file pinned at boot, named by descriptor: no
 /// `PATH` — the shell's override included — has any say in what runs.
 /// Its own argv names, each by the slot it was lent at, the parcel its
-/// options arrive in, the trampoline — ral's pin — and the warrant.
+/// options arrive in, the trampoline — ral's pin — and the warrant and report.
 #[test]
 fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
     let pin = stand_in();
-    let (handoff, warrant) = null_warrant();
+    let (handoff, slots) = null_warrant();
     let (cmd, _info_fd) = bwrap_command(
         &on(&pin, WHOLE),
         plan(&unrestricted()),
         handoff,
-        warrant,
+        slots,
         &unrestricted().rendered().expect("renders"),
         None,
         Ownership::Kept,
@@ -1104,12 +1105,18 @@ fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
     let args: Vec<_> = (cmd.get_args())
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let [opt, options, dashes, trampoline, flag, at] = &args[..] else {
-        panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`: {args:?}");
+    let [opt, options, dashes, trampoline, flag, warrant, report] = &args[..] else {
+        panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`: {args:?}");
     };
     assert_eq!(
-        [opt.as_str(), dashes, flag, at],
-        ["--args", "--", Role::Warrant.flag(), &warrant.to_string()],
+        [opt.as_str(), dashes, flag, warrant, report],
+        [
+            "--args",
+            "--",
+            Role::Warrant.flag(),
+            &slots.warrant.to_string(),
+            &slots.report.to_string()
+        ],
         "{args:?}"
     );
     let options = Slot::parse(options).expect("`--args` names a slot");

@@ -127,8 +127,8 @@ authority and returns domain data, never runtime values or control flow.
 - `enforce.rs` — the guards over the model's judgments: `check_exec`
   (`GrantStack::admit`), `check_exec_name` (`GrantStack::admit_name`, a head's
   failed-walk name judged as running it would be),
-  `check_fs_exact` (the access a walk found, for a probe's name), `fs_denial` (the wording of a
-  `Refused`), `check_flag`, and `check_device_name`.
+  `fs_denial` (the wording of a `Refused`, one clause per case shared with
+  `Display for Refused`), `check_flag`, and `check_device_name`.
   The exec and fs checks return
   `Result<_, Box<Denial>>`, a `Denial { check, error: Refusal }`, over
   `Refused::{Guarded, Withheld}`: a `fact::Check` and diagnostic data
@@ -148,15 +148,17 @@ authority and returns domain data, never runtime values or control flow.
   caller already holds), `admits_fs`, `sandbox_projection`, and the grant scope
   guards (`with_layer`, `push_session_capabilities`,
   `audit_deputy_prefixes`, `has_active_capabilities`). `Shell::locate` is the
-  one path every read and open takes: the name refusal, `path::walk` to the object,
-  then `GrantStack::judge` on its transcript, handing back the handle vouched
-  for. `Shell::refused` mints a `Denial`'s `Break` and records its check
+  one path every read and open takes: the device-name refusal, then
+  `GrantStack::locate` (`path::walk` to the object, `GrantStack::judge` on its
+  transcript), handing back the handle vouched for. `Shell::refused` mints a `Denial`'s `Break` and records its check
   through `Shell::record_check` with no `Mooring`, so on the trail alone.
   `Shell::exec_refused`, taking the `Denial` that `guard::check_exec` or
   `check_exec_name` returned to a head or `test_access`, records an exec
-  refusal against its call's `Mooring` and mints its `Break`. `walk_failure`
-  judges `failure_trace` for the requested operation before disclosing an
-  error; `locate_first` judges failed candidates on the same evidence.
+  refusal against its call's `Mooring` and mints its `Break`.
+  `GrantStack::judge_failure` judges `failure_trace` for the requested
+  operation before an error is disclosed; `GrantStack::locate` and `locate_dir`
+  apply it for every caller, and `locate_existing` and `locate_first` judge
+  failed walks through it.
   `From<Refusal> for Error` preserves the message and hint at this boundary.
 
 ## Construction — `core/src/authority/grant/`

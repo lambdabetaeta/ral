@@ -45,6 +45,12 @@ impl Default for JailLimits {
 
 static GUEST: OnceLock<Arc<GuestJail>> = OnceLock::new();
 
+/// Why the guest jail made no child of a launch: nothing ran.
+#[cfg(seccomp)]
+pub(crate) fn refused(why: impl std::fmt::Display) -> crate::authority::sandbox::Refusal {
+    crate::authority::sandbox::Refusal::Launch(format!("guest jail: {why}"))
+}
+
 #[cfg(seccomp)]
 pub(crate) fn install_guest(args: &[OsString]) -> Result<(), String> {
     // SAFETY: geteuid has no preconditions.

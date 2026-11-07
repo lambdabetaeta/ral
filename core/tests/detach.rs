@@ -273,9 +273,9 @@ fn a_frame_that_withholds_detach_refuses_the_call() {
 }
 
 /// A script whose `#!` interpreter does not exist passes vet and fails at
-/// `execve`; the error names the failed launch.
+/// `execve`; the error names the missing interpreter.
 #[test]
-fn a_launch_that_fails_says_it_cannot_launch() {
+fn a_launch_whose_interpreter_is_missing_says_so() {
     let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = with_detach();
     let dir = tempfile::tempdir().unwrap();
@@ -287,8 +287,8 @@ fn a_launch_that_fails_says_it_cannot_launch() {
         &format!("detach #'never born'# {}", no_interpreter.display()),
     );
     assert!(
-        message.contains("cannot launch"),
-        "the refusal must come from the failed spawn, not from vet, got {message:?}"
+        message.contains("its interpreter /nonexistent/ral-test-interpreter does not exist"),
+        "the refusal must name the missing interpreter, got {message:?}"
     );
 }
 

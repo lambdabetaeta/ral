@@ -9,15 +9,9 @@
 //! never consults them.
 
 use crate::path::walk::{Kind, Vetted, walk_with};
-use crate::path::{
-    Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Trace, is_absolute,
-};
+use crate::path::{Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Trace};
 use crate::site::{Silent, site};
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
-use std::fs::File;
-use std::io::Read;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// Interpreter hops followed, as the kernel bounds them.
@@ -160,30 +154,14 @@ fn system_only(v: &Vetted<'_>, me: u32) -> bool {
 fn trusted_shebang(program: Located) -> Option<PathBuf> {
     use crate::authority::policy::Ungoverned;
     let program = site!(Silent::CarrierRead, Ungoverned::read(program));
-    head_shebang(program.read().ok()?)
+    crate::path::shebang(program.read().ok()?)
 }
 
 /// The interpreter on the `#!` line of the program that was judged, read
 /// through its own handle: the object the launch is admitted for, whatever the
 /// name holds by now.
 pub(crate) fn launched_shebang(program: &Located<Judged<Reading>>) -> Option<PathBuf> {
-    head_shebang(program.read().ok()?)
-}
-
-fn head_shebang(file: File) -> Option<PathBuf> {
-    const LIMIT: u64 = if cfg!(target_os = "macos") { 512 } else { 256 };
-    let mut head = Vec::new();
-    file.take(LIMIT).read_to_end(&mut head).ok()?;
-    let line = head.strip_prefix(b"#!")?;
-    let end = line
-        .iter()
-        .position(|&b| b == b'\n' || (cfg!(target_os = "macos") && b == b'#'))?;
-    let blank = |b: &u8| *b == b' ' || *b == b'\t';
-    let line = &line[..end];
-    let start = line.iter().position(|b| !blank(b)).unwrap_or(line.len());
-    let interpreter = line[start..].split(blank).next()?;
-    let interpreter = PathBuf::from(OsStr::from_bytes(interpreter));
-    is_absolute(&interpreter).then_some(interpreter)
+    crate::path::shebang(program.read().ok()?)
 }
 
 /// What the system's own shims forward to: `/bin/sh` to the shell
@@ -239,10 +217,11 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
 mod tests {
     use super::*;
     use crate::test_helper::{located, real};
+    use std::fs::File;
     use std::os::unix::fs::PermissionsExt;
 
     fn shebang(path: &Path) -> Option<PathBuf> {
-        head_shebang(File::open(path).ok()?)
+        crate::path::shebang(File::open(path).ok()?)
     }
 
     /// An executable `name` under `dir` holding `body`.
@@ -289,19 +268,6 @@ mod tests {
         assert_eq!(hops(located(&script)), [env]);
     }
 
-    #[test]
-    fn a_relative_interpreter_yields_nothing() {
-        let (_dir, root) = temp_root();
-        assert_eq!(shebang(&file(&root, "a", "#!sh\n")), None);
-        assert_eq!(shebang(&file(&root, "b", "#!\n")), None);
-    }
-
-    #[test]
-    fn a_line_with_no_end_in_the_buffer_yields_nothing() {
-        let (_dir, root) = temp_root();
-        assert_eq!(shebang(&file(&root, "a", "#!/bin/sh")), None);
-    }
-
     /// The launched program's `#!` line is the admitted object's where the host
     /// can read through the handle, and nothing at all where it cannot: never
     /// the script now at its name.
@@ -323,21 +289,6 @@ mod tests {
         // the held identity, and refuses the one that now leads elsewhere.
         let expected = (!cfg!(target_os = "macos")).then(|| PathBuf::from("/bin/sh"));
         assert_eq!(launched_shebang(located), expected);
-    }
-
-    /// macOS ends the `#!` line at a `#`; Linux reads it as part of the name.
-    #[test]
-    fn a_hash_ends_the_interpreter_only_on_macos() {
-        let (_dir, root) = temp_root();
-        let expected = if cfg!(target_os = "macos") {
-            "/bin/sh"
-        } else {
-            "/bin/sh#x"
-        };
-        assert_eq!(
-            shebang(&file(&root, "a", "#!/bin/sh#x\n")),
-            Some(PathBuf::from(expected))
-        );
     }
 
     /// Files in a temp dir are this uid's, who could write any interpreter

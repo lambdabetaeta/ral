@@ -1,14 +1,15 @@
 //! The external arm of command dispatch — `dispatch` picks it over
-//! env and handler: vet the admitted head, wire the shell's streams
-//! into child stdio, spawn under the canonical pgid and sandbox, reap.
+//! env and handler: prepare the admitted head, wire the shell's streams
+//! into child stdio, start it under the canonical pgid and sandbox, reap.
 //!
 //! Pipeline stages never reach [`run`] — they take
-//! [`super::pipeline::PipeNode::run`] — but share `Head::admit`, `vet` and
-//! `build_launch` with it, so both paths resolve and confine a call the
-//! same way.
+//! [`super::pipeline::PipeNode::run`] — but a direct stage shares
+//! [`prepare`], [`start`] and [`ending`] with it, so both paths resolve,
+//! confine, start and end a call the same way.
 
-use crate::process::Group;
-use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
+use crate::authority::sandbox::Ownership;
+use crate::process::Spawned;
+use crate::shell::runtime::{Mooring, Settled, Shell, Value};
 
 mod child;
 #[cfg(unix)]
@@ -23,11 +24,9 @@ pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use head::{Admission, Head, Target};
-pub(crate) use process::{brake, build_launch, spawn, with_denials};
+pub(crate) use process::{Prepared, ending, prepare, start};
 pub(crate) use stdio::{ChildIo, ChildOut, TtyInputPermit, wire_stdio};
-pub(crate) use vet::{SpawnPlan, vet};
 
-use child::WaitedChild;
 use foreground::ForegroundDecision;
 use stdio::inherit_tty;
 
@@ -40,29 +39,11 @@ pub(crate) fn run(
     mooring: &Mooring,
     shell: &Shell,
 ) -> Settled<Value> {
-    let SpawnPlan {
-        shown: cmd_name,
-        admitted,
-        args,
-    } = vet(head, args)?;
-    #[cfg(debug_assertions)]
-    let program = admitted.program().to_string();
-
-    // Confinement can run for minutes on Windows, so the run's scope goes in
-    // with it and is read again on the way out: a wall that expired mid-stamp
-    // must not be discovered only once the child is already running.
-    let mut command = build_launch(
-        admitted,
-        &args,
-        crate::authority::sandbox::Ownership::Kept,
-        shell,
-        &shell.scope,
-    )?;
-    shell.poll()?;
+    let mut prepared = prepare(head, args, Ownership::Kept, shell)?;
 
     let inherit_tty = inherit_tty(shell);
     let pumps = wire_stdio(
-        &mut command,
+        &mut prepared.launch,
         shell,
         ChildIo::from(&shell.io),
         Some(TtyInputPermit::for_standalone_external()),
@@ -70,21 +51,26 @@ pub(crate) fn run(
     )?;
     let needs_pump = pumps.pumps_stdout();
 
-    let confinement = command.confinement();
-    let fg = ForegroundDecision::for_standalone(shell, needs_pump, confinement.is_some(), mooring);
+    let fg =
+        ForegroundDecision::for_standalone(shell, needs_pump, prepared.launch.enveloped(), mooring);
     #[cfg(debug_assertions)]
-    trace_io_wiring(&cmd_name, &program, inherit_tty, needs_pump, &fg, shell);
+    trace_io_wiring(&prepared.shown, inherit_tty, needs_pump, &fg, shell);
 
-    announce_command_title(&cmd_name, shell);
+    announce_command_title(&prepared.shown, shell);
 
     // Anchor the denial-log window before the spawn, so a kernel deny the
     // child logs falls inside what `authority::sandbox::denial_hint` reads back.
     let started = std::time::Instant::now();
     // `finish_command` builds the `Command{External}` observation from
-    // whatever error reaches it, so a spawn failure needs no emission of
+    // whatever error reaches it, so a start failure needs no emission of
     // its own here.
     let prepared_loan = fg.prepare(shell, mooring);
-    let (child, led, jail) = spawn(&mut command, fg.pgid_policy(), &cmd_name, shell)?;
+    let Spawned {
+        child,
+        landing,
+        jail,
+    } = start(&mut prepared, fg.pgid_policy())?;
+    let Prepared { shown, .. } = prepared;
 
     let child_pid = child.id();
     // Held until `reclaim`: its `Drop` restores ral's pgid on every path out
@@ -92,23 +78,22 @@ pub(crate) fn run(
     // pgroup.
     let loan = prepared_loan.and_then(|loan| loan.lend(child_pid.cast_signed()));
 
-    let group = landed_in(led, shell.io.stage.as_ref());
-    // Nothing fallible may run between `spawn` and this assembly: until
+    // Nothing fallible may run between `start` and this assembly: until
     // `RunningChild` owns it the bare child leaks on an early return,
     // whereas afterwards its `Drop` SIGKILLs the pgid and reaps.
     let running = RunningChild::assemble_with_owner(
         child,
-        cmd_name.clone(),
+        shown.clone(),
         pumps,
-        group,
+        landing.group(shell.io.stage.as_ref()),
         shell.scope.clone(),
         jail,
     );
 
-    let waited: WaitedChild = running.wait();
+    let waited = running.wait();
+    let outcome = waited.outcome;
     // The terminal returns the instant its tenant is dead; a key it heard is
     // struck on the node, which the current scope reads or a shield masks.
-    let outcome = waited.outcome.enveloped(confinement.is_some());
     if let Some(loan) = loan {
         loan.reclaim(outcome.death());
     }
@@ -128,23 +113,7 @@ pub(crate) fn run(
         pids.insert(child_pid);
         pids
     };
-    match outcome.classify(cause) {
-        None => Ok(Value::Unit),
-        Some(end) => Err(match Break::of_child(&cmd_name, end, &shell.scope) {
-            Break::Error(err) => Break::Error(with_denials(err, shell, pids, started)),
-            escape @ Break::Escape(_) => escape,
-        }),
-    }
-}
-
-/// Who signals a child spawned under `stage`: the group it `led`, else the
-/// pipeline's it joined, else nobody but its own pid.
-fn landed_in(
-    led: Option<crate::process::Pgid>,
-    stage: Option<&crate::process::Membership>,
-) -> Option<Group> {
-    led.map(Group::Owns)
-        .or_else(|| stage.cloned().map(Group::Joins))
+    ending(&shown, outcome, cause, &shell.scope, shell, pids, started).map(|()| Value::Unit)
 }
 
 /// Announce the running command via the terminal title (OSC 0).
@@ -162,7 +131,6 @@ fn announce_command_title(cmd: &str, shell: &Shell) {
 #[cfg(debug_assertions)]
 fn trace_io_wiring(
     cmd_name: &str,
-    resolved: &str,
     inherit_tty: bool,
     needs_pump: bool,
     fg: &ForegroundDecision,
@@ -174,7 +142,7 @@ fn trace_io_wiring(
     };
     crate::dbg_trace!(
         "exec",
-        "cmd={cmd_name} resolved={resolved} tty=[in:{} out:{} err:{}] \
+        "cmd={cmd_name} tty=[in:{} out:{} err:{}] \
          sink={sink} inherit={inherit_tty} pump={needs_pump} \
          interactive={} fg_job={}",
         shell.io.terminal.startup_stdin_tty,
@@ -183,30 +151,4 @@ fn trace_io_wiring(
         shell.io.interactive,
         fg.want_fg(),
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::process::{DurableRoot, Membership, Pgid, Scope};
-
-    fn pgid(raw: i32) -> Pgid {
-        Pgid::from_raw(raw).expect("positive")
-    }
-
-    /// An envelope inside a stage leads its payload's group, and is its
-    /// owner; a plain member joins; a top-level `Inherit` child has none.
-    #[test]
-    fn a_child_owns_what_it_leads_and_joins_what_it_only_entered() {
-        let stage = Membership::new(pgid(7), Scope::clone(&DurableRoot::default().worker()));
-        assert!(matches!(
-            landed_in(Some(pgid(9)), Some(&stage)),
-            Some(Group::Owns(g)) if g == pgid(9)
-        ));
-        assert!(matches!(
-            landed_in(None, Some(&stage)),
-            Some(Group::Joins(m)) if m.group() == pgid(7)
-        ));
-        assert!(landed_in(None, None).is_none());
-    }
 }

@@ -187,7 +187,7 @@ fn outcome_from_waitid(status: WaitIdStatus) -> WaitOutcome {
     } else {
         // WEXITED only reports exited, killed, or dumped; the last two are
         // both `terminating_signal`, so this arm is unreachable in practice.
-        WaitOutcome::NativeCode(1)
+        WaitOutcome::Exited(1)
     }
 }
 

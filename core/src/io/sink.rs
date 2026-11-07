@@ -741,7 +741,7 @@ mod tests {
             .stdout(plan.stdio)
             .spawn(crate::process::PgidPolicy::Inherit)
             .expect("spawn")
-            .0;
+            .child;
 
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).expect("read");
@@ -769,7 +769,7 @@ mod tests {
             .stdout(plan.stdio)
             .spawn(crate::process::PgidPolicy::Inherit)
             .expect("spawn")
-            .0;
+            .child;
         child.reap().expect("reap");
 
         let handle = std::thread::spawn(move || {

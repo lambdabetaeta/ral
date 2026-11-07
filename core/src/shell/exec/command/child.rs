@@ -439,11 +439,11 @@ mod tests {
         });
 
         let waited = running.wait();
-        let end = waited.outcome.classify(waited.cause);
+        let cancelled = waited.outcome.cancelled_by(waited.cause);
         waited.settle(&scope);
         canceller.join().expect("canceller thread");
 
-        assert_eq!(end, Some(ChildEnd::Cancelled(CancelCause::TimedOut)));
+        assert_eq!(cancelled, Some(CancelCause::TimedOut));
     }
 
     /// Run `sh` under a scope struck with `cause` — before the dispatch when

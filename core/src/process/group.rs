@@ -23,11 +23,12 @@ pub use unix::{spawn_with_pgid, spawn_with_pgid_after};
 
 #[cfg(windows)]
 mod windows;
+#[cfg(all(windows, test))]
+pub(crate) use windows::is_known_group;
 #[cfg(windows)]
 pub(crate) use windows::{
-    PreparedGroup, apply_group_active_process_limit, close_prepared_group, is_known_group,
-    prepare_group, prepared_job, register_prepared_group, release_win_group,
-    set_active_process_limit,
+    PreparedGroup, close_prepared_group, prepare_group, prepared_job, register_prepared_group,
+    release_win_group, set_active_process_limit,
 };
 #[cfg(windows)]
 pub use windows::{ReapStatus, break_pipeline_group, disown_pipeline_group, try_reap_leader};
@@ -120,10 +121,37 @@ pub enum PgidPolicy {
     Join(Pgid),
 }
 
-impl PgidPolicy {
-    /// Whether the child leads the group it lands in.
-    pub(crate) const fn leads(self) -> bool {
-        matches!(self, Self::NewLeader | Self::NewSession)
+/// Where a spawned child landed, and so what addresses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Landing {
+    /// A group of its own, or its envelope's payload's: signalled and killed
+    /// whole.
+    Owns(Pgid),
+    /// A pipeline's, whose owner addresses it as a whole.
+    Joins,
+    /// ral's own, where only its pid addresses it.
+    Shares,
+}
+
+impl Landing {
+    /// Where `policy` put a child whose spawn named `group`, `None` only
+    /// under `Inherit`.
+    pub(crate) fn of(policy: PgidPolicy, group: Option<Pgid>) -> Self {
+        match (policy, group) {
+            (PgidPolicy::Join(_), _) => Self::Joins,
+            (_, Some(group)) => Self::Owns(group),
+            (_, None) => Self::Shares,
+        }
+    }
+
+    /// Who signals the child: the group it owns, the `stage`'s it joined, or
+    /// nobody but its own pid.
+    pub(crate) fn group(self, stage: Option<&Membership>) -> Option<Group> {
+        match self {
+            Self::Owns(group) => Some(Group::Owns(group)),
+            Self::Joins => stage.cloned().map(Group::Joins),
+            Self::Shares => None,
+        }
     }
 }
 
@@ -223,6 +251,39 @@ mod tests {
         let member = membership(&stage);
         assert!(member.owes(CancelCause::Terminated));
         assert!(!member.owes(CancelCause::TimedOut));
+    }
+
+    /// A child owns what it, or its envelope's payload, leads; joins what it
+    /// only entered; and shares ral's group under `Inherit`.
+    #[test]
+    fn a_child_owns_what_it_leads_and_joins_what_it_only_entered() {
+        let (seven, nine) = (
+            Pgid::from_raw(7).expect("positive"),
+            Pgid::from_raw(9).expect("positive"),
+        );
+        let stage = Membership::new(seven, Scope::clone(&DurableRoot::default().worker()));
+        assert_eq!(
+            Landing::of(PgidPolicy::NewLeader, Some(nine)),
+            Landing::Owns(nine)
+        );
+        assert_eq!(
+            Landing::of(PgidPolicy::NewSession, Some(nine)),
+            Landing::Owns(nine)
+        );
+        assert_eq!(
+            Landing::of(PgidPolicy::Join(seven), Some(seven)),
+            Landing::Joins
+        );
+        assert_eq!(Landing::of(PgidPolicy::Inherit, None), Landing::Shares);
+        assert!(matches!(
+            Landing::Owns(nine).group(Some(&stage)),
+            Some(Group::Owns(g)) if g == nine
+        ));
+        assert!(matches!(
+            Landing::Joins.group(Some(&stage)),
+            Some(Group::Joins(m)) if m.group() == seven
+        ));
+        assert!(Landing::Shares.group(None).is_none());
     }
 
     #[test]

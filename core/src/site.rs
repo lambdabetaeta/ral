@@ -111,8 +111,18 @@ pub(crate) enum Silent {
     /// The `exec` of the sandbox respawn handoff, which replaces this process
     /// image with the confined target.  It raises no card: the surface card
     /// fired before the handoff, so the exec itself raises none.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     RespawnExec,
+    /// The Linux trampoline's wait for the program it supervises inside the
+    /// envelope, a stop being no end to report.  It raises no card: the
+    /// surface card fired before the handoff.
+    #[cfg(target_os = "linux")]
+    SupervisorWait,
+    /// The Linux trampoline's fork of the bundled tool it supervises, as it
+    /// supervises a file.  It raises no card: the surface card fired before
+    /// the handoff.
+    #[cfg(target_os = "linux")]
+    SupervisorFork,
     /// A stat and an access check by name under the directory handle a walk
     /// holds, asking whether the entry is still the walked object and beyond
     /// the user's write.  It raises no card: sandbox rendering over the walk's
@@ -122,6 +132,11 @@ pub(crate) enum Silent {
     /// Read through a system-only walk's handle; only the system can author it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     CarrierRead,
+    /// The real path of an admitted file whose spawn failed `ENOENT`, statted
+    /// without following a final link: a file gone is `not-found`, one still
+    /// there lacks its interpreter.  It raises no card: the grant admitted the
+    /// file to run, and this only words the failure.
+    SpawnedImageStat,
 
     // The wire and the engine process.
     /// The engine's exit when adopting the wire on fd 3 fails.  The process

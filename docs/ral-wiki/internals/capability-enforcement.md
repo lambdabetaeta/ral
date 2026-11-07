@@ -145,7 +145,7 @@ The [[#Guest jail|guest jail]] is a separate launch branch.
   macOS, Landlock on Linux hosts. Windows has no kernel exec filter
   ([[internals/exec-judgment|exec-judgment]]).
 - **Filesystem.** The guard checks ral's own reads and writes
-  (`authority::guard::check_fs_exact`). An OS sandbox confines the child's: Seatbelt on macOS,
+  (`GrantStack::refusal_fs`, through `Shell::locate`). An OS sandbox confines the child's: Seatbelt on macOS,
   bwrap on Linux hosts, an AppContainer LowBox token on Windows.
 - **Network.** There is no guard, because ral performs no network operation
   itself. The OS sandbox is the only enforcer. On Windows it is the withheld

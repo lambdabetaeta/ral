@@ -294,9 +294,10 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
             &DurableRoot::default().worker(),
         )
         .expect("confine under a derived capability SID");
-        let (mut child, _pgid, _) = launch
+        let mut child = launch
             .spawn(PgidPolicy::Inherit)
-            .expect("CreateProcessW must accept the derived capability SIDs");
+            .expect("CreateProcessW must accept the derived capability SIDs")
+            .child;
         let status = child.reap().expect("wait for the confined child");
         WaitOutcome::from_exit_status(status)
     };
@@ -468,7 +469,7 @@ fn assert_reads(
 fn assert_launch_reads(mut launch: crate::process::Launch, relative: &str, readable: bool) {
     use crate::process::PgidPolicy;
     use std::io::Read;
-    let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
+    let mut child = launch.spawn(PgidPolicy::Inherit).unwrap().child;
     let mut stdout = Vec::new();
     child
         .take_stdout()
@@ -694,7 +695,7 @@ fn an_image_is_granted_to_its_own_launch_alone() {
                 &DurableRoot::default().worker(),
             )
             .unwrap();
-            let (mut child, _, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
+            let mut child = launch.spawn(PgidPolicy::Inherit).unwrap().child;
             let mut stderr = String::new();
             child
                 .take_stderr()
@@ -731,7 +732,7 @@ fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
             exec: ExecProjection::default(),
         };
         let mut launch = confined(&writable, &w, "echo ok>made.txt").unwrap();
-        let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
+        let mut child = launch.spawn(PgidPolicy::Inherit).unwrap().child;
         let ended = child.reap().unwrap();
         assert!(
             w.join("made.txt").exists(),

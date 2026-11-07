@@ -58,13 +58,15 @@ pub use reexec::pinned_arg0;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use carriers::carriers;
 pub use launch::serve_warrant;
-pub(crate) use launch::{Ownership, sandboxed_command};
+pub(crate) use launch::{Image, Ownership, sandboxed_command};
 #[cfg(target_os = "macos")]
 pub use macos::ALREADY_PROFILED;
 
-// Read by `shell::exec::command::with_denials` on a failure that ran under an
-// active OS sandbox, for a hint naming the denied path.
+// Read by `shell::exec::command` on a failure that ran under an active OS
+// sandbox, for a hint naming the denied path or the refused interpreter.
 pub(crate) use diag::denial_hint;
+#[cfg(unix)]
+pub(crate) use diag::interpreter_hint;
 
 /// Whether this platform can enforce `net: false`: Linux via `--unshare-net`,
 /// macOS via deny-default Seatbelt, Windows via an `AppContainer` with no
@@ -97,15 +99,15 @@ pub(crate) use macos::RENDERS_EXEC as EXEC_ENFORCED;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) const EXEC_ENFORCED: bool = false;
 
-/// Why no confined child exists: nothing ran, and the sandbox is why.  Never
-/// the command's fault, so never phrased as such.
+/// Why no child exists, through no fault of the command's, so never phrased
+/// as one: nothing ran.
 #[derive(Debug)]
 pub(crate) enum Refusal {
-    /// This host cannot establish the confinement the active grant asks for:
-    /// an axis no backend here enforces, an envelope binary that was not there
-    /// to pin at boot, or a spawn the envelope itself failed.
+    /// This host cannot establish the confinement or budget the active grant
+    /// asks for: an axis no backend here enforces, an envelope binary that
+    /// was not there to pin at boot, an envelope or trampoline that failed.
     Unavailable(String),
-    /// The launch could not be built.
+    /// The launch could not be built or placed.
     Launch(String),
     /// A cancel arrived mid-launch: not a sandbox failure.
     #[cfg(windows)]

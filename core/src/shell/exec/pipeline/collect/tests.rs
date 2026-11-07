@@ -131,7 +131,7 @@ fn owning_pipeline(
     mooring: &Mooring,
 ) -> (PipelineGroup, CollectState, Sender<Event>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    let group = PipelineGroup::prepare(shell, tx.clone()).expect("anchor spawns");
+    let group = PipelineGroup::prepare(tx.clone()).expect("anchor spawns");
     let collect = CollectState::new(
         rx,
         group.group(),
@@ -304,7 +304,7 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
                 dir.path().to_path_buf(),
             )),
             pumps: command::Pumps::default(),
-            envelope: None,
+            landing: crate::process::Landing::Joins,
         }),
         None,
         slot,
@@ -328,8 +328,7 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
 fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
     let mut shell = crate::test_helper::core_shell();
     let mooring = Mooring::adrift();
-    let owner =
-        PipelineGroup::prepare(&shell, std::sync::mpsc::channel().0).expect("anchor spawns");
+    let owner = PipelineGroup::prepare(std::sync::mpsc::channel().0).expect("anchor spawns");
     let pgid = owner.leader_pgid();
     let joining =
         PipelineGroup::joining(owner.membership(&crate::process::DurableRoot::default().worker()));

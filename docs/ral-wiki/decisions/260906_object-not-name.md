@@ -39,7 +39,7 @@ profile admits ancestors as `file-read-metadata` only; a read handle there
 was refused, and every ral-owned read under a ral sandbox with it); a
 symlink met anywhere — leaf included — is read and spliced into the remaining
 name, which is re-walked from the root (40 hops is a cycle). The path assembled
-is canonical by construction. The verdict (`check_fs_exact`) is taken on that
+is canonical by construction. The verdict (`GrantStack::refusal_fs`) is taken on that
 object; the `Located` handed back performs open, stat, staging, rename and
 unlink relative to the directory handle with `FollowSymlinks::No`. So a
 dangling link is judged at its target, and a component swapped after the

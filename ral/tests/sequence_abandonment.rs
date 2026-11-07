@@ -60,7 +60,7 @@ fn a_more_specific_hint_survives() {
 
 /// `attempt` cannot make a command run, so a step that never became a process
 /// is not told to wrap itself in one; a path naming no program offers itself
-/// as text instead, bound when it is the whole of a `let`.
+/// as text instead.
 #[test]
 fn a_command_that_never_ran_is_not_told_to_attempt() {
     let out = run(
@@ -82,9 +82,8 @@ fn a_command_that_never_ran_is_not_told_to_attempt() {
         out.stderr
     );
     assert!(
-        out.stderr.contains(&format!(
-            "to bind the path as text, write `let d = #'{dir}'#`"
-        )),
+        out.stderr
+            .contains(&format!("to use the path as text, write `#'{dir}'#`")),
         "stderr: {}",
         out.stderr
     );

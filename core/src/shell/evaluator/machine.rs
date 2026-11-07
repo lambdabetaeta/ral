@@ -9,12 +9,13 @@
 
 use std::sync::Arc;
 
+use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
 use crate::io::{self, Sink};
 use crate::ir::Name;
 use crate::ir::Redirects;
 use crate::ir::{
-    Argv, CaseArm, Comp, CompKind, GroupNode, NativeEntry, Pattern, Prim, Val, ValListElem,
-    is_synthetic, synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, GroupNode, NativeEntry, Pattern, Prim,
+    Val, ValListElem, is_synthetic, synthetic,
 };
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
@@ -332,6 +333,37 @@ pub(crate) fn close_redirects(
     sig: &Signature,
 ) -> Result<Redirects<String>, Error> {
     redirects.try_map(|v| form(v, env, sig).map(|v| v.to_string()))
+}
+
+/// A directory or plain file ran as a command.
+fn names_no_program(b: &Break) -> bool {
+    let Break::Error(e) = b else { return false };
+    let Reason::Process(process) = &e.reason else {
+        return false;
+    };
+    matches!(
+        &process.failure,
+        Failure::NotRunnable(NotRunnable {
+            why: Unrunnable::Directory | Unrunnable::NotExecutable,
+            ..
+        })
+    )
+}
+
+/// `b`, offering a path head given no arguments as text: it was most likely
+/// meant as such.
+fn offer_path_as_text(b: Break, head: &CommandWord, argv: &[Value]) -> Break {
+    match (b, head.name()) {
+        (Break::Error(e), path @ (CommandName::Path(_) | CommandName::TildePath(_)))
+            if argv.is_empty() =>
+        {
+            Break::Error(e.append_hint(format!(
+                "to use the path as text, write `#'{}'#`",
+                path.written()
+            )))
+        }
+        (b, _) => b,
+    }
 }
 
 fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<Value> {
@@ -853,7 +885,8 @@ impl Machine {
         shell.poll()?;
         let argv = close_argv(&exec.argv, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
-        match dispatch::classify_command(&exec.head, env, mooring, shell)? {
+        let offer = |b| offer_path_as_text(b, &exec.head, &argv);
+        match dispatch::classify_command(&exec.head, env, mooring, shell).map_err(offer)? {
             Resolution::Env(Value::Native(entry)) if entry.decl.is_boundary() => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
                 let v = run_boundary(&entry, &argv, exec.site.as_ref(), span, mooring, shell)?;
@@ -882,7 +915,8 @@ impl Machine {
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::External(head) => {
-                let v = dispatch::run_external(head, &argv, &redirs, span, mooring, shell)?;
+                let v = dispatch::run_external(head, &argv, &redirs, span, mooring, shell)
+                    .map_err(|b| if names_no_program(&b) { offer(b) } else { b })?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
         }
@@ -1227,6 +1261,7 @@ pub(crate) fn apply(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::ir::{Name, Phrase};
@@ -1269,6 +1304,61 @@ mod tests {
 
     fn new_shell() -> Shell {
         crate::test_helper::core_shell()
+    }
+
+    /// The hint `source` fails with, when it fails.
+    #[cfg(unix)]
+    fn failure_hint(source: &str, shell: &mut Shell) -> Option<String> {
+        match run_source(source, shell) {
+            Err(Break::Error(e)) => e.hint.as_deref().map(str::to_owned),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    const AS_TEXT: &str = "to use the path as text, write";
+
+    /// A path head given no arguments offers itself as text, whether a grant
+    /// refuses it or it names a directory or plain file; given arguments, it
+    /// is a program call and offers nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_argless_path_head_that_is_no_program_offers_itself_as_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::path::shown(tmp.path());
+        let file = tmp.path().join("plain");
+        std::fs::write(&file, "").unwrap();
+        let file = crate::path::shown(&file);
+        let mut shell = new_shell();
+        for path in [&dir, &file] {
+            let hint = failure_hint(path, &mut shell).expect("a hint");
+            assert!(hint.contains(&format!("{AS_TEXT} `#'{path}'#`")), "{hint}");
+            let hint = failure_hint(&format!("{path} x"), &mut shell);
+            assert!(!hint.is_some_and(|h| h.contains(AS_TEXT)));
+        }
+    }
+
+    /// The grant's refusal keeps its own hint, and the offer follows it.
+    #[cfg(unix)]
+    #[test]
+    fn a_grant_refused_path_head_offers_itself_as_text_after_the_grants_hint() {
+        use crate::authority::policy::{Capabilities, ExecGrant};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::path::shown(tmp.path());
+        let mut shell = new_shell();
+        shell
+            .context
+            .grants
+            .push(crate::test_helper::layer(Capabilities {
+                exec: Some(ExecGrant::default()),
+                ..Capabilities::default()
+            }));
+        let hint = failure_hint(&dir, &mut shell).expect("a hint");
+        let (grant, text) = hint.rsplit_once("\n\n").expect("both hints are kept");
+        assert!(text.contains(&format!("{AS_TEXT} `#'{dir}'#`")), "{hint}");
+        assert!(grant.contains("grant") && !grant.contains("#'"), "{hint}");
+        let hint = failure_hint(&format!("{dir} x"), &mut shell).expect("a hint");
+        assert!(!hint.contains(AS_TEXT), "{hint}");
     }
 
     /// `M to x. N`: a `let` in `rest` is invisible once the `To` frame pops

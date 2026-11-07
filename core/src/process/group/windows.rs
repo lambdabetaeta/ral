@@ -12,7 +12,6 @@
 //! external's, while pipeline stages borrow one owned by `PipelineGroup`.
 
 use super::{Pgid, PgidPolicy};
-use crate::sync::LockExt as _;
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Pipeline-group state ───────────────────────────────────────────────────
@@ -455,34 +454,22 @@ mod win_groups {
         }
     }
 
-    /// Apply an active-process limit to an existing group's job.  Windows refuses
-    /// to put a child in a second job unless the jobs are nested, which this file
-    /// never arranges, so a grant landing on a pipeline member must constrain the
-    /// job the member already sits in.
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "the guard is deliberately held across the kernel call: see the comment inside"
-    )]
-    pub(crate) fn apply_active_process_limit(leader: i32, limit: u32) -> bool {
-        // Held across `SetInformationJobObject`: the job belongs to the registry,
-        // so dropping the lock first would let `release` close what we configure.
-        let groups = GROUPS.lock_ignore_poison();
-        let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
-            return false;
-        };
-        if state.job.is_null() {
-            return false;
-        }
-        set_active_process_limit(state.job, limit)
-    }
-
-    /// The shared kernel call behind both the per-child sandbox job
-    /// (`ChildHandle::limit_processes`) and the pipeline-group limit.
+    /// A grant's process budget on a job: the child's group's, or one made
+    /// for it alone.  Windows puts a child in no second job unless nested,
+    /// which this file never arranges, so a pipeline member's budget lands on
+    /// the job it already sits in.
     ///
     /// Read-modify-write, because one `LimitFlags` word carries every limit the
     /// job has: assigning it would strip `KILL_ON_JOB_CLOSE` off a group's job
-    /// and leave [`release`] unable to kill the members it still owns.
+    /// and leave [`release`] unable to kill the members it still owns.  Under
+    /// `GROUPS`, as [`disown`]'s clearing is: interleaved, it would re-arm the
+    /// `KILL_ON_JOB_CLOSE` a disown just cleared.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the guard is held across the read-modify-write on purpose: see the doc"
+    )]
     pub(crate) fn set_active_process_limit(job: HANDLE, limit: u32) -> bool {
+        let _groups = GROUPS.lock_ignore_poison();
         unsafe {
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             let mut returned: u32 = 0;
@@ -576,17 +563,7 @@ pub(crate) fn release_win_group(leader: i32) {
     win_groups::release(leader);
 }
 
-/// Cap the active-process count of the pipeline group's Job Object.
-///
-/// For `ChildHandle::limit_processes`: a child inside a pipeline
-/// cannot join a second job, so a grant's limit lands on the one it is
-/// already in.
-pub(crate) fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
-    win_groups::apply_active_process_limit(leader, limit)
-}
-
-/// Cap the active-process count of a Job Object the caller owns — the per-child
-/// job `ChildHandle::limit_processes` creates.
+/// Cap the active-process count of `job`, before the child it holds runs.
 pub(crate) fn set_active_process_limit(
     job: windows_sys::Win32::Foundation::HANDLE,
     limit: u32,
@@ -595,9 +572,9 @@ pub(crate) fn set_active_process_limit(
 }
 
 /// True when `leader` names a live group.
-/// `ChildHandle::limit_processes` asks before choosing between a fresh
-/// per-child job and constraining this one.
+#[cfg(test)]
 pub(crate) fn is_known_group(leader: i32) -> bool {
+    use crate::sync::LockExt as _;
     let groups = win_groups::GROUPS.lock_ignore_poison();
     groups.iter().any(|(p, _)| *p == leader)
 }
