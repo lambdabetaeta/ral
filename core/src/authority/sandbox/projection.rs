@@ -21,7 +21,7 @@ use crate::authority::policy::GrantPath;
 use crate::authority::policy::Subject;
 use crate::authority::policy::{
     Admitted, Baseline, ExecRules, FsAllow, FsOp, FsRules as FsTable, Gpu, GrantStack, Join,
-    region, rules, running_region,
+    region, rules,
 };
 use crate::path::{Excluded, RealPath};
 #[cfg(unix)]
@@ -223,7 +223,7 @@ impl SandboxProjection {
     ) -> Option<Self> {
         // Zipped because the two regions are `Some` on the same condition,
         // some layer held an `fs` opinion, so there is no mixed case to weigh.
-        let regions = running_region(grants, baseline)
+        let regions = region(grants, &FsOp::Read, baseline)
             .zip(region(grants, &FsOp::Write, baseline))
             .filter(|_| !grants.fs_is_top());
         let online = grants.net_veto().is_none();

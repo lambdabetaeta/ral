@@ -77,15 +77,15 @@ Submodules:
   tables met (writing reads) and the system reads from `Baseline` joined;
   `Baseline` also supplies the bundled-tool image and protected boot identities,
   assembled in `authority.rs`, without a policy-to-sandbox dependency;
-  `ReadRegion`, the read and
-  the running regions (run places `P≤L`) folded once for a walk that judges many
+  `ReadRegion`, the one read table
+  (run places `P≤L` included) folded once for a walk that judges many
   objects. `GrantStack::judge` and `locate`, each one function over the sealed
   `path::Handle` (`Located` or `Dir`), are where the stack's evidence becomes
   authority: the pinned-binary veto (`Refused::Guarded`) first, then
   the fold, then the handle `Judged<O>`, minted by `Handle::judged` against a
   `Verdict` only this file makes, as `ReadRegion::judge` and `Ungoverned::{read,
   write}` mint too; `GrantStack::read` is the read
-  judgment, `region` then the running region only on a missing allowance;
+  judgment, `region(Read)` alone;
 - `exec.rs` — the exec instance
   ([[design/authority-tables#Two instances|authority-tables]]) and its judgment: `Program`
   (`Tool` or `File { arg0, located }`, one owned `Located`) and the `Subject` it

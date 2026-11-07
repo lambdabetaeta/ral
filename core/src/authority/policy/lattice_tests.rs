@@ -1224,7 +1224,7 @@ fn law_4_extension_invariant_on_reads_with_run_places() {
         let extended = base.clone().extend(Fragment::of(frag));
         let own = rand_layer_of(frag_exec.clone(), Some(frag_fs.clone().unwrap_or_default()));
         let read = |layer: &GrantLayer, f: &str| {
-            running_region(&test_helper::stack([layer.clone()]), &baseline)
+            region(&test_helper::stack([layer.clone()]), &FsOp::Read, &baseline)
                 .map_or(Evidence::ALLOW, |r| {
                     r.evidence(path::Subject::Access(&trace(f)))
                 })
@@ -1377,7 +1377,7 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
     let baseline = Baseline::default();
     for _ in 0..800 {
         let stack = rand_stack(&u, &mut rng);
-        let full = running_region(&stack, &baseline);
+        let full = region(&stack, &FsOp::Read, &baseline);
         for f in &u.files {
             let access = trace(f);
             let subject = path::Subject::Access(&access);

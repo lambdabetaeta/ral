@@ -270,59 +270,41 @@ fn meet_onto<T: Meet>(acc: &mut Option<T>, next: T) {
 }
 
 /// The stack's table for `op`: each opining layer's allowances for `op` and
-/// its exclusions, met; for `Read`, joined with the [`Baseline`], which only an
+/// its exclusions, met; for `Read`, each layer also joined with the run places
+/// of the exec meet over it and the layers beneath it (no layer makes anything
+/// readable for those beneath it), then with the [`Baseline`], which only an
 /// exclusion removes.  `None` exactly when no layer held an `fs` opinion, so
 /// the guard is unrestricted and the projection needs no fs rules; a layer
 /// that opined and admitted nothing withholds support beyond the baseline.
 pub(crate) fn region(grants: &GrantStack, op: &FsOp, baseline: &Baseline) -> Option<FsRules> {
-    fold(grants, op, baseline).map(|f| f.plain)
-}
-
-/// The read table where each layer also reads the run places of the exec meet
-/// over it and the layers beneath it: no layer makes anything readable for
-/// those beneath it.
-pub(crate) fn running_region(grants: &GrantStack, baseline: &Baseline) -> Option<FsRules> {
-    fold(grants, &FsOp::Read, baseline).map(|f| f.placed)
-}
-
-/// Both tables for `op` in one pass over the layers.
-fn fold(grants: &GrantStack, op: &FsOp, baseline: &Baseline) -> Option<Folded> {
     let layers: Vec<&GrantLayer> = grants.layers().collect();
     let last = layers.iter().rposition(|l| l.fs().is_some())?;
     let mut run: Option<ExecRules> = None;
-    let (mut plain, mut placed): (Option<FsRules>, Option<FsRules>) = (None, None);
+    let mut met: Option<FsRules> = None;
     for layer in &layers[..=last] {
         if let Some(exec) = layer.exec() {
             meet_onto(&mut run, exec.clone());
         }
         let Some(fs) = layer.fs() else { continue };
         let table = fs.table(op).clone();
-        let places = run.iter().flat_map(ExecRules::places);
-        meet_onto(&mut placed, table.clone().join(Table::new(places, [])));
-        meet_onto(&mut plain, table);
+        meet_onto(
+            &mut met,
+            match op {
+                FsOp::Read => table.join(Table::new(run.iter().flat_map(ExecRules::places), [])),
+                FsOp::Write => table,
+            },
+        );
     }
-    let with_system_reads = |met: FsRules| match op {
+    let met = met?;
+    Some(match op {
         FsOp::Read => met.join(Table::new(baseline.allows().cloned(), [])),
         FsOp::Write => met,
-    };
-    Some(Folded {
-        plain: with_system_reads(plain?),
-        placed: with_system_reads(placed?),
     })
 }
 
-/// The read and running regions folded once, for a walk that judges many
-/// objects; `None` where no layer held an fs opinion.
-pub struct ReadRegion(Option<Folded>);
-
-/// A table and the same with each layer's run places joined.  A permit or an
-/// exclusion of `plain`, which holds no run places, is final with the same
-/// witness; only a missing allowance asks `placed`, whose run places add
-/// positive evidence alone.
-struct Folded {
-    plain: FsRules,
-    placed: FsRules,
-}
+/// The read region folded once, for a walk that judges many objects; `None`
+/// where no layer held an fs opinion.
+pub struct ReadRegion(Option<FsRules>);
 
 /// The user's own authority: no grant governs these reads and writes.
 ///
@@ -352,14 +334,10 @@ impl Ungoverned {
 
 impl ReadRegion {
     fn withheld(&self, s: Subject<'_>) -> Result<(), Withheld<FsDeny>> {
-        let Some(Folded { plain, placed }) = &self.0 else {
-            return Ok(());
-        };
-        match plain.withheld(s) {
-            None => Ok(()),
-            Some(Withheld::MissingAllowance) => placed.withheld(s).map_or(Ok(()), Err),
-            Some(excluded) => Err(excluded),
-        }
+        self.0
+            .as_ref()
+            .and_then(|region| region.withheld(s))
+            .map_or(Ok(()), Err)
     }
 
     /// Judge `h` for reading.
@@ -409,9 +387,9 @@ impl GrantStack {
         self.read_region(baseline).withheld(Subject::Access(trace))
     }
 
-    /// The read and running regions, folded now.
+    /// The read region, folded now.
     pub fn read_region(&self, baseline: &Baseline) -> ReadRegion {
-        ReadRegion(fold(self, &FsOp::Read, baseline))
+        ReadRegion(region(self, &FsOp::Read, baseline))
     }
 
     /// The decision on `op` for the access `trace`: under `Write`, first the
@@ -1055,7 +1033,7 @@ mod tests {
         assert!(matches!(why, Err(Withheld::Excluded { .. })), "{why:?}");
     }
 
-    /// The read judgment's two calls agree with the region of run places.
+    /// The read judgment is the read region's: one table, run places included.
     #[test]
     fn the_read_judgment_agrees_with_the_region_of_places() {
         let baseline = Baseline::default();
@@ -1067,7 +1045,7 @@ mod tests {
                 ..FsPolicy::default()
             }),
         ]);
-        let full = running_region(&stack, &baseline).unwrap();
+        let full = region(&stack, &FsOp::Read, &baseline).unwrap();
         for path in ["/x/prog", "/x/tools/ok", "/x/tools/bad", "/work/f", "/y/zz"] {
             let access = at(path);
             assert_eq!(

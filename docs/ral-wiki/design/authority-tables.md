@@ -318,16 +318,20 @@ which on fs leaves the floor alone; being empty never makes a table omitted.
   fs is `Extent::Everywhere`, so `t ⊕ Q` is read `Everywhere`, write
   `Everywhere`, deny `Q`'s denies. Discard devices and the pinned-binary write guard
   keep their own rules.
-- **Why two calls, and what they are exact for.** `fs::region` runs on every fs
-  check and `reasonable` has about a hundred names, so permitted reads compile
-  nothing. Places add only positive evidence and the meet is monotone in it, so a
-  permit or an exclusion from the first call is final, with the same witness; the
-  second call can only turn a missing allowance into a permit. That is exact for
-  enforcement, not for evidence: a place can turn Deny into Both, which `↓` never
-  distinguishes, and the first call's table is never composed further. One
-  method, `GrantStack::read`, serves the fs guard, the running-reads check at
-  exec and the bundled-tool check of ral's binary; the projection calls
-  `region(…, true)` once per spawn.
+- **Why one table.** `fs::region(…, Read)` is the one read table: the layers'
+  tables each joined with their run places `P≤L`, met, joined with the floor.
+  Places add positive evidence only, so this table holds the same denies as the
+  one without them, and a subject's verdict is the denies' alone wherever one
+  holds: `withheld` cites the matching exclusion of least `MatchedBy` in stable
+  key order, and the denies and that order are the same. Where none holds,
+  the verdict is `MissingAllowance` or permit by the positives, which places
+  only enlarge, so the table with places is the one that says whether a place
+  reads. Hence the guard (`ReadRegion`, `GrantStack::read`), the running-reads
+  check at exec, the bundled-tool check of ral's binary and the projection
+  (`SandboxProjection::of`, once per spawn) all ask this one table, with the
+  verdict and witness that a first call without places and a second with them
+  gave. That is exact for enforcement, not for evidence: a place can turn Deny
+  into Both, which `↓` never distinguishes. The write table has no places.
 - **Places are prefixes of a real path.** A place reads as a prefix whether exec
   runs it as a file or a directory, so containment is transitive across every
   pair of scopes and the meet stays exact without shaped probes. A file place
