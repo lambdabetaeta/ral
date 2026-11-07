@@ -127,7 +127,7 @@ impl Pumps {
 
 /// Announce the running command via the terminal title (OSC 0).
 fn announce_command_title(cmd: &str, shell: &Shell) {
-    if shell.io.interactive && shell.io.terminal.ui_title_ok() {
+    if shell.io.interactive && shell.io.terminal.ui_controls_ok() {
         use std::io::Write;
         let _ = std::io::stdout().write_all(crate::io::ansi::osc_set_title(cmd).as_bytes());
         let _ = std::io::stdout().flush();

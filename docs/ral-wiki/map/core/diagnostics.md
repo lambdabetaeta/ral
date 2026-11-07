@@ -174,6 +174,9 @@ the front end's, never a probe of its own null stdio. Before any seat,
 `stderr_color` answers from one memoised `Auto` probe, so early-startup errors
 still colour, and `ui_color` is false: only a front end has a UI. The
 `$TERMINAL` map is `impl From<&TerminalState> for Value` (`shell/runtime/value.rs`).
+`TerminalState` stores base facts only: `hyperlinks`, `clipboard_write` (both `modern_osc`) and
+`bracketed_paste` (`supports_ansi`) are methods, so no two fields can disagree, and the
+`$TERMINAL` keys of those names are derived.
 Value-output styling (the REPL's `=> ` prefix) lives instead in the `ral`
 crate's [[map/repl/loop|repl::theme]].
 

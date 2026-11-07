@@ -650,7 +650,7 @@ mod tests {
     fn bare_shell_help_has_no_library_section() {
         let mut shell = crate::test_helper::core_shell();
         let (sink, buf) = crate::io::new_buffer();
-        shell.set_stdout(sink);
+        shell.io.stdout = sink;
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
         let out = String::from_utf8(buf.take().bytes).expect("help output is UTF-8");
         assert!(
@@ -668,7 +668,7 @@ mod tests {
         let mut shell = crate::Shell::root(runtime.into(), crate::test_helper::process_cwd());
 
         let (sink, buf) = crate::io::new_buffer();
-        shell.set_stdout(sink);
+        shell.io.stdout = sink;
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
         let help_out = String::from_utf8(buf.take().bytes).expect("help output is UTF-8");
         assert!(
@@ -691,7 +691,7 @@ mod tests {
         let mut shell = crate::Shell::root(runtime.into(), crate::test_helper::process_cwd());
 
         let (sink, buf) = crate::io::new_buffer();
-        shell.set_stdout(sink);
+        shell.io.stdout = sink;
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
         let help_out = String::from_utf8(buf.take().bytes).expect("help output is UTF-8");
         assert!(

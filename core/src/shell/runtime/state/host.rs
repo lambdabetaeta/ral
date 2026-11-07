@@ -8,7 +8,6 @@ use super::Shell;
 use super::TerminalAccess;
 use super::bindings::BindingLease;
 use crate::fact::unix_secs;
-use crate::io::Sink;
 use crate::io::terminal::TerminalState;
 use crate::process::{DurableRoot, ScopeNode, TerminalLease};
 use crate::protocol::probe::{WorkerRow, WorkerState};
@@ -92,12 +91,6 @@ impl Shell {
     /// commands and prompts behave as a live session.
     pub fn set_interactive(&mut self, interactive: bool) {
         self.io.interactive = interactive;
-    }
-
-    /// Install the session stdout sink — the REPL puts its `ExternalPrinter`
-    /// here so background output lands above the prompt.
-    pub fn set_stdout(&mut self, stdout: Sink) {
-        self.io.stdout = stdout;
     }
 
     /// Every installed builtin's name, for tab completion.

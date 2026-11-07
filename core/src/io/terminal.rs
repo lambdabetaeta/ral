@@ -104,14 +104,10 @@ pub struct TerminalState {
     pub(crate) is_asciinema: bool,
     pub(crate) is_ci: bool,
     pub(crate) truecolor: bool,
-    /// OSC 8 hyperlinks recognised by the host terminal.
-    pub(crate) hyperlinks: bool,
-    /// OSC 52 clipboard *write*.  Read is deliberately unprobed: too many
-    /// terminals gate it behind a permission prompt.
-    pub(crate) clipboard_write: bool,
-    /// Bracketed paste, taken to follow `supports_ansi` rather than costing a
-    /// round-trip query — it is universal in modern ANSI terminals.
-    pub(crate) bracketed_paste: bool,
+    /// The host terminal honours both OSC 8 hyperlinks and OSC 52 clipboard
+    /// writes (see [`hyperlinks`](Self::hyperlinks),
+    /// [`clipboard_write`](Self::clipboard_write)).
+    pub(crate) modern_osc: bool,
     pub(crate) mode: InteractiveMode,
 }
 
@@ -140,7 +136,6 @@ impl TerminalState {
         let supports_ansi = ansi_supported(mode, startup_stdout_tty);
         let stderr_ansi_capable =
             matches!(mode, InteractiveMode::Full) || anstyle_query::term_supports_ansi_color();
-        let modern_osc = env.recognises_modern_osc();
 
         Self {
             startup_stdin_tty,
@@ -154,11 +149,26 @@ impl TerminalState {
             is_asciinema: host::var_os("ASCIINEMA_REC").is_some(),
             is_ci: anstyle_query::is_ci(),
             truecolor: env.advertises_truecolor(),
-            hyperlinks: modern_osc,
-            clipboard_write: modern_osc,
-            bracketed_paste: supports_ansi,
+            modern_osc: env.recognises_modern_osc(),
             mode,
         }
+    }
+
+    /// OSC 8 hyperlinks are recognised by the host terminal.
+    pub(crate) fn hyperlinks(&self) -> bool {
+        self.modern_osc
+    }
+
+    /// OSC 52 clipboard *write* is recognised.  Read is deliberately unprobed:
+    /// too many terminals gate it behind a permission prompt.
+    pub(crate) fn clipboard_write(&self) -> bool {
+        self.modern_osc
+    }
+
+    /// Bracketed paste follows `supports_ansi` rather than costing a
+    /// round-trip query: it is universal in modern ANSI terminals.
+    pub(crate) fn bracketed_paste(&self) -> bool {
+        self.supports_ansi
     }
 
     // ── Policy predicates ─────────────────────────────────────────────────
@@ -178,11 +188,6 @@ impl TerminalState {
         self.startup_stdout_tty && !self.mode.is_minimal()
     }
 
-    /// Terminal title may be set via OSC 0/2 sequences.
-    pub fn ui_title_ok(&self) -> bool {
-        self.ui_controls_ok()
-    }
-
     /// 24-bit foreground/background colors may be emitted.
     pub(crate) fn ui_truecolor_ok(&self) -> bool {
         self.ui_ansi_ok() && self.truecolor
@@ -190,17 +195,17 @@ impl TerminalState {
 
     /// OSC 8 hyperlinks may be emitted.
     pub fn ui_hyperlinks_ok(&self) -> bool {
-        self.ui_controls_ok() && self.hyperlinks
+        self.ui_controls_ok() && self.hyperlinks()
     }
 
     /// OSC 52 clipboard writes may be emitted.
     pub fn ui_clipboard_write_ok(&self) -> bool {
-        self.ui_controls_ok() && self.clipboard_write
+        self.ui_controls_ok() && self.clipboard_write()
     }
 
     /// Bracketed-paste mode may be enabled by the line editor.
     pub(crate) fn ui_bracketed_paste_ok(&self) -> bool {
-        self.ui_controls_ok() && self.bracketed_paste
+        self.ui_controls_ok() && self.bracketed_paste()
     }
 
     /// Diagnostics may emit ANSI.  Separate from `ui_ansi_ok` because stderr
@@ -409,8 +414,8 @@ mod tests {
         assert!(warn.is_some());
     }
 
-    /// Mirrors the production probe in the one way the predicates care about:
-    /// the extra capabilities ride on `supports_ansi`.
+    /// Base facts only; the derived ones follow from them.  The extra
+    /// capabilities ride on `supports_ansi`.
     fn make_state(
         mode: InteractiveMode,
         supports_ansi: bool,
@@ -431,9 +436,7 @@ mod tests {
             is_asciinema: false,
             is_ci: false,
             truecolor: extras_allowed,
-            hyperlinks: extras_allowed,
-            clipboard_write: extras_allowed,
-            bracketed_paste: extras_allowed,
+            modern_osc: extras_allowed,
             mode,
         }
     }
@@ -559,7 +562,7 @@ mod tests {
     #[test]
     fn ui_hyperlinks_ok_ignores_no_color_but_needs_tty() {
         let mut s = make_state(InteractiveMode::Auto, true, true, true);
-        s.hyperlinks = true;
+        s.modern_osc = true;
         // NO_COLOR is set above; hyperlinks are structure, not color.
         assert!(s.ui_hyperlinks_ok());
 
@@ -574,7 +577,7 @@ mod tests {
     #[test]
     fn ui_clipboard_write_ok_tracks_controls() {
         let mut s = make_state(InteractiveMode::Auto, true, false, true);
-        s.clipboard_write = true;
+        s.modern_osc = true;
         assert!(s.ui_clipboard_write_ok());
         s.mode = InteractiveMode::Minimal;
         assert!(!s.ui_clipboard_write_ok());
@@ -583,8 +586,10 @@ mod tests {
     #[test]
     fn ui_bracketed_paste_ok_tracks_controls() {
         let mut s = make_state(InteractiveMode::Auto, true, false, true);
-        s.bracketed_paste = true;
         assert!(s.ui_bracketed_paste_ok());
+        s.supports_ansi = false;
+        assert!(!s.ui_bracketed_paste_ok(), "follows supports_ansi");
+        s.supports_ansi = true;
         s.startup_stdout_tty = false;
         assert!(!s.ui_bracketed_paste_ok());
     }
@@ -603,9 +608,7 @@ mod tests {
             is_asciinema: false,
             is_ci: false,
             truecolor: true,
-            hyperlinks: true,
-            clipboard_write: false,
-            bracketed_paste: true,
+            modern_osc: true,
             mode: InteractiveMode::Full,
         };
         let crate::shell::runtime::Value::Map(m) = crate::shell::runtime::Value::from(&state)
@@ -634,7 +637,7 @@ mod tests {
         expect_bool("is-ci", false);
         expect_bool("truecolor", true);
         expect_bool("hyperlinks", true);
-        expect_bool("clipboard-write", false);
+        expect_bool("clipboard-write", true);
         expect_bool("bracketed-paste", true);
         expect_bool("ui-ansi-ok", state.ui_ansi_ok());
         expect_bool("ui-truecolor-ok", state.ui_truecolor_ok());

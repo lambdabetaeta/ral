@@ -77,7 +77,7 @@ fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
 /// computation in [`render`], so the title updates whether or not the user
 /// changes the prompt.  No-op on terminals that can't render OSC titles.
 pub(super) fn write_terminal_title(terminal: &ral_core::io::terminal::TerminalState, cwd: &str) {
-    if !terminal.ui_title_ok() {
+    if !terminal.ui_controls_ok() {
         return;
     }
     use std::io::Write;
