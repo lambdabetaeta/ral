@@ -1,7 +1,7 @@
 //! A grant a test writes in Rust: it spells a grant value, which the one
 //! front-end resolves as it resolves any other.
 
-use super::freeze::Place;
+use super::freeze::{Anchor, Place};
 use super::value::{Axes, ExecTable, FsTable, GrantValue, Target};
 use crate::authority::policy::{EditorVerb, Gpu, Net, ShellVerb};
 use crate::path::FrozenPath;
@@ -88,7 +88,7 @@ impl Capabilities {
 }
 
 fn place(path: FrozenPath) -> Place {
-    Place::Absolute(path.into_string())
+    Anchor::Absolute.place(path.into_string())
 }
 
 fn target(key: ExecKey) -> Target {

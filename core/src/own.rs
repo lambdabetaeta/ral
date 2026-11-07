@@ -757,14 +757,14 @@ impl OwnDir {
     /// Whether a link is at `name`.
     fn is_link(&self, name: &EntryName) -> bool {
         self.find(Act::Open, name)
-            .is_ok_and(|found| found.kind() == Some(Kind::Symlink))
+            .is_ok_and(|found| found.trace().kind() == Some(Kind::Symlink))
     }
 
     /// [`find`](Self::find), refusing a link: where the program keeps a file
     /// of its own, it is written through none.
     fn unlinked(&self, act: Act, name: &EntryName) -> Result<Located<Judged<Writing>>, OwnError> {
         let found = self.find(act, name)?;
-        if found.kind() == Some(Kind::Symlink) {
+        if found.trace().kind() == Some(Kind::Symlink) {
             return Err(OwnError::Linked(self.at(name)));
         }
         Ok(found)

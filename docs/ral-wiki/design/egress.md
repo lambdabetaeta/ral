@@ -122,7 +122,7 @@ ral's own `net` capability is a veto
 ([[design/two-enforcers|two-enforcers]]): it has no in-process guard, since
 ral dispatches no network operation. In the
 [[internals/capability-enforcement#Guest jail|guest jail]], the stack's
-`net_veto` (`Some(Net::Offline)`) gives each command a fresh network namespace
+veto (`GrantStack::net`, `Some(Net::Offline)`) gives each command a fresh network namespace
 with loopback up (`docs/SPEC.md` §12.11). IP egress and abstract Unix sockets
 outside that namespace are out of reach; local loopback and pathname Unix
 sockets remain, and a reachable pathname socket can relay for an offline

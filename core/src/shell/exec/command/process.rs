@@ -251,7 +251,6 @@ fn build_launch(
     let mut launch = match &projection {
         Some(projection) => crate::authority::sandbox::sandboxed_command(
             projection,
-            shell.baseline(),
             &image,
             &args,
             ownership,
@@ -270,7 +269,7 @@ fn build_launch(
     #[cfg(seccomp)]
     if let Some(jail) = jail {
         let plan = jail
-            .plan(ownership, shell.context.grants.net_veto())
+            .plan(ownership, shell.context.grants.net())
             .map_err(crate::process::jail::refused)?;
         launch.apply_guest_jail(&plan)?;
     }

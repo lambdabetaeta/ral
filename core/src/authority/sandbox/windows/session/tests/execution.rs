@@ -52,8 +52,8 @@ fn read_write_and_excluded_arms_execute_under_a_carved_directory() {
         );
         let grant = SandboxProjection {
             fs: FsProjection::Restricted(rules(&[&read], &[&write], &[&exclude])),
-            net: false,
-            gpu: true,
+            net: Some(crate::authority::policy::Net::Offline),
+            gpu: None,
             exec: ExecProjection::default(),
         };
         let control = run(&grant, &root, r"type R\key.txt");
@@ -196,7 +196,7 @@ fn a_staged_spawn_keeps_every_sid_owner_alive_through_teardown() {
         let tree = Tree::new();
         let a = tree.at("A");
         let mut grant = projection(&[&tree.real("A")], &[]);
-        grant.net = true;
+        grant.net = None;
         admitted(&proof, &run(&grant, &a, "type ok.txt"), "secret");
 
         // Include teardown-before-spawn, independent of the race's scheduling.

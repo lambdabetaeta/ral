@@ -572,7 +572,7 @@ fn a_prefix_whose_component_became_a_symlink_since_render_is_refused() {
         .expect("ASCII paths render");
     std::fs::rename(&parent, dir.join("moved")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &parent).unwrap();
-    let shown = Shown::of(&rendered, &host_system_reads()).expect("the plan builds");
+    let shown = Shown::of(&rendered).expect("the plan builds");
     let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown, &mut Handoff::default()) else {
         panic!("a symlinked component would show its target");
     };
@@ -595,7 +595,7 @@ fn a_directory_recreated_after_the_render_is_what_the_bind_holds() {
     std::fs::rename(&data, dir.join("old")).unwrap();
     std::fs::create_dir(&data).unwrap();
     std::fs::write(data.join("fresh"), "x").unwrap();
-    let shown = Shown::of(&rendered, &host_system_reads()).expect("the plan builds");
+    let shown = Shown::of(&rendered).expect("the plan builds");
     let mut handoff = Handoff::default();
     let binds = Binds::open(&on(&stand_in(), WHOLE), shown, &mut handoff).expect("the binds open");
     let held = held_at(&binds, &data);
@@ -605,9 +605,9 @@ fn a_directory_recreated_after_the_render_is_what_the_bind_holds() {
 }
 
 /// A position that names a link when the launch opens it refuses the
-/// launch, in the sentence it always did.
+/// launch as a redirected allowance, in the words Windows gives one.
 #[test]
-fn a_position_turned_link_refuses_the_launch_in_todays_sentence() {
+fn a_position_turned_link_refuses_the_launch_as_a_redirected_allowance() {
     let dir = workdir("binds-turned-link");
     let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
     let (data, elsewhere) = (dir.join("data"), dir.join("elsewhere"));
@@ -617,15 +617,16 @@ fn a_position_turned_link_refuses_the_launch_in_todays_sentence() {
     let rendered = policy.rendered().expect("ASCII paths render");
     std::fs::rename(&data, dir.join("old")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &data).unwrap();
-    let shown = Shown::of(&rendered, &host_system_reads()).expect("the plan builds");
+    let shown = Shown::of(&rendered).expect("the plan builds");
     let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown, &mut Handoff::default()) else {
         panic!("a link at the position would show its target");
     };
     assert_eq!(
         why,
         format!(
-            "sandbox: {} now goes through a symbolic link that ral will not follow; \
-             reload the grant or restart ral if you made that change",
+            "sandbox: '{}' was granted by its real path, but it now goes through a symbolic \
+             link; an allowance names what it named when granted. To allow the new target, \
+             grant it where the ceiling is set (in exarch, restart with a grant that names it)",
             data.display()
         )
     );
@@ -778,14 +779,15 @@ fn a_pinned_directory_turned_link_refuses_the_launch() {
         .expect("ASCII paths render");
     std::fs::rename(&p, dir.join("moved")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &p).unwrap();
-    let Err(why) = Shown::of(&rendered, &host_system_reads()) else {
+    let Err(why) = Shown::of(&rendered) else {
         panic!("a pin through a link would show its target");
     };
     assert_eq!(
         why,
         format!(
-            "sandbox: {} now goes through a symbolic link that ral will not follow; \
-             reload the grant or restart ral if you made that change",
+            "sandbox: '{}' was granted by its real path, but it now goes through a symbolic \
+             link; an allowance names what it named when granted. To allow the new target, \
+             grant it where the ceiling is set (in exarch, restart with a grant that names it)",
             p.display()
         )
     );
@@ -1007,7 +1009,7 @@ fn a_restricted_envelope_shows_the_gpu_only_where_left_on() {
         assert!(position_of(&on, &piece).is_some(), "{piece:?}: {on:?}");
     }
     assert!(!on.iter().any(|a| a.contains("card")), "{on:?}");
-    policy.gpu = false;
+    policy.gpu = Some(Gpu::Withheld);
     let off = render_gpu(&policy);
     assert!(
         !off.iter()
@@ -1027,7 +1029,7 @@ fn an_unrestricted_envelope_masks_a_withheld_gpu() {
             .any(|a| a.contains("nvidia") || a.contains("/dev/dri")),
         "{on:?}"
     );
-    policy.gpu = false;
+    policy.gpu = Some(Gpu::Withheld);
     let off = render_gpu(&policy);
     let root = position_of(&off, &["--dev-bind", "/", "/"]).expect("the host's root");
     let dri =
@@ -1145,8 +1147,8 @@ fn the_fresh_proc_and_dev_go_over_every_projection_bind() {
             write: vec![prefix(&dir_s)],
             ..FsLists::default()
         }),
-        net: true,
-        gpu: true,
+        net: None,
+        gpu: None,
         exec: ExecProjection::default(),
     };
     // `Unrestricted` dev-binds `/` wholesale and mounts no `/dev` of its own.
@@ -1290,8 +1292,8 @@ fn only_the_two_ownership_ties_distinguish_a_surrendered_launch() {
             read: vec![prefix("/usr")],
             ..FsLists::default()
         }),
-        net: false,
-        gpu: true,
+        net: Some(Net::Offline),
+        gpu: None,
         exec: ExecProjection::default(),
     };
     let binds = binds(&policy, WHOLE);

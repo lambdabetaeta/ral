@@ -17,7 +17,6 @@ fn spawn_confined(
     shell.scope = scope.clone();
     let mut launch = crate::authority::sandbox::sandboxed_command(
         &unrestricted(),
-        &Baseline::default(),
         &Image::of(&sh()),
         &sh_args(script),
         Ownership::Kept,
@@ -371,7 +370,6 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
         let mut launch = enveloped(
             &env,
             &policy,
-            &host_system_reads(),
             &Image::of(&program),
             &[],
             None,
@@ -614,7 +612,6 @@ fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutc
     let shell = crate::test_helper::core_shell();
     let mut launch = crate::authority::sandbox::sandboxed_command(
         &unrestricted(),
-        &Baseline::default(),
         &Image::of(program),
         args,
         Ownership::Kept,

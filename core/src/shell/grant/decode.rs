@@ -155,7 +155,7 @@ fn place_of(tag: &Tag) -> Result<Option<Place>, PolicyError> {
     let Some(anchor) = Anchor::of_tag(tag.label) else {
         return Ok(None);
     };
-    Ok(Some(anchor.place(tag.text(&PLACE, "a path")?.into())))
+    Ok(Some(anchor.place(tag.text(&PLACE, "a path")?)))
 }
 
 fn selector_of(tag: &Tag) -> Result<Option<Selector>, PolicyError> {

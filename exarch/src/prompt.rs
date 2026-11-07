@@ -303,7 +303,7 @@ fn skills_section(skills: &[skill::Skill]) -> String {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::authority::grant::freeze::Place;
+    use ral_core::authority::grant::freeze::Anchor;
     use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
     use ral_core::authority::policy::{EditorVerb, Gpu, Net};
     use ral_core::data::datum::Datum as _;
@@ -312,7 +312,7 @@ mod tests {
     /// its layers a list on the wire, and the guest's word on the GPU beside
     /// them.
     fn crossed(withholds_gpu: bool) -> Grants {
-        let work = |sub: &str| Place::Absolute(format!("/work{sub}"));
+        let work = |sub: &str| Anchor::Absolute.place(format!("/work{sub}"));
         let guest = Axes {
             fs: Some(FsTable {
                 read: vec![work("")],
@@ -322,7 +322,7 @@ mod tests {
             exec: Some(ExecTable {
                 allow: vec![
                     Target::Name("git".into()),
-                    Target::Dir(Place::Absolute("/usr/bin".into())),
+                    Target::Dir(Anchor::Absolute.place("/usr/bin")),
                 ],
                 deny: vec![Target::Name("bash".into())],
             }),

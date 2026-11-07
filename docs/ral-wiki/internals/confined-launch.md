@@ -126,7 +126,7 @@ trampoline's. Its code is `core/src/authority/sandbox/warrant/trampoline.rs`;
 
 **For a Unix host projection, `Warrant::confine` is the only road to the program;
 it runs only after confinement is entered and the handoff closed.** The warrant's `Confinement` is
-the one thing the child enters: `Seatbelt(profile)` on macOS; on Linux
+the one thing the child enters, one type per platform: the profile on macOS; on Linux
 `unconfined`, `landlock@<fd>` or `landlock+refer@<fd>`, a `Landlocked` promise naming the ruleset's descriptor, or none.
 
 - **On Linux the parent decides everything.** It probes Landlock once, and

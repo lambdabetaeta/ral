@@ -9,7 +9,7 @@
 //! pid namespace with a fresh `/proc` where the host can build them
 //! ([`HostEnvelope`]), the [`seccomp`] deny-set on x86-64 and aarch64.
 //! bwrap has no endpoint filter — `--unshare-net` drops the network namespace
-//! whole — so `SandboxProjection::net` is a bit, not a list.
+//! whole — so `SandboxProjection::net` is one veto, not a list.
 //!
 //! Every object the envelope shows is opened here, never through a symlink,
 //! and mounted by that handle ([`Binds`]): bwrap resolves no source name, so
@@ -40,7 +40,6 @@ use super::launch::Ownership;
 use super::reexec::Pinned;
 use super::warrant::{Handoff, Slot, Slots, nul_terminated, parcel};
 use super::{FsProjection, RenderedProjection};
-use crate::authority::policy::Baseline;
 use crate::path::{
     CwdPath, Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered,
     Trace, is_loop, render_real, walk_lenient,
@@ -249,7 +248,7 @@ pub(crate) fn bwrap_argv(
         c.arg("--die-with-parent");
         c.args(["--info-fd", &info.to_string()]);
     }
-    if !policy.net {
+    if policy.net.is_some() {
         c.arg("--unshare-net");
     }
     if let Some(dir) = chdir {
@@ -274,7 +273,7 @@ pub(crate) fn bwrap_argv(
             // After the binds, or a prefix of `/` or `/proc` re-binds the host's over these.
             c.args(["--proc", "/proc"]);
             render_dev(&mut c, host);
-            if policy.gpu {
+            if policy.gpu.is_none() {
                 gpu.admit(&mut c);
             }
         }
@@ -284,7 +283,7 @@ pub(crate) fn bwrap_argv(
             // so `/proc/self` is the payload's own either way.
             c.args(["--dev-bind", "/", "/"]);
             c.args(["--proc", "/proc"]);
-            if !policy.gpu {
+            if policy.gpu.is_some() {
                 gpu.withhold(&mut c);
             }
         }
@@ -526,7 +525,7 @@ impl Shown {
     /// a read-only one wins.  Then each pinned directory onto itself, which
     /// shows nothing new and so roots nothing.  Each deny is read once, for
     /// its mask.
-    pub(crate) fn of(policy: &RenderedProjection, baseline: &Baseline) -> Result<Self, String> {
+    pub(crate) fn of(policy: &RenderedProjection) -> Result<Self, String> {
         let FsProjection::Restricted(lists) = &policy.fs else {
             let root = open_dir_nofollow(&RealPath::universal())?.ok_or("sandbox: no root")?;
             return Ok(Self {
@@ -536,11 +535,6 @@ impl Shown {
                 denies: Vec::new(),
             });
         };
-        let tolerated = (lists.read.iter())
-            .map(|object| &object.position)
-            .filter(|position| baseline.allows().any(|f| f.real() == Some(*position)))
-            .cloned()
-            .collect();
         let mut names: Vec<_> = binds(&lists.read, Access::ReadOnly)
             .chain(binds(&lists.write, Access::Writable))
             .collect();
@@ -565,7 +559,7 @@ impl Shown {
         denied.sort();
         Ok(Self {
             binds: binds.into_iter().chain(spine).collect(),
-            tolerated,
+            tolerated: lists.tolerated.clone(),
             roots,
             denies: denied.into_iter().map(Deny::read).collect(),
         })
@@ -695,8 +689,9 @@ impl fmt::Display for OpenError {
         match self {
             Self::Linked(name) => write!(
                 f,
-                "sandbox: {name} now goes through a symbolic link that ral will not follow; \
-                 reload the grant or restart ral if you made that change"
+                "sandbox: '{name}' was granted by its real path, but it now goes through a \
+                 symbolic link; {}",
+                crate::authority::remedy::grant_the_new_target()
             ),
             Self::Failed { name, source } => write!(f, "sandbox: cannot open {name}: {source}"),
         }

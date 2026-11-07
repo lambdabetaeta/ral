@@ -568,14 +568,14 @@ impl Entries {
         let name = EntryName::parse(OsStr::new(".git")).ok()?;
         let found = self.region.judge(dir.locate(&name, LeafMode::Follow).ok()?);
         let at = LexicalPath::absolute(&dir.real().as_path().join(".git"))?;
-        Some((at, found.ok()?.kind()? == Kind::Dir))
+        Some((at, found.ok()?.trace().kind()? == Kind::Dir))
     }
 
     /// [`dot_git_in`](Self::dot_git_in) of a directory held by name.
     fn dot_git_at(&self, real: &Path) -> Option<(LexicalPath, bool)> {
         let at = LexicalPath::absolute(&real.join(".git"))?;
         let found = self.region.judge(walk(&at, LeafMode::Follow).ok()?);
-        let is_dir = found.ok()?.kind()? == Kind::Dir;
+        let is_dir = found.ok()?.trace().kind()? == Kind::Dir;
         Some((at, is_dir))
     }
 

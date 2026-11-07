@@ -1,7 +1,7 @@
 //! Authority is derived from one resolved host folder; capabilities name guest paths only.
 
 use crate::site::{Silent, site};
-use ral_core::authority::grant::freeze::Place;
+use ral_core::authority::grant::freeze::Anchor;
 use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
 use ral_core::authority::policy::{Gpu, Ungoverned};
 use ral_core::path::{LeafMode, RealPath, shown, spelled, walk_dir, walk_lenient};
@@ -214,7 +214,7 @@ impl Grant {
     pub(crate) fn ceiling(&self) -> GrantValue {
         let places = || {
             [guest_abi::layout::WORK, guest_abi::layout::SCRATCH]
-                .map(|p| Place::Absolute(p.to_owned()))
+                .map(|p| Anchor::Absolute.place(p.to_owned()))
                 .to_vec()
         };
         Axes {

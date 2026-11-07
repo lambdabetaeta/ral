@@ -549,8 +549,8 @@ impl GrantStack {
             .collect()
     }
 
-    /// Layers with no opinion are skipped, here and in `fs`, `net` and `gpu` below:
-    /// the folds intersect what remains, and an empty run means no attenuation.
+    /// Layers with no opinion are skipped, here and in `fs` below: the folds
+    /// intersect what remains, and an empty run means no attenuation.
     pub(crate) fn exec(&self) -> impl Iterator<Item = &ExecRules> {
         self.0.iter().filter_map(|l| l.exec.as_ref())
     }
@@ -559,17 +559,14 @@ impl GrantStack {
         self.0.iter().filter_map(|l| l.fs.as_ref())
     }
 
-    pub fn net(&self) -> impl Iterator<Item = Net> {
-        self.0.iter().filter_map(|l| l.net)
+    /// The stack's network veto: any layer's binds the whole stack.
+    pub fn net(&self) -> Option<Net> {
+        self.0.iter().find_map(|l| l.net)
     }
 
-    /// Any layer's network veto binds the whole stack.
-    pub fn net_veto(&self) -> Option<Net> {
-        self.net().next()
-    }
-
-    pub fn gpu(&self) -> impl Iterator<Item = Gpu> {
-        self.0.iter().filter_map(|l| l.gpu)
+    /// The stack's GPU veto: any layer's binds the whole stack.
+    pub fn gpu(&self) -> Option<Gpu> {
+        self.0.iter().find_map(|l| l.gpu)
     }
 
     /// A meet over the layers: one `false` vote anywhere withholds `flag`

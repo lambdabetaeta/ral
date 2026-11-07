@@ -4,7 +4,9 @@ use super::{
     Shown, bwrap_argv, bwrap_command, envelope, open_object, own_cgroup, pin_envelope,
 };
 use crate::Role;
-use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};
+use crate::authority::policy::{
+    Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Gpu, Net, Program,
+};
 use crate::authority::policy::{ExecAllow, ExecDeny, ExecRules, FsDeny, GrantPath, Rule};
 use crate::authority::sandbox::launch::{Image, Ownership, admitted, enveloped};
 use crate::authority::sandbox::warrant::{Handoff, Slot, Slots};
@@ -87,7 +89,7 @@ fn on(pin: &Pinned, host: HostEnvelope) -> Envelope<'_> {
 /// What the envelope would show of `policy`.
 fn plan(policy: &SandboxProjection) -> Shown {
     let rendered = policy.rendered().expect("ASCII paths render");
-    Shown::of(&rendered, &host_system_reads()).expect("the plan builds")
+    Shown::of(&rendered).expect("the plan builds")
 }
 
 /// `real/tool`, runnable, under a fresh work dir with `linkdir -> real`
@@ -227,7 +229,6 @@ fn run_after(
     let mut launch = enveloped(
         env,
         policy,
-        &host_system_reads(),
         &Image::of(admitted),
         args,
         None,
@@ -289,8 +290,8 @@ fn emitted(stdout: &str, marker: &str) -> bool {
 fn exec_policy(exec: ExecProjection) -> SandboxProjection {
     SandboxProjection {
         fs: FsProjection::Unrestricted,
-        net: true,
-        gpu: true,
+        net: None,
+        gpu: None,
         exec,
     }
 }

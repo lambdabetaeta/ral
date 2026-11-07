@@ -239,8 +239,9 @@ fn an_unlistable_directory_ends_the_plan() {
         Excluded::walk(&crate::path::LexicalPath::absolute(&tree.path("/a/b/c")).unwrap()).unwrap();
     let refused = carve(&[tree.at("/a")], &[&excluded]);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-    if let Err(unlisted) = refused {
-        assert_eq!(tree.spelled(&unlisted.at), "/a/b");
+    if let Err(why) = refused {
+        let at = shown(tree.at("/a/b").as_path());
+        assert!(why.contains(&format!("cannot list '{at}'")), "{why}");
     }
 }
 

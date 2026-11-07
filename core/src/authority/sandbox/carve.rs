@@ -35,49 +35,23 @@ use crate::authority::sandbox::TOKEN;
 use crate::path::{
     Depth, Dir, Excluded, Installing, Kind, LeafMode, Located, RealPath, Subject, Walked, shown,
 };
-use std::fmt;
 use std::io;
 
 /// A directory on the way to an exclusion that could not be held or listed:
 /// what cannot be listed cannot be carved, and is not granted whole instead.
-#[derive(Debug)]
-pub(crate) struct Unlisted {
-    at: RealPath,
-    why: String,
+fn unlisted(at: &RealPath, e: &io::Error) -> String {
+    format!(
+        "sandbox: cannot list '{}' to grant around an exclusion in it: {e}",
+        shown(at.as_path())
+    )
 }
 
-impl Unlisted {
-    fn at(at: &RealPath, e: &io::Error) -> Self {
-        Self {
-            at: at.clone(),
-            why: e.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for Unlisted {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "sandbox: cannot list '{}' to grant around an exclusion in it: {}",
-            shown(self.at.as_path()),
-            self.why
-        )
-    }
-}
-
-impl From<Unlisted> for super::Refusal {
-    fn from(unlisted: Unlisted) -> Self {
-        Self::Launch(unlisted.to_string())
-    }
-}
-
-fn entries(dir: &Dir<Installing>) -> Result<Vec<Located<Installing>>, Unlisted> {
+fn entries(dir: &Dir<Installing>) -> Result<Vec<Located<Installing>>, String> {
     dir.read_dir()
-        .map_err(|e| Unlisted::at(dir.real(), &e))?
+        .map_err(|e| unlisted(dir.real(), &e))?
         .map(|entry| {
             dir.locate(entry.name(), LeafMode::NoFollow)
-                .map_err(|e| Unlisted::at(&entry.real(), &e))
+                .map_err(|e| unlisted(&entry.real(), &e))
         })
         .collect()
 }
@@ -99,10 +73,7 @@ pub(crate) struct Carving {
 ///
 /// # Errors
 /// A directory that cannot be held or listed ends the plan.
-pub(crate) fn carve(
-    allowances: &[RealPath],
-    exclusions: &[&Excluded],
-) -> Result<Carving, Unlisted> {
+pub(crate) fn carve(allowances: &[RealPath], exclusions: &[&Excluded]) -> Result<Carving, String> {
     let positions: Vec<_> = exclusions.iter().map(|e| e.followed().real()).collect();
     let mut carving = Carving::default();
     for allowance in allowances {
@@ -119,7 +90,7 @@ pub(crate) fn carve(
         // Absent: nothing to grant. Not a directory: nothing to carve.
         let held = allowance
             .open_dir_nofollow(&TOKEN)
-            .map_err(|e| Unlisted::at(allowance, &e))?;
+            .map_err(|e| unlisted(allowance, &e))?;
         let mut pending: Vec<_> = held.into_iter().collect();
         while let Some(dir) = pending.pop() {
             for entry in entries(&dir)? {
@@ -134,7 +105,8 @@ pub(crate) fn carve(
                     Ok(dir) if beneath => pending.push(dir),
                     Ok(dir) => carving.held.push(dir.into_located()),
                     Err(entry)
-                        if !beneath && matches!(entry.kind(), Some(Kind::File | Kind::Other)) =>
+                        if !beneath
+                            && matches!(entry.trace().kind(), Some(Kind::File | Kind::Other)) =>
                     {
                         carving.held.push(entry);
                     }

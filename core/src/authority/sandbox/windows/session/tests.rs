@@ -151,8 +151,8 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     std::fs::create_dir(&outside).unwrap();
     let projection = SandboxProjection {
         fs: FsProjection::Restricted(rules(&[granted.to_str().unwrap()], &[], &[])),
-        net: false,
-        gpu: true,
+        net: Some(crate::authority::policy::Net::Offline),
+        gpu: None,
         exec: ExecProjection::default(),
     };
     let _session = SessionGuard;
@@ -254,8 +254,8 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
             &[granted.to_str().unwrap()],
             &[],
         )),
-        net: false,
-        gpu: true,
+        net: Some(crate::authority::policy::Net::Offline),
+        gpu: None,
         exec: ExecProjection::default(),
     };
     let _session = SessionGuard;
@@ -421,8 +421,8 @@ impl Tree {
 fn projection(read: &[&str], deny: &[&str]) -> crate::authority::sandbox::SandboxProjection {
     crate::authority::sandbox::SandboxProjection {
         fs: crate::authority::sandbox::FsProjection::Restricted(rules(read, &[], deny)),
-        net: false,
-        gpu: true,
+        net: Some(crate::authority::policy::Net::Offline),
+        gpu: None,
         exec: crate::authority::sandbox::ExecProjection::default(),
     }
 }
@@ -729,8 +729,8 @@ fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
         let allow = tree.real("W");
         let writable = SandboxProjection {
             fs: FsProjection::Restricted(rules(&[&allow], &[&allow], &[])),
-            net: false,
-            gpu: true,
+            net: Some(crate::authority::policy::Net::Offline),
+            gpu: None,
             exec: ExecProjection::default(),
         };
         let mut launch = confined(&writable, &w, "echo ok>made.txt").unwrap();

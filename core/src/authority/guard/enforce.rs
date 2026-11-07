@@ -66,9 +66,13 @@ impl Denial {
 }
 
 /// What an enclosing grant may do to a missing allowance, said only where
-/// more than one layer supplies the axis.
-const NESTED: &str = "an enclosing grant may be the one that withholds it, and a nested grant \
-                      cannot add authority its caller withholds";
+/// more than one of `layers` supplies the axis.
+fn nested(layers: impl Iterator) -> Option<&'static str> {
+    (layers.count() > 1).then_some(
+        "an enclosing grant may be the one that withholds it, and a nested grant cannot add \
+         authority its caller withholds",
+    )
+}
 
 /// The exclusion half of a refusal; its fix is [`remedy::remove_the_exclusion`].
 fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
@@ -154,17 +158,18 @@ fn exec_error(
     tool: Option<&str>,
     why: &ExecDenial,
 ) -> Refusal {
-    let layers = grants.exec().count();
     let head = format!("command '{shown}' denied by active grant");
     match why {
-        ExecDenial::Run(Withheld::MissingAllowance) if layers > 1 => Refusal::new(format!(
-            "{head}: some layer's exec `allow` list does not let it run"
-        ))
-        .with_hint(NESTED),
-        ExecDenial::Run(Withheld::MissingAllowance) => Refusal::new(format!(
-            "{head}: nothing in the grant's exec `allow` list lets it run"
-        ))
-        .with_hint(remedy::add_to_exec()),
+        ExecDenial::Run(Withheld::MissingAllowance) => match nested(grants.exec()) {
+            Some(nested) => Refusal::new(format!(
+                "{head}: some layer's exec `allow` list does not let it run"
+            ))
+            .with_hint(nested),
+            None => Refusal::new(format!(
+                "{head}: nothing in the grant's exec `allow` list lets it run"
+            ))
+            .with_hint(remedy::add_to_exec()),
+        },
         ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Refusal::new(format!(
             "{head}: {}",
             excluded(
@@ -178,7 +183,7 @@ fn exec_error(
             "{head}: {}",
             read_cause(baseline, shown, tool, why)
         ))
-        .with_hint(read_hint(why, grants.fs().count())),
+        .with_hint(read_hint(why, nested(grants.fs()))),
     }
 }
 
@@ -211,14 +216,14 @@ fn read_cause(
     }
 }
 
-fn read_hint(why: &Withheld<FsDeny>, layers: usize) -> String {
-    match why {
-        Withheld::MissingAllowance if layers > 1 => NESTED.to_string(),
-        Withheld::MissingAllowance => format!(
+fn read_hint(why: &Withheld<FsDeny>, nested: Option<&str>) -> String {
+    match (why, nested) {
+        (Withheld::MissingAllowance, Some(nested)) => nested.to_string(),
+        (Withheld::MissingAllowance, None) => format!(
             "running a program reads it: {}",
             remedy::add_to_fs("it", FsList::Read)
         ),
-        Withheld::Excluded { .. } => remedy::remove_the_exclusion().to_string(),
+        (Withheld::Excluded { .. }, _) => remedy::remove_the_exclusion().to_string(),
     }
 }
 
@@ -252,17 +257,18 @@ pub(crate) fn fs_denial(
     let said = says(&refused, &path);
     let (verdict, detail, hint) = match refused {
         Refused::Withheld(Withheld::MissingAllowance) => {
-            let hint = if grants.fs().count() > 1 {
-                NESTED.to_string()
-            } else {
-                remedy::add_to_fs(
-                    "it",
-                    match op {
-                        FsOp::Read => FsList::Either,
-                        FsOp::Write => FsList::Write,
-                    },
-                )
-            };
+            let hint = nested(grants.fs()).map_or_else(
+                || {
+                    remedy::add_to_fs(
+                        "it",
+                        match op {
+                            FsOp::Read => FsList::Either,
+                            FsOp::Write => FsList::Write,
+                        },
+                    )
+                },
+                str::to_owned,
+            );
             ("denied by grant", None, hint)
         }
         Refused::Withheld(Withheld::Excluded { scope, .. }) => (

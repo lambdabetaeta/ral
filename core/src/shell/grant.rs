@@ -50,7 +50,7 @@ impl Shell {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::authority::grant::freeze::Place;
+    use crate::authority::grant::freeze::Anchor;
     use crate::path::CwdPath;
     use crate::path::lex::fold_dots;
 
@@ -61,14 +61,14 @@ mod tests {
         shell.set_scratch(scratch.to_str().unwrap());
         let path = shell
             .freeze_ctx()
-            .place(&Place::Scratch(".".into()))
+            .place(&Anchor::Scratch.place("."))
             .unwrap()
             .unwrap();
         assert_eq!(path.as_str(), fold_dots(&scratch).to_string_lossy());
         let bare = crate::test_helper::core_shell();
         let err = bare
             .freeze_ctx()
-            .place(&Place::Scratch(".".into()))
+            .place(&Anchor::Scratch.place("."))
             .unwrap_err();
         assert!(err.message.contains("no scratch directory"), "{err:?}");
     }
@@ -86,8 +86,8 @@ mod tests {
         shell.set_env_var("HOME", root.to_str().unwrap());
         shell.seed_cwd(CwdPath::new(root.to_path_buf()).unwrap());
         for (place, expected) in [
-            (Place::Home(".".into()), home),
-            (Place::Cwd(".".into()), cwd),
+            (Anchor::Home.place("."), home),
+            (Anchor::Cwd.place("."), cwd),
         ] {
             let path = ctx.place(&place).unwrap().unwrap();
             assert_eq!(path.as_str(), fold_dots(&expected).to_string_lossy());

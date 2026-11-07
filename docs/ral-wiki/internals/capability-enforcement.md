@@ -231,7 +231,7 @@ heads alike.
   the pre-exec hook enters the cgroup, isolates an offline network, drops
   supplementary groups and credentials, sets `NO_NEW_PRIVS`, marks descriptors
   above stderr close-on-exec, then installs seccomp. Setup failure refuses launch.
-- The stack's `net_veto` does reach the jail: ``net: `offline`` creates a fresh
+- The stack's net veto (`GrantStack::net`) does reach the jail: ``net: `offline`` creates a fresh
   network namespace with loopback up. IP egress and outside abstract Unix
   sockets are isolated; local loopback and pathname Unix sockets remain, and a
   reachable pathname socket can relay outside the command. The host

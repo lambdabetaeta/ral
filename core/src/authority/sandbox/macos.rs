@@ -8,13 +8,13 @@
 //! binary through `exec:` already shifts trust to that binary.
 //!
 //! Seatbelt has no per-address network rules, so `SandboxProjection::net` is
-//! one allow/deny bit over IP sockets rather than an endpoint list.
+//! one veto over IP sockets rather than an endpoint list.
 
 use super::{ExecProjection, FsProjection, RenderedLists, SandboxProjection};
-use crate::authority::policy::{ExecDeny, KernelAllow};
+use crate::authority::policy::{ExecDeny, Gpu, KernelAllow, Net};
 use crate::path::{
-    Excluded, LeafMode, LexicalPath, Object, RealPath, Rendered, render_real, rendered_ancestors,
-    walk_lenient,
+    Excluded, LeafMode, LexicalPath, Object, Rendered, render_excluded, render_real,
+    rendered_ancestors, walk_lenient,
 };
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
@@ -80,8 +80,8 @@ pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
 /// than `format!()` strings.
 const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
-/// The `net: true` rules: IP sockets, the resolver's Unix socket, and the
-/// resolver and trust-evaluation Mach services that ride the same bit.
+/// The online rules: IP sockets, the resolver's Unix socket, and the
+/// resolver and trust-evaluation Mach services that ride the same veto.
 const NET_PROFILE: &str = include_str!("macos-net.sbpl");
 
 /// The one Unix socket `NET_PROFILE` admits; a denial naming it is `net`'s.
@@ -120,8 +120,8 @@ struct Profile {
     fs_denies: Vec<String>,
     /// Directory names frozen in their parents, and ral's own file locked.
     pins: Vec<String>,
-    net: bool,
-    gpu: bool,
+    net: Option<Net>,
+    gpu: Option<Gpu>,
 }
 
 impl fmt::Display for Profile {
@@ -142,10 +142,10 @@ impl fmt::Display for Profile {
         {
             write!(f, "\n{line}")?;
         }
-        if *net {
+        if net.is_none() {
             write!(f, "\n{NET_PROFILE}")?;
         }
-        if *gpu {
+        if gpu.is_none() {
             write!(f, "\n{GPU_PROFILE}")?;
         }
         Ok(())
@@ -170,7 +170,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         }
     }
 
-    if policy.gpu {
+    if policy.gpu.is_none() {
         emit_gpu_caches(&mut profile.fs_allows, gpu_caches());
     }
 
@@ -216,16 +216,17 @@ fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rend
 /// launch needs beyond it, so exec's own clauses read nothing.
 fn emit_fs_restricted(profile: &mut Profile, lists: &RenderedLists) {
     let objects = || lists.read.iter().chain(&lists.write);
-    let readable: Vec<&Rendered> = objects().flat_map(Object::names).collect();
+    // Each write prefix is among `read` too.
+    let mut readable: Vec<&Rendered> = objects().flat_map(Object::names).collect();
+    readable.sort();
+    readable.dedup();
     let walk: BTreeSet<&Rendered> = objects().flat_map(|o| &o.walk).collect();
     let stat: BTreeSet<Rendered> = rendered_ancestors(readable.iter().chain(&walk).copied())
         .into_iter()
         .chain(walk.iter().copied().cloned())
         .collect();
     let lines = &mut profile.fs_allows;
-    for name in &stat {
-        lines.push(Clause::allow("file-read-metadata", Filter::Literal(name)).to_string());
-    }
+    emit_lookups(lines, &stat);
     for name in walk {
         // Holding a link needs data access to the link, never its target.
         lines.push(Clause::allow("file-read-data", Filter::Symlink(name)).to_string());
@@ -267,9 +268,7 @@ fn socket_clauses(allow: bool, path: &Rendered) -> [String; 3] {
 /// Metal's caches, read and written, and the lookups down to them.  Among
 /// the fs allows, so a grant's deny still wins.
 fn emit_gpu_caches(lines: &mut Vec<String>, caches: &[Rendered]) {
-    for name in rendered_ancestors(caches) {
-        lines.push(Clause::allow("file-read-metadata", Filter::Literal(&name)).to_string());
-    }
+    emit_lookups(lines, &rendered_ancestors(caches));
     for cache in caches {
         lines.push(Clause::allow("file-read*", Filter::Subpath(cache)).to_string());
         lines.push(Clause::allow("file-write*", Filter::Subpath(cache)).to_string());
@@ -280,39 +279,22 @@ fn emit_gpu_caches(lines: &mut Vec<String>, caches: &[Rendered]) {
 /// `process-exec` clauses [`emit_exec_rules`] renders below.
 pub(crate) const RENDERS_EXEC: bool = true;
 
-/// A `process-exec` clause.
-fn exec_clause(allow: bool, filter: Filter) -> String {
-    Clause {
-        allow,
-        ops: "process-exec",
-        filter,
-    }
-    .to_string()
-}
-
-/// A clause for each name the kernel may present `path` by: the subtree of a
-/// `dir`, a file's literal.
-fn exec_clauses(allow: bool, path: &RealPath, dir: bool) -> Result<Vec<String>, String> {
+/// A `process-exec` clause over each of `names`: a directory's by `subpath`,
+/// a file's by `literal`.
+fn exec_clauses<'a>(
+    allow: bool,
+    names: &'a [Rendered],
+    filter: fn(&'a Rendered) -> Filter<'a>,
+) -> Vec<String> {
     let clause = |name| {
-        let filter = if dir {
-            Filter::Subpath(name)
-        } else {
-            Filter::Literal(name)
-        };
-        exec_clause(allow, filter)
+        Clause {
+            allow,
+            ops: "process-exec",
+            filter: filter(name),
+        }
+        .to_string()
     };
-    Ok(render_real(path)?.iter().map(clause).collect())
-}
-
-/// Deny clauses at each position `excluded` holds, its name's and its link's
-/// target's, as the fs renderers render an exclusion.
-fn excluded_clauses(excluded: &Excluded, dir: bool) -> Result<Vec<String>, String> {
-    let clauses: Vec<_> = excluded
-        .positions()
-        .iter()
-        .map(|position| exec_clauses(false, position, dir))
-        .collect::<Result<_, _>>()?;
-    Ok(clauses.concat())
+    names.iter().map(clause).collect()
 }
 
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard.
@@ -332,15 +314,26 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
         profile.exec_rules.push(ANY_EXEC.to_string());
         return Ok(());
     };
-    let positives = rules.allows().map(|scope| match scope {
-        KernelAllow::Any => Ok(vec![ANY_EXEC.to_string()]),
-        KernelAllow::Dir(dir) => exec_clauses(true, &dir.position(), true),
-        KernelAllow::File(real) => exec_clauses(true, real, false),
+    // An exclusion at each position it holds, its name's and its link's
+    // target's, as the fs renderers render one.
+    let excluded = |excluded: &Excluded| render_excluded(&excluded.positions());
+    let positives = rules.allows().map(|scope| -> Result<_, String> {
+        Ok(match scope {
+            KernelAllow::Any => vec![ANY_EXEC.to_string()],
+            KernelAllow::Dir(dir) => {
+                exec_clauses(true, &render_real(&dir.position())?, Filter::Subpath)
+            }
+            KernelAllow::File(real) => exec_clauses(true, &render_real(real)?, Filter::Literal),
+        })
     });
-    let negatives = rules.denies().map(|scope| match scope {
-        ExecDeny::Dir(dir) => excluded_clauses(&dir.real, true),
-        ExecDeny::File(file) => excluded_clauses(&file.real, false),
-        ExecDeny::Name(veto) => Ok(vec![exec_clause(false, Filter::Regex(veto.key()))]),
+    let negatives = rules.denies().map(|scope| -> Result<_, String> {
+        Ok(match scope {
+            ExecDeny::Dir(dir) => exec_clauses(false, &excluded(&dir.real)?, Filter::Subpath),
+            ExecDeny::File(file) => exec_clauses(false, &excluded(&file.real)?, Filter::Literal),
+            ExecDeny::Name(veto) => {
+                vec![Clause::deny("process-exec", Filter::Regex(veto.key())).to_string()]
+            }
+        })
     });
     for clauses in positives.chain(negatives) {
         profile.exec_rules.extend(clauses?);
@@ -354,7 +347,7 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
         })
         .collect::<Result<Vec<_>, _>>()?
         .concat();
-    emit_ancestor_metadata(&mut profile.exec_ancestors, &granted);
+    emit_lookups(&mut profile.exec_ancestors, &rendered_ancestors(&granted));
     Ok(())
 }
 
@@ -445,7 +438,7 @@ fn withheld_services() -> &'static [(&'static str, &'static str)] {
         (
             "com.apple.coreservices.launchservicesd",
             "launchservicesd spawns `/usr/bin/open`'s target as a child of launchd, outside \
-             this profile: an escape, and for a URL an egress channel under `net: false`",
+             this profile: an escape, and for a URL an egress channel under `` net: `offline ``",
         ),
         (
             "com.apple.pasteboard",
@@ -512,16 +505,13 @@ pub(super) fn withheld_service(name: &str) -> Option<&'static str> {
         .map(|(_, why)| *why)
 }
 
-/// Seatbelt gates each directory lookup on the way to a granted name.
-/// Metadata is enough: search is all a resolver — the kernel's, or ral's walk
-/// — holds on an ancestor.  Over every rendered path handed in, system and
-/// self-exec included, which the projection's `pinned_dirs` never saw.
-fn emit_ancestor_metadata<'a>(
-    lines: &mut Vec<String>,
-    paths: impl IntoIterator<Item = &'a Rendered>,
-) {
-    for ancestor in rendered_ancestors(paths) {
-        lines.push(Clause::allow("file-read-metadata", Filter::Literal(&ancestor)).to_string());
+/// Each of `names` statable, which is how every emitter opens the lookups to
+/// what it grants: Seatbelt gates each one on the way to a granted name, and
+/// metadata is enough, search being all a resolver — the kernel's, or ral's
+/// walk — holds on an ancestor.
+fn emit_lookups<'a>(lines: &mut Vec<String>, names: impl IntoIterator<Item = &'a Rendered>) {
+    for name in names {
+        lines.push(Clause::allow("file-read-metadata", Filter::Literal(name)).to_string());
     }
 }
 
@@ -573,7 +563,7 @@ mod tests {
         RESOLVER_SOCKET, build_profile, gpu_caches, withheld_services,
     };
     use crate::authority::policy::{
-        ExecAllow, ExecDeny, ExecRules, FsAllow, FsDeny, GrantPath, Rule,
+        ExecAllow, ExecDeny, ExecRules, FsAllow, FsDeny, Gpu, GrantPath, Net, Rule,
     };
     use crate::authority::sandbox::{ExecProjection, FsLists, FsProjection, SandboxProjection};
     use crate::path::proper_ancestors;
@@ -741,8 +731,8 @@ mod tests {
             exec_ancestors: section("exec-ancestors"),
             fs_denies: section("fs-denies"),
             pins: section("pins"),
-            net: true,
-            gpu: false,
+            net: None,
+            gpu: Some(Gpu::Withheld),
         }
         .to_string();
         let sections = profile
@@ -1141,6 +1131,25 @@ mod tests {
         }
     }
 
+    /// A write prefix is among the reads too, as the fold makes it, and is
+    /// read by one clause, never one per list naming it.
+    #[test]
+    fn mac_profile_reads_a_written_prefix_once() {
+        let policy = SandboxProjection {
+            fs: FsProjection::Restricted(FsLists {
+                read: vec![prefix("/ral-test/w")],
+                write: vec![prefix("/ral-test/w")],
+                ..FsLists::default()
+            }),
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy).unwrap();
+        let read = "(allow file-read* (subpath \"/ral-test/w\"))";
+        assert_eq!(profile.matches(read).count(), 1, "{read}:\n{profile}");
+        let outside = "(deny process-exec (require-not (require-any (subpath \"/ral-test/w\"))))";
+        assert!(profile.contains(outside), "{outside}:\n{profile}");
+    }
+
     /// A grant that names ral's own file leaves the lock its one write deny.
     #[test]
     fn mac_profile_denies_ral_writes_once_when_the_grant_names_it() {
@@ -1160,33 +1169,33 @@ mod tests {
         }
     }
 
-    /// `net: false` closes DNS only because *no* network rule reaches the
+    /// Offline closes DNS only because *no* network rule reaches the
     /// profile: the resolver talks to mDNSResponder over a UNIX socket, which
     /// Seatbelt gates as `network-outbound`.  Admitting that form for any
-    /// local socket would reopen hostname-label egress while `net: false`
-    /// still read as closed, so the denial is asserted over every rule the
+    /// local socket would reopen hostname-label egress while offline still
+    /// read as closed, so the denial is asserted over every rule the
     /// profile carries, not just the IP ones.
     #[test]
     fn mac_profile_denies_network_when_disabled() {
         let profile = build_profile(&SandboxProjection {
-            net: false,
+            net: Some(Net::Offline),
             ..SandboxProjection::default()
         })
         .unwrap();
         for rule in rules(&profile).lines() {
             assert!(
                 !rule.contains("network"),
-                "net: false admitted a network rule: {rule}\n{profile}"
+                "offline admitted a network rule: {rule}\n{profile}"
             );
         }
         let open = build_profile(&SandboxProjection {
-            net: true,
+            net: None,
             ..SandboxProjection::default()
         })
         .unwrap();
         assert!(
             rules(&open).contains("(allow network-outbound (remote ip))"),
-            "net: true emitted no network rule, so the denial above proves nothing:\n{open}"
+            "online emitted no network rule, so the denial above proves nothing:\n{open}"
         );
     }
 
@@ -1194,7 +1203,7 @@ mod tests {
     fn mac_write_prefix_admits_unix_connections_binding_and_listening() {
         let policy = SandboxProjection {
             fs: writing(&["/ral-test/write"]),
-            net: false,
+            net: Some(Net::Offline),
             ..SandboxProjection::default()
         };
         let profile = build_profile(&policy).unwrap();
@@ -1215,7 +1224,7 @@ mod tests {
         ] {
             let policy = SandboxProjection {
                 fs,
-                net: false,
+                net: Some(Net::Offline),
                 ..SandboxProjection::default()
             };
             let profile = rules(&build_profile(&policy).unwrap());
@@ -1233,7 +1242,7 @@ mod tests {
                 deny: frozen(&["/ral-test/write/denied"]),
                 ..FsLists::default()
             }),
-            net: false,
+            net: Some(Net::Offline),
             ..SandboxProjection::default()
         };
         let profile = build_profile(&policy).unwrap();
@@ -1266,7 +1275,7 @@ mod tests {
         for rule in net.lines().filter(|l| l.contains("network")) {
             assert!(
                 rule == resolver || rule.contains("(remote ip)") || rule.contains("(local ip)"),
-                "net: true admitted a non-IP socket: {rule}\n{net}"
+                "online admitted a non-IP socket: {rule}\n{net}"
             );
         }
     }
@@ -1274,13 +1283,13 @@ mod tests {
     /// A wholesale `(allow mach-lookup)` hands out launchservicesd, and with
     /// it `/usr/bin/open` — a spawn performed by launchd outside this profile,
     /// which is an escape and, for a URL, an egress channel.  The service list is
-    /// therefore closed by name, and the resolver's services ride the `net` bit
+    /// therefore closed by name, and the resolver's services ride the `net` veto
     /// with the sockets.
     #[test]
     fn mac_profile_names_every_mach_service() {
         let closed = rules(
             &build_profile(&SandboxProjection {
-                net: false,
+                net: Some(Net::Offline),
                 ..SandboxProjection::default()
             })
             .unwrap(),
@@ -1296,13 +1305,13 @@ mod tests {
             );
         }
         let open = build_profile(&SandboxProjection {
-            net: true,
+            net: None,
             ..SandboxProjection::default()
         })
         .unwrap();
         assert!(
             rules(&open).contains("com.apple.dnssd.service"),
-            "net: true emitted no resolver service:\n{open}"
+            "online emitted no resolver service:\n{open}"
         );
         // A service the hint explains must be one no projection opens, or the
         // reason is quoted about a service the child actually holds.
@@ -1314,13 +1323,13 @@ mod tests {
         }
     }
 
-    /// The GPU's rules ride the `gpu` bit alone, and the names the hint quotes
+    /// The GPU's rules ride the `gpu` veto alone, and the names the hint quotes
     /// are the ones the profile opens.
     #[test]
     fn mac_profile_withholds_the_gpu_when_withheld() {
         let closed = rules(
             &build_profile(&SandboxProjection {
-                gpu: false,
+                gpu: Some(Gpu::Withheld),
                 ..SandboxProjection::default()
             })
             .unwrap(),
@@ -1351,7 +1360,7 @@ mod tests {
         assert!(!caches.is_empty(), "this host names a user cache directory");
         let open = build_profile(&SandboxProjection::default()).unwrap();
         let closed = build_profile(&SandboxProjection {
-            gpu: false,
+            gpu: Some(Gpu::Withheld),
             ..SandboxProjection::default()
         })
         .unwrap();
@@ -1505,8 +1514,8 @@ mod tests {
                 deny: frozen(&["/tmp/work/.exarch.toml"]),
                 ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
+            net: None,
+            gpu: None,
             exec: ExecProjection::default(),
         };
         let profile = build_profile(&policy).unwrap();
@@ -1535,8 +1544,8 @@ mod tests {
                 deny: frozen(&["/tmp/work/.ssh/id_rsa"]),
                 ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
+            net: None,
+            gpu: None,
             exec: ExecProjection::default(),
         };
         let profile = build_profile(&policy).unwrap();
@@ -1577,8 +1586,8 @@ mod tests {
                 deny: frozen(&[&deny]),
                 ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
+            net: None,
+            gpu: None,
             exec: ExecProjection::default(),
         };
         let profile = build_profile(&policy).unwrap();

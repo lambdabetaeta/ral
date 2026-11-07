@@ -978,8 +978,8 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
         "the run's own frames must leave with it, and only they"
     );
     assert_eq!(
-        shell.context.grants.net().collect::<Vec<_>>(),
-        [crate::authority::policy::Net::Offline]
+        shell.context.grants.net(),
+        Some(crate::authority::policy::Net::Offline)
     );
     let RunReport::Ran {
         ending: End::Ok(value),

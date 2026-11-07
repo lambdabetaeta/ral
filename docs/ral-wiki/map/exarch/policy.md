@@ -114,7 +114,7 @@ no file on disk for the child to rewrite.
 `deny_layer(paths, ctx)` is a pure constructor, not a mutator: it returns a
 fresh `GrantLayer` holding only those paths as its fs exclusions, for the
 caller to push, rather than folding them into whatever layer already carries
-an `fs` opinion. It builds typed `Axes` (`FsTable { deny: [Place::Absolute p …] }`),
+an `fs` opinion. It builds typed `Axes` (`FsTable { deny: [Anchor::Absolute.place(p) …] }`),
 and `carve_out(Axes, ctx)` encodes them as a `GrantValue`, decodes that with
 `decode_fragment` and extends the top by the fragment
 (`GrantLayer::root().extend(..)`), as the self layer does: a carve-out is a grant

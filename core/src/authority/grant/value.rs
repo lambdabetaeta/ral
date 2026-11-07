@@ -185,7 +185,7 @@ fn nullary(word: impl Into<&'static str>) -> FOValue {
 }
 
 fn place(place: &Place) -> FOValue {
-    tag(&place.tag(), Some(place.payload().to_owned().encode()))
+    tag(&place.anchor.tag(), Some(place.payload.clone().encode()))
 }
 
 fn target(target: Target) -> FOValue {
@@ -200,7 +200,7 @@ fn target(target: Target) -> FOValue {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::authority::grant::freeze::FreezeCtx;
+    use crate::authority::grant::freeze::{Anchor, FreezeCtx};
     use crate::authority::policy::{Flag, FsOp, GrantLayer};
     use crate::shell::grant::{decode_fragment, decode_grant};
     use crate::test_helper::Tree;
@@ -214,14 +214,14 @@ mod tests {
         let tree = Tree::lay(tmp.path(), ["/work/", "/bin/tool"]);
         let cwd = crate::path::CwdPath::new(tree.path("/work")).unwrap();
         let ctx = FreezeCtx::at(crate::host::EnvVars::new(), cwd);
-        let tool = Place::Absolute(tree.at("/bin/tool"));
+        let tool = Anchor::Absolute.place(tree.at("/bin/tool"));
         let value = GrantValue::from(Axes {
             exec: Some(ExecTable {
                 allow: vec![Target::File(tool), Target::Name("ral-no-such-tool".into())],
-                deny: vec![Target::Dir(Place::Cwd(".".into()))],
+                deny: vec![Target::Dir(Anchor::Cwd.place("."))],
             }),
             fs: Some(FsTable {
-                read: vec![Place::Cwd(".".into())],
+                read: vec![Anchor::Cwd.place(".")],
                 ..FsTable::default()
             }),
             net: Some(Net::Offline),
@@ -235,8 +235,8 @@ mod tests {
         let reads = layer.fs().expect("an fs axis").table(&FsOp::Read);
         assert_eq!(reads.allows().count(), 1);
         let stack = crate::test_helper::stack([layer]);
-        assert_eq!(stack.net_veto(), Some(Net::Offline));
-        assert_eq!(stack.gpu().collect::<Vec<_>>(), [Gpu::Withheld]);
+        assert_eq!(stack.net(), Some(Net::Offline));
+        assert_eq!(stack.gpu(), Some(Gpu::Withheld));
         assert!(stack.permits(Flag::Editor(EditorVerb::Read)));
         assert!(!stack.permits(Flag::Editor(EditorVerb::Write)));
         assert!(!stack.permits(Flag::Shell(ShellVerb::Chdir)));
@@ -281,17 +281,17 @@ mod tests {
 
         /// Directories, the root first, which no exclusion names.
         fn dirs(&self) -> Vec<Place> {
-            let absolute = |p: &str| Place::Absolute(self.tree.at(p));
+            let absolute = |p: &str| Anchor::Absolute.place(self.tree.at(p));
             let mut dirs = vec![
-                Place::Absolute("/".into()),
+                Anchor::Absolute.place("/"),
                 absolute("/opt"),
                 absolute("/opt/sub"),
                 absolute("/WORK"),
                 absolute("/absent/dir"),
-                Place::Cwd(".".into()),
-                Place::Cwd("src".into()),
-                Place::Home(".".into()),
-                Place::Scratch(".".into()),
+                Anchor::Cwd.place("."),
+                Anchor::Cwd.place("src"),
+                Anchor::Home.place("."),
+                Anchor::Scratch.place("."),
             ];
             if cfg!(unix) {
                 dirs.push(absolute("/link"));
@@ -302,9 +302,9 @@ mod tests {
         fn files(&self) -> Vec<Place> {
             let tool = format!("/bin/tool{}", std::env::consts::EXE_SUFFIX);
             vec![
-                Place::Absolute(self.tree.at(&tool)),
-                Place::Absolute(self.tree.at("/work/absent")),
-                Place::Cwd("notes".into()),
+                Anchor::Absolute.place(self.tree.at(&tool)),
+                Anchor::Absolute.place(self.tree.at("/work/absent")),
+                Anchor::Cwd.place("notes"),
             ]
         }
 
@@ -430,7 +430,7 @@ mod tests {
         };
         let data = |axes: Axes| FOValue::from(GrantValue::from(axes));
         let tool = format!("/bin/tool{}", std::env::consts::EXE_SUFFIX);
-        let tool = Place::Absolute(crate::path::shown(host.tree.path(&tool)));
+        let tool = Anchor::Absolute.place(crate::path::shown(host.tree.path(&tool)));
         let exec = Axes {
             exec: Some(ExecTable {
                 deny: vec![Target::File(tool)],
@@ -447,7 +447,7 @@ mod tests {
         );
         let reads = carve(Axes {
             fs: Some(FsTable {
-                deny: vec![Place::Cwd("notes".into())],
+                deny: vec![Anchor::Cwd.place("notes")],
                 ..FsTable::default()
             }),
             ..Axes::default()

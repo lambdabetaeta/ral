@@ -21,13 +21,13 @@
 
 #[cfg(target_os = "linux")]
 use super::linux::Envelope;
-#[cfg(target_os = "macos")]
-use super::warrant::Seatbelt;
 #[cfg(unix)]
-use super::warrant::{Handoff, Slots, Warrant};
+use super::warrant::{Confinement, Handoff, Slots, Warrant};
 use super::{Refusal, SandboxProjection};
 use crate::Role;
-use crate::authority::policy::{Admitted, Baseline, Program};
+#[cfg(all(test, unix))]
+use crate::authority::policy::Baseline;
+use crate::authority::policy::{Admitted, Program};
 use crate::path::{CwdPath, RealPath};
 #[cfg(unix)]
 use crate::process::report::Report;
@@ -122,8 +122,7 @@ pub(crate) fn interpreter_of(admitted: &Admitted) -> Option<PathBuf> {
 ///
 /// `cwd` is the logical cwd Linux folds in as `--chdir`, and `ownership`
 /// likewise reaches Linux alone, the one backend that builds an
-/// envelope process to tie to us; `baseline`, which of the projection's read
-/// objects a host may keep from this user, is Linux's alone too.
+/// envelope process to tie to us.
 ///
 /// macOS and Linux both launch the `ral --warrant` trampoline — Linux's under
 /// bwrap — while Windows spawns the program itself, confined by the token the
@@ -132,12 +131,11 @@ pub(crate) fn interpreter_of(admitted: &Admitted) -> Option<PathBuf> {
     not(target_os = "linux"),
     allow(
         unused_variables,
-        reason = "baseline, cwd and ownership are consumed by the bwrap argv alone"
+        reason = "cwd and ownership are consumed by the bwrap argv alone"
     )
 )]
 pub(crate) fn sandboxed_command(
     projection: &SandboxProjection,
-    baseline: &Baseline,
     image: &Image,
     args: &[String],
     ownership: Ownership,
@@ -146,7 +144,7 @@ pub(crate) fn sandboxed_command(
 ) -> Result<crate::process::Launch, Refusal> {
     #[cfg(target_os = "linux")]
     {
-        linux_sandboxed_command(projection, baseline, image, args, ownership, cwd, cancel)
+        linux_sandboxed_command(projection, image, args, ownership, cwd, cancel)
     }
     #[cfg(target_os = "macos")]
     {
@@ -187,7 +185,6 @@ pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, 
 #[cfg(target_os = "linux")]
 fn linux_sandboxed_command(
     projection: &SandboxProjection,
-    baseline: &Baseline,
     image: &Image,
     args: &[String],
     ownership: Ownership,
@@ -197,30 +194,16 @@ fn linux_sandboxed_command(
     let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
     let own = super::reexec::own()?;
     let env = Envelope::probe(bwrap, own);
-    enveloped(
-        &env,
-        projection,
-        baseline,
-        image,
-        args,
-        Some(cwd),
-        ownership,
-        scope,
-    )
+    enveloped(&env, projection, image, args, Some(cwd), ownership, scope)
 }
 
 /// `env`'s trampoline, handed its warrant and the Landlock ruleset built
 /// here, against what the envelope will show.  The trampoline is *us*:
 /// our boot pin, which bwrap execs by descriptor.
 #[cfg(target_os = "linux")]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "independent inputs to one envelope launch"
-)]
 pub(super) fn enveloped(
     env: &Envelope<'_>,
     projection: &SandboxProjection,
-    baseline: &Baseline,
     image: &Image,
     args: &[String],
     chdir: Option<&CwdPath>,
@@ -228,7 +211,7 @@ pub(super) fn enveloped(
     scope: &crate::process::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     let rendered = projection.rendered()?;
-    let shown = super::linux::Shown::of(&rendered, baseline)?;
+    let shown = super::linux::Shown::of(&rendered)?;
     let mut handoff = Handoff::default();
     let confinement = super::linux::landlock::build(
         &rendered.exec,
@@ -237,7 +220,8 @@ pub(super) fn enveloped(
         env.host.landlock,
         &mut handoff,
     )?;
-    let (slots, report) = issue(&Warrant::new(confinement, image, args), &mut handoff)?;
+    let warrant = Warrant::new(Confinement(confinement), image, args);
+    let (slots, report) = issue(&warrant, &mut handoff)?;
     let (cmd, info) =
         super::linux::bwrap_command(env, shown, handoff, slots, &rendered, chdir, ownership)?;
     Ok(bwrapped(cmd, info, report, scope))
@@ -281,7 +265,10 @@ fn macos_sandboxed_command(
     own.verify()?;
     let profile = super::macos::build_profile(projection)?;
     let mut handoff = Handoff::default();
-    let (slots, report) = issue(&Warrant::new(Seatbelt(profile), image, args), &mut handoff)?;
+    let (slots, report) = issue(
+        &Warrant::new(Confinement(profile), image, args),
+        &mut handoff,
+    )?;
     Ok(trampoline(own, handoff, slots, report, scope))
 }
 
@@ -338,9 +325,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     use crate::authority::policy::{ExecAllow, ExecDeny, ExecRules, Rule};
+    #[cfg(target_os = "macos")]
+    use crate::authority::sandbox::ExecProjection;
     use crate::{
         authority::policy::{FsAllow, FsDeny, GrantPath},
-        authority::sandbox::{ExecProjection, FsLists, FsProjection},
+        authority::sandbox::{FsLists, FsProjection},
         path::{Excluded, FrozenPath, Trace},
     };
 
@@ -363,11 +352,9 @@ mod tests {
                 read: vec![prefix("/tmp")],
                 write: vec![prefix("/tmp")],
                 deny: vec![excluding("/etc")],
-                pinned_dirs: Vec::new(),
+                ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
-            exec: ExecProjection::default(),
+            ..SandboxProjection::default()
         }
     }
 
@@ -414,11 +401,9 @@ mod tests {
                     .collect(),
                 write: vec![prefix(write_dir)],
                 deny: Vec::new(),
-                pinned_dirs: Vec::new(),
+                ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
-            exec: ExecProjection::default(),
+            ..SandboxProjection::default()
         }
     }
 
@@ -635,11 +620,10 @@ mod tests {
                 read: scopes(read).into_iter().chain(baseline()).collect(),
                 write: scopes(write),
                 deny: deny.iter().copied().map(excluding).collect(),
-                pinned_dirs: Vec::new(),
+                ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
             exec,
+            ..SandboxProjection::default()
         }
     }
 
@@ -976,11 +960,9 @@ mod tests {
                 read: read.into_iter().chain(baseline()).collect(),
                 write: Vec::new(),
                 deny,
-                pinned_dirs: Vec::new(),
+                ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
-            exec: ExecProjection::default(),
+            ..SandboxProjection::default()
         };
         let cat = Program::file("/bin/cat".into()).expect("/bin/cat exists");
         let args = [file.to_string_lossy().into_owned()];
@@ -1079,7 +1061,6 @@ mod tests {
         for program in [sh(), Program::Tool("ls")] {
             let launch = linux_sandboxed_command(
                 &restrictive(),
-                &Baseline::default(),
                 &image(program),
                 &["-l".into()],
                 Ownership::Kept,

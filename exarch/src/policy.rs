@@ -16,7 +16,7 @@ mod load;
 
 use base::resolve_base;
 use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
-use ral_core::authority::grant::freeze::{FreezeCtx, Place, host_absolute};
+use ral_core::authority::grant::freeze::{Anchor, FreezeCtx, host_absolute};
 use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
 use ral_core::authority::policy::{GrantLayer, GrantStack};
 use ral_core::host::EnvVars;
@@ -186,7 +186,10 @@ fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, String> 
         .map(|p| held(p))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let fs = FsTable {
-        deny: held.into_iter().map(Place::Absolute).collect(),
+        deny: held
+            .into_iter()
+            .map(|p| Anchor::Absolute.place(p))
+            .collect(),
         ..FsTable::default()
     };
     carve_out(
@@ -207,7 +210,7 @@ fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, String>
          so cannot exclude it from exec",
     )?;
     let exec = ExecTable {
-        deny: vec![Target::File(Place::Absolute(held(exe)?))],
+        deny: vec![Target::File(Anchor::Absolute.place(held(exe)?))],
         ..ExecTable::default()
     };
     carve_out(
@@ -238,6 +241,7 @@ fn carve_out(excluded: Axes, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::authority::grant::freeze::Place;
     use ral_core::authority::grant::value::LayerValue;
     use ral_core::authority::policy::Net;
     use ral_core::data::FOValue;
@@ -400,11 +404,11 @@ mod tests {
         stack.push(confined);
         stack.push(minimal);
         assert!(
-            stack.net().next().is_some(),
+            stack.net().is_some(),
             "naming a looser base must not turn the network back on"
         );
         assert!(
-            stack.gpu().next().is_some(),
+            stack.gpu().is_some(),
             "naming a looser base must not hand back the GPU"
         );
     }
@@ -443,7 +447,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_default_boot_grant_reads_as_pinned() {
-        use ral_core::authority::grant::freeze::Anchor;
         use ral_core::protocol::probe::Grants;
         use std::os::unix::fs::PermissionsExt;
         const FIXTURE: &str = "/fixture/";
@@ -471,7 +474,10 @@ mod tests {
         let pinnable = |mut axes: Axes| {
             if let Some(exec) = &mut axes.exec {
                 exec.allow.retain(|target| match target {
-                    Target::Dir(Place::Absolute(dir)) => dir.starts_with(FIXTURE),
+                    Target::Dir(Place {
+                        anchor: Anchor::Absolute,
+                        payload,
+                    }) => payload.starts_with(FIXTURE),
                     _ => true,
                 });
             }

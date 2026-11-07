@@ -2,7 +2,7 @@
 generated_at_commit: 5eaef7d9
 verified_at_commit: 7ab5809a
 verified_at_date: 2026-10-26
-anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
+anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_lookups, withheld_services, rendered_ancestors, pinned_dirs, step]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -28,7 +28,8 @@ cost of saying the second in the first:
 - **Ancestor chains.** `(allow file-read* (subpath P))` does not make `P`
   reachable: Seatbelt gates each directory lookup on the way, so every proper
   ancestor of every granted name gets `(allow file-read-metadata (literal …))`
-  (`emit_ancestor_metadata`, over `rendered_ancestors`). Metadata suffices
+  (`emit_lookups`, the one emitter of these lines for the fs, exec and GPU
+  sections, over `rendered_ancestors`). Metadata suffices
   because *search* is all a resolver holds on an ancestor — the kernel's,
   `posix_spawn`'s, and ral's own walk, which opens its intermediates `O_SEARCH`
   for exactly this reason (the directory step of `path/walk/macos.rs`). A read handle
@@ -61,8 +62,9 @@ that — before making the profile say more.
 ## What `build_profile` renders, rule by rule
 
 **fs.** `Restricted` renders the grant's read prefixes — which already carry
-the read `floor`, joined by the fold — and its write prefixes as `file-read*` subpaths with
-their ancestor chains, the write prefixes as `file-write*` subpaths, and then
+the read `floor` and the write prefixes, joined by the fold — as `file-read*`
+subpaths with their ancestor chains, each name once, the write prefixes as
+`file-write*` subpaths, and then
 the denies: each exclusion denies reading, writing, linking and running, and
 `(deny process-exec (require-not (require-any (subpath …) …)))` over the read
 region refuses every program the fs does not read (plain `(deny process-exec)`
@@ -95,7 +97,9 @@ negative one. Positive clauses are `process-exec` alone, `(allow process-exec
 (subpath|literal …))`; reads, run places and support among them are the fs
 section's, which renders them whether exec is restricted or not. Support
 (carriers, [[decisions/261004_exec-carriers|exec-carriers]]) arrives among the
-positives as `File` allows. A negative clause is `(deny process-exec …)`, and a
+positives as `File` allows. A negative clause is `(deny process-exec …)` at
+each name an exclusion's held positions render to, as the fs denies render
+(`render_excluded`), and a
 veto is `(deny process-exec (regex "/name$"))`, the name wherever it resolves;
 an entry with both bits emits both clauses. Every path and name is spliced as
 an ordinary `"…"` literal with `\` and `"` escaped, a veto's regex

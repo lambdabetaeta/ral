@@ -318,16 +318,16 @@ fn deny_all_withholds_every_verb() {
     for flag in every_flag() {
         assert!(!stack.permits(flag), "{} must be withheld", flag.key());
     }
-    assert_eq!(stack.net_veto(), Some(Net::Offline));
-    assert_eq!(stack.gpu().collect::<Vec<_>>(), [Gpu::Withheld]);
+    assert_eq!(stack.net(), Some(Net::Offline));
+    assert_eq!(stack.gpu(), Some(Gpu::Withheld));
 }
 
-/// What a stack decides: each verb, an exec admission, and the net opinions.
-fn judgments(stack: &GrantStack, ls: &str) -> (Vec<bool>, bool, Vec<Net>) {
+/// What a stack decides: each verb, an exec admission, and the net veto.
+fn judgments(stack: &GrantStack, ls: &str) -> (Vec<bool>, bool, Option<Net>) {
     (
         every_flag().into_iter().map(|f| stack.permits(f)).collect(),
         admits(stack, ls),
-        stack.net().collect(),
+        stack.net(),
     )
 }
 
@@ -360,13 +360,13 @@ fn neutral_layers_judge_as_ambient_and_leave_it_inactive() {
     let tmp = tempfile::tempdir().unwrap();
     let ls = Tree::lay(tmp.path(), ["/bin/ls"]).at("/bin/ls");
     let ambient = GrantStack::root();
-    assert_eq!(ambient.net_veto(), None);
+    assert_eq!(ambient.net(), None);
     for layer in neutral_layers() {
         assert!(!layer.is_restrictive(), "{layer:?} must be neutral");
         let mut stack = GrantStack::root();
         stack.push(layer);
         assert!(!stack.is_restrictive());
-        assert_eq!(stack.net_veto(), None);
+        assert_eq!(stack.net(), None);
         assert_eq!(judgments(&stack, &ls), judgments(&ambient, &ls));
     }
 }
@@ -392,7 +392,7 @@ fn neutral_layers_leave_a_restrictive_stack_as_it_was() {
         nested.push(layer);
         for stack in [&stack, &nested] {
             assert!(stack.is_restrictive());
-            assert_eq!(stack.net_veto(), Some(Net::Offline));
+            assert_eq!(stack.net(), Some(Net::Offline));
             assert_eq!(judgments(stack, &ls), judged);
         }
     }
@@ -966,27 +966,27 @@ fn extension_unions_verbs_and_keeps_the_net_and_gpu_vetoes() {
         net: Some(Net::Offline),
         ..Capabilities::default()
     };
-    let nets = |layer: GrantLayer| test_helper::stack([layer]).net().collect::<Vec<_>>();
+    let net = |layer: GrantLayer| test_helper::stack([layer]).net();
     assert_eq!(
-        nets(GrantLayer::root().extend(fragment(offline.clone()))),
-        [Net::Offline]
+        net(GrantLayer::root().extend(fragment(offline.clone()))),
+        Some(Net::Offline)
     );
     assert_eq!(
-        nets(layer(offline).extend(fragment(Capabilities::default()))),
-        [Net::Offline]
+        net(layer(offline).extend(fragment(Capabilities::default()))),
+        Some(Net::Offline)
     );
     let withheld = Capabilities {
         gpu: Some(Gpu::Withheld),
         ..Capabilities::default()
     };
-    let gpus = |layer: GrantLayer| test_helper::stack([layer]).gpu().collect::<Vec<_>>();
+    let gpu = |layer: GrantLayer| test_helper::stack([layer]).gpu();
     assert_eq!(
-        gpus(GrantLayer::root().extend(fragment(withheld.clone()))),
-        [Gpu::Withheld]
+        gpu(GrantLayer::root().extend(fragment(withheld.clone()))),
+        Some(Gpu::Withheld)
     );
     assert_eq!(
-        gpus(layer(withheld).extend(fragment(Capabilities::default()))),
-        [Gpu::Withheld]
+        gpu(layer(withheld).extend(fragment(Capabilities::default()))),
+        Some(Gpu::Withheld)
     );
 }
 
@@ -1274,10 +1274,10 @@ fn law_4_extension_invariant_on_verbs_net_and_gpu() {
             };
             assert!(!e.permits(flag) || b.permits(flag) || listed, "{flag:?}");
         }
-        assert!(f.net().next().is_none() || e.net().next().is_some());
-        assert!(e.net().next().is_none() || b.net().next().is_some() || f.net().next().is_some());
-        assert!(f.gpu().next().is_none() || e.gpu().next().is_some());
-        assert!(e.gpu().next().is_none() || b.gpu().next().is_some() || f.gpu().next().is_some());
+        assert!(f.net().is_none() || e.net().is_some());
+        assert!(e.net().is_none() || b.net().is_some() || f.net().is_some());
+        assert!(f.gpu().is_none() || e.gpu().is_some());
+        assert!(e.gpu().is_none() || b.gpu().is_some() || f.gpu().is_some());
     }
 }
 

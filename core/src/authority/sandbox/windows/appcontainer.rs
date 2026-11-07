@@ -17,7 +17,7 @@
 //! [`OwnedCapabilitySid::from_capability_name`] from the names `dacl` mints and
 //! stamps persistently. So a token's reach is exactly the capability set
 //! `session` mints into it. Withholding the network capabilities is the whole
-//! of `net: false`: an `AppContainer` holding neither `internetClient` nor
+//! of `` net: `offline ``: an `AppContainer` holding neither `internetClient` nor
 //! `privateNetworkClientServer` cannot open a socket.
 //! No capability withholds the GPU: an `AppContainer` reaches Direct3D
 //! regardless, so here `` gpu: `withheld `` changes nothing, and every grant

@@ -68,7 +68,7 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::authority::grant::freeze::{FreezeCtx, Place};
+    use ral_core::authority::grant::freeze::{Anchor, FreezeCtx, Place};
     #[cfg(unix)]
     use ral_core::authority::grant::value::FsTable;
     use ral_core::authority::grant::value::{ExecTable, Target};
@@ -174,7 +174,7 @@ mod tests {
 
     #[cfg(unix)]
     fn xdg(kind: XdgKind, sub: &str) -> Place {
-        Place::Xdg(kind, sub.into())
+        Anchor::Xdg(kind).place(sub)
     }
 
     /// The real path of the file at the host-held `path`, as the in-process
@@ -298,7 +298,7 @@ mod tests {
         );
         for prefix in reads(&fs_of(&layer)) {
             assert!(
-                !prefix.payload().starts_with("/h"),
+                !prefix.payload.starts_with("/h"),
                 "confined fs prefix {prefix:?} reaches into home: build jail must not"
             );
         }
@@ -510,7 +510,7 @@ mod tests {
     fn reasonable_and_read_only_admit_git() {
         let home = host_home();
         let ctx = ctx_at(&home, "/");
-        let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
+        let gitconfig = frozen(&Anchor::Home.place(".gitconfig"), &ctx);
         for (name, text) in [("reasonable", REASONABLE_RAL), ("read-only", READ_ONLY_RAL)] {
             let layer = load(name, text, &ctx);
             if let Some(git) = host_real("git") {
@@ -579,7 +579,7 @@ mod tests {
     fn git_extension_extends_into_git_capable_profile() {
         let home = host_home();
         let ctx = ctx_at(&home, "/");
-        let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
+        let gitconfig = frozen(&Anchor::Home.place(".gitconfig"), &ctx);
         let xdg_config_git = frozen(&xdg(XdgKind::Config, "git"), &ctx);
 
         let extended_minimal = load("minimal", MINIMAL_RAL, &ctx).extend(fragment(
@@ -683,7 +683,7 @@ mod tests {
         let ctx = ctx_at(&host_home(), "/work");
         let base = ral_core::test_helper::layer(Capabilities {
             fs: Some(ral_core::authority::policy::FsPolicy {
-                read_prefixes: vec![frozen(&Place::Absolute("/work".into()), &ctx)],
+                read_prefixes: vec![frozen(&Anchor::Absolute.place("/work"), &ctx)],
                 ..Default::default()
             }),
             ..Capabilities::default()

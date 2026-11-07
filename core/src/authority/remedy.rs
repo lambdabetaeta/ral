@@ -1,5 +1,6 @@
-//! The fixes both enforcers suggest, each worded once: a guard refusal and a
-//! kernel-denial hint say why at their site, then end in one of these.
+//! The fixes both enforcers suggest, each worded once: a guard refusal, a
+//! kernel-denial hint and a sandbox's launch refusal say why at their site,
+//! then end in one of these.
 
 /// No allowance reopens an exclusion.
 pub(crate) fn remove_the_exclusion() -> &'static str {
@@ -23,6 +24,14 @@ pub(crate) fn add_to_fs(what: &str, list: FsList) -> String {
         FsList::Either => "`read` or `write`",
     };
     format!("add {what} to the grant's fs {list} list")
+}
+
+/// An allowance keeps the real path it was frozen to, so a link put on that
+/// path since redirects nothing.
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) fn grant_the_new_target() -> &'static str {
+    "an allowance names what it named when granted. To allow the new target, grant it where \
+     the ceiling is set (in exarch, restart with a grant that names it)"
 }
 
 /// Let the grant's exec `allow` list name the program, in any key's form.

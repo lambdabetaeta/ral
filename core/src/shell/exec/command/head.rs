@@ -234,7 +234,7 @@ fn judge(
     if located.is_executable() {
         return Ok(Ok(admitted));
     }
-    let error = match located.kind() {
+    let error = match located.trace().kind() {
         Some(kind) if matches!(candidate_kind, CandidateKind::Path) || kind == Kind::File => {
             unstartable(
                 candidate_kind,

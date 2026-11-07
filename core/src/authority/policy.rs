@@ -21,10 +21,12 @@ mod lattice_tests;
 #[cfg(any(test, feature = "test-util"))]
 pub use crate::authority::grant::builder::{Capabilities, ExecGrant, ExecKey, FsPolicy};
 pub use deputy::deputy_prefixes;
+#[cfg(any(target_os = "macos", all(unix, feature = "test-util")))]
+pub(crate) use exec::KernelAllow;
+#[cfg(unix)]
+pub(crate) use exec::Subject;
 pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Rule, rules};
 pub(crate) use exec::{ExecAllow, ExecDeny, KernelRules, Veto};
-#[cfg(unix)]
-pub(crate) use exec::{KernelAllow, Subject};
 pub(crate) use fs::Verdict;
 pub use fs::{Baseline, FsDeny, FsOp, LocateError, ReadRegion, Refused, Ungoverned};
 pub(crate) use fs::{FsAllow, FsLayer, FsRules, region};

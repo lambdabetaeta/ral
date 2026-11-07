@@ -114,7 +114,7 @@ impl SessionSandbox {
     }
 }
 
-/// The network capability SIDs, derived once per session. A `net: false`
+/// The network capability SIDs, derived once per session. An offline
 /// projection never calls this — the empty array *is* the enforcement, since
 /// an `AppContainer` with no network capability cannot open a socket.
 fn ensure_network_caps(
@@ -318,8 +318,7 @@ pub(crate) fn confine(
         t_grants.elapsed(),
     );
 
-    let network = projection
-        .net
+    let network = (projection.net.is_none())
         .then(|| ensure_network_caps(network_caps))
         .transpose()?;
     let filesystem: Vec<_> = names

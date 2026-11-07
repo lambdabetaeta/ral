@@ -419,7 +419,7 @@ fn admit_sockets(
         let Some(held) = open_nofollow(path)? else {
             continue;
         };
-        if held.kind() == Some(Kind::Dir) {
+        if held.trace().kind() == Some(Kind::Dir) {
             dirs.push(path.clone());
         } else {
             let fd = leaf_fd(&held).map_err(|e| Error::admit(path, e))?;
@@ -462,7 +462,7 @@ fn admit_files(
         };
         // A file admit names that file alone, never what a directory since
         // put there holds.
-        if held.kind() == Some(Kind::Dir)
+        if held.trace().kind() == Some(Kind::Dir)
             || !table
                 .evidence(Subject::Program(crate::path::Subject::Access(held.trace())))
                 .permits()
@@ -634,7 +634,7 @@ impl Walk<'_> {
     /// Admit a regular file only where its position and inode permit it.
     fn file(&mut self, f: &Located<Installing>) -> Result<(), Error> {
         let at = crate::path::Subject::Access(f.trace());
-        if f.kind() != Some(Kind::File)
+        if f.trace().kind() != Some(Kind::File)
             || self.excluded.contains(&f.trace().last_id())
             || !self.table.evidence(Subject::Program(at)).permits()
         {

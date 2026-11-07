@@ -109,7 +109,7 @@ fn install(shell: &mut Shell, stack: &GrantStack) {
 
 /// The fs exclusions each layer of `stack` writes, as ral shows a path.
 fn denies(stack: &GrantStack) -> impl Iterator<Item = Vec<String>> {
-    let shown = |place: &Place| ral_core::path::shown(place.payload());
+    let shown = |place: &Place| ral_core::path::shown(&place.payload);
     (stack.layers())
         .filter_map(|layer| layer.axes().fs)
         .map(move |fs| fs.deny.iter().map(shown).collect())
@@ -182,7 +182,7 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
             );
         }
         assert!(
-            stack.net().next().is_some(),
+            stack.net().is_some(),
             "net: `offline in either file must survive the fold, flag order must not reach it"
         );
         for name in ["a.ral", "b.ral"] {

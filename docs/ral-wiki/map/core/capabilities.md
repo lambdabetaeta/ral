@@ -562,7 +562,7 @@ The daemon and jail share `layout::EXEC_CONTROLLERS`. The role installs the
 (`shell/exec/command/process.rs`) uses it for every command: a bounded fresh
 uid and per-exec cgroup, the envelope's seccomp deny-set, and close-on-exec
 marking above stderr. The daemon disables the user namespaces bwrap needs.
-`GrantStack::net_veto` carries any layer's veto to both the host projection
+`GrantStack::net`, the stack's one veto, carries any layer's to both the host projection
 and `JailPlan`: an offline guest command gets a fresh network namespace with
 loopback up. IP egress and outside abstract Unix sockets are out of reach;
 the guest jail installs no Landlock domain, so pathname socket reachability
@@ -678,9 +678,9 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   `ral --warrant <w> <r>` (`Role::Warrant`), the warrant's descriptor and the
   report socket's. The confinement to enter and the program to
   run cross in a `Warrant` (`sandbox/warrant.rs`, its fields private) compiled in
-  the parent. The confinement is the `Confinement` trait — `spell`, `parse`,
-  `enter` — implemented on macOS by `Seatbelt(String)`, the profile
-  `macos::build_profile` compiled, and on Linux by `Option<Landlocked>`, spelled
+  the parent. The confinement is `Confinement`, one type per platform with
+  `spell`, `parse` and `enter`: on macOS the profile
+  `macos::build_profile` compiled, and on Linux an `Option<Landlocked>`, spelled
   `unconfined`, `landlock@<fd>` or `landlock+refer@<fd>`, the ruleset's descriptor;
   the program is an `Image`: a file carries its real path and `argv[0]`, a tool
   a `&'static str` from the bundled-tool table. Head resolution and warrant

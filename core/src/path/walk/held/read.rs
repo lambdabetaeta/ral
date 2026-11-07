@@ -39,10 +39,6 @@ impl<A: Peeks> Located<A> {
         self.observed()
     }
 
-    pub(crate) fn kind(&self) -> Option<Kind> {
-        self.stat().map(|stat| stat.kind)
-    }
-
     /// [`Self::holds_program`], asked of an admitted program, never before
     /// the judgment.
     pub(crate) fn is_executable(&self) -> bool {

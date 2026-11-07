@@ -159,7 +159,7 @@ mod tests {
     use super::{engine_root, engine_runtime, test_shell};
     use crate::app::{EXARCH, SCRATCH_VAR, Scratch};
     use ral_core::Shell;
-    use ral_core::authority::grant::freeze::Place;
+    use ral_core::authority::grant::freeze::Anchor;
     use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
     use ral_core::authority::policy::FsOp;
     use ral_core::path::EnginePath;
@@ -208,7 +208,7 @@ mod tests {
             ral_core::path::CwdPath::new(shell.cwd()).expect("the shell's cwd is absolute"),
         )
         .with_scratch(shell.scratch())
-        .place(&Place::Scratch("cache".into()))
+        .place(&Anchor::Scratch.place("cache"))
         .expect("the place freezes")
         .expect("the place is live");
         assert!(frozen.as_str().contains("a-session-scratch"), "{frozen:?}");
@@ -245,7 +245,7 @@ mod tests {
         std::fs::create_dir(&cwd).expect("the root's cwd");
         let here = Axes {
             fs: Some(FsTable {
-                read: vec![Place::Cwd(".".into())],
+                read: vec![Anchor::Cwd.place(".")],
                 ..FsTable::default()
             }),
             ..Axes::default()
@@ -267,7 +267,7 @@ mod tests {
         let dir = ral_core::path::utf8(tmp.path()).expect("a test path is Unicode");
         let program = Axes {
             exec: Some(ExecTable {
-                allow: vec![Target::File(Place::Absolute(dir.into()))],
+                allow: vec![Target::File(Anchor::Absolute.place(dir))],
                 ..ExecTable::default()
             }),
             ..Axes::default()

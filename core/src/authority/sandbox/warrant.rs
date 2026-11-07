@@ -121,26 +121,31 @@ const MAGIC: &[u8] = b"ral-warrant/5";
 /// Under macOS's default socket-buffer ceiling, far above either OS's `ARG_MAX`.
 const CAP: usize = 8 << 20;
 
-/// What the confined re-exec enters before it runs anything, spelled as one
-/// field of the warrant.  Entering sweeps every descriptor above stderr but
-/// the report's at `keep`.
-pub(super) trait Confinement: Sized {
-    fn spell(&self) -> Cow<'_, str>;
-    fn parse(field: &str) -> Result<Self, String>;
-    fn enter(&self, keep: Slot) -> Result<(), String>;
-}
+// `Confinement`, one type per platform: what the confined re-exec enters
+// before it runs anything, spelled as one field of the warrant.  Entering
+// sweeps every descriptor above stderr but the report's at `keep`.
 
 /// macOS: the Seatbelt profile the launch compiled.
 #[cfg(target_os = "macos")]
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Seatbelt(pub(super) String);
+pub(super) struct Confinement(pub(super) String);
+
+/// Linux: the Landlock ruleset the launch promised, at the slot it names,
+/// or none.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Confinement(pub(super) Option<Landlocked>);
 
 #[cfg(target_os = "macos")]
-impl Confinement for Seatbelt {
+impl Confinement {
     fn spell(&self) -> Cow<'_, str> {
         (&self.0).into()
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Linux's spelling can be malformed, and the decoder reads both alike"
+    )]
     fn parse(field: &str) -> Result<Self, String> {
         Ok(Self(field.to_owned()))
     }
@@ -152,12 +157,10 @@ impl Confinement for Seatbelt {
     }
 }
 
-/// Linux: the Landlock ruleset the launch promised, at the slot it names,
-/// or none.
 #[cfg(target_os = "linux")]
-impl Confinement for Option<Landlocked> {
+impl Confinement {
     fn spell(&self) -> Cow<'_, str> {
-        match self {
+        match &self.0 {
             None => "unconfined".into(),
             Some(Landlocked { refer_root, at }) => {
                 let refer = if *refer_root { "+refer" } else { "" };
@@ -168,7 +171,7 @@ impl Confinement for Option<Landlocked> {
 
     fn parse(field: &str) -> Result<Self, String> {
         if field == "unconfined" {
-            return Ok(None);
+            return Ok(Self(None));
         }
         let (kind, at) = field.split_once('@').unwrap_or((field, ""));
         let refer_root = match kind {
@@ -181,28 +184,22 @@ impl Confinement for Option<Landlocked> {
                 ));
             }
         };
-        Ok(Some(Landlocked {
+        Ok(Self(Some(Landlocked {
             refer_root,
             at: Slot::parse(at)?,
-        }))
+        })))
     }
 
     fn enter(&self, keep: Slot) -> Result<(), String> {
-        self.as_ref().map_or(Ok(()), Landlocked::enter)?;
+        self.0.as_ref().map_or(Ok(()), Landlocked::enter)?;
         close_inherited(keep)
     }
 }
 
-/// The platform's confinement, where a concrete one is named.
-#[cfg(target_os = "macos")]
-pub(super) type Native = Seatbelt;
-#[cfg(target_os = "linux")]
-pub(super) type Native = Option<Landlocked>;
-
 /// The confinement, and the image to run inside it.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Warrant {
-    confinement: Native,
+    confinement: Confinement,
     image: Image,
     args: Vec<OsString>,
 }
@@ -215,7 +212,7 @@ pub(super) struct Confined {
 }
 
 impl Warrant {
-    pub(super) fn new(confinement: Native, image: &Image, args: &[String]) -> Self {
+    pub(super) fn new(confinement: Confinement, image: &Image, args: &[String]) -> Self {
         Self {
             confinement,
             image: image.clone(),
@@ -303,7 +300,7 @@ impl Warrant {
                 .next()
                 .ok_or_else(|| format!("the warrant ends before its {what}"))
         };
-        let confinement = Native::parse(text(next("confinement")?)?)?;
+        let confinement = Confinement::parse(text(next("confinement")?)?)?;
         let kind = next("kind")?;
         let program = OsStr::from_bytes(next("program")?);
         let image = match kind {
@@ -656,8 +653,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     const NO_CONFINEMENT: &str = "unconfined";
 
-    fn confinement() -> Native {
-        Native::parse(CONFINEMENT).expect("a valid confinement")
+    fn confinement() -> Confinement {
+        Confinement::parse(CONFINEMENT).expect("a valid confinement")
     }
 
     fn file(real: &[u8], arg0: &[u8], args: &[&[u8]]) -> Warrant {
@@ -690,7 +687,7 @@ mod tests {
     fn every_bundled_name_round_trips_to_its_static_spelling() {
         for tool in crate::uutils::bundled_tools() {
             let warrant = Warrant {
-                confinement: Native::parse(NO_CONFINEMENT).expect("a valid confinement"),
+                confinement: Confinement::parse(NO_CONFINEMENT).expect("a valid confinement"),
                 image: Image::Tool(tool),
                 args: Vec::new(),
             };
@@ -847,11 +844,11 @@ mod tests {
         let projection = SandboxProjection {
             fs: super::super::FsProjection::Unrestricted,
             exec: ExecProjection::default(),
-            net: false,
-            gpu: true,
+            net: Some(crate::authority::policy::Net::Offline),
+            gpu: None,
         };
         let mut warrant = file(b"/bin/echo", b"echo", &[b"warrant-arrived"]);
-        warrant.confinement = Seatbelt(super::super::macos::build_profile(&projection).unwrap());
+        warrant.confinement = Confinement(super::super::macos::build_profile(&projection).unwrap());
         let prepare = |warrant: &Warrant| {
             let mut handoff = Handoff::default();
             let (slots, report) = super::super::launch::issue(warrant, &mut handoff)?;

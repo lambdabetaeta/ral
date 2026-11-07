@@ -1218,7 +1218,6 @@ fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
     let launch = enveloped(
         &on(&stand_in(), host),
         &exec_policy(admitting(&[], &[])),
-        &Baseline::default(),
         &Image::of(&admitted(sh)),
         &["-c".to_string(), "echo RAN".to_string()],
         None,
@@ -1236,7 +1235,7 @@ fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
 /// down — is a launch it refuses, not one it runs open.
 #[test]
 fn a_promised_ruleset_that_never_arrived_runs_nothing() {
-    use crate::authority::sandbox::warrant::Warrant;
+    use crate::authority::sandbox::warrant::{Confinement, Warrant};
     use std::os::fd::AsFd;
     let own = crate::authority::sandbox::reexec::own().expect("ral pins itself");
     let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
@@ -1248,7 +1247,7 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
         at,
     });
     let warrant = Warrant::new(
-        promise,
+        Confinement(promise),
         &Image::of(&admitted(sh)),
         &["-c".to_string(), "echo RAN".to_string()],
     );

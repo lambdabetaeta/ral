@@ -64,16 +64,12 @@ use std::path::Path;
 use std::str::FromStr;
 use strum::VariantArray;
 
-/// One path a grant names: a tag and a subpath.
+/// One path a grant names: an anchor and its payload, the subpath, or for
+/// [`Anchor::Absolute`] the path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Place {
-    Absolute(String),
-    Cwd(String),
-    Home(String),
-    Tempdir(String),
-    Scratch(String),
-    Gitdir(String),
-    Xdg(XdgKind, String),
+pub struct Place {
+    pub anchor: Anchor,
+    pub payload: String,
 }
 
 /// The tag half of a [`Place`]: what its subpath is anchored to.  The one
@@ -122,46 +118,10 @@ impl Anchor {
         Self::all().find(|a| a.tag() == tag)
     }
 
-    pub fn place(self, sub: String) -> Place {
-        match self {
-            Self::Absolute => Place::Absolute(sub),
-            Self::Cwd => Place::Cwd(sub),
-            Self::Home => Place::Home(sub),
-            Self::Tempdir => Place::Tempdir(sub),
-            Self::Scratch => Place::Scratch(sub),
-            Self::Gitdir => Place::Gitdir(sub),
-            Self::Xdg(kind) => Place::Xdg(kind, sub),
-        }
-    }
-}
-
-impl Place {
-    pub fn anchor(&self) -> Anchor {
-        match self {
-            Self::Absolute(_) => Anchor::Absolute,
-            Self::Cwd(_) => Anchor::Cwd,
-            Self::Home(_) => Anchor::Home,
-            Self::Tempdir(_) => Anchor::Tempdir,
-            Self::Scratch(_) => Anchor::Scratch,
-            Self::Gitdir(_) => Anchor::Gitdir,
-            Self::Xdg(kind, _) => Anchor::Xdg(*kind),
-        }
-    }
-
-    /// The tag a grant spells this place with.
-    pub fn tag(&self) -> Cow<'static, str> {
-        self.anchor().tag()
-    }
-
-    pub fn payload(&self) -> &str {
-        match self {
-            Self::Absolute(s)
-            | Self::Cwd(s)
-            | Self::Home(s)
-            | Self::Tempdir(s)
-            | Self::Scratch(s)
-            | Self::Gitdir(s)
-            | Self::Xdg(_, s) => s,
+    pub fn place(self, payload: impl Into<String>) -> Place {
+        Place {
+            anchor: self,
+            payload: payload.into(),
         }
     }
 }
@@ -170,7 +130,7 @@ impl Place {
 /// shows a path.
 impl From<&FrozenPath> for Place {
     fn from(written: &FrozenPath) -> Self {
-        Self::Absolute(written.shown())
+        Anchor::Absolute.place(written.shown())
     }
 }
 
@@ -489,27 +449,27 @@ impl FreezeCtx {
     /// directory claims, a spelling whose walk fails, or an exclusion of the
     /// root.
     pub(crate) fn walked<W: Polar>(&self, place: &Place) -> Result<Option<Placed<W>>, PolicyError> {
-        let tag = place.tag();
-        let sub = |s| subpath(&tag, s);
-        let frozen = match place {
-            Place::Absolute(raw) => return Placed::absolute(raw),
-            Place::Cwd(s) => join_sub(self.cwd.as_path(), sub(s)?)?,
-            Place::Tempdir(s) => join_sub(crate::host::temp_dir(), sub(s)?)?,
-            Place::Scratch(s) => {
-                let sub = sub(s)?;
+        let tag = place.anchor.tag();
+        let sub = || subpath(&tag, &place.payload);
+        let frozen = match place.anchor {
+            Anchor::Absolute => return Placed::absolute(&place.payload),
+            Anchor::Cwd => join_sub(self.cwd.as_path(), sub()?)?,
+            Anchor::Tempdir => join_sub(crate::host::temp_dir(), sub()?)?,
+            Anchor::Scratch => {
+                let sub = sub()?;
                 join_sub(self.scratch().ok_or_else(scratch_unknown)?, sub)?
             }
-            Place::Gitdir(s) => {
-                let sub = sub(s)?;
+            Anchor::Gitdir => {
+                let sub = sub()?;
                 let cwd = self.cwd.as_path();
                 let base = discover_git_dir(cwd, ungoverned)?.unwrap_or_else(|| cwd.to_path_buf());
                 join_sub(base, sub)?
             }
-            Place::Home(s) => {
-                let sub = sub(s)?;
+            Anchor::Home => {
+                let sub = sub()?;
                 join_sub(self.home().ok_or_else(home_unknown)?, sub)?
             }
-            Place::Xdg(kind, s) => return self.xdg::<W>(*kind, sub(s)?).map(Some),
+            Anchor::Xdg(kind) => return self.xdg::<W>(kind, sub()?).map(Some),
         };
         GrantPath::<W>::walked(anchored(&tag, frozen)?)
             .map(Placed::Walked)
@@ -556,7 +516,7 @@ impl FreezeCtx {
         ) else {
             return Err(home_unknown());
         };
-        let tag = format!("xdg-{}", <&str>::from(kind));
+        let tag = Anchor::Xdg(kind).tag();
         let resolved = GrantPath::<W>::walked(anchored(&tag, join_sub(base, sub)?)?)?;
         let lands = resolved.real.followed().real();
         let home = Home::of(spelled)?;
@@ -565,7 +525,6 @@ impl FreezeCtx {
         }
         let var = kind.env_var();
         let val = self.env.get_or_host(var).unwrap_or_default();
-        let name = <&str>::from(kind);
         let written = resolved.written.shown();
         let clause = if val.is_empty() {
             format!(
@@ -577,7 +536,7 @@ impl FreezeCtx {
                 "{var}={val}: set it to a subpath of HOME ({}), unset it to use the \
                  default, or replace {} in the policy with an {} path.",
                 shown(spelled),
-                code(&format!("`xdg-{name}")),
+                code(&format!("`{tag}")),
                 code("`absolute"),
             )
         };
@@ -588,7 +547,7 @@ impl FreezeCtx {
         };
         Err(PolicyError::new(format!(
             "{} resolves to '{lands}'{via}, outside HOME; refusing to widen the grant.  {clause}",
-            code(&format!("`xdg-{name}")),
+            code(&format!("`{tag}")),
         )))
     }
 }
@@ -793,14 +752,15 @@ fn runtime_prefix(s: &str) -> Option<PolicyError> {
                 rest(tilde.suffix.as_deref().unwrap_or_default())
             )),
         ),
-        SigilHead::Xdg(kind, sub) => {
-            let name = <&str>::from(kind);
-            format!(
-                "{} is not expanded in a grant; write {}",
-                code(&format!("`xdg:{name}")),
-                code(&format!("`xdg-{name} {}", rest(sub.unwrap_or_default()))),
-            )
-        }
+        SigilHead::Xdg(kind, sub) => format!(
+            "{} is not expanded in a grant; write {}",
+            code(&format!("`xdg:{}", <&str>::from(kind))),
+            code(&format!(
+                "`{} {}",
+                Anchor::Xdg(kind).tag(),
+                rest(sub.unwrap_or_default())
+            )),
+        ),
         SigilHead::UnknownXdg => unknown_xdg_message(s),
     }))
 }
@@ -833,7 +793,7 @@ fn unknown_xdg_message(entry: &str) -> String {
          Did you mean one of those?",
         XdgKind::VARIANTS
             .iter()
-            .map(|&k| code(&format!("`xdg-{}", <&str>::from(k))))
+            .map(|&k| code(&format!("`{}", Anchor::Xdg(k).tag())))
             .collect::<Vec<_>>()
             .join(", "),
     )
@@ -980,15 +940,15 @@ mod tests {
     }
 
     fn cwd(s: &str) -> Place {
-        Place::Cwd(s.into())
+        Anchor::Cwd.place(s)
     }
 
     fn abs(s: &str) -> Place {
-        Place::Absolute(s.into())
+        Anchor::Absolute.place(s)
     }
 
     fn xdg(kind: XdgKind, s: &str) -> Place {
-        Place::Xdg(kind, s.into())
+        Anchor::Xdg(kind).place(s)
     }
 
     fn refusal(place: &Place, ctx: &FreezeCtx) -> String {
@@ -1126,7 +1086,7 @@ mod tests {
 
     #[test]
     fn freeze_expands_tempdir_place() {
-        let places = [Place::Tempdir(".".into()), Place::Tempdir("scratch".into())];
+        let places = [Anchor::Tempdir.place("."), Anchor::Tempdir.place("scratch")];
         let paths = frozen(&places, &ctx("/h", "/cwd")).unwrap();
         // macOS `TMPDIR` ends in `/`, which folding strips, so compare
         // against the same kernel rather than a literal.
@@ -1140,7 +1100,7 @@ mod tests {
     fn freeze_expands_scratch_place_from_the_scratch_the_context_carries() {
         let scratch = std::env::temp_dir().join("a-session-scratch");
         let ctx = ctx("/h", "/cwd").with_scratch(Some(scratch.to_str().unwrap()));
-        let places = [Place::Scratch(".".into()), Place::Scratch("cache".into())];
+        let places = [Anchor::Scratch.place("."), Anchor::Scratch.place("cache")];
         let paths = frozen(&places, &ctx).unwrap();
         let fold = |p: &Path| fold_dots(p).to_string_lossy().into_owned();
         assert_eq!(paths[0], fold(&scratch));
@@ -1149,7 +1109,7 @@ mod tests {
 
     #[test]
     fn a_scratch_place_with_no_scratch_is_refused() {
-        let err = refusal(&Place::Scratch(".".into()), &ctx("/h", "/cwd"));
+        let err = refusal(&Anchor::Scratch.place("."), &ctx("/h", "/cwd"));
         assert!(err.contains("no scratch directory"), "{err}");
     }
 
@@ -1259,7 +1219,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_drive_relative_home_is_refused() {
-        let err = refusal(&Place::Home(".".into()), &ctx(r"\", r"C:\cwd"));
+        let err = refusal(&Anchor::Home.place("."), &ctx(r"\", r"C:\cwd"));
         assert!(err.contains("relative"), "{err}");
     }
 
@@ -1307,10 +1267,10 @@ mod tests {
         for sub in ["", "/x", r"\x", "C:x", r"C:\x", "c:/x"] {
             for place in [
                 cwd(sub),
-                Place::Home(sub.into()),
-                Place::Tempdir(sub.into()),
-                Place::Scratch(sub.into()),
-                Place::Gitdir(sub.into()),
+                Anchor::Home.place(sub),
+                Anchor::Tempdir.place(sub),
+                Anchor::Scratch.place(sub),
+                Anchor::Gitdir.place(sub),
                 xdg(XdgKind::Cache, sub),
             ] {
                 assert!(ctx.place(&place).is_err(), "{place:?} should be refused");
@@ -1493,7 +1453,6 @@ mod tests {
     fn anchors_round_trip_through_their_tags() {
         for anchor in Anchor::all() {
             assert_eq!(Anchor::of_tag(&anchor.tag()), Some(anchor));
-            assert_eq!(anchor.place(String::new()).anchor(), anchor);
         }
         assert_eq!(Anchor::of_tag("cwdd"), None);
     }
@@ -1590,7 +1549,7 @@ mod tests {
     #[test]
     fn run_time_prefixes_are_refused_under_every_tag_naming_the_place() {
         let ctx = ctx("/h", "/cwd");
-        for place in [abs("~/x"), cwd("~/x"), Place::Home("~".into())] {
+        for place in [abs("~/x"), cwd("~/x"), Anchor::Home.place("~")] {
             let err = refusal(&place, &ctx);
             assert!(err.contains("`home x") || err.contains("`home ."), "{err}");
         }
@@ -1619,7 +1578,7 @@ mod tests {
 
     #[test]
     fn a_relative_home_is_refused() {
-        let err = refusal(&Place::Home("x".into()), &ctx("rel", "/cwd"));
+        let err = refusal(&Anchor::Home.place("x"), &ctx("rel", "/cwd"));
         assert!(err.contains("relative"), "{err}");
     }
 
@@ -1632,7 +1591,7 @@ mod tests {
         let unbound = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"];
         crate::host::env::test_support::with_vars_cleared(&unbound, || {
             for place in [
-                Place::Home(".gitconfig".into()),
+                Anchor::Home.place(".gitconfig"),
                 xdg(XdgKind::Config, "git"),
             ] {
                 let err = refusal(&place, &homeless_ctx("/cwd"));

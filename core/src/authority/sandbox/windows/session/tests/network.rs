@@ -8,7 +8,7 @@ fn only_online_projections_attach_network_capability_sids() {
         let cwd = tree.at("A");
         let mut grant = projection(&[&tree.real("A")], &[]);
         for (online, expected) in [(false, 0), (true, 2), (false, 0), (true, 2)] {
-            grant.net = online;
+            grant.net = (!online).then_some(crate::authority::policy::Net::Offline);
             let launch = confined(&grant, &cwd, "echo ok").unwrap();
             assert_eq!(
                 launch.network_capability_count(),

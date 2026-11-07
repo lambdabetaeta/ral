@@ -18,7 +18,7 @@
 use crate::authority::policy::Extent;
 use crate::authority::policy::{
     Admitted, Baseline, ExecRules, FsAllow, FsDeny, FsOp, FsRules, Gpu, GrantStack, Join,
-    KernelRules, region, rules,
+    KernelRules, Net, region, rules,
 };
 #[cfg(unix)]
 use crate::authority::policy::{GrantPath, Subject, Withheld};
@@ -50,6 +50,10 @@ pub struct FsLists<A = FsAllow, X = FsDeny> {
     /// no deny rule covers.  Derived after rendering, so both a deny's surface
     /// chain and its resolved chain are pinned.  Empty until then.
     pub(crate) pinned_dirs: Vec<X>,
+    /// The positions among `read` the [`Baseline`] supplies, which a host may
+    /// keep from this user: Linux, opening what it shows, drops one it cannot.
+    #[cfg(target_os = "linux")]
+    pub(crate) tolerated: BTreeSet<RealPath>,
 }
 
 /// Empty under any naming: rules over no paths, the shape a backend falls back
@@ -62,6 +66,8 @@ impl<A, X> Default for FsLists<A, X> {
             write: Vec::new(),
             deny: Vec::new(),
             pinned_dirs: Vec::new(),
+            #[cfg(target_os = "linux")]
+            tolerated: BTreeSet::new(),
         }
     }
 }
@@ -128,10 +134,11 @@ pub(crate) enum ExecProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxProjection<A = FsAllow, X = FsDeny> {
     pub fs: FsProjection<A, X>,
-    pub net: bool,
-    /// Whether the GPU is in reach: no layer withholds it, or this host
-    /// cannot withhold it.
-    pub gpu: bool,
+    /// The stack's network veto; `None` is online.
+    pub net: Option<Net>,
+    /// The stack's GPU veto, where this host can withhold the GPU; `None`
+    /// leaves it in reach.
+    pub gpu: Option<Gpu>,
     pub(crate) exec: ExecProjection,
 }
 
@@ -148,8 +155,8 @@ impl<A, X> Default for SandboxProjection<A, X> {
     fn default() -> Self {
         Self {
             fs: FsProjection::default(),
-            net: true,
-            gpu: true,
+            net: None,
+            gpu: None,
             exec: ExecProjection::default(),
         }
     }
@@ -189,6 +196,8 @@ impl SandboxProjection {
                 deny,
                 // Derived below, so nothing a caller supplied is authority.
                 pinned_dirs: _,
+                #[cfg(target_os = "linux")]
+                tolerated,
             }) => {
                 let positions: Vec<_> = (deny.iter())
                     .flat_map(|deny| deny.grant().real.positions())
@@ -205,6 +214,8 @@ impl SandboxProjection {
                     pinned_dirs: pinned_dirs(&positions, &prefixes)?,
                     write: objects(write)?,
                     deny: render_excluded(&positions)?,
+                    #[cfg(target_os = "linux")]
+                    tolerated: tolerated.clone(),
                 })
             }
         };
@@ -240,9 +251,10 @@ impl SandboxProjection {
         let regions = region(grants, &FsOp::Read, baseline)
             .zip(region(grants, &FsOp::Write, baseline))
             .filter(|_| !grants.fs_is_top());
-        let online = grants.net_veto().is_none();
-        let gpu =
-            !(crate::authority::sandbox::WITHHOLDS_GPU && grants.gpu().any(|g| g == Gpu::Withheld));
+        let net = grants.net();
+        let gpu = grants
+            .gpu()
+            .filter(|_| crate::authority::sandbox::WITHHOLDS_GPU);
 
         let kernel = rules(grants)
             .filter(|_| !grants.exec_is_top())
@@ -255,7 +267,7 @@ impl SandboxProjection {
         // re-execs it cannot (`sh -c`).
         let exec_triggers_sandbox = crate::authority::sandbox::EXEC_ENFORCED && kernel.is_some();
 
-        if regions.is_none() && online && gpu && !exec_triggers_sandbox {
+        if regions.is_none() && net.is_none() && gpu.is_none() && !exec_triggers_sandbox {
             return None;
         }
 
@@ -281,16 +293,16 @@ impl SandboxProjection {
                     // closed.
                     deny: read.denies().cloned().collect(),
                     pinned_dirs: Vec::new(),
+                    #[cfg(target_os = "linux")]
+                    tolerated: (read.live().filter_map(FsAllow::real))
+                        .filter(|&position| baseline.allows().any(|b| b.real() == Some(position)))
+                        .cloned()
+                        .collect(),
                 })
             }
             None => FsProjection::Unrestricted,
         };
-        Some(Self {
-            fs,
-            net: online,
-            gpu,
-            exec,
-        })
+        Some(Self { fs, net, gpu, exec })
     }
 }
 
@@ -372,14 +384,12 @@ mod rendered_tests {
     fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsLists {
-                read: Vec::new(),
                 write: write.iter().copied().map(prefix).collect(),
                 deny: deny.iter().copied().map(excluding).collect(),
                 pinned_dirs: pinned.iter().copied().map(excluding).collect(),
+                ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
-            exec: ExecProjection::default(),
+            ..SandboxProjection::default()
         }
     }
 
@@ -453,9 +463,7 @@ mod rendered_tests {
                 read: vec![linked],
                 ..FsLists::default()
             }),
-            net: true,
-            gpu: true,
-            exec: ExecProjection::default(),
+            ..SandboxProjection::default()
         };
         let out = projection.rendered().expect("ASCII paths render");
         let lists = out.fs.lists().expect("restricted");
@@ -538,6 +546,37 @@ mod tests {
         }
     }
 
+    /// The projection marks the baseline's live reads as tolerated, and no
+    /// authored read: what a host keeps from this user is dropped, never a
+    /// place the grant names.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_baselines_live_reads_alone_are_tolerated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = crate::test_helper::Tree::lay(tmp.path(), &["/w/f", "/sys/f", "/etc/f"]);
+        let at = |p: &str| FrozenPath::from_surface(&tree.at(p));
+        let walked = |p: &str| {
+            crate::authority::policy::FsAllow::Prefix(
+                crate::authority::policy::GrantPath::<crate::path::Trace>::walk(at(p)).unwrap(),
+            )
+        };
+        let baseline: Baseline = [walked("/sys"), walked("/etc")].into_iter().collect();
+        let grants = stack([layer(Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![at("/w")],
+                write_prefixes: Vec::new(),
+                deny_paths: vec![at("/etc")],
+            }),
+            ..Capabilities::default()
+        })]);
+        let projection = super::SandboxProjection::of(&grants, &baseline, None).unwrap();
+        let lists = projection.fs.lists().expect("fs restricted");
+        assert_eq!(
+            lists.tolerated,
+            std::collections::BTreeSet::from([crate::test_helper::real(tree.path("/sys"))])
+        );
+    }
+
     /// Exec that denotes `t` projects as unrestricted, though its places
     /// still reach the read region.
     #[test]
@@ -556,10 +595,10 @@ mod tests {
             gpu: Some(Gpu::Withheld),
             ..Capabilities::default()
         });
-        assert!(!withheld.gpu && withheld.net);
+        assert_eq!((withheld.gpu, withheld.net), (Some(Gpu::Withheld), None));
         assert_eq!(withheld.fs, FsProjection::Unrestricted);
         assert_eq!(withheld.exec, ExecProjection::Unrestricted);
-        assert!(project(authored(Some("/ral-test/w"), None)).gpu);
+        assert_eq!(project(authored(Some("/ral-test/w"), None)).gpu, None);
     }
 
     /// Support reads a system script's interpreter where the fs grant names

@@ -248,11 +248,7 @@ impl std::fmt::Display for DaclError {
                     Some(t) => write!(f, "'{}' is now a link to '{}'", shown(at), shown(t))?,
                     None => write!(f, "'{}' is now a reparse point", shown(at))?,
                 }
-                f.write_str(
-                    "; an allowance names what it named when granted. To allow the new \
-                     target, grant it where the ceiling is set (in exarch, restart with a \
-                     grant that names it)",
-                )
+                write!(f, "; {}", crate::authority::remedy::grant_the_new_target())
             }
             Self::WriteDacDenied { path, reason } => {
                 write!(f, "WRITE_DAC denied on {}: {reason}", shown(path))

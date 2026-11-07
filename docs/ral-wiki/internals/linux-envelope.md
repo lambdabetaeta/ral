@@ -95,12 +95,15 @@ spelling is only the destination at which the opened object is bound.
   nothing. A writable bind is dropped only inside a writable one.
 - **A redirected allowance refuses the launch.** Every bind object opens with
   `openat2(RESOLVE_NO_SYMLINKS)`, so a symlink put anywhere on a frozen
-  allowance's path refuses the launch, naming it, rather than following it.
+  allowance's path refuses the launch, naming it, rather than following it, in
+  the words Windows gives a redirect (`remedy::grant_the_new_target`).
 - **There is no write freeze.** No bind is laid read-only over an admitted
   directory a write covers; the protection it gave is a declared limit
   ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 - **Missing objects are dropped, changed ones refused.** An absent object drops
-  its binds at the open, and so does a system default this user may not reach.
+  its binds at the open, and so does a system default this user may not reach:
+  the projection marks which reads the `Baseline` supplied (`FsLists::tolerated`,
+  folded where the baseline is), so no launch is handed the baseline itself.
   A name that now reaches another object, or an open through a symlink, refuses
   the launch and says which.
 - **Every deny is masked at every name a bind shows it.** A deny that would hide

@@ -85,10 +85,10 @@ fn run_trampoline(
     args: &[String],
 ) -> Ran {
     use crate::authority::sandbox::launch::{bwrapped, issue};
-    use crate::authority::sandbox::warrant::Warrant;
+    use crate::authority::sandbox::warrant::{Confinement, Warrant};
     let mut handoff = Handoff::default();
     let (slots, report) = issue(
-        &Warrant::new(None, &Image::of(admitted), args),
+        &Warrant::new(Confinement(None), &Image::of(admitted), args),
         &mut handoff,
     )
     .expect("issues");
