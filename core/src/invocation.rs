@@ -20,6 +20,7 @@ pub fn serve(
     match *role {
         #[cfg(unix)]
         Invocation::EnvReport => Some(crate::host::login_env::serve_report()),
+        #[cfg(unix)]
         Invocation::Warrant(args) => Some(authority::sandbox::serve_warrant(args)),
         Invocation::PipelineAnchor => Some(crate::shell::exec::pipeline::anchor::serve()),
         #[cfg(unix)]
@@ -107,8 +108,8 @@ fn argv_before_main() -> Vec<OsString> {
     std::env::args_os().skip(1).collect()
 }
 
-/// `ral --ral-bundled-tool <tool> <args...>`: unconfined, under whatever
-/// sandbox the process already inherited.
+/// `ral --ral-bundled-tool <tool> <args...>`: confines nothing itself; it runs
+/// under whatever confinement its parent applied.
 fn serve_bundled_tool(args: &[OsString]) -> u8 {
     let Some((tool, args)) = args.split_first() else {
         terminal::cmd_error(
@@ -117,8 +118,5 @@ fn serve_bundled_tool(args: &[OsString]) -> u8 {
         );
         return 2;
     };
-    uutils::run(tool, args.to_vec()).unwrap_or_else(|e| {
-        terminal::cmd_error("ral", &e.to_string());
-        127
-    })
+    uutils::serve(tool, args.to_vec())
 }

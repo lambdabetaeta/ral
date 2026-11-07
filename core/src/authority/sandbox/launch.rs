@@ -31,6 +31,7 @@ use crate::authority::policy::{Admitted, Baseline, Program};
 use crate::path::{CwdPath, RealPath};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::process::report::Report;
+#[cfg(unix)]
 use std::ffi::OsString;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::AsFd;
@@ -293,7 +294,7 @@ pub(super) fn trampoline(
 /// then run the program and say on the report what became of it.  Nothing
 /// runs unconfined, and nothing is printed: the parent words what it is told.
 /// Only a call naming no report socket, made by hand, is refused on stderr.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 pub fn serve_warrant(args: &[OsString]) -> u8 {
     let slots = match args {
         [warrant, report] => Slot::parse(&crate::path::shown(warrant)).and_then(|warrant| {
@@ -332,23 +333,6 @@ pub fn serve_warrant(args: &[OsString]) -> u8 {
     }
 }
 
-/// Windows confines at the parent's spawn, so a child asking to confine
-/// itself is a regression to the Unix shape, or forged, and is refused
-/// rather than run unconfined.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn serve_warrant(_args: &[OsString]) -> u8 {
-    crate::io::terminal::cmd_error(
-        "ral",
-        &format!(
-            "{} is not served on {}: confinement is applied to a child from outside, \
-             never by the child itself; refusing to run unconfined",
-            Role::Warrant.flag(),
-            std::env::consts::OS
-        ),
-    );
-    126
-}
-
 /// What an unrestricted in-process guard admits, for a test that builds a launch without
 /// a dispatch.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -358,7 +342,7 @@ pub(super) fn admitted(program: crate::authority::policy::Program) -> Admitted {
         .expect("an unrestricted stack admits everything")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;

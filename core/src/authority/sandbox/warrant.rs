@@ -387,10 +387,7 @@ fn unstarted_code(e: &io::Error) -> u8 {
 
 /// The bundled `tool`'s exit code, run in this process.
 fn tool_code(tool: &'static str, args: Vec<OsString>) -> u8 {
-    crate::uutils::run(tool.as_ref(), args).unwrap_or_else(|e| {
-        crate::io::terminal::cmd_error("ral", &e.to_string());
-        127
-    })
+    crate::uutils::serve(tool.as_ref(), args)
 }
 
 impl Warrant {

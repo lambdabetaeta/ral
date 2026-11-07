@@ -20,6 +20,7 @@ pub enum Role {
     /// The process that holds a pipeline's pgid open.
     PipelineAnchor,
     /// A confined re-exec, whose warrant arrives on a descriptor.
+    #[cfg(unix)]
     Warrant,
     /// The bundled-tool multicall.
     BundledTool,
@@ -34,6 +35,7 @@ impl Role {
         #[cfg(seccomp)]
         Self::GuestEngine,
         Self::PipelineAnchor,
+        #[cfg(unix)]
         Self::Warrant,
         Self::BundledTool,
     ];
@@ -49,6 +51,7 @@ impl Role {
             #[cfg(seccomp)]
             Self::GuestEngine => guest_abi::layout::ENGINE_FLAG,
             Self::PipelineAnchor => "--ral-pipeline-anchor",
+            #[cfg(unix)]
             Self::Warrant => "--warrant",
             Self::BundledTool => "--ral-bundled-tool",
         }
@@ -67,6 +70,7 @@ pub enum Invocation<'a> {
     #[cfg(seccomp)]
     GuestEngine(&'a [OsString]),
     /// The warrant descriptor's argument, validated by the trampoline.
+    #[cfg(unix)]
     Warrant(&'a [OsString]),
     /// The tool's name, then its arguments.
     BundledTool(&'a [OsString]),
@@ -91,6 +95,7 @@ pub fn classify(argv: &[OsString]) -> Invocation<'_> {
         #[cfg(seccomp)]
         Role::GuestEngine => Invocation::GuestEngine(rest),
         Role::PipelineAnchor => Invocation::PipelineAnchor,
+        #[cfg(unix)]
         Role::Warrant => Invocation::Warrant(rest),
         Role::BundledTool => Invocation::BundledTool(rest),
     }
@@ -172,6 +177,7 @@ mod tests {
 
     /// The warrant's arguments are carried, never read here: a flag after it
     /// names no role, and the trampoline judges what it carries.
+    #[cfg(unix)]
     #[test]
     fn a_warrant_reads_nothing_after_its_flag() {
         let warrant = Role::Warrant.flag();

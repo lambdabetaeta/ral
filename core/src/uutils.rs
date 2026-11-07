@@ -183,11 +183,19 @@ impl std::fmt::Display for Unbundled {
     }
 }
 
-/// Run bundled `tool` in this process, the body of a re-exec child: the
-/// `Role::BundledTool` multicall, or a confined warrant once confined.  It
-/// inherits its execution context from the exec, so uucore's process-global
-/// exit-code cell is this process's own.
-pub(crate) fn run(tool: &std::ffi::OsStr, args: Vec<std::ffi::OsString>) -> Result<u8, Unbundled> {
+/// The exit code of bundled `tool` run in this process, the body of a re-exec
+/// child: the `Role::BundledTool` multicall, or a confined warrant once
+/// confined.  A name no tool answers to is said on stderr and is 127.
+pub(crate) fn serve(tool: &std::ffi::OsStr, args: Vec<std::ffi::OsString>) -> u8 {
+    run(tool, args).unwrap_or_else(|e| {
+        crate::io::terminal::cmd_error("ral", &e.to_string());
+        127
+    })
+}
+
+/// uucore's exit-code cell is process-global: this runs only in a process
+/// of its own.
+fn run(tool: &std::ffi::OsStr, args: Vec<std::ffi::OsString>) -> Result<u8, Unbundled> {
     #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
     {
         let Some(tool) = bundled_name(tool) else {
@@ -427,5 +435,15 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unbundled_name_serves_127() {
+        assert_eq!(serve("zz-no-such-tool".as_ref(), Vec::new()), 127);
     }
 }
