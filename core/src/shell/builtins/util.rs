@@ -1,7 +1,8 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
+use crate::error::{Error, io_message};
 use crate::io::Source;
-use crate::shell::runtime::{Settled, Shell, Value, sig, sig_hint};
+use crate::shell::runtime::{Settled, Shell, Value};
 
 /// Arity floor for a builtin; `name` rides the error text.
 ///
@@ -11,7 +12,7 @@ use crate::shell::runtime::{Settled, Shell, Value, sig, sig_hint};
 pub(crate) fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()> {
     if args.len() < min {
         let noun = if min == 1 { "argument" } else { "arguments" };
-        return Err(sig(format!("{name} requires {min} {noun}")));
+        return Err(Error::new(format!("{name} requires {min} {noun}")).into());
     }
     Ok(())
 }
@@ -26,20 +27,20 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
             Value::Int(n) => match u8::try_from(*n) {
                 Ok(b) => out.push(b),
                 Err(_) => {
-                    return Err(sig_hint(
-                        format!("{ctx}: byte at index {idx} out of range: {n}"),
-                        "bytes must be Int values in range 0..255",
-                    ));
+                    return Err(Error::new(format!(
+                        "{ctx}: byte at index {idx} out of range: {n}"
+                    ))
+                    .with_hint("bytes must be Int values in range 0..255")
+                    .into());
                 }
             },
             _ => {
-                return Err(sig_hint(
-                    format!(
-                        "{ctx}: expected Int at index {idx}, got {}",
-                        item.type_name()
-                    ),
-                    "bytes must be Int values in range 0..255",
-                ));
+                return Err(Error::new(format!(
+                    "{ctx}: expected Int at index {idx}, got {}",
+                    item.type_name()
+                ))
+                .with_hint("bytes must be Int values in range 0..255")
+                .into());
             }
         }
     }
@@ -53,15 +54,16 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
 /// here.
 pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io::BufRead>> {
     if matches!(shell.io.stdin, Source::Terminal) {
-        return Err(sig(format!(
+        return Err(Error::new(format!(
             "{name}: no input (pipe bytes or pass a value as argument)"
-        )));
+        ))
+        .into());
     }
     let Some(reader) = shell
         .io
         .stdin
         .reader()
-        .map_err(|e| crate::shell::runtime::Error::io("could not duplicate stdin", &e))?
+        .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?
     else {
         return Ok(Box::new(std::io::empty()));
     };
@@ -85,7 +87,7 @@ pub(crate) fn read_lines<R: std::io::BufRead>(
                 line.truncate(crate::io::without_terminator(&line).len());
                 Some(Ok(line))
             }
-            Err(e) => Some(Err(sig(format!("{name}: {e}")))),
+            Err(e) => Some(Err(Error::new(format!("{name}: {e}")).into())),
         }
     })
 }

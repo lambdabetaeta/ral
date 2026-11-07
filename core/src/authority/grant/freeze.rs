@@ -38,7 +38,7 @@
 //! git directory must name this working tree back, as a linked worktree's
 //! `gitdir` file does and as `core.worktree` does for a repository split off
 //! with `--separate-git-dir`.  A pointer no git directory claims is a
-//! [`PolicyError`], never a wider grant.  `tempdir` trusts its source as
+//! an [`Error`], never a wider grant.  `tempdir` trusts its source as
 //! given, `TMPDIR` being the launching user's to set; `scratch` reads no
 //! environment at all, being the directory the host made for the session and
 //! handed to the [`FreezeCtx`], which a host that made none refuses.
@@ -46,6 +46,7 @@
 use super::Polar;
 use super::toolchains::{self, Toolchain};
 use crate::authority::policy::{GrantPath, Ungoverned};
+use crate::error::Error;
 use crate::host::EnvVars;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::{
@@ -166,87 +167,47 @@ impl FromStr for Selector {
     }
 }
 
-/// A capability-policy decode/freeze failure.
-///
-/// The capability decoder and the freeze answer a malformed grant with a
-/// "no", never a process exit; having no `Escape` arm is how the type checker
-/// holds them to it.  A `Break` is minted only at the boundary that needs one.
-#[derive(Debug, Clone)]
-pub struct PolicyError {
-    pub message: String,
-    pub hint: Option<String>,
+/// A spelling whose walk failed for a reason that is no absent or
+/// unenterable tail.
+pub(crate) fn unwalkable(written: &FrozenPath, error: &std::io::Error) -> Error {
+    Error::new(format!(
+        "ral cannot resolve '{}', which the grant names: {error}",
+        written.shown()
+    ))
+    .with_hint(
+        "A grant is resolved when it loads, so every name it passes through must be \
+         one ral can follow: is a link in a loop, or a path component not a directory?",
+    )
 }
 
-impl PolicyError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            hint: None,
-        }
-    }
-
-    pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
-        self
-    }
-
-    /// A spelling whose walk failed for a reason that is no absent or
-    /// unenterable tail.
-    pub(crate) fn unwalkable(written: &FrozenPath, error: &std::io::Error) -> Self {
-        Self::new(format!(
-            "ral cannot resolve '{}', which the grant names: {error}",
-            written.shown()
-        ))
-        .with_hint(
-            "A grant is resolved when it loads, so every name it passes through must be \
-             one ral can follow: is a link in a loop, or a path component not a directory?",
-        )
-    }
-
-    /// An exclusion of the filesystem root, which holds no object to name.
-    pub(crate) fn root_exclusion(written: &FrozenPath) -> Self {
-        Self::new(format!(
-            "'{}' is the filesystem root, and excluding the root excludes every path",
-            written.shown()
-        ))
-        .with_hint(
-            "To withhold every path, grant none: leave the fs `read` and `write` lists empty.",
-        )
-    }
-
-    /// A file key naming the filesystem root, a directory, not a program.
-    pub(crate) fn root_program(written: &FrozenPath) -> Self {
-        Self::new(format!(
-            "'{}' is the filesystem root, a directory, so as an exec target it names a binary \
-             that cannot exist",
-            written.shown()
-        ))
-        .with_hint(
-            "To run every program leave `exec` out; for every program beneath a directory \
-             write `dir` before the place.",
-        )
-    }
+/// An exclusion of the filesystem root, which holds no object to name.
+pub(crate) fn root_exclusion(written: &FrozenPath) -> Error {
+    Error::new(format!(
+        "'{}' is the filesystem root, and excluding the root excludes every path",
+        written.shown()
+    ))
+    .with_hint("To withhold every path, grant none: leave the fs `read` and `write` lists empty.")
 }
 
-/// The message, then the hint on a line of its own.
-impl std::fmt::Display for PolicyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)?;
-        match &self.hint {
-            Some(hint) => write!(f, "\nhint: {hint}"),
-            None => Ok(()),
-        }
-    }
+/// A file key naming the filesystem root, a directory, not a program.
+pub(crate) fn root_program(written: &FrozenPath) -> Error {
+    Error::new(format!(
+        "'{}' is the filesystem root, a directory, so as an exec target it names a binary \
+         that cannot exist",
+        written.shown()
+    ))
+    .with_hint(
+        "To run every program leave `exec` out; for every program beneath a directory \
+         write `dir` before the place.",
+    )
 }
 
 /// The `gitdir` place's refusals, in the grant's terms.
-impl From<BadPointer> for PolicyError {
-    fn from(BadPointer { dot_git, why }: BadPointer) -> Self {
-        match why {
-            Pointer::Unclaimed(target) => unclaimed_message(&dot_git, &target),
-            Pointer::NoGitdirLine => no_pointer_message(&dot_git),
-            Pointer::Unreadable(error) => unreadable_message(&dot_git, &error),
-        }
+fn bad_pointer(BadPointer { dot_git, why }: BadPointer) -> Error {
+    match why {
+        Pointer::Unclaimed(target) => unclaimed_message(&dot_git, &target),
+        Pointer::NoGitdirLine => no_pointer_message(&dot_git),
+        Pointer::Unreadable(error) => unreadable_message(&dot_git, &error),
     }
 }
 
@@ -260,8 +221,8 @@ fn ungoverned(path: &LexicalPath) -> std::io::Result<String> {
     std::io::read_to_string(file.read()?)
 }
 
-fn unclaimed_message(dot_git: &Path, target: &Path) -> PolicyError {
-    PolicyError::new(format!(
+fn unclaimed_message(dot_git: &Path, target: &Path) -> Error {
+    Error::new(format!(
         "the .git file at '{dot_git}' points at '{target}', but that directory \
          does not name this working tree back, so {gitdir} will not grant it; \
          a pointer written inside the tree would otherwise choose the grant.",
@@ -280,8 +241,8 @@ fn unclaimed_message(dot_git: &Path, target: &Path) -> PolicyError {
     ))
 }
 
-fn no_pointer_message(dot_git: &Path) -> PolicyError {
-    PolicyError::new(format!(
+fn no_pointer_message(dot_git: &Path) -> Error {
+    Error::new(format!(
         "the .git entry at '{}' is a file with no `gitdir:` line, so there is \
          no git directory for {} to name.",
         shown(dot_git),
@@ -296,8 +257,8 @@ fn no_pointer_message(dot_git: &Path) -> PolicyError {
     ))
 }
 
-fn unreadable_message(dot_git: &Path, error: &std::io::Error) -> PolicyError {
-    PolicyError::new(format!(
+fn unreadable_message(dot_git: &Path, error: &std::io::Error) -> Error {
+    Error::new(format!(
         "the .git file at '{}' cannot be read ({error}), so {} cannot \
          say which git directory the grant covers.",
         shown(dot_git),
@@ -325,7 +286,7 @@ impl<W: Polar> Placed<W> {
     ///
     /// # Errors
     /// A payload absolute under neither platform's rules, or whose walk fails.
-    pub(crate) fn absolute(raw: &str) -> Result<Option<Self>, PolicyError> {
+    pub(crate) fn absolute(raw: &str) -> Result<Option<Self>, Error> {
         if raw == "/" {
             return Ok(Some(Self::Root));
         }
@@ -342,7 +303,7 @@ impl<W: Polar> Placed<W> {
     ///
     /// # Errors
     /// What the polarity refuses of the root.
-    pub(crate) fn grant(self) -> Result<GrantPath<W::Grant>, PolicyError> {
+    pub(crate) fn grant(self) -> Result<GrantPath<W::Grant>, Error> {
         match self {
             Self::Root => W::root(FrozenPath::root()),
             Self::Walked(path) => W::grant(path),
@@ -415,7 +376,7 @@ impl FreezeCtx {
     }
 
     /// The home, walked: where the escape guards ask what lies within it.
-    fn home_dir(&self) -> Result<Option<Home>, PolicyError> {
+    fn home_dir(&self) -> Result<Option<Home>, Error> {
         self.home().as_deref().map(Home::of).transpose()
     }
 
@@ -431,7 +392,7 @@ impl FreezeCtx {
     /// # Errors
     /// As [`walked`](Self::walked).
     #[cfg(any(test, feature = "test-util"))]
-    pub fn place(&self, place: &Place) -> Result<Option<FrozenPath>, PolicyError> {
+    pub fn place(&self, place: &Place) -> Result<Option<FrozenPath>, Error> {
         Ok(self.walked::<Trace>(place)?.map(|placed| placed.written()))
     }
 
@@ -446,7 +407,7 @@ impl FreezeCtx {
     /// place, an anchored place that freezes relative, a `.git` pointer no git
     /// directory claims, a spelling whose walk fails, or an exclusion of the
     /// root.
-    pub(crate) fn walked<W: Polar>(&self, place: &Place) -> Result<Option<Placed<W>>, PolicyError> {
+    pub(crate) fn walked<W: Polar>(&self, place: &Place) -> Result<Option<Placed<W>>, Error> {
         let tag = place.anchor.tag();
         let sub = || subpath(&tag, &place.payload);
         let frozen = match place.anchor {
@@ -460,7 +421,9 @@ impl FreezeCtx {
             Anchor::Gitdir => {
                 let sub = sub()?;
                 let cwd = self.cwd.as_path();
-                let base = discover_git_dir(cwd, ungoverned)?.unwrap_or_else(|| cwd.to_path_buf());
+                let base = discover_git_dir(cwd, ungoverned)
+                    .map_err(bad_pointer)?
+                    .unwrap_or_else(|| cwd.to_path_buf());
                 join_sub(base, sub)?
             }
             Anchor::Home => {
@@ -484,7 +447,7 @@ impl FreezeCtx {
     pub(crate) fn selector<W: Polar>(
         &self,
         selector: Selector,
-    ) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+    ) -> Result<Vec<GrantPath<W::Grant>>, Error> {
         let home = self.home_dir()?;
         match selector {
             Selector::Path => path_dirs::<W>(home.as_ref()),
@@ -506,7 +469,7 @@ impl FreezeCtx {
     /// That guard is stated in `home`'s terms, so an unknown home leaves an
     /// `xdg-*` grant unanswerable, an absolute `XDG_*_HOME` included, since
     /// there would then be nothing to contain it.
-    fn xdg<W: Polar>(&self, kind: XdgKind, sub: &str) -> Result<Placed<W>, PolicyError> {
+    fn xdg<W: Polar>(&self, kind: XdgKind, sub: &str) -> Result<Placed<W>, Error> {
         let spelled = self.home();
         let (Some(spelled), Some(base)) = (
             spelled.as_deref(),
@@ -543,7 +506,7 @@ impl FreezeCtx {
         } else {
             format!(" (written '{written}', which is a symbolic link)")
         };
-        Err(PolicyError::new(format!(
+        Err(Error::new(format!(
             "{} resolves to '{lands}'{via}, outside HOME; refusing to widen the grant.  {clause}",
             code(&format!("`{tag}")),
         )))
@@ -563,13 +526,13 @@ impl Home {
     ///
     /// # Errors
     /// A home whose walk fails, named.
-    pub(crate) fn of(spelled: &str) -> Result<Self, PolicyError> {
+    pub(crate) fn of(spelled: &str) -> Result<Self, Error> {
         let written = FrozenPath::from_surface(spelled);
         let real = written
             .is_absolute()
             .then(|| walk_lenient(&written.lexical(), LeafMode::Follow))
             .transpose()
-            .map_err(|e| PolicyError::unwalkable(&written, &e))?
+            .map_err(|e| unwalkable(&written, &e))?
             .map(|trace| trace.real().clone());
         Ok(Self {
             spelled: spelled.into(),
@@ -581,11 +544,11 @@ impl Home {
 /// An anchored place must freeze absolute: a relative `HOME` or `TMPDIR`
 /// would otherwise re-anchor to the *live* cwd at check time, a different
 /// directory after a `cd`.
-fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, PolicyError> {
+fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, Error> {
     if frozen.is_absolute() {
         return Ok(frozen);
     }
-    Err(PolicyError::new(format!(
+    Err(Error::new(format!(
         "{} freezes to the relative path '{}'; an anchor must be absolute. \
          Is HOME or TMPDIR relative?",
         code(&format!("`{tag}")),
@@ -607,13 +570,23 @@ fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, PolicyError> {
 /// A run-time prefix, a root-relative `\x`, a malformed UNC, verbatim or
 /// device root, a head of two mixed separators, or a relative or
 /// drive-relative path.
-pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, PolicyError> {
+pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, Error> {
     if let Some(err) = runtime_prefix(raw) {
         return Err(err);
     }
-    let live = grant_eligibility(raw)
-        .map_err(|why| not_absolute(raw, why))?
-        .admits(rules);
+    live_under(raw, rules).map_err(|why| {
+        let refused = not_absolute(raw, why);
+        match write_instead(raw, why) {
+            Some(hint) => refused.with_hint(hint),
+            None => refused,
+        }
+    })
+}
+
+/// Whether `raw` is live under `rules`, by [`grant_eligibility`]: the one
+/// classification of an absolute spelling, a grant's payload or a host's path.
+fn live_under(raw: &str, rules: PathRules) -> Result<bool, GrantRefusal> {
+    let live = grant_eligibility(raw)?.admits(rules);
     if live {
         debug_assert!(
             rules != PathRules::Windows || windows_components(raw.as_bytes()).next().is_some(),
@@ -627,66 +600,64 @@ pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, PolicyE
 /// the one classifier of a path the host chose (a `PATH` entry, a toolchain
 /// or system-read directory) or holds (exarch's carve-outs).
 ///
-/// Classified by [`live_absolute`] under the host's rules on its native
-/// text, and frozen in its native form, never re-read through a payload
-/// string.  A held path has no other platform to be live on, so where a
-/// payload would be the dead grant this one is refused, as one absolute
-/// under neither platform's rules is: a deny that named nothing would fail
-/// open.
+/// Classified by [`live_under`] under the host's rules on its native text,
+/// and frozen in its native form, never re-read through a payload string.  A
+/// held path has no other platform to be live on, so where a payload would be
+/// the dead grant this one is refused, as one absolute under neither
+/// platform's rules is: a deny that named nothing would fail open.  The
+/// refusal says what is wrong with the path; the caller says who chose it.
 ///
 /// # Errors
 /// A path that is not UTF-8, a malformed root, a path not absolute under
 /// the host's rules, or one [`FrozenPath::freeze`] refuses.
-pub fn host_absolute(path: &Path) -> Result<FrozenPath, PolicyError> {
-    let text = crate::path::utf8(path)
-        .map_err(|e| PolicyError::new(format!("{e}, so ral cannot hold it as a grant")))?;
-    if live_absolute(text, PathRules::HOST)? {
-        freeze(path)
-    } else {
-        Err(not_absolute(text, GrantRefusal::ForeignOrRelative))
+pub fn host_absolute(path: &Path) -> Result<FrozenPath, Error> {
+    let text = crate::path::utf8(path).map_err(|e| Error::new(e.to_string()))?;
+    match live_under(text, PathRules::HOST) {
+        Ok(true) => freeze(path),
+        Ok(false) => Err(not_absolute(text, GrantRefusal::ForeignOrRelative)),
+        Err(why) => Err(not_absolute(text, why)),
     }
 }
 
-/// The refusal of `raw` by its [`GrantRefusal`]: a malformed or mixed head, or
-/// one absolute under neither platform's rules.
-fn not_absolute(raw: &str, why: GrantRefusal) -> PolicyError {
+/// What is wrong with `raw` as an absolute path, by its [`GrantRefusal`]: a
+/// malformed or mixed head, or one absolute under neither platform's rules.
+fn not_absolute(raw: &str, why: GrantRefusal) -> Error {
     let word = quote_word(raw);
-    let abs = |rest: &str| code(&format!("`absolute {rest}"));
-    PolicyError::new(match why {
+    Error::new(match why {
         GrantRefusal::Malformed => format!(
-            "{} is no well-formed UNC or verbatim path; a UNC path needs a \
-             server and a share, as in {}; a verbatim path is \
-             {} or {}.  A '?' is no server name, \
-             '.' and '..' are neither a server nor a share name, and device paths \
-             are not accepted",
-            abs(&word),
-            abs("'\\\\server\\share\\x'"),
-            abs("'\\\\?\\C:\\x'"),
-            abs("'\\\\?\\UNC\\server\\share\\x'"),
+            "{word} is no well-formed UNC or verbatim path; a UNC path needs a \
+             server and a share, as in '\\\\server\\share\\x'; a verbatim path is \
+             '\\\\?\\C:\\x' or '\\\\?\\UNC\\server\\share\\x'.  A '?' is no server \
+             name, '.' and '..' are neither a server nor a share name, and device \
+             paths are not accepted"
         ),
         GrantRefusal::MixedHead => format!(
-            "{} opens with two different separators, which Windows reads as a \
-             UNC or device path and POSIX does not; write {} or {}",
-            abs(&word),
-            abs("'\\\\server\\share\\x'"),
-            abs("/x"),
+            "{word} opens with two different separators, which Windows reads as a \
+             UNC or device path and POSIX does not"
         ),
-        GrantRefusal::NtObject => format!(
-            "{} is an NT object-manager path, not a path a grant can name; write {}",
-            abs(&word),
-            abs("'C:\\x'")
-        ),
-        GrantRefusal::Driveless => {
-            format!("{} names no drive; write {}", abs(&word), abs("'C:\\x'"))
+        GrantRefusal::NtObject => format!("{word} is an NT object-manager path"),
+        GrantRefusal::Driveless => format!("{word} names no drive"),
+        GrantRefusal::DriveRelative => format!("{word} is drive-relative"),
+        GrantRefusal::ForeignOrRelative => format!("{word} is not an absolute path"),
+    })
+}
+
+/// How a grant writes what `raw` meant, for the refusal [`not_absolute`]
+/// words; a malformed root's refusal already shows the well-formed ones.
+fn write_instead(raw: &str, why: GrantRefusal) -> Option<String> {
+    let abs = |rest: &str| code(&format!("`absolute {rest}"));
+    Some(match why {
+        GrantRefusal::Malformed => return None,
+        GrantRefusal::MixedHead => {
+            format!("write {} or {}", abs("'\\\\server\\share\\x'"), abs("/x"))
         }
-        GrantRefusal::DriveRelative => {
-            format!("{} is drive-relative; write {}", abs(&word), abs("'C:\\…'"))
-        }
+        GrantRefusal::NtObject => format!("no grant can name one; write {}", abs("'C:\\x'")),
+        GrantRefusal::Driveless => format!("write {}", abs("'C:\\x'")),
+        GrantRefusal::DriveRelative => format!("write {}", abs("'C:\\…'")),
         GrantRefusal::ForeignOrRelative => format!(
-            "{} needs an absolute path; for a path under the working \
-             directory write {}",
+            "{} needs an absolute path; for a path under the working directory write {}",
             code("`absolute"),
-            code(&format!("`cwd {word}")),
+            code(&format!("`cwd {}", quote_word(raw))),
         ),
     })
 }
@@ -694,7 +665,7 @@ fn not_absolute(raw: &str, why: GrantRefusal) -> PolicyError {
 /// A relative subpath, judged lexically so that a profile fails alike on
 /// every platform: the empty string, a leading separator and a drive prefix
 /// are refused, where `Path::join` would strip, replace or ignore them.
-fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, PolicyError> {
+fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, Error> {
     if let Some(err) = runtime_prefix(s) {
         return Err(err);
     }
@@ -702,7 +673,7 @@ fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, PolicyError> {
         let word = quote_word(s);
         let this = code(&format!("`{tag}"));
         let drive = code("`absolute 'C:\\…'");
-        PolicyError::new(match why {
+        Error::new(match why {
             SubpathRefusal::Empty => format!(
                 "{this} needs a path; write {} for the anchor itself",
                 code(&format!("`{tag} ."))
@@ -735,13 +706,13 @@ fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, PolicyError> {
 /// called `~`: refuse, and say which place the author meant.  The grant rule
 /// is judged under Windows rules on every host, so `xdg:config\x` is an
 /// `xdg:` head everywhere and the suffix is read to match.
-fn runtime_prefix(s: &str) -> Option<PolicyError> {
+fn runtime_prefix(s: &str) -> Option<Error> {
     let rest = |r: &str| match relative_suffix(r, PathRules::Windows) {
         "" => ".".to_string(),
         r => quote_word(r).into_owned(),
     };
     let head = SigilHead::of_for(s, PathRules::Windows)?;
-    Some(PolicyError::new(match head {
+    Some(Error::new(match head {
         SigilHead::Tilde(tilde) => format!(
             "'~' is not expanded in a grant; for a path under the home directory \
              write {}",
@@ -765,8 +736,8 @@ fn runtime_prefix(s: &str) -> Option<PolicyError> {
 
 /// The one answer for a home-relative place where nothing binds `HOME`: `home`
 /// and `xdg-*` fail for the same reason and take the same two fixes.
-fn home_unknown() -> PolicyError {
-    PolicyError::new(format!(
+fn home_unknown() -> Error {
+    Error::new(format!(
         "HOME is unset, so {} and {} places in the policy \
          can't be resolved.  Set HOME in the environment, or replace the \
          home-relative places in the policy with {} paths.",
@@ -776,8 +747,8 @@ fn home_unknown() -> PolicyError {
     ))
 }
 
-fn scratch_unknown() -> PolicyError {
-    PolicyError::new(format!(
+fn scratch_unknown() -> Error {
+    Error::new(format!(
         "this session has no scratch directory, so {} places in the policy can't be \
          resolved.  Replace them with {} paths.",
         code("`scratch"),
@@ -797,14 +768,14 @@ fn unknown_xdg_message(entry: &str) -> String {
     )
 }
 
-fn join_sub(base: impl AsRef<Path>, sub: &str) -> Result<FrozenPath, PolicyError> {
+fn join_sub(base: impl AsRef<Path>, sub: &str) -> Result<FrozenPath, Error> {
     freeze(base.as_ref().join(sub))
 }
 
 /// The one place a grant's path becomes a [`FrozenPath`]: a grant is serialized as text, so a
 /// spelling that is not Unicode is refused here.
-fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
-    FrozenPath::freeze(path.as_ref()).map_err(PolicyError::new)
+fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, Error> {
+    FrozenPath::freeze(path.as_ref()).map_err(Error::new)
 }
 
 /// What `dir` is, if the world: a root (a drive's under Windows rules), the
@@ -831,18 +802,18 @@ pub(super) fn refuse_the_world(
     advice: &str,
     dir: &Trace,
     home: Option<&Home>,
-) -> Result<(), PolicyError> {
+) -> Result<(), Error> {
     let Some(what) = the_world(dir.real(), home.and_then(|h| h.real.as_ref())) else {
         return Ok(());
     };
     let selector = code(&format!("`dir `{}", selector.name()));
-    Err(PolicyError::new(format!(
+    Err(Error::new(format!(
         "{subject}, {what}, so {selector} would run and read all of it. {advice}"
     )))
 }
 
 /// [`path_dirs_in`] over the host's `$PATH`.
-fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W::Grant>>, Error> {
     let path = crate::host::var_os("PATH").unwrap_or_default();
     path_dirs_in::<W>(&path, home)
 }
@@ -858,16 +829,15 @@ fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W::Grant>>, 
 fn path_dirs_in<W: Polar>(
     path: &OsStr,
     home: Option<&Home>,
-) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+) -> Result<Vec<GrantPath<W::Grant>>, Error> {
     let dirs: Vec<_> = crate::path::path_entries(path)
         .filter(|entry| crate::path::is_absolute(entry))
         .map(|entry| {
             let subject = format!("PATH holds {}", shown(&entry));
             let held = host_absolute(&entry).map_err(|e| {
-                PolicyError::new(format!(
-                    "{subject}, which {} cannot hold: {}",
-                    code("`dir `path"),
-                    e.message
+                e.with_context(format!(
+                    "{subject}, which {} cannot hold",
+                    code("`dir `path")
                 ))
             })?;
             let dir = GrantPath::<W>::walked(held)?;
@@ -882,7 +852,7 @@ fn path_dirs_in<W: Polar>(
         })
         .collect::<Result<_, _>>()?;
     if dirs.is_empty() {
-        return Err(PolicyError::new(format!(
+        return Err(Error::new(format!(
             "{} expands to zero absolute directories; \
              PATH is empty, unset, or contains only relative entries",
             code("`path")
@@ -927,7 +897,7 @@ mod tests {
     }
 
     /// The live places among `places`, frozen; a dead grant is dropped.
-    fn frozen(places: &[Place], ctx: &FreezeCtx) -> Result<Vec<String>, PolicyError> {
+    fn frozen(places: &[Place], ctx: &FreezeCtx) -> Result<Vec<String>, Error> {
         places
             .iter()
             .filter_map(|p| ctx.place(p).transpose())
@@ -948,15 +918,16 @@ mod tests {
     }
 
     fn refusal(place: &Place, ctx: &FreezeCtx) -> String {
-        ctx.place(place).unwrap_err().message
+        ctx.place(place).unwrap_err().describe().into_owned()
     }
 
-    /// A refusal shows its message, then its hint on a line of its own.
+    /// A refusal's fix rides as its hint, never in its message.
     #[test]
-    fn a_refusal_shows_its_hint_under_its_message() {
-        assert_eq!(PolicyError::new("no").to_string(), "no");
-        let hinted = PolicyError::new("no").with_hint("try this");
-        assert_eq!(hinted.to_string(), "no\nhint: try this");
+    fn a_refusal_keeps_its_hint_out_of_its_message() {
+        let refused = root_exclusion(&FrozenPath::from_surface("/"));
+        assert!(!refused.to_string().contains("hint"), "{refused}");
+        assert_eq!(refused.hints().len(), 1);
+        assert!(refused.hints()[0].contains("grant none"), "{refused}");
     }
 
     #[cfg(unix)]
@@ -971,7 +942,7 @@ mod tests {
             let home = Home::of(home).unwrap();
             let err = path_dirs_in::<Trace>(OsStr::new(&path), Some(&home)).unwrap_err();
             assert_eq!(
-                err.message,
+                err.describe(),
                 format!(
                     "PATH holds {entry}, {what}, so `` `dir `path `` would run and read all \
                      of it. Is PATH set correctly?"
@@ -989,9 +960,9 @@ mod tests {
         for home in [None, Some(&home)] {
             let err = path_dirs_in::<Trace>(OsStr::new(r"C:\Windows;C:\"), home).unwrap_err();
             assert!(
-                err.message.contains("C:/, the filesystem root"),
+                err.describe().contains("C:/, the filesystem root"),
                 "{}",
-                err.message
+                err.describe()
             );
         }
     }
@@ -1032,21 +1003,24 @@ mod tests {
         };
         let err = path_dirs_in::<Trace>(OsStr::new(malformed), None).unwrap_err();
         assert!(
-            err.message.contains("no well-formed UNC"),
+            err.to_string().contains("no well-formed UNC"),
             "{}",
-            err.message
+            err.to_string()
         );
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
             assert!(
-                err.message.contains("PATH holds ///x/bin"),
-                "the entry is named as written, unfolded: {}",
-                err.message
+                err.to_string().contains("PATH holds ///x/bin"),
+                "the entry is named as written, unfolded: {err}"
             );
             let err =
                 path_dirs_in::<Trace>(OsStr::from_bytes(b"/usr/bin:/\xff"), None).unwrap_err();
-            assert!(err.message.contains("is not UTF-8"), "{}", err.message);
+            assert!(
+                err.to_string().contains("is not UTF-8"),
+                "{}",
+                err.to_string()
+            );
         }
     }
 
@@ -1354,9 +1328,9 @@ mod tests {
             for rules in [PathRules::Posix, PathRules::Windows] {
                 let err = live_absolute(raw, rules).unwrap_err();
                 assert!(
-                    err.message.contains("server and a share"),
+                    err.describe().contains("server and a share"),
                     "{raw}: {}",
-                    err.message
+                    err.describe()
                 );
             }
         }
@@ -1435,8 +1409,8 @@ mod tests {
                 assert_eq!(got.as_ref().ok().copied(), want, "{raw} {rules:?}");
                 if let Err(err) = got {
                     assert_eq!(
-                        err.message,
-                        not_absolute(raw, grant_eligibility(raw).unwrap_err()).message,
+                        err.describe(),
+                        not_absolute(raw, grant_eligibility(raw).unwrap_err()).describe(),
                         "{raw} {rules:?}"
                     );
                 }
@@ -1466,7 +1440,7 @@ mod tests {
             .walked::<W>(place)
             .and_then(|placed| placed.map(Placed::grant).transpose())
         {
-            Err(e) => e.message,
+            Err(e) => e.describe().into_owned(),
             Ok(_) => panic!("{place:?} was not refused"),
         }
     }
@@ -1561,7 +1535,7 @@ mod tests {
     fn a_backslash_run_time_prefix_is_refused_on_every_host() {
         for (raw, want) in [(r"xdg:config\x", "`xdg-config x"), (r"~\x", "`home x")] {
             let err = runtime_prefix(raw).unwrap_or_else(|| panic!("{raw} is not a prefix"));
-            assert!(err.message.contains(want), "{raw}: {}", err.message);
+            assert!(err.describe().contains(want), "{raw}: {}", err.describe());
         }
     }
 

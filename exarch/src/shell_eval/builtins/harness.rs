@@ -24,7 +24,8 @@ use crate::enquiry::{
 use crate::schedule::ScheduleInfo;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
+use ral_core::error::Error;
+use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled};
 use ral_core::ty::Site;
 use ral_core::ty::{Kind, Row, RowVar, Scheme, Ty, TyVar, Typed as _, closed_record, open_variant};
 use ral_core::typecheck::Unifier;
@@ -37,19 +38,20 @@ const AGENTS: &str = "exarch-agents";
 
 /// The model's argument as first-order data, the only kind that crosses.
 fn first_order(verb: &str, arg: &Value) -> Settled<FOValue> {
-    FOValue::try_from(arg).map_err(|_| {
-        sig(format!(
+    Ok(FOValue::try_from(arg).map_err(|_| {
+        Error::new(format!(
             "{verb}: the argument must be first-order data; no closures, handles, or \
              environments: since it crosses to the host as plain data"
         ))
-    })
+    })?)
 }
 
 /// Enquire `request`, admitting the host's answer only in the shape owed.
 fn ask(verb: &str, request: Request, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     let owed = request.owed();
     let answer = shell.enquire(mooring, request.encode())?;
-    owed(&answer).map_err(|why| sig(format!("{verb}: the host answered out of shape; {why}")))?;
+    owed(&answer)
+        .map_err(|why| Error::new(format!("{verb}: the host answered out of shape; {why}")))?;
     Ok(Value::from(answer))
 }
 
@@ -60,7 +62,7 @@ fn builtin_family<F: Family>(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let verb = format!("exarch-{}", F::CLASS);
-    let request = family::<F>(&first_order(&verb, &args[0])?).map_err(sig)?;
+    let request = family::<F>(&first_order(&verb, &args[0])?).map_err(Error::new)?;
     ask(&verb, request.request(), mooring, shell)
 }
 
@@ -88,7 +90,7 @@ fn builtin_agents(
 }
 
 fn agents(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
-    match Word::decode(&first_order(AGENTS, &args[0])?).map_err(sig)? {
+    match Word::decode(&first_order(AGENTS, &args[0])?).map_err(Error::new)? {
         Word::Ask(request) => ask(AGENTS, Request::Agents(request), mooring, shell),
         Word::Spawn(Launch { grant, spec }) => fork_then_enquire(grant.0, mooring, shell, |fork| {
             Request::Agents(Agents::Start(Start { spec, fork }))
@@ -109,12 +111,12 @@ fn fork_then_enquire(
         Some(Fork::Park(nursery)) => ForkClaim::Parked(nursery.park(shell.bequeath(grant))),
         Some(Fork::Seal) => ForkClaim::Sealed(
             ral_core::seed::seal(&shell.bequeath(grant))
-                .map_err(|why| sig(format!("{AGENTS}: {why}")))?,
+                .map_err(|why| Error::new(format!("{AGENTS}: {why}")))?,
         ),
         None => {
-            return Err(sig(format!(
-                "{AGENTS}: this host adopts no forked sessions"
-            )));
+            return Err(
+                Error::new(format!("{AGENTS}: this host adopts no forked sessions")).into(),
+            );
         }
     };
     ask(AGENTS, request(claim), mooring, shell)

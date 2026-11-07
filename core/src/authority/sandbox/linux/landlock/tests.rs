@@ -257,7 +257,7 @@ fn tree() -> (tempfile::TempDir, PathBuf) {
 
 /// What [`expand`] hands its sink, each handle checked against its name,
 /// and whether it stands for a hierarchy.
-fn expanded(rules: &[Rule], walks: bool) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
+fn expanded(rules: &[Rule], walks: bool) -> Result<BTreeSet<(PathBuf, bool)>, RulesetError> {
     expanded_on(rules, &whole(), walks)
 }
 
@@ -265,7 +265,7 @@ fn expanded_on(
     rules: &[Rule],
     roots: &[RealPath],
     walks: bool,
-) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
+) -> Result<BTreeSet<(PathBuf, bool)>, RulesetError> {
     expanded_masking(rules, roots, walks, &[])
 }
 
@@ -274,7 +274,7 @@ fn expanded_masking(
     roots: &[RealPath],
     walks: bool,
     masks: &[RealPath],
-) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
+) -> Result<BTreeSet<(PathBuf, bool)>, RulesetError> {
     use std::os::unix::fs::MetadataExt;
     let mut seen = BTreeSet::new();
     expand(&table_of(rules), roots, &|_| walks, masks, &mut |admit| {
@@ -464,7 +464,7 @@ fn a_veto_is_carried_only_where_vetoes_walk() {
 }
 
 /// The files `admit_files` admits for `rules`.
-fn admitted_files(rules: &[Rule]) -> Result<BTreeSet<PathBuf>, Error> {
+fn admitted_files(rules: &[Rule]) -> Result<BTreeSet<PathBuf>, RulesetError> {
     let mut seen = BTreeSet::new();
     admit_files(&table_of(rules), &mut |admit| {
         seen.insert(admit.path.as_path().to_path_buf());
@@ -502,7 +502,7 @@ fn a_root_now_a_symlink_refuses_the_expansion() {
     std::os::unix::fs::symlink(d.join("sub"), &link).expect("symlink");
     let refused = expanded(&[rule(position, true, true)], true);
     assert!(
-        matches!(refused, Err(Error::Open(OpenError::Linked(_)))),
+        matches!(refused, Err(RulesetError::Open(OpenError::Linked(_)))),
         "{refused:?}"
     );
 }

@@ -103,9 +103,14 @@ fn job_and_engine_forensics_round_trip() {
         ),
         (
             Record::Forensic(Forensic::EngineSevered {
-                cause: Severed::Refused("version mismatch".into()),
+                cause: Severed::Refused(ral_core::protocol::WireError::of(
+                    &ral_core::error::Error::new("version mismatch").with_hint("upgrade"),
+                )),
             }),
-            json!({ "engine_severed": { "cause": { "Refused": "version mismatch" } } }),
+            json!({ "engine_severed": { "cause": { "Refused": {
+                "message": "version mismatch",
+                "hints": ["upgrade"],
+            } } } }),
         ),
         (
             Record::Forensic(Forensic::EngineSevered {

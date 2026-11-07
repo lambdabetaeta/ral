@@ -1,10 +1,9 @@
 //! The one error type: a record (`reason`, `prov`) plus the report of one
 //! unwinding.  Rendering lives in `shell::runtime::error`.
 
-use crate::compile::CompileError;
 use crate::diagnostic::Rejection;
-use crate::fact::{ErrorRecord, FailureCode, Reason};
-use crate::source::{CallSite, Source, SourceDb, Span};
+use crate::fact::{FailureCode, Reason};
+use crate::source::{CallSite, SourceDb, Span};
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
@@ -18,10 +17,10 @@ pub struct Error {
     pub reason: Reason,
     pub prov: Option<Prov>,
     hints: Box<[Box<str>]>,
-    pub witness: Option<Box<Span>>,
-    pub rejection: Option<Box<Rejection>>,
-    pub context: Option<Box<str>>,
-    pub unwound: Unwound,
+    witness: Option<Box<Span>>,
+    rejection: Option<Box<Rejection>>,
+    context: Option<Box<str>>,
+    unwound: Unwound,
 }
 
 /// Where a failure was claimed.  `Live` is resolved against a source registry
@@ -246,43 +245,6 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
-// One-line shims for wave 4's B batches; C deletes them.
-impl Error {
-    pub fn raised(message: impl Into<String>) -> Self {
-        Self::new(message.into())
-    }
-
-    pub fn from_reason(reason: Reason) -> Self {
-        Self::new(reason)
-    }
-
-    pub fn io(what: impl fmt::Display, e: &io::Error) -> Self {
-        Self::new(io_message(what, e))
-    }
-
-    pub(crate) fn process(program: &str, failure: crate::fact::Failure) -> Self {
-        Self::new(Reason::process(program, failure))
-    }
-
-    pub(crate) fn compile(error: CompileError, source: Source) -> Self {
-        Self::new(error.to_string()).with_rejection(error.reject(source))
-    }
-
-    pub(crate) fn from_record(record: ErrorRecord) -> Self {
-        let mut error = Self::new(record.reason);
-        error.prov = Some(Prov::Resolved(Box::new((record.frame, record.site))));
-        error
-    }
-
-    pub(crate) fn append_hint(self, hint: impl Into<Box<str>>) -> Self {
-        self.with_hint(hint)
-    }
-
-    pub(crate) fn prepend_hint(self, hint: impl Into<Box<str>>) -> Self {
-        self.with_hint(hint)
-    }
-}
 
 #[cfg(test)]
 mod tests {

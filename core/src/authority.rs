@@ -14,7 +14,7 @@ impl policy::Baseline {
     /// # Errors
     /// As [`of_home`](Self::of_home): a host whose system reads are malformed
     /// or cannot be walked.
-    pub(crate) fn of_host() -> Result<Self, grant::freeze::PolicyError> {
+    pub(crate) fn of_host() -> Result<Self, crate::error::Error> {
         use crate::site::{Silent, site};
 
         let home = site!(Silent::SystemReadsHome, crate::host::home());

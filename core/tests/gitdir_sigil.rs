@@ -12,7 +12,8 @@
 //! this working tree back, and a pointer nothing claims is a policy error
 //! rather than a wider grant.
 
-use ral_core::authority::grant::freeze::{Anchor, FreezeCtx, PolicyError};
+use ral_core::authority::grant::freeze::{Anchor, FreezeCtx};
+use ral_core::error::Error;
 use ral_core::host::EnvVars;
 use ral_core::path::CwdPath;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ fn root() -> (tempfile::TempDir, PathBuf) {
     (tmp, root)
 }
 
-fn freeze(cwd: &Path) -> Result<String, PolicyError> {
+fn freeze(cwd: &Path) -> Result<String, Error> {
     let cwd = CwdPath::new(cwd.to_path_buf()).expect("a tempdir is absolute");
     FreezeCtx::at(EnvVars::new(), cwd)
         .place(&Anchor::Gitdir.place("."))

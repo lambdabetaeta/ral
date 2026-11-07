@@ -6,9 +6,9 @@ use crate::record::{Display, Emitter, Forensic, Transient};
 use ral_core::carrier::Host;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
+use ral_core::error::Error;
 use ral_core::fact::Worker;
-use ral_core::protocol::EnquiryError;
-use ral_core::shell::runtime::{Notice, Observation, Observed};
+use ral_core::shell::runtime::{Notice, Observation, Observed, no_desk};
 use ral_core::sync::LockExt;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -155,8 +155,8 @@ impl Host for SurfaceApplier {
         record(&self.recorder, &surface);
     }
 
-    fn enquire(&self, _req: FOValue) -> Result<FOValue, EnquiryError> {
-        Err(EnquiryError::no_desk())
+    fn enquire(&self, _req: FOValue) -> Result<FOValue, Error> {
+        Err(no_desk())
     }
 }
 

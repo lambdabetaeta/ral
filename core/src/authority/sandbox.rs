@@ -17,6 +17,7 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("ral's sandbox has backends for Linux, macOS and Windows only");
 
+use crate::error::Error;
 use crate::path::ObjectId;
 
 #[cfg(unix)]
@@ -99,36 +100,12 @@ pub(crate) use macos::RENDERS_EXEC as EXEC_ENFORCED;
 #[cfg(windows)]
 pub(crate) const EXEC_ENFORCED: bool = false;
 
-/// Why no child exists, through no fault of the command's, so never phrased
-/// as one: nothing ran.
-#[derive(Debug)]
-pub(crate) enum Refusal {
-    /// This host cannot establish the confinement or budget the active grant
-    /// asks for: an axis no backend here enforces, an envelope binary that
-    /// was not there to pin at boot, an envelope or trampoline that failed.
-    Unavailable(String),
-    /// The launch could not be built or placed.
-    Launch(String),
-    /// A cancel arrived mid-launch: not a sandbox failure.
-    #[cfg(windows)]
-    Cancelled(crate::process::CancelCause),
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unavailable(why) => write!(f, "sandbox confinement unavailable: {why}"),
-            Self::Launch(why) => f.write_str(why),
-            #[cfg(windows)]
-            Self::Cancelled(cause) => f.write_str(cause.message()),
-        }
-    }
-}
-
-impl From<String> for Refusal {
-    fn from(why: String) -> Self {
-        Self::Launch(why)
-    }
+/// This host cannot establish the confinement or budget the active grant
+/// asks for: an axis no backend here enforces, an envelope binary that was
+/// not there to pin at boot, an envelope or trampoline that failed.  Nothing
+/// ran, so it is never phrased as the command's fault.
+pub(crate) fn unavailable(why: impl std::fmt::Display) -> Error {
+    Error::new(format!("sandbox confinement unavailable: {why}"))
 }
 
 /// Boot-pinned objects the baseline protects against writes under every grant.

@@ -13,6 +13,7 @@
 
 use crate::compile::compile_and_typecheck;
 use crate::diagnostic::Rejection;
+use crate::error::io_message;
 use crate::fact::FailureCode as _;
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
 use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode, arm_lifetime};
@@ -247,9 +248,9 @@ impl Shell {
             Program::Hook { ref name, ref args } => {
                 let Some(hook) = self.hook(name).cloned() else {
                     return RunReport::Static {
-                        diagnostics: StaticDiagnostics::Host(crate::shell::runtime::Error::new(
-                            format!("hook '{name}' is not registered"),
-                        )),
+                        diagnostics: StaticDiagnostics::Host(Error::new(format!(
+                            "hook '{name}' is not registered"
+                        ))),
                     };
                 };
 
@@ -268,7 +269,7 @@ impl Shell {
                 let body = move |m: &Mooring, s: &mut Self| {
                     crate::shell::evaluator::apply(&hook.binding.value, args, m, s).map_err(|brk| {
                         match brk {
-                            Break::Error(e) => Break::Error(e.with_context(label)),
+                            Break::Error(e) => e.with_context(label).into(),
                             escape @ Break::Escape(_) => escape,
                         }
                     })
@@ -315,10 +316,10 @@ impl Shell {
                 Ok(stdin) => stdin,
                 Err(e) => {
                     return RunReport::Static {
-                        diagnostics: StaticDiagnostics::Host(Error::io(
+                        diagnostics: StaticDiagnostics::Host(Error::new(io_message(
                             "could not duplicate the session's stdin",
                             &e,
-                        )),
+                        ))),
                     };
                 }
             },

@@ -2,6 +2,7 @@
 
 use super::IdentityTransport;
 use crate::engine::EngineInstaller;
+use crate::error::Error;
 use crate::io::terminal::TerminalState;
 use crate::path::EnginePath;
 use crate::protocol::{Attach, EngineSpec, Report, Root, Run};
@@ -12,17 +13,17 @@ use crate::source::SourceOrigin;
 /// with no grant lexicon can: no seeded child.
 pub(crate) const fn installer(
     tag: &'static str,
-    runtime: fn(&EngineSpec) -> Result<Runtime, String>,
-    root: fn(&Root, &mut Shell) -> Result<(), String>,
+    runtime: fn(&EngineSpec) -> Result<Runtime, Error>,
+    root: fn(&Root, &mut Shell) -> Result<(), Error>,
 ) -> EngineInstaller {
     EngineInstaller {
         tag,
         runtime,
         root,
         narrow: |base, _| {
-            Err(format!(
+            Err(Error::new(format!(
                 "this engine makes no children, so it has no policy to resolve `{base}` by"
-            ))
+            )))
         },
     }
 }

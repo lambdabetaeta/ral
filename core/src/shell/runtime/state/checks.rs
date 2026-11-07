@@ -3,20 +3,15 @@
 //! guards that push and pop grant layers. A layer holding no opinion on an
 //! effect abstains, so a check passes unless some layer withholds.
 
-use crate::authority::guard::{Denial, Refusal, check_device_name, check_flag, fs_denial};
+use crate::authority::guard::{Denial, check_device_name, check_flag, fs_denial};
 use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer, LocateError};
 use crate::authority::sandbox::SandboxProjection;
-use crate::path::{Dir, Handle, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
+use crate::error::io_message;
+use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
 use crate::path::{Kind, is_loop};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
 use std::collections::BTreeMap;
 use std::io;
-
-impl From<Refusal> for Error {
-    fn from(Refusal { message, hint }: Refusal) -> Self {
-        hint.into_iter().fold(Self::new(message), Self::with_hint)
-    }
-}
 
 impl Shell {
     /// Check a boolean capability: `Err` if a layer of the active stack
@@ -25,21 +20,21 @@ impl Shell {
     /// # Errors
     /// `Err` if a layer of the active stack withholds it.
     pub fn check(&self, flag: Flag, who: &str) -> Settled<()> {
-        check_flag(&self.context.grants, flag, who).map_err(|refusal| Error::from(refusal).into())
+        Ok(check_flag(&self.context.grants, flag, who)?)
     }
 
     /// Record `check` and mint the `Break` that refuses.  Its callers hold no
     /// `Mooring`, so the denial reaches the trail alone.
     fn refused(&mut self, Denial { check, error }: Denial) -> Break {
         self.record_check(None, check);
-        Error::from(error).into()
+        error.into()
     }
 
     /// Record an exec `denial` against `mooring` and mint the `Break` that refuses.
     pub(crate) fn exec_refused(&mut self, denial: Denial, mooring: &Mooring) -> Break {
         let Denial { check, error } = denial;
         self.record_check(Some(mooring), check);
-        Error::from(error).into()
+        error.into()
     }
 
     /// The baseline every fs judgment of this shell reads: its runtime's.
@@ -97,22 +92,10 @@ impl Shell {
     /// I/O error, phrased with the name as written; or the refusal of a
     /// reserved device name.
     pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<Judged<O>>> {
-        let located = self.locate_unworded::<O, Located>(path)?;
-        located.map_err(|e| Error::io(path.shown(), &e).into())
-    }
-
-    /// [`locate`](Self::locate) to either handle kind, the walk's failure
-    /// left for the caller to word.
-    ///
-    /// # Errors
-    /// As [`locate`](Self::locate), less the walk's failure.
-    pub(crate) fn locate_unworded<O: Op, H: Handle>(
-        &mut self,
-        path: &LexicalPath,
-    ) -> Settled<io::Result<H::As<Judged<O>>>> {
-        check_device_name(path).map_err(Error::from)?;
-        let verdict = (self.context.grants).locate::<O, H>(self.baseline(), path);
-        self.raised::<O, _>(path, verdict)
+        check_device_name(path)?;
+        let verdict = (self.context.grants).locate::<O, Located>(self.baseline(), path);
+        let located = self.raised::<O, _>(path, verdict)?;
+        located.map_err(|e| Error::new(io_message(path.shown(), &e)).into())
     }
 
     /// [`locate`](Self::locate) for a directory entered.
@@ -120,8 +103,10 @@ impl Shell {
     /// # Errors
     /// As [`locate`](Self::locate).
     pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
-        let dir = self.locate_unworded::<O, Dir>(path)?;
-        dir.map_err(|e| Error::io(path.shown(), &e).into())
+        check_device_name(path)?;
+        let verdict = (self.context.grants).locate::<O, Dir>(self.baseline(), path);
+        let dir = self.raised::<O, _>(path, verdict)?;
+        dir.map_err(|e| Error::new(io_message(path.shown(), &e)).into())
     }
 
     /// [`locate`](Self::locate) for a probe, which must tell *absent* from
@@ -142,7 +127,7 @@ impl Shell {
         path: &LexicalPath,
         leaf: LeafMode,
     ) -> Settled<Option<Located<Judged<O>>>> {
-        check_device_name(path).map_err(Error::from)?;
+        check_device_name(path)?;
         let located = match walk(path, leaf) {
             Ok(located) => located,
             Err(e) => {
@@ -151,10 +136,9 @@ impl Shell {
                     Err(lenient) => Some(lenient),
                     Ok(()) => is_loop(&e).then_some(e),
                 };
-                return told.map_or(
-                    Ok(None),
-                    |error| Err(Error::io(path.shown(), &error).into()),
-                );
+                return told.map_or(Ok(None), |error| {
+                    Err(Error::new(io_message(path.shown(), &error)).into())
+                });
             }
         };
         let held = self.judge_named::<O>(located, path)?;
@@ -177,7 +161,7 @@ impl Shell {
     ) -> Settled<Option<Located<Judged<O>>>> {
         let mut first = None;
         for cand in candidates {
-            check_device_name(&cand).map_err(Error::from)?;
+            check_device_name(&cand)?;
             let located = match walk(&cand, LeafMode::Follow) {
                 Ok(located) => located,
                 Err(e) => {

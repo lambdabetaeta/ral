@@ -10,8 +10,9 @@
 use ral_core::authority::policy::{EditorVerb, Flag};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::error::Error;
 use ral_core::fact::FailureCode as _;
-use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
+use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::Site;
 use ral_core::ty::{
     CompTy, Grade, Kind, Scheme, Ty, Typed, closed_record, closed_variant, open_record,
@@ -35,8 +36,8 @@ fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<
 /// `op`'s answer, decoded as a `T`.
 fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<T> {
     shell.check(op.flag(), name)?;
-    T::decode(&shell.enquire(mooring, op.into().encode())?)
-        .map_err(|why| sig(format!("the host answered outside its shape: {why}")))
+    Ok(T::decode(&shell.enquire(mooring, op.into().encode())?)
+        .map_err(|why| Error::new(format!("the host answered outside its shape: {why}")))?)
 }
 
 /// A non-negative offset, flooring a negative one at zero.
@@ -70,14 +71,16 @@ fn set_op(arg: &Value) -> Settled<EditorOp> {
             label,
             payload: Some(v),
         }) if &**label == "set" => Ok(Some((**v).clone())),
-        _ => Err(sig(format!("_ed-set: {key} must be `keep or `set <value>"))),
+        _ => Err(Error::new(format!(
+            "_ed-set: {key} must be `keep or `set <value>"
+        ))),
     };
     let text = choice("text")?
         .map(|v| v.as_str("_ed-set text").map(str::to_owned))
         .transpose()?;
     let cursor = match choice("cursor")? {
         Some(Value::Int(n)) => Some(offset(n)),
-        Some(_) => return Err(sig("_ed-set: cursor must be Int")),
+        Some(_) => return Err(Error::new("_ed-set: cursor must be Int").into()),
         None => None,
     };
     Ok(EditorOp::Set { text, cursor })
@@ -184,7 +187,7 @@ pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let prefix = args[0].as_str("_ed-history")?;
     let limit = match &args[1] {
         Value::Int(n) => offset(*n),
-        _ => return Err(sig("_ed-history: limit must be Int")),
+        _ => return Err(Error::new("_ed-history: limit must be Int").into()),
     };
     let history: Vec<String> = answer(shell, mooring, "_ed-history", EditorOp::History)?;
     let mut results: Vec<Value> = Vec::new();
@@ -282,7 +285,7 @@ pub fn builtin_ed_highlight(
 fn highlight_req(v: &Value) -> Settled<HighlightReq> {
     let int_field = |v: &Value, field: &'static str| match v {
         Value::Int(n) => Ok(offset(*n)),
-        _ => Err(sig(format!("highlight span: {field} must be Int"))),
+        _ => Err(Error::new(format!("highlight span: {field} must be Int"))),
     };
     let m = v.as_map("_ed-highlight span")?;
     let mut span = HighlightReq {
@@ -299,10 +302,7 @@ fn highlight_req(v: &Value) -> Settled<HighlightReq> {
         }
     }
     if style_ansi(&span.style).is_none() {
-        return Err(sig(format!(
-            "_ed-highlight: unknown style '{}'",
-            span.style
-        )));
+        return Err(Error::new(format!("_ed-highlight: unknown style '{}'", span.style)).into());
     }
     Ok(span)
 }
@@ -340,7 +340,7 @@ pub fn builtin_ed_state(
     };
     let new_val = ral_core::shell::evaluator::apply(&args[1], vec![current], mooring, shell)?;
     let data = FOValue::try_from(&new_val).map_err(|e| {
-        sig(format!(
+        Error::new(format!(
             "_ed-state: the updater returned {}, but the state cell holds only data",
             e.leaf
         ))

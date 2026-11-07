@@ -76,8 +76,11 @@ resolved model and judgments. Composition runs entirely on resolved `GrantLayer`
 An `` `xdg-* `` place escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
 `ral_core::shell::load::profile::load_capabilities_from_*` — the same surface as ral's
-`--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error
-format and the `absolute_in` cwd-join helper).
+`--capabilities <path>.ral` (`policy/load.rs` puts its refusal under the flag
+that named the file, as context, and holds the `absolute_in` cwd-join helper).
+The module's refusals are `Error`s, the decoder's hints kept, through
+`for_invocation` and `base_layer` (the installer's `GrantNarrower`); `run`
+flattens them only at the command line, hints rendered (`Error::plain`).
 
 `base_layer(base_name, ctx)` resolves a bake-in base against the child's
 working directory and scratch from its `FreezeCtx`, as one way of naming the single layer a

@@ -217,7 +217,8 @@ pub fn run() -> Result<(), String> {
         c.extend.as_deref(),
         &c.restrict,
         ral_core::authority::sandbox::pinned_arg0(),
-    )?;
+    )
+    .map_err(|e| e.plain())?;
     let (_mode, terminal, _warn) = ral_core::io::terminal::TerminalState::probe_from_env();
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
@@ -235,8 +236,8 @@ pub fn run() -> Result<(), String> {
     let config_dir = app::EXARCH.xdg_dir(XdgKind::Config);
     // The boot's own reads are judged under the baseline of a runtime built here,
     // before any is made; a host that cannot resolve its baseline boots nothing.
-    let boot_floor =
-        ral_core::Runtime::bare(terminal).map_err(|e| format!("exarch cannot start: {e}"))?;
+    let boot_floor = ral_core::Runtime::bare(terminal)
+        .map_err(|e| e.with_context("exarch cannot start").plain())?;
     // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {
         prompt::CHAT_SYSTEM.to_string()

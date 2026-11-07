@@ -73,6 +73,19 @@ impl Error {
         diagnosis.compact(&message, hint.as_deref())
     }
 
+    /// The report's words, uncoloured and unlaid: the message line under its
+    /// context, then its notes.  For a host's log or a command line's last
+    /// word, where no session renders.
+    #[must_use]
+    pub fn plain(&self) -> String {
+        let (mut out, hint) = self.diagnosis(&ExitHints::default()).compose();
+        if let Some(hint) = hint {
+            out.push('\n');
+            let _ = write!(out, "hint: {hint}");
+        }
+        out
+    }
+
     /// A host refusal has no source location.
     pub(crate) fn render_spanless(&self, exit_hints: &ExitHints) -> String {
         render(
@@ -490,7 +503,7 @@ mod tests {
         );
         assert!(!rendered.contains("later steps"), "{rendered}");
         assert_eq!(decorated.record(&shell), record);
-        assert_eq!(decorated.discarded(u32::MAX).unwound.discarded, u32::MAX);
+        assert_eq!(decorated.discarded(u32::MAX).unwound().discarded, u32::MAX);
     }
 
     #[cfg(unix)]

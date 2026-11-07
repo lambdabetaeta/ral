@@ -6,6 +6,7 @@ use crate::app::{SCRATCH_VAR, seed_var};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::data::FOValue;
+use ral_core::error::Error;
 use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::{EngineSpec, Root};
 use ral_core::shell::boot::boot_runtime;
@@ -25,7 +26,7 @@ pub fn face_process_signals(terminal: &TerminalState) {
 ///
 /// # Errors
 /// A host whose system reads cannot be resolved, which can run nothing.
-pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
+pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
     let mut runtime = boot_runtime(
         spec.terminal,
         &shell_eval::PRELUDE,
@@ -56,17 +57,17 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
 ///
 /// # Panics
 /// Panics if the embedded agent library fails to load.
-pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
+pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
     let Some((_, scratch)) = root.env.iter().find(|(name, _)| name == SCRATCH_VAR) else {
-        return Err(format!(
+        return Err(Error::new(format!(
             "exarch engine: the root attach names no ${SCRATCH_VAR}: the host owns the scratch and names it in every root attach"
-        ));
+        )));
     };
     shell.set_scratch(scratch.as_str());
     if !matches!(root.config, FOValue::Unit) {
         let layer = shell
             .decode_grant(&root.config, "the root's ceiling")
-            .map_err(|e| format!("exarch engine: {e}"))?;
+            .map_err(|e| e.with_context("exarch engine"))?;
         shell.push_session_capabilities(layer);
     }
     crate::library::install_agent_library(&ral_core::shell::runtime::Mooring::adrift(), shell)
@@ -276,8 +277,8 @@ mod tests {
         let Err(why) = engine_root(&root, &mut shell) else {
             panic!("a directory is no program");
         };
-        assert!(why.contains("is a directory"), "{why}");
-        assert!(why.contains("hint:") && why.contains("`dir"), "{why}");
+        assert!(why.describe().contains("is a directory"), "{why}");
+        assert!(why.hints().iter().any(|h| h.contains("`dir")), "{why:?}");
     }
 
     #[test]
@@ -296,6 +297,6 @@ mod tests {
         let Err(why) = engine_root(&Root::new(EnginePath::Host(temp)), &mut shell) else {
             panic!("an unnamed scratch must refuse the attach");
         };
-        assert!(why.contains(SCRATCH_VAR), "{why}");
+        assert!(why.describe().contains(SCRATCH_VAR), "{why}");
     }
 }

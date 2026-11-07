@@ -119,7 +119,7 @@ impl Mismatch {
         if let Some(hint) = self.hint() {
             error = error.with_hint(hint);
         }
-        Break::Error(error)
+        error.into()
     }
 
     fn place(&self) -> String {

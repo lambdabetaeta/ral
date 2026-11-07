@@ -35,12 +35,12 @@ use gpu::GpuNodes;
 use host::Builds;
 pub(crate) use host::HostEnvelope;
 
-use super::Refusal;
 use super::launch::Ownership;
 use super::reexec::Pinned;
 use super::warrant::{Handoff, Slot, Slots, nul_terminated, parcel};
-use super::{FsProjection, RenderedProjection};
+use super::{FsProjection, RenderedProjection, unavailable};
 use crate::authority::policy::FsOp;
+use crate::error::Error;
 use crate::path::{
     CwdPath, Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered,
     Trace, is_loop, render_real, walk_lenient,
@@ -149,30 +149,31 @@ pub(crate) fn bwrap_command(
     policy: &RenderedProjection,
     chdir: Option<&CwdPath>,
     ownership: Ownership,
-) -> Result<(Command, Option<InfoFd>), Refusal> {
+) -> Result<(Command, Option<InfoFd>), Error> {
     let bwrap = crate::path::shown(env.bwrap.arg0());
-    let unavailable = |why: String| Err(Refusal::Unavailable(why));
     match env.host.builds {
         Builds::ByFd => {}
         Builds::Nothing(why) => {
-            return unavailable(format!(
+            return Err(unavailable(format!(
                 "bwrap at {bwrap} cannot build an envelope on this host: {why}"
-            ));
+            )));
         }
     }
-    let binds = Binds::open(env, shown, &mut handoff)?;
+    let binds = Binds::open(env, shown, &mut handoff).map_err(Error::new)?;
     let (info, address) = (ownership == Ownership::Kept)
         .then(|| InfoFd::open(&mut handoff))
-        .transpose()?
+        .transpose()
+        .map_err(Error::new)?
         .unzip();
     let mut lend_parcel = |name: &str, bytes: &[u8]| {
         let parcel =
             parcel(name, bytes).map_err(|e| format!("sandbox: cannot parcel {name}: {e}"))?;
         handoff.lend(parcel.as_fd())
     };
-    let seccomp = (seccomp_programs()?.into_iter())
+    let seccomp = (seccomp_programs().map_err(Error::new)?.into_iter())
         .map(|program| lend_parcel("ral-seccomp", &program))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::new)?;
     let options = bwrap_argv(
         policy,
         chdir,
@@ -181,12 +182,14 @@ pub(crate) fn bwrap_command(
         &binds,
         &GpuNodes::discover(),
         &seccomp,
-    )?;
+    )
+    .map_err(Error::new)?;
     let args = lend_parcel(
         "ral-bwrap-args",
-        &nul_terminated(options.iter().map(|arg| arg.as_bytes()))?,
-    )?;
-    let trampoline = handoff.lend(env.trampoline.fd())?;
+        &nul_terminated(options.iter().map(|arg| arg.as_bytes())).map_err(Error::new)?,
+    )
+    .map_err(Error::new)?;
+    let trampoline = handoff.lend(env.trampoline.fd()).map_err(Error::new)?;
     let mut c = env.bwrap.command();
     c.args(["--args", &args.to_string(), "--"])
         .arg(crate::path::proc_fd_path(trampoline.fd()))

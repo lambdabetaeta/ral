@@ -7,12 +7,13 @@
 //! wrote there.  `absolute-path` is exempt: lexical, with no filesystem to
 //! gate.
 
+use crate::error::{Error, io_message};
 use crate::fact::{DirEntry, FileInfo};
 use crate::path::tree::Glob;
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
 };
-use crate::shell::runtime::{Break, Settled, Shell, Value, sig};
+use crate::shell::runtime::{Settled, Shell, Value};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -51,7 +52,7 @@ fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<Dir<Judged<Writing
     let rp = shell.anchor(&crate::host::temp_dir());
     let dir = shell.locate_dir::<Writing>(&rp)?;
     crate::path::utf8(dir.real().as_path()).map_err(|e| {
-        sig(format!(
+        Error::new(format!(
             "{ctx}: the temp directory {e}, so no path made in it can be returned as text; \
              point TMPDIR (TMP on Windows) at one that is"
         ))
@@ -69,7 +70,7 @@ fn made_in(
     parent: &Dir<Judged<Writing>>,
     make: impl Fn(Located<Judged<Writing>>) -> io::Result<String>,
 ) -> Settled<Value> {
-    let failed = |e: &dyn std::fmt::Display| sig(format!("{ctx}: {e}"));
+    let failed = |e: &dyn std::fmt::Display| Error::new(format!("{ctx}: {e}"));
     loop {
         let name = EntryName::fresh("ral-tmp-").map_err(|e| failed(&e))?;
         let target = parent.absent(name);
@@ -77,7 +78,7 @@ fn made_in(
         match make(target) {
             Ok(made) => return Ok(Value::string(made)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(failed(&e)),
+            Err(e) => return Err(failed(&e).into()),
         }
     }
 }
@@ -113,7 +114,7 @@ fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Val
 pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
     let raw = args[0].as_str("glob")?;
     let pattern = shell.resolve(raw);
-    let glob = Arc::new(Glob::parse(&pattern).map_err(|e| sig(format!("glob: {e}")))?);
+    let glob = Arc::new(Glob::parse(&pattern).map_err(|e| Error::new(format!("glob: {e}")))?);
     let mut walk = shell.admitted_walk(glob.walk(), "glob", raw);
     let mut hits = Vec::new();
     while let Some(entry) = walk.next()? {
@@ -126,8 +127,8 @@ pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
 }
 
 /// Label an `io::Error` with the operation and the path that provoked it.
-fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Break {
-    sig(format!("{ctx}: {}: {e}", shown(path)))
+fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Error {
+    Error::new(io_message(format!("{ctx}: {}", shown(path)), e))
 }
 
 /// Portable per-path metadata: the `stat` fields `std::fs::Metadata` carries
@@ -138,7 +139,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     let raw = args[0].as_str("file-info")?;
     let rp = shell.resolve(raw);
     let path = rp.as_path().to_path_buf();
-    let missing = || sig(format!("file-info: {raw}: no such file or directory"));
+    let missing = || Error::new(format!("file-info: {raw}: no such file or directory"));
     let located = shell
         .locate_existing::<Reading>(&rp, LeafMode::NoFollow)?
         .ok_or_else(missing)?;
@@ -156,7 +157,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
     let rp = shell.resolve(s);
     let located = shell
         .locate_existing::<Reading>(&rp, LeafMode::Follow)?
-        .ok_or_else(|| sig(format!("resolve-path: {s}: no such file or directory")))?;
+        .ok_or_else(|| Error::new(format!("resolve-path: {s}: no such file or directory")))?;
     Ok(Value::string(shown(located.real().as_path())))
 }
 

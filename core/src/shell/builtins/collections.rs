@@ -5,8 +5,9 @@
 //! whatever effects an element's body performs land in the enclosing trail
 //! unwrapped, from the doors that performed them.
 
+use crate::error::Error;
 use crate::shell::evaluator::{apply, expr};
-use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell, Value, sig};
+use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
 
 /// Steps `range` runs between cancellation polls: its per-step work is a
 /// single push, which an unconditional poll would dominate.  The combinators
@@ -72,11 +73,12 @@ pub(super) fn builtin_filter(
         .filter_map(
             |item| match call(&args[0], item.as_ref().clone(), mooring, shell) {
                 Ok(Value::Bool(keep)) => keep.then(|| Ok(item.into_owned())),
-                Ok(other) => Some(Err(sig(format!(
+                Ok(other) => Some(Err(Error::new(format!(
                     "filter: predicate must return Bool, got {} '{}'",
                     other.type_name(),
                     other
-                )))),
+                ))
+                .into())),
                 Err(e) => Some(Err(e)),
             },
         )
@@ -121,26 +123,28 @@ pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
     let start = match &args[0] {
         Value::Int(n) => *n,
         other => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "range: expected Int for start, got {}",
                 other.type_name()
-            )));
+            ))
+            .into());
         }
     };
     let end = match &args[1] {
         Value::Int(n) => *n,
         other => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "range: expected Int for end, got {}",
                 other.type_name()
-            )));
+            ))
+            .into());
         }
     };
     let count = if end > start {
         end.checked_sub(start)
             .and_then(|span| usize::try_from(span).ok())
             .ok_or_else(|| {
-                sig(format!(
+                Error::new(format!(
                     "range: span from {start} to {end} exceeds the addressable range"
                 ))
             })?

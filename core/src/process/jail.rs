@@ -47,8 +47,8 @@ static GUEST: OnceLock<Arc<GuestJail>> = OnceLock::new();
 
 /// Why the guest jail made no child of a launch: nothing ran.
 #[cfg(seccomp)]
-pub(crate) fn refused(why: impl std::fmt::Display) -> crate::authority::sandbox::Refusal {
-    crate::authority::sandbox::Refusal::Launch(format!("guest jail: {why}"))
+pub(crate) fn refused(why: impl std::fmt::Display) -> crate::error::Error {
+    crate::error::Error::new(format!("guest jail: {why}"))
 }
 
 #[cfg(seccomp)]

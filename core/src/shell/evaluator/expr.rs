@@ -5,7 +5,7 @@ use crate::data::Finite;
 use crate::io;
 use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp};
 use crate::ir::{Key, Prim, Val};
-use crate::shell::runtime::{Break, Env, Error, Map, Settled, Signature, Value, sig_hint};
+use crate::shell::runtime::{Break, Env, Error, Map, Settled, Signature, Value};
 use std::borrow::Cow;
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -119,14 +119,15 @@ pub(crate) fn eval_prim(
             // Release the capture's scope before taking over its buffer.
             drop(env);
             let Value::Bytes(bytes) = value else {
-                return Err(sig_hint(
-                    format!(
-                        "the value boundary was handed {} where a captured byte payload belongs",
-                        value.type_name()
-                    ),
+                return Err(Error::new(format!(
+                    "the value boundary was handed {} where a captured byte payload belongs",
+                    value.type_name()
+                ))
+                .with_hint(
                     "only the type checker writes this step, so this is a fault in ral \
                      rather than in your program: please report the source that produced it",
-                ));
+                )
+                .into());
             };
             let mut bytes = bytes.into_vec();
             bytes.truncate(io::without_terminator(&bytes).len());

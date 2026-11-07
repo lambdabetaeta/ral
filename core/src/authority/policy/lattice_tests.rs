@@ -5,7 +5,7 @@
 
 use super::exec::{ExecRules, Subject};
 use super::*;
-use crate::authority::grant::freeze::{FreezeCtx, PolicyError};
+use crate::authority::grant::freeze::FreezeCtx;
 use crate::path::{self, Excluded, FrozenPath, Trace};
 use crate::shell::grant::{decode_capability_map, decode_grant};
 use crate::shell::runtime::Value;
@@ -59,10 +59,6 @@ fn spelled(p: &Path) -> FrozenPath {
 /// A prefix witness for the fixtures that build `FsPolicy`/`ExecGrant`.
 fn nprefix(s: &str) -> FrozenPath {
     spelled(&at(s))
-}
-
-fn break_msg(e: PolicyError) -> String {
-    e.message
 }
 
 fn name(s: &str) -> ExecKey {
@@ -460,7 +456,7 @@ fn a_grant_value_refuses_an_unknown_key() {
     };
     let err = decode_capability_map(&Value::from(stale), "test", &test_ctx("/h"))
         .expect_err("`detach` is no key of a grant");
-    assert!(err.message.contains("detach"), "{}", err.message);
+    assert!(err.to_string().contains("detach"), "{err}");
 }
 
 /// A spelling absolute only under the other platform's rules is a dead grant
@@ -542,7 +538,9 @@ fn decode_rejects_xdg_typo() {
         "fs",
         map(vec![("read", Value::list(vec![tagged("xdg-cofnig", ".")]))]),
     )]);
-    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
+    let err = decode_capability_map(&v, "test", &test_ctx("/h"))
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("xdg-cofnig"), "got {err}");
     assert!(
         err.contains("`` `xdg-config ``,"),
@@ -610,7 +608,7 @@ fn decode_rejects_directory_as_exec_file() {
         )]),
     )]);
     let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
-    assert!(err.hint.unwrap().contains("`` `dir `absolute '/etc' ``"));
+    assert!(err.hints()[0].contains("`` `dir `absolute '/etc' ``"));
 }
 
 /// Defence in depth: `XDG_DATA_HOME=/etc` must not widen a policy naming
@@ -626,7 +624,7 @@ fn decode_rejects_xdg_var_outside_home() {
     let err = with_var("XDG_DATA_HOME", Some("/etc"), || {
         decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err()
     });
-    let err = break_msg(err);
+    let err = err.to_string();
     assert!(
         err.contains("XDG_DATA_HOME"),
         "should name the env var: {err}"
@@ -645,7 +643,9 @@ fn decode_errors_when_there_is_no_home() {
     )]);
     crate::host::env::test_support::with_vars_cleared(&crate::host::HOME_VARS, || {
         for ctx in [test_ctx(""), no_home_ctx()] {
-            let err = break_msg(decode_capability_map(&v, "test", &ctx).unwrap_err());
+            let err = decode_capability_map(&v, "test", &ctx)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("HOME"), "got {err}");
         }
     });
@@ -662,7 +662,9 @@ fn decode_rejects_relative_absolute_place() {
             Value::list(vec![tagged("absolute", "proj")]),
         )]),
     )]);
-    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
+    let err = decode_capability_map(&v, "test", &test_ctx("/h"))
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("proj"), "should name the entry: {err}");
     assert!(
         err.contains("`` `cwd proj ``"),
@@ -677,7 +679,9 @@ fn decode_rejects_dot_relative_absolute_places() {
             "fs",
             map(vec![("read", Value::list(vec![tagged("absolute", p)]))]),
         )]);
-        let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
+        let err = decode_capability_map(&v, "test", &test_ctx("/h"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains(p), "should name the entry: {err}");
     }
 }
@@ -720,7 +724,9 @@ fn decode_accepts_cwd_relative_fs_place() {
 fn decode_rejects_non_tag_verb() {
     for key in ["editor", "shell"] {
         let v = map(vec![(key, Value::list(vec![Value::Int(5)]))]);
-        let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
+        let err = decode_capability_map(&v, "test", &test_ctx("/h"))
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("expected a verb"),
             "should say what a verb is: {err}"
@@ -843,7 +849,7 @@ fn a_grant_value_spells_no_every_and_a_repeat_adds_nothing() {
         ]),
     )]);
     let err = decode_capability_map(&every, "test", &test_ctx("/h")).unwrap_err();
-    assert!(err.message.contains("every"), "{}", err.message);
+    assert!(err.to_string().contains("every"), "{err}");
     let git = || tagged("name", "git");
     let decode = |allow: Vec<Value>| {
         let exec = map(vec![("exec", map(vec![("allow", Value::list(allow))]))]);

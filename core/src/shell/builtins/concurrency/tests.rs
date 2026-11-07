@@ -1391,7 +1391,7 @@ fn worker_flushes_done_to_deferred_sink() {
         Some("<block>")
     );
 
-    let err = run(|_, _child| Err(sig("boom")));
+    let err = run(|_, _child| Err(Error::new("boom").into()));
     assert_eq!(done_outcome_label(&err[0]), "err");
 
     let panicked = run(|_, _child| panic!("worker exploded"));
@@ -1413,10 +1413,10 @@ fn watched_lines_surface_one_by_one() {
     let handle = spawn_child(&m, &mut shell, birth, |_, child| {
         child
             .write_stdout(b"one\ntwo")
-            .map_err(|e| sig(e.to_string()))?;
+            .map_err(|e| Error::new(e.to_string()))?;
         child
             .write_stderr(b"bad\r\n")
-            .map_err(|e| sig(e.to_string()))?;
+            .map_err(|e| Error::new(e.to_string()))?;
         Ok(Value::Unit)
     })
     .unwrap();
@@ -3389,7 +3389,7 @@ fn exit_brood_and_race_wait_for_already_stopping_children() {
 
         let err = exit_brood(
             &owner,
-            Err(sig("gather halted")),
+            Err(Error::new("gather halted").into()),
             std::time::Duration::from_secs(5),
             &mut shell,
         )

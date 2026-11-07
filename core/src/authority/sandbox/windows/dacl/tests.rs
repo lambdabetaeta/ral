@@ -8,7 +8,7 @@
 // so each diffs against the one it was taken from.
 
 use super::*;
-use crate::process::cancel::DurableRoot;
+use crate::process::cancel::{CancelCause, DurableRoot};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -191,7 +191,13 @@ fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
 
         let err = grant(&canonical, CAP_SID, GrantKind::ReadWrite, &cancel);
         assert!(
-            matches!(err, Err(DaclError::Cancelled(CancelCause::TimedOut))),
+            matches!(
+                err,
+                Err(DaclError::Cancelled(Cancellation {
+                    cause: CancelCause::TimedOut,
+                    ..
+                }))
+            ),
             "the poll must report the cause it saw, not a grant failure"
         );
         assert!(

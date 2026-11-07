@@ -1298,7 +1298,7 @@ pub(super) mod tests {
             (ExecGrant::of([], [key()]), "excluding the root"),
         ] {
             let why = crate::test_helper::decoded(exec(grant)).unwrap_err();
-            assert!(why.message.contains(wording), "{}", why.message);
+            assert!(why.describe().contains(wording), "{}", why.describe());
         }
     }
 
@@ -1313,8 +1313,15 @@ pub(super) mod tests {
             ExecGrant::of([], [ExecKey::Path(spelled(&dir))]),
         ] {
             let why = crate::test_helper::decoded(exec(grant)).unwrap_err();
-            assert!(why.message.contains("is a directory"), "{}", why.message);
-            assert!(why.hint.is_some_and(|h| h.contains("`dir")), "a `dir` hint");
+            assert!(
+                why.describe().contains("is a directory"),
+                "{}",
+                why.describe()
+            );
+            assert!(
+                why.hints().iter().any(|h| h.contains("`dir")),
+                "a `dir` hint"
+            );
         }
     }
 
@@ -1323,7 +1330,11 @@ pub(super) mod tests {
     fn a_path_shaped_name_key_is_refused() {
         let grant = ExecGrant::of([ExecKey::Name("bin/tool".into())], []);
         let why = crate::test_helper::decoded(exec(grant)).unwrap_err();
-        assert!(why.message.contains("bare command name"), "{}", why.message);
+        assert!(
+            why.describe().contains("bare command name"),
+            "{}",
+            why.describe()
+        );
     }
 
     /// A grant has no "here": a relative `PATH` entry is the environment's, so

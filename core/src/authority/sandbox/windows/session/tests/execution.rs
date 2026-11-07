@@ -1,6 +1,6 @@
 use super::{SessionGuard, Tree, cmd, confined, projection, rules, with_scoped_state};
 use crate::authority::policy::{Baseline, Capabilities, FsPolicy};
-use crate::authority::sandbox::{ExecProjection, FsProjection, Refusal, SandboxProjection};
+use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
 use crate::path::FrozenPath;
 use crate::process::{Launch, PgidPolicy, Unstarted};
 use crate::test_helper::confinement::{Output, admitted, denied};
@@ -14,6 +14,7 @@ fn capture(launch: &mut Launch) -> std::io::Result<Output> {
         Ok(spawned) => spawned.child,
         Err(Unstarted::Program(e)) => return Err(e),
         Err(Unstarted::Refused(why)) => panic!("the probe was refused: {why}"),
+        Err(Unstarted::Stopped(stop)) => panic!("the probe was stopped: {stop}"),
     };
     let mut stdout = String::new();
     child.take_stdout().unwrap().read_to_string(&mut stdout)?;
@@ -179,11 +180,11 @@ fn a_junction_replacing_a_granted_leaf_or_ancestor_refuses_the_next_launch() {
             std::fs::rename(&base, tree.at(&format!("saved{index}"))).unwrap();
             let _junction = Junction::new(base, &outside);
             let refusal = match confined(&grant, tree.root.path(), "echo secret") {
-                Err(Refusal::Launch(why)) => why,
-                Err(other) => panic!("expected a redirected allowance, got {other}"),
+                Err(Unstarted::Refused(why)) => why,
+                Err(other) => panic!("expected a redirected allowance, got {other:?}"),
                 Ok(_) => panic!("a junction on the frozen allowance admitted a launch"),
             };
-            assert!(refusal.contains("is now a link"), "{refusal}");
+            assert!(refusal.describe().contains("is now a link"), "{refusal}");
         }
     });
 }

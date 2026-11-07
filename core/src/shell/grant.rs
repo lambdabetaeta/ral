@@ -7,20 +7,11 @@ pub(crate) use decode::decode_capability_map;
 pub use decode::{decode_fragment, decode_grant};
 pub use spawn::{GrantNarrower, SpawnGrant};
 
-use crate::authority::grant::freeze::{FreezeCtx, PolicyError};
+use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::GrantLayer;
 use crate::data::FOValue;
-use crate::shell::runtime::{Break, Error, Shell};
-
-impl From<PolicyError> for Break {
-    fn from(e: PolicyError) -> Self {
-        let err = Error::new(e.message);
-        Self::Error(match e.hint {
-            Some(hint) => err.with_hint(hint),
-            None => err,
-        })
-    }
-}
+use crate::error::Error;
+use crate::shell::runtime::Shell;
 
 impl Shell {
     /// The environment, logical cwd and session scratch every grant freezes against.
@@ -37,11 +28,7 @@ impl Shell {
     ///
     /// # Errors
     /// As [`decode_grant`].
-    pub fn decode_grant(
-        &self,
-        record: &FOValue,
-        err_prefix: &str,
-    ) -> Result<GrantLayer, PolicyError> {
+    pub fn decode_grant(&self, record: &FOValue, err_prefix: &str) -> Result<GrantLayer, Error> {
         decode_grant(record, err_prefix, &self.freeze_ctx())
     }
 }
@@ -49,7 +36,6 @@ impl Shell {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::*;
     use crate::authority::grant::freeze::Anchor;
     use crate::path::{CwdPath, fold_dots};
 
@@ -69,7 +55,7 @@ mod tests {
             .freeze_ctx()
             .place(&Anchor::Scratch.place("."))
             .unwrap_err();
-        assert!(err.message.contains("no scratch directory"), "{err:?}");
+        assert!(err.describe().contains("no scratch directory"), "{err:?}");
     }
 
     #[test]
@@ -90,21 +76,6 @@ mod tests {
         ] {
             let path = ctx.place(&place).unwrap().unwrap();
             assert_eq!(path.as_str(), fold_dots(&expected).to_string_lossy());
-        }
-    }
-
-    #[test]
-    fn a_policy_refusal_keeps_its_message_and_hint_at_the_shell_boundary() {
-        for hint in [None, Some("an alternative".to_owned())] {
-            let error = PolicyError {
-                message: "a refusal".into(),
-                hint: hint.clone(),
-            };
-            let Break::Error(error) = Break::from(error) else {
-                panic!("a policy refusal is never an escape")
-            };
-            assert_eq!(error.describe(), "a refusal");
-            assert_eq!(error.hints().first().map(|h| &**h), hint.as_deref());
         }
     }
 }

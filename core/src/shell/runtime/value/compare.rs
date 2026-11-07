@@ -3,7 +3,7 @@
 
 use super::Value;
 use crate::data::Finite;
-use crate::shell::runtime::{Settled, sig_hint};
+use crate::shell::runtime::{Error, Settled};
 use std::cmp::Ordering;
 
 /// `i` against `f`, exactly: no rounding of `i` into an `f64`.
@@ -85,14 +85,15 @@ impl Value {
                     }
             }
             (a, b) if a.opacity().is_some() || b.opacity().is_some() => {
-                return Err(sig_hint(
-                    format!(
-                        "equality: cannot compare {} with {}",
-                        a.type_name(),
-                        b.type_name()
-                    ),
+                return Err(Error::new(format!(
+                    "equality: cannot compare {} with {}",
+                    a.type_name(),
+                    b.type_name()
+                ))
+                .with_hint(
                     "equality is defined on scalars, strings, bytes, lists, maps, and variants",
-                ));
+                )
+                .into());
             }
             _ => false,
         })
@@ -109,14 +110,13 @@ impl Value {
         }
         match (self, other) {
             (Self::String(a), Self::String(b)) => Ok(a.cmp(b)),
-            _ => Err(sig_hint(
-                format!(
-                    "{op}: cannot compare {} with {}",
-                    self.type_name(),
-                    other.type_name()
-                ),
-                "ordering is defined on numbers and strings",
-            )),
+            _ => Err(Error::new(format!(
+                "{op}: cannot compare {} with {}",
+                self.type_name(),
+                other.type_name()
+            ))
+            .with_hint("ordering is defined on numbers and strings")
+            .into()),
         }
     }
 }

@@ -15,7 +15,7 @@
 
 use super::flow::Settled;
 use super::value::Value;
-use super::{Mooring, Shell};
+use super::{Error, Mooring, Shell};
 use crate::ty::Site;
 use crate::typecheck::builtins::{
     BuiltinDiagnostic, BuiltinTypeRule, Convention, Decl, LANGUAGE_CONSTANTS, Manifest,
@@ -153,10 +153,11 @@ impl BuiltinEntry {
             (BuiltinBody::Boundary(f), Some(site)) => f(args, site, mooring, shell),
             // Checking gives every boundary call a frozen site; only a host calling
             // a door outside a checked program reaches this.
-            (BuiltinBody::Boundary(_), None) => Err(crate::shell::runtime::sig(format!(
+            (BuiltinBody::Boundary(_), None) => Err(Error::new(format!(
                 "{}: reached without a checked site",
                 self.decl.name
-            ))),
+            ))
+            .into()),
         }?;
         // The declared scheme, not the body, is authoritative: asserted in
         // debug, coerced to `Unit` in release.

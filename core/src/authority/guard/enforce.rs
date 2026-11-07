@@ -14,45 +14,25 @@ use crate::authority::policy::{
     ShellVerb, Withheld,
 };
 use crate::authority::remedy::{self, FsList};
+use crate::error::Error;
 use crate::fact::{Check, Resource};
 use crate::path::{LexicalPath, MatchedBy, Trace};
 use crate::text::code;
 use std::fmt::{self, Display};
-
-/// The guard's diagnostic; the shell gives it runtime status and control flow.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Refusal {
-    pub message: String,
-    pub hint: Option<String>,
-}
-
-impl Refusal {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            hint: None,
-        }
-    }
-
-    fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
-        self
-    }
-}
 
 /// A refused exec or fs check: the fact the trail keeps, and the refusal the
 /// caller raises.  An admitted check is never recorded: a trail of every
 /// permitted read says nothing an auditor asked.
 pub(crate) struct Denial {
     pub check: Check,
-    pub error: Refusal,
+    pub error: Error,
 }
 
 impl Denial {
     fn new(
         resource: Resource,
         fields: impl IntoIterator<Item = (&'static str, String)>,
-        error: Refusal,
+        error: Error,
     ) -> Self {
         let fields = fields
             .into_iter()
@@ -126,14 +106,14 @@ pub(crate) fn check_exec(
     baseline: &Baseline,
     shown: &str,
     program: Program,
-) -> Result<Admitted, Denial> {
+) -> Result<Admitted, Box<Denial>> {
     let tool = match program {
         Program::Tool(name) => Some(name),
         Program::File { .. } => None,
     };
     grants.admit(baseline, program).map_err(|why| {
         let error = exec_error(grants, baseline, shown, tool, &why);
-        exec_denial(shown, &why, error)
+        Box::new(exec_denial(shown, &why, error))
     })
 }
 
@@ -143,10 +123,10 @@ pub(crate) fn check_exec_name(
     baseline: &Baseline,
     shown: &str,
     trace: &Trace,
-) -> Result<(), Denial> {
+) -> Result<(), Box<Denial>> {
     grants.admit_name(baseline, trace).map_err(|why| {
         let error = exec_error(grants, baseline, shown, None, &why);
-        exec_denial(shown, &why, error)
+        Box::new(exec_denial(shown, &why, error))
     })
 }
 
@@ -157,20 +137,20 @@ fn exec_error(
     shown: &str,
     tool: Option<&str>,
     why: &ExecDenial,
-) -> Refusal {
+) -> Error {
     let head = format!("command '{shown}' denied by active grant");
     match why {
         ExecDenial::Run(Withheld::MissingAllowance) => match nested(grants.exec()) {
-            Some(nested) => Refusal::new(format!(
+            Some(nested) => Error::new(format!(
                 "{head}: some layer's exec `allow` list does not let it run"
             ))
             .with_hint(nested),
-            None => Refusal::new(format!(
+            None => Error::new(format!(
                 "{head}: nothing in the grant's exec `allow` list lets it run"
             ))
             .with_hint(remedy::add_to_exec()),
         },
-        ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Refusal::new(format!(
+        ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Error::new(format!(
             "{head}: {}",
             excluded(
                 format_args!("'{shown}'"),
@@ -179,7 +159,7 @@ fn exec_error(
             )
         ))
         .with_hint(remedy::remove_the_exclusion()),
-        ExecDenial::Read(why) => Refusal::new(format!(
+        ExecDenial::Read(why) => Error::new(format!(
             "{head}: {}",
             read_cause(baseline, shown, tool, why)
         ))
@@ -227,7 +207,7 @@ fn read_hint(why: &Withheld<FsDeny>, nested: Option<&str>) -> String {
     }
 }
 
-fn exec_denial(shown: &str, why: &ExecDenial, error: Refusal) -> Denial {
+fn exec_denial(shown: &str, why: &ExecDenial, error: Error) -> Denial {
     let deny = match why {
         ExecDenial::Run(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
         ExecDenial::Read(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
@@ -240,9 +220,9 @@ fn exec_denial(shown: &str, why: &ExecDenial, error: Refusal) -> Denial {
 
 /// Refuse a name the host would read as a DOS device (Windows only).  No grant
 /// can admit it: it names no object to judge.
-pub(crate) fn check_device_name(path: &LexicalPath) -> Result<(), Refusal> {
+pub(crate) fn check_device_name(path: &LexicalPath) -> Result<(), Error> {
     path.reserved_device_refusal()
-        .map_or(Ok(()), |m| Err(Refusal::new(m)))
+        .map_or(Ok(()), |m| Err(Error::new(m)))
 }
 
 /// Name a refusal by the request, never by a withheld link's target.
@@ -285,7 +265,7 @@ pub(crate) fn fs_denial(
                 .to_string(),
         ),
     };
-    let error = Refusal::new(format!("fs {name} {verdict}: {said}")).with_hint(hint);
+    let error = Error::new(format!("fs {name} {verdict}: {said}")).with_hint(hint);
     let fields = [("op", name.to_string()), ("path", path)]
         .into_iter()
         .chain(detail);
@@ -294,11 +274,11 @@ pub(crate) fn fs_denial(
 
 /// Refuse a verb or builtin some layer of the stack withholds; `who` names it
 /// in the refusal.  Silence permits.
-pub(crate) fn check_flag(grants: &GrantStack, flag: Flag, who: &str) -> Result<(), Refusal> {
+pub(crate) fn check_flag(grants: &GrantStack, flag: Flag, who: &str) -> Result<(), Error> {
     if grants.permits(flag) {
         return Ok(());
     }
-    Err(Refusal::new(match flag {
+    Err(Error::new(match flag {
         Flag::Shell(ShellVerb::Detach) => format!(
             "{who}: an active grant withholds it, so nothing here may outlive this session. \
              Would `spawn` do, since it ends when the session does?"

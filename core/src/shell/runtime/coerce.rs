@@ -1,17 +1,8 @@
-//! Error constructors and the decoders of a builtin's arguments.
+//! The decoders of a builtin's arguments.
 
 use super::{Break, Closure, Error, HandleInner, List, Map, Value};
 
-pub fn sig(message: impl Into<String>) -> Break {
-    Error::new(message.into()).into()
-}
-
-pub(crate) fn sig_hint(message: impl Into<String>, hint: impl Into<String>) -> Break {
-    Error::new(message.into()).with_hint(hint.into()).into()
-}
-
-/// Each decoder fails with a bare `Error`: a shape mismatch is never an exit,
-/// and the capability decoder folds it straight into `PolicyError`.
+/// Each decoder fails with a bare `Error`: a shape mismatch is never an exit.
 impl Value {
     /// The one wording of a shape mismatch.
     fn expected(&self, ctx: &str, want: &str) -> Error {
@@ -109,5 +100,6 @@ pub(crate) fn decode_utf8_strict(
     context: &str,
     hint: &str,
 ) -> Result<String, Break> {
-    String::from_utf8(bytes).map_err(|e| sig_hint(format!("{context}: {e}"), hint))
+    String::from_utf8(bytes)
+        .map_err(|e| Error::new(format!("{context}: {e}")).with_hint(hint).into())
 }

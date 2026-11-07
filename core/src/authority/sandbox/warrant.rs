@@ -861,7 +861,7 @@ mod tests {
                 &crate::process::DurableRoot::default().child(),
             );
             launch.stdin(crate::process::StdioSpec::Null);
-            Ok::<_, super::super::Refusal>(launch)
+            Ok::<_, crate::error::Error>(launch)
         };
         let ran = |launch: crate::process::Launch| -> Output {
             launch.output().expect("the prepared warrant spawns").into()

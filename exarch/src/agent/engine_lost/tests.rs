@@ -51,13 +51,18 @@ fn the_sentence_carries_a_path_and_nothing_else() {
 /// goes into a window does not.  The split is the whole design.
 #[test]
 fn the_logged_form_keeps_what_the_sentence_drops() {
-    let lost = EngineLost::running(&Severed::Refused("protocol version 9".into()), &run_dir());
+    let refused = ral_core::error::Error::new("protocol version 9").with_hint("upgrade the engine");
+    let lost = EngineLost::running(
+        &Severed::Refused(ral_core::protocol::WireError::of(&refused)),
+        &run_dir(),
+    );
     let logged = lost.logged();
     assert!(logged.starts_with(&lost.to_string()), "{logged}");
     assert!(
         logged.contains("protocol version 9"),
         "the engine's own refusal is worth keeping somewhere: {logged}"
     );
+    assert!(logged.contains("hint: upgrade the engine"), "{logged}");
     assert!(
         logged.contains("engine-refused") && !lost.to_string().contains("engine-refused"),
         "the code left the window for the record, not the bin: {logged}"

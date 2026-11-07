@@ -4,5 +4,5 @@
 mod enforce;
 
 pub(crate) use enforce::{
-    Denial, Refusal, check_device_name, check_exec, check_exec_name, check_flag, fs_denial,
+    Denial, check_device_name, check_exec, check_exec_name, check_flag, fs_denial,
 };

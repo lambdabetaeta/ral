@@ -80,8 +80,8 @@ pub use walk::AdmittedWalk;
 // `sig` rides along with the coercions: both sit below the builtins and the
 // capability layer, which reach them without importing each other.
 mod coerce;
-pub(crate) use coerce::{decode_utf8_strict, sig_hint};
-pub use coerce::{settings_map, sig};
+pub(crate) use coerce::decode_utf8_strict;
+pub use coerce::settings_map;
 
 pub use state::modules::Modules;
 

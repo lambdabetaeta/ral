@@ -37,12 +37,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::authority::policy::FsAllow;
-use crate::authority::sandbox::Refusal;
 use crate::authority::sandbox::carve;
-use crate::authority::sandbox::{FsLists, SandboxProjection};
+use crate::authority::sandbox::{FsLists, SandboxProjection, unavailable};
+use crate::error::{Error, io_message};
 use crate::path::{Installing, Located, RealPath, Walked, shown};
-use crate::process::Launch;
 use crate::process::cancel::Scope;
+use crate::process::{Launch, Unstarted};
 use crate::sync::LockExt as _;
 
 use super::appcontainer::{
@@ -83,7 +83,7 @@ fn cell() -> &'static Mutex<Option<SessionSandbox>> {
 }
 
 impl SessionSandbox {
-    fn create() -> Result<Self, Refusal> {
+    fn create() -> Result<Self, Unstarted> {
         let dacl = DaclManager::new()?;
         Ok(Self {
             dacl,
@@ -99,7 +99,7 @@ impl SessionSandbox {
     /// name, and the ledger entry precedes the create so a crash between them
     /// leaves recovery deleting a profile that may not exist, never a
     /// registered profile the ledger does not know.
-    fn profile_sid(&mut self, key: ProjectionKey) -> Result<Arc<OwnedContainerSid>, Refusal> {
+    fn profile_sid(&mut self, key: ProjectionKey) -> Result<Arc<OwnedContainerSid>, Unstarted> {
         let vacant = match self.projections.entry(key) {
             Entry::Occupied(known) => return Ok(known.get().sid()),
             Entry::Vacant(vacant) => vacant,
@@ -109,7 +109,7 @@ impl SessionSandbox {
         let name = profile_name(index);
         self.dacl.record_profile(&name)?;
         let profile = AppContainerProfile::create_or_reuse(&name)
-            .map_err(|e| io_refusal("sandbox: create AppContainer profile", &e))?;
+            .map_err(|e| Error::new(io_message("sandbox: create AppContainer profile", &e)))?;
         Ok(vacant.insert(profile).sid())
     }
 }
@@ -119,10 +119,10 @@ impl SessionSandbox {
 /// an `AppContainer` with no network capability cannot open a socket.
 fn ensure_network_caps(
     slot: &mut Option<Arc<CapabilitySids>>,
-) -> Result<Arc<CapabilitySids>, Refusal> {
+) -> Result<Arc<CapabilitySids>, Error> {
     if slot.is_none() {
         let caps = CapabilitySids::build()
-            .map_err(|e| io_refusal("sandbox: derive network capability SIDs", &e))?;
+            .map_err(|e| Error::new(io_message("sandbox: derive network capability SIDs", &e)))?;
         *slot = Some(Arc::new(caps));
     }
     Ok(Arc::clone(slot.as_ref().expect("network caps built above")))
@@ -179,7 +179,7 @@ pub(crate) fn confine(
     projection: &SandboxProjection,
     program_image: Option<&RealPath>,
     cancel: &Scope,
-) -> Result<(), Refusal> {
+) -> Result<(), Unstarted> {
     // Traced in three parts, each a different kind of cost: minting the
     // profile, ensuring the grants, and proving the exclusions.
     #[cfg(debug_assertions)]
@@ -211,8 +211,8 @@ pub(crate) fn confine(
         .map(|&p| p.clone())
         .collect();
     let exclusions: Vec<_> = lists.deny.iter().map(|d| &d.grant().real).collect();
-    let readwrite = carve::carve(&readwrite, &exclusions)?;
-    let mut readonly = carve::carve(&readonly, &exclusions)?;
+    let readwrite = carve::carve(&readwrite, &exclusions).map_err(Error::new)?;
+    let mut readonly = carve::carve(&readonly, &exclusions).map_err(Error::new)?;
     readonly.whole.retain(|p| !readwrite.whole.contains(p));
     readonly.held.retain(|entry| {
         !readwrite.whole.contains(entry.real())
@@ -354,14 +354,14 @@ fn ensure_grant(
     pin: &FrozenPin,
     kind: GrantKind,
     cancel: &Scope,
-) -> Result<String, Refusal> {
+) -> Result<String, Unstarted> {
     let name = dacl::fs_capability_name(pin.name(), kind);
     if !fs_cap_sids.contains_key(&name) {
         let sid = OwnedCapabilitySid::from_capability_name(&name)
-            .map_err(|e| io_refusal("sandbox: derive fs capability SID", &e))?;
+            .map_err(|e| Error::new(io_message("sandbox: derive fs capability SID", &e)))?;
         let sid_string = sid
             .sid_string()
-            .map_err(|e| io_refusal("sandbox: fs capability SID string", &e))?;
+            .map_err(|e| Error::new(io_message("sandbox: fs capability SID string", &e)))?;
         dacl::ensure_frozen_grant(pin, &sid_string, kind, cancel)?;
         fs_cap_sids.insert(name.clone(), Arc::new(sid));
     }
@@ -375,7 +375,7 @@ fn ensure_grant(
 /// path it would narrow to one drive and stamp that whole.  An exclusion of
 /// the root is already no exclusion (`deny_all`), and never reaches here.
 /// Run before anything is stamped, so the guard alone judges.
-fn positions<'a>(region: &'a [FsAllow], lists: &FsLists) -> Result<Vec<&'a RealPath>, Refusal> {
+fn positions<'a>(region: &'a [FsAllow], lists: &FsLists) -> Result<Vec<&'a RealPath>, Error> {
     let positions: Option<Vec<_>> = region.iter().map(FsAllow::real).collect();
     positions.ok_or_else(|| {
         let allows = if lists.deny.is_empty() {
@@ -383,7 +383,7 @@ fn positions<'a>(region: &'a [FsAllow], lists: &FsLists) -> Result<Vec<&'a RealP
         } else {
             "every path except some exclusions"
         };
-        Refusal::Unavailable(format!(
+        unavailable(format!(
             "this grant allows {allows}, which Windows cannot enforce: a sandboxed program \
              reaches only folders stamped for it, and ral will not stamp every drive; grant \
              the folders the program needs instead"
@@ -401,12 +401,12 @@ fn positions<'a>(region: &'a [FsAllow], lists: &FsLists) -> Result<Vec<&'a RealP
 /// Judged on the frozen real paths the stamps key on, under the deny reading
 /// of names, which takes every spelling a filesystem could match as the same:
 /// a near miss is refused, never let through.
-fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Result<(), Refusal> {
+fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Result<(), Error> {
     for d in denied {
         for g in granted {
             if d.contains_folded(g) || g.contains_folded(d) {
                 let (d, g) = (shown(d.as_path()), shown(g.as_path()));
-                return Err(Refusal::Unavailable(format!(
+                return Err(unavailable(format!(
                     "this command is allowed '{g}' and '{d}' is excluded, which Windows \
                      cannot enforce together: a sandbox can be kept out of what lies beneath \
                      an allowance, but not out of the allowance itself or what holds it. \
@@ -488,24 +488,20 @@ pub(crate) fn teardown() {
     );
 }
 
-fn io_refusal(context: &str, e: &std::io::Error) -> Refusal {
-    Refusal::Launch(format!("{context}: {e}"))
-}
-
-/// A cancel mid-stamp is not a sandbox failure, so it stays a cancellation
-/// and never reads as `sandbox: fs grant failed`; nor does a redirected
+/// A cancel mid-stamp is not a sandbox failure, so it stays a stop and
+/// never reads as `sandbox: fs grant failed`; nor does a redirected
 /// allowance, which says what it is; nor does a position that is not Unicode;
 /// and an exclusion the token could still reach is confinement this host
 /// cannot establish.
-impl From<DaclError> for Refusal {
+impl From<DaclError> for Unstarted {
     fn from(e: DaclError) -> Self {
         match e {
-            DaclError::Cancelled(cause) => Self::Cancelled(cause),
+            DaclError::Cancelled(stop) => Self::Stopped(stop),
             e @ (DaclError::Redirected { .. } | DaclError::NotUnicode(_)) => {
-                Self::Launch(e.to_string())
+                Self::Refused(Error::new(e.to_string()))
             }
-            e @ DaclError::Reachable { .. } => Self::Unavailable(e.to_string()),
-            e => Self::Launch(format!("sandbox: fs grant failed: {e}")),
+            e @ DaclError::Reachable { .. } => Self::Refused(unavailable(e)),
+            e => Self::Refused(Error::new(format!("sandbox: fs grant failed: {e}"))),
         }
     }
 }

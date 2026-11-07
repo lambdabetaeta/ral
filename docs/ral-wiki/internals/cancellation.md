@@ -276,6 +276,11 @@ in force, at:
 - a base's **closing poll** (`final_poll`), the first half of its return
   clause: a run, a worker and a stage read their node once more after the
   body settled, so a stop that landed after the last poll is not lost. The
+  join supersedes the body's ending unless that outranks it in the one order
+  of endings (`Break::rank`, the pipeline fold's), or is the join itself,
+  located; an `exit` has already left. So a reader-gone join, which a
+  collector above consumes, supersedes only a value: a stage whose cleanup
+  halted keeps the halt as its verdict. The
   run's wall is disarmed first, and a firing already claimed is waited for on
   its own `fired` flag, so nothing fires after this poll.
 

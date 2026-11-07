@@ -15,8 +15,9 @@ mod tests;
 
 #[cfg(unix)]
 use super::util::check_arity;
+use crate::error::Error;
 use crate::shell::evaluator::machine;
-use crate::shell::runtime::{Closure, Mooring, Settled, Shell, TitlePolicy, Value, sig, sig_hint};
+use crate::shell::runtime::{Closure, Mooring, Settled, Shell, TitlePolicy, Value};
 pub(crate) use birth::exit_brood;
 use birth::{Birth, spawn_child};
 use eliminate::join;
@@ -52,9 +53,9 @@ pub(crate) fn spawn_form(
     shell: &mut Shell,
 ) -> Settled<Value> {
     if title.is_none() && mooring.worker_title == TitlePolicy::Required {
-        return Err(sig(
-            "spawn: this host requires a title: spawn \"what it does\" { … }",
-        ));
+        return Err(
+            Error::new("spawn: this host requires a title: spawn \"what it does\" { … }").into(),
+        );
     }
     let closure = body.expect_thunk("spawn")?;
     Ok(Value::Handle(Box::new(spawn_child(
@@ -69,27 +70,28 @@ pub(crate) fn spawn_form(
 /// line, since it is all a person reading a listing or a `ps` has to go on.
 pub(crate) fn legible_title(arg: &Value, verb: &str) -> Settled<String> {
     let Value::String(s) = arg else {
-        return Err(sig(format!(
+        return Err(Error::new(format!(
             "{verb}: the title must be a String, got {}",
             arg.type_name()
-        )));
+        ))
+        .into());
     };
     let title = s.trim();
     let hint = "say what the work is in a few words, on one line: \"build the docs\"";
     if title.is_empty() {
-        return Err(sig_hint(
-            format!("{verb}: the title must be a non-empty single line, got an empty one"),
-            hint,
-        ));
+        return Err(Error::new(format!(
+            "{verb}: the title must be a non-empty single line, got an empty one"
+        ))
+        .with_hint(hint)
+        .into());
     }
     if title.contains('\n') {
-        return Err(sig_hint(
-            format!(
-                "{verb}: the title must be a non-empty single line, got {} lines",
-                title.lines().count()
-            ),
-            hint,
-        ));
+        return Err(Error::new(format!(
+            "{verb}: the title must be a non-empty single line, got {} lines",
+            title.lines().count()
+        ))
+        .with_hint(hint)
+        .into());
     }
     Ok(title.to_string())
 }

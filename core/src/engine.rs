@@ -10,6 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::data::FOValue;
+use crate::error::Error;
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, RootCause, Scope, ScopeNode};
 use crate::protocol::channel::WriteError;
@@ -34,10 +35,10 @@ pub struct EngineInstaller {
     /// engine: a root and a child engine each derive their own, an in-process
     /// child shares its parent's. An `Err` refuses the attach, in the
     /// recipe's own words.
-    pub runtime: fn(&EngineSpec) -> Result<Runtime, String>,
+    pub runtime: fn(&EngineSpec) -> Result<Runtime, Error>,
     /// The root-only recipe over a root session: libraries, hints, seeds,
     /// ledgers. An `Err` refuses the attach, in the recipe's own words.
-    pub root: fn(&Root, &mut Shell) -> Result<(), String>,
+    pub root: fn(&Root, &mut Shell) -> Result<(), Error>,
     /// How a seeded or adopted child's grant becomes a ceiling. A field and
     /// not a registered hook: core has no base-tag lexicon to resolve a grant
     /// against, so a host that boots an engine must state the policy its
@@ -86,16 +87,16 @@ fn resolve_installer<'a>(
     installers: &'a [EngineInstaller],
     proto_version: u32,
     installer: &str,
-) -> Result<&'a EngineInstaller, String> {
+) -> Result<&'a EngineInstaller, Error> {
     if proto_version != PROTOCOL_VERSION {
-        return Err(format!(
+        return Err(Error::new(format!(
             "protocol version mismatch (front-end {proto_version}, engine {PROTOCOL_VERSION})"
-        ));
+        )));
     }
     installers
         .iter()
         .find(|i| i.tag == installer)
-        .ok_or_else(|| format!("unknown builtin installer '{installer}'"))
+        .ok_or_else(|| Error::new(format!("unknown builtin installer '{installer}'")))
 }
 
 impl Engine {
@@ -110,14 +111,14 @@ impl Engine {
     pub(crate) fn boot(
         installers: &'static [EngineInstaller],
         attach: &Attach,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Error> {
         let spec = &attach.engine;
         let installer = resolve_installer(installers, spec.proto_version, &spec.installer)?;
         let runtime = Arc::new((installer.runtime)(spec)?);
         let shell = match &attach.origin {
             Origin::Root(root) => {
-                let cwd =
-                    CwdPath::new(root.cwd.native().to_path_buf()).map_err(|e| e.to_string())?;
+                let cwd = CwdPath::new(root.cwd.native().to_path_buf())
+                    .map_err(|e| Error::new(e.to_string()))?;
                 let mut shell = Shell::root(Arc::clone(&runtime), cwd);
                 crate::shell::boot::seed_host_env(&mut shell);
                 (installer.root)(root, &mut shell)?;
@@ -326,8 +327,8 @@ mod tests {
         ) {
             Ok(_) => panic!("unknown tag must be refused"),
             Err(msg) => {
-                assert!(msg.contains("unknown builtin installer"));
-                assert!(msg.contains("no-such-installer"));
+                assert!(msg.describe().contains("unknown builtin installer"));
+                assert!(msg.describe().contains("no-such-installer"));
             }
         }
     }
@@ -336,7 +337,7 @@ mod tests {
     fn resolve_installer_refuses_protocol_mismatch_before_tag_lookup() {
         match resolve_installer(&crate::carrier::testkit::BARE, PROTOCOL_VERSION + 1, "bare") {
             Ok(_) => panic!("a mismatched protocol version must be refused"),
-            Err(msg) => assert!(msg.contains("protocol version mismatch")),
+            Err(msg) => assert!(msg.describe().contains("protocol version mismatch")),
         }
     }
 
@@ -370,6 +371,6 @@ mod tests {
         let Err(why) = Engine::boot(&crate::carrier::testkit::BARE, &attach) else {
             panic!("a seal that is not a frame must refuse the attach");
         };
-        assert!(why.contains("sealed bequest"), "{why}");
+        assert!(why.describe().contains("sealed bequest"), "{why}");
     }
 }

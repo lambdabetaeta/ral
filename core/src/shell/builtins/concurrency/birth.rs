@@ -2,13 +2,14 @@
 //! rule a gather and a worker's base share: join the brood, or end it.
 
 use super::join;
+use crate::error::Error;
 use crate::fact::{Reason, Worker};
 use crate::io::{Sink, Streams, new_buffer};
 use crate::process::{DurableRoot, Scope};
 use crate::shell::runtime::{
-    Break, Brood, BroodGuard, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed,
-    Error, HandleInner, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, Value, WatchEvent,
-    WorkerEntry, WorkerId, sig,
+    Brood, BroodGuard, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed,
+    HandleInner, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, Value, WatchEvent,
+    WorkerEntry, WorkerId,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,7 +52,7 @@ where
         .local
         .workers
         .reserve(mooring.worker_cap)
-        .map_err(|err| sig(format!("{verb}: {err}")))?;
+        .map_err(|err| Error::new(format!("{verb}: {err}")))?;
 
     let Cradle { under, brood } = &shell.local.cradle;
     let node = under.child();
@@ -157,9 +158,9 @@ where
     );
     match place {
         Birthplace::Gather(brood) => brood.enrol(handle.clone()).map_err(|EnrolClosed| {
-            Break::Error(Error::new(format!(
+            Error::new(format!(
                 "{verb}: the enclosing gather has ended; the new worker was cancelled"
-            )))
+            ))
         })?,
         // After the reservation, never before: a cap-refused spawn observes no
         // birth, so no phantom worker reaches an orphan join.

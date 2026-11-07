@@ -2,8 +2,9 @@
 //! `exit`, `surface`, `warn`, and `ask`.
 
 use crate::data::{FOValue, datum::Datum};
+use crate::error::{Error, Prov};
 use crate::fact::{ErrorRecord, Failure};
-use crate::shell::runtime::{Break, Error, Escape, Mooring, Settled, Shell, Value, sig};
+use crate::shell::runtime::{Break, Escape, Mooring, Settled, Shell, Value};
 use crate::site::{Silent, site};
 
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
@@ -20,49 +21,53 @@ pub(super) fn builtin_reset(_args: &[Value], shell: &mut Shell) -> Settled<Value
     Ok(Value::Unit)
 }
 
-fn exit_status(n: i64) -> Result<u8, Break> {
+fn exit_status(n: i64) -> Result<u8, Error> {
     u8::try_from(n).map_err(|_| {
-        sig(format!(
+        Error::new(format!(
             "exit: status {n} is outside 0..=255: an exit status is one byte"
         ))
     })
 }
 
-fn error_record(args: &[Value], cmd: &str) -> Result<ErrorRecord, Break> {
+fn error_record(args: &[Value], cmd: &str) -> Result<ErrorRecord, Error> {
     let value = args
         .first()
-        .ok_or_else(|| sig(format!("{cmd}: expected an error record")))?;
-    let data = FOValue::try_from(value).map_err(|_| sig(format!("{cmd}: expected plain data")))?;
-    ErrorRecord::decode(&data).map_err(|why| sig(format!("{cmd}: {why}")))
+        .ok_or_else(|| Error::new(format!("{cmd}: expected an error record")))?;
+    let data =
+        FOValue::try_from(value).map_err(|_| Error::new(format!("{cmd}: expected plain data")))?;
+    ErrorRecord::decode(&data).map_err(|why| Error::new(format!("{cmd}: {why}")))
 }
 
-fn reraise(args: &[Value]) -> Result<Error, Break> {
+fn reraise(args: &[Value]) -> Result<Break, Error> {
     let record = error_record(args, "raise")?;
     match record.reason().failure() {
         Some(Failure::Exited(0)) => {
-            return Err(sig(
+            return Err(Error::new(
                 "raise: `exited 0` is success, not a failure; use `return`",
             ));
         }
         Some(Failure::Signaled(n)) if !(1..=127).contains(n) => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "raise: `signaled {n}` names no signal; signals are 1 to 127"
             )));
         }
         _ => {}
     }
-    Ok(Error::from_record(record))
+    Ok(Break::from(Error::new(record.reason))
+        .claimed_by(|| Prov::Resolved(Box::new((record.frame, record.site)))))
 }
 
 pub(super) fn builtin_fail(args: &[Value]) -> Break {
     match args.first().and_then(|v| v.as_str("fail").ok()) {
-        Some(message) => Error::raised(message).into(),
-        None => sig("fail: expected a String; use `raise $e` to re-raise an error record"),
+        Some(message) => Error::new(message).into(),
+        None => {
+            Error::new("fail: expected a String; use `raise $e` to re-raise an error record").into()
+        }
     }
 }
 
 pub(super) fn builtin_raise(args: &[Value]) -> Break {
-    reraise(args).map_or_else(|b| b, Break::Error)
+    reraise(args).unwrap_or_else(Break::from)
 }
 
 pub(super) fn builtin_describe(args: &[Value]) -> Settled<Value> {
@@ -73,10 +78,7 @@ pub(super) fn builtin_describe(args: &[Value]) -> Settled<Value> {
 
 pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
     let Value::Int(n) = &args[0] else {
-        return Err(sig(format!(
-            "exit: expected Int, got {}",
-            args[0].type_name()
-        )));
+        return Err(Error::new(format!("exit: expected Int, got {}", args[0].type_name())).into());
     };
     Err(Break::Escape(Escape::Exit(exit_status(*n)?)))
 }
@@ -282,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn reraised_exited_record_uses_the_session_table_and_situational_hint_wins() {
+    fn reraised_exited_record_uses_the_session_table_after_the_stored_hint() {
         let mut shell = crate::test_helper::core_shell();
         shell.set_exit_hints(ExitHints::from_text("tool 3 check the input"));
         let record = ErrorRecord::new(tool(Failure::Exited(3)), "wrapper".into(), site());
@@ -295,11 +297,12 @@ mod tests {
             .with_context("outer")
             .discarded(12);
         let rendered = decorated.render(shell.sources(), None, shell.exit_hints());
-        assert!(rendered.contains("check this invocation"), "{rendered}");
-        assert!(!rendered.contains("check the input"), "{rendered}");
+        let stored = rendered.find("check this invocation").expect(&rendered);
+        let advice = rendered.find("check the input").expect(&rendered);
+        assert!(stored < advice, "{rendered}");
         let raised = reraised(&decorated.record(&shell));
-        assert!(raised.hints().is_empty() && raised.context.is_none());
-        assert_eq!(raised.unwound, crate::shell::runtime::Unwound::default());
+        assert!(raised.hints().is_empty() && raised.context().is_none());
+        assert_eq!(raised.unwound(), crate::shell::runtime::Unwound::default());
         assert!(
             raised
                 .render(shell.sources(), None, shell.exit_hints())

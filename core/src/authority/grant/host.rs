@@ -1,8 +1,9 @@
 //! The host's system reads, as a [`Baseline`].
 
-use super::freeze::{Home, PolicyError};
+use super::freeze::Home;
 use super::toolchains;
 use crate::authority::policy::{Baseline, FsAllow};
+use crate::error::Error;
 
 impl Baseline {
     /// [`of_host`](Self::of_host) with the process's home given, by which
@@ -11,7 +12,7 @@ impl Baseline {
     ///
     /// # Errors
     /// As [`of_env`](Self::of_env).
-    pub(crate) fn of_home(home: Option<&str>) -> Result<Self, PolicyError> {
+    pub(crate) fn of_home(home: Option<&str>) -> Result<Self, Error> {
         Self::of_env(crate::host::var, home)
     }
 
@@ -25,7 +26,7 @@ impl Baseline {
     pub(crate) fn of_env(
         env: impl Fn(&str) -> Option<String>,
         home: Option<&str>,
-    ) -> Result<Self, PolicyError> {
+    ) -> Result<Self, Error> {
         let home = home.map(Home::of).transpose()?;
         let reads = toolchains::system_reads_in(env, home.as_ref())?;
         Ok(reads

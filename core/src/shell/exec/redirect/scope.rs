@@ -5,10 +5,11 @@
 //! closed in `machine::close_redirects`, over the machine's own `Env`.
 
 use super::{OpenedWrite, Prior, install_stdin_redirect, open_write};
+use crate::error::io_message;
 use crate::fact::Write;
 use crate::io::Sink;
 use crate::ir::{Redirects, StderrTarget, WriteMode};
-use crate::shell::runtime::{Bytes, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
+use crate::shell::runtime::{Bytes, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 use crate::source::Span;
 
 /// What the body's result means for the writes this frame staged.
@@ -100,7 +101,7 @@ fn settle(
                 Ok(()) => (WriteOutcome::Committed, true),
                 Err(e) => {
                     if commit_err.is_ok() {
-                        commit_err = Err(crate::shell::runtime::Error::io(&path, &e).into());
+                        commit_err = Err(Error::new(io_message(&path, &e)).into());
                     }
                     (WriteOutcome::Failed, false)
                 }

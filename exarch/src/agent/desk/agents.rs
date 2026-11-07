@@ -9,9 +9,11 @@ use crate::enquiry::{Deposit, ForkClaim, Message, Name, Selection, Start};
 use crate::provider::Provider;
 use crate::record::{Born, ChildStatus, Memory};
 use crate::shell_eval;
+use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
-use ral_core::shell::runtime::Error;
+use ral_core::error::Error;
+use ral_core::shell::runtime::no_desk;
 use std::sync::Arc;
 
 use super::{DeskAct, ExarchDesk};
@@ -19,7 +21,7 @@ use super::{DeskAct, ExarchDesk};
 impl ExarchDesk {
     /// Construction and adoption both run on the parent's thread.
     pub(super) fn launch(&self, Start { spec, fork }: Start) -> Result<FOValue, Error> {
-        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(no_desk)?;
         let call = &self.call;
         body.log
             .check_available()
@@ -76,8 +78,7 @@ impl ExarchDesk {
     /// across the wire.  The engine narrows by the bequest's grant on either
     /// engine.
     fn fork_engine(&self, fork: ForkClaim) -> Result<Engine, Error> {
-        let refused =
-            |why: String| Error::new(format!("`` exarch-agents `start `` refused: {why}"));
+        let refused = |why: Error| why.with_context("`` exarch-agents `start `` refused");
         match (&self.call.kind, fork) {
             (EngineKind::Identity(parent), ForkClaim::Parked(id)) => parent
                 .adopt_parked(id)
@@ -86,17 +87,15 @@ impl ExarchDesk {
             (EngineKind::Wire { engine }, ForkClaim::Sealed(seed)) => {
                 self.make_engine(engine, seed).map_err(refused)
             }
-            (EngineKind::Identity(_), ForkClaim::Sealed(_)) => Err(refused(
+            (EngineKind::Identity(_), ForkClaim::Sealed(_)) => Err(refused(Error::new(
                 "this host runs its children in its own process, so the fork must be `parked \
-                 <nursery id>`: a sealed bequest names a wire this desk does not have"
-                    .into(),
-            )),
-            (EngineKind::Wire { .. }, ForkClaim::Parked(_)) => Err(refused(
+                 <nursery id>`: a sealed bequest names a wire this desk does not have",
+            ))),
+            (EngineKind::Wire { .. }, ForkClaim::Parked(_)) => Err(refused(Error::new(
                 "this host makes its children over a wire, so the fork must be `sealed <bytes>`: \
                  a session that says it is parked in process is naming a nursery this desk does \
-                 not have"
-                    .into(),
-            )),
+                 not have",
+            ))),
         }
     }
 
@@ -107,25 +106,32 @@ impl ExarchDesk {
         &self,
         engine: &ral_core::protocol::EngineSpec,
         seal: ral_core::seed::Sealed,
-    ) -> Result<Engine, String> {
+    ) -> Result<Engine, Error> {
         let s = &self.call;
-        let factory = s.fleet.launch.factory.as_ref().ok_or(
-            "this wire session has no engine factory: a construction bug, since a fuelled wire \
-             launch is refused at Fleet::found without one",
-        )?;
+        let factory = s.fleet.launch.factory.as_ref().ok_or_else(|| {
+            Error::new(
+                "this wire session has no engine factory: a construction bug, since a fuelled \
+                 wire launch is refused at Fleet::found without one",
+            )
+        })?;
         let stream = factory
             .engine()
-            .map_err(|why| format!("could not make a helper engine: {why}"))?;
+            .map_err(|why| Error::new(format!("could not make a helper engine: {why}")))?;
         let transport = ral_core::carrier::WireTransport::adopt(
             stream,
             ral_core::protocol::channel::Liveness::default(),
         )
-        .map_err(|e| format!("could not adopt the helper engine's wire: {e}"))?;
+        .map_err(|e| Error::new(format!("could not adopt the helper engine's wire: {e}")))?;
         Engine::wire(
             transport,
             ral_core::protocol::Attach::child(engine.clone(), seal),
         )
-        .map_err(|lost| crate::agent::EngineLost::starting(&lost, s.handle.run_dir()).to_string())
+        .map_err(|lost| match lost {
+            Severed::Refused(why) => why.into_error(),
+            lost => Error::new(
+                crate::agent::EngineLost::starting(&lost, s.handle.run_dir()).to_string(),
+            ),
+        })
     }
 
     fn spawn_child(
@@ -168,7 +174,7 @@ impl ExarchDesk {
     }
 
     pub(super) fn agent_stop(&self, name: &str) -> Result<FOValue, Error> {
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let body = self.loan.get().ok_or_else(no_desk)?;
         let call = &self.call;
         let verdict = match call.fleet.registry.resolve(name) {
             None => Ok(Said::new(
@@ -199,7 +205,7 @@ impl ExarchDesk {
     }
 
     pub(super) fn agent_dismiss(&self, name: &str) -> Result<FOValue, Error> {
-        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(no_desk)?;
         let verdict = match body.nursery.named(name).cloned() {
             Some(helper) => {
                 let ended = !body.nursery.holds(helper.id());
@@ -222,7 +228,7 @@ impl ExarchDesk {
     }
 
     pub(super) fn message(&self, Message { to: name, text }: Message) -> Result<FOValue, Error> {
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let body = self.loan.get().ok_or_else(no_desk)?;
         let call = &self.call;
         let verdict = match call.fleet.registry.resolve(&name) {
             None => Err(Said::new(
@@ -301,7 +307,7 @@ impl ExarchDesk {
 
     /// The loop takes the staged reply after this batch returns.
     pub(super) fn agent_reply(&self, value: FOValue) -> Result<FOValue, Error> {
-        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(no_desk)?;
         let s = &self.call;
         let returns = s
             .handle
@@ -329,7 +335,7 @@ impl ExarchDesk {
     }
 
     pub(super) fn agent_read(&self, name: String) -> Result<FOValue, Error> {
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let body = self.loan.get().ok_or_else(no_desk)?;
         let content = match body.nursery.named(&name) {
             None => Err(format!(
                 "you started no agent named '{name}'; {} reads only your own helpers, and a clear forgets earlier ones",

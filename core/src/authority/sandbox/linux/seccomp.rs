@@ -457,14 +457,14 @@ mod probe {
 
 /// Which stage refused to compile the deny-set.
 #[derive(Debug)]
-pub(crate) enum Error {
+pub(crate) enum FilterError {
     /// `std::env::consts::ARCH` is neither x86-64 nor aarch64; cannot happen
     /// under this file's arch cfg, but this is a `Result`, not a panic.
     Arch(seccompiler::BackendError),
     Compile(seccompiler::BackendError),
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for FilterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Arch(e) => write!(f, "seccomp: {e}"),
@@ -475,7 +475,7 @@ impl fmt::Display for Error {
 
 #[cfg(seccomp)]
 impl Cond {
-    fn compile(&self) -> Result<Vec<seccompiler::SeccompCondition>, Error> {
+    fn compile(&self) -> Result<Vec<seccompiler::SeccompCondition>, FilterError> {
         use seccompiler::{SeccompCmpArgLen::Dword, SeccompCmpOp, SeccompCondition};
         match *self {
             Self::FlagSet { arg, mask } => SeccompCondition::new(
@@ -485,24 +485,24 @@ impl Cond {
                 u64::from(mask),
             )
             .map(|condition| vec![condition])
-            .map_err(Error::Compile),
+            .map_err(FilterError::Compile),
             Self::ArgEq { arg, value } => {
                 SeccompCondition::new(arg, Dword, SeccompCmpOp::Eq, u64::from(value))
                     .map(|condition| vec![condition])
-                    .map_err(Error::Compile)
+                    .map_err(FilterError::Compile)
             }
             Self::ArgNotIn { arg, values } => values
                 .iter()
                 .map(|&value| SeccompCondition::new(arg, Dword, SeccompCmpOp::Ne, u64::from(value)))
                 .collect::<Result<_, _>>()
-                .map_err(Error::Compile),
+                .map_err(FilterError::Compile),
         }
     }
 }
 
 #[cfg(seccomp)]
 impl When {
-    fn compile(&self) -> Result<Vec<seccompiler::SeccompRule>, Error> {
+    fn compile(&self) -> Result<Vec<seccompiler::SeccompRule>, FilterError> {
         match self {
             Self::Always => Ok(Vec::new()),
             Self::Any(alternatives) => alternatives
@@ -515,7 +515,7 @@ impl When {
                         .into_iter()
                         .flatten()
                         .collect();
-                    seccompiler::SeccompRule::new(conditions).map_err(Error::Compile)
+                    seccompiler::SeccompRule::new(conditions).map_err(FilterError::Compile)
                 })
                 .collect(),
         }
@@ -542,7 +542,7 @@ impl Filter {
     /// Compiled once per process, on success.  A failure is not cached: it is
     /// a static bug in [`Filter::ENVELOPE`], so each call recompiles and fails
     /// again, which spares `Error` a `Clone` bound.
-    pub(crate) fn programs(&self) -> Result<&'static Programs, Error> {
+    pub(crate) fn programs(&self) -> Result<&'static Programs, FilterError> {
         static PROGRAMS: std::sync::OnceLock<Programs> = std::sync::OnceLock::new();
         if let Some(programs) = PROGRAMS.get() {
             return Ok(programs);
@@ -551,9 +551,10 @@ impl Filter {
         Ok(PROGRAMS.get_or_init(|| compiled))
     }
 
-    fn compile(&self) -> Result<Programs, Error> {
-        let arch: seccompiler::TargetArch =
-            std::env::consts::ARCH.try_into().map_err(Error::Arch)?;
+    fn compile(&self) -> Result<Programs, FilterError> {
+        let arch: seccompiler::TargetArch = std::env::consts::ARCH
+            .try_into()
+            .map_err(FilterError::Arch)?;
 
         // Grouped by verdict, in order of first appearance, each carrying the
         // per-syscall rule map a `SeccompFilter` wants.
@@ -582,8 +583,8 @@ impl Filter {
                 verdict.action(),
                 arch,
             )
-            .map_err(Error::Compile)?;
-            let bpf: seccompiler::BpfProgram = filter.try_into().map_err(Error::Compile)?;
+            .map_err(FilterError::Compile)?;
+            let bpf: seccompiler::BpfProgram = filter.try_into().map_err(FilterError::Compile)?;
             verdicts.push((verdict, bpf));
         }
 

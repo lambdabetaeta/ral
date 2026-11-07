@@ -20,10 +20,10 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 ## `core/src/engine.rs`
 
 - `EngineInstaller { tag, runtime, root, narrow }` — one compiled-in
-  installer, in two halves. `runtime: fn(&EngineSpec) -> Runtime`
+  installer, in two halves. `runtime: fn(&EngineSpec) -> Result<Runtime, Error>`
   is the process half (Σ, builtins, docs; a root and a child engine each
   derive their own, an in-process child shares its parent's); `root:
-  fn(&Root, &mut Shell) -> Result<(), String>` is the root-only recipe
+  fn(&Root, &mut Shell) -> Result<(), Error>` is the root-only recipe
   (libraries, hints, seeds, ledgers), which refuses in its own words; `narrow: GrantNarrower` is the policy a seeded or adopted
   child is held to. Only `tag` crosses `Attach`, never the function.
 - `Runtime`: what the binary supplies, and the only place builtins are
@@ -108,12 +108,15 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `Reading(Result<FOValue, String>)` answers a `Frame::Probe` under its
   `DispatchId`: the probe's own event, not a run that ended.
 - `SessionEvent` — engine→front-end with no dispatch to ride: `Attached` /
-  `Refused(String)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
+  `Refused(WireError)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
   (a worker's batch, and a watched worker's lines).
-- `EnquiryError` — message only, the wire shape of a refused enquiry;
-  `no_desk()` is the fixed wording for a host with nothing to answer, and
-  `From<EnquiryError> for Error` the one way a refusal becomes the error
-  both carriers' desks raise as plain `Reason::Raised`.
+- `WireError { message, hints }` — the one wire form of an `Error`: a refused
+  enquiry's `Frame::Answer`, `SessionEvent::Refused` and `Severed::Refused`.
+  `WireError::of(&Error)` takes the message line, context included, and the
+  hints; `into_error` folds them back through `with_hint` as a plain
+  `Reason::Raised`. Both carriers pass every refusal through the pair, so a
+  refusal reads the same under either and its hints survive the crossing.
+  The record (`ErrorRecord`, `$err`) is untouched: hints stay report facts.
 - `Control` — `Strike(DispatchId, CancelCause)` and `End(RootCause)`, the
   closed `Cancelled | Terminated | Aborted`; applied by `Scopes::apply` under
   both carriers. Even a terminal dispatch-local cause never ends the engine.
@@ -369,7 +372,7 @@ own trees under no grant).
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). A
   `` `restrict `` record crosses undecoded and is decoded there, which keeps
   `GrantLayer`'s resolved-by-construction invariant true of every layer pushed.
-- `GrantNarrower` — `fn(&str, &FreezeCtx) -> Result<GrantLayer, String>`, a field
+- `GrantNarrower` — `fn(&str, &FreezeCtx) -> Result<GrantLayer, Error>`, a field
   of `EngineInstaller` rather than a registered hook: core has no base-tag
   lexicon of its own, so a `` `base `` arm is always resolved by the host
   that boots the engine (`exarch::policy::base_layer`), and the policy is

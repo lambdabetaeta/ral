@@ -130,7 +130,10 @@ situational hint takes precedence. Context prefixes never change the reason. The
 composes hint, saturating counted discard, then eligible abandoned-tail note.
 A panic is spanless `run panicked: …`; values, exits and reader-gone stops
 render nothing. `Error::render`, `compact` and `render_spanless` use that same
-renderer. Hosts print the supplied `rendered` verbatim.
+renderer; `Error::plain` is its words alone, uncoloured and unlaid (message
+line, then notes), for a host's log or a command line's last word where no
+session renders: `Severed`'s `Display`, exarch's startup refusals. Hosts print
+the supplied `rendered` verbatim.
 
 The renderer dispatches on where the error came from, not what the input
 looked like: a carried `rejection` draws its own report, so a broken plugin,

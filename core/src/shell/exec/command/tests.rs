@@ -143,7 +143,7 @@ mod head {
                 .select(&ctx.grants, &Baseline::default())
                 .expect_err("an empty exec allowance refuses even an absent name");
             assert_eq!(denied.at, path::shown(&file));
-            assert!(denied.denial.error.message.contains("exec `allow` list"));
+            assert!(denied.denial.error.describe().contains("exec `allow` list"));
         }
     }
 
@@ -178,7 +178,7 @@ mod head {
         ]
         .map(|file| {
             let refusal = denied(&file);
-            assert!(refusal.error.message.contains("not readable"));
+            assert!(refusal.error.describe().contains("not readable"));
             (file, refusal)
         });
         #[cfg(unix)]
@@ -187,7 +187,18 @@ mod head {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::copy(&source, &file).unwrap();
             let after = denied(&file);
-            assert_eq!(before.error, after.error, "{}", file.display());
+            assert_eq!(
+                before.error.describe(),
+                after.error.describe(),
+                "{}",
+                file.display()
+            );
+            assert_eq!(
+                before.error.hints(),
+                after.error.hints(),
+                "{}",
+                file.display()
+            );
             assert_eq!(before.check, after.check, "{}", file.display());
         }
     }

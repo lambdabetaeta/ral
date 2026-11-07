@@ -8,9 +8,8 @@
 //! [`crate::ir::Prim::Decode`], an operation whose meaning no session can
 //! redefine.
 
-use crate::shell::runtime::{
-    Break, Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token, sig, sig_hint,
-};
+use crate::error::Error;
+use crate::shell::runtime::{Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token};
 use crate::text::plural;
 use crate::ty::RefusedArg;
 
@@ -26,7 +25,7 @@ fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     let mut bytes = Vec::new();
     super::util::stdin_reader(name, shell)?
         .read_to_end(&mut bytes)
-        .map_err(|e| sig(format!("{name}: {e}")))?;
+        .map_err(|e| Error::new(format!("{name}: {e}")))?;
     Ok(bytes)
 }
 
@@ -37,10 +36,7 @@ fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
     if args.is_empty() {
         return Ok(());
     }
-    Err(sig_hint(
-        format!("{name}: takes no arguments; it reads the byte channel"),
-        "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`",
-    ))
+    Err(Error::new(format!("{name}: takes no arguments; it reads the byte channel")).with_hint("to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`").into())
 }
 
 fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
@@ -123,8 +119,8 @@ pub(crate) fn builtin_from_json(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let text = input_text(args, "from-json", shell)?;
-    let json = serde_json::from_str(&text).map_err(|e| sig(format!("from-json: {e}")))?;
-    let value = json_to_value(json).map_err(|e| sig(format!("from-json: {e}")))?;
+    let json = serde_json::from_str(&text).map_err(|e| Error::new(format!("from-json: {e}")))?;
+    let value = json_to_value(json).map_err(|e| Error::new(format!("from-json: {e}")))?;
     site.admitted("from-json", value, shell)
 }
 
@@ -196,7 +192,7 @@ pub(crate) fn builtin_from_json_at(
         .iter()
         .map(|token| match &*token {
             Value::String(s) => Ok(s.to_string()),
-            other => Err(sig(format!(
+            other => Err(Error::new(format!(
                 "{DOOR}: a reference token is text, got {}",
                 other.type_name()
             ))),
@@ -208,15 +204,15 @@ pub(crate) fn builtin_from_json_at(
         "use from-bytes to keep raw bytes",
     )?;
     let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| sig(format!("{DOOR}: {e}")))?;
+        serde_json::from_str(&text).map_err(|e| Error::new(format!("{DOOR}: {e}")))?;
     let mut leaf = &json;
     let mut at = String::new();
     for token in &tokens {
-        leaf = step(leaf, token, &at).map_err(|why| sig(format!("{DOOR}: {why}")))?;
+        leaf = step(leaf, token, &at).map_err(|why| Error::new(format!("{DOOR}: {why}")))?;
         at.push('/');
         at.push_str(&pointer_token(token));
     }
-    let value = json_to_value(leaf.clone()).map_err(|e| sig(format!("{DOOR}: {e}")))?;
+    let value = json_to_value(leaf.clone()).map_err(|e| Error::new(format!("{DOOR}: {e}")))?;
     site.admitted(DOOR, value, shell)
 }
 
@@ -239,13 +235,15 @@ pub(crate) fn builtin_from_jsonl(
         }
         let n = index + 1;
         let json = serde_json::from_slice(&line).map_err(|e| {
-            sig(format!(
+            Error::new(format!(
                 "from-jsonl: line {n}, column {}: {}",
                 e.column(),
                 unpositioned(&e)
             ))
         })?;
-        records.push(json_to_value(json).map_err(|e| sig(format!("from-jsonl: line {n}: {e}")))?);
+        records.push(
+            json_to_value(json).map_err(|e| Error::new(format!("from-jsonl: line {n}: {e}")))?,
+        );
     }
     site.admitted("from-jsonl", Value::list(records), shell)
 }
@@ -277,7 +275,7 @@ pub(super) fn builtin_from_csv(
     let mut seen = std::collections::HashSet::with_capacity(headers.len());
     for h in &headers {
         if !seen.insert(h) {
-            return Err(sig(format!("from-csv: duplicate header column {h:?}")));
+            return Err(Error::new(format!("from-csv: duplicate header column {h:?}")).into());
         }
     }
     let mut rows = Vec::new();
@@ -295,19 +293,19 @@ pub(super) fn builtin_from_csv(
 
 /// `from-csv`'s refusal, a ragged row named by the line its read began on:
 /// the row's own, unless blank lines precede it.
-fn csv_refusal(e: &csv::Error) -> Break {
+fn csv_refusal(e: &csv::Error) -> Error {
     match e.kind() {
         csv::ErrorKind::UnequalLengths {
             pos: Some(pos),
             expected_len,
             len,
-        } => sig(format!(
+        } => Error::new(format!(
             "from-csv: line {} has {}, but the header has {}",
             pos.line(),
             plural(*len, "field"),
             plural(*expected_len, "field")
         )),
-        _ => sig(format!("from-csv: {e}")),
+        _ => Error::new(format!("from-csv: {e}")),
     }
 }
 
@@ -318,12 +316,13 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     if let Some(first) = rows.iter().next() {
         let header = first.as_ref().as_map_ref("to-csv")?;
         if header.is_empty() {
-            return Err(sig(
+            return Err(Error::new(
                 "to-csv: the row at index 0 has no keys, and CSV cannot write a row of no columns",
-            ));
+            )
+            .into());
         }
         wtr.write_record(header.keys())
-            .map_err(|e| sig(format!("to-csv: {e}")))?;
+            .map_err(|e| Error::new(format!("to-csv: {e}")))?;
         for (i, row) in rows.iter().enumerate() {
             let map = row.as_ref().as_map_ref("to-csv")?;
             let stray = header
@@ -336,22 +335,21 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
                 } else {
                     (0, i)
                 };
-                return Err(sig_hint(
-                    format!(
+                return Err(Error::new(format!(
                         "to-csv: the row at index {has} has the key {key:?}, but the row at index {lacks} does not"
-                    ),
-                    "CSV cannot leave a field out: give every row every key, as `union $blank $row` does where `$blank` maps each column to ''",
-                ));
+                    )).with_hint("CSV cannot leave a field out: give every row every key, as `union $blank $row` does where `$blank` maps each column to ''").into());
             }
             let cells = map
                 .iter()
                 .map(|(key, value)| csv_cell(&value, i, key))
                 .collect::<Settled<Vec<_>>>()?;
             wtr.write_record(cells)
-                .map_err(|e| sig(format!("to-csv: {e}")))?;
+                .map_err(|e| Error::new(format!("to-csv: {e}")))?;
         }
     }
-    let bytes = wtr.into_inner().map_err(|e| sig(format!("to-csv: {e}")))?;
+    let bytes = wtr
+        .into_inner()
+        .map_err(|e| Error::new(format!("to-csv: {e}")))?;
     write_encoded(&bytes, shell)
 }
 
@@ -368,9 +366,9 @@ fn csv_cell(value: &Value, row: usize, key: &str) -> Settled<String> {
         Value::Thunk(_) | Value::Native(_) => "a block",
         Value::Handle(_) => "a handle",
     };
-    Err(sig(format!(
+    Err(Error::new(format!(
         "to-csv: the cell `{key}` of the row at index {row} is {kind}; a CSV cell is text, a number or a boolean"
-    )))
+    )).into())
 }
 
 fn write_encoded(bytes: &[u8], shell: &mut Shell) -> Settled<Value> {
@@ -407,10 +405,9 @@ pub(super) fn builtin_echo(
     shell: &mut Shell,
 ) -> Settled<Value> {
     if args.iter().any(|arg| matches!(arg, Value::Unit)) {
-        return Err(sig_hint(
-            "echo: cannot print Unit",
-            RefusedArg::Unit.remedy("echo"),
-        ));
+        return Err(Error::new("echo: cannot print Unit")
+            .with_hint(RefusedArg::Unit.remedy("echo"))
+            .into());
     }
     let mut s = Value::render_argv(args).join(" ");
     s.push('\n');
@@ -448,7 +445,7 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, Unrepresentable> {
 }
 
 pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let json = value_to_json(&args[0]).map_err(|e| sig(format!("to-json: {e}")))?;
+    let json = value_to_json(&args[0]).map_err(|e| Error::new(format!("to-json: {e}")))?;
     write_encoded(json.to_string().as_bytes(), shell)
 }
 
@@ -458,7 +455,7 @@ pub(super) fn builtin_to_jsonl(args: &[Value], shell: &mut Shell) -> Settled<Val
     let mut text = String::new();
     for (i, item) in args[0].as_list("to-jsonl")?.iter().enumerate() {
         let json = value_to_json(item.as_ref())
-            .map_err(|e| sig(format!("to-jsonl: element at index {i}: {e}")))?;
+            .map_err(|e| Error::new(format!("to-jsonl: element at index {i}: {e}")))?;
         text.push_str(&json.to_string());
         text.push('\n');
     }

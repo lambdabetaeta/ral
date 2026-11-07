@@ -10,7 +10,7 @@ pub(crate) mod scope;
 pub(crate) mod val;
 
 use crate::ir::{Comp, Pattern, Phrase};
-use crate::shell::runtime::{Binding, Break, Env, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Spanned;
 use crate::ty::Scheme;
 use std::sync::Arc;
@@ -94,7 +94,7 @@ pub(crate) fn run_phrases(
             // A non-final phrase's error says what it abandoned, as
             // `Frame::Seq`'s halt does for a chain step.
             Err(Break::Error(e)) if i != last => {
-                ran.outcome = Err(Break::Error(e.abandoning_tail()));
+                ran.outcome = Err(e.abandoning_tail().into());
                 break;
             }
             Err(err) => {
@@ -157,10 +157,11 @@ pub fn apply(
 ) -> Settled<Value> {
     match val {
         Value::Thunk(_) | Value::Native(_) => machine::apply(val.clone(), args, mooring, shell),
-        _ => Err(crate::shell::runtime::sig_hint(
-            format!("cannot call {} '{}'", val.type_name(), val),
-            "only Blocks, Lambdas, and natives can be called",
-        )),
+        _ => Err(
+            Error::new(format!("cannot call {} '{}'", val.type_name(), val))
+                .with_hint("only Blocks, Lambdas, and natives can be called")
+                .into(),
+        ),
     }
 }
 

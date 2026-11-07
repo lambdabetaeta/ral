@@ -348,6 +348,11 @@ fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
     }
 }
 
+/// An attach refusal with a hint, which must cross the wire with it.
+fn refused() -> WireError {
+    WireError::of(&Error::new("no").with_hint("ask the host"))
+}
+
 #[test]
 fn a_refusal_from_the_engine_is_the_attach_verdict() {
     let (front, back) = UnixStream::pair().unwrap();
@@ -355,13 +360,10 @@ fn a_refusal_from_the_engine_is_the_attach_verdict() {
     let peer = std::thread::spawn(move || {
         let mut ch = WireChannel::from_stream(back);
         assert!(matches!(ch.read_frame().unwrap(), Some(Frame::Attach(_))));
-        ch.write_frame(&Frame::Session(SessionEvent::Refused("no".into())))
+        ch.write_frame(&Frame::Session(SessionEvent::Refused(refused())))
             .unwrap();
     });
     attach(&transport);
-    assert_eq!(
-        transport.await_attached(),
-        Err(Severed::Refused("no".into()))
-    );
+    assert_eq!(transport.await_attached(), Err(Severed::Refused(refused())));
     peer.join().unwrap();
 }

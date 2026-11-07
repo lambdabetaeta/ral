@@ -70,7 +70,7 @@
 use crate::own::OwnError;
 use crate::path::is_volume_guid;
 use crate::path::shown;
-use crate::process::cancel::{CancelCause, Scope};
+use crate::process::cancel::{Cancellation, Scope};
 use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
@@ -205,7 +205,7 @@ pub(crate) enum DaclError {
     /// A cancel landed between two paths' stamps.  Not a failure: stamps
     /// already applied are persistent by design, and one interrupted before
     /// its apply left no witness, so the next grant simply re-runs it.
-    Cancelled(CancelCause),
+    Cancelled(Cancellation),
 }
 
 impl std::fmt::Display for DaclError {
@@ -280,7 +280,7 @@ impl std::fmt::Display for DaclError {
                 "timed out acquiring DACL mutex on {} after {timeout_ms} ms",
                 shown(path)
             ),
-            Self::Cancelled(cause) => write!(f, "{}", cause.message()),
+            Self::Cancelled(stop) => write!(f, "{stop}"),
         }
     }
 }
@@ -306,10 +306,7 @@ impl From<OwnError> for DaclError {
 /// The stamp loops' poll point: a chain of atomic loads, so it costs nothing
 /// against the security write it guards.
 fn cancelled(cancel: &Scope) -> Result<(), DaclError> {
-    match cancel.cause() {
-        Some(cause) => Err(DaclError::Cancelled(cause)),
-        None => Ok(()),
-    }
+    cancel.poll().map_err(DaclError::Cancelled)
 }
 
 /// The capability name whose derived SID carries one `(path, kind)` grant.

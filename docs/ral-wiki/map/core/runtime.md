@@ -317,7 +317,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     against what actually happened: a thread's forgiveness reads its own
     break alone (a `ReaderGone` break is only ever this collector's doing),
     an external's is the collector's reading of `sent`: a death by its own
-    kill with `sent == Some(ReaderGone)`. The verdicts join by `stronger`/`rank`, an
+    kill with `sent == Some(ReaderGone)`. The verdicts join by `stronger` over `Break::rank`, an
     escape outranking an error and ties going to the earlier stage;
     `drive`/`cancel_all`/`step` take no `&Shell` at all. `drive` is
     `while live() { recv; step; run }`, no interval and

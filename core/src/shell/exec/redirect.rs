@@ -9,6 +9,7 @@
 pub(crate) mod scope;
 
 use crate::authority::policy::FsOp;
+use crate::error::io_message;
 use crate::fact::Read;
 use crate::io::{Sink, Source};
 use crate::ir::{StdinSource, WriteMode};
@@ -102,7 +103,7 @@ pub(crate) fn open_write(
     heard: bool,
     shell: &mut Shell,
 ) -> Settled<(File, Option<OpenedWrite>, Option<Vec<u8>>)> {
-    let io = |e: io::Error| Break::from(Error::io(path, &e));
+    let io = |e: io::Error| Break::from(Error::new(io_message(path, &e)));
     let rp = shell.resolve(path);
     if rp.is_discard() {
         return Ok((crate::path::open_discard().map_err(io)?, None, None));
@@ -142,7 +143,7 @@ fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
     } else {
         shell.locate::<Reading>(&rp)?.read()
     };
-    Ok(opened.map_err(|e| Error::io(path, &e))?)
+    Ok(opened.map_err(|e| Error::new(io_message(path, &e)))?)
 }
 
 impl Shell {
@@ -159,10 +160,13 @@ impl Shell {
     pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> Settled<()> {
         use std::io::Write as _;
         let (mut file, opened, _) = open_write(path, WriteMode::Write, false, self)?;
-        file.write_all(bytes).map_err(|e| Error::io(path, &e))?;
+        file.write_all(bytes)
+            .map_err(|e| Error::new(io_message(path, &e)))?;
         drop(file);
         if let Some(OpenedWrite::Atomic(staged)) = opened {
-            staged.publish().map_err(|e| Error::io(path, &e))?;
+            staged
+                .publish()
+                .map_err(|e| Error::new(io_message(path, &e)))?;
         }
         Ok(())
     }
@@ -200,8 +204,8 @@ pub(crate) fn install_stdin_redirect(
                 .strip_prefix("\r\n")
                 .or_else(|| word.strip_prefix('\n'))
                 .unwrap_or(word);
-            let (reader, mut writer) =
-                crate::process::cloexec_pipe().map_err(|e| Error::io("here-string", &e))?;
+            let (reader, mut writer) = crate::process::cloexec_pipe()
+                .map_err(|e| Error::new(io_message("here-string", &e)))?;
             let bytes = body.as_bytes().to_vec();
             std::thread::Builder::new()
                 .name("ral-here-string".into())
@@ -210,7 +214,7 @@ pub(crate) fn install_stdin_redirect(
                     // A broken pipe is the consumer stopping early, not a fault.
                     let _ = writer.write_all(&bytes);
                 })
-                .map_err(|e| Error::io("here-string", &e))?;
+                .map_err(|e| Error::new(io_message("here-string", &e)))?;
             Source::Reader(crate::io::SourceReader::pipe(reader))
         }
     };

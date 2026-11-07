@@ -84,6 +84,7 @@ pub(crate) mod engine {
     use ral_core::Runtime;
     use ral_core::data::datum::Datum as _;
     use ral_core::engine::EngineInstaller;
+    use ral_core::error::Error;
     use ral_core::protocol::{EngineSpec, Root};
     use ral_core::record;
     use ral_core::shell::boot::boot_runtime;
@@ -133,31 +134,31 @@ pub(crate) mod engine {
     }
 
     /// The REPL's process half.
-    fn repl_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
+    fn repl_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
         boot_runtime(spec.terminal, &crate::PRELUDE, &repl_surface())
     }
 
     /// Everything an interactive session is before rc.
-    fn repl_root(_: &Root, shell: &mut ral_core::Shell) -> Result<(), String> {
+    fn repl_root(_: &Root, shell: &mut ral_core::Shell) -> Result<(), Error> {
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_interactive(true);
         let terminal = ral_core::Value::from(&shell.terminal());
         shell.set_var("TERMINAL".into(), terminal);
-        crate::repl::external_editor::register(shell)?;
-        boot_builtin::register(shell)
+        crate::repl::external_editor::register(shell).map_err(Error::new)?;
+        boot_builtin::register(shell).map_err(Error::new)
     }
 
     /// The batch session's process half.
-    fn batch_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
+    fn batch_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
         boot_runtime(spec.terminal, &crate::PRELUDE, &batch_surface())
     }
 
     /// Everything a script's session is before its boot dispatch.
-    fn batch_root(root: &Root, shell: &mut ral_core::Shell) -> Result<(), String> {
-        let config = BatchConfig::decode(&root.config)?;
+    fn batch_root(root: &Root, shell: &mut ral_core::Shell) -> Result<(), Error> {
+        let config = BatchConfig::decode(&root.config).map_err(Error::new)?;
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_args(config.args);
-        boot_builtin::register(shell)
+        boot_builtin::register(shell).map_err(Error::new)
     }
 
     /// The `batch` installer's `Root.config`.
@@ -176,12 +177,11 @@ pub(crate) mod engine {
     fn no_seeded_children(
         _grant: &str,
         _ctx: &ral_core::authority::grant::freeze::FreezeCtx,
-    ) -> Result<ral_core::authority::policy::GrantLayer, String> {
-        Err(
+    ) -> Result<ral_core::authority::policy::GrantLayer, Error> {
+        Err(Error::new(
             "the ral shell's engine spawns no child engines, so it has no grant policy to hold \
-             one to: was this meant to run under exarch?"
-                .to_string(),
-        )
+             one to: was this meant to run under exarch?",
+        ))
     }
 }
 

@@ -745,10 +745,13 @@ mod tests {
                 crate::path::shown(value)
             ),
             "no well-formed UNC".to_owned(),
-            "\nhint: Set HOMEBREW_PREFIX to a well-formed absolute path, or unset it.".to_owned(),
         ] {
             assert!(text.contains(&part), "{part}: {text}");
         }
+        assert_eq!(
+            why.hints().first().map(|h| &**h),
+            Some("Set HOMEBREW_PREFIX to a well-formed absolute path, or unset it.")
+        );
     }
 
     /// A baseline of the prefixes at `dirs`, each an existing directory.
@@ -979,7 +982,7 @@ mod tests {
         let Err(why) = Baseline::of_home(utf8(&home).ok()) else {
             panic!("a baseline through a link cycle cannot be walked");
         };
-        assert!(why.message.contains(utf8(&home).unwrap()), "{why}");
+        assert!(why.describe().contains(utf8(&home).unwrap()), "{why}");
     }
 
     /// An allowance is held where it was decoded: the link its spelling went

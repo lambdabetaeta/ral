@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU8;
 
 use crate::data::FOValue;
+use crate::error::Error;
 use crate::io::{Captured, RunIo, RunStdin};
 use crate::path::EnginePath;
 use crate::process::{CancelCause, RequestedTerminalAccess, RootCause};
-use crate::shell::runtime::{CapturePolicy, Error};
+use crate::shell::runtime::CapturePolicy;
 use probe::Probe;
 
 pub mod channel;
@@ -23,7 +24,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 42;
+pub const PROTOCOL_VERSION: u32 = 43;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ pub enum Frame {
     /// Front-end → engine: the dual of `Event::Enquiry`, correlated by the
     /// enquiry alone — `Parks::fill` keys its slots by `EnquiryId`, and the
     /// dispatch it belongs to is implicit in which enquiry is outstanding.
-    Answer(EnquiryId, Result<FOValue, EnquiryError>),
+    Answer(EnquiryId, Result<FOValue, WireError>),
     /// Front-end → engine heartbeat, never sent before `Attach`. Where the
     /// failure mode is silence — a virtual socket into a guest, whose dead host
     /// produces no EOF — liveness must be manufactured: *any* received frame is
@@ -337,7 +338,7 @@ pub enum SessionEvent {
     /// The engine booted the installer `Attach` named and takes dispatches.
     Attached,
     /// The engine refuses to attach, in its own words, and exits.
-    Refused(String),
+    Refused(WireError),
     /// The engine and every session worker have torn down.
     Ended,
     /// A deferred worker's surface batch, delivered when it settles and
@@ -345,28 +346,35 @@ pub enum SessionEvent {
     DeferredSurface(Vec<FOValue>),
 }
 
-/// A desk refusal's text, raised alike under both transports.
+/// An [`Error`] as it crosses the transport, a desk's refusal or an engine's
+/// refusal to attach: its message line, context included, and its hints,
+/// nothing else.
 ///
-/// The enquiring builtin supplies the engine-side provenance.
+/// Both carriers pass every refusal through [`WireError::of`] and back
+/// through [`WireError::into_error`], so a refusal reads the same under
+/// either. The enquiring builtin supplies the engine-side provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnquiryError {
+pub struct WireError {
     pub message: String,
+    pub hints: Vec<String>,
 }
 
-impl EnquiryError {
-    /// The refusal of a host that installed no desk, in the one wording
-    /// [`crate::shell::runtime::NO_DESK`] fixes.
+impl WireError {
+    /// What of `error` the transport carries.
     #[must_use]
-    pub fn no_desk() -> Self {
+    pub fn of(error: &Error) -> Self {
         Self {
-            message: crate::shell::runtime::NO_DESK.to_string(),
+            message: error.to_string(),
+            hints: error.hints().iter().map(ToString::to_string).collect(),
         }
     }
-}
 
-impl From<EnquiryError> for Error {
-    fn from(refusal: EnquiryError) -> Self {
-        Self::raised(refusal.message)
+    /// The error this refusal was, on the far side.
+    #[must_use]
+    pub fn into_error(self) -> Error {
+        self.hints
+            .into_iter()
+            .fold(Error::new(self.message), Error::with_hint)
     }
 }
 
@@ -483,15 +491,17 @@ mod ending_wire_round_trip_tests {
     }
 
     #[test]
-    fn an_enquiry_refusal_carries_only_text_and_becomes_a_plain_raise() {
+    fn an_enquiry_refusal_carries_message_and_hints_and_becomes_a_plain_raise() {
         use crate::fact::FailureCode as _;
 
-        let refusal = EnquiryError {
-            message: "the desk refused".into(),
-        };
+        let refused = Error::new("the desk refused")
+            .with_context("enquire")
+            .with_hint("try the foreground")
+            .with_hint("or ask again");
+        let refusal = WireError::of(&refused);
         assert_eq!(
             serde_json::to_string(&refusal).unwrap(),
-            r#"{"message":"the desk refused"}"#
+            r#"{"message":"enquire: the desk refused","hints":["try the foreground","or ask again"]}"#
         );
         let frame = Frame::Answer(EnquiryId(7), Err(refusal));
         let encoded = serde_json::to_string(&frame).unwrap();
@@ -500,8 +510,12 @@ mod ending_wire_round_trip_tests {
         let Frame::Answer(_, Err(refusal)) = decoded else {
             panic!("the refusal must survive the wire")
         };
-        let error = Error::from(refusal);
-        assert_eq!(error.reason, Reason::Raised("the desk refused".into()));
+        let error = refusal.into_error();
+        assert_eq!(
+            error.reason,
+            Reason::Raised("enquire: the desk refused".into())
+        );
+        assert_eq!(error.hints(), refused.hints());
         assert_eq!(error.failure_code(), NonZeroU8::MIN);
     }
 

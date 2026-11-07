@@ -35,7 +35,7 @@ pub fn load() -> Result<NetPolicy, String> {
         .ok_or_else(|| format!("{LABEL} cannot load: the working directory is unavailable"))?;
     let mut shell = ral_core::HostSurface::default()
         .shell(ral_core::io::terminal::TerminalState::default(), cwd)
-        .map_err(|e| format!("{LABEL} cannot load: {e}"))?;
+        .map_err(|e| e.with_context(format!("{LABEL} cannot load")).plain())?;
     decode(
         crate::config::evaluate_no_authority(&mut shell, &source, &origin, LABEL)?,
         &origin.to_string(),

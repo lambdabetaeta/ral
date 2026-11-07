@@ -1,6 +1,6 @@
 //! The live shell's boundary over the directory-tree walk.
 
-use super::{Break, Settled, Shell, sig};
+use super::{Break, Error, Settled, Shell};
 use crate::path::CwdPath;
 use crate::path::tree::{Entries, Found, Walk, WalkEntry};
 
@@ -53,9 +53,9 @@ impl AdmittedWalk {
     /// # Errors
     /// A name no ral string can hold, headed by what the walk was for.
     pub fn name(&self, entry: &WalkEntry) -> Settled<String> {
-        entry
+        Ok(entry
             .name(self.base.as_ref())
-            .map_err(|e| sig(format!("{}: {e}", self.who)))
+            .map_err(|e| Error::new(format!("{}: {e}", self.who)))?)
     }
 }
 

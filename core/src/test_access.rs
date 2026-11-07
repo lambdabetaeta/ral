@@ -180,7 +180,7 @@ pub fn admits_file(shell: &Shell, real: &str) -> bool {
 pub fn check_file(shell: &mut Shell, real: &str) -> Settled<()> {
     check_exec(&shell.context.grants, shell.baseline(), real, file(real))
         .map(drop)
-        .map_err(|denial| shell.exec_refused(denial, &Mooring::adrift()))
+        .map_err(|denial| shell.exec_refused(*denial, &Mooring::adrift()))
 }
 
 /// The scheme `name` carries on the live scope: `None` when it is unbound or

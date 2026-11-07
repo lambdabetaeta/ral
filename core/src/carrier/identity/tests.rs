@@ -2,9 +2,10 @@
 //! probes, all through one in-process engine.
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
+use crate::error::Error;
 use crate::path::EnginePath;
 use crate::process::CancelCause;
-use crate::protocol::{Ending, EnquiryError, Ran, Report, Root};
+use crate::protocol::{Ending, Ran, Report, Root};
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::Shell;
 
@@ -203,6 +204,48 @@ mod enquiry_tests {
         assert_eq!(err.describe(), crate::shell::runtime::NO_DESK);
     }
 
+    /// The absent-desk refusal carries its hint.
+    #[test]
+    fn absent_desk_carries_its_hint() {
+        let shell = crate::test_helper::core_shell();
+        let Break::Error(err) = shell
+            .enquire(&Mooring::adrift(), FOValue::Unit)
+            .expect_err("no desk is installed")
+        else {
+            panic!("an absent desk is an error, not a stop");
+        };
+        assert_eq!(
+            err.hints(),
+            [Box::<str>::from(crate::shell::runtime::NO_DESK_HINT)]
+        );
+    }
+
+    /// A host's refusal keeps its message line and hints, and nothing else,
+    /// as over the wire.
+    #[test]
+    fn a_host_refusal_reads_as_over_the_wire() {
+        struct Refuser;
+        impl Host for Refuser {
+            fn surface(&self, _val: &FOValue) {}
+            fn enquire(&self, _req: FOValue) -> Result<FOValue, Error> {
+                Err(Error::new("no").with_context("ask").with_hint("try again"))
+            }
+        }
+        let desk = IdentityDesk {
+            host: Arc::new(Refuser),
+            events: no_events(),
+        };
+        let Err(Break::Error(err)) = crate::shell::runtime::EnquiryDesk::enquire(
+            &desk,
+            FOValue::Unit,
+            &crate::process::DurableRoot::default().child(),
+        ) else {
+            panic!("a refusal is an error, not a stop");
+        };
+        assert_eq!(err.describe(), "ask: no");
+        assert_eq!(err.hints(), [Box::<str>::from("try again")]);
+    }
+
     /// A no-op receiver, for a desk built without a real dispatch behind it.
     fn no_events() -> Arc<EventReceiver> {
         let (_tx, rx) = mpsc::channel();
@@ -213,7 +256,7 @@ mod enquiry_tests {
     struct IncrementSeam;
     impl Host for IncrementSeam {
         fn surface(&self, _val: &FOValue) {}
-        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
             match req {
                 FOValue::Int { value } => Ok(FOValue::Int { value: value + 1 }),
                 other => Ok(other),
@@ -265,7 +308,7 @@ mod enquiry_tests {
     struct ReentrantProbeSeam(std::sync::Arc<IdentityTransport>);
     impl Host for ReentrantProbeSeam {
         fn surface(&self, _val: &FOValue) {}
-        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
             let _ = self.0.cwd();
             Ok(req)
         }
@@ -296,7 +339,7 @@ mod enquiry_tests {
     struct ReentrantDispatchSeam(std::sync::Arc<IdentityTransport>);
     impl Host for ReentrantDispatchSeam {
         fn surface(&self, _val: &FOValue) {}
-        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
             let _ = dispatch_to_report(
                 &*self.0,
                 crate::protocol::Run::captured("", crate::source::SourceOrigin::named("<test>")),
@@ -665,11 +708,14 @@ mod probe_tests {
             .adopt_parked(id)
             .err()
             .expect("a bequest adopts once");
-        assert!(again.contains("no forked session is parked"), "{again}");
+        assert!(
+            again.describe().contains("no forked session is parked"),
+            "{again}"
+        );
         let based = transport
             .adopt_parked(park(SpawnGrant::Base("confined".into())))
             .err()
             .expect("a bare engine has no base lexicon");
-        assert!(based.contains("`confined`"), "{based}");
+        assert!(based.describe().contains("`confined`"), "{based}");
     }
 }

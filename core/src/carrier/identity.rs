@@ -10,10 +10,11 @@ use super::{
 };
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
+use crate::error::Error;
 use crate::process::Scope;
 use crate::protocol::channel::WriteError;
 use crate::protocol::probe::Probe;
-use crate::protocol::{Attach, DispatchId, Event, Run};
+use crate::protocol::{Attach, DispatchId, Event, Run, WireError};
 use crate::shell::runtime::{Fork, Nursery, NurseryId, Runtime, Shell};
 use crate::sync::LockExt as _;
 
@@ -56,7 +57,7 @@ impl IdentityTransport {
     pub fn boot(installers: &'static [EngineInstaller], attach: &Attach) -> Result<Self, Severed> {
         Engine::boot(installers, attach)
             .map(Self::over)
-            .map_err(Severed::Refused)
+            .map_err(|refused| Severed::Refused(WireError::of(&refused)))
     }
 
     fn over(engine: Engine) -> Self {
@@ -81,13 +82,13 @@ impl IdentityTransport {
     ///
     /// # Errors
     /// No bequest parked under `id`, or whatever narrowing its grant refuses.
-    pub fn adopt_parked(&self, id: NurseryId) -> Result<Self, String> {
+    pub fn adopt_parked(&self, id: NurseryId) -> Result<Self, Error> {
         let bequest = self.nursery.adopt(id).ok_or_else(|| {
-            format!(
+            Error::new(format!(
                 "no forked session is parked under nursery id {}: was it adopted already, or \
                  has the run that forked it ended?",
                 id.0
-            )
+            ))
         })?;
         let shell = Shell::child_of(Arc::clone(&self.runtime), bequest, self.installer.narrow)?;
         Ok(Self::over(Engine::new(shell, self.installer)))
@@ -155,7 +156,7 @@ impl crate::shell::runtime::EnquiryDesk for IdentityDesk {
         }
         self.host
             .enquire(req)
-            .map_err(|e| crate::shell::runtime::Break::from(crate::shell::runtime::Error::from(e)))
+            .map_err(|e| WireError::of(&e).into_error().into())
     }
 }
 

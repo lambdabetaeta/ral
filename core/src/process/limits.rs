@@ -8,7 +8,8 @@ mod fork_brake;
 
 use super::Launch;
 #[cfg(any(windows, target_os = "macos"))]
-use crate::authority::sandbox::Refusal;
+use crate::authority::sandbox::unavailable;
+use crate::error::Error;
 #[cfg(unix)]
 use rustix::process::Resource;
 #[cfg(unix)]
@@ -59,8 +60,8 @@ pub(super) const ACTIVE_PROCESS_CAP: u32 = 512;
 
 /// Why a child under a grant was not started: `why` its budget could not be set.
 #[cfg(any(windows, target_os = "macos"))]
-pub(super) fn unbudgeted(why: impl std::fmt::Display) -> Refusal {
-    Refusal::Unavailable(format!(
+pub(super) fn unbudgeted(why: impl std::fmt::Display) -> Error {
+    unavailable(format!(
         "{why}, so this command would run with no process budget"
     ))
 }
@@ -119,7 +120,7 @@ impl Launch {
             reason = "only macOS can fail: it measures the fork-brake budget"
         )
     )]
-    pub(crate) fn limit_resources(&mut self) -> Result<(), crate::authority::sandbox::Refusal> {
+    pub(crate) fn limit_resources(&mut self) -> Result<(), Error> {
         #[cfg(target_os = "macos")]
         self.limit_forks(
             fork_brake::limit()
@@ -163,7 +164,7 @@ impl Launch {
         clippy::unnecessary_wraps,
         reason = "the Unix arms can fail; on Windows a budget that cannot be set refuses the spawn"
     )]
-    pub(crate) fn limit_resources(&mut self) -> Result<(), Refusal> {
+    pub(crate) fn limit_resources(&mut self) -> Result<(), Error> {
         self.process_cap = true;
         Ok(())
     }

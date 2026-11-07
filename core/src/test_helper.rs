@@ -58,7 +58,7 @@ pub fn layer(caps: crate::authority::policy::Capabilities) -> crate::authority::
 /// What the decoder refuses of the grant value.
 pub fn decoded(
     caps: crate::authority::policy::Capabilities,
-) -> Result<crate::authority::policy::GrantLayer, crate::authority::grant::freeze::PolicyError> {
+) -> Result<crate::authority::policy::GrantLayer, crate::error::Error> {
     crate::shell::grant::decode_grant(
         caps.value().as_ref(),
         "test grant",

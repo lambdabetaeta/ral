@@ -111,6 +111,31 @@ impl Break {
         }))
     }
 
+    /// The one order of endings, a pipeline's fold's and a closing poll's: a
+    /// reader-gone stop naming a node contributes nothing, being a collector
+    /// above's to consume; then `Error < Exit < Stopped c`, stops by cause.
+    pub(crate) fn rank(&self) -> u8 {
+        match self {
+            Self::Escape(Escape::Stopped(Stop {
+                cause: CancelCause::ReaderGone,
+                owner: Some(_),
+                ..
+            })) => 0,
+            Self::Error(_) => 1,
+            Self::Escape(Escape::Exit(_)) => 2,
+            Self::Escape(Escape::Stopped(Stop { cause, .. })) => 3 + *cause as u8,
+        }
+    }
+
+    /// Both are stops of one cause naming one owner.
+    fn same_stop(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Escape(Escape::Stopped(a)), Self::Escape(Escape::Stopped(b)))
+                if a.cause == b.cause && a.owner == b.owner
+        )
+    }
+
     /// A child cancelled under `scope`, the current scope it was waited
     /// under: a stop carrying the join on it.  The join is `None` when the
     /// cause came from a collector's own `sent` alone (an anchor's death,
@@ -147,22 +172,19 @@ impl From<Cancellation> for Break {
 
 /// A base frame's closing poll, the first half of its return clause: the
 /// owner's node is read once more after the body settled, so a stop that
-/// landed after the body's last poll is not lost.  A stop in force outranks
-/// a value, an error and a weaker stop; a located stop is kept, for its
-/// caret, when it outranks the join or equals it *naming the join's owner*:
-/// an equal-cause stop naming someone else is superseded, or a base's own
-/// switch would convert the wrong owner's stop.  An `exit` has already left.
+/// landed after the body's last poll is not lost.  The join supersedes what
+/// the body ended in unless that outranks it ([`Break::rank`]) or is the join
+/// itself, located, kept for its caret; an equal stop naming another owner is
+/// superseded, or a worker's switch would convert the wrong owner's stop.  An
+/// `exit` has already left.
 fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value> {
-    match (node.in_force(), settled) {
-        (_, exit @ Err(Break::Escape(Escape::Exit(_)))) => exit,
-        (Some(join), Err(Break::Escape(Escape::Stopped(stop))))
-            if stop.cause > join.cause
-                || (stop.cause == join.cause && stop.owner.as_ref() == Some(&join.owner)) =>
-        {
-            Err(Break::Escape(Escape::Stopped(stop)))
-        }
-        (Some(join), _) => Err(join.into()),
-        (None, settled) => settled,
+    let Some(join) = node.in_force().map(Break::from) else {
+        return settled;
+    };
+    match settled {
+        exit @ Err(Break::Escape(Escape::Exit(_))) => exit,
+        Err(held) if held.rank() > join.rank() || held.same_stop(&join) => Err(held),
+        _ => Err(join),
     }
 }
 
@@ -291,7 +313,7 @@ mod tests {
 
     #[test]
     fn every_end_has_its_code() {
-        let error = |reason| End::Err(Error::from_reason(reason));
+        let error = |reason: Reason| End::Err(Error::new(reason));
         assert_eq!(End::Ok(Value::Unit).code(), 0);
         assert_eq!(error(Reason::Raised("x".into())).code(), 1);
         assert_eq!(
@@ -367,7 +389,12 @@ mod tests {
         ));
         let calm = DurableRoot::default().child();
         assert!(matches!(
-            final_poll(Err(Break::Error(Error::raised("x"))), &calm),
+            final_poll(Err(Error::new("x").into()), &calm),
+            Err(Break::Error(e)) if e.failure_code() == nz(1)
+        ));
+        let cut = node_under(C::ReaderGone);
+        assert!(matches!(
+            final_poll(Err(Error::new("x").into()), &cut),
             Err(Break::Error(e)) if e.failure_code() == nz(1)
         ));
     }
@@ -392,7 +419,7 @@ mod tests {
         ));
         let calm = DurableRoot::default().child();
         assert!(matches!(
-            shell.base(&calm, |_| Err(Error::raised("x").into())),
+            shell.base(&calm, |_| Err(Error::new("x").into())),
             End::Err(Error { prov: Some(_), .. })
         ));
         assert!(matches!(

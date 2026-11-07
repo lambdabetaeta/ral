@@ -1,8 +1,9 @@
 use super::{FsAllow, FsLists, ProjectionKey, profile_name, refuse_deny_meeting_grant};
 use crate::authority::policy::{FsDeny, GrantPath};
-use crate::authority::sandbox::Refusal;
 use crate::authority::sandbox::carve::carve;
+use crate::error::Error;
 use crate::path::{Dir, Excluded, FrozenPath, RealPath, Trace};
+use crate::process::Unstarted;
 use crate::test_helper::{place, real as walked};
 use std::path::{Path, PathBuf};
 
@@ -71,7 +72,7 @@ impl Drop for SessionGuard {
 }
 
 /// Both regions' positions, as `confine` asks them.
-fn refuse_universal_prefix(rules: &FsLists) -> Result<(), Refusal> {
+fn refuse_universal_prefix(rules: &FsLists) -> Result<(), Error> {
     super::positions(&rules.read, rules)?;
     super::positions(&rules.write, rules)?;
     Ok(())
@@ -120,9 +121,7 @@ fn an_exclusion_meeting_a_whole_grant_is_refused() {
         let refused =
             refuse_deny_meeting_grant(&granted.iter().collect::<Vec<_>>(), &positions(&[denied]));
         match refused {
-            Err(Refusal::Unavailable(why)) => {
-                assert!(why.contains("cannot enforce together"), "{why}");
-            }
+            Err(why) => assert!(why.describe().contains("cannot enforce together"), "{why}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -174,7 +173,10 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
         .output()
         .unwrap();
     assert!(junction.status.success(), "{junction:?}");
-    let why = confine().unwrap_err().to_string();
+    let Err(Unstarted::Refused(why)) = confine() else {
+        panic!("a redirected allowance refuses the launch");
+    };
+    let why = why.to_string();
     assert!(
         why.contains("an allowance names what it named when granted"),
         "{why}"
@@ -436,7 +438,7 @@ fn confined(
     projection: &crate::authority::sandbox::SandboxProjection,
     cwd: &Path,
     line: &str,
-) -> Result<crate::process::Launch, Refusal> {
+) -> Result<crate::process::Launch, Unstarted> {
     use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, StdioSpec};
     let mut launch = Launch::new(cmd());
@@ -496,10 +498,16 @@ fn assert_launch_reads(mut launch: crate::process::Launch, relative: &str, reada
 }
 
 /// The refusal `confine` gave, which must be one this host cannot establish.
-fn unavailable(refused: Result<crate::process::Launch, Refusal>) -> String {
+fn unavailable(refused: Result<crate::process::Launch, Unstarted>) -> String {
     match refused {
-        Err(Refusal::Unavailable(why)) => why,
-        Err(other) => panic!("expected an unavailable confinement, got {other}"),
+        Err(Unstarted::Refused(why))
+            if why
+                .describe()
+                .starts_with("sandbox confinement unavailable: ") =>
+        {
+            why.describe().into_owned()
+        }
+        Err(other) => panic!("expected an unavailable confinement, got {other:?}"),
         Ok(_) => panic!("expected a refusal, and confine let the launch through"),
     }
 }

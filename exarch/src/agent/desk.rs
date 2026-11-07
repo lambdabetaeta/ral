@@ -14,9 +14,9 @@ use atomic_refcell::AtomicRefCell;
 use ral_core::carrier::Host;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::error::Error;
 use ral_core::process::Scope;
-use ral_core::protocol::EnquiryError;
-use ral_core::shell::runtime::Error;
+use ral_core::shell::runtime::no_desk;
 use std::sync::Arc;
 
 /// The acts a desk verb can commit. One vocabulary for two readers: the rail's
@@ -128,10 +128,6 @@ pub(crate) struct ExarchDesk {
     pub(crate) call: Call,
 }
 
-fn no_desk() -> Error {
-    EnquiryError::no_desk().into()
-}
-
 impl ExarchDesk {
     /// Decode one enquiry and answer it. The decode is the vocabulary's, so
     /// an ill-shaped request is refused here in the words its builtin would use.
@@ -214,10 +210,8 @@ impl Host for RunHost {
         self.apply.surface(val);
     }
 
-    fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-        self.desk.handle(&req).map_err(|e| EnquiryError {
-            message: e.describe().into_owned(),
-        })
+    fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+        self.desk.handle(&req)
     }
 }
 

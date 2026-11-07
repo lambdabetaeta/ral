@@ -24,11 +24,12 @@
 //! therefore cannot mount; ral builds the ruleset before bwrap mounts and
 //! enters it afterwards.
 
-use super::super::Refusal;
+use super::super::unavailable;
 use super::super::warrant::{Handoff, Slot};
 use super::{OpenError, Shown, leaf_fd, open_dir_nofollow, open_nofollow};
 use crate::authority::policy::{ExecDeny, KernelRules, Subject};
 use crate::authority::sandbox::{ExecProjection, RenderedFs};
+use crate::error::Error;
 use crate::path::{Dir, Hold, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath};
 use crate::site::{Silent, site};
 use libc::{c_int, c_uint};
@@ -255,7 +256,7 @@ impl Ruleset {
     }
 
     /// Confine this process and everything it execs; the descriptor closes.
-    fn restrict_self(self) -> Result<(), Error> {
+    fn restrict_self(self) -> Result<(), RulesetError> {
         let off = 0 as libc::c_ulong;
         // SAFETY: `prctl` and the syscall touch only this process's own state.
         let restricted = unsafe {
@@ -272,7 +273,7 @@ impl Ruleset {
         if restricted {
             Ok(())
         } else {
-            Err(Error::Restrict(io::Error::last_os_error()))
+            Err(RulesetError::Restrict(io::Error::last_os_error()))
         }
     }
 }
@@ -298,11 +299,12 @@ impl Landlocked {
     /// created it.
     pub(crate) fn enter(&self) -> Result<(), String> {
         let at = self.at;
-        let ruleset = Ruleset(at.take().ok_or_else(|| Error::Missing(at.fd()))?);
+        let ruleset = Ruleset(at.take().ok_or_else(|| RulesetError::Missing(at.fd()))?);
         if self.refer_root {
             let root = open_dir_nofollow(&RealPath::universal())?
                 .ok_or("landlock: the envelope has no root to admit")?;
-            (ruleset.admit(root.as_fd(), Rights::REFER)).map_err(|e| Error::admit("/", e))?;
+            (ruleset.admit(root.as_fd(), Rights::REFER))
+                .map_err(|e| RulesetError::admit("/", e))?;
         }
         Ok(ruleset.restrict_self()?)
     }
@@ -336,21 +338,20 @@ fn kernel_table(exec: &ExecProjection) -> Option<&KernelRules> {
 /// A failed probe, whatever the projection, which tells nothing; and an
 /// exec-restricting grant on a kernel without Landlock, which would otherwise
 /// run with no kernel exec layer.
-fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refusal> {
+fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Error> {
     let restricted = kernel_table(exec).is_some();
     let abi = match landlock {
         Landlock::At(abi) => abi,
         Landlock::Absent if !restricted => return Ok(None),
         Landlock::Absent => {
-            return Err(Refusal::Unavailable(
+            return Err(unavailable(
                 "landlock: this kernel cannot enforce the grant's limits on which programs \
                  may run, because Landlock is unavailable; ral refuses rather than run them \
-                 unchecked.  Is the kernel older than 5.13, or does it have Landlock disabled?"
-                    .into(),
+                 unchecked.  Is the kernel older than 5.13, or does it have Landlock disabled?",
             ));
         }
         Landlock::Unprobed(_) => {
-            return Err(Refusal::Unavailable(format!(
+            return Err(unavailable(format!(
                 "landlock: {landlock}; refusing to launch confined"
             )));
         }
@@ -383,24 +384,24 @@ pub(crate) fn build(
     shown: &Shown,
     landlock: Landlock,
     handoff: &mut Handoff,
-) -> Result<Option<Landlocked>, Refusal> {
+) -> Result<Option<Landlocked>, Error> {
     let Some(Plan { handled, scoped }) = plan(exec, landlock)? else {
         return Ok(None);
     };
     let ruleset = Ruleset::create(handled, scoped)
-        .map_err(|e| Refusal::Launch(Error::Create(e).to_string()))?;
+        .map_err(|e| Error::new(RulesetError::Create(e).to_string()))?;
     if let Some(table) = kernel_table(exec) {
-        admit_exec(&ruleset, table, fs, shown)?;
+        admit_exec(&ruleset, table, fs, shown).map_err(Error::new)?;
     }
     if handled.contains(Rights::RESOLVE_UNIX) {
         admit_sockets(fs, &shown.roots, &mut |admit| {
             ruleset.admit(admit.fd, Rights::RESOLVE_UNIX)
         })
-        .map_err(String::from)?;
+        .map_err(|e| Error::new(e.to_string()))?;
     }
     Ok(Some(Landlocked {
         refer_root: handled.contains(Rights::REFER),
-        at: handoff.lend(ruleset.as_fd())?,
+        at: handoff.lend(ruleset.as_fd()).map_err(Error::new)?,
     }))
 }
 
@@ -409,7 +410,7 @@ fn admit_sockets(
     fs: &RenderedFs,
     roots: &[RealPath],
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
-) -> Result<(), Error> {
+) -> Result<(), RulesetError> {
     let Some(lists) = fs.lists() else {
         return Ok(());
     };
@@ -422,16 +423,16 @@ fn admit_sockets(
         if held.trace().kind() == Some(Kind::Dir) {
             dirs.push(path.clone());
         } else {
-            let fd = leaf_fd(&held).map_err(|e| Error::admit(path, e))?;
-            sink(Admit { path, fd }).map_err(|e| Error::admit(path, e))?;
+            let fd = leaf_fd(&held).map_err(|e| RulesetError::admit(path, e))?;
+            sink(Admit { path, fd }).map_err(|e| RulesetError::admit(path, e))?;
         }
     }
     for path in lowered(dirs, roots) {
         let Some(held) = open_nofollow(&path)? else {
             continue;
         };
-        let fd = leaf_fd(&held).map_err(|e| Error::admit(&path, e))?;
-        sink(Admit { path: &path, fd }).map_err(|e| Error::admit(&path, e))?;
+        let fd = leaf_fd(&held).map_err(|e| RulesetError::admit(&path, e))?;
+        sink(Admit { path: &path, fd }).map_err(|e| RulesetError::admit(&path, e))?;
     }
     Ok(())
 }
@@ -455,7 +456,7 @@ fn admit_exec(
 fn admit_files(
     table: &KernelRules,
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
-) -> Result<(), Error> {
+) -> Result<(), RulesetError> {
     for file in table.allowed_files() {
         let Some(held) = open_nofollow(file)? else {
             continue;
@@ -469,8 +470,8 @@ fn admit_files(
         {
             continue;
         }
-        let fd = leaf_fd(&held).map_err(|e| Error::admit(file, e))?;
-        sink(Admit { path: file, fd }).map_err(|source| Error::admit(file, source))?;
+        let fd = leaf_fd(&held).map_err(|e| RulesetError::admit(file, e))?;
+        sink(Admit { path: file, fd }).map_err(|source| RulesetError::admit(file, source))?;
     }
     Ok(())
 }
@@ -534,7 +535,7 @@ fn expand(
     walks: &dyn Fn(&RealPath) -> bool,
     masks: &[RealPath],
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
-) -> Result<(), Error> {
+) -> Result<(), RulesetError> {
     let mut holding = BTreeSet::new();
     for deny in table.denies() {
         let (ExecDeny::Dir(path) | ExecDeny::File(path)) = deny else {
@@ -599,7 +600,7 @@ struct Walk<'w> {
 
 impl Walk<'_> {
     /// Judge the position and inode; list every exclusion-holding directory.
-    fn dir(&mut self, d: &Dir<Installing>) -> Result<(), Error> {
+    fn dir(&mut self, d: &Dir<Installing>) -> Result<(), RulesetError> {
         let at = crate::path::Subject::Access(d.trace());
         let id = d.trace().last_id();
         let masked = self.masks.iter().any(|m| m.contains(d.real()));
@@ -624,20 +625,20 @@ impl Walk<'_> {
     }
 
     /// Admit a regular file only where its position and inode permit it.
-    fn file(&mut self, f: &Located<Installing>) -> Result<(), Error> {
+    fn file(&mut self, f: &Located<Installing>) -> Result<(), RulesetError> {
         let at = crate::path::Subject::Access(f.trace());
         if f.trace().kind() != Some(Kind::File)
             || !self.table.evidence(Subject::Program(at)).permits()
         {
             return Ok(());
         }
-        let fd = leaf_fd(f).map_err(|e| Error::admit(f.real(), e))?;
+        let fd = leaf_fd(f).map_err(|e| RulesetError::admit(f.real(), e))?;
         self.admit(Admit { path: f.real(), fd })
     }
 
     /// `d`'s entries, each judged by the table.  Symlinks are nothing: a rule
     /// attaches to the inode one reaches, and the guard judges the real path.
-    fn list(&mut self, d: &Dir<Installing>) -> Result<(), Error> {
+    fn list(&mut self, d: &Dir<Installing>) -> Result<(), RulesetError> {
         let Some(entries) = reached(d.read_dir(), d.real())? else {
             return Ok(());
         };
@@ -662,26 +663,26 @@ impl Walk<'_> {
         Ok(())
     }
 
-    fn admit(&mut self, admit: Admit<'_>) -> Result<(), Error> {
-        (self.sink)(admit).map_err(|source| Error::admit(admit.path, source))
+    fn admit(&mut self, admit: Admit<'_>) -> Result<(), RulesetError> {
+        (self.sink)(admit).map_err(|source| RulesetError::admit(admit.path, source))
     }
 }
 
 /// `None` where the walk cannot reach an entry: gone since it was listed,
 /// not what it was listed as, or unreadable, which admits it nowhere and
 /// fails closed.
-fn reached<T>(opened: io::Result<T>, at: &RealPath) -> Result<Option<T>, Error> {
+fn reached<T>(opened: io::Result<T>, at: &RealPath) -> Result<Option<T>, RulesetError> {
     use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
     match opened {
         Ok(object) => Ok(Some(object)),
         Err(e) if matches!(e.kind(), NotFound | NotADirectory | PermissionDenied) => Ok(None),
-        Err(e) => Err(Error::admit(at, e)),
+        Err(e) => Err(RulesetError::admit(at, e)),
     }
 }
 
 /// Which stage refused, and what the user can do about it.
 #[derive(Debug)]
-pub(super) enum Error {
+pub(super) enum RulesetError {
     Create(io::Error),
     Admit { name: String, source: io::Error },
     Open(OpenError),
@@ -689,7 +690,7 @@ pub(super) enum Error {
     Missing(c_int),
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for RulesetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Create(e) => write!(f, "landlock: this kernel refused the ruleset: {e}"),
@@ -708,7 +709,7 @@ impl fmt::Display for Error {
     }
 }
 
-impl Error {
+impl RulesetError {
     fn admit(name: impl fmt::Display, source: impl Into<io::Error>) -> Self {
         Self::Admit {
             name: name.to_string(),
@@ -717,14 +718,14 @@ impl Error {
     }
 }
 
-impl From<OpenError> for Error {
+impl From<OpenError> for RulesetError {
     fn from(e: OpenError) -> Self {
         Self::Open(e)
     }
 }
 
-impl From<Error> for String {
-    fn from(e: Error) -> Self {
+impl From<RulesetError> for String {
+    fn from(e: RulesetError) -> Self {
         e.to_string()
     }
 }

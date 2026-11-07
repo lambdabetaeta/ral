@@ -239,7 +239,7 @@ fn a_hook_fault_names_its_hook() {
         let End::Err(error) = run_block_hook(&mut shell, name, "{ cd '' }", deny()) else {
             panic!("`cd ''` must raise");
         };
-        assert_eq!(error.context.as_deref(), Some(label.trim_end_matches(": ")));
+        assert_eq!(error.context(), Some(label.trim_end_matches(": ")));
     }
 }
 
@@ -1505,7 +1505,7 @@ fn a_run_ending_in_an_error_under_a_stop_ends_stopped() {
     let mut runtime = crate::test_helper::core_runtime();
     install_halting_act(&mut runtime, "strike-then-fail", |mooring| {
         mooring.home.cancel(CancelCause::Interrupted);
-        crate::shell::runtime::sig("x")
+        crate::shell::runtime::Error::new("x").into()
     });
     let (ending, _) = ran(runtime, Run::captured("strike-then-fail", test_origin()));
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");

@@ -6,10 +6,11 @@ use clipboard::{Clipboard, Copied};
 use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum as _, untag};
+use ral_core::error::Error;
 use ral_core::io::ansi::{DIM, RESET};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::{WorkerRow, WorkerState};
-use ral_core::protocol::{Ending, EnquiryError, Program, Ran, Report, Run};
+use ral_core::protocol::{Ending, Program, Ran, Report, Run};
 use ral_core::shell::runtime::{DeferredSink, DoneEvent, HookName};
 use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
@@ -201,21 +202,20 @@ impl Host for ReplHost {
         self.render(val);
     }
 
-    fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-        let refuse = |message: String| EnquiryError { message };
-        match Enquiry::decode(&req).map_err(refuse)? {
+    fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+        match Enquiry::decode(&req).map_err(Error::new)? {
             Enquiry::Editor(op) => self
                 .editor
                 .lock_ignore_poison()
                 .as_mut()
                 .map(|ctx| ctx.apply(op))
                 .ok_or_else(|| {
-                    refuse("editor op: no plugin context (not inside a plugin handler)".into())
+                    Error::new("editor op: no plugin context (not inside a plugin handler)")
                 }),
             Enquiry::Plugin(note) => super::plugin::lock(&self.runtime)
                 .note(note)
                 .map(|()| FOValue::Unit)
-                .map_err(refuse),
+                .map_err(Error::new),
             Enquiry::Clipboard(ClipboardReq { text, osc52 }) => {
                 let whole = matches!(
                     self.clipboard.lock_ignore_poison().copy(&text, osc52),
@@ -339,6 +339,10 @@ mod tests {
         let host = ReplHost::new(Arc::default());
         let req = Enquiry::Editor(super::super::enquiry::EditorOp::Get).encode();
         let err = host.enquire(req).expect_err("no context installed");
-        assert!(err.message.contains("no plugin context"), "{}", err.message);
+        assert!(
+            err.describe().contains("no plugin context"),
+            "{}",
+            err.describe()
+        );
     }
 }

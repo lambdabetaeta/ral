@@ -14,8 +14,7 @@ use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalLoan, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, CommandOrigin, End, Escape, Mooring, Settled, Shell, Stop, UNREPORTED,
-    Value,
+    AuditFragment, Break, CommandOrigin, End, Mooring, Settled, Shell, Stop, UNREPORTED, Value,
 };
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -319,26 +318,9 @@ impl StageObservation {
     }
 }
 
-/// A stage's reader-gone stop is some collector's above to consume, so it
-/// contributes nothing here (law 5); the closed-stdout stop is a stop like any
-/// other.
-fn rank(br: &Break) -> u8 {
-    match br {
-        Break::Escape(Escape::Stopped(Stop {
-            cause: CancelCause::ReaderGone,
-            owner: Some(_),
-            ..
-        })) => 0,
-        Break::Error(_) => 1,
-        Break::Escape(Escape::Exit(_)) => 2,
-        Break::Escape(Escape::Stopped(Stop { cause, .. })) => 3 + *cause as u8,
-    }
-}
-
-/// `Error 1 < Exit 2 < Stopped c (3 + c)`; two stops rank by cause; ties go to
-/// the earlier stage.
+/// By [`Break::rank`] (law 5); ties go to the earlier stage.
 fn stronger(held: Break, new: Break) -> Break {
-    if rank(&new) > rank(&held) { new } else { held }
+    if new.rank() > held.rank() { new } else { held }
 }
 
 /// Live collector state: every stage still running or already observed.

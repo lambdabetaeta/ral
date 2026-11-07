@@ -1,7 +1,8 @@
 //! The shell-state builtins: `alias`, `unalias`, and `cd`.
 
 use crate::authority::policy::{Flag, ShellVerb};
-use crate::shell::runtime::{Settled, Shell, Value, sig};
+use crate::error::Error;
+use crate::shell::runtime::{Settled, Shell, Value};
 
 /// `alias NAME BODY` — the interactive door to [`Shell::install_alias`],
 /// which the rc `aliases:` map and the plugin loader also come in through.
@@ -9,22 +10,25 @@ pub(super) fn builtin_alias(args: &[Value], shell: &mut Shell) -> Settled<Value>
     let (name, thunk) = match args {
         [Value::String(name), thunk @ Value::Thunk(_)] => (name.to_string(), thunk.clone()),
         [Value::String(_), other] => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "alias: body must be a block, got {}",
                 other.type_name()
-            )));
+            ))
+            .into());
         }
         [other, _] => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "alias: name must be a String, got {}",
                 other.type_name()
-            )));
+            ))
+            .into());
         }
         _ => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "alias: expected `alias NAME {{ |args| BODY }}`, got {} args",
                 args.len()
-            )));
+            ))
+            .into());
         }
     };
     shell.install_alias(name, thunk)?;
@@ -36,20 +40,22 @@ pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Valu
     let name = match args {
         [Value::String(s)] => s.as_str(),
         [other] => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "unalias: name must be a String, got {}",
                 other.type_name()
-            )));
+            ))
+            .into());
         }
         _ => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "unalias: expected `unalias NAME`, got {} args",
                 args.len()
-            )));
+            ))
+            .into());
         }
     };
     if !shell.remove_alias(name) {
-        return Err(sig(format!("unalias: no alias named '{name}'")));
+        return Err(Error::new(format!("unalias: no alias named '{name}'")).into());
     }
     Ok(Value::Unit)
 }
@@ -61,17 +67,18 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
     // success that moved nowhere.
     let path = match &args[0] {
         Value::String(s) if s.is_empty() => {
-            return Err(sig(
-                "cd: the empty string names no directory; did you mean `cd .`, or `cd ~`?"
-                    .to_string(),
-            ));
+            return Err(Error::new(
+                "cd: the empty string names no directory; did you mean `cd .`, or `cd ~`?",
+            )
+            .into());
         }
         Value::String(s) => s.as_str(),
         other => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "cd: expected a String path, got {}",
                 other.type_name()
-            )));
+            ))
+            .into());
         }
     };
 

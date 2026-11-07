@@ -4,10 +4,11 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 
+use ral_core::error::Error;
 use ral_core::external_editor::{EditorCommand, admit_draft, after_cleanup, read_draft};
 use ral_core::path::{Dir, EntryName, Kind, LeafMode, Reading, ScopedDir, Visibility, Writing};
 use ral_core::shell::runtime::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, sig,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
 };
 use ral_core::{Shell, Value};
 
@@ -44,9 +45,10 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
 }
 
 fn failure(context: &str, error: impl std::fmt::Display) -> Break {
-    sig(format!(
+    Error::new(format!(
         "external editor: {context}: {error}; the input buffer was not changed"
     ))
+    .into()
 }
 
 /// Preserve the edit failure; report cleanup separately. An escape wins.
@@ -309,7 +311,10 @@ mod tests {
             BuiltinBody::Captured(std::sync::Arc::new(move |_, _, shell| {
                 let workspace = workspace.lock().unwrap().take().expect("called once");
                 shell.with_layer(layer.clone(), |shell| {
-                    workspace.finish(shell, Err::<Value, _>(sig("the editor failed")))
+                    workspace.finish(
+                        shell,
+                        Err::<Value, _>(Error::new("the editor failed").into()),
+                    )
                 })
             })),
         );

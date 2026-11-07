@@ -14,11 +14,12 @@
 //! `` `consumed `` from one snapshot. `poll` hands over the ok/err half of
 //! the ending; the rest is re-raised as `await` raises it.
 
+use crate::error::Error;
 use crate::fact::Io;
 use crate::io::{Retained, Streams};
 use crate::shell::runtime::{
-    Break, CompletedHandle, HandleInner, Mooring, Owner, Sample, Settled, Shell, Value,
-    outcome_value, sig, stop_and_drain,
+    CompletedHandle, HandleInner, Mooring, Owner, Sample, Settled, Shell, Value, outcome_value,
+    stop_and_drain,
 };
 
 /// `cancel <handle>` -- claim a concurrent block and stop it and everything it
@@ -66,8 +67,8 @@ fn cut_note(title: &str, stream: &str, retained: &Retained) -> String {
 }
 
 /// `verb`'s refusal of a handle whose result is gone to another claimer.
-fn already_claimed(verb: &str) -> Break {
-    sig(format!("{verb}: this worker's result was already claimed"))
+fn already_claimed(verb: &str) -> Error {
+    Error::new(format!("{verb}: this worker's result was already claimed"))
 }
 
 /// Exact await of a claimed result: replay, then conclude.
@@ -137,7 +138,7 @@ pub(crate) fn outlive(shell: &mut Shell) -> Settled<()> {
 
 /// [`join`], for a caller to whom another claimer is `verb`'s failure.
 pub(crate) fn await_handle(handle: &HandleInner, verb: &str, shell: &mut Shell) -> Settled<Value> {
-    join(handle, shell)?.ok_or_else(|| already_claimed(verb))
+    Ok(join(handle, shell)?.ok_or_else(|| already_claimed(verb))?)
 }
 
 /// `await <handle>` -- wait for a concurrent block, claim it, and behave as if
@@ -233,7 +234,7 @@ fn handles_of(list: &Value, verb: &str) -> Settled<Vec<HandleInner>> {
         .map(|v| v.expect_handle(verb).cloned())
         .collect::<Result<Vec<_>, _>>()?;
     if handles.is_empty() {
-        return Err(sig(format!("{verb}: no handles to wait for")));
+        return Err(Error::new(format!("{verb}: no handles to wait for")).into());
     }
     Ok(handles)
 }

@@ -31,7 +31,7 @@ fn failure(error: Error) -> StageObservation {
 }
 
 fn error_break(status: u8) -> Break {
-    Error::from_reason(crate::fact::Reason::process(
+    Error::new(crate::fact::Reason::process(
         "tool",
         crate::fact::Failure::Exited(i32::from(status)),
     ))
@@ -804,7 +804,7 @@ fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
         &mut state,
         Event::Returned(
             0,
-            failure(Error::from_reason(crate::fact::Reason::process(
+            failure(Error::new(crate::fact::Reason::process(
                 "tool",
                 crate::fact::Failure::Exited(3),
             ))),
@@ -868,7 +868,7 @@ fn a_reader_gone_stages_cleanup_halt_is_forwarded() {
         &mut state,
         returned(
             0,
-            failure(Error::from_reason(crate::fact::Reason::process(
+            failure(Error::new(crate::fact::Reason::process(
                 "tool",
                 crate::fact::Failure::Exited(7),
             ))),
@@ -886,7 +886,7 @@ fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
         &mut state,
         returned(
             0,
-            failure(Error::from_reason(crate::fact::Reason::process(
+            failure(Error::new(crate::fact::Reason::process(
                 "tool",
                 crate::fact::Failure::Exited(7),
             ))),
@@ -1262,7 +1262,7 @@ fn a_stage_halt_outranks_the_teardown_at_the_fold() {
                 50,
                 returned(
                     0,
-                    failure(Error::from_reason(crate::fact::Reason::process(
+                    failure(Error::new(crate::fact::Reason::process(
                         "tool",
                         crate::fact::Failure::Exited(7),
                     ))),

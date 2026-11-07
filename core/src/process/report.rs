@@ -7,7 +7,8 @@
 //! a record.
 
 use super::launch::Unstarted;
-use crate::authority::sandbox::Refusal;
+use crate::authority::sandbox::unavailable;
+use crate::error::Error;
 use crate::process::Scope;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -112,10 +113,10 @@ impl Testimony {
     pub(crate) fn first(
         &mut self,
         scope: &Scope,
-        vanished: impl FnOnce() -> Refusal,
+        vanished: impl FnOnce() -> Error,
     ) -> Result<(), Unstarted> {
         use rustix::event::PollFlags;
-        let refused = |why: String| Err(Unstarted::Refused(Refusal::Unavailable(why)));
+        let refused = |why: String| Err(Unstarted::Refused(unavailable(why)));
         // A readable report holds its first record whole, or soon: only
         // `started`, one byte, is written once a program runs.
         let heard = loop {

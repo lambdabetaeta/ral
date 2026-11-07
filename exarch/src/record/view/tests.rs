@@ -448,7 +448,9 @@ fn an_engine_severance_draws_a_system_note_with_its_code_and_cause() {
 
     for (cause, text) in [
         (
-            Severed::Refused("version mismatch".into()),
+            Severed::Refused(ral_core::protocol::WireError::of(
+                &ral_core::error::Error::new("version mismatch"),
+            )),
             "the ral engine was lost (engine-refused): the engine refused to attach: version mismatch",
         ),
         (

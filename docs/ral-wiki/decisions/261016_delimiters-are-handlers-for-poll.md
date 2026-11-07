@@ -192,7 +192,8 @@ worker's escape is data on its `` `done `` card.
    earlier stage. A refinement of the Agda's `_⊕_`, which keeps the earlier
    escape whatever its kind. The collector's own closing observation (the
    teardown's cause) is the verdict only when no stage halted: a base's
-   closing poll outranks an error because the condition persists on its node
+   closing poll ranks by this order too, so a stop in force bar a named
+   reader-gone one outranks an error because the condition persists on its node
    and the next poll would raise it again, whereas a teardown's cause lives on
    the stages' nodes, which die with them, so it displaces nothing. That is
    what makes "contributes nothing" compositional: `!{ !{ fail [status: 7,
@@ -449,7 +450,7 @@ and owner as a non-catchable stop); `Scope`, `ScopeNode`, `ScopeId`,
 `Cancellation`, `WorkerStop`, `POLL_SLICE`, `resolve` in
 `core/src/process/cancel.rs` (`Scope::poll` returns domain cancellation); `Shell::scope`, `Shell::poll`,
 `Shell::write_sink` in `core/src/shell/runtime/state/mod.rs`; `Mooring::home` in
-`core/src/shell/runtime/mooring.rs`; the collector's `rank`, `recv`, `escalate`,
+`core/src/shell/runtime/mooring.rs`; `Break::rank` in `core/src/shell/runtime/flow.rs`; the collector's `recv`, `escalate`,
 `cancel_all` and `StageObservation` in `core/src/shell/exec/pipeline/collect.rs`;
 `convert_own_stop` in `core/src/shell/builtins/concurrency/birth.rs`; `Ending` in
 `core/src/fact/ending.rs`. See [[internals/cancellation|cancellation]] for the

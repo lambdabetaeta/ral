@@ -12,8 +12,9 @@
 
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
-use crate::authority::sandbox::{Image, Ownership, Refusal, SandboxProjection};
-use crate::fact::{Failure, Unrunnable};
+use crate::authority::sandbox::{Image, Ownership, SandboxProjection};
+use crate::error::{Error, io_message};
+use crate::fact::{Failure, Reason, Unrunnable};
 use crate::io::{Edge, OutFd, Sink, Source, Streams};
 use crate::ir::CommandName;
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
@@ -21,9 +22,7 @@ use crate::process::{
     CancelCause, Launch, POLL_SLICE, PgidPolicy, PreparedTerminalLoan, Scope, Spawned, StdioSpec,
     TerminalLoan, Unstarted, WaitOutcome,
 };
-use crate::shell::runtime::{
-    Break, Context, Error, Mooring, Settled, Shell, TerminalAccess, Value, sig,
-};
+use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, TerminalAccess, Value};
 use crate::ty::RefusedArg;
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -70,7 +69,7 @@ pub(crate) enum Target {
 
 pub(crate) struct Denied {
     pub(crate) at: String,
-    denial: Denial,
+    denial: Box<Denial>,
 }
 
 impl Head {
@@ -173,10 +172,12 @@ impl Head {
         let shown = self.shown.clone();
         self.select(&shell.context.grants, shell.baseline())
             .map_err(
-                |Denied { denial, .. }| match shell.exec_refused(denial, mooring) {
-                    Break::Error(e) if search => Break::Error(e.prepend_hint(format!(
-                        "'{shown}' is no program in any PATH directory the grant runs from"
-                    ))),
+                |Denied { denial, .. }| match shell.exec_refused(*denial, mooring) {
+                    Break::Error(e) if search => e
+                        .with_hint(format!(
+                            "'{shown}' is no program in any PATH directory the grant runs from"
+                        ))
+                        .into(),
                     refusal => refusal,
                 },
             )
@@ -286,7 +287,7 @@ fn judge(
 }
 
 fn not_found(shown: &str) -> Error {
-    Error::process(shown, Failure::NotFound)
+    Error::new(Reason::process(shown, Failure::NotFound))
 }
 
 fn is_absent(error: &Error) -> bool {
@@ -300,7 +301,7 @@ fn unstartable(kind: CandidateKind, shown: &str, arg0: &Path, why: Unrunnable) -
         CandidateKind::Path => shown.to_owned(),
         CandidateKind::Search => path::shown(arg0),
     };
-    Error::process(shown, Failure::not_runnable(found, why))
+    Error::new(Reason::process(shown, Failure::not_runnable(found, why)))
 }
 
 /// What an `io::Error` met launching a program means: a refusal is
@@ -362,12 +363,6 @@ fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
 
 // ── prepare ───────────────────────────────────────────────────────────────────
 
-impl From<Refusal> for Break {
-    fn from(refusal: Refusal) -> Self {
-        sig(refusal.to_string())
-    }
-}
-
 /// A vetted call built into its launch, not yet started.  `shown` is the
 /// name diagnostics and audit report; the launch runs `image` with `args`.
 pub(crate) struct Prepared {
@@ -398,14 +393,22 @@ pub(crate) fn prepare(
     let Head { shown, program } = head;
     let admitted = program?;
     let args = validate_argv(&shown, args)?;
-    let prepared =
-        build_launch(shown, admitted, args, ownership, shell).map_err(|refusal| match refusal {
-            #[cfg(windows)]
-            Refusal::Cancelled(cause) => Break::cancelled(cause, &shell.scope),
-            other => Break::from(other),
-        })?;
+    let prepared = build_launch(shown, admitted, args, ownership, shell).map_err(unbuilt)?;
     shell.poll()?;
     Ok(prepared)
+}
+
+/// A launch that could not be built: a refusal as itself, a stop as the run's.
+/// Nothing was spawned, so no program failed to start; the arm is ral's own
+/// step failing.
+fn unbuilt(unstarted: Unstarted) -> Break {
+    match unstarted {
+        Unstarted::Refused(refusal) => refusal.into(),
+        Unstarted::Stopped(stop) => stop.into(),
+        Unstarted::Program(e) => {
+            Error::new(io_message("ral could not build the launch", &e)).into()
+        }
+    }
 }
 
 /// Build `admitted`'s launch with `args` under `ownership`, and apply the
@@ -423,7 +426,7 @@ fn build_launch(
     args: Vec<String>,
     ownership: Ownership,
     shell: &Shell,
-) -> Result<Prepared, Refusal> {
+) -> Result<Prepared, Unstarted> {
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
     // The in-process guard in `Head::admit` runs either way.
@@ -562,7 +565,7 @@ fn stdin_stdio(stdin: &Source) -> Settled<StdioSpec> {
         Source::Terminal => StdioSpec::Inherit,
         Source::Reader(r) => r
             .try_clone()
-            .map_err(|e| Error::io("could not duplicate stdin", &e))?
+            .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?
             .into(),
     })
 }
@@ -585,7 +588,7 @@ pub(crate) fn wire_stdio(
     stdout: ChildOut,
     stderr: &Sink,
 ) -> Settled<Pumps<Sink>> {
-    let pipe = |e: std::io::Error| Error::io("pipe", &e);
+    let pipe = |e: std::io::Error| Error::new(io_message("pipe", &e));
     command.stdin(stdin_stdio(stdin)?);
     let (out, out_pump, joined) = match stdout {
         ChildOut::Sink(sink) => {
@@ -622,12 +625,12 @@ fn join_stderr(command: &mut Launch, stdout: &Sink) -> Settled<Option<Sink>> {
         let owned = std::io::stdout()
             .as_handle()
             .try_clone_to_owned()
-            .map_err(|e| Error::io("pipe", &e))?;
+            .map_err(|e| Error::new(io_message("pipe", &e)))?;
         (StdioSpec::from_owned(owned), None)
     } else {
         stdout
             .child_stdio(OutFd::Stderr)
-            .map_err(|e| Error::io("pipe", &e))?
+            .map_err(|e| Error::new(io_message("pipe", &e)))?
     };
     command.stderr(stdio);
     Ok(pump)
@@ -811,7 +814,6 @@ fn started<T>(
 fn unstarted_error(prepared: &Prepared, unstarted: Unstarted) -> Break {
     match unstarted {
         Unstarted::Refused(refusal) => refusal.into(),
-        #[cfg(unix)]
         Unstarted::Stopped(stop) => stop.into(),
         Unstarted::Program(e) => {
             let interpreter = prepared.interpreter.as_deref();
@@ -842,7 +844,12 @@ fn at_spawn(
 ) -> Error {
     use crate::site::{Silent, site};
     use std::io::ErrorKind::{NotFound, PermissionDenied};
-    let failed = |why| Error::process(program, Failure::not_runnable(program, why));
+    let failed = |why| {
+        Error::new(Reason::process(
+            program,
+            Failure::not_runnable(program, why),
+        ))
+    };
     let denied = matches!(e.kind(), PermissionDenied | NotFound)
         .then(withheld)
         .flatten();
@@ -859,7 +866,7 @@ fn at_spawn(
                 interpreter.map(crate::path::shown),
             ))
         }
-        (None, NotFound, _) => Error::process(program, Failure::NotFound),
+        (None, NotFound, _) => Error::new(Reason::process(program, Failure::NotFound)),
         (None, ..) => failed(unrunnable(e)),
     }
 }
@@ -893,7 +900,7 @@ pub(crate) fn ending(
 /// failure reads no log.
 fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> Error {
     let Claim::Confined(pids) = claim else {
-        return Error::process(name, failure);
+        return Error::new(Reason::process(name, failure));
     };
     let exited = match failure {
         Failure::Exited(n) => Some(n),
@@ -902,7 +909,7 @@ fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> 
     let hint = crate::authority::sandbox::denial_hint(pids, since, exited);
     #[cfg(target_os = "macos")]
     let hint = hint.or_else(|| exited.and_then(crate::process::limits::failure_hint));
-    let error = Error::process(name, failure);
+    let error = Error::new(Reason::process(name, failure));
     match hint {
         Some(hint) => error.with_hint(hint),
         None => error,
@@ -994,18 +1001,20 @@ pub(crate) fn detach(
         // Every pass of the stack: a catch-all intercepts as a per-name does.
         match shell.lookup_handler(bare) {
             Some(HandlerLookup::Frame(..)) => {
-                return Err(sig(format!(
+                return Err(Error::new(format!(
                     "detach: `{bare}` is handled here (by an arm for it, or by the catch-all) \
                      and a handler runs inside this session, so nothing can be detached. To \
                      stub `detach`, stand in for `detach` itself; to run the real program, \
                      `^{bare}`"
-                )));
+                ))
+                .into());
             }
             Some(HandlerLookup::Base(_)) => {
-                return Err(sig(format!(
+                return Err(Error::new(format!(
                     "detach: `{bare}` is ral's own, and runs inside this session; nothing \
                      can be detached"
-                )));
+                ))
+                .into());
             }
             None => {}
         }
@@ -1047,10 +1056,10 @@ pub(crate) fn detach(
             args,
             born: Survivor::Unnamed(why),
         }) => {
-            let lost = sig(format!(
+            let lost = Error::new(format!(
                 "detach: '{shown}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid"
             ));
-            (shown, args, Err(lost))
+            (shown, args, Err(lost.into()))
         }
         Err(broke) => (shown, Value::render_argv(argv), Err(broke)),
     };

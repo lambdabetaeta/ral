@@ -42,7 +42,10 @@ mod severance_codes {
     #[test]
     fn every_severance_has_its_own_settled_code() {
         let codes = [
-            (Severed::Refused("v9".into()).code(), "engine-refused"),
+            (
+                Severed::Refused(WireError::of(&Error::new("v9"))).code(),
+                "engine-refused",
+            ),
             (Severed::Closed("eof".into()).code(), "engine-closed"),
             (
                 Severed::Silent(Duration::from_secs(30)).code(),

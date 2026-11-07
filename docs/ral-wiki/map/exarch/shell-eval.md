@@ -109,7 +109,7 @@ host-facing surface. Every real caller builds `agent::desk::RunHost`, pairing
 the per-call `ExarchDesk` with a `SurfaceApplier` (`shell_eval/surface.rs`,
 [[map/exarch/builtins|builtins]]); a bare `SurfaceApplier` alone is the mute
 host the harness runs under, whose `enquire` answers the honest
-`EnquiryError::no_desk()` rather than reaching a handler.
+`shell::runtime::no_desk()` rather than reaching a handler.
 
 `BINDING_IDLE_CALLS` (256) is the binding lease's constant, which this
 module owns but does not put on the request: it is not

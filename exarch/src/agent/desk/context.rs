@@ -5,13 +5,14 @@ use crate::record::context::ContextSurvey;
 use crate::record::{AgentLog, EditAuthority};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
-use ral_core::shell::runtime::Error;
+use ral_core::error::Error;
+use ral_core::shell::runtime::no_desk;
 
 use super::{DeskAct, ExarchDesk};
 
 impl ExarchDesk {
     pub(super) fn context_survey(&self) -> Result<ContextSurvey, Error> {
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let body = self.loan.get().ok_or_else(no_desk)?;
         Ok(body.log.context().context_survey())
     }
 
@@ -22,7 +23,7 @@ impl ExarchDesk {
         read: impl FnOnce(P) -> Result<FOValue, String>,
     ) -> Result<FOValue, Error> {
         let located = {
-            let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+            let mut body = self.loan.get().ok_or_else(no_desk)?;
             locate(&mut body.log)
         };
         located.and_then(read).map_err(Error::new)
@@ -35,7 +36,7 @@ impl ExarchDesk {
             note: Note(note),
         }: Evict,
     ) -> Result<FOValue, Error> {
-        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(no_desk)?;
         let payload = format!("note {note}");
         let evicted = body
             .log

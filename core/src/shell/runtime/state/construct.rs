@@ -7,7 +7,6 @@ use super::hooks::HookTable;
 use super::modules::Modules;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
-use crate::authority::grant::freeze::PolicyError;
 use crate::authority::policy::{Baseline, GrantStack};
 use crate::host::EnvVars;
 use crate::io::terminal::TerminalState;
@@ -17,7 +16,8 @@ use crate::process::{DurableRoot, Scope, TerminalLease};
 use crate::shell::grant::{GrantNarrower, SpawnGrant};
 use crate::shell::runtime::handler::{HandlerFrame, HandlerStack};
 use crate::shell::runtime::{
-    Audit, BuiltinEntry, BuiltinTable, Convention, Cradle, Env, ExitHints, Set, Signature, Value,
+    Audit, BuiltinEntry, BuiltinTable, Convention, Cradle, Env, Error, ExitHints, Set, Signature,
+    Value,
 };
 use crate::source::SourceDb;
 use crate::ty::Fixings;
@@ -50,7 +50,7 @@ impl Runtime {
     /// # Errors
     /// A system read that is malformed or whose walk fails, named: a host
     /// that cannot resolve its own baseline cannot run anything.
-    pub fn bare(terminal: TerminalState) -> Result<Self, PolicyError> {
+    pub fn bare(terminal: TerminalState) -> Result<Self, Error> {
         Ok(Self::bare_on(Baseline::of_host()?, terminal))
     }
 
@@ -337,7 +337,7 @@ impl Shell {
         runtime: Arc<Runtime>,
         bequest: Bequest,
         narrow: GrantNarrower,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Error> {
         let Bequest { image, grant } = bequest;
         let mut child = Self::construct(runtime, image, None);
         grant.narrow_onto(&mut child, narrow)?;

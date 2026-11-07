@@ -41,7 +41,7 @@ fn only_create_process_s_failure_is_the_program_s() {
     let refused = |mut launch: Launch| {
         matches!(
             launch.spawn(PgidPolicy::Inherit),
-            Err(Unstarted::Refused(Refusal::Launch(_)))
+            Err(Unstarted::Refused(_))
         )
     };
     assert!(refused(Launch::new(r"C:\ral-no-such-dir\tool.bat")));

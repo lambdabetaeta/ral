@@ -6,12 +6,13 @@
 use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
+use ral_core::error::Error;
 use ral_core::host::EnvVars;
 use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Ran, Report};
 use ral_core::record;
 use ral_core::shell::runtime::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, sig,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
 };
 use ral_core::ty::{Row, Scheme, Ty, Typed as _};
 use ral_core::typecheck::Unifier;
@@ -184,7 +185,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
 }
 
 fn refuse(message: &str) -> Break {
-    sig(format!("{NAME}: {message}"))
+    Error::new(format!("{NAME}: {message}")).into()
 }
 
 /// Decode the boot answer; only the host chooses capability refusals' exit 2.

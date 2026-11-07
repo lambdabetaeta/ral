@@ -7,7 +7,7 @@ use crate::shell::runtime::Nursery;
 fn no_base(
     _: &str,
     _: &crate::authority::grant::freeze::FreezeCtx,
-) -> Result<crate::authority::policy::GrantLayer, String> {
+) -> Result<crate::authority::policy::GrantLayer, crate::error::Error> {
     panic!("only a Base grant consults the narrower")
 }
 

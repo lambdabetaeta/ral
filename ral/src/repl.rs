@@ -110,7 +110,9 @@ pub(crate) fn engine_at(
         clippy::unnecessary_wraps,
         reason = "must match EngineInstaller::runtime's signature, which can genuinely refuse"
     )]
-    fn test_runtime(_: &ral_core::protocol::EngineSpec) -> Result<ral_core::Runtime, String> {
+    fn test_runtime(
+        _: &ral_core::protocol::EngineSpec,
+    ) -> Result<ral_core::Runtime, ral_core::error::Error> {
         Ok(RUNTIME
             .take()
             .expect("no runtime: was this test engine booted through `engine_at`?"))
@@ -122,7 +124,7 @@ pub(crate) fn engine_at(
     fn dressed_root(
         _: &ral_core::protocol::Root,
         shell: &mut ral_core::Shell,
-    ) -> Result<(), String> {
+    ) -> Result<(), ral_core::error::Error> {
         if let Some(dress) = DRESS.take() {
             dress(shell);
         }
@@ -132,7 +134,11 @@ pub(crate) fn engine_at(
         tag: TEST_TAG,
         runtime: test_runtime,
         root: dressed_root,
-        narrow: |_, _| Err("a test engine makes no child sessions".into()),
+        narrow: |_, _| {
+            Err(ral_core::error::Error::new(
+                "a test engine makes no child sessions",
+            ))
+        },
     }];
     RUNTIME.set(Some(runtime));
     DRESS.set(Some(Box::new(dress)));

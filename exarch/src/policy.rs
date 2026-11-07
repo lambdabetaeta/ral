@@ -19,6 +19,7 @@ use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
 use ral_core::authority::grant::freeze::{Anchor, FreezeCtx, host_absolute};
 use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
 use ral_core::authority::policy::{GrantLayer, GrantStack};
+use ral_core::error::Error;
 use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::{CwdPath, FrozenPath};
@@ -56,7 +57,7 @@ pub fn for_invocation(
     extension: Option<&Path>,
     restrict_files: &[PathBuf],
     own: Option<&Path>,
-) -> Result<Invocation, String> {
+) -> Result<Invocation, Error> {
     let ctx = FreezeCtx::at(EnvVars::new(), cwd.clone()).with_scratch(Some(scratch));
     let credentials = crate::provider::credential_files();
     compose(
@@ -77,14 +78,14 @@ fn compose(
     restrict_files: &[PathBuf],
     credentials: &[PathBuf],
     own: Option<&Path>,
-) -> Result<Invocation, String> {
+) -> Result<Invocation, Error> {
     let cwd = ctx.cwd();
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
     // the frozen GrantStack returned here.
     let mut load_shell = ral_core::HostSurface::default()
         .shell(TerminalState::default(), cwd.clone())
-        .map_err(|e| format!("the capability loader cannot start: {e}"))?;
+        .map_err(|e| e.with_context("the capability loader cannot start"))?;
 
     let mut ceiling: GrantLayer = resolve_base(base_name, ctx)?;
     if let Some(path) = extension {
@@ -167,7 +168,7 @@ pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only",
 ///
 /// # Errors
 /// Unknown `base_name`.
-pub fn base_layer(base_name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+pub fn base_layer(base_name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
     let anchor = FreezeCtx::at(EnvVars::new(), ctx.cwd().clone());
     resolve_base(base_name, &anchor.with_scratch(ctx.scratch()))
 }
@@ -180,7 +181,7 @@ pub fn base_layer(base_name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, String
 /// the OS sandbox profiles each judge, expanded to the firmlink variants.
 /// A path [`host_absolute`] refuses fails the layer whole: a deny that named
 /// nothing would fail open.
-fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
     let held = paths
         .iter()
         .map(|p| held(p))
@@ -204,11 +205,13 @@ fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, String> 
 /// Exclude the boot-pinned binary `own` from exec. Called only when exec is
 /// restricted; refuses if `own` is `None`. An fs exclusion would refuse every
 /// bundled tool.
-fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
-    let exe = own.ok_or(
-        "exarch could not pin its own binary at startup (is it missing or unreadable?), \
-         so cannot exclude it from exec",
-    )?;
+fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
+    let exe = own.ok_or_else(|| {
+        Error::new(
+            "exarch could not pin its own binary at startup (is it missing or unreadable?), \
+             so cannot exclude it from exec",
+        )
+    })?;
     let exec = ExecTable {
         deny: vec![Target::File(Anchor::Absolute.place(held(exe)?))],
         ..ExecTable::default()
@@ -223,17 +226,14 @@ fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, String>
 }
 
 /// The `absolute` spelling a held path freezes to.
-fn held(path: &Path) -> Result<String, String> {
-    host_absolute(path)
-        .map(FrozenPath::into_string)
-        .map_err(|e| e.to_string())
+fn held(path: &Path) -> Result<String, Error> {
+    host_absolute(path).map(FrozenPath::into_string)
 }
 
 /// `t ⊕ excluded`: every request less what `excluded` denies, read as an
 /// extension of the top, as `--extend` reads a fragment.
-fn carve_out(excluded: Axes, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
-    let fragment = decode_fragment(GrantValue::from(excluded).as_ref(), "exarch", ctx)
-        .map_err(|e| e.to_string())?;
+fn carve_out(excluded: Axes, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
+    let fragment = decode_fragment(GrantValue::from(excluded).as_ref(), "exarch", ctx)?;
     Ok(GrantLayer::root().extend(fragment))
 }
 
@@ -308,11 +308,16 @@ mod tests {
     /// A carve-out the decoder refuses is refused in its words, hint and all.
     #[cfg(unix)]
     #[test]
-    fn a_refused_carve_out_keeps_the_decoders_hint() {
+    fn a_refused_carve_out_is_refused_in_the_decoders_words() {
         let ctx = ctx_at(&std::env::temp_dir());
         let why = deny_layer(&[PathBuf::from("/")], &ctx).unwrap_err();
-        assert!(why.contains("filesystem root"), "{why}");
-        assert!(why.contains("\nhint: To withhold every path"), "{why}");
+        assert!(why.describe().contains("filesystem root"), "{why}");
+        assert!(
+            why.hints()
+                .iter()
+                .any(|h| h.starts_with("To withhold every path")),
+            "{why:?}"
+        );
     }
 
     #[test]
@@ -327,7 +332,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(
-            err,
+            err.describe(),
             "exarch could not pin its own binary at startup (is it missing or unreadable?), \
              so cannot exclude it from exec"
         );

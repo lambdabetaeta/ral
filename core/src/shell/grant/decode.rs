@@ -13,13 +13,14 @@
 //! The runtime cannot tell a record from a map, so both are read, at every
 //! depth.  Every list denotes a set: a repeat adds nothing and is no error.
 
-use crate::authority::grant::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
+use crate::authority::grant::freeze::{Anchor, FreezeCtx, Place, Selector};
 use crate::authority::grant::value::Target;
 use crate::authority::grant::{Keyed, Placed, Polar, name_rules};
 use crate::authority::policy::{
     EditorVerb, ExecRules, Fragment, FsLayer, Gpu, GrantLayer, GrantPath, Net, Rule, ShellVerb,
 };
 use crate::data::FOValue;
+use crate::error::Error;
 use crate::path::{Excluded, Kind, PathRules, SigilHead, Trace, has_drive, names_a_path_for};
 use crate::shell::runtime::{List, Map, Value, settings_map};
 use crate::syntax::quote::quote_word;
@@ -60,16 +61,16 @@ impl<'a> Tag<'a> {
     }
 
     /// The string payload, `what` naming what it should hold; `vocab` advises.
-    fn text(&self, vocab: &Vocab, what: &str) -> Result<&'a str, PolicyError> {
+    fn text(&self, vocab: &Vocab, what: &str) -> Result<&'a str, Error> {
         let tag = code(&format!("`{}", self.label));
         match self.payload {
             Some(Value::String(s)) => Ok(s.as_str()),
-            Some(other) => Err(PolicyError::new(format!(
+            Some(other) => Err(Error::new(format!(
                 "{tag} takes {what}, got {}",
                 other.type_name()
             ))
             .with_hint(vocab.payload)),
-            None => Err(PolicyError::new(format!(
+            None => Err(Error::new(format!(
                 "{tag} needs a payload: {what}, as in {}",
                 code(&format!("`{} …", self.label))
             ))
@@ -78,10 +79,10 @@ impl<'a> Tag<'a> {
     }
 
     /// A nullary tag takes no payload.
-    fn nullary(&self, vocab: &Vocab) -> Result<(), PolicyError> {
+    fn nullary(&self, vocab: &Vocab) -> Result<(), Error> {
         match self.payload {
             None => Ok(()),
-            Some(_) => Err(PolicyError::new(format!(
+            Some(_) => Err(Error::new(format!(
                 "{0} takes no payload; write it bare, {0}",
                 code(&format!("`{}", self.label))
             ))
@@ -91,11 +92,8 @@ impl<'a> Tag<'a> {
 }
 
 /// Prefix each refusal with the key it came from.
-fn within(prefix: &str) -> impl Fn(PolicyError) -> PolicyError + '_ {
-    move |e| PolicyError {
-        message: format!("{prefix}: {}", e.message),
-        ..e
-    }
+fn within(prefix: &str) -> impl Fn(Error) -> Error + '_ {
+    move |e| e.with_context(prefix)
 }
 
 fn describe(value: &Value) -> String {
@@ -106,9 +104,9 @@ fn describe(value: &Value) -> String {
 }
 
 /// A tag `vocab`'s row lacks, in the words the checker uses for it.
-fn unknown_tag(vocab: &Vocab, tag: &str) -> PolicyError {
+fn unknown_tag(vocab: &Vocab, tag: &str) -> Error {
     let (message, advice) = vocab.refuse(tag);
-    let error = PolicyError::new(message);
+    let error = Error::new(message);
     match advice {
         Some(advice) => error.with_hint(advice),
         None => error,
@@ -116,8 +114,8 @@ fn unknown_tag(vocab: &Vocab, tag: &str) -> PolicyError {
 }
 
 /// A value that is no tag at all, where `vocab` wants one.
-fn untagged(vocab: &Vocab, value: &Value) -> PolicyError {
-    PolicyError::new(format!(
+fn untagged(vocab: &Vocab, value: &Value) -> Error {
+    Error::new(format!(
         "expected {}, got {}",
         indefinite(vocab.noun),
         describe(value)
@@ -125,10 +123,10 @@ fn untagged(vocab: &Vocab, value: &Value) -> PolicyError {
     .with_hint(vocab.untagged)
 }
 
-fn list_of(value: &Value, noun: &str) -> Result<List, PolicyError> {
+fn list_of(value: &Value, noun: &str) -> Result<List, Error> {
     match value {
         Value::List(items) => Ok(items.clone()),
-        other => Err(PolicyError::new(format!(
+        other => Err(Error::new(format!(
             "expected a list of {noun}, got {}",
             describe(other)
         ))),
@@ -136,10 +134,10 @@ fn list_of(value: &Value, noun: &str) -> Result<List, PolicyError> {
 }
 
 /// A nested table is a record; `empty` is how one admitting nothing is written.
-fn table_of<'a>(value: &'a Value, empty: &str) -> Result<&'a Map, PolicyError> {
+fn table_of<'a>(value: &'a Value, empty: &str) -> Result<&'a Map, Error> {
     match value {
         Value::Map(m) => Ok(m),
-        other => Err(PolicyError::new(format!(
+        other => Err(Error::new(format!(
             "a grant table is a record, got {}; for a table that admits nothing write `{empty}`",
             describe(other)
         ))),
@@ -149,14 +147,14 @@ fn table_of<'a>(value: &'a Value, empty: &str) -> Result<&'a Map, PolicyError> {
 // ── Places and selectors ──────────────────────────────────────────────────
 
 /// A place tag and its subpath; `None` for a tag that is not a place.
-fn place_of(tag: &Tag) -> Result<Option<Place>, PolicyError> {
+fn place_of(tag: &Tag) -> Result<Option<Place>, Error> {
     let Some(anchor) = Anchor::of_tag(tag.label) else {
         return Ok(None);
     };
     Ok(Some(anchor.place(tag.text(&PLACE, "a path")?)))
 }
 
-fn selector_of(tag: &Tag) -> Result<Option<Selector>, PolicyError> {
+fn selector_of(tag: &Tag) -> Result<Option<Selector>, Error> {
     let Ok(selector) = tag.label.parse() else {
         return Ok(None);
     };
@@ -165,7 +163,7 @@ fn selector_of(tag: &Tag) -> Result<Option<Selector>, PolicyError> {
 }
 
 /// One entry of an fs list.
-fn decode_place(value: &Value) -> Result<Place, PolicyError> {
+fn decode_place(value: &Value) -> Result<Place, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(&PLACE, value))?;
     place_of(&tag)?.ok_or_else(|| unknown_tag(&PLACE, tag.label))
 }
@@ -174,7 +172,7 @@ fn decode_place(value: &Value) -> Result<Place, PolicyError> {
 fn freeze_places<W: Polar>(
     list: &List,
     ctx: &FreezeCtx,
-) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+) -> Result<Vec<GrantPath<W::Grant>>, Error> {
     list.iter()
         .filter_map(|item| {
             decode_place(&item)
@@ -189,7 +187,7 @@ fn freeze_places<W: Polar>(
 
 /// `fs: [read: [...], write: [...], deny: [...]]`, lists of places, where
 /// `deny` carves holes inside the `read`/`write` prefix regions.
-fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, PolicyError> {
+fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, Error> {
     let at = within(err_prefix);
     let (mut read, mut write, mut deny) = (Vec::new(), Vec::new(), Vec::new());
     for (sub, paths) in table_of(value, "fs: [read: []]").map_err(&at)? {
@@ -198,18 +196,14 @@ fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer
             "read" => read = freeze_places::<Trace>(&list(&paths)?, ctx).map_err(&at)?,
             "write" => write = freeze_places::<Trace>(&list(&paths)?, ctx).map_err(&at)?,
             "deny" => deny = freeze_places::<Excluded>(&list(&paths)?, ctx).map_err(&at)?,
-            _ => return Err(at(PolicyError::new(nested("fs").unknown_key(sub)))),
+            _ => return Err(at(Error::new(nested("fs").unknown_key(sub)))),
         }
     }
     Ok(FsLayer::new(read, write, deny))
 }
 
 /// `net` and `gpu` each take their one restriction; omit one to inherit.
-fn decode_veto<V: FromStr>(
-    value: &Value,
-    vocab: &Vocab,
-    err_prefix: &str,
-) -> Result<V, PolicyError> {
+fn decode_veto<V: FromStr>(value: &Value, vocab: &Vocab, err_prefix: &str) -> Result<V, Error> {
     let at = within(err_prefix);
     let tag = Tag::of(value).ok_or_else(|| at(untagged(vocab, value)))?;
     let veto = tag
@@ -225,7 +219,7 @@ fn decode_verbs<V: FromStr + Ord>(
     value: &Value,
     vocab: &Vocab,
     err_prefix: &str,
-) -> Result<BTreeSet<V>, PolicyError> {
+) -> Result<BTreeSet<V>, Error> {
     let at = within(err_prefix);
     list_of(value, &format!("{}s", vocab.noun))
         .map_err(&at)?
@@ -246,11 +240,11 @@ fn decode_verbs<V: FromStr + Ord>(
 
 /// A name is a bare command name; a path is a place, which is judged by its
 /// own rules.
-fn bare_name(name: &str) -> Result<(), PolicyError> {
+fn bare_name(name: &str) -> Result<(), Error> {
     if !path_shaped(name) {
         return Ok(());
     }
-    Err(PolicyError::new(format!(
+    Err(Error::new(format!(
         "{} takes a bare command name, not {}",
         code("`name"),
         quote_word(name)
@@ -277,7 +271,7 @@ fn path_shaped(name: &str) -> bool {
 
 /// An unwrapped place names one executable; a directory there is a mistake
 /// the author can fix by wrapping it in `dir`.
-fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
+fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let Some(placed) = ctx.walked::<W>(place)? else {
         return Ok(vec![]);
     };
@@ -285,7 +279,7 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Pol
         && walked.real.followed().kind() == Some(Kind::Dir)
     {
         let cited = |target: Target| code(&target.to_string());
-        return Err(PolicyError::new(format!(
+        return Err(Error::new(format!(
             "{} is a directory, so as an exec target it names a binary that \
              cannot exist",
             cited(Target::File(place.clone()))
@@ -299,9 +293,9 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Pol
 }
 
 /// `dir D`: every directory `D`, a place or a selector, resolves to.
-fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
+fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let payload = tag.payload.ok_or_else(|| {
-        PolicyError::new(format!("{} needs a place or a selector", code("`dir")))
+        Error::new(format!("{} needs a place or a selector", code("`dir")))
             .with_hint(DIR_TARGET.untagged)
     })?;
     let inner = Tag::of(payload).ok_or_else(|| untagged(&DIR_TARGET, payload))?;
@@ -321,7 +315,7 @@ fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyEr
 
 /// One entry of an `allow` or `deny` list, as the rules polarity `W` makes
 /// of it.
-fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
+fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(&EXEC_TARGET, value))?;
     match tag.label {
         "name" => {
@@ -339,7 +333,7 @@ fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, 
 }
 
 /// An `allow` or `deny` list, the rules of each target at polarity `W`.
-fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
+fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let rules: Vec<_> = list
         .iter()
         .map(|item| decode_target::<W>(&item, ctx))
@@ -349,7 +343,7 @@ fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, P
 
 /// `exec: [allow: [...], deny: [...]]`.  Argument restrictions are gone: a
 /// target is admitted or denied whatever its arguments.
-fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, PolicyError> {
+fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, Error> {
     let at = within(err_prefix);
     let mut rules = Vec::new();
     for (key, targets) in table_of(value, "exec: [allow: []]").map_err(&at)? {
@@ -374,8 +368,8 @@ fn is_old_policy(value: &Value) -> bool {
     }
 }
 
-fn unknown_exec_key(key: &str, value: &Value) -> PolicyError {
-    let err = PolicyError::new(nested("exec").unknown_key(key));
+fn unknown_exec_key(key: &str, value: &Value) -> Error {
+    let err = Error::new(nested("exec").unknown_key(key));
     if !is_old_policy(value) || !near_names(key, ["allow", "deny"], 1).is_empty() {
         return err;
     }
@@ -400,15 +394,15 @@ fn unknown_exec_key(key: &str, value: &Value) -> PolicyError {
 /// decoder and the checker cannot drift apart.
 ///
 /// # Errors
-/// A [`PolicyError`] naming the key whose shape or value it will not read, or
+/// A [`Error`] naming the key whose shape or value it will not read, or
 /// the place that would not resolve absolute or whose walk failed.
 pub(crate) fn decode_capability_map(
     value: &Value,
     err_prefix: &str,
     ctx: &FreezeCtx,
-) -> Result<GrantLayer, PolicyError> {
+) -> Result<GrantLayer, Error> {
     let entries = settings_map(value).ok_or_else(|| {
-        PolicyError::new(format!(
+        Error::new(format!(
             "{err_prefix} expects a record or `()`, got {}",
             value.type_name()
         ))
@@ -426,7 +420,7 @@ pub(crate) fn decode_capability_map(
             "shell" => shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &at)?),
             other => {
                 let table = declared(ContractForm::Grant);
-                return Err(PolicyError::new(match table.holds(other) {
+                return Err(Error::new(match table.holds(other) {
                     Some(Holds::Refused(advice)) => format!("{err_prefix}: {advice}"),
                     _ => format!("{err_prefix}: {}", table.unknown_key(other)),
                 }));
@@ -445,7 +439,7 @@ pub fn decode_grant(
     record: &FOValue,
     err_prefix: &str,
     ctx: &FreezeCtx,
-) -> Result<GrantLayer, PolicyError> {
+) -> Result<GrantLayer, Error> {
     decode_capability_map(&Value::from(record.clone()), err_prefix, ctx)
 }
 
@@ -458,7 +452,7 @@ pub fn decode_fragment(
     record: &FOValue,
     err_prefix: &str,
     ctx: &FreezeCtx,
-) -> Result<Fragment, PolicyError> {
+) -> Result<Fragment, Error> {
     decode_grant(record, err_prefix, ctx).map(Fragment::of)
 }
 
@@ -516,11 +510,11 @@ mod tests {
         )
     }
 
-    fn decode(value: &Value) -> Result<GrantLayer, PolicyError> {
+    fn decode(value: &Value) -> Result<GrantLayer, Error> {
         decode_capability_map(value, "test", &ctx())
     }
 
-    fn rules_of(exec_value: Value) -> Result<ExecRules, PolicyError> {
+    fn rules_of(exec_value: Value) -> Result<ExecRules, Error> {
         decode(&rec(&[("exec", exec_value)])).map(|layer| layer.exec().cloned().unwrap())
     }
 
@@ -587,16 +581,26 @@ mod tests {
             .collect()
     }
 
-    fn refusal(value: &Value) -> PolicyError {
+    fn refusal(value: &Value) -> Error {
         decode(value).unwrap_err()
     }
 
-    fn exec_refusal(exec_value: Value) -> PolicyError {
+    fn exec_refusal(exec_value: Value) -> Error {
         refusal(&rec(&[("exec", exec_value)]))
     }
 
-    fn fs_refusal(read: Vec<Value>) -> PolicyError {
+    fn fs_refusal(read: Vec<Value>) -> Error {
         refusal(&rec(&[("fs", rec(&[("read", list(read))]))]))
+    }
+
+    /// The key path says where the decoder stood: report context, never the
+    /// record a handler reads.
+    #[test]
+    fn the_key_path_is_context_and_not_the_reason() {
+        let e = exec_refusal(rec(&[("alow", list(vec![]))]));
+        assert!(e.to_string().starts_with("test exec: "), "{e}");
+        assert!(!e.describe().contains("test exec"), "{}", e.describe());
+        assert_eq!(e.context(), Some("test exec"));
     }
 
     // ── exec ──
@@ -810,19 +814,15 @@ mod tests {
             "a\\b",
         ] {
             let e = exec_refusal(exec(vec![tagged("name", name)], vec![]));
-            assert!(
-                e.message.contains("bare command name"),
-                "{name}: {}",
-                e.message
-            );
-            assert!(e.hint.unwrap().contains("`` `absolute /path ``"));
+            assert!(e.to_string().contains("bare command name"), "{name}: {e}");
+            assert!(e.hints()[0].contains("`` `absolute /path ``"));
         }
     }
 
     #[test]
     fn a_bare_string_target_offers_name_or_a_place() {
         let e = exec_refusal(exec(vec![Value::string("git")], vec![]));
-        let hint = e.hint.unwrap();
+        let hint = &e.hints()[0];
         assert!(hint.contains("`name git"), "{hint}");
         assert!(hint.contains("`absolute"), "{hint}");
     }
@@ -831,19 +831,16 @@ mod tests {
     fn an_unknown_target_tag_lists_the_targets_and_offers_the_nearest() {
         let e = exec_refusal(exec(vec![tagged("nmae", "git")], vec![]));
         assert!(
-            e.message.contains("`` `nmae `` is not an exec target;"),
-            "{}",
-            e.message
+            e.to_string().contains("`` `nmae `` is not an exec target;"),
+            "{e}"
         );
         assert!(
-            e.message.ends_with("(did you mean `` `name ``?)"),
-            "{}",
-            e.message
+            e.to_string().ends_with("(did you mean `` `name ``?)"),
+            "{e}"
         );
         assert!(
-            e.message.contains("`dir") && e.message.contains("`xdg-bin"),
-            "{}",
-            e.message
+            e.to_string().contains("`dir") && e.to_string().contains("`xdg-bin"),
+            "{e}"
         );
     }
 
@@ -851,7 +848,7 @@ mod tests {
     fn an_unwrapped_selector_is_refused_with_the_dir_hint() {
         for sel in ["path", "system", "homebrew"] {
             let e = exec_refusal(exec(vec![bare(sel)], vec![]));
-            let hint = e.hint.unwrap();
+            let hint = &e.hints()[0];
             assert!(hint.contains(&format!("write `` `dir `{sel} ``")), "{hint}");
         }
     }
@@ -861,8 +858,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
         let e = exec_refusal(exec(vec![tagged("absolute", &path)], vec![]));
-        assert!(e.message.contains("is a directory"), "{}", e.message);
-        assert!(e.hint.unwrap().contains("`dir `absolute"), "dir hint");
+        assert!(e.to_string().contains("is a directory"), "{e}");
+        assert!(e.hints()[0].contains("`dir `absolute"), "dir hint");
     }
 
     #[test]
@@ -873,13 +870,13 @@ mod tests {
             Value::string("/x"),
         ] {
             let e = exec_refusal(exec(vec![dir(payload)], vec![]));
-            assert!(e.message.contains("place or a selector"), "{}", e.message);
+            assert!(e.to_string().contains("place or a selector"), "{e}");
         }
         let e = exec_refusal(exec(vec![bare("dir")], vec![]));
         assert!(
-            e.message.contains("`` `dir `` needs a place or a selector"),
-            "{}",
-            e.message
+            e.to_string()
+                .contains("`` `dir `` needs a place or a selector"),
+            "{e}"
         );
     }
 
@@ -889,7 +886,7 @@ mod tests {
             vec![dir(Value::variant("system", Some(Value::Bool(true))))],
             vec![],
         ));
-        assert!(e.message.contains("takes no payload"), "{}", e.message);
+        assert!(e.to_string().contains("takes no payload"), "{e}");
     }
 
     /// Per-command maps, string policies and subcommand lists are gone, and
@@ -903,7 +900,10 @@ mod tests {
             rec(&[("cargo", list(vec![Value::string("build")]))]),
         ] {
             let e = exec_refusal(value.clone());
-            let text = format!("{} {}", e.message, e.hint.clone().unwrap_or_default());
+            let text = format!(
+                "{e} {}",
+                e.hints().first().map(|h| &**h).unwrap_or_default()
+            );
             assert!(
                 text.contains("record") || text.contains("no longer supported"),
                 "{value:?}: {text}"
@@ -914,13 +914,9 @@ mod tests {
     #[test]
     fn a_misspelt_exec_key_offers_the_real_ones() {
         let e = exec_refusal(rec(&[("alow", list(vec![]))]));
-        assert!(e.message.contains("takes allow, deny"), "{}", e.message);
-        assert!(
-            e.message.ends_with("(did you mean 'allow'?)"),
-            "{}",
-            e.message
-        );
-        assert!(e.hint.is_none());
+        assert!(e.to_string().contains("takes allow, deny"), "{e}");
+        assert!(e.to_string().ends_with("(did you mean 'allow'?)"), "{e}");
+        assert_eq!(e.hints(), [] as [Box<str>; 0]);
     }
 
     /// The per-command migration hint is for the old string surface's shapes;
@@ -928,13 +924,13 @@ mod tests {
     #[test]
     fn the_per_command_hint_is_only_for_the_old_policy_shapes() {
         for value in [Value::string("allow"), list(vec![Value::string("build")])] {
-            let hint = exec_refusal(rec(&[("git", value)])).hint.unwrap();
+            let hint = exec_refusal(rec(&[("git", value)])).hints()[0].to_string();
             assert!(hint.contains("`` allow: [`name git] ``"), "{hint}");
         }
         for value in [list(vec![bare("git")]), Value::Bool(true), rec(&[])] {
             let e = exec_refusal(rec(&[("only", value)]));
-            assert!(e.message.contains("unknown key 'only'"), "{}", e.message);
-            assert!(e.hint.is_none(), "{:?}", e.hint);
+            assert!(e.to_string().contains("unknown key 'only'"), "{e}");
+            assert!(e.hints().is_empty(), "{:?}", e.hints());
         }
     }
 
@@ -945,15 +941,15 @@ mod tests {
             "fs",
             rec(&[("raed", list(vec![tagged("cwdd", ".")]))]),
         )]));
-        assert!(e.message.contains("unknown key 'raed'"), "{}", e.message);
+        assert!(e.to_string().contains("unknown key 'raed'"), "{e}");
     }
 
     /// Specific advice replaces the nearest-tag guess, which would contradict it.
     #[test]
     fn a_dir_of_a_name_gives_its_advice_and_no_guess() {
         let e = exec_refusal(exec(vec![dir(tagged("name", "git"))], vec![]));
-        assert!(!e.message.contains("did you mean"), "{}", e.message);
-        assert!(e.hint.unwrap().contains("`` `name git ``"));
+        assert!(!e.to_string().contains("did you mean"), "{e}");
+        assert!(e.hints()[0].contains("`` `name git ``"));
     }
 
     #[test]
@@ -971,7 +967,7 @@ mod tests {
     #[test]
     fn a_unit_exec_table_shows_the_record_it_wants() {
         let e = exec_refusal(Value::Unit);
-        assert!(e.message.contains("exec: [allow: []]"), "{}", e.message);
+        assert!(e.to_string().contains("exec: [allow: []]"), "{e}");
     }
 
     // ── fs ──
@@ -998,13 +994,13 @@ mod tests {
             bare("homebrew"),
         ] {
             let e = fs_refusal(vec![item]);
-            assert!(e.message.contains("is not a place"), "{}", e.message);
-            assert!(e.hint.unwrap().contains("fs lists take places"));
+            assert!(e.to_string().contains("is not a place"), "{e}");
+            assert!(e.hints()[0].contains("fs lists take places"));
         }
         let e = fs_refusal(vec![Value::string("/tmp")]);
-        assert!(e.message.contains("expected a place"), "{}", e.message);
-        assert!(e.hint.unwrap().contains("`absolute /tmp"));
-        let m = fs_refusal(vec![tagged("cwdd", "x")]).message;
+        assert!(e.to_string().contains("expected a place"), "{e}");
+        assert!(e.hints()[0].contains("`absolute /tmp"));
+        let m = fs_refusal(vec![tagged("cwdd", "x")]).to_string();
         assert!(
             m.contains(
                 "`` `cwdd `` is not a place; a place is one of `` `absolute ``, `` `cwd ``, "
@@ -1015,7 +1011,7 @@ mod tests {
             m.ends_with("`` `xdg-bin `` (did you mean `` `cwd ``?)"),
             "{m}"
         );
-        let m = fs_refusal(vec![bare("cwd")]).message;
+        let m = fs_refusal(vec![bare("cwd")]).to_string();
         assert!(m.contains("`` `cwd `` needs a payload"), "{m}");
     }
 
@@ -1133,11 +1129,7 @@ mod tests {
         ] {
             let why = decode_capability_map(&value, "test", &anchored_at(&root, &root, &[]))
                 .expect_err("a link cycle cannot be walked");
-            assert!(
-                why.message.contains(utf8(&looped).unwrap()),
-                "{}",
-                why.message
-            );
+            assert!(why.to_string().contains(utf8(&looped).unwrap()), "{why}");
         }
     }
 
@@ -1151,7 +1143,7 @@ mod tests {
             rec(&[("exec", exec(vec![], vec![dir(root)]))]),
         ] {
             let why = refusal(&value);
-            assert!(why.message.contains("filesystem root"), "{}", why.message);
+            assert!(why.to_string().contains("filesystem root"), "{why}");
         }
     }
 
@@ -1168,7 +1160,7 @@ mod tests {
         let everywhere = ExecAllow::Dir(GrantPath::everywhere());
         assert!(rules.allows().any(|a| *a == everywhere), "{rules:?}");
         let why = exec_refusal(exec(vec![root], vec![]));
-        assert!(why.message.contains("a directory"), "{}", why.message);
+        assert!(why.to_string().contains("a directory"), "{why}");
     }
 
     /// So is a link that leads to it.
@@ -1184,7 +1176,7 @@ mod tests {
             &anchored_at(&root, &root, &[]),
         )
         .expect_err("a link to the root excludes every path");
-        assert!(why.message.contains("filesystem root"), "{}", why.message);
+        assert!(why.to_string().contains("filesystem root"), "{why}");
     }
 
     /// `xdg-*` judges its base by the walk the layer keeps: a base linked out
@@ -1213,7 +1205,7 @@ mod tests {
             )
         };
         let why = read(&leaves).expect_err("a base linked out of HOME");
-        assert!(why.message.contains("outside HOME"), "{}", why.message);
+        assert!(why.to_string().contains("outside HOME"), "{why}");
 
         let grants = stack([read(&stays).expect("a base linked within HOME")]);
         std::fs::remove_file(&stays).unwrap();
@@ -1231,21 +1223,19 @@ mod tests {
         assert_eq!(layer.axes().net, Some(Net::Offline));
         for value in [Value::Bool(true), Value::Bool(false)] {
             let e = refusal(&rec(&[("net", value)]));
-            assert!(e.message.contains("expected a net mode"), "{}", e.message);
+            assert!(e.to_string().contains("expected a net mode"), "{e}");
             assert!(
-                e.hint
-                    .unwrap()
-                    .contains("omit `net` to inherit, or write `` net: `offline ``"),
+                e.hints()[0].contains("omit `net` to inherit, or write `` net: `offline ``"),
                 "hint"
             );
         }
-        let m = refusal(&rec(&[("net", bare("online"))])).message;
+        let m = refusal(&rec(&[("net", bare("online"))])).to_string();
         assert!(m.contains("`` `online `` is not a net mode"), "{m}");
         let m = refusal(&rec(&[(
             "net",
             Value::variant("offline", Some(Value::Bool(true))),
         )]))
-        .message;
+        .to_string();
         assert!(m.contains("takes no payload"), "{m}");
     }
 
@@ -1255,21 +1245,19 @@ mod tests {
         assert_eq!(layer.axes().gpu, Some(Gpu::Withheld));
         for value in [Value::Bool(true), Value::Bool(false)] {
             let e = refusal(&rec(&[("gpu", value)]));
-            assert!(e.message.contains("expected a GPU mode"), "{}", e.message);
+            assert!(e.to_string().contains("expected a GPU mode"), "{e}");
             assert!(
-                e.hint
-                    .unwrap()
-                    .contains("omit `gpu` to inherit, or write `` gpu: `withheld ``"),
+                e.hints()[0].contains("omit `gpu` to inherit, or write `` gpu: `withheld ``"),
                 "hint"
             );
         }
-        let m = refusal(&rec(&[("gpu", bare("on"))])).message;
+        let m = refusal(&rec(&[("gpu", bare("on"))])).to_string();
         assert!(m.contains("`` `on `` is not a GPU mode"), "{m}");
         let m = refusal(&rec(&[(
             "gpu",
             Value::variant("withheld", Some(Value::Bool(true))),
         )]))
-        .message;
+        .to_string();
         assert!(m.contains("takes no payload"), "{m}");
     }
 
@@ -1293,45 +1281,40 @@ mod tests {
 
     #[test]
     fn an_unknown_verb_lists_the_offered_ones() {
-        let m = refusal(&rec(&[("shell", list(vec![bare("chdri")]))])).message;
+        let m = refusal(&rec(&[("shell", list(vec![bare("chdri")]))])).to_string();
         assert!(m.contains("`` `chdri `` is not a verb"), "{m}");
         assert!(
             m.contains("`` `chdir ``, `` `detach ``") && m.contains("did you mean `` `chdir ``?"),
             "{m}"
         );
-        let m = refusal(&rec(&[("editor", list(vec![bare("exec")]))])).message;
+        let m = refusal(&rec(&[("editor", list(vec![bare("exec")]))])).to_string();
         assert!(m.contains("`` `read ``, `` `write ``, `` `tui ``"), "{m}");
     }
 
     #[test]
     fn the_boolean_record_surface_is_refused() {
         for key in ["editor", "shell"] {
-            let m = refusal(&rec(&[(key, rec(&[("read", Value::Bool(true))]))])).message;
+            let m = refusal(&rec(&[(key, rec(&[("read", Value::Bool(true))]))])).to_string();
             assert!(m.contains("expected a list of"), "{m}");
         }
         let e = refusal(&rec(&[("shell", list(vec![Value::string("chdir")]))]));
-        assert!(e.message.contains("expected a verb"), "{}", e.message);
-        assert!(e.hint.unwrap().contains("`shell` takes the list of verbs"));
+        assert!(e.to_string().contains("expected a verb"), "{e}");
+        assert!(e.hints()[0].contains("`shell` takes the list of verbs"));
         let m = refusal(&rec(&[(
             "editor",
             list(vec![Value::variant("read", Some(Value::Bool(true)))]),
         )]))
-        .message;
+        .to_string();
         assert!(m.contains("takes no payload"), "{m}");
     }
 
     #[test]
     fn detach_is_a_shell_verb_not_a_key() {
         let e = refusal(&rec(&[("detach", Value::Bool(true))]));
+        assert!(e.to_string().contains("`detach` is a shell verb"), "{e}");
         assert!(
-            e.message.contains("`detach` is a shell verb"),
-            "{}",
-            e.message
-        );
-        assert!(
-            e.message.contains("`` shell: [`chdir, `detach] ``"),
-            "{}",
-            e.message
+            e.to_string().contains("`` shell: [`chdir, `detach] ``"),
+            "{e}"
         );
     }
 
@@ -1368,19 +1351,18 @@ mod tests {
             match &key.holds {
                 Holds::Refused(advice) => {
                     let e = refusal(&rec(&[(key.label, Value::Unit)]));
-                    assert_eq!(e.message, format!("test: {advice}"));
+                    assert_eq!(e.to_string(), format!("test: {advice}"));
                 }
                 Holds::Table(sub) => {
                     for inner in sub.keys {
                         let value = rec(&[(inner.label, list(vec![entry(key.label)]))]);
-                        decode(&rec(&[(key.label, value)])).unwrap_or_else(|e| {
-                            panic!("'{} {}': {}", key.label, inner.label, e.message)
-                        });
+                        decode(&rec(&[(key.label, value)]))
+                            .unwrap_or_else(|e| panic!("'{} {}': {e}", key.label, inner.label));
                     }
                 }
                 _ => {
                     let value = rec(&[(key.label, representative(key.label))]);
-                    decode(&value).unwrap_or_else(|e| panic!("'{}': {}", key.label, e.message));
+                    decode(&value).unwrap_or_else(|e| panic!("'{}': {e}", key.label));
                 }
             }
         }
@@ -1392,12 +1374,15 @@ mod tests {
     fn an_unknown_key_is_refused_in_its_tables_words_at_each_depth() {
         let table = declared(ContractForm::Grant);
         let e = refusal(&rec(&[("bogus", Value::Unit)]));
-        assert_eq!(e.message, format!("test: {}", table.unknown_key("bogus")));
+        assert_eq!(
+            e.to_string(),
+            format!("test: {}", table.unknown_key("bogus"))
+        );
         for key in table.keys {
             if let Holds::Table(sub) = &key.holds {
                 let e = refusal(&rec(&[(key.label, rec(&[("bogus", list(vec![]))]))]));
                 assert_eq!(
-                    e.message,
+                    e.to_string(),
                     format!("test {}: {}", key.label, sub.unknown_key("bogus"))
                 );
             }

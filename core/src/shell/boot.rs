@@ -11,6 +11,7 @@
 //! binary takes `BakedPrelude::runtime` instead.
 
 use crate::authority::policy::Baseline;
+use crate::error::Error;
 use crate::io::terminal::TerminalState;
 use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::path::CwdPath;
@@ -242,15 +243,12 @@ impl HostSurface {
     /// Core plus this surface, no prelude: the process half of a session.
     ///
     /// # Errors
-    /// [`Runtime::bare`]'s, shown with its hint: the host's baseline cannot
-    /// be resolved.
+    /// [`Runtime::bare`]'s: the host's baseline cannot be resolved.
     ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
-    pub fn runtime(&self, terminal: TerminalState) -> Result<Runtime, String> {
-        Runtime::bare(terminal)
-            .map(|bare| self.install(bare))
-            .map_err(|e| e.to_string())
+    pub fn runtime(&self, terminal: TerminalState) -> Result<Runtime, Error> {
+        Runtime::bare(terminal).map(|bare| self.install(bare))
     }
 
     /// `runtime` with core and this surface installed in it.
@@ -274,7 +272,7 @@ impl HostSurface {
     ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
-    pub fn shell(&self, terminal: TerminalState, cwd: CwdPath) -> Result<Shell, String> {
+    pub fn shell(&self, terminal: TerminalState, cwd: CwdPath) -> Result<Shell, Error> {
         Ok(Shell::root(self.runtime(terminal)?.into(), cwd))
     }
 }
@@ -295,7 +293,7 @@ pub fn boot_runtime(
     terminal: TerminalState,
     prelude: &BakedPrelude,
     surface: &HostSurface,
-) -> Result<Runtime, String> {
+) -> Result<Runtime, Error> {
     let mut runtime = surface.runtime(terminal)?;
     prelude.seat(&mut runtime);
     Ok(runtime)
@@ -317,7 +315,7 @@ pub fn boot_shell(
     prelude: &BakedPrelude,
     surface: &HostSurface,
     cwd: CwdPath,
-) -> Result<Shell, String> {
+) -> Result<Shell, Error> {
     let mut shell = Shell::root(boot_runtime(terminal, prelude, surface)?.into(), cwd);
     seed_host_env(&mut shell);
     Ok(shell)

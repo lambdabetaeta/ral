@@ -332,8 +332,9 @@ pub(crate) fn interpreter_hint(
             code(&scope.to_string())
         ))),
         (Some(Withheld::MissingAllowance), _) => Some(format!(
-            "its interpreter {shown} is not admitted by the grant: a script you can edit \
-             carries no interpreter of its own, so {}. {}",
+            "its interpreter {shown} is not admitted by the grant: allowing a script does \
+             not allow the interpreter its `#!` line names, which runs as a program of its \
+             own; {}. {}",
             remedy::add_to_exec(),
             written_as(&format!(
                 "grant [ exec: [allow: [`absolute {shown}]] ] {{ … }}"

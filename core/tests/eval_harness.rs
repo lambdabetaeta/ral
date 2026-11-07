@@ -22,7 +22,7 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::shell::runtime::Settled<V
         // A static diagnostic reads as a failed run: no value was produced.
         RunReport::Static { diagnostics } => {
             let msg = diagnostics.render(shell.exit_hints()).0;
-            Err(ral_core::shell::runtime::Error::raised(msg).into())
+            Err(ral_core::shell::runtime::Error::new(msg).into())
         }
     }
 }

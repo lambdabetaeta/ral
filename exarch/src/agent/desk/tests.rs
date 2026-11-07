@@ -271,7 +271,7 @@ struct Parking<R> {
 impl<R: Send> Host for Parking<R> {
     fn surface(&self, _val: &FOValue) {}
 
-    fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+    fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
         let Ok(Request::Agents(Agents::Start(Start {
             fork: ForkClaim::Parked(id),
             ..
@@ -522,5 +522,6 @@ fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
     let error = host
         .enquire(Request::Agents(Agents::List).encode())
         .unwrap_err();
-    assert_eq!(error, EnquiryError::no_desk());
+    assert_eq!(error.reason, no_desk().reason);
+    assert_eq!(error.hints(), no_desk().hints());
 }

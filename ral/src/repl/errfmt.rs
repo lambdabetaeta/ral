@@ -6,8 +6,8 @@
 //! a failed load left out.
 
 use ral_core::err;
+use ral_core::error::Error;
 use ral_core::io::ansi::{self, BOLD_YELLOW, RESET};
-use ral_core::shell::runtime::Error;
 use ral_core::{Shell, io::terminal};
 
 /// Print a failed load's report, then `ral: {what}: …` saying how far it got:
@@ -15,7 +15,7 @@ use ral_core::{Shell, io::terminal};
 /// else `ran`, for a caller with that to say.
 pub(super) fn report_failed_load(shell: &Shell, what: &str, e: &Error, ran: Option<&str>) {
     err!("{}", e.render(shell.sources(), None, shell.exit_hints()));
-    let why = match e.rejection {
+    let why = match e.rejection() {
         Some(_) => Some("skipped, since it does not compile"),
         None => ran,
     };

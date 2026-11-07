@@ -34,7 +34,9 @@ thread_local! {
     static RUNTIME_DRESS: std::cell::Cell<Option<RuntimeDress>> = const { std::cell::Cell::new(None) };
 }
 
-fn dressed_runtime(spec: &ral_core::protocol::EngineSpec) -> Result<Runtime, String> {
+fn dressed_runtime(
+    spec: &ral_core::protocol::EngineSpec,
+) -> Result<Runtime, ral_core::error::Error> {
     let mut runtime = crate::boot::engine_runtime(spec)?;
     if let Some(dress) = RUNTIME_DRESS.take() {
         dress(&mut runtime);
@@ -46,7 +48,10 @@ fn dressed_runtime(spec: &ral_core::protocol::EngineSpec) -> Result<Runtime, Str
     clippy::unnecessary_wraps,
     reason = "must match EngineInstaller::root's signature, which can genuinely refuse"
 )]
-fn dressed_root(root: &ral_core::protocol::Root, shell: &mut Shell) -> Result<(), String> {
+fn dressed_root(
+    root: &ral_core::protocol::Root,
+    shell: &mut Shell,
+) -> Result<(), ral_core::error::Error> {
     crate::boot::engine_root(root, shell)?;
     if let Some(dress) = DRESS.take() {
         dress(shell);
@@ -368,7 +373,8 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
     use crate::record::Memory;
     use ral_core::data::FOValue;
     use ral_core::data::datum::Datum as _;
-    use ral_core::protocol::{EnquiryError, Run};
+    use ral_core::error::Error;
+    use ral_core::protocol::Run;
     use ral_core::source::SourceOrigin;
 
     struct Capture {
@@ -379,7 +385,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
     impl ral_core::carrier::Host for Capture {
         fn surface(&self, _val: &FOValue) {}
 
-        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
             let Ok(Request::Agents(Agents::Start(Start {
                 spec,
                 fork: ForkClaim::Parked(id),

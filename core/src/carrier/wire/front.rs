@@ -12,11 +12,12 @@ use crate::carrier::{
     Ends, Host, Line, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id,
 };
 use crate::data::FOValue;
+use crate::error::Error;
 use crate::process::{Fatal, Scope};
 use crate::protocol::channel::{Liveness, WireChannel, WireStream, WriteError, ticks};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
-    Attach, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
+    Attach, DispatchId, EnquiryId, Event, Frame, Report, Run, SessionEvent, WireError,
 };
 use crate::shell::runtime::DeferredSink;
 use crate::sync::{CondvarExt as _, LockExt};
@@ -263,9 +264,9 @@ impl WireTransport {
     pub fn attach(&self, attach: Attach) {
         // No session yet to refuse into: the refusal is the attach's verdict.
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Attach(attach)) {
-            self.sever(Severed::Refused(format!(
+            self.sever(Severed::Refused(WireError::of(&Error::new(format!(
                 "the attach could not be sent: {e}"
-            )));
+            )))));
             return;
         }
         let pending = self.pending_heartbeat.lock_ignore_poison().take();
@@ -422,12 +423,11 @@ impl Transport for WireTransport {
 
     /// An answer the fuse refuses is replaced by its refusal, so the parked
     /// engine is not left waiting.
-    fn answer(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
+    fn answer(&self, eid: EnquiryId, answer: Result<FOValue, Error>) {
+        let answer = answer.map_err(|e| WireError::of(&e));
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Answer(eid, answer)) {
-            let refusal = EnquiryError {
-                message: format!("answer: the host could not reply: {e}"),
-            };
-            let _ = self.write(&Frame::Answer(eid, Err(refusal)));
+            let refusal = Error::new(format!("answer: the host could not reply: {e}"));
+            let _ = self.write(&Frame::Answer(eid, Err(WireError::of(&refusal))));
         }
     }
 }

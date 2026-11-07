@@ -6,9 +6,10 @@ use crate::shell_eval::surface::SurfaceApplier;
 use crate::test_helper::engine_over_socketpair;
 use atomic_refcell::AtomicRefCell;
 use ral_core::carrier::{Host, WireTransport};
+use ral_core::error::Error;
 use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::protocol::channel::Liveness;
-use ral_core::protocol::{EnquiryError, Ran, Report};
+use ral_core::protocol::{Ran, Report};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -58,10 +59,7 @@ impl Host for SurfaceCollector {
     fn surface(&self, val: &ral_core::data::FOValue) {
         self.0.lock().unwrap().push(val.clone());
     }
-    fn enquire(
-        &self,
-        _req: ral_core::data::FOValue,
-    ) -> Result<ral_core::data::FOValue, EnquiryError> {
+    fn enquire(&self, _req: ral_core::data::FOValue) -> Result<ral_core::data::FOValue, Error> {
         unreachable!("this run raises no enquiry")
     }
 }

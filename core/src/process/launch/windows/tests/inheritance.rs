@@ -60,6 +60,7 @@ fn raw_child(launch: &mut Launch) -> io::Result<ReapedChild> {
         Ok(spawned) => Ok(ReapedChild(spawned.child)),
         Err(crate::process::Unstarted::Program(e)) => Err(e),
         Err(crate::process::Unstarted::Refused(why)) => panic!("the launch was refused: {why}"),
+        Err(crate::process::Unstarted::Stopped(stop)) => panic!("the launch was stopped: {stop}"),
     }
 }
 

@@ -9,6 +9,7 @@ use super::resolve::StageLaunch;
 use super::route::{ByteIn, ByteOut, StageRoute};
 use super::stage::{ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
+use crate::error::io_message;
 use crate::fact::AuditIo;
 use crate::io::{Sink, Source, SourceReader};
 use crate::process::{PgidPolicy, Scope, Spawned};
@@ -32,7 +33,7 @@ pub(super) fn stage_stdin(
             Source::Terminal => return Ok(Source::Terminal),
             Source::Reader(r) => r
                 .try_clone()
-                .map_err(|e| Error::io("could not duplicate stdin", &e))?,
+                .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?,
         },
     };
     Ok(Source::Reader(reader.interruptible(scope.clone())))

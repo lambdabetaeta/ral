@@ -6,7 +6,8 @@ use crate::schedule::{ScheduleInfo, Trigger};
 use jiff::Timestamp;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
-use ral_core::shell::runtime::Error;
+use ral_core::error::Error;
+use ral_core::shell::runtime::no_desk;
 
 use super::{DeskAct, ExarchDesk};
 
@@ -39,7 +40,7 @@ impl ExarchDesk {
         }: Add,
     ) -> Result<FOValue, Error> {
         self.require_schedule_grant("exarch-schedules `add")?;
-        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(no_desk)?;
         let call = &self.call;
         let trigger = Trigger::from(trigger);
 
@@ -88,7 +89,7 @@ impl ExarchDesk {
     /// A snapshot of this agent's live wakeups — every `` `exarch-schedules ``
     /// tag's answer.
     pub(super) fn schedule_table(&self) -> Result<FOValue, Error> {
-        let _body = self.loan.get().ok_or_else(super::no_desk)?;
+        let _body = self.loan.get().ok_or_else(no_desk)?;
         self.call
             .handle
             .0
@@ -102,7 +103,7 @@ impl ExarchDesk {
     /// call answering a table that does not carry it.
     pub(super) fn unschedule(&self, label: &str) -> Result<FOValue, Error> {
         self.require_schedule_grant("exarch-schedules `remove")?;
-        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(no_desk)?;
         let call = &self.call;
         // The rail's payload column spells out the miss the table only implies,
         // since the verb has no argument of its own to show there.

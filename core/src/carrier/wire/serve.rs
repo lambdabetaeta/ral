@@ -14,14 +14,15 @@ use std::time::{Duration, Instant};
 
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
+use crate::error::Error;
 use crate::process::{POLL_SLICE, RootCause, Scope};
 use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
-    Attach, Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Origin, Report, Root, Run,
-    SessionEvent,
+    Attach, Control, DispatchId, EnquiryId, Event, Frame, Origin, Report, Root, Run, SessionEvent,
+    WireError,
 };
-use crate::shell::runtime::{Break, DeferredSink, EnquiryDesk, Error, Fork, Settled};
+use crate::shell::runtime::{Break, DeferredSink, EnquiryDesk, Fork, Settled};
 use crate::site::{Silent, site};
 use crate::sync::LockExt;
 
@@ -122,14 +123,14 @@ const SETTLE_POLL: Duration = Duration::from_millis(50);
 #[derive(Default)]
 struct Parks {
     next: AtomicU64,
-    parked: Mutex<HashMap<EnquiryId, mpsc::SyncSender<Result<FOValue, EnquiryError>>>>,
+    parked: Mutex<HashMap<EnquiryId, mpsc::SyncSender<Result<FOValue, WireError>>>>,
 }
 
 impl Parks {
     /// Called from the reader loop. An answer whose park has gone finds no
     /// sender, or races its receiver's drop and fails to send; either way it
     /// is dropped.
-    fn fill(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
+    fn fill(&self, eid: EnquiryId, answer: Result<FOValue, WireError>) {
         let park = self.parked.lock_ignore_poison().remove(&eid);
         if let Some(tx) = park {
             let _ = tx.send(answer);
@@ -157,7 +158,7 @@ impl EnquiryDesk for WireDesk {
         if let Err(e) = (self.outlet)(self.id, Event::Enquiry(eid, req)) {
             self.parks.parked.lock_ignore_poison().remove(&eid);
             return Err(Error::new(match e {
-                WriteError::Severed => "enquiry lost: the host connection is down".into(),
+                WriteError::Severed => "enquiry lost: the host connection is down".to_string(),
                 WriteError::Unencodable(e) => format!("enquiry: the host could not be asked: {e}"),
             })
             .into());
@@ -171,7 +172,7 @@ impl EnquiryDesk for WireDesk {
         // in hand outranks a cancel pending beside it, and an enquiry raised
         // under an already-cancelled scope returns without parking at all. The
         // park converts the scope's cancellation to the evaluator's stop.
-        let raised = |e| Break::from(Error::from(e));
+        let raised = |e: WireError| Break::from(e.into_error());
         loop {
             match rx.try_recv() {
                 Ok(answer) => return answer.map_err(raised),
@@ -337,12 +338,12 @@ fn engine_session(
             attach.engine.terminal.seat();
             match Engine::boot(installers, &attach) {
                 Ok(engine) => engine,
-                Err(msg) => {
-                    crate::errln!("engine: {msg}");
+                Err(refused) => {
+                    crate::errln!("engine: {}", refused.plain());
                     engine_send(
                         &writer,
                         &wire_fault,
-                        &Frame::Session(SessionEvent::Refused(msg)),
+                        &Frame::Session(SessionEvent::Refused(WireError::of(&refused))),
                     );
                     return 1;
                 }
@@ -576,7 +577,7 @@ mod within_tests;
 mod wire_desk_tests {
     use super::*;
     use crate::process::{CancelCause, DurableRoot};
-    use crate::shell::runtime::Stop;
+    use crate::shell::runtime::{Stop, no_desk};
 
     /// A desk for dispatch `id` whose events leave on `ours`.
     fn desk_over(ours: WireChannel, id: u64) -> WireDesk {
@@ -617,7 +618,7 @@ mod wire_desk_tests {
         );
     }
 
-    /// A desk refusal raises its text alike under either transport.
+    /// A desk refusal raises its message and hints alike under either transport.
     #[test]
     fn refused_enquiry_raises_the_front_ends_text() {
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
@@ -629,7 +630,7 @@ mod wire_desk_tests {
             let Frame::Event(_, Event::Enquiry(eid, _)) = frame else {
                 panic!("expected Event::Enquiry, got {frame:?}");
             };
-            filler.parks.fill(eid, Err(EnquiryError::no_desk()));
+            filler.parks.fill(eid, Err(WireError::of(&no_desk())));
         });
 
         let Break::Error(err) = desk
@@ -644,6 +645,7 @@ mod wire_desk_tests {
             err.reason,
             crate::fact::Reason::Raised(crate::shell::runtime::NO_DESK.into())
         );
+        assert_eq!(err.hints(), no_desk().hints());
     }
 
     fn is_cancelled_stop(br: &Break) -> bool {

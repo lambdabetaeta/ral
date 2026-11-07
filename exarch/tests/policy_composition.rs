@@ -13,6 +13,7 @@ use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
 use ral_core::authority::grant::freeze::Place;
 use ral_core::authority::policy::GrantStack;
+use ral_core::error::Error;
 use ral_core::path::XdgKind;
 use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
 use ral_core::shell::runtime::{Break, Settled, Shell};
@@ -61,7 +62,7 @@ fn compose(
     base: &str,
     extension: Option<&Path>,
     restricts: &[PathBuf],
-) -> Result<Invocation, String> {
+) -> Result<Invocation, Error> {
     let own = own_binary();
     let own = Some(Path::new(&own));
     for_invocation(
@@ -484,7 +485,9 @@ fn an_unknown_base_names_every_base_that_exists() {
     let dir = Scratch::for_test(EXARCH, "unknown-base").expect("scratch dir");
 
     assert_eq!(
-        compose(&dir, "resonable", None, &[]).unwrap_err(),
+        compose(&dir, "resonable", None, &[])
+            .unwrap_err()
+            .to_string(),
         format!(
             "unknown base 'resonable'; expected one of: {}",
             BASES.join(", ")
@@ -513,9 +516,9 @@ fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
     )
     .unwrap_err();
     assert_eq!(
-        err,
+        err.to_string(),
         format!(
-            "--restrict path does not exist: {}",
+            "--restrict: capability file: {}: no such file or directory",
             ral_core::path::shown(dir.path().join("no-such-file.ral"))
         )
     );

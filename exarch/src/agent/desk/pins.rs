@@ -4,13 +4,14 @@ use crate::card::{Card, encode_card};
 use crate::shell_eval::{surface, surface::Surface};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
-use ral_core::shell::runtime::Error;
+use ral_core::error::Error;
+use ral_core::shell::runtime::no_desk;
 
 use super::ExarchDesk;
 
 impl ExarchDesk {
     pub(super) fn apply_pin(&self, key: String, card: Option<Card>) -> Result<FOValue, Error> {
-        let mut body = self.loan.get().ok_or_else(super::no_desk)?;
+        let mut body = self.loan.get().ok_or_else(no_desk)?;
         match &card {
             Some(card) => {
                 body.pins.insert(key.clone(), card.clone());
@@ -28,7 +29,7 @@ impl ExarchDesk {
     }
 
     pub(super) fn pin_read(&self, key: &str) -> Result<FOValue, Error> {
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let body = self.loan.get().ok_or_else(no_desk)?;
         Ok(match body.pins.get(key) {
             Some(card) => FOValue::Variant {
                 label: "some".into(),
@@ -42,7 +43,7 @@ impl ExarchDesk {
     }
 
     pub(super) fn pin_list(&self) -> Result<FOValue, Error> {
-        let body = self.loan.get().ok_or_else(super::no_desk)?;
+        let body = self.loan.get().ok_or_else(no_desk)?;
         Ok(Vec::from_iter(body.pins.keys().cloned()).encode())
     }
 }

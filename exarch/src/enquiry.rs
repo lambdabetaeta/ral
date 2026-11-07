@@ -1698,7 +1698,8 @@ mod tests {
         }
         let err =
             crate::policy::base_layer("bogus", &ctx).expect_err("an unknown base must be refused");
-        let offered: std::collections::BTreeSet<&str> = err
+        let said = err.describe();
+        let offered: std::collections::BTreeSet<&str> = said
             .rsplit_once("expected one of: ")
             .unwrap_or_else(|| panic!("the refusal must enumerate the bases, got: {err}"))
             .1

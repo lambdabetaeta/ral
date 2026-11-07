@@ -209,7 +209,9 @@ spawn adapter live in `shell::grant`.
   or chooses (exarch's carve-outs, `PATH` entries, toolchain and system-read
   directories), classified on its native text and frozen as an `absolute`
   grant, refused with `GrantRefusal::ForeignOrRelative` where a payload would
-  be dead, so exarch's deny layer fails closed; the tags `absolute`,
+  be dead, so exarch's deny layer fails closed, in words about the path
+  alone: its caller names who chose it, and only a payload's refusal
+  (`live_absolute`) adds, as a hint, how a grant writes it; the tags `absolute`,
   `cwd`, `home`, `tempdir`, `scratch`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
   refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
   the `path` selector (`path_dirs`, over the pure `path_dirs_in`, which

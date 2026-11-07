@@ -1,7 +1,8 @@
 //! String, regex, shell-word, and value-coercion builtins.
 
 use crate::data::Finite;
-use crate::shell::runtime::{Settled, Value, sig, sig_hint};
+use crate::error::Error;
+use crate::shell::runtime::{Settled, Value};
 use std::borrow::Cow;
 
 use super::util::regex_err;
@@ -11,11 +12,8 @@ use super::util::{lossy_line_list, read_lines};
 fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
     match v {
         Value::Int(n) => usize::try_from(*n)
-            .map_err(|_| sig(format!("{ctx}: index must be non-negative, got {n}"))),
-        other => Err(sig(format!(
-            "{ctx}: expected Int, got {}",
-            other.type_name()
-        ))),
+            .map_err(|_| Error::new(format!("{ctx}: index must be non-negative, got {n}")).into()),
+        other => Err(Error::new(format!("{ctx}: expected Int, got {}", other.type_name())).into()),
     }
 }
 
@@ -27,10 +25,11 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
         Value::List(items) => items.len(),
         Value::Map(m) => m.len(),
         _ => {
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "length: expected String, Bytes, List, or Map, got {}",
                 val.type_name()
-            )));
+            ))
+            .into());
         }
     };
     #[allow(
@@ -83,13 +82,13 @@ pub(super) fn builtin_posix_split(args: &[Value]) -> Settled<Value> {
     let s = args[0].as_str("posix-split")?;
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(s)
-        .ok_or_else(|| sig("posix-split: malformed input (unterminated quote?)".to_string()))?;
+        .ok_or_else(|| Error::new("posix-split: malformed input (unterminated quote?)"))?;
     Ok(Value::list(parts.into_iter().map(Value::string).collect()))
 }
 
 pub(super) fn builtin_posix_quote(args: &[Value]) -> Settled<Value> {
     let s = args[0].as_str("posix-quote")?;
-    let quoted = shlex::try_quote(s).map_err(|e| sig(format!("posix-quote: {e}")))?;
+    let quoted = shlex::try_quote(s).map_err(|e| Error::new(format!("posix-quote: {e}")))?;
     Ok(Value::string(quoted))
 }
 
@@ -99,7 +98,8 @@ pub(super) fn builtin_ral_quote(args: &[Value]) -> Settled<Value> {
 }
 
 fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
-    regex::Regex::new(pattern).map_err(|e| sig(regex_err(ctx, pattern, &e.to_string())))
+    regex::Regex::new(pattern)
+        .map_err(|e| Error::new(regex_err(ctx, pattern, &e.to_string())).into())
 }
 
 /// Compile `args[0]`, hand the regex to `f`.
@@ -118,18 +118,20 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
     with_regex("re-replace", args, |re, args| {
         let input = args[2].as_str("re-replace")?;
         match re.find_iter(input).count() {
-            0 => Err(sig(
+            0 => Err(Error::new(
                 "re-replace: pattern not found in input; is the file already updated, \
                  or did the pattern get whitespace-mangled?",
-            )),
+            )
+            .into()),
             1 => Ok(Value::string(
                 re.replace(input, args[1].as_str("re-replace")?),
             )),
-            n => Err(sig(format!(
+            n => Err(Error::new(format!(
                 "re-replace: pattern matches {n} times; must match exactly once; \
                  widen the pattern with surrounding context to disambiguate, \
                  or use re-replace-all to replace every match"
-            ))),
+            ))
+            .into()),
         }
     })
 }
@@ -169,18 +171,20 @@ pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     let to = args[1].as_str("string-replace")?;
     let input = args[2].as_str("string-replace")?;
     if from.is_empty() {
-        return Err(sig("string-replace: 'from' must be non-empty"));
+        return Err(Error::new("string-replace: 'from' must be non-empty").into());
     }
     match occurrence_starts(input, from).len() {
-        0 => Err(sig(
+        0 => Err(Error::new(
             "string-replace: 'from' not found in input; did the pattern get \
              whitespace-mangled?",
-        )),
+        )
+        .into()),
         1 => Ok(Value::string(input.replacen(from, to, 1))),
-        n => Err(sig(format!(
+        n => Err(Error::new(format!(
             "string-replace: 'from' matches {n} times; must match exactly once; \
              widen the pattern with surrounding context to disambiguate"
-        ))),
+        ))
+        .into()),
     }
 }
 
@@ -212,10 +216,9 @@ pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
         let input = args[1].as_str("re-find-match")?;
         match re.find(input) {
             Some(m) => Ok(Value::string(m.as_str())),
-            None => Err(sig(format!(
-                "re-find-match: no match for pattern '{}'",
-                args[0]
-            ))),
+            None => {
+                Err(Error::new(format!("re-find-match: no match for pattern '{}'", args[0])).into())
+            }
         }
     })
 }
@@ -288,24 +291,21 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
         Value::Float(f) if f.get().fract() == 0.0 => f
             .to_i64()
             .map(Value::Int)
-            .ok_or_else(|| sig(format!("int: {f} is outside the integer range"))),
-        Value::Float(f) => Err(sig_hint(
-            format!("int: {f} is not integral"),
-            "convert with floor, ceil or trunc, which return an Int",
-        )),
+            .ok_or_else(|| Error::new(format!("int: {f} is outside the integer range")).into()),
+        Value::Float(f) => Err(Error::new(format!("int: {f} is not integral"))
+            .with_hint("convert with floor, ceil or trunc, which return an Int")
+            .into()),
         Value::String(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
-            sig_hint(
-                format!("int: '{s}' is not a valid integer"),
-                "expected a whole-number string, e.g. int '42'",
-            )
+            Error::new(format!("int: '{s}' is not a valid integer"))
+                .with_hint("expected a whole-number string, e.g. int '42'")
+                .into()
         }),
-        other => Err(sig_hint(
-            format!(
-                "int: expected String, Int, or integral Float, got {}",
-                other.type_name()
-            ),
-            "e.g. int '42'",
-        )),
+        other => Err(Error::new(format!(
+            "int: expected String, Int, or integral Float, got {}",
+            other.type_name()
+        ))
+        .with_hint("e.g. int '42'")
+        .into()),
     }
 }
 
@@ -318,19 +318,17 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
         // construction, so those spellings are refused alongside garbage.
         Value::String(s) => match s.parse::<f64>().map(Finite::new) {
             Ok(Some(f)) => Ok(Value::Float(f)),
-            Ok(None) => Err(sig(format!("float: '{s}' is not a finite number"))),
-            Err(_) => Err(sig_hint(
-                format!("float: '{s}' is not a valid number"),
-                "expected a numeric string, e.g. float '3.14'",
-            )),
+            Ok(None) => Err(Error::new(format!("float: '{s}' is not a finite number")).into()),
+            Err(_) => Err(Error::new(format!("float: '{s}' is not a valid number"))
+                .with_hint("expected a numeric string, e.g. float '3.14'")
+                .into()),
         },
-        other => Err(sig_hint(
-            format!(
-                "float: expected String, Int, or Float, got {}",
-                other.type_name()
-            ),
-            "e.g. float '3.14'",
-        )),
+        other => Err(Error::new(format!(
+            "float: expected String, Int, or Float, got {}",
+            other.type_name()
+        ))
+        .with_hint("e.g. float '3.14'")
+        .into()),
     }
 }
 

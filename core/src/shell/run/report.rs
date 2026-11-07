@@ -92,7 +92,7 @@ impl Report {
     /// two it is printing.
     pub(crate) fn refused(message: impl Into<String>) -> Self {
         let (rendered, status) = spanless(
-            &Error::new(message.into()),
+            &Error::new(Into::<String>::into(message)),
             &crate::shell::runtime::ExitHints::default(),
         );
         Self::Static { rendered, status }
@@ -105,7 +105,7 @@ impl Report {
     #[cfg(unix)]
     pub(crate) fn faulted(message: impl Into<String>) -> Self {
         let (rendered, status) = spanless(
-            &Error::new(message.into()),
+            &Error::new(Into::<String>::into(message)),
             &crate::shell::runtime::ExitHints::default(),
         );
         Self::Faulted { rendered, status }
@@ -146,7 +146,7 @@ mod runtime_error_seam_tests {
     #[test]
     fn runtime_error_projects_to_a_full_diagnostic_string() {
         let shell = crate::test_helper::core_shell();
-        let err = Error::raised("boom").with_hint("try harder");
+        let err = Error::new("boom").with_hint("try harder");
         // A single command whose error carries no span: the compact one-liner.
         let Report::Ran(Ran {
             rendered,

@@ -12,7 +12,9 @@
 
 use ral_core::authority::grant::freeze::FreezeCtx;
 use ral_core::authority::policy::GrantLayer;
+use ral_core::error::Error;
 use ral_core::io::terminal::TerminalState;
+use ral_core::shell::runtime::Break;
 use ral_core::source::SourceOrigin;
 
 const MINIMAL_RAL: &str = include_str!("../../data/minimal.exarch.ral");
@@ -28,7 +30,7 @@ const GIT_EXTENSION_RAL: &str = include_str!("../../examples/git.exarch.ral");
 /// Resolve `name` to a [`GrantLayer`], every spelling walked against `ctx`, so
 /// `super::for_invocation` composes on already-resolved bundles.  A bare exec
 /// name this host finds nowhere, and bundles not at all, makes no allowance.
-pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
     let text = match name {
         "minimal" => MINIMAL_RAL,
         "reasonable" => REASONABLE_RAL,
@@ -37,15 +39,15 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
         "confined" => CONFINED_RAL,
         "dangerous" => DANGEROUS_RAL,
         other => {
-            return Err(format!(
+            return Err(Error::new(format!(
                 "unknown base '{other}'; \
                  expected one of: dangerous, reasonable, edit-only, read-only, minimal, confined"
-            ));
+            )));
         }
     };
     let mut shell = ral_core::HostSurface::default()
         .shell(TerminalState::default(), ctx.cwd().clone())
-        .map_err(|e| format!("built-in base '{name}' cannot load: {e}"))?;
+        .map_err(|e| e.with_context(format!("built-in base '{name}' cannot load")))?;
     let origin = SourceOrigin::named(format!("<built-in:{name}>"));
     ral_core::shell::load::profile::load_capabilities_from_str(
         &ral_core::shell::runtime::Mooring::adrift(),
@@ -55,12 +57,8 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
         ctx,
     )
     .map_err(|e| match e {
-        ral_core::shell::runtime::Break::Error(err) => {
-            format!("built-in base '{name}' failed to parse: {}", err.describe())
-        }
-        other @ ral_core::shell::runtime::Break::Escape(_) => {
-            format!("built-in base '{name}' failed: {other:?}")
-        }
+        Break::Error(err) => err.with_context(format!("built-in base '{name}' failed to parse")),
+        other @ Break::Escape(_) => Error::new(format!("built-in base '{name}' failed: {other:?}")),
     })
 }
 
@@ -68,7 +66,9 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::authority::grant::freeze::{Anchor, FreezeCtx, Place};
+    #[cfg(unix)]
+    use ral_core::authority::grant::freeze::Anchor;
+    use ral_core::authority::grant::freeze::{FreezeCtx, Place};
     #[cfg(unix)]
     use ral_core::authority::grant::value::FsTable;
     use ral_core::authority::grant::value::{ExecTable, Target};

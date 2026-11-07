@@ -114,7 +114,7 @@ pub(crate) fn refused_arm(
     shell: &Shell,
 ) -> crate::shell::runtime::Break {
     let sentence = error.hint().unwrap_or_else(|| error.kind.render_message());
-    crate::shell::runtime::Break::Error(crate::shell::runtime::Error::new(format!(
+    crate::shell::runtime::Break::from(crate::shell::runtime::Error::new(format!(
         "{label}: {sentence}"
     )))
     .locate(label, span, shell)
@@ -142,11 +142,12 @@ pub(crate) fn arm_closure<'a>(
 ) -> Settled<&'a Closure> {
     match value {
         Value::Thunk(closure) => Ok(closure),
-        other => Err(super::coerce::sig(format!(
+        other => Err(super::Error::new(format!(
             "{context} must be a block, such as {}, got a {}",
             arity.form(),
             other.type_name()
-        ))),
+        ))
+        .into()),
     }
 }
 

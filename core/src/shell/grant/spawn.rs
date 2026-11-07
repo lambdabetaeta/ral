@@ -11,6 +11,7 @@ use super::decode::decode_grant;
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::GrantLayer;
 use crate::data::FOValue;
+use crate::error::Error;
 use crate::shell::runtime::Shell;
 
 /// A base tag and the anchor to freeze it against (the child's cwd and
@@ -24,7 +25,7 @@ use crate::shell::runtime::Shell;
 /// an installer is chosen at `Attach`, before a seed is applied or a fork
 /// adopted, so the policy can be demanded of every host that dresses an engine
 /// instead of left in a slot one of them might forget to fill.
-pub type GrantNarrower = fn(&str, &FreezeCtx) -> Result<GrantLayer, String>;
+pub type GrantNarrower = fn(&str, &FreezeCtx) -> Result<GrantLayer, Error>;
 
 /// A spawn's grant, as it crosses to a child that has not yet resolved it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,11 +46,11 @@ impl SpawnGrant {
     /// # Errors
     /// Whatever `narrow` refuses a base with, or the capability decoder's own
     /// sentence for a restriction record it will not read.
-    pub fn layer(&self, narrow: GrantNarrower, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+    pub fn layer(&self, narrow: GrantNarrower, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
         match self {
             Self::Inherit => Ok(GrantLayer::root()),
             Self::Base(name) => narrow(name, ctx),
-            Self::Restrict(record) => decode_grant(record, "grant", ctx).map_err(|e| e.to_string()),
+            Self::Restrict(record) => decode_grant(record, "grant", ctx),
         }
     }
 
@@ -62,7 +63,7 @@ impl SpawnGrant {
         &self,
         shell: &mut Shell,
         narrow: GrantNarrower,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let layer = self.layer(narrow, &shell.freeze_ctx())?;
         shell.push_session_capabilities(layer);
         Ok(())
@@ -80,7 +81,7 @@ mod tests {
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
     /// one, and these cases are the other two arms.
-    fn unreachable_narrower(_grant: &str, _ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+    fn unreachable_narrower(_grant: &str, _ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
         panic!("only a Base grant consults the narrower")
     }
 
@@ -141,8 +142,9 @@ mod tests {
             .expect_err("a net axis that is not `offline`");
         let decoder = decode_capability_map(&record, "grant", &ctx)
             .expect_err("the decoder refuses it first");
-        let hint = decoder.hint.expect("the refusal carries a hint");
-        assert_eq!(refusal, format!("{}\nhint: {hint}", decoder.message));
+        assert!(!decoder.hints().is_empty(), "the refusal carries a hint");
+        assert_eq!(refusal.to_string(), decoder.to_string());
+        assert_eq!(refusal.hints(), decoder.hints(), "the hint survives");
     }
 
     #[test]
@@ -164,13 +166,12 @@ mod tests {
             let refusal = restrict(&record)
                 .layer(unreachable_narrower, &cwd("/work/proj"))
                 .expect_err("an argument policy must not decode");
+            let said = refusal.describe();
+            assert!(said.contains(&format!("unknown key '{key}'")), "{said}");
             assert!(
-                refusal.contains(&format!("unknown key '{key}'")),
-                "{refusal}"
-            );
-            assert!(
-                refusal.contains("argument restrictions are no longer supported"),
-                "{refusal}"
+                (refusal.hints().iter())
+                    .any(|h| h.contains("argument restrictions are no longer supported")),
+                "{refusal:?}"
             );
         }
     }
@@ -187,11 +188,11 @@ mod tests {
     }
 
     /// Only the name `tight` resolves, so the result is the narrower's own.
-    fn tight_only(base: &str, _ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+    fn tight_only(base: &str, _ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
         if base == "tight" {
             Ok(offline())
         } else {
-            Err(base.to_owned())
+            Err(Error::new(base))
         }
     }
 
@@ -203,9 +204,12 @@ mod tests {
             .expect("the narrower resolves `tight`");
         assert_eq!(layer, offline());
         assert!(layer.is_restrictive());
+        let refusal = SpawnGrant::Base("loose".into())
+            .layer(tight_only, &ctx)
+            .expect_err("the narrower refuses `loose`");
         assert_eq!(
-            SpawnGrant::Base("loose".into()).layer(tight_only, &ctx),
-            Err("loose".to_owned()),
+            refusal.describe(),
+            "loose",
             "the narrower's refusal is the layer's, verbatim"
         );
     }

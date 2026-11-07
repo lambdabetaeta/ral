@@ -358,7 +358,7 @@ node is the collector's own doing — its reader-gone stop, or the teardown it
 ran — and is consumed (`StageObservation::names`, `forgiven`); a stop naming
 any other node is forwarded, and so is a cleanup that halted on anything
 else, which becomes the verdict. A reader-gone stop naming *any* node ranks
-under everything in the fold (`rank` 0): its owner is a collector above,
+under everything in the fold (`Break::rank` 0): its owner is a collector above,
 which will consume it. A child the stage thread spawned holding the edge
 (`!{ sh -c … } | true`) is heard by the sentinel like any external; the
 `Effect::KillStage` that follows writes `ReaderGone` on the stage's node, and
@@ -519,9 +519,9 @@ outcome. The shell-touching finish this implies — reading a filed stage's
 `sent` back against what happened, forgiving a `ReaderGone` kill — waits for
 [`CollectState::fold`], the one place `&mut Shell` reaches an external's
 settlement, since no reaper-posting closure or stage thread may hold one; the
-verdicts it ranks join by `stronger` over `rank`: a reader-gone stop naming
-any node contributes nothing, then `Error < Exit < Stopped c`, stops ordered
-by cause, ties going to the earlier stage. **A stage's escape tears the
+verdicts it ranks join by `stronger` over `Break::rank`, the order a base's
+closing poll ranks by too: a reader-gone stop naming any node contributes
+nothing, then `Error < Exit < Stopped c`, stops ordered by cause, ties going to the earlier stage. **A stage's escape tears the
 pipeline down at once**: a filed `Returned` carrying an `exit`, or a stop the
 stage did not get from this collector, answers `Effect::CancelAll` with its
 cause (`Cancelled` for an `exit`), the siblings having no use left — their

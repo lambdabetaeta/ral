@@ -541,10 +541,7 @@ fn a_retained_desk_refuses_start_after_its_loan_returns() {
     let err = retained
         .ask(start_req(NurseryId(0), "hi", "helper"))
         .unwrap_err();
-    assert_eq!(
-        err.reason,
-        ral_core::fact::Reason::Raised(EnquiryError::no_desk().message)
-    );
+    assert_eq!(err.reason, no_desk().reason);
 }
 
 /// A refusal at adoption: here, a restriction record the capability

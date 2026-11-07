@@ -10,8 +10,9 @@
 //! Windows a group a pipeline or a lone external owns is a `Job`.
 
 use super::collect::Event;
+use crate::error::io_message;
 use crate::process::{Group, Landing, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};
-use crate::shell::runtime::{Break, Error, Settled, sig};
+use crate::shell::runtime::{Break, Error, Settled};
 use std::sync::mpsc::Sender;
 
 /// Pgid lifecycle for one pipeline.  It drops after every stage handle has
@@ -156,16 +157,16 @@ impl AnchorProcess {
     fn spawn(tx: Sender<Event>) -> Settled<Self> {
         #[cfg(windows)]
         let _ = tx;
-        let (reader, release) =
-            crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
+        let (reader, release) = crate::process::cloexec_pipe()
+            .map_err(|e| Error::new(io_message("pipeline anchor", &e)))?;
         let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::PipelineAnchor)
-            .map_err(|e| Error::io("pipeline anchor", &e))?;
+            .map_err(|e| Error::new(io_message("pipeline anchor", &e)))?;
         cmd.stdin(crate::process::StdioSpec::from_owned(reader));
         cmd.stderr(crate::process::StdioSpec::Null);
         #[cfg(unix)]
         let mut report = {
-            let (report, writer) =
-                crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
+            let (report, writer) = crate::process::cloexec_pipe()
+                .map_err(|e| Error::new(io_message("pipeline anchor", &e)))?;
             cmd.stdout(crate::process::StdioSpec::from_owned(writer));
             report
         };
@@ -176,15 +177,14 @@ impl AnchorProcess {
         } = cmd
             .spawn(PgidPolicy::NewLeader)
             .map_err(|unstarted| match unstarted {
-                Unstarted::Program(e) => Break::from(Error::io("pipeline anchor", &e)),
+                Unstarted::Program(e) => Break::from(Error::new(io_message("pipeline anchor", &e))),
                 Unstarted::Refused(refusal) => Break::from(refusal),
-                #[cfg(unix)]
                 Unstarted::Stopped(stop) => Break::from(stop),
             })?;
         drop(cmd);
         let Landing::Owns(pgid) = landing else {
             discard(&mut child);
-            return Err(sig("pipeline anchor: failed to establish a process group"));
+            return Err(Error::new("pipeline anchor: failed to establish a process group").into());
         };
         #[cfg(unix)]
         let (child, reporter) = {
@@ -203,7 +203,9 @@ impl AnchorProcess {
             });
             if let Err(e) = readiness {
                 discard(&mut child);
-                return Err(Error::io("pipeline anchor did not become ready", &e).into());
+                return Err(
+                    Error::new(io_message("pipeline anchor did not become ready", &e)).into(),
+                );
             }
             let report_tx = tx.clone();
             let reporter = std::thread::Builder::new()
@@ -211,7 +213,7 @@ impl AnchorProcess {
                 .spawn(move || read_anchor_reports(report, &report_tx))
                 .map_err(|e| {
                     discard(&mut child);
-                    Error::io("pipeline anchor", &e)
+                    Error::new(io_message("pipeline anchor", &e))
                 })?;
             (child.into_watch(tx, anchor_death), reporter)
         };

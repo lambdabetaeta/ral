@@ -16,13 +16,14 @@ use std::time::Duration;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::engine::Scopes;
+use crate::error::Error;
 use crate::process::{
     Ambient, CancelCause, Fatal, POLL_SLICE, RootCause, Scope, ScopeNode, interrupt_epoch,
 };
 use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, Grants, PathEntry, Probe, WorkerRow};
-use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
-use crate::shell::runtime::DeferredSink;
+use crate::protocol::{Control, DispatchId, EnquiryId, Event, Frame, Report, Run, WireError};
+use crate::shell::runtime::{DeferredSink, no_desk};
 use crate::sync::LockExt as _;
 
 mod identity;
@@ -48,7 +49,7 @@ pub use wire::run_engine;
 pub enum Severed {
     /// The engine refused `Attach`, in its own words: a protocol version
     /// mismatch, an unknown installer, a seed it could not apply.
-    Refused(String),
+    Refused(WireError),
     /// The stream closed or a frame failed to cross.
     Closed(String),
     /// Nothing arrived for the liveness deadline — a virtual socket whose far
@@ -84,7 +85,11 @@ impl Severed {
 impl std::fmt::Display for Severed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Refused(msg) => write!(f, "the engine refused to attach: {msg}"),
+            Self::Refused(why) => write!(
+                f,
+                "the engine refused to attach: {}",
+                why.clone().into_error().plain()
+            ),
             Self::Closed(msg) => write!(f, "the connection to the engine closed: {msg}"),
             Self::Silent(d) => write!(
                 f,
@@ -119,15 +124,15 @@ pub trait Host: Send + Sync {
     ///
     /// # Errors
     /// Returns `Err` when this host cannot answer `req`.
-    fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError>;
+    fn enquire(&self, req: FOValue) -> Result<FOValue, Error>;
 }
 
 /// The mute host: renders nothing, answers nothing.
 impl Host for () {
     fn surface(&self, _val: &FOValue) {}
 
-    fn enquire(&self, _req: FOValue) -> Result<FOValue, EnquiryError> {
-        Err(EnquiryError::no_desk())
+    fn enquire(&self, _req: FOValue) -> Result<FOValue, Error> {
+        Err(no_desk())
     }
 }
 
@@ -199,7 +204,7 @@ pub trait Transport: Send + Sync {
     /// Answer one enquiry the engine raised on `Event::Enquiry`. A no-op under
     /// the identity transport, whose enquiry is a direct call through the
     /// installed `Desk` and never a frame.
-    fn answer(&self, _eid: EnquiryId, _answer: Result<FOValue, EnquiryError>) {}
+    fn answer(&self, _eid: EnquiryId, _answer: Result<FOValue, Error>) {}
 
     /// The out-of-band control sender: writable while a dispatch is in
     /// flight.

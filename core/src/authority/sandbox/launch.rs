@@ -19,16 +19,18 @@
 //! bwrap's first act.  Windows has no trampoline — its `LowBox` token is
 //! applied at the parent's spawn.
 
+use super::SandboxProjection;
 #[cfg(target_os = "linux")]
 use super::linux::Envelope;
 #[cfg(unix)]
 use super::warrant::{Confinement, Handoff, Slots, Warrant};
-use super::{Refusal, SandboxProjection};
 use crate::Role;
 #[cfg(all(test, unix))]
 use crate::authority::policy::Baseline;
 use crate::authority::policy::{Admitted, Program};
+use crate::error::Error;
 use crate::path::{CwdPath, RealPath};
+use crate::process::Unstarted;
 #[cfg(unix)]
 use crate::process::report::Report;
 #[cfg(unix)]
@@ -79,7 +81,7 @@ impl Image {
 
     /// The plain launch of this image with `args`: unconfined, or for
     /// Windows to confine at the spawn.
-    pub(crate) fn launch(&self, args: &[String]) -> Result<crate::process::Launch, Refusal> {
+    pub(crate) fn launch(&self, args: &[String]) -> Result<crate::process::Launch, Error> {
         let mut launch = match self {
             Self::File { real, arg0 } => {
                 let mut launch = crate::process::Launch::new(real.as_path());
@@ -88,7 +90,7 @@ impl Image {
             }
             Self::Tool(tool) => {
                 let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {
-                    Refusal::Launch(format!(
+                    Error::new(format!(
                         "bundled tool '{tool}': cannot resolve ral's own program: {e}"
                     ))
                 })?;
@@ -141,14 +143,16 @@ pub(crate) fn sandboxed_command(
     ownership: Ownership,
     cwd: &CwdPath,
     cancel: &crate::process::cancel::Scope,
-) -> Result<crate::process::Launch, Refusal> {
+) -> Result<crate::process::Launch, Unstarted> {
     #[cfg(target_os = "linux")]
     {
-        linux_sandboxed_command(projection, image, args, ownership, cwd, cancel)
+        Ok(linux_sandboxed_command(
+            projection, image, args, ownership, cwd, cancel,
+        )?)
     }
     #[cfg(target_os = "macos")]
     {
-        macos_sandboxed_command(projection, image, args, cancel)
+        Ok(macos_sandboxed_command(projection, image, args, cancel)?)
     }
     #[cfg(windows)]
     {
@@ -167,12 +171,15 @@ pub(crate) fn sandboxed_command(
 /// The warrant lent to `handoff`, and the report socket kept for the child:
 /// the trampoline's two slots, and the parent's ends of the report.
 #[cfg(unix)]
-pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, Report), Refusal> {
-    let parcel = warrant.parcel()?;
-    let warrant_at = handoff.lend(parcel.as_fd())?;
-    let (reader, writer) = crate::process::cloexec_socketpair()
-        .map_err(|e| format!("sandbox: cannot open the confined launch's report socket: {e}"))?;
-    let (kept, report_at) = handoff.keep(writer.as_fd())?;
+pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, Report), Error> {
+    let parcel = warrant.parcel().map_err(Error::new)?;
+    let warrant_at = handoff.lend(parcel.as_fd()).map_err(Error::new)?;
+    let (reader, writer) = crate::process::cloexec_socketpair().map_err(|e| {
+        Error::new(format!(
+            "sandbox: cannot open the confined launch's report socket: {e}"
+        ))
+    })?;
+    let (kept, report_at) = handoff.keep(writer.as_fd()).map_err(Error::new)?;
     let slots = Slots {
         warrant: warrant_at,
         report: report_at,
@@ -190,9 +197,9 @@ fn linux_sandboxed_command(
     ownership: Ownership,
     cwd: &CwdPath,
     scope: &crate::process::Scope,
-) -> Result<crate::process::Launch, Refusal> {
-    let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
-    let own = super::reexec::own()?;
+) -> Result<crate::process::Launch, Error> {
+    let bwrap = super::linux::envelope().map_err(super::unavailable)?;
+    let own = super::reexec::own().map_err(Error::new)?;
     let env = Envelope::probe(bwrap, own);
     enveloped(&env, projection, image, args, Some(cwd), ownership, scope)
 }
@@ -209,9 +216,9 @@ pub(super) fn enveloped(
     chdir: Option<&CwdPath>,
     ownership: Ownership,
     scope: &crate::process::Scope,
-) -> Result<crate::process::Launch, Refusal> {
-    let rendered = projection.rendered()?;
-    let shown = super::linux::Shown::of(&rendered)?;
+) -> Result<crate::process::Launch, Error> {
+    let rendered = projection.rendered().map_err(Error::new)?;
+    let shown = super::linux::Shown::of(&rendered).map_err(Error::new)?;
     let mut handoff = Handoff::default();
     let confinement = super::linux::landlock::build(
         &rendered.exec,
@@ -260,10 +267,10 @@ fn macos_sandboxed_command(
     image: &Image,
     args: &[String],
     scope: &crate::process::Scope,
-) -> Result<crate::process::Launch, Refusal> {
-    let own = super::reexec::own()?;
-    own.verify()?;
-    let profile = super::macos::build_profile(projection)?;
+) -> Result<crate::process::Launch, Error> {
+    let own = super::reexec::own().map_err(Error::new)?;
+    own.verify().map_err(Error::new)?;
+    let profile = super::macos::build_profile(projection).map_err(Error::new)?;
     let mut handoff = Handoff::default();
     let (slots, report) = issue(
         &Warrant::new(Confinement(profile), image, args),

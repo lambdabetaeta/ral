@@ -7,10 +7,11 @@
 //! depth guard: nothing is cached, so those are what keep repeated loads
 //! terminating.
 
+use crate::error::{Error, io_message};
 use crate::path::{Judged, LexicalPath, Located, Reading};
 use crate::shell::evaluator::Mode;
 use crate::shell::load::{ModuleLoad, check_source, module_phrases};
-use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
 use std::sync::Arc;
@@ -20,17 +21,17 @@ use std::sync::Arc;
 fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled<String> {
     let read = located.read();
     drop(located);
-    let mut file = read.map_err(|e| Error::io(shown, &e).with_context("use"))?;
+    let mut file = read.map_err(|e| Error::new(io_message(shown, &e)).with_context("use"))?;
     let mut source = String::new();
     std::io::Read::read_to_string(&mut file, &mut source)
-        .map_err(|e| Error::io(shown, &e).with_context("use"))?;
+        .map_err(|e| Error::new(io_message(shown, &e)).with_context("use"))?;
     Ok(crate::source::normalize_source_text(source))
 }
 
 /// Report the loader's context without changing the failure value.
 fn tag_loader_error(e: Break) -> Break {
     match e {
-        Break::Error(err) if err.context.is_none() => Break::Error(err.with_context("use")),
+        Break::Error(err) if err.context().is_none() => err.with_context("use").into(),
         error @ Break::Error(_) => error,
         other @ Break::Escape(_) => other,
     }

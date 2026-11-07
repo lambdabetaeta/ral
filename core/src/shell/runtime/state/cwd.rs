@@ -7,6 +7,7 @@
 //! as `Command::current_dir` and exports it as `PWD`.
 
 use super::Shell;
+use crate::error::io_message;
 use crate::path::{CwdPath, walk_dir};
 use crate::shell::runtime::Error;
 use std::io::ErrorKind;
@@ -52,7 +53,7 @@ impl Shell {
             ErrorKind::NotADirectory => {
                 Error::new(format!("{}: not a directory", resolved.shown()))
             }
-            _ => Error::io(resolved.shown(), &e),
+            _ => Error::new(io_message(resolved.shown(), &e)),
         })?;
         let cwd = CwdPath::new(dir.real().as_path().to_path_buf())
             .map_err(|e| Error::new(e.to_string()))?;

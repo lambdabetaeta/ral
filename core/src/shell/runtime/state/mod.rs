@@ -37,8 +37,7 @@ use super::audit::{Audit, DisplacedSite};
 use super::env::Env;
 use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
-use super::mooring::{Mooring, TerminalAccess};
-use super::sig;
+use super::mooring::{Mooring, TerminalAccess, no_desk};
 use crate::authority::policy::GrantStack;
 use crate::error::{Error, FrameName, Prov};
 use crate::host::EnvVars;
@@ -294,10 +293,7 @@ impl Shell {
     ) -> Settled<crate::data::FOValue> {
         match mooring.desk.as_ref() {
             Some(desk) => desk.enquire(req, &self.scope),
-            None => Err(Break::Error(
-                Error::raised(crate::shell::runtime::NO_DESK)
-                    .with_hint(crate::shell::runtime::NO_DESK_HINT),
-            )),
+            None => Err(no_desk().into()),
         }
     }
 
@@ -352,7 +348,9 @@ impl Shell {
             Err(WriteFault::Stopped(stop)) => Err(stop.into()),
             Err(WriteFault::BrokenPipe) if sink.is_stderr() => Ok(()),
             Err(WriteFault::BrokenPipe) => Err(Break::stopped(CancelCause::ReaderGone, None)),
-            Err(WriteFault::Io(e)) => Err(sig(format!("could not write to {what}: {e}"))),
+            Err(WriteFault::Io(e)) => {
+                Err(Error::new(format!("could not write to {what}: {e}")).into())
+            }
         }
     }
 

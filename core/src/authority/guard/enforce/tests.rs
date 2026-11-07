@@ -185,8 +185,9 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
 
 mod words {
     use super::*;
-    use crate::authority::guard::enforce::{Refusal, check_exec, fs_denial};
+    use crate::authority::guard::enforce::{check_exec, fs_denial};
     use crate::authority::policy::{ExecGrant, ExecKey, Program};
+    use crate::error::Error;
     use crate::fact::Resource;
 
     fn grants(layers: impl IntoIterator<Item = Capabilities>) -> GrantStack {
@@ -214,7 +215,7 @@ mod words {
         ExecKey::Dir(FrozenPath::from_surface(path))
     }
 
-    fn refusal(grants: &GrantStack, real: &str) -> Refusal {
+    fn refusal(grants: &GrantStack, real: &str) -> Error {
         match check_exec(grants, &Baseline::default(), "t", file(real)) {
             Ok(_) => panic!("{real} should be refused"),
             Err(denial) => denial.error,
@@ -230,9 +231,9 @@ mod words {
         let t = tree.at("/x/t");
         let only = exec([dir(&tree.at("/other"))], []);
         let one = refusal(&grants([only.clone()]), &t);
-        assert!(one.message.contains("lets it run"), "{}", one.message);
+        assert!(one.describe().contains("lets it run"), "{}", one.describe());
         assert_eq!(
-            one.hint.as_deref(),
+            one.hints().first().map(|h| &**h),
             Some(
                 "add it to the grant's exec `allow` list: `` `name git `` for a command name, \
                  `` `absolute /path/to/it `` for a file, or `` `dir `absolute /path `` for its \
@@ -242,12 +243,12 @@ mod words {
         let outer = exec([dir(&tree.at("/x"))], []);
         let two = refusal(&grants([outer, only]), &t);
         assert!(
-            two.message
+            two.describe()
                 .contains("some layer's exec `allow` list does not let it run"),
             "{}",
-            two.message
+            two.describe()
         );
-        assert!(two.hint.unwrap().contains("enclosing grant"));
+        assert!(two.hints()[0].contains("enclosing grant"));
     }
 
     /// An exclusion is named with its `dir` constructor, and its hint is the
@@ -260,9 +261,9 @@ mod words {
         let both = exec([dir(&x)], [dir(&x)]);
         let e = refusal(&grants([both]), &tree.at("/x/t"));
         let named = format!("`dir `absolute '{}'", crate::path::shown(&x));
-        assert!(e.message.contains(&named), "{}", e.message);
+        assert!(e.describe().contains(&named), "{}", e.describe());
         assert_eq!(
-            e.hint.as_deref(),
+            e.hints().first().map(|h| &**h),
             Some(
                 "an allowance cannot override an exclusion; remove the exclusion from the \
                  policy that imposes it"
@@ -299,14 +300,19 @@ mod words {
         };
         for caps in [by_exec, by_fs] {
             let grants = grants([caps]);
-            let guard = refusal(&grants, &sh)
-                .hint
+            let refused = refusal(&grants, &sh);
+            let guard = refused
+                .hints()
+                .first()
                 .expect("an exclusion's refusal hints");
             let projection = SandboxProjection::of(&grants, &Baseline::default(), None)
                 .expect("fs is restricted");
             let kernel = interpreter_hint(&projection, std::path::Path::new(&sh))
                 .expect("the kernel names the exclusion");
-            assert!(kernel.ends_with(&guard), "guard: {guard}\nkernel: {kernel}");
+            assert!(
+                kernel.ends_with(&**guard),
+                "guard: {guard}\nkernel: {kernel}"
+            );
         }
     }
 
@@ -324,7 +330,7 @@ mod words {
         assert_eq!(denial.check.resource, Resource::Exec);
         assert_eq!(denial.check.fields["name"], "t");
         assert!(!denial.check.fields.contains_key("resolved"));
-        assert!(!denial.error.message.contains(&tree.at("/x/t")));
+        assert!(!denial.error.describe().contains(&tree.at("/x/t")));
         assert!(denial.check.fields.contains_key("deny"));
         assert!(!denial.check.fields.contains_key("args"));
     }
@@ -358,10 +364,11 @@ mod words {
             let Err(plain) = check_exec(&grants, &baseline, &link, file(&target)) else {
                 panic!("the target is outside the admitted folder");
             };
-            assert_eq!(denial.error, plain.error);
-            for text in std::iter::once(&denial.error.message)
-                .chain(denial.error.hint.iter())
-                .chain(denial.check.fields.values())
+            assert_eq!(denial.error.describe(), plain.error.describe());
+            assert_eq!(denial.error.hints(), plain.error.hints());
+            for text in std::iter::once(&*denial.error.describe())
+                .chain(denial.error.hints().iter().map(|h| &**h))
+                .chain(denial.check.fields.values().map(String::as_str))
             {
                 assert!(!text.contains(&tree.at("/elsewhere")), "{text}");
             }
@@ -380,9 +387,9 @@ mod words {
         let deny = exec([ExecKey::Name("sh".into())], [ExecKey::Name("sh".into())]);
         let e = refusal(&grants([deny]), crate::path::utf8(&sh).unwrap());
         assert!(
-            e.message.contains("excluded by `` `name 'sh' ``"),
+            e.describe().contains("excluded by `` `name 'sh' ``"),
             "{}",
-            e.message
+            e.describe()
         );
     }
 
@@ -401,12 +408,12 @@ mod words {
         };
         let e = refusal(&grants([reads, runs.clone()]), &t);
         assert!(
-            e.message.contains("may run, but it is not readable"),
+            e.describe().contains("may run, but it is not readable"),
             "{}",
-            e.message
+            e.describe()
         );
         assert_eq!(
-            e.hint.as_deref(),
+            e.hints().first().map(|h| &**h),
             Some("running a program reads it: add it to the grant's fs `read` list")
         );
         let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t));
@@ -435,14 +442,14 @@ mod words {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
         assert!(
-            denial.error.message.contains("'ls' is built into ral"),
+            denial.error.describe().contains("'ls' is built into ral"),
             "{}",
-            denial.error.message
+            denial.error.describe()
         );
         assert!(
-            denial.error.message.contains("ral's binary"),
+            denial.error.describe().contains("ral's binary"),
             "{}",
-            denial.error.message
+            denial.error.describe()
         );
     }
 
@@ -464,7 +471,7 @@ mod words {
                 "no allowance of the active grant covers it"
             );
             assert_eq!(
-                fs_denial(&grants, refused, op, &path).error.message,
+                fs_denial(&grants, refused, op, &path).error.describe(),
                 format!(
                     "fs {} denied by grant: no allowance of the active grant covers {}",
                     <&str>::from(&op),
@@ -537,7 +544,7 @@ mod fs_facts {
             assert_eq!(denial.check.fields["op"], <&str>::from(&op));
             assert_eq!(denial.check.fields["path"], shown);
             assert_eq!(denial.check.fields.len(), 2, "{:?}", denial.check.fields);
-            assert!(denial.error.hint.is_some_and(|h| !h.is_empty()));
+            assert!(denial.error.hints().iter().any(|h| !h.is_empty()));
         }
     }
 
@@ -562,7 +569,7 @@ mod fs_facts {
         );
         assert!(fields["deny"].contains("secret"), "{fields:?}");
         assert!(!fields.contains_key("pinned"));
-        assert!(denial.error.hint.is_some_and(|h| !h.is_empty()));
+        assert!(denial.error.hints().iter().any(|h| !h.is_empty()));
     }
 
     #[test]
@@ -581,7 +588,7 @@ mod fs_facts {
         assert_eq!(fields["path"], LexicalPath::absolute(&own).unwrap().shown());
         assert_eq!(fields["pinned"], "ral");
         assert!(!fields.contains_key("deny"));
-        assert!(denial.error.hint.is_some_and(|h| !h.is_empty()));
+        assert!(denial.error.hints().iter().any(|h| !h.is_empty()));
     }
 }
 

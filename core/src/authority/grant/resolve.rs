@@ -1,8 +1,9 @@
 //! How a walked exec target becomes the rules a layer holds.
 
-use super::freeze::PolicyError;
+use super::freeze::root_program;
 use super::paths::Polar;
 use crate::authority::policy::{ExecAllow, ExecDeny, Extent, GrantPath, Rule, Veto};
+use crate::error::Error;
 use crate::path::{self, Excluded, FrozenPath, Trace};
 
 /// How a walked key becomes a rule, by the polarity that walked it: an
@@ -11,29 +12,25 @@ pub(crate) trait Keyed: Polar {
     /// # Errors
     /// A file key naming the root (the root is a directory, not a program),
     /// or what the polarity refuses of the root.
-    fn file(path: GrantPath<Self::Grant>) -> Result<Rule, PolicyError>;
+    fn file(path: GrantPath<Self::Grant>) -> Result<Rule, Error>;
     fn dir(path: GrantPath<Self::Grant>) -> Rule;
     /// A bare name: the tool bundled under it and the file the `PATH` found,
     /// never the root; for an exclusion the veto on the name everywhere.
     ///
     /// # Errors
     /// What the polarity refuses of the found file.
-    fn name(
-        name: &str,
-        bundled: bool,
-        found: Option<GrantPath<Self>>,
-    ) -> Result<Vec<Rule>, PolicyError>;
+    fn name(name: &str, bundled: bool, found: Option<GrantPath<Self>>) -> Result<Vec<Rule>, Error>;
 }
 
 impl Keyed for Trace {
-    fn file(path: GrantPath<Extent>) -> Result<Rule, PolicyError> {
+    fn file(path: GrantPath<Extent>) -> Result<Rule, Error> {
         match path.real {
             Extent::Under { position: real, .. } => Ok(Rule::Allow(ExecAllow::File {
                 real,
                 written: path.written,
                 found_as: None,
             })),
-            Extent::Everywhere => Err(PolicyError::root_program(&path.written)),
+            Extent::Everywhere => Err(root_program(&path.written)),
         }
     }
 
@@ -41,11 +38,7 @@ impl Keyed for Trace {
         Rule::Allow(ExecAllow::Dir(path))
     }
 
-    fn name(
-        name: &str,
-        bundled: bool,
-        found: Option<GrantPath<Self>>,
-    ) -> Result<Vec<Rule>, PolicyError> {
+    fn name(name: &str, bundled: bool, found: Option<GrantPath<Self>>) -> Result<Vec<Rule>, Error> {
         let tool = bundled.then(|| Rule::Allow(ExecAllow::Tool(name.into())));
         let file = found.map(|path| {
             Rule::Allow(ExecAllow::File {
@@ -59,7 +52,7 @@ impl Keyed for Trace {
 }
 
 impl Keyed for Excluded {
-    fn file(path: GrantPath<Self>) -> Result<Rule, PolicyError> {
+    fn file(path: GrantPath<Self>) -> Result<Rule, Error> {
         Ok(Rule::Deny(Box::new(ExecDeny::File(path))))
     }
 
@@ -67,7 +60,7 @@ impl Keyed for Excluded {
         Rule::Deny(Box::new(ExecDeny::Dir(path)))
     }
 
-    fn name(name: &str, _: bool, found: Option<GrantPath<Self>>) -> Result<Vec<Rule>, PolicyError> {
+    fn name(name: &str, _: bool, found: Option<GrantPath<Self>>) -> Result<Vec<Rule>, Error> {
         let file = found
             .map(Self::grant)
             .transpose()?
@@ -90,7 +83,7 @@ pub(crate) fn name_rules<W: Keyed>(
     name: &str,
     path: Option<&str>,
     unix_available: bool,
-) -> Result<Vec<Rule>, PolicyError> {
+) -> Result<Vec<Rule>, Error> {
     let found = path::locate(name, path, None)
         .and_then(|hit| FrozenPath::freeze(&hit).ok())
         .map(GrantPath::<W>::walked)

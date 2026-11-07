@@ -17,8 +17,9 @@
 //! ([`system_reads_in`]).
 
 use super::Polar;
-use super::freeze::{Home, PolicyError, Selector, host_absolute, refuse_the_world, the_world};
+use super::freeze::{Home, Selector, host_absolute, refuse_the_world, the_world};
 use crate::authority::policy::GrantPath;
+use crate::error::Error;
 use crate::path::{Kind, RealPath, Trace, is_absolute, join_slash, path_entries, shown};
 use crate::path::{XdgKind, resolve_xdg_in};
 use crate::text::code;
@@ -522,11 +523,11 @@ fn walked<'a, W: Polar>(
     holder: &str,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&str>,
-) -> Result<Vec<Found<W>>, PolicyError> {
+) -> Result<Vec<Found<W>>, Error> {
     (chosen(locations, env, home).into_iter())
         .filter_map(|Chosen { dir, via }| {
             host_absolute(&dir)
-                .map_err(|why| malformed(&dir, via.as_ref(), holder, &why))
+                .map_err(|why| malformed(&dir, via.as_ref(), holder, why))
                 .and_then(GrantPath::<W>::walked)
                 .map(|w| w.real.followed().kind().is_some().then_some((w, via)))
                 .transpose()
@@ -536,7 +537,7 @@ fn walked<'a, W: Polar>(
 
 /// A chosen `dir` that `holder` cannot hold, [`host_absolute`] having
 /// refused it for `why`: what chose it, and what to change.
-fn malformed(dir: &Path, via: Option<&Via>, holder: &str, why: &PolicyError) -> PolicyError {
+fn malformed(dir: &Path, via: Option<&Via>, holder: &str, why: Error) -> Error {
     let (subject, fix) = match via {
         Some((var, value)) => (
             format!("{var} is {}", shown(value)),
@@ -547,11 +548,8 @@ fn malformed(dir: &Path, via: Option<&Via>, holder: &str, why: &PolicyError) -> 
             "Check its HOME/XDG base.".to_owned(),
         ),
     };
-    PolicyError::new(format!(
-        "{subject}, which {holder} cannot hold: {}",
-        why.message
-    ))
-    .with_hint(fix)
+    why.with_context(format!("{subject}, which {holder} cannot hold"))
+        .with_hint(fix)
 }
 
 /// The directories `toolchain` expands to over an injected environment and
@@ -567,7 +565,7 @@ pub(crate) fn expand_in<W: Polar>(
     toolchain: Toolchain,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,
-) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+) -> Result<Vec<GrantPath<W::Grant>>, Error> {
     let selector = Selector::Toolchain(toolchain);
     let holder = code(&format!("`dir `{}", selector.name()));
     let spelled = home.map(|h| h.spelled.as_str());
@@ -610,7 +608,7 @@ fn provenance<W: Polar>(dir: &GrantPath<W>, via: Option<Via>) -> (String, String
 /// # Errors
 /// As [`expand_in`]; a home that cannot be walked.
 #[cfg(any(test, feature = "test-util"))]
-pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, PolicyError> {
+pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, Error> {
     let home = home.map(Home::of).transpose()?;
     let kept = expand_in::<Trace>(toolchain, crate::host::var, home.as_ref())?;
     Ok(kept
@@ -632,7 +630,7 @@ pub(crate) fn keeps_system_read(dir: &RealPath, held: Option<&RealPath>) -> bool
 pub(crate) fn system_reads_in(
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,
-) -> Result<Vec<GrantPath<Trace>>, PolicyError> {
+) -> Result<Vec<GrantPath<Trace>>, Error> {
     let rows = SYSTEM_READS.iter().flat_map(|t| t.locations());
     system_reads(LISTED.iter().chain(rows), env, home)
 }
@@ -647,7 +645,7 @@ fn system_reads<'a>(
     locations: impl IntoIterator<Item = &'a Location>,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,
-) -> Result<Vec<GrantPath<Trace>>, PolicyError> {
+) -> Result<Vec<GrantPath<Trace>>, Error> {
     let held = home.and_then(|h| h.real.as_ref());
     let holder = "ral's read floor (the system paths every program may read)";
     let found = walked::<Trace>(locations, holder, env, home.map(|h| h.spelled.as_str()))?;
@@ -687,7 +685,7 @@ mod tests {
         toolchain: Toolchain,
         env: impl Fn(&str) -> Option<String>,
         home: Option<&str>,
-    ) -> Result<Vec<String>, PolicyError> {
+    ) -> Result<Vec<String>, Error> {
         let home = home.map(Home::of).transpose()?;
         let dirs = expand_in::<Trace>(toolchain, env, home.as_ref())?;
         Ok(dirs.iter().map(|d| d.written.as_str().to_owned()).collect())
@@ -780,9 +778,13 @@ mod tests {
             "default directory or symlink".to_owned(),
             "HOME/XDG base".to_owned(),
         ] {
-            assert!(err.message.contains(&part), "{part}: {}", err.message);
+            assert!(err.to_string().contains(&part), "{part}: {err}");
         }
-        assert!(!err.message.contains("set correctly"), "{}", err.message);
+        assert!(
+            !err.to_string().contains("set correctly"),
+            "{}",
+            err.to_string()
+        );
     }
 
     #[test]
@@ -1142,7 +1144,7 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(
-                err.message,
+                err.to_string(),
                 format!(
                     "RUSTUP_HOME is {value}, {what}, so `` `dir `rustup `` would run and read \
                      all of it. Is RUSTUP_HOME set correctly?"
@@ -1208,7 +1210,7 @@ mod tests {
         let looped = format!("{root}/loop");
         std::os::unix::fs::symlink("loop", &looped).unwrap();
         let err = system_reads_in(env(&[("HOMEBREW_PREFIX", &looped)]), None).unwrap_err();
-        assert!(err.message.contains(&looped), "{}", err.message);
+        assert!(err.to_string().contains(&looped), "{}", err.to_string());
     }
 
     #[test]
@@ -1347,10 +1349,10 @@ mod tests {
             "`dir `rustup".to_owned(),
             "no well-formed UNC".to_owned(),
         ] {
-            assert!(err.message.contains(&part), "{part}: {}", err.message);
+            assert!(err.to_string().contains(&part), "{part}: {err}");
         }
         assert_eq!(
-            err.hint.as_deref(),
+            err.hints().first().map(|h| &**h),
             Some("Set RUSTUP_HOME to a well-formed absolute path, or unset it.")
         );
     }
@@ -1362,12 +1364,12 @@ mod tests {
         const MALFORMED: &[Location] = &[loc!([], [Base::Abs("///x/bin")])];
         let err = walked::<Trace>(MALFORMED, "a fixture", env(&[]), None).unwrap_err();
         assert!(
-            err.message
+            err.to_string()
                 .starts_with("default directory ///x/bin, which a fixture cannot hold: "),
             "{}",
-            err.message
+            err.to_string()
         );
-        assert!(err.hint.is_some_and(|h| h.contains("HOME/XDG")));
+        assert!(err.hints().iter().any(|h| h.contains("HOME/XDG")));
     }
 
     /// The system reads refuse a malformed choice as a selector does, naming
@@ -1378,13 +1380,13 @@ mod tests {
         let value = malformed_dir();
         let err = system_reads(PROBE, env(&[("A", value)]), None).unwrap_err();
         assert!(
-            err.message
+            err.to_string()
                 .starts_with(&format!("A is {}, which ral's read floor", shown(value))),
             "{}",
-            err.message
+            err.to_string()
         );
         assert_eq!(
-            err.hint.as_deref(),
+            err.hints().first().map(|h| &**h),
             Some("Set A to a well-formed absolute path, or unset it.")
         );
     }

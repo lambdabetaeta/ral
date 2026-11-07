@@ -4,8 +4,8 @@
 
 use crate::host::EnvVars;
 use crate::shell::runtime::{
-    FrameHandle, HandlerArity, HandlerEntry, HandlerRole, Map, Settled, Shell, Value, arm_closure,
-    refused_arm, sig,
+    Error, FrameHandle, HandlerArity, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
+    arm_closure, refused_arm,
 };
 
 use crate::path::{CwdPath, Reading};
@@ -92,14 +92,14 @@ fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
             "OLDPWD" => "is never passed to commands: ral keeps no previous directory for `cd -`",
             _ => continue,
         };
-        return Err(sig(format!("within env: `{k}` {why}")));
+        return Err(Error::new(format!("within env: `{k}` {why}")).into());
     }
     overrides
         .iter()
         .map(|(name, value)| {
             let name = name.to_string();
             let text = value.scalar_text().ok_or_else(|| {
-                sig(format!(
+                Error::new(format!(
                     "within env: value for '{name}' must be a scalar (string, int, float, or \
                      bool), got {}",
                     value.type_name()
@@ -117,11 +117,12 @@ fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
 fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<CwdPath> {
     let path = v.to_string();
     if path.is_empty() {
-        return Err(sig("within dir: path cannot be empty"));
+        return Err(Error::new("within dir: path cannot be empty").into());
     }
     let rp = shell.resolve(&path);
     let dir = shell.locate_dir::<Reading>(&rp)?;
-    CwdPath::new(dir.real().as_path().to_path_buf()).map_err(|e| sig(format!("within dir: {e}")))
+    Ok(CwdPath::new(dir.real().as_path().to_path_buf())
+        .map_err(|e| Error::new(format!("within dir: {e}")))?)
 }
 
 /// `handlers:` — one named handler per entry, each vetted against its

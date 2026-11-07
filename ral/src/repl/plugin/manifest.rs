@@ -5,10 +5,11 @@
 //! told, plus the [`ManifestHandlers`] it registers itself; the host
 //! re-validates the manifest into a [`LoadedPlugin`].
 
+use super::HookHealth;
 use super::router::{CTRL_X, KeyChord, builtin_action, parse_key_notation, reserved_action};
-use super::{HookHealth, load_err};
 use ral_core::data::FOValue;
-use ral_core::shell::runtime::{Error, settings_map};
+use ral_core::error::Error;
+use ral_core::shell::runtime::settings_map;
 use ral_core::{Map, Value, label, record};
 use std::collections::HashMap;
 use strum::{IntoStaticStr, VariantArray};
@@ -157,7 +158,7 @@ pub(super) struct ManifestHandlers {
 /// values the engine registers.
 pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> {
     let Some(map) = settings_map(val) else {
-        return Err(load_err(format!(
+        return Err(Error::new(format!(
             "plugin manifest: expected a record, got {}",
             val.type_name()
         )));
@@ -170,26 +171,26 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
     for key in map.keys() {
         match table.holds(key) {
             Some(ral_core::typecheck::contract::Holds::Refused(advice)) => {
-                return Err(load_err(*advice));
+                return Err(Error::new(*advice));
             }
             Some(_) => {}
-            None => return Err(load_err(format!("manifest: {}", table.unknown_key(key)))),
+            None => return Err(Error::new(format!("manifest: {}", table.unknown_key(key)))),
         }
     }
     let name = match map.get("name").as_deref() {
         Some(Value::String(s)) => s.to_string(),
         Some(other) => {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "manifest 'name': expected String, got {}",
                 other.type_name()
             )));
         }
-        None => return Err(load_err("manifest missing required 'name' field")),
+        None => return Err(Error::new("manifest missing required 'name' field")),
     };
     let aliases = match map.get("aliases").as_deref() {
         Some(Value::Map(m)) => parse_aliases(m)?,
         Some(other) => {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "manifest 'aliases': expected Map, got {}",
                 other.type_name()
             )));
@@ -199,7 +200,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
     let hooks = match map.get("hooks").as_deref() {
         Some(Value::Map(m)) => parse_hooks(m)?,
         Some(other) => {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "manifest 'hooks': expected Map, got {}",
                 other.type_name()
             )));
@@ -209,7 +210,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
     let (keybindings, keybinding_handlers) = match map.get("keybindings").as_deref() {
         Some(Value::List(l)) => parse_keybindings(l.iter().map(std::borrow::Cow::into_owned))?,
         Some(other) => {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "manifest 'keybindings': expected List, got {}",
                 other.type_name()
             )));
@@ -236,7 +237,7 @@ fn parse_hooks(entries: &Map) -> Result<Vec<(HookEvent, Value)>, Error> {
             .iter()
             .find(|&&e| <&str>::from(e) == name)
         else {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "unknown hook event '{name}'. Valid events: {}",
                 HookEvent::VARIANTS
                     .iter()
@@ -246,7 +247,7 @@ fn parse_hooks(entries: &Map) -> Result<Vec<(HookEvent, Value)>, Error> {
             )));
         };
         if !matches!(value.as_ref(), Value::Thunk(_)) {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "hook '{name}': expected a block, got {}",
                 value.type_name()
             )));
@@ -266,7 +267,7 @@ where
     let mut handlers = Vec::new();
     for entry in entries {
         let Value::Map(map) = entry else {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "keybinding entry: expected Map, got {}",
                 entry.type_name()
             )));
@@ -274,27 +275,27 @@ where
         let key = match map.get("key").as_deref() {
             Some(Value::String(s)) => s.to_string(),
             Some(other) => {
-                return Err(load_err(format!(
+                return Err(Error::new(format!(
                     "keybinding 'key': expected String, got {}",
                     other.type_name()
                 )));
             }
-            None => return Err(load_err("keybinding entry missing 'key' field")),
+            None => return Err(Error::new("keybinding entry missing 'key' field")),
         };
         let handler = match map.get("handler").as_deref() {
             Some(h @ Value::Thunk(_)) => h.clone(),
             Some(other) => {
-                return Err(load_err(format!(
+                return Err(Error::new(format!(
                     "keybinding '{key}': handler: expected a block, got {}",
                     other.type_name()
                 )));
             }
-            None => return Err(load_err("keybinding entry missing 'handler' field")),
+            None => return Err(Error::new("keybinding entry missing 'handler' field")),
         };
         let guard = match map.get("guard").as_deref() {
             Some(Value::String(g)) => Some(g.to_string()),
             Some(other) => {
-                return Err(load_err(format!(
+                return Err(Error::new(format!(
                     "keybinding '{key}': guard: expected String, got {}",
                     other.type_name()
                 )));
@@ -302,7 +303,7 @@ where
             None => None,
         };
         let spec = KeySpec { key, guard };
-        spec.bind().map_err(load_err)?;
+        spec.bind().map_err(Error::new)?;
         handlers.push((spec.key.clone(), handler));
         out.push(spec);
     }
@@ -313,7 +314,7 @@ fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
     let mut out = Vec::with_capacity(entries.len());
     for (name, value) in entries {
         if !matches!(value.as_ref(), Value::Thunk(_)) {
-            return Err(load_err(format!(
+            return Err(Error::new(format!(
                 "alias '{name}': expected a block, got {}",
                 value.type_name()
             )));

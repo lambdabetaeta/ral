@@ -119,12 +119,14 @@ pub fn seal(bequest: &Bequest) -> Result<Sealed, String> {
 impl Sealed {
     /// The frame back out. Refuses, naming the fault, on bytes that are not
     /// one `EngineSeed` frame.
-    pub(crate) fn unseal(&self) -> Result<EngineSeed, String> {
+    pub(crate) fn unseal(&self) -> Result<EngineSeed, Error> {
         let mut rest: &[u8] = &self.0;
         match crate::io::frame::read_frame(&mut rest) {
-            Err(e) => Err(format!("seed: the sealed bequest is not a seed frame: {e}")),
+            Err(e) => Err(Error::new(format!(
+                "seed: the sealed bequest is not a seed frame: {e}"
+            ))),
             Ok(Some(seed)) if rest.is_empty() => Ok(seed),
-            Ok(_) => Err("seed: the sealed bequest is not one frame".into()),
+            Ok(_) => Err(Error::new("seed: the sealed bequest is not one frame")),
         }
     }
 }
@@ -140,8 +142,8 @@ impl Datum for Sealed {
 }
 
 /// How a decode failure is worded, naming the part of the seed it was in.
-fn failed(part: &'static str) -> impl FnOnce(Error) -> String {
-    move |e| format!("seed: the seed's {part} failed to decode: {}", e.describe())
+fn failed(part: &'static str) -> impl FnOnce(Error) -> Error {
+    move |e| e.with_context(format!("seed: the seed's {part} failed to decode"))
 }
 
 impl EngineSeed {
@@ -178,8 +180,8 @@ impl EngineSeed {
     /// Decode against `runtime`, whose builtin table re-links natives by name.
     ///
     /// # Errors
-    /// Returns a sentence naming the part of the seed that failed to decode.
-    pub(crate) fn decode(self, runtime: &Runtime) -> Result<Bequest, String> {
+    /// The decode failure, under the part of the seed it was in.
+    pub(crate) fn decode(self, runtime: &Runtime) -> Result<Bequest, Error> {
         let dec =
             WireDecoder::for_runtime(runtime, &self.scope_table).map_err(failed("scope table"))?;
         let mut context = self
@@ -258,7 +260,7 @@ mod tests {
     fn no_base(
         _: &str,
         _: &crate::authority::grant::freeze::FreezeCtx,
-    ) -> Result<crate::authority::policy::GrantLayer, String> {
+    ) -> Result<crate::authority::policy::GrantLayer, Error> {
         panic!("only a Base grant consults the narrower")
     }
 
@@ -659,6 +661,6 @@ mod tests {
         let err = Sealed(Bytes::from(&b"not a frame"[..]))
             .unseal()
             .expect_err("garbage");
-        assert!(err.contains("sealed bequest"), "{err}");
+        assert!(err.describe().contains("sealed bequest"), "{err}");
     }
 }

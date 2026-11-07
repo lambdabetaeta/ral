@@ -10,10 +10,11 @@
 //! untouched.  Unloading is the exact inverse.
 
 use ral_core::data::datum::Datum as _;
+use ral_core::error::Error;
 use ral_core::path::{Judged, Located, Reading};
 use ral_core::shell::runtime::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, FrameHandle, HookName, HookSig, Map,
-    Mooring, PluginEntry, Settled,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, FrameHandle, HookName, HookSig, Map, Mooring,
+    PluginEntry, Settled,
 };
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::typecheck::builtins::scheme;
@@ -21,7 +22,6 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
 use super::super::enquiry::{Enquiry, PluginNote};
-use super::load_err;
 use super::manifest::{self, HookEvent, ManifestHandlers};
 
 fn load_plugin_builtin(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
@@ -65,11 +65,12 @@ pub(crate) static BUILTINS: &[BuiltinEntry] = &BUILTINS_ARR;
 /// The plugin's source, read through the judged handle, which ends here:
 /// nothing of the load after the read holds the file or its directory.
 fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String)> {
-    let file = SourceFile::new(located.real().as_path().to_path_buf()).map_err(load_err)?;
+    let file = SourceFile::new(located.real().as_path().to_path_buf())
+        .map_err(|e| Error::new(e.to_string()))?;
     let read = located.read().and_then(std::io::read_to_string);
     drop(located);
     let source =
-        read.map_err(|e| load_err(format!("{}: {e}", ral_core::path::shown(file.path()))))?;
+        read.map_err(|e| Error::new(format!("{}: {e}", ral_core::path::shown(file.path()))))?;
     Ok((file, ral_core::source::normalize_source_text(source)))
 }
 
@@ -106,8 +107,11 @@ pub(crate) fn load_plugin(
         name: manifest.name.clone(),
         aliases: Vec::new(),
     };
-    if shell.plugin_loaded(&entry.name).map_err(load_err)? {
-        return Err(load_err("already loaded").into());
+    if shell
+        .plugin_loaded(&entry.name)
+        .map_err(|e| Error::new(e.to_string()))?
+    {
+        return Err(Error::new("already loaded").into());
     }
     check_no_binding_conflicts(&handlers.aliases, shell)?;
 
@@ -131,7 +135,9 @@ pub(crate) fn load_plugin(
         }
         return Err(e);
     }
-    Ok(shell.commit_plugin(entry).map_err(load_err)?)
+    Ok(shell
+        .commit_plugin(entry)
+        .map_err(|e| Error::new(e.to_string()))?)
 }
 
 /// Register a plugin's hook-event and keybinding handlers in the session
@@ -162,7 +168,7 @@ fn register_plugin_hooks(
                 HookSig::Hook { kind: kind.into() },
                 policy,
             )
-            .map_err(|e| load_err(format!("hook '{name}': {e}")))?;
+            .map_err(|e| Error::new(format!("hook '{name}': {e}")))?;
     }
     for (idx, (key, handler)) in handlers.keybindings.iter().enumerate() {
         shell
@@ -174,7 +180,7 @@ fn register_plugin_hooks(
                 },
                 DefaultPolicy::leased(),
             )
-            .map_err(|e| load_err(format!("keybinding '{key}': {e}")))?;
+            .map_err(|e| Error::new(format!("keybinding '{key}': {e}")))?;
     }
     Ok(())
 }
@@ -183,8 +189,11 @@ fn register_plugin_hooks(
 /// it go: drops every hook and keybinding handler it registered and removes
 /// its aliases.
 pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
-    if !shell.plugin_loaded(name).map_err(load_err)? {
-        return Err(load_err("not loaded").into());
+    if !shell
+        .plugin_loaded(name)
+        .map_err(|e| Error::new(e.to_string()))?
+    {
+        return Err(Error::new("not loaded").into());
     }
     shell.enquire(
         mooring,
@@ -203,7 +212,7 @@ pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) ->
 /// name is not a conflict — the alias installs, live only under `^name`.
 fn check_no_binding_conflicts(bindings: &[(String, Value)], shell: &Shell) -> Result<(), Error> {
     match bindings.iter().find(|(name, _)| shell.has_alias(name)) {
-        Some((name, _)) => Err(load_err(format!(
+        Some((name, _)) => Err(Error::new(format!(
             "alias '{name}' conflicts with an existing alias"
         ))),
         None => Ok(()),
@@ -221,7 +230,7 @@ fn install_bindings(
                 .install_alias(name.clone(), value.clone())
                 .map_err(|e| match e {
                     Break::Error(err) => err.with_context(format!("alias '{name}'")),
-                    Break::Escape(_) => load_err(format!("alias '{name}' installation escaped")),
+                    Break::Escape(_) => Error::new(format!("alias '{name}' installation escaped")),
                 })?,
         );
     }
@@ -239,10 +248,11 @@ fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) 
             mooring,
             shell,
         ),
-        _ if !options.is_empty() => Err(Break::Error(load_err(
+        _ if !options.is_empty() => Err(Error::new(
             "it takes no configuration; \
              its entry in the rc's plugins map wants the empty options map `[:]`",
-        ))),
+        )
+        .into()),
         val => Ok(val),
     }
 }
@@ -251,7 +261,7 @@ fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) 
 /// one, which only a return of unknown type can slip past the checker with.
 fn check_is_manifest(val: &Value) -> Result<(), Error> {
     match val {
-        Value::Thunk(_) => Err(load_err(
+        Value::Thunk(_) => Err(Error::new(
             "it returned a Block as its manifest; \
              expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])",
         )),
@@ -289,7 +299,7 @@ fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located
         .collect();
     shell
         .locate_first(candidates)?
-        .ok_or_else(|| load_err("not found; is it in <config>/ral/plugins or RAL_PATH?").into())
+        .ok_or_else(|| Error::new("not found; is it in <config>/ral/plugins or RAL_PATH?").into())
 }
 
 #[cfg(test)]

@@ -18,11 +18,12 @@ pub(crate) mod source;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::errln;
+use ral_core::error::Error;
 use ral_core::own::{OwnDir, UserFile};
 use ral_core::path::{XdgKind, shown};
 use ral_core::record;
 use ral_core::shell::runtime::{
-    Break, DefaultPolicy, Error, HandlerEntry, Hook, HookName, HookSig, Map, Mooring, Settled,
+    Break, DefaultPolicy, HandlerEntry, Hook, HookName, HookSig, Map, Mooring, Settled,
 };
 use ral_core::ty::{Ty, Typed};
 use ral_core::typecheck::Form;
@@ -258,7 +259,7 @@ impl RcPlan {
     pub(crate) fn apply(self, mooring: &Mooring, shell: &mut Shell) -> Settled<RcSettings> {
         shell
             .set_hooks(self.hooks)
-            .map_err(|e| Break::Error(Error::new(e.to_string())))?;
+            .map_err(|e| Error::new(e.to_string()))?;
         #[cfg(unix)]
         if let Some(mask) = self.umask {
             rustix::process::umask(mask);
@@ -287,11 +288,12 @@ impl RcPlan {
         for (name, options) in &self.plugins {
             let loaded = match options.into_owned() {
                 Value::Map(o) => super::plugin::load::load_plugin(name, &o, mooring, shell),
-                other => Err(Break::Error(Error::new(format!(
+                other => Err(Error::new(format!(
                     "the value under a plugin name is its options map; got {}. \
                      Write `{name}: [:]` if it takes no options.",
                     other.type_name()
-                )))),
+                ))
+                .into()),
             };
             match loaded {
                 Err(Break::Error(e)) => {

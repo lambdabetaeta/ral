@@ -40,7 +40,10 @@ and a binding is only the carriage around it.
   the wire encodes. Construction is attach: `IdentityTransport::boot`
   returns the verdict the wire's `await_attached` does — `Severed::Refused`,
   in the refusing step's own words — so a transport in hand is one its
-  engine accepted.
+  engine accepted. Every step of the attach (the runtime, the root recipe,
+  the seal, `Shell::child_of` and the host's `GrantNarrower`) refuses with an
+  `Error`, which crosses as a `WireError`, so a refusal's hints reach the
+  host on either carrier.
 - **No front-end holds a `Shell`.** Nothing public on `IdentityTransport`
   yields a `Shell` or accepts one. A front-end reaches its engine only through
   `Transport` — dispatch, probe, control — so a facility it needs must exist

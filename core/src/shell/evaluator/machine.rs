@@ -26,7 +26,7 @@ use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
     Binding, Break, BroodGuard, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle,
     DisplacedSite, Env, Error, FrameHandle, FrameName, HandlerArity, HandlerFrame, Mooring,
-    Settled, Shell, Signature, TrailScope, Value, report_value, sig, sig_hint,
+    Settled, Shell, Signature, TrailScope, Value, report_value,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -225,7 +225,7 @@ fn bare_lambda_error() -> Error {
 fn as_value(t: Terminal) -> Result<Value, Break> {
     match t {
         Terminal::Value(v) => Ok(v),
-        Terminal::Lambda { .. } => Err(Break::Error(bare_lambda_error())),
+        Terminal::Lambda { .. } => Err(bare_lambda_error().into()),
     }
 }
 
@@ -239,9 +239,8 @@ fn capture_overflowed() -> Error {
 
 /// `V` meeting an argument: unreachable for a checked program, which applies
 /// only what it has forced; kept a clean error, not a panic.
-fn not_a_function(v: &Value) -> Break {
-    sig_hint(
-        format!("{} is not a function", v.type_name()),
+fn not_a_function(v: &Value) -> Error {
+    Error::new(format!("{} is not a function", v.type_name())).with_hint(
         "the type checker forces every function before it is applied, so this is a fault \
          in ral rather than in your program: please report the source that produced it",
     )
@@ -297,10 +296,11 @@ fn run_boundary(
     let arity = entry.decl.fixed_arity();
     if argv.len() != arity {
         let name = &entry.decl.name;
-        return Err(sig(format!(
+        return Err(Error::new(format!(
             "{name}: takes {arity} argument(s) in one call, got {}",
             argv.len()
-        )));
+        ))
+        .into());
     }
     super::call::run_native(entry, argv, site, span, mooring, shell)
 }
@@ -351,7 +351,7 @@ fn names_no_program(e: &Error) -> bool {
 fn offer_path_as_text(e: Error, head: &CommandWord, argv: &[Value]) -> Error {
     match head.name() {
         path @ (CommandName::Path(_) | CommandName::TildePath(_)) if argv.is_empty() => e
-            .append_hint(format!(
+            .with_hint(format!(
                 "to use the path as text, write `#'{}'#`",
                 path.written()
             )),
@@ -409,14 +409,15 @@ impl Machine {
     fn room(&self, n: usize, shell: &Shell) -> Settled<()> {
         let depth = self.stack.len() - self.call_site_frames;
         if depth + n > shell.session.stack_limit {
-            return Err(sig_hint(
-                format!(
-                    "recursion limit exceeded ({} frames)",
-                    shell.session.stack_limit
-                ),
+            return Err(Error::new(format!(
+                "recursion limit exceeded ({} frames)",
+                shell.session.stack_limit
+            ))
+            .with_hint(
                 "usually a runaway recursive function: \
                      raise via rc recursion-limit: or --recursion-limit",
-            ));
+            )
+            .into());
         }
         Ok(())
     }
@@ -499,10 +500,12 @@ impl Machine {
                 comp: native_code(entry, span),
                 env: Env::new(),
             }),
-            other => Err(sig_hint(
-                format!("cannot force {}: ! requires a Block", other.type_name()),
-                "wrap in a block: !{ expr }",
-            )),
+            other => Err(Error::new(format!(
+                "cannot force {}: ! requires a Block",
+                other.type_name()
+            ))
+            .with_hint("wrap in a block: !{ expr }")
+            .into()),
         }
     }
 
@@ -658,11 +661,12 @@ impl Machine {
                     Self::force_val(&if b { then } else { else_ }.item, env, comp.span, shell)?
                 }
                 other => {
-                    return Err(sig(format!(
+                    return Err(Error::new(format!(
                         "if: expected Bool, got {} '{}'",
                         other.type_name(),
                         other
-                    )));
+                    ))
+                    .into());
                 }
             },
 
@@ -831,11 +835,12 @@ impl Machine {
         let (label, payload) = match form(&scrutinee.item, &env, &shell.sig)? {
             Value::Variant { label, payload } => (label, payload),
             other => {
-                return Err(sig(format!(
+                return Err(Error::new(format!(
                     "case: scrutinee must be a variant, got {} {}",
                     other.type_name(),
                     other
-                )));
+                ))
+                .into());
             }
         };
         let Some(arm) = arms.iter().find(|arm| arm.tag.item == *label) else {
@@ -843,10 +848,11 @@ impl Machine {
                 .iter()
                 .map(|a| format!("{}{}", crate::ty::TAG_PREFIX, a.tag.item))
                 .collect();
-            return Err(sig(format!(
+            return Err(Error::new(format!(
                 "case: no arm for variant `{label}`; this case matches: {}",
                 handled.join(", ")
-            )));
+            ))
+            .into());
         };
         let payload = payload.map_or(Value::Unit, |p| *p);
         self.push_args(vec![payload], span, shell)?;
@@ -979,7 +985,9 @@ impl Machine {
                         env,
                     })
                 }
-                Terminal::Value(v) => Err(not_a_function(&v).locate("apply", span, shell)),
+                Terminal::Value(v) => {
+                    Err(Break::from(not_a_function(&v)).locate("apply", span, shell))
+                }
             },
 
             Frame::Capture { prev, buf, span } => {
@@ -1057,14 +1065,14 @@ impl Machine {
                 };
                 Err(match s {
                     Break::Error(e) if !matches!(pattern.as_ref(), Pattern::Name(name) if is_synthetic(name)) => {
-                        Break::Error(e.abandoning_tail())
+                        e.abandoning_tail().into()
                     }
                     s => s,
                 })
             }
 
             Frame::Seq { .. } => Err(match s {
-                Break::Error(e) => Break::Error(e.abandoning_tail()),
+                Break::Error(e) => e.abandoning_tail().into(),
                 s @ Break::Escape(_) => s,
             }),
 
@@ -1073,7 +1081,7 @@ impl Machine {
                 let total = buf.take().total;
                 Err(match s {
                     Break::Error(e) if total > 0 => {
-                        Break::Error(e.discarded(u32::try_from(total).unwrap_or(u32::MAX)))
+                        e.discarded(u32::try_from(total).unwrap_or(u32::MAX)).into()
                     }
                     s => s,
                 })
@@ -1177,7 +1185,7 @@ impl Frame {
 fn end_of_run(focus: Focus) -> Settled<Value> {
     match focus {
         Focus::Return(Terminal::Value(v)) => Ok(v),
-        Focus::Return(Terminal::Lambda { .. }) => Err(Break::Error(bare_lambda_error())),
+        Focus::Return(Terminal::Lambda { .. }) => Err(bare_lambda_error().into()),
         Focus::Halt(s) => Err(s),
         Focus::Eval { .. } => {
             unreachable!(
@@ -1196,11 +1204,14 @@ fn run(
     shell: &mut Shell,
 ) -> Settled<Value> {
     if shell.local.machine_depth >= NESTED_MACHINE_LIMIT {
-        return Err(sig_hint(
-            format!("native re-entry depth exceeded ({NESTED_MACHINE_LIMIT})"),
+        return Err(Error::new(format!(
+            "native re-entry depth exceeded ({NESTED_MACHINE_LIMIT})"
+        ))
+        .with_hint(
             "a builtin such as `map` applied a function that itself applied `map`, too deep: \
                  restructure with a tail-recursive loop",
-        ));
+        )
+        .into());
     }
     shell.local.machine_depth += 1;
     let mut m = Machine::default();
@@ -1450,7 +1461,7 @@ mod tests {
         let Err(Break::Error(e)) = result else {
             panic!("expected the inner failure, got {result:?}")
         };
-        assert_eq!(e.unwound.discarded, 7, "ab\\n plus cde\\n");
+        assert_eq!(e.unwound().discarded, 7, "ab\\n plus cde\\n");
         assert_eq!(e.hints(), []);
         let rendered = e.render(shell.sources(), None, shell.exit_hints());
         assert_eq!(rendered.matches("were discarded").count(), 1, "{rendered}");
@@ -1470,8 +1481,8 @@ mod tests {
         let Err(Break::Error(e)) = result else {
             panic!("expected failure")
         };
-        assert_eq!(e.unwound.discarded, 3);
-        assert!(e.unwound.abandoned_tail);
+        assert_eq!(e.unwound().discarded, 3);
+        assert!(e.unwound().abandoned_tail);
         assert_eq!(e.hints(), []);
         let rendered = e.render(shell.sources(), None, shell.exit_hints());
         let discard = rendered

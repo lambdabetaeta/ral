@@ -17,7 +17,7 @@ static INSTALLERS: [EngineInstaller; 1] = [EngineInstaller {
     runtime: |spec| {
         BOOTS.set(BOOTS.get() + 1);
         if REFUSE_BOOT.replace(false) {
-            return Err("test boot refusal".into());
+            return Err(ral_core::error::Error::new("test boot refusal"));
         }
         let mut runtime = crate::boot::engine_runtime(spec)?;
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);

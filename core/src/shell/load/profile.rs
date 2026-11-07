@@ -11,13 +11,11 @@ use std::path::Path;
 
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::{Fragment, GrantLayer};
-use crate::path::{Located, Reading};
+use crate::error::io_message;
+use crate::path::Reading;
 use crate::shell::grant::decode_capability_map;
-use crate::shell::runtime::{Break, Mooring, Settled, Shell, sig};
+use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell};
 use crate::source::{SourceFile, SourceOrigin};
-
-/// How a profile file that is not there is said to be, ahead of its name.
-pub const NOT_FOUND: &str = "path does not exist";
 
 /// Evaluate `source` and decode its terminal value into a resolved
 /// [`GrantLayer`], walking places against `ctx`.
@@ -39,7 +37,7 @@ pub fn load_capabilities_from_str(
     // row is held to the same table the form is.
     let contract = crate::typecheck::contract::declared(crate::typecheck::Form::Grant);
     let value = super::evaluate_source(mooring, shell, source, origin, Some(contract))
-        .map_err(|e| wrap(origin, e))?;
+        .map_err(|e| wrap(format!("capability file {origin}"), e))?;
     let prefix = format!("capability file {origin}");
     decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }
@@ -60,18 +58,12 @@ pub fn load_capabilities_from_path(
     path: &Path,
     ctx: &FreezeCtx,
 ) -> Settled<GrantLayer> {
-    let display = crate::path::shown(path);
-    let unread = |e: &std::io::Error| match e.kind() {
-        std::io::ErrorKind::NotFound => sig(format!("{NOT_FOUND}: {display}")),
-        _ => sig(format!("capability file {display}: {e}")),
-    };
     let rp = shell.anchor(path);
-    let located = (shell.locate_unworded::<Reading, Located>(&rp))
-        .map_err(|e| wrap(&display, e))?
-        .map_err(|e| unread(&e))?;
+    let located = (shell.locate::<Reading>(&rp)).map_err(|e| wrap("capability file", e))?;
     let file = SourceFile::new(located.real().as_path().to_path_buf())
-        .map_err(|e| sig(format!("capability file {e}")))?;
-    let source = (located.read().and_then(std::io::read_to_string)).map_err(|e| unread(&e))?;
+        .map_err(|e| Error::new(format!("capability file {e}")))?;
+    let source = (located.read().and_then(std::io::read_to_string))
+        .map_err(|e| Error::new(io_message(rp.shown(), &e)).with_context("capability file"))?;
     let source = crate::source::normalize_source_text(source);
     load_capabilities_from_str(mooring, shell, &source, &SourceOrigin::File(file), ctx)
 }
@@ -140,9 +132,9 @@ pub fn apply_session_profiles(
     Ok(())
 }
 
-fn wrap(origin: impl std::fmt::Display, e: Break) -> Break {
+fn wrap(context: impl std::fmt::Display, e: Break) -> Break {
     match e {
-        Break::Error(err) => Break::Error(err.with_context(format!("capability file {origin}"))),
+        Break::Error(err) => err.with_context(context).into(),
         other @ Break::Escape(_) => other,
     }
 }
@@ -256,11 +248,8 @@ mod tests {
         let Break::Error(error) = err else {
             panic!("expected a profile error, got {err:?}");
         };
-        assert_eq!(
-            error.context.as_deref(),
-            Some("capability file <test:nonmap>")
-        );
-        let rejection = error.rejection.as_ref().expect("non-map compile rejection");
+        assert_eq!(error.context(), Some("capability file <test:nonmap>"));
+        let rejection = error.rejection().expect("non-map compile rejection");
         assert_eq!(
             rejection.source.origin(),
             &SourceOrigin::named("<test:nonmap>")
@@ -361,7 +350,7 @@ mod tests {
                 assert!(message.contains("denied by grant"), "{name}: {message}");
             }
             let message = load(shell, "gone/p.ral");
-            assert!(message.starts_with(NOT_FOUND), "{message}");
+            assert!(message.ends_with("no such file or directory"), "{message}");
         });
     }
 
