@@ -148,31 +148,33 @@ impl Read for SourceReader {
 
 /// A scope carrying a cause reads as EOF, never as data.  The scope is read
 /// first, so a stream that is always ready still polls once per read.
-#[cfg(unix)]
 fn read_interruptible(fd: &mut Fd, scope: &Scope, buf: &mut [u8]) -> io::Result<usize> {
-    use super::poll_slice;
-    use rustix::event::PollFlags;
     loop {
         if scope.is_cancelled() {
             return Ok(0);
         }
-        if poll_slice(&*fd, PollFlags::IN)?.is_some() {
-            return fd.read(buf);
+        if let Some(n) = try_read(fd, buf)? {
+            return Ok(n);
         }
     }
 }
 
+/// Read once the fd is ready within a slice; `None` if the slice ends first.
+#[cfg(unix)]
+fn try_read(fd: &mut Fd, buf: &mut [u8]) -> io::Result<Option<usize>> {
+    use rustix::event::PollFlags;
+    match super::poll_slice(&*fd, PollFlags::IN)? {
+        Some(_) => fd.read(buf).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Read; `None` if an `interrupt` aborted the `ReadFile`, which took nothing.
 #[cfg(windows)]
-fn read_interruptible(fd: &mut Fd, scope: &Scope, buf: &mut [u8]) -> io::Result<usize> {
-    loop {
-        if scope.is_cancelled() {
-            return Ok(0);
-        }
-        // An `interrupt` aborts the `ReadFile` in flight; the scope is then re-read.
-        match fd.read(buf) {
-            Err(e) if super::aborted(&e) => {}
-            r => return r,
-        }
+fn try_read(fd: &mut Fd, buf: &mut [u8]) -> io::Result<Option<usize>> {
+    match fd.read(buf) {
+        Err(e) if super::aborted(&e) => Ok(None),
+        r => r.map(Some),
     }
 }
 

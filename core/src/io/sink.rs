@@ -171,14 +171,11 @@ fn reader_gone(stage: &ScopeId) -> WriteFault {
     })
 }
 
-/// Write `bytes` in `PIPE_BUF` chunks.  Before each chunk the writer's scope
-/// is read, so an always-ready pipe still polls once per chunk; a chunk that
-/// would block is waited for a slice at a time.  A chunk that lands on a dead
-/// edge is the stage's reader-gone stop, judged after landing, not refused
-/// before, so the sentinel hears the write; a chunk that cannot land on one
-/// (the pipe full, nobody draining) is the reader-gone stop too, judged at the
-/// slice.
-#[cfg(unix)]
+/// Write `bytes` a chunk at a time.  Before each chunk the writer's scope is
+/// read, so an always-ready pipe still polls once per chunk.  After each try,
+/// landed or not, a dead edge is the stage's reader-gone stop: judged after
+/// landing, not refused before, so the sentinel hears the write; and a chunk
+/// that cannot land on one (the pipe full, nobody draining) is the stop too.
 fn write_sliced(
     w: &os_pipe::PipeWriter,
     edge: &Edge,
@@ -186,21 +183,11 @@ fn write_sliced(
     scope: &Scope,
     mut bytes: &[u8],
 ) -> Result<(), WriteFault> {
-    use super::poll_slice;
-    use rustix::event::PollFlags;
     while !bytes.is_empty() {
         scope.poll()?;
-        let Some(revents) = poll_slice(w, PollFlags::OUT)? else {
-            if edge.is_dead() {
-                return Err(reader_gone(stage));
-            }
-            continue;
-        };
-        if revents.intersects(PollFlags::ERR | PollFlags::HUP) {
-            return Err(WriteFault::BrokenPipe);
+        if let Some(n) = try_chunk(w, bytes)? {
+            bytes = &bytes[n..];
         }
-        let n = (&*w).write(&bytes[..bytes.len().min(libc::PIPE_BUF)])?;
-        bytes = &bytes[n..];
         if edge.is_dead() {
             return Err(reader_gone(stage));
         }
@@ -208,34 +195,35 @@ fn write_sliced(
     Ok(())
 }
 
+/// Write one `PIPE_BUF` chunk if the pipe takes it within a slice; `None` if
+/// the slice ends first.  A hung-up reader is a broken pipe.
+#[cfg(unix)]
+fn try_chunk(w: &os_pipe::PipeWriter, bytes: &[u8]) -> io::Result<Option<usize>> {
+    use rustix::event::PollFlags;
+    let Some(revents) = super::poll_slice(w, PollFlags::OUT)? else {
+        return Ok(None);
+    };
+    if revents.intersects(PollFlags::ERR | PollFlags::HUP) {
+        return Err(io::ErrorKind::BrokenPipe.into());
+    }
+    (&*w)
+        .write(&bytes[..bytes.len().min(libc::PIPE_BUF)])
+        .map(Some)
+}
+
 /// `CreatePipe`'s default buffer: a chunk fits a drained pipe whole, so the
 /// sentinel's one read lands it.
 #[cfg(windows)]
 const PIPE_CHUNK: usize = 4096;
 
-/// The same loop, a chunk per `write`; a blocked chunk is aborted by an
-/// `interrupt`, which re-reads the scope and the edge.  A cause in force
-/// stops; none (shielded) retries the chunk.
+/// Write one chunk; `None` if an `interrupt` aborted it, so the loop re-reads
+/// the scope and the edge, and under a shield retries it.
 #[cfg(windows)]
-fn write_sliced(
-    w: &os_pipe::PipeWriter,
-    edge: &Edge,
-    stage: &ScopeId,
-    scope: &Scope,
-    mut bytes: &[u8],
-) -> Result<(), WriteFault> {
-    while !bytes.is_empty() {
-        scope.poll()?;
-        match (&*w).write(&bytes[..bytes.len().min(PIPE_CHUNK)]) {
-            Ok(n) => bytes = &bytes[n..],
-            Err(e) if super::aborted(&e) => {}
-            Err(e) => return Err(e.into()),
-        }
-        if edge.is_dead() {
-            return Err(reader_gone(stage));
-        }
+fn try_chunk(w: &os_pipe::PipeWriter, bytes: &[u8]) -> io::Result<Option<usize>> {
+    match (&*w).write(&bytes[..bytes.len().min(PIPE_CHUNK)]) {
+        Err(e) if super::aborted(&e) => Ok(None),
+        r => r.map(Some),
     }
-    Ok(())
 }
 
 impl Sink {
