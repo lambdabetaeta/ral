@@ -177,7 +177,7 @@ impl Excluded {
     }
 
     /// The holds, the name's first.
-    pub(in crate::path) fn holds(&self) -> impl Iterator<Item = &Hold> {
+    pub(crate) fn holds(&self) -> impl Iterator<Item = &Hold> {
         std::iter::once(&self.named).chain(&self.target)
     }
 }

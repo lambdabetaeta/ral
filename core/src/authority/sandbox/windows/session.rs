@@ -36,11 +36,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::authority::policy::{FsAllow, GrantPath};
+use crate::authority::policy::FsAllow;
 use crate::authority::sandbox::Refusal;
 use crate::authority::sandbox::carve;
 use crate::authority::sandbox::{FsRules, SandboxProjection};
-use crate::path::{Excluded, Installing, Located, RealPath, shown};
+use crate::path::{Installing, Located, RealPath, Walked, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
 use crate::sync::LockExt as _;
@@ -201,7 +201,11 @@ pub(crate) fn confine(
         positions(&rules.read, &rules)?,
         positions(&rules.write, &rules)?,
     );
-    let denied: Vec<RealPath> = rules.deny.iter().map(excluded_real).collect();
+    // The followed position alone: carving never grants a link entry, and
+    // `ensure_unreachable` would refuse a link's own.
+    let denied: Vec<RealPath> = (rules.deny.iter())
+        .map(|deny| deny.real.followed().real().clone())
+        .collect();
     let readwrite: Vec<RealPath> = write.iter().map(|&p| p.clone()).collect();
     let readonly: Vec<RealPath> = (read.iter().filter(|p| !write.contains(p)))
         .map(|&p| p.clone())
@@ -414,16 +418,6 @@ fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Resu
         }
     }
     Ok(())
-}
-
-/// Where an exclusion lies: its link's target where its name is one, else
-/// the object at its name.  One position, not both as the Unix renderers
-/// render (`render_excluded`): the DACL side judged the followed path alone
-/// before, carving never grants a link entry anyway, and `ensure_unreachable`
-/// holds a position with every link refused, which the link's own would fail.
-fn excluded_real(deny: &GrantPath<Excluded>) -> RealPath {
-    let held = deny.real.target().unwrap_or_else(|| deny.real.named());
-    held.real().clone()
 }
 
 /// Recovery failures are logged; they do not prevent session startup.

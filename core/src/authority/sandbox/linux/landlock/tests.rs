@@ -364,6 +364,27 @@ fn a_listed_hard_link_to_an_excluded_file_is_not_admitted() {
     assert!(seen.contains(&(d.join("a"), false)), "{seen:?}");
 }
 
+/// A directory a file exclusion holds is kept out by the walk's `excluded`
+/// set alone: the table judges a file exclusion only against programs, so
+/// permits what lies beneath it.
+#[test]
+fn a_directory_a_file_exclusion_holds_is_never_entered() {
+    let (_tmp, d) = tree();
+    let rules = [allow(&d, true), deny(&d.join("s"), false)];
+    let beneath = real(d.join("s/f"));
+    let at = Subject::Program(crate::path::Subject::Position(&beneath));
+    assert!(
+        table_of(&rules).evidence(at).permits(),
+        "the table permits it"
+    );
+    let seen = expanded(&rules, true).expect("expands");
+    assert!(
+        !seen.iter().any(|(p, _)| p.starts_with(d.join("s"))),
+        "{seen:?}"
+    );
+    assert!(seen.contains(&(d.join("sub"), true)), "{seen:?}");
+}
+
 #[test]
 fn a_moved_exclusion_holding_directory_is_still_listed() {
     let (_tmp, d) = tree();

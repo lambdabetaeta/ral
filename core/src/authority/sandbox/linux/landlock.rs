@@ -29,7 +29,7 @@ use super::super::warrant::{Handoff, Slot};
 use super::{OpenError, Shown, leaf_fd, open_dir_nofollow, open_nofollow};
 use crate::authority::policy::{ExecDeny, ExecRules, Subject};
 use crate::authority::sandbox::{ExecProjection, RenderedFs};
-use crate::path::{Dir, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath, Trace};
+use crate::path::{Dir, Hold, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath};
 use crate::site::{Silent, site};
 use libc::{c_int, c_uint};
 use std::collections::BTreeSet;
@@ -541,7 +541,7 @@ fn expand(
         let (ExecDeny::Dir(path) | ExecDeny::File(path)) = deny else {
             continue;
         };
-        for trace in std::iter::once(path.real.named()).chain(path.real.target()) {
+        for trace in path.real.holds().map(Hold::trace) {
             let mut ids = trace.spine_ids();
             if let Some(id) = trace.leaf_id() {
                 excluded.insert(id);
@@ -580,12 +580,9 @@ fn listed(table: &ExecRules, masks: &[RealPath], d: &RealPath, walks: bool) -> b
     let masked = masks.iter().any(|m| d.contains_folded(m) && !m.contains(d));
     masked
         || table.denies().any(|scope| match scope {
-            ExecDeny::Dir(p) | ExecDeny::File(p) => {
-                let holds = std::iter::once(p.real.named()).chain(p.real.target());
-                holds
-                    .map(Trace::real)
-                    .any(|p| d.contains_folded(p) && !p.contains_folded(d))
-            }
+            ExecDeny::Dir(p) | ExecDeny::File(p) => (p.real.holds())
+                .map(|hold| hold.trace().real())
+                .any(|p| d.contains_folded(p) && !p.contains_folded(d)),
             ExecDeny::Name(_) => walks,
         })
 }
@@ -598,6 +595,9 @@ struct Walk<'w> {
     masks: &'w [RealPath],
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
     holding: BTreeSet<ObjectId>,
+    /// Each exclusion's held object.  The table refuses these by identity
+    /// too, but for a directory held by a file exclusion, which speaks only
+    /// to programs.
     excluded: BTreeSet<ObjectId>,
     /// The identity of each directory being listed, so a bind mount looping
     /// back onto one ends the descent there.
