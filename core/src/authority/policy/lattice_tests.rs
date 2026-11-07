@@ -662,13 +662,15 @@ fn decode_rejects_relative_absolute_place() {
             Value::list(vec![tagged("absolute", "proj")]),
         )]),
     )]);
-    let err = decode_capability_map(&v, "test", &test_ctx("/h"))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("proj"), "should name the entry: {err}");
+    let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
     assert!(
-        err.contains("`` `cwd proj ``"),
-        "should hint the cwd place: {err}"
+        err.describe().contains("proj"),
+        "should name the entry: {err}"
+    );
+    assert!(
+        err.hints().iter().any(|h| h.contains("`` `cwd proj ``")),
+        "should hint the cwd place: {:?}",
+        err.hints()
     );
 }
 

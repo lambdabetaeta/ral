@@ -1318,13 +1318,19 @@ mod tests {
         crate::test_helper::core_shell()
     }
 
-    /// The hint `source` fails with, when it fails.
+    /// The hints `source` fails with, when it fails.
     #[cfg(unix)]
-    fn failure_hint(source: &str, shell: &mut Shell) -> Option<String> {
+    fn failure_hints(source: &str, shell: &mut Shell) -> Vec<String> {
         match run_source(source, shell) {
-            Err(Break::Error(e)) => e.hints().first().map(ToString::to_string),
+            Err(Break::Error(e)) => e.hints().iter().map(ToString::to_string).collect(),
             other => panic!("expected an error, got {other:?}"),
         }
+    }
+
+    /// The first hint `source` fails with, when it fails.
+    #[cfg(unix)]
+    fn failure_hint(source: &str, shell: &mut Shell) -> Option<String> {
+        failure_hints(source, shell).into_iter().next()
     }
 
     #[cfg(unix)]
@@ -1365,12 +1371,23 @@ mod tests {
                 exec: Some(ExecGrant::default()),
                 ..Capabilities::default()
             }));
-        let hint = failure_hint(&dir, &mut shell).expect("a hint");
-        let (grant, text) = hint.rsplit_once("\n\n").expect("both hints are kept");
-        assert!(text.contains(&format!("{AS_TEXT} `#'{dir}'#`")), "{hint}");
-        assert!(grant.contains("grant") && !grant.contains("#'"), "{hint}");
-        let hint = failure_hint(&format!("{dir} x"), &mut shell).expect("a hint");
-        assert!(!hint.contains(AS_TEXT), "{hint}");
+        let hints = failure_hints(&dir, &mut shell);
+        let [grant, text] = hints.as_slice() else {
+            panic!("expected the grant's hint then the offer: {hints:?}")
+        };
+        assert!(
+            text.contains(&format!("{AS_TEXT} `#'{dir}'#`")),
+            "{hints:?}"
+        );
+        assert!(
+            grant.contains("grant") && !grant.contains("#'"),
+            "{hints:?}"
+        );
+        let hints = failure_hints(&format!("{dir} x"), &mut shell);
+        assert!(
+            !hints.is_empty() && hints.iter().all(|h| !h.contains(AS_TEXT)),
+            "{hints:?}"
+        );
     }
 
     /// `M to x. N`: a `let` in `rest` is invisible once the `To` frame pops
