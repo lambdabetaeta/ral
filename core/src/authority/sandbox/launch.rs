@@ -428,7 +428,7 @@ mod tests {
     fn confined(
         mut launch: crate::process::Launch,
     ) -> Result<std::process::Output, crate::process::Unstarted> {
-        launch.stdin(crate::process::StdioSpec::null());
+        launch.stdin(crate::process::StdioSpec::Null);
         launch.output()
     }
 

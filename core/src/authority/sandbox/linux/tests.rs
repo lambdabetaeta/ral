@@ -160,9 +160,9 @@ fn start_granted<R>(
         let mut prepared = prepare(head, &args, Ownership::Kept, shell).expect("the launch builds");
         prepared
             .launch
-            .stdin(StdioSpec::null())
-            .stdout(StdioSpec::null())
-            .stderr(StdioSpec::null());
+            .stdin(StdioSpec::Null)
+            .stdout(StdioSpec::Null)
+            .stderr(StdioSpec::Null);
         let started = start(prepared, PgidPolicy::NewLeader)
             .unwrap_or_else(|broke| panic!("the confined sh must start: {broke:?}"));
         then(started, shell)
@@ -237,7 +237,7 @@ fn run_after(
     )
     .expect("the launch builds");
     between();
-    launch.stdin(crate::process::StdioSpec::null());
+    launch.stdin(crate::process::StdioSpec::Null);
     launch.output()
 }
 

@@ -142,79 +142,28 @@ pub(crate) enum StdioSpec {
     Inherit,
     Null,
     Piped,
-    #[cfg(not(windows))]
-    Stdio(std::process::Stdio),
-    #[cfg(windows)]
-    Handle(std::os::windows::io::OwnedHandle),
+    Owned(OwnedStdio),
 }
 
+#[cfg(not(windows))]
+type OwnedStdio = std::os::fd::OwnedFd;
+#[cfg(windows)]
+type OwnedStdio = std::os::windows::io::OwnedHandle;
+
 impl StdioSpec {
-    pub(crate) fn inherit() -> Self {
-        Self::Inherit
-    }
-
-    pub(crate) fn null() -> Self {
-        Self::Null
-    }
-
-    pub(crate) fn piped() -> Self {
-        Self::Piped
-    }
-
     #[cfg(not(windows))]
     fn into_stdio(self) -> std::process::Stdio {
         match self {
             Self::Inherit => std::process::Stdio::inherit(),
             Self::Null => std::process::Stdio::null(),
             Self::Piped => std::process::Stdio::piped(),
-            Self::Stdio(stdio) => stdio,
+            Self::Owned(fd) => fd.into(),
         }
     }
 
-    #[cfg(not(windows))]
-    pub(crate) fn from_stdio(stdio: std::process::Stdio) -> Self {
-        Self::Stdio(stdio)
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn from_owned_handle(handle: std::os::windows::io::OwnedHandle) -> Self {
-        Self::Handle(handle)
-    }
-
-    pub(crate) fn from_pipe_reader(reader: os_pipe::PipeReader) -> Self {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::OwnedHandle;
-            Self::from_owned_handle(OwnedHandle::from(reader))
-        }
-        #[cfg(not(windows))]
-        {
-            Self::from_stdio(std::process::Stdio::from(reader))
-        }
-    }
-
-    pub(crate) fn from_pipe_writer(writer: os_pipe::PipeWriter) -> Self {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::OwnedHandle;
-            Self::from_owned_handle(OwnedHandle::from(writer))
-        }
-        #[cfg(not(windows))]
-        {
-            Self::from_stdio(std::process::Stdio::from(writer))
-        }
-    }
-
-    pub(crate) fn from_file(file: std::fs::File) -> Self {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::OwnedHandle;
-            Self::from_owned_handle(OwnedHandle::from(file))
-        }
-        #[cfg(not(windows))]
-        {
-            Self::from_stdio(std::process::Stdio::from(file))
-        }
+    /// The child's fd becomes this one; a pipe end or file converts as is.
+    pub(crate) fn from_owned(owned: impl Into<OwnedStdio>) -> Self {
+        Self::Owned(owned.into())
     }
 }
 
@@ -435,7 +384,7 @@ impl Launch {
     pub(crate) fn output(mut self) -> Result<std::process::Output, Unstarted> {
         use std::io::Read;
         use std::os::unix::process::ExitStatusExt;
-        self.stdout(StdioSpec::piped()).stderr(StdioSpec::piped());
+        self.stdout(StdioSpec::Piped).stderr(StdioSpec::Piped);
         let Spawned { mut child, .. } = self.spawn(crate::process::PgidPolicy::Inherit)?;
         let drain = |pipe: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
@@ -1179,7 +1128,7 @@ mod windows {
                 }
                 StdioSpec::Null => Self::null(),
                 StdioSpec::Piped => Self::piped(stream),
-                StdioSpec::Handle(handle) => {
+                StdioSpec::Owned(handle) => {
                     let raw = handle.as_raw_handle() as HANDLE;
                     Ok(Self {
                         child: raw,

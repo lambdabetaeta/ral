@@ -286,9 +286,9 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         let mut launch = Launch::new(cmd);
         launch.args(["/d", "/s", "/c", &format!("echo ok>{rel}")]);
         launch.current_dir(&granted);
-        launch.stdin(StdioSpec::null());
-        launch.stdout(StdioSpec::null());
-        launch.stderr(StdioSpec::null());
+        launch.stdin(StdioSpec::Null);
+        launch.stdout(StdioSpec::Null);
+        launch.stderr(StdioSpec::Null);
         super::confine(
             &mut launch,
             &projection,
@@ -442,7 +442,7 @@ fn confined(
     let mut launch = Launch::new(cmd());
     launch.args(["/d", "/s", "/c", line]);
     launch.current_dir(cwd);
-    launch.stdin(StdioSpec::null());
+    launch.stdin(StdioSpec::Null);
     launch.stdout(StdioSpec::Piped);
     launch.stderr(StdioSpec::Piped);
     super::confine(
@@ -687,8 +687,8 @@ fn an_image_is_granted_to_its_own_launch_alone() {
             ]);
             launch.env("RAL_TEST_IMAGE_READ", tree.at(r"B\key.txt"));
             launch.current_dir(&a);
-            launch.stdin(StdioSpec::null());
-            launch.stdout(StdioSpec::null());
+            launch.stdin(StdioSpec::Null);
+            launch.stdout(StdioSpec::Null);
             launch.stderr(StdioSpec::Piped);
             super::confine(
                 &mut launch,

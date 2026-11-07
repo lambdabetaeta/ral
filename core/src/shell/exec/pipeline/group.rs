@@ -160,17 +160,17 @@ impl AnchorProcess {
             crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
         let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::PipelineAnchor)
             .map_err(|e| Error::io("pipeline anchor", &e))?;
-        cmd.stdin(crate::process::StdioSpec::from_pipe_reader(reader));
-        cmd.stderr(crate::process::StdioSpec::null());
+        cmd.stdin(crate::process::StdioSpec::from_owned(reader));
+        cmd.stderr(crate::process::StdioSpec::Null);
         #[cfg(unix)]
         let mut report = {
             let (report, writer) =
                 crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
-            cmd.stdout(crate::process::StdioSpec::from_pipe_writer(writer));
+            cmd.stdout(crate::process::StdioSpec::from_owned(writer));
             report
         };
         #[cfg(windows)]
-        cmd.stdout(crate::process::StdioSpec::null());
+        cmd.stdout(crate::process::StdioSpec::Null);
         let Spawned {
             mut child, landing, ..
         } = cmd

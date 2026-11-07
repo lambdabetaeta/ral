@@ -98,7 +98,7 @@ mod tests {
         use std::io::Read;
         let mut cmd = Launch::new("sh");
         cmd.args(["-c", "ulimit -Su; ulimit -Hu"]);
-        cmd.stdout(StdioSpec::piped());
+        cmd.stdout(StdioSpec::Piped);
         cmd.limit_resources().unwrap();
         let mut child = cmd.spawn(PgidPolicy::Inherit).unwrap().child;
         let mut out = String::new();

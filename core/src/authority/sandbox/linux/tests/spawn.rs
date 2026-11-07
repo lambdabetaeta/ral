@@ -381,8 +381,8 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
         let args = args(&late.name);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         launch
-            .stdin(crate::process::StdioSpec::from_stdio(
-                late.slave.try_clone().unwrap().into(),
+            .stdin(crate::process::StdioSpec::from_owned(
+                late.slave.try_clone().unwrap(),
             ))
             .env("RAL_TEST_PROBE", probe::request(&args));
         launch.output().unwrap().into()
@@ -619,7 +619,7 @@ fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutc
         &shell.scope,
     )
     .expect("build confined launch");
-    launch.stdin(crate::process::StdioSpec::null());
+    launch.stdin(crate::process::StdioSpec::Null);
     let Spawned { child, .. } = launch
         .spawn(PgidPolicy::NewLeader)
         .expect("spawn the confined program");

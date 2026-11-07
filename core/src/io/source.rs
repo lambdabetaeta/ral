@@ -1,8 +1,13 @@
 //! Byte input for a pipeline stage — the mirror of `sink` on the output side.
 
+use std::fs::File;
 use std::io::{self, Read};
 
 use crate::process::Scope;
+#[cfg(unix)]
+use std::os::fd::OwnedFd as Owned;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle as Owned;
 
 /// Where a stage's byte input comes from.
 ///
@@ -20,13 +25,8 @@ pub enum Source {
 /// A pipe or file, and for a stage thread's stdin the scope whose cause ends
 /// a blocked read as EOF.  The scope is never handed to a child.
 pub struct SourceReader {
-    fd: Fd,
+    fd: File,
     scope: Option<Scope>,
-}
-
-enum Fd {
-    Pipe(os_pipe::PipeReader),
-    File(std::fs::File),
 }
 
 impl Source {
@@ -46,17 +46,11 @@ impl Source {
 
 impl SourceReader {
     pub(crate) fn pipe(r: os_pipe::PipeReader) -> Self {
-        Self {
-            fd: Fd::Pipe(r),
-            scope: None,
-        }
+        Self::file(File::from(Owned::from(r)))
     }
 
-    pub(crate) fn file(f: std::fs::File) -> Self {
-        Self {
-            fd: Fd::File(f),
-            scope: None,
-        }
+    pub(crate) fn file(fd: File) -> Self {
+        Self { fd, scope: None }
     }
 
     /// This reader as one that ends as EOF once `scope` carries a cause; a
@@ -72,45 +66,16 @@ impl SourceReader {
     /// # Errors
     /// Returns `Err` if duplicating the pipe or file fails.
     pub(crate) fn try_clone(&self) -> io::Result<Self> {
-        let fd = match &self.fd {
-            Fd::Pipe(r) => Fd::Pipe(r.try_clone()?),
-            Fd::File(f) => Fd::File(f.try_clone()?),
-        };
         Ok(Self {
-            fd,
+            fd: self.fd.try_clone()?,
             scope: self.scope.clone(),
         })
     }
 }
 
-impl Fd {
-    fn inner(&mut self) -> &mut dyn Read {
-        match self {
-            Self::Pipe(r) => r,
-            Self::File(f) => f,
-        }
-    }
-}
-
-/// Forwards the bulk reads too: `File`'s own preallocate from its length,
-/// where the default doubles the buffer and peaks at twice the payload.
-impl Read for Fd {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner().read(buf)
-    }
-
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.inner().read_to_end(buf)
-    }
-
-    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        self.inner().read_to_string(buf)
-    }
-}
-
 /// The fd read under its scope.
 struct Scoped<'a> {
-    fd: &'a mut Fd,
+    fd: &'a mut File,
     scope: &'a Scope,
 }
 
@@ -148,7 +113,7 @@ impl Read for SourceReader {
 
 /// A scope carrying a cause reads as EOF, never as data.  The scope is read
 /// first, so a stream that is always ready still polls once per read.
-fn read_interruptible(fd: &mut Fd, scope: &Scope, buf: &mut [u8]) -> io::Result<usize> {
+fn read_interruptible(fd: &mut File, scope: &Scope, buf: &mut [u8]) -> io::Result<usize> {
     loop {
         if scope.is_cancelled() {
             return Ok(0);
@@ -161,7 +126,7 @@ fn read_interruptible(fd: &mut Fd, scope: &Scope, buf: &mut [u8]) -> io::Result<
 
 /// Read once the fd is ready within a slice; `None` if the slice ends first.
 #[cfg(unix)]
-fn try_read(fd: &mut Fd, buf: &mut [u8]) -> io::Result<Option<usize>> {
+fn try_read(fd: &mut File, buf: &mut [u8]) -> io::Result<Option<usize>> {
     use rustix::event::PollFlags;
     match super::poll_slice(&*fd, PollFlags::IN)? {
         Some(_) => fd.read(buf).map(Some),
@@ -171,7 +136,7 @@ fn try_read(fd: &mut Fd, buf: &mut [u8]) -> io::Result<Option<usize>> {
 
 /// Read; `None` if an `interrupt` aborted the `ReadFile`, which took nothing.
 #[cfg(windows)]
-fn try_read(fd: &mut Fd, buf: &mut [u8]) -> io::Result<Option<usize>> {
+fn try_read(fd: &mut File, buf: &mut [u8]) -> io::Result<Option<usize>> {
     match fd.read(buf) {
         Err(e) if super::aborted(&e) => Ok(None),
         r => r.map(Some),
@@ -180,30 +145,7 @@ fn try_read(fd: &mut Fd, buf: &mut [u8]) -> io::Result<Option<usize>> {
 
 impl From<SourceReader> for crate::process::StdioSpec {
     fn from(r: SourceReader) -> Self {
-        match r.fd {
-            Fd::Pipe(r) => Self::from_pipe_reader(r),
-            Fd::File(f) => Self::from_file(f),
-        }
-    }
-}
-
-#[cfg(unix)]
-impl std::os::fd::AsFd for Fd {
-    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        match self {
-            Self::Pipe(r) => r.as_fd(),
-            Self::File(f) => f.as_fd(),
-        }
-    }
-}
-
-#[cfg(windows)]
-impl std::os::windows::io::AsRawHandle for Fd {
-    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
-        match self {
-            Self::Pipe(r) => r.as_raw_handle(),
-            Self::File(f) => f.as_raw_handle(),
-        }
+        Self::from_owned(r.fd)
     }
 }
 

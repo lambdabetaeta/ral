@@ -113,7 +113,7 @@ fn run_trampoline(
         report,
         &crate::process::DurableRoot::default().worker(),
     );
-    launch.stdin(crate::process::StdioSpec::null());
+    launch.stdin(crate::process::StdioSpec::Null);
     launch.output()
 }
 

@@ -148,11 +148,11 @@ fn overlap(fail_creation: bool) {
         scope.spawn(move || {
             let mut launch = Launch::new(image);
             launch.args(HELD);
-            launch.stdin(StdioSpec::from_pipe_reader(raw_stdin));
-            launch.stdout(StdioSpec::from_pipe_writer(
+            launch.stdin(StdioSpec::from_owned(raw_stdin));
+            launch.stdout(StdioSpec::from_owned(
                 writer.try_clone().expect("stdout copy"),
             ));
-            launch.stderr(StdioSpec::null());
+            launch.stderr(StdioSpec::Null);
             // Retain one admitted handle after failure to observe rollback,
             // rather than letting ChildStdio's close mask a missing restoration.
             launch.admitted_handles.push(writer.as_raw_handle());
@@ -222,9 +222,9 @@ fn overlap(fail_creation: bool) {
             let mut launch = Launch::new(cmd_exe());
             launch.args(["/d", "/c", "exit /b 0"]);
             launch
-                .stdin(StdioSpec::null())
-                .stdout(StdioSpec::null())
-                .stderr(StdioSpec::null());
+                .stdin(StdioSpec::Null)
+                .stdout(StdioSpec::Null)
+                .stderr(StdioSpec::Null);
             raw_child(&mut launch)
                 .expect("subsequent raw launch")
                 .finish();
@@ -286,9 +286,9 @@ fn inheritance_lock_does_not_span_standard_or_raw_child_waits() {
             let mut launch = Launch::new(cmd_exe());
             launch.args(HELD);
             launch
-                .stdin(StdioSpec::from_pipe_reader(stdin))
-                .stdout(StdioSpec::null())
-                .stderr(StdioSpec::null());
+                .stdin(StdioSpec::from_owned(stdin))
+                .stdout(StdioSpec::Null)
+                .stderr(StdioSpec::Null);
             let _ = raw_tx.send(raw_child(&mut launch));
         });
         let mut raw = raw_rx

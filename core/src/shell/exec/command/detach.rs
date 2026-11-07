@@ -77,9 +77,9 @@ pub(crate) fn detach(
         )?;
         prepared
             .launch
-            .stdin(StdioSpec::null())
-            .stdout(StdioSpec::null())
-            .stderr(StdioSpec::null());
+            .stdin(StdioSpec::Null)
+            .stdout(StdioSpec::Null)
+            .stderr(StdioSpec::Null);
         start_detached(prepared)
     })();
     let (shown, args, result) = match launched {

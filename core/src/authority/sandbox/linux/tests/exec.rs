@@ -1264,7 +1264,7 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
             scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().worker()),
             envelope: None,
         })
-        .stdin(crate::process::StdioSpec::null());
+        .stdin(crate::process::StdioSpec::Null);
     let ran = launch.output();
     drop(withheld);
     let Err(Unstarted::Refused(why)) = ran else {

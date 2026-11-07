@@ -251,13 +251,11 @@ impl Sink {
     pub(crate) fn child_stdio(&self, fd: OutFd) -> io::Result<(StdioSpec, Option<Self>)> {
         Ok(match (self, fd) {
             (Self::Terminal, OutFd::Stdout) | (Self::Stderr, OutFd::Stderr) => {
-                (StdioSpec::inherit(), None)
+                (StdioSpec::Inherit, None)
             }
-            (Self::File(f), _) => (StdioSpec::from_file(f.try_clone()?), None),
-            (Self::Pipe { writer, .. }, _) => {
-                (StdioSpec::from_pipe_writer(writer.try_clone()?), None)
-            }
-            _ => (StdioSpec::piped(), Some(self.clone())),
+            (Self::File(f), _) => (StdioSpec::from_owned(f.try_clone()?), None),
+            (Self::Pipe { writer, .. }, _) => (StdioSpec::from_owned(writer.try_clone()?), None),
+            _ => (StdioSpec::Piped, Some(self.clone())),
         })
     }
 

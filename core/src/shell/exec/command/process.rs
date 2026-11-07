@@ -464,7 +464,7 @@ mod judged_program {
         let (tmp, mut shell) = workdir();
         point_build_at(tmp.path(), &plant(tmp.path(), "a"));
         let mut prepared = judge(&mut shell, &[]);
-        prepared.launch.stdout(crate::process::StdioSpec::null());
+        prepared.launch.stdout(crate::process::StdioSpec::Null);
         let Ok(Started {
             born: Born { mut spawned, claim },
             ..

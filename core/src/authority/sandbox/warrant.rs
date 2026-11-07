@@ -860,7 +860,7 @@ mod tests {
                 report,
                 &crate::process::DurableRoot::default().worker(),
             );
-            launch.stdin(crate::process::StdioSpec::null());
+            launch.stdin(crate::process::StdioSpec::Null);
             Ok::<_, super::super::Refusal>(launch)
         };
         let ran = |launch: crate::process::Launch| -> Output {

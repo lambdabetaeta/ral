@@ -35,8 +35,8 @@ pub(crate) enum ChildOut {
 /// duplicate of it, and `Terminal` ral's own fd 0.
 fn stdin_stdio(stdin: &Source) -> Settled<StdioSpec> {
     Ok(match stdin {
-        Source::Empty => StdioSpec::null(),
-        Source::Terminal => StdioSpec::inherit(),
+        Source::Empty => StdioSpec::Null,
+        Source::Terminal => StdioSpec::Inherit,
         Source::Reader(r) => r
             .try_clone()
             .map_err(|e| Error::io("could not duplicate stdin", &e))?
@@ -69,7 +69,7 @@ pub(crate) fn wire_stdio(
             let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe)?;
             (out, pump, stderr.same_destination(&sink).then_some(sink))
         }
-        ChildOut::Edge { writer, .. } => (StdioSpec::from_pipe_writer(writer), None, None),
+        ChildOut::Edge { writer, .. } => (StdioSpec::from_owned(writer), None, None),
     };
     command.stdout(out);
     let err_pump = if let Some(sink) = joined {
@@ -100,7 +100,7 @@ fn join_stderr(command: &mut crate::process::Launch, stdout: &Sink) -> Settled<O
             .as_handle()
             .try_clone_to_owned()
             .map_err(|e| Error::io("pipe", &e))?;
-        (StdioSpec::from_owned_handle(owned), None)
+        (StdioSpec::from_owned(owned), None)
     } else {
         stdout
             .child_stdio(OutFd::Stderr)
@@ -179,7 +179,7 @@ mod tests {
         );
 
         let stdio = stdin_stdio(&stdin).expect("stdin_stdio");
-        assert!(matches!(stdio, StdioSpec::Stdio(_)));
+        assert!(matches!(stdio, StdioSpec::Owned(_)));
 
         // The source is borrowed, never taken, so it still has a reader.
         assert!(stdin.reader().expect("reader").is_some());
