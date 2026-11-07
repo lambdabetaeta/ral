@@ -10,8 +10,8 @@
 //! Seatbelt has no per-address network rules, so `SandboxProjection::net` is
 //! one allow/deny bit over IP sockets rather than an endpoint list.
 
-use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
-use crate::authority::policy::{ExecAllow, ExecDeny};
+use super::{ExecProjection, FsProjection, RenderedLists, SandboxProjection};
+use crate::authority::policy::{ExecDeny, KernelAllow};
 use crate::path::{
     Excluded, LeafMode, LexicalPath, Object, RealPath, Rendered, render_real, rendered_ancestors,
     walk_lenient,
@@ -160,7 +160,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     };
     let rendered = policy.rendered()?;
     match &rendered.fs {
-        FsProjection::Restricted(rules) => emit_fs_restricted(&mut profile, rules),
+        FsProjection::Restricted(lists) => emit_fs_restricted(&mut profile, lists),
         FsProjection::Unrestricted => {
             // Pass fs through, so an exec-only grant can enter the sandbox
             // for exec gating without clamping the agent's cwd or HOME.
@@ -181,8 +181,8 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     let own = render_real(super::reexec::own()?.trace().real())?;
     let pinned = rendered
         .fs
-        .rules()
-        .map(|r| r.pinned_dirs.as_slice())
+        .lists()
+        .map(|l| l.pinned_dirs.as_slice())
         .unwrap_or_default();
     // Ral's own file is unwritable and its path unrenameable, whatever the
     // grant: a swap between the parent's check and the re-exec would never
@@ -214,8 +214,8 @@ fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rend
 /// twin; its surface's walk may stat directories and read links, never list
 /// those directories.  The read region carries what exec runs and what a
 /// launch needs beyond it, so exec's own clauses read nothing.
-fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
-    let objects = || rules.read.iter().chain(&rules.write);
+fn emit_fs_restricted(profile: &mut Profile, lists: &RenderedLists) {
+    let objects = || lists.read.iter().chain(&lists.write);
     let readable: Vec<&Rendered> = objects().flat_map(Object::names).collect();
     let walk: BTreeSet<&Rendered> = objects().flat_map(|o| &o.walk).collect();
     let stat: BTreeSet<Rendered> = rendered_ancestors(readable.iter().chain(&walk).copied())
@@ -233,7 +233,7 @@ fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
     for path in &readable {
         lines.push(Clause::allow("file-read*", Filter::Subpath(path)).to_string());
     }
-    for prefix in rules.write.iter().flat_map(Object::names) {
+    for prefix in lists.write.iter().flat_map(Object::names) {
         lines.push(Clause::allow("file-write*", Filter::Subpath(prefix)).to_string());
         lines.extend(socket_clauses(true, prefix));
     }
@@ -246,7 +246,7 @@ fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
     // (Seatbelt has no `file-link*`) blocks `link(2)` against the source,
     // closing the hole where a second name elsewhere would let writes bypass
     // the deny.
-    for path in &rules.deny {
+    for path in &lists.deny {
         profile.fs_denies.extend(
             ["file-read*", "file-write*", "file-link", "process-exec"]
                 .map(|op| Clause::deny(op, Filter::Subpath(path)).to_string()),
@@ -333,10 +333,9 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
         return Ok(());
     };
     let positives = rules.allows().map(|scope| match scope {
-        ExecAllow::Any => Ok(vec![ANY_EXEC.to_string()]),
-        ExecAllow::Dir(dir) => exec_clauses(true, &dir.real.position(), true),
-        ExecAllow::File { real, .. } => exec_clauses(true, real, false),
-        ExecAllow::Tool(_) => Ok(Vec::new()),
+        KernelAllow::Any => Ok(vec![ANY_EXEC.to_string()]),
+        KernelAllow::Dir(dir) => exec_clauses(true, &dir.position(), true),
+        KernelAllow::File(real) => exec_clauses(true, real, false),
     });
     let negatives = rules.denies().map(|scope| match scope {
         ExecDeny::Dir(dir) => excluded_clauses(&dir.real, true),
@@ -349,9 +348,9 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     let granted = rules
         .live()
         .filter_map(|scope| match scope {
-            ExecAllow::Dir(dir) => Some(render_real(&dir.real.position())),
-            ExecAllow::File { real, .. } => Some(render_real(real)),
-            _ => None,
+            KernelAllow::Dir(dir) => Some(render_real(&dir.position())),
+            KernelAllow::File(real) => Some(render_real(real)),
+            KernelAllow::Any => None,
         })
         .collect::<Result<Vec<_>, _>>()?
         .concat();
@@ -573,8 +572,10 @@ mod tests {
         BASE_PROFILE, Clause, Filter, GPU_CACHES, GPU_NAMES, GPU_PROFILE, NET_PROFILE, Profile,
         RESOLVER_SOCKET, build_profile, gpu_caches, withheld_services,
     };
-    use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, GrantPath, Rule};
-    use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+    use crate::authority::policy::{
+        ExecAllow, ExecDeny, ExecRules, FsAllow, FsDeny, GrantPath, Rule,
+    };
+    use crate::authority::sandbox::{ExecProjection, FsLists, FsProjection, SandboxProjection};
     use crate::path::proper_ancestors;
     use crate::path::{Excluded, FrozenPath, Trace, command_name_key, render_real};
     use crate::test_helper::trace;
@@ -626,7 +627,7 @@ mod tests {
     fn restricted(fs: FsProjection, rules: Vec<Rule>) -> SandboxProjection {
         SandboxProjection {
             fs,
-            exec: ExecProjection::Restricted(rules.into_iter().collect()),
+            exec: ExecProjection::Restricted(rules.into_iter().collect::<ExecRules>().for_kernel()),
             ..SandboxProjection::default()
         }
     }
@@ -637,28 +638,30 @@ mod tests {
         )
     }
 
-    fn frozen(paths: &[&str]) -> Vec<GrantPath<Excluded>> {
+    fn frozen(paths: &[&str]) -> Vec<FsDeny> {
         (paths.iter())
             .map(|p| {
-                GrantPath::<Excluded>::walk(FrozenPath::from_surface(p))
-                    .expect("an exclusion walks")
+                FsDeny(
+                    GrantPath::<Excluded>::walk(FrozenPath::from_surface(p))
+                        .expect("an exclusion walks"),
+                )
             })
             .collect()
     }
 
     /// A restricted fs writing under `prefixes` and nothing else.
     fn writing(prefixes: &[&str]) -> FsProjection {
-        FsProjection::Restricted(FsRules {
+        FsProjection::Restricted(FsLists {
             write: prefixes.iter().copied().map(prefix).collect(),
-            ..FsRules::default()
+            ..FsLists::default()
         })
     }
 
     /// A restricted fs reading `reads` and nothing else.
     fn reading(reads: Vec<FsAllow>) -> FsProjection {
-        FsProjection::Restricted(FsRules {
+        FsProjection::Restricted(FsLists {
             read: reads,
-            ..FsRules::default()
+            ..FsLists::default()
         })
     }
 
@@ -1105,11 +1108,11 @@ mod tests {
             .expect("ral lies below the root")
             .as_str()
             .to_string();
-        let restricted_fs = FsProjection::Restricted(FsRules {
+        let restricted_fs = FsProjection::Restricted(FsLists {
             read: vec![prefix(&dir)],
             write: vec![prefix(&dir)],
             deny: frozen(&[&format!("{dir}/x/secret")]),
-            ..FsRules::default()
+            ..FsLists::default()
         });
         for fs in [FsProjection::Unrestricted, restricted_fs] {
             let profile = build_profile(&SandboxProjection {
@@ -1223,10 +1226,10 @@ mod tests {
     #[test]
     fn mac_fs_deny_withholds_unix_sockets_after_write_allows() {
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 write: vec![prefix("/ral-test/write")],
                 deny: frozen(&["/ral-test/write/denied"]),
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             net: false,
             ..SandboxProjection::default()
@@ -1371,9 +1374,9 @@ mod tests {
             .find(|c| c.as_str().ends_with("/com.apple.metal"))
             .expect("com.apple.metal renders");
         let profile = build_profile(&SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 deny: frozen(&[metal.as_str()]),
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             ..SandboxProjection::default()
         })
@@ -1465,10 +1468,10 @@ mod tests {
         std::fs::create_dir(&work).unwrap();
         std::fs::write(&secret, "secret").unwrap();
         let policy = restricted(
-            FsProjection::Restricted(FsRules {
+            FsProjection::Restricted(FsLists {
                 write: vec![prefix(work.to_str().unwrap())],
                 deny: frozen(&[secret.to_str().unwrap()]),
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             vec![
                 dir(work.to_str().unwrap(), true),
@@ -1495,10 +1498,10 @@ mod tests {
     fn mac_profile_emits_deny_rules_for_deny_paths() {
         // /tmp firmlinks to /private/tmp, so both spellings must appear.
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 write: vec![prefix("/tmp/work")],
                 deny: frozen(&["/tmp/work/.exarch.toml"]),
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             net: true,
             gpu: true,
@@ -1525,10 +1528,10 @@ mod tests {
     #[test]
     fn mac_profile_emits_pin_rules_for_deny_ancestors() {
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 write: vec![prefix("/tmp/work")],
                 deny: frozen(&["/tmp/work/.ssh/id_rsa"]),
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             net: true,
             gpu: true,
@@ -1567,10 +1570,10 @@ mod tests {
         let write = root.to_str().expect("ascii temp path").to_string();
         let deny = format!("{write}/alias/secret");
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 write: vec![prefix(&write)],
                 deny: frozen(&[&deny]),
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             net: true,
             gpu: true,

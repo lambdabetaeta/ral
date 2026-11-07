@@ -294,15 +294,17 @@ pub(crate) fn denial_hint(
 }
 
 /// The hint for a script whose `execve` a sandbox under `projection` refused:
-/// its `interpreter`, excluded on either axis or not admitted; `None` where it
-/// is neither, or not absolute.
+/// what withholds its `interpreter`.  An exclusion on either axis first, as
+/// no allowance reopens it; then a missing exec allowance, whose remedy also
+/// reads it; then a missing read, which bwrap shows as absence.  `None` where
+/// nothing withholds it, or it is not absolute.
 #[cfg(unix)]
 pub(crate) fn interpreter_hint(
     projection: &super::SandboxProjection,
     interpreter: &std::path::Path,
 ) -> Option<String> {
     use crate::authority::policy::{Subject, Withheld};
-    use crate::path::{Depth, LeafMode, LexicalPath, walk};
+    use crate::path::{LeafMode, LexicalPath, walk};
     let interpreter = LexicalPath::absolute(interpreter)?;
     let walked = walk(&interpreter, LeafMode::Follow).ok()?;
     let trace = walked.trace();
@@ -312,36 +314,41 @@ pub(crate) fn interpreter_hint(
         super::ExecProjection::Restricted(rules) => rules.withheld(Subject::Program(at)),
         super::ExecProjection::Unrestricted => None,
     };
-    let denied = || {
-        (projection.fs.rules()?.deny.iter()).find(|p| p.real.matches(at, Depth::Within).is_some())
-    };
+    let read = projection
+        .fs
+        .lists()
+        .and_then(|lists| lists.read_withheld(at));
     let shown = quote_word(&crate::path::shown(interpreter.as_path())).into_owned();
-    let excluded = |scope: String| {
+    let excluded = |by: String| {
         format!(
-            "its interpreter {shown} is excluded by {}: {}",
-            code(&scope),
+            "its interpreter {shown} is excluded by {by}: {}",
             remedy::remove_the_exclusion()
         )
     };
-    if let Some(Withheld::Excluded { scope, .. }) = &exec {
-        return Some(excluded(scope.to_string()));
-    }
-    if let Some(denied) = denied() {
-        return Some(excluded(format!(
-            "`absolute {}",
-            quote_word(denied.written.as_str())
-        )));
-    }
-    matches!(exec, Some(Withheld::MissingAllowance)).then(|| {
-        format!(
+    match (exec, read) {
+        (Some(Withheld::Excluded { scope, .. }), _) => Some(excluded(code(&scope.to_string()))),
+        (_, Some(Withheld::Excluded { scope, .. })) => Some(excluded(format!(
+            "the fs deny {}",
+            code(&scope.to_string())
+        ))),
+        (Some(Withheld::MissingAllowance), _) => Some(format!(
             "its interpreter {shown} is not admitted by the grant: a script you can edit \
              carries no interpreter of its own, so {}. {}",
             remedy::add_to_exec(),
             written_as(&format!(
                 "grant [ exec: [allow: [`absolute {shown}]] ] {{ … }}"
             )),
-        )
-    })
+        )),
+        (None, Some(Withheld::MissingAllowance)) => Some(format!(
+            "its interpreter {shown} lies outside the grant's fs read set, and a confined \
+             command cannot start what it cannot read: {}. {}",
+            remedy::add_to_fs("it (or a parent directory)", FsList::Read),
+            written_as(&format!(
+                "grant [ fs: [read: [`absolute {shown}]] ] {{ … }}"
+            )),
+        )),
+        (None, None) => None,
+    }
 }
 
 /// Exit codes an `AppContainer` denial plausibly produces: the raw Win32
@@ -778,6 +785,84 @@ mod tests {
             "{out:?}"
         );
         assert!(!marker.exists(), "a diagnostic collector ran from PATH");
+    }
+
+    /// A projection reading `read` and excluding `deny`, under `exec`.
+    #[cfg(unix)]
+    fn confining(
+        read: &[&std::path::Path],
+        deny: &[&std::path::Path],
+        exec: super::super::ExecProjection,
+    ) -> super::super::SandboxProjection {
+        use crate::authority::policy::{FsAllow, FsDeny, GrantPath};
+        use crate::authority::sandbox::{FsLists, FsProjection, SandboxProjection};
+        use crate::path::{Excluded, FrozenPath, Trace};
+        let frozen = |p: &&std::path::Path| FrozenPath::from_surface(crate::path::utf8(p).unwrap());
+        let read = read.iter().map(frozen).map(GrantPath::<Trace>::walk);
+        let deny = deny.iter().map(frozen).map(GrantPath::<Excluded>::walk);
+        SandboxProjection {
+            fs: FsProjection::Restricted(FsLists {
+                read: read.map(|p| FsAllow::Prefix(p.unwrap())).collect(),
+                deny: deny.map(|p| FsDeny(p.unwrap())).collect(),
+                ..FsLists::default()
+            }),
+            exec,
+            ..SandboxProjection::default()
+        }
+    }
+
+    /// An interpreter outside the read set, exec unrestricted, is named with
+    /// the read that admits it: bwrap shows it as absent, Seatbelt refuses
+    /// its exec, and neither says why.
+    #[cfg(unix)]
+    #[test]
+    fn an_unread_interpreter_is_named_with_the_read_it_needs() {
+        use super::super::ExecProjection::Unrestricted;
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = crate::test_helper::Tree::lay(tmp.path(), &["/work/run", "/lib/sh"]);
+        let (work, lib, interp) = (tree.path("/work"), tree.path("/lib"), tree.path("/lib/sh"));
+        let shown = quote_word(&crate::path::shown(&interp)).into_owned();
+        let unread = confining(&[&work], &[], Unrestricted);
+        assert_eq!(
+            interpreter_hint(&unread, &interp),
+            Some(format!(
+                "its interpreter {shown} lies outside the grant's fs read set, and a confined \
+                 command cannot start what it cannot read: add it (or a parent directory) to \
+                 the grant's fs `read` list. In ral that is the `` grant [ fs: [read: [`absolute {shown}]] ] \
+                 {{ … }} `` block, or `--extend` for exarch."
+            ))
+        );
+        assert_eq!(
+            interpreter_hint(&confining(&[&work, &lib], &[], Unrestricted), &interp),
+            None
+        );
+    }
+
+    /// An exclusion on either axis is named before any missing allowance, and
+    /// a missing exec allowance before a missing read, which it would supply.
+    #[cfg(unix)]
+    #[test]
+    fn the_interpreter_hint_names_an_exclusion_then_exec_then_read() {
+        use super::super::ExecProjection::Restricted;
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = crate::test_helper::Tree::lay(tmp.path(), &["/work/run", "/lib/sh"]);
+        let (work, lib, interp) = (tree.path("/work"), tree.path("/lib"), tree.path("/lib/sh"));
+        let nothing = || Restricted(crate::authority::policy::ExecRules::default().for_kernel());
+        let unadmitted = interpreter_hint(&confining(&[&work], &[], nothing()), &interp);
+        let unadmitted = unadmitted.expect("exec withholds it");
+        assert!(
+            unadmitted.contains("is not admitted by the grant")
+                && unadmitted.contains(remedy::add_to_exec()),
+            "{unadmitted}"
+        );
+        let excluded = interpreter_hint(&confining(&[&work, &lib], &[&interp], nothing()), &interp);
+        let excluded = excluded.expect("fs excludes it");
+        let deny = code(&crate::path::shown(&interp));
+        assert!(
+            excluded.contains(&format!("is excluded by the fs deny {deny}"))
+                && excluded.ends_with(remedy::remove_the_exclusion()),
+            "{excluded}"
+        );
     }
 
     #[cfg(target_os = "macos")]

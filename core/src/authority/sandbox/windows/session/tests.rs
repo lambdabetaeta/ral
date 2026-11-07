@@ -1,5 +1,5 @@
-use super::{FsAllow, FsRules, ProjectionKey, profile_name, refuse_deny_meeting_grant};
-use crate::authority::policy::GrantPath;
+use super::{FsAllow, FsLists, ProjectionKey, profile_name, refuse_deny_meeting_grant};
+use crate::authority::policy::{FsDeny, GrantPath};
 use crate::authority::sandbox::Refusal;
 use crate::authority::sandbox::carve::carve;
 use crate::path::{Dir, Excluded, FrozenPath, RealPath, Trace};
@@ -42,15 +42,17 @@ fn prefixes(paths: &[&str]) -> Vec<FsAllow> {
         .collect()
 }
 
-fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsRules {
-    FsRules {
+fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsLists {
+    FsLists {
         read: prefixes(read),
         write: prefixes(write),
         deny: deny
             .iter()
             .map(|d| {
-                GrantPath::<Excluded>::walk(FrozenPath::from_surface(d))
-                    .expect("an exclusion walks")
+                FsDeny(
+                    GrantPath::<Excluded>::walk(FrozenPath::from_surface(d))
+                        .expect("an exclusion walks"),
+                )
             })
             .collect(),
         pinned_dirs: Vec::new(),
@@ -69,7 +71,7 @@ impl Drop for SessionGuard {
 }
 
 /// Both regions' positions, as `confine` asks them.
-fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
+fn refuse_universal_prefix(rules: &FsLists) -> Result<(), Refusal> {
     super::positions(&rules.read, rules)?;
     super::positions(&rules.write, rules)?;
     Ok(())

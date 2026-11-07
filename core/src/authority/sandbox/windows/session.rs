@@ -39,7 +39,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use crate::authority::policy::FsAllow;
 use crate::authority::sandbox::Refusal;
 use crate::authority::sandbox::carve;
-use crate::authority::sandbox::{FsRules, SandboxProjection};
+use crate::authority::sandbox::{FsLists, SandboxProjection};
 use crate::path::{Installing, Located, RealPath, Walked, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
@@ -50,7 +50,7 @@ use super::appcontainer::{
 };
 use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 
-/// One fs projection's identity, as [`FsRules`]
+/// One fs projection's identity, as [`FsLists`]
 /// carries it, which names the profile its launches run under: launches the
 /// fs grants tell apart never share a named-object namespace. It decides no
 /// capability, since a token names its own launch's grants alone, network
@@ -196,21 +196,21 @@ pub(crate) fn confine(
     // Empty when fs is `Unrestricted`: an AppContainer is deny-by-default, so
     // an unattenuated projection grants nothing but the image and rests on the
     // ambient ALL APPLICATION PACKAGES grants.
-    let rules = projection.fs.rules().cloned().unwrap_or_default();
+    let lists = projection.fs.lists().cloned().unwrap_or_default();
     let (read, write) = (
-        positions(&rules.read, &rules)?,
-        positions(&rules.write, &rules)?,
+        positions(&lists.read, &lists)?,
+        positions(&lists.write, &lists)?,
     );
     // The followed position alone: carving never grants a link entry, and
     // `ensure_unreachable` would refuse a link's own.
-    let denied: Vec<RealPath> = (rules.deny.iter())
-        .map(|deny| deny.real.followed().real().clone())
+    let denied: Vec<RealPath> = (lists.deny.iter())
+        .map(|deny| deny.grant().real.followed().real().clone())
         .collect();
     let readwrite: Vec<RealPath> = write.iter().map(|&p| p.clone()).collect();
     let readonly: Vec<RealPath> = (read.iter().filter(|p| !write.contains(p)))
         .map(|&p| p.clone())
         .collect();
-    let exclusions: Vec<_> = rules.deny.iter().map(|d| &d.real).collect();
+    let exclusions: Vec<_> = lists.deny.iter().map(|d| &d.grant().real).collect();
     let readwrite = carve::carve(&readwrite, &exclusions)?;
     let mut readonly = carve::carve(&readonly, &exclusions)?;
     readonly.whole.retain(|p| !readwrite.whole.contains(p));
@@ -259,7 +259,7 @@ pub(crate) fn confine(
         t_confine.elapsed(),
         read.len(),
         write.len(),
-        rules.deny.len(),
+        lists.deny.len(),
     );
     let SessionSandbox {
         network_caps,
@@ -331,7 +331,7 @@ pub(crate) fn confine(
     // is checked is the token the child gets.
     #[cfg(debug_assertions)]
     let t_deny = std::time::Instant::now();
-    if !rules.deny.is_empty() {
+    if !lists.deny.is_empty() {
         let capabilities = super::appcontainer::capability_entries(&filesystem, network.as_deref());
         let access = dacl::ContainerAccess::of(profile_sid.sid(), &capabilities)?;
         for denied in &denied {
@@ -341,7 +341,7 @@ pub(crate) fn confine(
     crate::dbg_trace!(
         "sandbox-win",
         "confine: {} exclusion(s) proven unreachable in {:?}",
-        rules.deny.len(),
+        lists.deny.len(),
         t_deny.elapsed(),
     );
     launch.security_capabilities(profile_sid, filesystem, network);
@@ -376,10 +376,10 @@ fn ensure_grant(
 /// path it would narrow to one drive and stamp that whole.  An exclusion of
 /// the root is already no exclusion (`deny_all`), and never reaches here.
 /// Run before anything is stamped, so the guard alone judges.
-fn positions<'a>(region: &'a [FsAllow], rules: &FsRules) -> Result<Vec<&'a RealPath>, Refusal> {
+fn positions<'a>(region: &'a [FsAllow], lists: &FsLists) -> Result<Vec<&'a RealPath>, Refusal> {
     let positions: Option<Vec<_>> = region.iter().map(FsAllow::real).collect();
     positions.ok_or_else(|| {
-        let allows = if rules.deny.is_empty() {
+        let allows = if lists.deny.is_empty() {
             "every path"
         } else {
             "every path except some exclusions"

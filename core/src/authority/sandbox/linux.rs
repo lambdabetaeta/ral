@@ -527,7 +527,7 @@ impl Shown {
     /// shows nothing new and so roots nothing.  Each deny is read once, for
     /// its mask.
     pub(crate) fn of(policy: &RenderedProjection, baseline: &Baseline) -> Result<Self, String> {
-        let FsProjection::Restricted(rules) = &policy.fs else {
+        let FsProjection::Restricted(lists) = &policy.fs else {
             let root = open_dir_nofollow(&RealPath::universal())?.ok_or("sandbox: no root")?;
             return Ok(Self {
                 binds: Vec::new(),
@@ -536,13 +536,13 @@ impl Shown {
                 denies: Vec::new(),
             });
         };
-        let tolerated = (rules.read.iter())
+        let tolerated = (lists.read.iter())
             .map(|object| &object.position)
             .filter(|position| baseline.allows().any(|f| f.real() == Some(*position)))
             .cloned()
             .collect();
-        let mut names: Vec<_> = binds(&rules.read, Access::ReadOnly)
-            .chain(binds(&rules.write, Access::Writable))
+        let mut names: Vec<_> = binds(&lists.read, Access::ReadOnly)
+            .chain(binds(&lists.write, Access::Writable))
             .collect();
         names.sort();
         names.dedup();
@@ -558,10 +558,10 @@ impl Shown {
         // Sorted, so a parent is pinned before its children, whose pins it
         // would bury.  No shown bind lies beneath one to bury: each pinned
         // directory lies within a writable bind, which covers every bind in it.
-        let spine = (rules.pinned_dirs.iter())
+        let spine = (lists.pinned_dirs.iter())
             .filter_map(|name| Bind::pin(name).transpose())
             .collect::<Result<Vec<_>, _>>()?;
-        let mut denied: Vec<_> = rules.deny.iter().collect();
+        let mut denied: Vec<_> = lists.deny.iter().collect();
         denied.sort();
         Ok(Self {
             binds: binds.into_iter().chain(spine).collect(),

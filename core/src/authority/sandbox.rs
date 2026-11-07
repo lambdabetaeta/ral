@@ -45,8 +45,8 @@ pub(crate) mod windows;
 #[cfg(any(unix, test))]
 pub(crate) use projection::ExecProjection;
 #[cfg(target_os = "macos")]
-pub(crate) use projection::RenderedRules;
-pub use projection::{FsProjection, FsRules, SandboxProjection};
+pub(crate) use projection::RenderedLists;
+pub use projection::{FsLists, FsProjection, SandboxProjection};
 #[cfg(target_os = "linux")]
 pub(crate) use projection::{RenderedFs, RenderedProjection};
 pub use reexec::pinned_arg0;

@@ -2,7 +2,7 @@
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-03
-anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
+anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -71,8 +71,7 @@ launch for a direct pipeline stage and `detach`.
   lexical fold would judge another file than `execve` reaches. Windows folds
   `..` itself, and is handed an absolute path.
 - **Arguments play no part.** An allowed target runs with any arguments, a
-  denied one with none. `Admitted` holds only the judged program and its exec
-  table; a refusal is its `ExecDenial` alone, the refused program and its
+  denied one with none. `Admitted` holds only the judged program; a refusal is its `ExecDenial` alone, the refused program and its
   handle dropped. The guard words a bundled tool's read refusal by the tool's
   name. The caller owns argv, and no refusal records it.
 - **A path key** matches the real path by equality, and a directory key by
@@ -138,21 +137,22 @@ cannot run another program.
 ## The kernel holds the same evidence
 
 **Direct admission reads the live stack on every seat.** On hosts, `build_launch`
-projects that stack beside the `Admitted`'s table; each path admits and launches
-within one machine step, and the stack changes only at `Frame::Grant` and
+projects that stack, compiling its exec table once more; each path admits and
+launches within one machine step, and the stack changes only at `Frame::Grant` and
 `Shell::with_pushed`.
 
 **`authority::guard::check_exec` judges the program before the spawn. The kernel then
 holds the same table against programs the child starts itself on macOS and
 Linux hosts, within the declared limits.**
 
-- **The host kernel projection's rules are `ExecRules::for_kernel` of the table inside the
-  `Admitted`, joined with live support.** Support is what a launch needs beyond
+- **The host kernel projection's rules are `ExecRules::for_kernel` of the
+  stack's table, joined with live support.** Support is what a launch needs beyond
   the policy: carriers
   ([[decisions/261004_exec-carriers|exec-carriers]]) and the Linux dynamic
   linker. It yields to every exclusion on either axis, grants running and
   reading and never writing, and is computed for every projected host launch.
-  Bundled-tool scopes are dropped.
+  Bundled-tool scopes are dropped: the kernel's allowance type, `KernelAllow`,
+  has none.
 - **macOS:** the Seatbelt profile renders every positive `process-exec`
   clause, then every negative one, and its fs section refuses running whatever
   it does not read. Ordering within a

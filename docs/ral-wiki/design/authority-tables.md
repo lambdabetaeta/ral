@@ -392,7 +392,7 @@ summaries. An `every` table with exclusions activates.
 | where the exclusions live | each layer's read and write tables both hold every exclusion | in the table, beside the allowances |
 | tables per stack | two, one per `FsOp`, `None` when no layer holds an fs opinion | one, `None` when no layer holds an exec opinion |
 | resolved | where the layer is decoded: allowances to a position, exclusions to the objects held; never again | the same; a bare name on the decoding environment's `PATH` |
-| extra scopes | places of exec's run allowances; the platform floor and live support, joined as positives | support files, joined by `for_kernel` |
+| extra scopes | places of exec's run allowances; the platform floor and live support, joined as positives | support files, joined by `KernelRules::with_support` |
 
 **An exclusion beats every allowance, in both.** An fs exclusion is a carve-out
 protecting *content*: credentials under a readable `` `xdg-config ``, the agent's
@@ -438,12 +438,15 @@ closed under meet; the layer is resolved where it is decoded and the meet runs
 over what it holds ([[decisions/260906_object-not-name|object-not-name]],
 fault B). The model sits
 below the sandbox ([[decisions/261006_capability-is-data|capability-is-data]]),
-so `ExecProjection::Restricted` carries the `ExecRules` itself.
+so `ExecProjection::Restricted` carries the table itself, as the kernel holds it.
 
-**What the kernel is handed.** `for_kernel(support)` drops the `Tool` scopes and
-joins the live support as `File` allowances, giving again an `ExecRules`. The
-kernel sees no tools and no argv, so the table is its poorer view of the same
-evidence. Seatbelt renders every positive clause, then every negative one; its last-match-wins puts every exclusion on top by
+**What the kernel is handed.** `ExecRules::for_kernel` drops the `Tool` scopes,
+giving a `KernelRules = Table<KernelAllow, ExecDeny>`, and `with_support` joins
+the live support as `File` allowances. The kernel sees no tools and no argv, so
+the table is its poorer view of the same evidence; `KernelAllow` (`Any`, `Dir`,
+`File`) has no tool to carry, so no backend has a tool arm, and holds what its
+`ExecAllow` holds (`the_kernel_rules_are_the_table_joined_with_its_support`).
+Seatbelt renders every positive clause, then every negative one; its last-match-wins puts every exclusion on top by
 construction, and order within a group is for stable output only. Landlock
 renders allowances only, from `live()` and `permits()`, subtracting exclusions
 along their spines before it issues rules, and `Any` lowered against the
@@ -725,7 +728,10 @@ spelling.
   the author wrote none and dropped when an exec or an fs exclusion covers them.
   An excluded carrier therefore refuses the script that starts through it, and
   the confined child's hint says which exclusion, since an allowance cannot
-  override it ([[decisions/261004_exec-carriers|exec-carriers]]).
+  override it ([[decisions/261004_exec-carriers|exec-carriers]]). An
+  interpreter that is no carrier and that the read table withholds is absent
+  to bwrap and refused by Seatbelt; the hint names the `read` entry that admits
+  it, from the read table's verdict on the launch's own projection.
 
 ### What the kernel cannot see
 
@@ -770,9 +776,13 @@ argues from.
   live positives, run places and live support among them, beside the write
   prefixes, the floor and the exclusions; a surface spelling is never a
   predicate of its own (macOS lets a lookup stat it, no more), since a name that was a symlink at decode can later
-  hold a real directory the grant never named. Exclusions render from the
-  resolved real paths their walks held, by position (the identity reading is
-  ral's own readers'). Each backend refuses a redirected allowance rather than
+  hold a real directory the grant never named. Exclusions stay the read table's
+  `FsDeny`s until rendering, so the lists judge as the read table does
+  (`FsLists::read_withheld`, which the interpreter hint asks): the live filter
+  drops only an allowance whose own subject an exclusion holds, which supports
+  nothing that exclusion does not, so no verdict or witness changes. They render
+  from the resolved real paths their walks held, by position (the identity
+  reading is ral's own readers'). Each backend refuses a redirected allowance rather than
   following it: Linux's `open_nofollow` refuses the launch, Seatbelt matches the
   resolved path against the recorded one, and Windows stamps the checked object
   through a held handle, with no redirecting reparse point on its path (a symlink,
@@ -834,8 +844,9 @@ argues from.
 - **The projection renders what the guard judged**, once at spawn, because that
   is when the profile is written.
 - **The exec table is a function of the layers**, resolved where each was
-  decoded; the projection carries the very table in the `Admitted` that judged
-  the launch (`ExecProjection::Restricted(ExecRules)`, by `ExecRules::for_kernel`),
+  decoded; the projection compiles the stack's table once, at spawn, within the
+  machine step whose `admit` judged the launch by the same stack, and hands the
+  kernel `ExecRules::for_kernel` of it (`ExecProjection::Restricted(KernelRules)`),
   so the kernel list is no third language.
 
 ### Absent denies

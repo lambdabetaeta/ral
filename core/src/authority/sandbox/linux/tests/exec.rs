@@ -1,11 +1,16 @@
 use super::*;
 
 fn file_rule(path: &RealPath, allow: bool) -> Rule {
+    let written = FrozenPath::from_surface(crate::path::utf8(path.as_path()).unwrap());
     if allow {
-        Rule::Allow(ExecAllow::support(path))
+        Rule::Allow(ExecAllow::File {
+            written,
+            real: path.clone(),
+            found_as: None,
+        })
     } else {
         Rule::Deny(Box::new(ExecDeny::File(
-            GrantPath::<Excluded>::walk(FrozenPath::of_real(path)).expect("a file walks"),
+            GrantPath::<Excluded>::walk(written).expect("a file walks"),
         )))
     }
 }
@@ -22,6 +27,11 @@ fn veto_rule(name: &str) -> Rule {
 /// multi-call image elsewhere, and the linkers a launch's support
 /// supplies: nothing else is admitted, ral's own binary included.
 fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
+    kernel(admitting_rules(dirs, paths))
+}
+
+/// The rules [`admitting`] projects.
+fn admitting_rules(dirs: &[&str], paths: &[&str]) -> Vec<Rule> {
     use crate::test_helper::real;
     let coreutils = real("/usr/bin/cat").as_path().parent().map(real);
     let dirs = ["/bin", "/usr/bin"]
@@ -34,7 +44,7 @@ fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
     let linkers = crate::authority::sandbox::carriers::linkers(|_| false)
         .into_iter()
         .map(|linker| file_rule(&linker, true));
-    ExecProjection::Restricted(dirs.chain(files).chain(linkers).collect())
+    dirs.chain(files).chain(linkers).collect()
 }
 
 /// Landlock's own precondition, alongside `envelope_launches`: without a
@@ -113,10 +123,7 @@ fn a_nested_interpreter_inherits_the_layer() {
 /// [`admitting`] less `blocks`, which Landlock renders by subtracting
 /// them from the allowed directories that hold them.
 fn admitting_less(dirs: &[&str], blocks: impl IntoIterator<Item = Rule>) -> ExecProjection {
-    let ExecProjection::Restricted(rules) = admitting(dirs, &[]) else {
-        unreachable!("admitting restricts");
-    };
-    ExecProjection::Restricted(rules.join(blocks.into_iter().collect()))
+    kernel(admitting_rules(dirs, &[]).into_iter().chain(blocks))
 }
 
 /// A command of `/usr/bin` with an inode of its own: a hard link or a
@@ -481,15 +488,11 @@ fn every_program_is_lowered_onto_each_bind_less_the_exclusions() {
     let unrelated = copy_true(&dir.join("elsewhere"), "unrelated");
     let real = |p: &std::path::Path| crate::test_helper::real(p);
     let policy = SandboxProjection {
-        exec: ExecProjection::Restricted(
-            [
-                Rule::Allow(ExecAllow::Any),
-                file_rule(&real(&excluded), false),
-                file_rule(&real(&unrelated), false),
-            ]
-            .into_iter()
-            .collect(),
-        ),
+        exec: kernel([
+            Rule::Allow(ExecAllow::Any),
+            file_rule(&real(&excluded), false),
+            file_rule(&real(&unrelated), false),
+        ]),
         ..restricted(&[&bind], &[], &[])
     };
     let Some(env) = envelope_launches(&policy) else {
@@ -681,11 +684,7 @@ fn a_confined_child_cannot_signal_a_host_process() {
          kill -TERM {pid} 2>/dev/null && echo SLEEPER-SIGNALLED\n",
         pid = sleeper.id(),
     );
-    let bare = ExecProjection::Restricted(
-        [Rule::Allow(ExecAllow::Any), veto_rule("rm")]
-            .into_iter()
-            .collect(),
-    );
+    let bare = kernel([Rule::Allow(ExecAllow::Any), veto_rule("rm")]);
     for exec in [ExecProjection::Unrestricted, admitting(&[], &[]), bare] {
         let policy = exec_policy(exec);
         let Some(env) = envelope_launches(&policy) else {
@@ -892,7 +891,7 @@ fn an_exec_excluded_carrier_is_not_read() {
     };
     let carried = |deny: &[&std::path::Path]| {
         let (policy, _) = folded(Some((&[], deny)), Some(reads()), script.as_path());
-        let rules = policy.fs.rules().expect("a restricted fs").read.clone();
+        let rules = policy.fs.lists().expect("a restricted fs").read.clone();
         rules.contains(&FsAllow::RunPlace(carrier.clone()))
     };
     assert!(carried(&[]), "support carries the interpreter: {carrier}");
@@ -960,6 +959,61 @@ fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
             "{axis}: the hint does not name the exclusion: {hint:?}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A script whose interpreter lies outside the fs reads, exec omitted, finds
+/// no interpreter in the envelope, and the hint names the read that shows it.
+#[test]
+fn a_script_whose_interpreter_is_unread_is_absent_and_the_hint_names_the_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = workdir("exec-interp-unread");
+    let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+    let (shown, hidden) = (dir.join("shown"), dir.join("hidden"));
+    for d in [&shown, &hidden] {
+        std::fs::create_dir(d).expect("make a dir");
+    }
+    let (_, interp) = scripted(&hidden);
+    let script = shown.join("run");
+    std::fs::write(
+        &script,
+        format!("#!{}\necho INTERP-RAN\n", interp.display()),
+    )
+    .expect("write the script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make the script runnable");
+    let reads = |dirs: &[&std::path::Path]| FsPolicy {
+        read_prefixes: (dirs.iter())
+            .map(|d| FrozenPath::from_surface(crate::path::utf8(d).unwrap()))
+            .collect(),
+        ..FsPolicy::default()
+    };
+    let (unread, admitted) = folded(None, Some(reads(&[&shown])), &script);
+    let Some(env) = envelope_launches(&unread) else {
+        return;
+    };
+    let ran = run_admitted(&env, &unread, &admitted, &[]);
+    assert!(
+        matches!(&ran, Err(Unstarted::Program(e)) if e.kind() == std::io::ErrorKind::NotFound),
+        "{ran:?}"
+    );
+    let hint = crate::authority::sandbox::interpreter_hint(&unread, &interp).unwrap_or_default();
+    assert!(
+        hint.contains("lies outside the grant's fs read set")
+            && hint.contains(interp.to_str().unwrap()),
+        "{hint}"
+    );
+    let (read, admitted) = folded(None, Some(reads(&[&shown, &hidden])), &script);
+    let ran = run_admitted(&env, &read, &admitted, &[]);
+    assert!(
+        ran.as_ref()
+            .is_ok_and(|out| emitted(&String::from_utf8_lossy(&out.stdout), "INTERP-RAN")),
+        "control: {ran:?}"
+    );
+    assert_eq!(
+        crate::authority::sandbox::interpreter_hint(&read, &interp),
+        None
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1233,13 +1287,8 @@ fn a_moved_exec_exclusion_is_refused_only_where_landlock_judges_it() {
     let exclusion = file_rule(&crate::test_helper::real(&evil), false);
     let trigger = file_rule(&crate::test_helper::place(bin.join("other")), false);
     let exact = file_rule(&crate::test_helper::place(&x), true);
-    let base = admitting(&[bin.to_str().unwrap()], &[]);
-    let with = |extra: Vec<Rule>| {
-        let ExecProjection::Restricted(table) = base.clone() else {
-            unreachable!()
-        };
-        ExecProjection::Restricted(table.join(extra.into_iter().collect()))
-    };
+    let base = admitting_rules(&[bin.to_str().unwrap()], &[]);
+    let with = |extra: Vec<Rule>| kernel(base.iter().cloned().chain(extra));
     let policies = [
         exec_policy(with(vec![exclusion.clone(), trigger])),
         exec_policy(admitting_less(&[], [exact, exclusion.clone()])),

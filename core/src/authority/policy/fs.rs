@@ -60,7 +60,7 @@ pub enum FsAllow {
 
 /// An exclusion of an fs table: a spelling and the objects its walk held.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct FsDeny(pub(super) GrantPath<Excluded>);
+pub struct FsDeny(pub(crate) GrantPath<Excluded>);
 
 impl std::fmt::Display for FsDeny {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

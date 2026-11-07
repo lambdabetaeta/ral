@@ -94,17 +94,20 @@ Submodules:
   Table<ExecAllow, ExecDeny>`; `rules`, the stack's table; `places`, the run
   places. Authored exec targets are resolved by `authority::grant`, not here;
   `GrantStack::admit(baseline, program)` judges the table then reading and is
-  the only mint of `Admitted` (`Program<Judged<Reading>>` and the exec table,
-  private fields); a refusal is data, `ExecDenial::{Run(Withheld<ExecDeny>),
+  the only mint of `Admitted` (`Program<Judged<Reading>>`, a private
+  field); a refusal is data, `ExecDenial::{Run(Withheld<ExecDeny>),
   Read(Withheld<FsDeny>)}`, the refused program dropped;
   `admit` reads through `read_region(baseline)` and vouches for a file through
   `ReadRegion::judge`; it carries no argv. `GrantStack::admit_name`
   judges a failed walk's `Trace` by the same exec table and `GrantStack::read`,
   without minting a handle.
-  `ExecRules::for_kernel(support)` is
-  the table less bundled-tool allowances, joined with the live support as `File`
-  allows, what the kernel is handed; `allowed_files` the live file allowances the
-  carriers are computed over. Vetoes key on `path::command_name_key`;
+  `ExecRules::for_kernel` is the table as the kernel holds it, `KernelRules =
+  Table<KernelAllow, ExecDeny>`: `KernelAllow` (`Any`, `Dir`, `File`) has no
+  tool, the kernel seeing ral's own binary for one, and holds what its
+  `ExecAllow` holds (a property test); `with_support` joins the live support as
+  `File` allows; `allowed_files` the live file allowances the carriers are
+  computed over. `ExecDeny::matches` is the one reading both tables give an
+  exclusion. Vetoes key on `path::command_name_key`;
 - `deputy.rs` — `deputy_prefixes`, the confused-deputy report: the prefixes a
   grant makes both `exec`-admitted and `fs`-writable, the live part of
   `R ∧ W`, the exec region (each exec layer's `Dir` keys with full evidence,
@@ -646,13 +649,14 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   meet-folds the stack once, at spawn, into `FsProjection` (`read:
   Vec<FsAllow>`, the live positives of the read region with run places and live
   support among them, beside the write prefixes, the system reads and the exclusions;
-  allowances keep their resolved positions up to rendering, exclusions render
-  from the resolved real paths their walks held; `FsRules`, whose `rendered()`
-  derives `pinned_dirs`; no write
-  reach classification) and `ExecProjection::Restricted(ExecRules)`,
-  `ExecRules::for_kernel` of the `Admitted`'s own table joined with the live
-  support (`sandbox::carriers`), so the profile renders the table that judged
-  the launch rather than a second compile. It takes no `Shell`;
+  allowances keep their resolved positions up to rendering, exclusions stay the
+  read table's `FsDeny`s and render from the resolved real paths their walks
+  held; `FsLists`, whose `rendered()` derives `pinned_dirs` and whose
+  `read_withheld` gives the read table's verdict; no write
+  reach classification) and `ExecProjection::Restricted(KernelRules)`, the
+  stack's table compiled once here, `for_kernel`, joined with the live
+  support (`sandbox::carriers`); `Admitted` brings only the launched file
+  whose carriers are support. It takes no `Shell`;
   `Shell::sandbox_projection` (`shell/runtime/state/checks.rs`) is the entry.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
   projection on a backend with no kernel network enforcement, so an unenforceable
@@ -943,6 +947,13 @@ kernel denial log to scrape at
 all, so its arm gates on the exit code alone: only an access-denied-shaped
 exit (`ERROR_ACCESS_DENIED` / `STATUS_ACCESS_DENIED`) under an active sandbox
 yields the fixed, pathless hint: never a fabricated path.
+
+A script refused at its start reads no log: `interpreter_hint` asks the
+launch's own projection what withholds its `#!` interpreter, the kernel exec
+table and then the read table (`FsLists::read_withheld`), and names an
+exclusion first (no allowance reopens one), then a missing exec allowance, then
+a missing read, each with the grant entry that admits it. The last is the case
+bwrap shows as an absent interpreter.
 
 `collect(Collector)` runs fixed absolute system paths: `/usr/bin/log show
 --style ndjson` on macOS; `/usr/bin/journalctl` or `/bin/journalctl` with

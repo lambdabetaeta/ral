@@ -420,7 +420,8 @@ resolution of a path that the judgment also reads.
 - **A confined script whose interpreter the launch's own projection hides is
   `permission-denied` with the interpreter hint**, whatever `errno` the kernel
   chose: Seatbelt refuses the exec (`EACCES`), bwrap hides the interpreter
-  (`ENOENT`). The hint comes from this launch's own projection, asked only once the
+  (`ENOENT`), whether an exclusion, the exec table or the read set withholds
+  it. The hint comes from this launch's own projection, asked only once the
   start has failed, about the interpreter read with the image; with no projection (the guest jail) there is no hint and a hidden
   interpreter reads as missing.
 - **A start is the program's failure only if the program's `execve` failed.**

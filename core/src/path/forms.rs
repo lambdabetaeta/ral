@@ -1,5 +1,5 @@
 //! The normal-form path types the grant pipeline trusts: [`LexicalPath`] on
-//! the access side, [`FrozenPath`] on the grant side, and [`RealPath`], the
+//! the access side, [`FrozenPath`] on the grant side, and [`RealPath`](super::RealPath), the
 //! position a walk ends at and exec authority judges.
 //!
 //! A [`FrozenPath`] is a spelling and nothing else: folded, shown, ordered.
@@ -13,7 +13,7 @@
 
 use super::lex::{is_absolute, is_working_directory, utf8};
 use super::site::Silent;
-use super::walk::{EntryName, RealPath};
+use super::walk::EntryName;
 use super::{GuestPath, PathRules};
 use crate::path::shown;
 use crate::site::site;
@@ -302,14 +302,6 @@ impl FrozenPath {
     /// spelling (Windows has no `/`).
     pub(crate) fn lexical(&self) -> LexicalPath {
         LexicalPath::from_lexed(PathBuf::from(&self.surface))
-    }
-
-    /// A position held as a spelling, shown: what a launch's own support
-    /// files are, which no author wrote.
-    pub(crate) fn of_real(real: &RealPath) -> Self {
-        Self {
-            surface: shown(real.as_path()),
-        }
     }
 
     /// The surface form, for the OS sandbox renderer and overlap keys.

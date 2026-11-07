@@ -338,10 +338,10 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    use crate::authority::policy::{ExecAllow, ExecDeny, Rule};
+    use crate::authority::policy::{ExecAllow, ExecDeny, ExecRules, Rule};
     use crate::{
-        authority::policy::{FsAllow, GrantPath},
-        authority::sandbox::{ExecProjection, FsProjection, FsRules},
+        authority::policy::{FsAllow, FsDeny, GrantPath},
+        authority::sandbox::{ExecProjection, FsLists, FsProjection},
         path::{Excluded, FrozenPath, Trace},
     };
 
@@ -351,13 +351,16 @@ mod tests {
         )
     }
 
-    fn excluding(path: &str) -> GrantPath<Excluded> {
-        GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+    fn excluding(path: &str) -> FsDeny {
+        FsDeny(
+            GrantPath::<Excluded>::walk(FrozenPath::from_surface(path))
+                .expect("an exclusion walks"),
+        )
     }
 
     fn restrictive() -> SandboxProjection {
         SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 read: vec![prefix("/tmp")],
                 write: vec![prefix("/tmp")],
                 deny: vec![excluding("/etc")],
@@ -406,7 +409,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn write_confined_to(write_dir: &str) -> SandboxProjection {
         SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 read: std::iter::once(prefix(write_dir))
                     .chain(baseline())
                     .collect(),
@@ -629,7 +632,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 read: scopes(read).into_iter().chain(baseline()).collect(),
                 write: scopes(write),
                 deny: deny.iter().copied().map(excluding).collect(),
@@ -644,7 +647,8 @@ mod tests {
     /// `every` program, and nothing else.
     #[cfg(target_os = "macos")]
     fn every() -> ExecProjection {
-        ExecProjection::Restricted(std::iter::once(Rule::Allow(ExecAllow::Any)).collect())
+        let every: ExecRules = std::iter::once(Rule::Allow(ExecAllow::Any)).collect();
+        ExecProjection::Restricted(every.for_kernel())
     }
 
     /// A Mach-O of this user's own, ad-hoc signed so that relocating it is
@@ -710,15 +714,17 @@ mod tests {
         let projection = if by_exec {
             let shell = GrantPath::<Excluded>::walk(FrozenPath::from_surface("/bin/sh"))
                 .expect("/bin/sh walks");
-            let exec = [
+            let exec: ExecRules = [
                 Rule::Allow(ExecAllow::Any),
                 Rule::Deny(Box::new(ExecDeny::File(shell))),
-            ];
+            ]
+            .into_iter()
+            .collect();
             confined_to(
                 &[&work],
                 &[&work],
                 &[],
-                ExecProjection::Restricted(exec.into_iter().collect()),
+                ExecProjection::Restricted(exec.for_kernel()),
             )
         } else {
             confined_to(&[&work, Path::new("/bin")], &[&work], &["/bin/sh"], every())
@@ -757,6 +763,37 @@ mod tests {
                 "by exec: {by_exec}; {hint}"
             );
         }
+    }
+
+    /// A script whose interpreter lies outside the read set, exec
+    /// unrestricted, is refused by Seatbelt, and the hint names the read that
+    /// admits it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_script_whose_interpreter_is_unread_fails_and_the_hint_names_the_read() {
+        let (work, lib) = (scratch("unread_work"), scratch("unread_lib"));
+        let interp = lib.join("sh");
+        std::fs::copy("/bin/sh", &interp).expect("copy /bin/sh");
+        let script = work.join("run");
+        std::fs::write(&script, format!("#!{}\nexit 0\n", interp.display())).expect("write script");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        let projection = confined_to(&[&work], &[&work], &[], ExecProjection::Unrestricted);
+        let admitted = admitted(Program::file(script).expect("a script"));
+        let interpreter = interpreter_of(&admitted).expect("a script names its interpreter");
+        let launch = macos_sandboxed_command(&projection, &Image::of(&admitted), &[], &unstopped())
+            .expect("build host command");
+        let out = confined(launch);
+        let hint = super::super::interpreter_hint(&projection, &interpreter).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&lib);
+        assert!(refused(&out), "{out:?}");
+        assert!(
+            hint.contains("lies outside the grant's fs read set")
+                && hint.contains("fs: [read: [`absolute ")
+                && hint.contains(&interp.display().to_string()),
+            "{hint}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -934,9 +971,9 @@ mod tests {
 
     /// `cat file` confined to reading `read` and the baseline, minus `deny`.
     #[cfg(target_os = "macos")]
-    fn reads(read: Vec<FsAllow>, deny: Vec<GrantPath<Excluded>>, file: &Path) -> bool {
+    fn reads(read: Vec<FsAllow>, deny: Vec<FsDeny>, file: &Path) -> bool {
         let projection = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 read: read.into_iter().chain(baseline()).collect(),
                 write: Vec::new(),
                 deny,

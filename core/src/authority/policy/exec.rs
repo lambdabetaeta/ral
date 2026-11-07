@@ -6,7 +6,8 @@
 //! of files, directories and names, which judge a [`Program`] as any table
 //! judges a subject.  A stack's authority is the meet of its layers' tables.
 //! [`GrantStack::admit`] is the one judgment; the guard words its refusals
-//! and the sandbox renders the table it judged with.
+//! and the sandbox renders the same table as the kernel holds it
+//! ([`KernelRules`]).
 
 use super::fs::{Baseline, FsAllow, FsDeny};
 use super::lattice::{Extent, GrantPath};
@@ -21,26 +22,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-/// A program the stack admitted, and the table that admitted it. Only
-/// [`GrantStack::admit`] makes one, so nothing launches unjudged: a file is
-/// held as vouched for reading, which running it does.
+/// A program the stack admitted. Only [`GrantStack::admit`] makes one, so
+/// nothing launches unjudged: a file is held as vouched for reading, which
+/// running it does.
 /// It launches under the stack that made it: each path admits and launches
 /// within one machine step.
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct Admitted {
     program: Program<Judged<Reading>>,
-    rules: Option<ExecRules>,
 }
 
 impl Admitted {
     pub(crate) fn program(&self) -> &Program<Judged<Reading>> {
         &self.program
-    }
-
-    /// The stack's exec table, `None` where no layer restricts exec.
-    pub(crate) fn rules(&self) -> Option<&ExecRules> {
-        self.rules.as_ref()
     }
 }
 
@@ -61,8 +56,7 @@ impl GrantStack {
         baseline: &Baseline,
         program: Program,
     ) -> Result<Admitted, ExecDenial> {
-        let rules = rules(self);
-        run_withheld(rules.as_ref(), program.subject())?;
+        run_withheld(rules(self).as_ref(), program.subject())?;
         let program = match program {
             Program::Tool(name) => {
                 self.tool_read(baseline).map_err(ExecDenial::Read)?;
@@ -77,7 +71,7 @@ impl GrantStack {
                 }
             }
         };
-        Ok(Admitted { program, rules })
+        Ok(Admitted { program })
     }
 
     /// [`admit`](Self::admit) of a name a walk reached no object at: the same
@@ -182,12 +176,13 @@ pub(crate) enum ExecAllow {
 }
 
 impl ExecAllow {
-    /// A file a launch needs beyond the policy, which no author wrote.
-    pub(crate) fn support(real: &RealPath) -> Self {
-        Self::File {
-            written: FrozenPath::of_real(real),
-            real: real.clone(),
-            found_as: None,
+    /// This allowance as the kernel holds it; `None` for a bundled tool.
+    fn kernel(&self) -> Option<KernelAllow> {
+        match self {
+            Self::Any => Some(KernelAllow::Any),
+            Self::Dir(dir) => Some(KernelAllow::Dir(dir.real.clone())),
+            Self::File { real, .. } => Some(KernelAllow::File(real.clone())),
+            Self::Tool(_) => None,
         }
     }
 
@@ -261,9 +256,7 @@ impl Allows for ExecAllow {
         match (self, subject) {
             (Self::Any, _) => true,
             (Self::Dir(dir), Subject::Program(at) | Subject::Dir(at)) => dir.real.contains(at),
-            (Self::File { real, .. }, Subject::Program(at)) => at
-                .position()
-                .is_some_and(|at| real.contains(&at) && at.contains(real)),
+            (Self::File { real, .. }, Subject::Program(at)) => holds_file(real, at),
             (Self::Tool(tool), Subject::Tool(name)) => tool == name,
             _ => false,
         }
@@ -272,25 +265,62 @@ impl Allows for ExecAllow {
     fn own(&self) -> Subject<'_> {
         match self {
             Self::Any => Subject::Any,
-            Self::Dir(GrantPath {
-                real: Extent::Under { position, .. },
-                ..
-            }) => Subject::Dir(path::Subject::Position(position)),
-            Self::Dir(GrantPath {
-                real: Extent::Everywhere,
-                ..
-            }) => Subject::Dir(path::Subject::Everywhere),
+            Self::Dir(dir) => inside(&dir.real),
             Self::File { real, .. } => Subject::Program(path::Subject::Position(real)),
             Self::Tool(name) => Subject::Tool(name),
         }
     }
 }
 
-impl Denies<ExecAllow> for ExecDeny {
-    /// A tool has no place on disk, and only a directory exclusion speaks to
-    /// a directory.  A name's key is folded already, so it holds every
-    /// spelling as stored.
-    fn matches(&self, subject: Subject<'_>) -> Option<MatchedBy> {
+/// A file allowance holds a program at its own position, and nothing else.
+fn holds_file(real: &RealPath, at: path::Subject<'_>) -> bool {
+    at.position()
+        .is_some_and(|at| real.contains(&at) && at.contains(real))
+}
+
+/// A directory allowance's own subject: its inside.
+fn inside(dir: &Extent) -> Subject<'_> {
+    Subject::Dir(match dir {
+        Extent::Under { position, .. } => path::Subject::Position(position),
+        Extent::Everywhere => path::Subject::Everywhere,
+    })
+}
+
+/// An exec allowance as the kernel is handed it: no bundled tool, which the
+/// kernel sees as ral's own binary.  It holds what its [`ExecAllow`] holds.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum KernelAllow {
+    Any,
+    Dir(Extent),
+    File(RealPath),
+}
+
+impl Allows for KernelAllow {
+    type Subject<'a> = Subject<'a>;
+
+    fn contains(&self, subject: Subject<'_>) -> bool {
+        match (self, subject) {
+            (Self::Any, _) => true,
+            (Self::Dir(dir), Subject::Program(at) | Subject::Dir(at)) => dir.contains(at),
+            (Self::File(real), Subject::Program(at)) => holds_file(real, at),
+            _ => false,
+        }
+    }
+
+    fn own(&self) -> Subject<'_> {
+        match self {
+            Self::Any => Subject::Any,
+            Self::Dir(dir) => inside(dir),
+            Self::File(real) => Subject::Program(path::Subject::Position(real)),
+        }
+    }
+}
+
+impl ExecDeny {
+    /// The one reading both tables give an exclusion.  A tool has no place
+    /// on disk, and only a directory exclusion speaks to a directory.  A
+    /// name's key is folded already, so it holds every spelling as stored.
+    pub(crate) fn matches(&self, subject: Subject<'_>) -> Option<MatchedBy> {
         let vetoes =
             |key: &str, name: &str| (key == command_name_key(name)).then_some(MatchedBy::Name);
         match (self, subject) {
@@ -308,8 +338,25 @@ impl Denies<ExecAllow> for ExecDeny {
     }
 }
 
+impl Denies<ExecAllow> for ExecDeny {
+    fn matches(&self, subject: Subject<'_>) -> Option<MatchedBy> {
+        Self::matches(self, subject)
+    }
+}
+
+impl Denies<KernelAllow> for ExecDeny {
+    fn matches(&self, subject: Subject<'_>) -> Option<MatchedBy> {
+        Self::matches(self, subject)
+    }
+}
+
 /// Exec authority, as a function from programs to evidence.
 pub(crate) type ExecRules = Table<ExecAllow, ExecDeny>;
+
+/// Exec authority as the kernel holds it ([`ExecRules::for_kernel`]): the
+/// kernel sees no tools and no argv, so this is its poorer view of the same
+/// evidence.
+pub(crate) type KernelRules = Table<KernelAllow, ExecDeny>;
 
 /// A rule of either half.
 #[derive(Clone, Debug)]
@@ -332,19 +379,13 @@ impl FromIterator<Rule> for ExecRules {
 }
 
 impl ExecRules {
-    /// What the kernel is handed: this table beside `support`, the files its
-    /// launch needs beyond the policy (carriers, the linker), joined as
-    /// allows.  Bundled tools are not rendered, the kernel seeing ral's own
-    /// binary for them.  Support yields to every exclusion, which the caller
-    /// has already applied to it.
-    pub(crate) fn for_kernel(&self, support: &BTreeSet<RealPath>) -> Self {
-        let rules = Self::new(
-            (self.allows())
-                .filter(|scope| !matches!(scope, ExecAllow::Tool(_)))
-                .cloned(),
+    /// This table as the kernel holds it: every exclusion, and every
+    /// allowance but the bundled tools.
+    pub(crate) fn for_kernel(&self) -> KernelRules {
+        KernelRules::new(
+            self.allows().filter_map(ExecAllow::kernel),
             self.denies().cloned(),
-        );
-        rules.join(Self::new(support.iter().map(ExecAllow::support), []))
+        )
     }
 
     /// The fs allowances running makes: each allowed file and directory is a
@@ -365,24 +406,6 @@ impl ExecRules {
                 ..
             })
             | ExecAllow::File { real: place, .. } => Some(FsAllow::RunPlace(place.clone())),
-            _ => None,
-        })
-    }
-
-    /// The files a rule admits.
-    #[cfg(unix)]
-    pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
-        self.live().filter_map(|scope| match scope {
-            ExecAllow::File { real, .. } => Some(real),
-            _ => None,
-        })
-    }
-
-    /// The directories a rule admits.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn allowed_dirs(&self) -> impl Iterator<Item = RealPath> {
-        self.live().filter_map(|scope| match scope {
-            ExecAllow::Dir(dir) => Some(dir.real.position().into_owned()),
             _ => None,
         })
     }
@@ -413,6 +436,36 @@ impl super::Axis for ExecRules {
 
     fn is_top(&self) -> bool {
         self.allows().any(|a| matches!(a, ExecAllow::Any)) && self.denies().next().is_none()
+    }
+}
+
+impl KernelRules {
+    /// This table beside `support`, the files a launch needs beyond the
+    /// policy (carriers, the linker), joined as allows.  Support yields to
+    /// every exclusion, which the caller has already applied to it.
+    pub(crate) fn with_support(self, support: &BTreeSet<RealPath>) -> Self {
+        self.join(Self::new(
+            support.iter().cloned().map(KernelAllow::File),
+            [],
+        ))
+    }
+
+    /// The files a rule admits.
+    #[cfg(unix)]
+    pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
+        self.live().filter_map(|scope| match scope {
+            KernelAllow::File(real) => Some(real),
+            _ => None,
+        })
+    }
+
+    /// The directories a rule admits.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn allowed_dirs(&self) -> impl Iterator<Item = RealPath> {
+        self.live().filter_map(|scope| match scope {
+            KernelAllow::Dir(dir) => Some(dir.position().into_owned()),
+            _ => None,
+        })
     }
 }
 
@@ -900,18 +953,24 @@ pub(super) mod tests {
                 .filter(|_| rng.below(4) == 0)
                 .map(|t| t.real().clone())
                 .collect();
-            let kernel = rules.for_kernel(&support);
-            assert!(kernel.allows().all(|s| !matches!(s, ExecAllow::Tool(_))));
-            let with = rules
-                .clone()
-                .join(ExecRules::new(support.iter().map(ExecAllow::support), []));
+            let kernel = rules.for_kernel().with_support(&support);
+            let supported = support.iter().map(|real| ExecAllow::File {
+                written: FrozenPath::from_surface(utf8(real.as_path()).unwrap()),
+                real: real.clone(),
+                found_as: None,
+            });
+            let with = rules.clone().join(ExecRules::new(supported, []));
+            let everywhere = [Subject::Any, Subject::Dir(path::Subject::Everywhere)];
             for t in &paths {
                 let at = path::Subject::Position(t.real());
                 for s in [
                     Subject::Program(path::Subject::Access(t)),
                     Subject::Program(at),
                     Subject::Dir(at),
-                ] {
+                ]
+                .into_iter()
+                .chain(everywhere)
+                {
                     assert_eq!(
                         kernel.evidence(s),
                         with.evidence(s),
@@ -926,8 +985,10 @@ pub(super) mod tests {
     #[test]
     fn support_whose_name_is_vetoed_is_both_to_the_kernel() {
         let rules: ExecRules = std::iter::once(veto("c")).collect();
-        let kernel = rules.for_kernel(&std::iter::once(real("/x/c")).collect());
-        assert_eq!(of_file(&kernel, "/x/c"), BOTH);
+        let kernel = rules
+            .for_kernel()
+            .with_support(&std::iter::once(real("/x/c")).collect());
+        assert_eq!(kernel.evidence(program(&real("/x/c"))), BOTH);
     }
 
     #[test]
@@ -935,7 +996,29 @@ pub(super) mod tests {
         let rules: ExecRules = [allow_file("/x/bash"), veto("bash")].into_iter().collect();
         assert_eq!(rules.live().count(), 0);
         #[cfg(unix)]
-        assert_eq!(rules.allowed_files().count(), 0);
+        assert_eq!(rules.for_kernel().allowed_files().count(), 0);
+    }
+
+    /// The kernel's table drops the bundled tools, and only them.
+    #[test]
+    fn the_kernel_holds_every_allowance_but_the_tools() {
+        let rules: ExecRules = [
+            allow_tool("ls"),
+            allow_file("/x/ls"),
+            allow_dir("/d"),
+            any(),
+        ]
+        .into_iter()
+        .collect();
+        let kernel: Vec<_> = rules.for_kernel().allows().cloned().collect();
+        assert_eq!(
+            kernel,
+            [
+                KernelAllow::Any,
+                KernelAllow::Dir(GrantPath::<Trace>::walk(written("/d")).unwrap().real),
+                KernelAllow::File(real("/x/ls")),
+            ]
+        );
     }
 
     /// The run places are the positive files and directories: a file and a

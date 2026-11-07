@@ -419,6 +419,45 @@ fn seatbelt_holds_an_absent_deny_inside_a_write_prefix() {
     }
 }
 
+/// A script whose interpreter lies outside the fs reads, exec omitted, is
+/// refused on both kernels (Seatbelt refuses its exec; bwrap shows nothing
+/// there), and the hint names the read that admits it, never a missing
+/// interpreter.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn an_unread_interpreter_is_refused_naming_the_read_it_needs() {
+    use std::os::unix::fs::PermissionsExt;
+    let _proof = ral_core::require_confinement!();
+    let d = common::Scratch::new("interp_unread");
+    let (work, interp) = (d.join("work"), d.join("lib/sh"));
+    for dir in [&work, &d.join("lib")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::copy("/bin/sh", &interp).unwrap();
+    let script = work.join("run");
+    std::fs::write(&script, format!("#!{}\necho ran\n", interp.display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = ral(&[
+        "-c",
+        &format!(
+            "grant [fs: [read: [{}]]] {{ {} }}",
+            common::places(&[&work]),
+            script.display()
+        ),
+    ]);
+    let shown = ral_core::path::shown(&interp);
+    assert_ne!(out.status, 0, "stdout:\n{}", out.stdout);
+    assert!(!out.stdout.contains("ran"), "stdout:\n{}", out.stdout);
+    for part in [
+        "lies outside the grant's fs read set",
+        "to the grant's fs `read` list",
+        &shown,
+    ] {
+        assert!(out.stderr.contains(part), "{part}; stderr:\n{}", out.stderr);
+    }
+    assert!(!out.stderr.contains("does not exist"), "{}", out.stderr);
+}
+
 /// A table reaching `exec:` through a parameter is left to the runtime
 /// decoder, which must refuse an ill-shaped one *before* the grant frame is
 /// pushed and the body entered.

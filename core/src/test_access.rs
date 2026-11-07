@@ -19,7 +19,7 @@ use crate::authority::guard::check_exec;
 use crate::authority::policy::FsAllow;
 use crate::authority::policy::Program;
 #[cfg(unix)]
-use crate::authority::policy::{ExecAllow, ExecDeny};
+use crate::authority::policy::{ExecDeny, KernelAllow};
 use crate::authority::sandbox::FsProjection;
 #[cfg(unix)]
 use crate::authority::sandbox::{ExecProjection, SandboxProjection};
@@ -69,8 +69,8 @@ where
     A: ReadName,
 {
     projection
-        .rules()
-        .map(|rules| rules.read.iter().map(ReadName::real_name).collect())
+        .lists()
+        .map(|lists| lists.read.iter().map(ReadName::real_name).collect())
 }
 
 /// How an allowance names the real path it grants.
@@ -113,17 +113,16 @@ pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<Kerne
     let ExecProjection::Restricted(rules) = &projection.exec else {
         return None;
     };
-    let positives = rules.allows().filter_map(|scope| match scope {
-        ExecAllow::Any => Some(KernelExecRule::Any { allow: true }),
-        ExecAllow::Dir(dir) => Some(KernelExecRule::Dir {
-            path: dir.real.position().to_string(),
+    let positives = rules.allows().map(|scope| match scope {
+        KernelAllow::Any => KernelExecRule::Any { allow: true },
+        KernelAllow::Dir(dir) => KernelExecRule::Dir {
+            path: dir.position().to_string(),
             allow: true,
-        }),
-        ExecAllow::File { real, .. } => Some(KernelExecRule::File {
+        },
+        KernelAllow::File(real) => KernelExecRule::File {
             path: real.to_string(),
             allow: true,
-        }),
-        ExecAllow::Tool(_) => None,
+        },
     });
     let negatives = rules.denies().map(|scope| match scope {
         ExecDeny::Dir(dir) => KernelExecRule::Dir {

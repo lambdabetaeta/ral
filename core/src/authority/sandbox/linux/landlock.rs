@@ -27,7 +27,7 @@
 use super::super::Refusal;
 use super::super::warrant::{Handoff, Slot};
 use super::{OpenError, Shown, leaf_fd, open_dir_nofollow, open_nofollow};
-use crate::authority::policy::{ExecDeny, ExecRules, Subject};
+use crate::authority::policy::{ExecDeny, KernelRules, Subject};
 use crate::authority::sandbox::{ExecProjection, RenderedFs};
 use crate::path::{Dir, Hold, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath};
 use crate::site::{Silent, site};
@@ -318,7 +318,7 @@ struct Plan {
 /// The table the kernel must enforce: a restricted exec projection, less
 /// one whose every exclusion is a name veto beneath `Any`, which nothing
 /// walks there ([`vetoes_walk`]) and so subtracts nothing.
-fn kernel_table(exec: &ExecProjection) -> Option<&ExecRules> {
+fn kernel_table(exec: &ExecProjection) -> Option<&KernelRules> {
     let ExecProjection::Restricted(table) = exec else {
         return None;
     };
@@ -410,11 +410,11 @@ fn admit_sockets(
     roots: &[RealPath],
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
 ) -> Result<(), Error> {
-    let Some(rules) = fs.rules() else {
+    let Some(lists) = fs.lists() else {
         return Ok(());
     };
     let mut dirs = Vec::new();
-    for object in &rules.write {
+    for object in &lists.write {
         let path = &object.position;
         let Some(held) = open_nofollow(path)? else {
             continue;
@@ -440,7 +440,7 @@ fn admit_sockets(
 /// envelope, less what the table excludes beneath it.
 fn admit_exec(
     ruleset: &Ruleset,
-    table: &ExecRules,
+    table: &KernelRules,
     fs: &RenderedFs,
     shown: &Shown,
 ) -> Result<(), String> {
@@ -453,7 +453,7 @@ fn admit_exec(
 
 /// Each file `table` allows, as itself, into `sink`.
 fn admit_files(
-    table: &ExecRules,
+    table: &KernelRules,
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
 ) -> Result<(), Error> {
     for file in table.allowed_files() {
@@ -479,7 +479,7 @@ fn admit_files(
 /// reaches it, so the launch's snapshot stays exact and building then
 /// running in one command still works.  A veto beneath a write, and beneath
 /// `Any`, is advisory.
-fn vetoes_walk<'a>(table: &'a ExecRules, fs: &'a RenderedFs) -> impl Fn(&RealPath) -> bool + 'a {
+fn vetoes_walk<'a>(table: &'a KernelRules, fs: &'a RenderedFs) -> impl Fn(&RealPath) -> bool + 'a {
     let any = table.supports(Subject::Any);
     move |dir: &RealPath| !any && !written(fs, dir)
 }
@@ -487,10 +487,10 @@ fn vetoes_walk<'a>(table: &'a ExecRules, fs: &'a RenderedFs) -> impl Fn(&RealPat
 /// Whether some write reaches `dir`: it lies within a write prefix, or a
 /// write prefix lies within it.  Every write does under an unrestricted fs.
 fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
-    let Some(rules) = fs.rules() else {
+    let Some(lists) = fs.lists() else {
         return true;
     };
-    (rules.write.iter().flat_map(Object::names))
+    (lists.write.iter().flat_map(Object::names))
         .any(|w| w.holds_position(dir) || w.under_position(dir))
 }
 
@@ -529,7 +529,7 @@ struct Admit<'a> {
 /// is excluded likewise: the envelope shows a scratch tmpfs there that the
 /// payload may `chmod` open and write, so no rule may reach it from above.
 fn expand(
-    table: &ExecRules,
+    table: &KernelRules,
     roots: &[RealPath],
     walks: &dyn Fn(&RealPath) -> bool,
     masks: &[RealPath],
@@ -576,7 +576,7 @@ fn expand(
 /// own evidence: an exclusion of a directory or file strictly within `d`
 /// under the folded reading (over-listing is cost, never a hole), a masked
 /// directory likewise, or any name veto where vetoes `walks` `d`.
-fn listed(table: &ExecRules, masks: &[RealPath], d: &RealPath, walks: bool) -> bool {
+fn listed(table: &KernelRules, masks: &[RealPath], d: &RealPath, walks: bool) -> bool {
     let masked = masks.iter().any(|m| d.contains_folded(m) && !m.contains(d));
     masked
         || table.denies().any(|scope| match scope {
@@ -590,7 +590,7 @@ fn listed(table: &ExecRules, masks: &[RealPath], d: &RealPath, walks: bool) -> b
 /// One expansion in progress.  Every handle is opened relative to its
 /// parent's, never through a symlink, handed to the sink, and closed.
 struct Walk<'w> {
-    table: &'w ExecRules,
+    table: &'w KernelRules,
     walks: &'w dyn Fn(&RealPath) -> bool,
     masks: &'w [RealPath],
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,

@@ -21,10 +21,10 @@ mod lattice_tests;
 #[cfg(any(test, feature = "test-util"))]
 pub use crate::authority::grant::builder::{Capabilities, ExecGrant, ExecKey, FsPolicy};
 pub use deputy::deputy_prefixes;
-#[cfg(unix)]
-pub(crate) use exec::Subject;
 pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Rule, rules};
-pub(crate) use exec::{ExecAllow, ExecDeny};
+pub(crate) use exec::{ExecAllow, ExecDeny, KernelRules};
+#[cfg(unix)]
+pub(crate) use exec::{KernelAllow, Subject};
 pub use fs::{Baseline, FsDeny, FsOp, LocateError, ReadRegion, Refused, Ungoverned};
 pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region};
 pub(crate) use lattice::Axis;

@@ -1,6 +1,6 @@
 use super::*;
-use crate::authority::policy::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};
-use crate::authority::sandbox::{FsProjection, FsRules};
+use crate::authority::policy::{ExecAllow, ExecDeny, ExecRules, Extent, GrantPath, Rule};
+use crate::authority::sandbox::{FsLists, FsProjection};
 use crate::path::{Excluded, FrozenPath, render_objects, utf8};
 use crate::test_helper::confinement::skip;
 use crate::test_helper::{Tree, place, real};
@@ -29,11 +29,12 @@ fn nowhere(spelled: &str) -> RealPath {
 }
 
 fn restricted() -> ExecProjection {
-    ExecProjection::Restricted(ExecRules::default())
+    ExecProjection::Restricted(KernelRules::default())
 }
 
-fn table_of(rules: &[Rule]) -> ExecRules {
-    rules.iter().cloned().collect()
+/// `rules` as the kernel holds them.
+fn table_of(rules: &[Rule]) -> KernelRules {
+    rules.iter().cloned().collect::<ExecRules>().for_kernel()
 }
 
 #[test]
@@ -156,7 +157,11 @@ fn rule(real: RealPath, dir: bool, allow: bool) -> Rule {
         (true, false) => Rule::Deny(Box::new(ExecDeny::Dir(
             GrantPath::<Excluded>::walk(written).expect("a directory walks"),
         ))),
-        (false, true) => Rule::Allow(ExecAllow::support(&real)),
+        (false, true) => Rule::Allow(ExecAllow::File {
+            written,
+            real,
+            found_as: None,
+        }),
         (false, false) => Rule::Deny(Box::new(ExecDeny::File(
             GrantPath::<Excluded>::walk(written).expect("a file walks"),
         ))),
@@ -511,9 +516,9 @@ fn writing(prefixes: &[&str]) -> RenderedFs {
     let prefixes: Vec<_> = prefixes.iter().map(|p| nowhere(p)).collect();
     let none: &[RealPath] = &[];
     let write = render_objects(prefixes.iter().map(|p| (p, None, none))).expect("renders");
-    FsProjection::Restricted(FsRules {
+    FsProjection::Restricted(FsLists {
         write,
-        ..FsRules::default()
+        ..FsLists::default()
     })
 }
 

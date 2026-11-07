@@ -80,7 +80,9 @@ an `errno`.** `Launch::spawn` and `spawn_detached` return nothing else.
   platforms: Seatbelt refuses the exec (`EACCES`), bwrap hides the interpreter
   (`ENOENT`), and the user sees one thing. `Prepared` keeps the launch's own
   projection, and only on a failure to start is the verdict asked of it
-  (`interpreter_hint`); with no projection, as inside the guest jail, there is
+  (`interpreter_hint`): the exec table's, then the read table's, so an
+  interpreter excluded, not admitted to run, or outside the read set each
+  names its fix; with no projection, as inside the guest jail, there is
   no verdict and so no hint, and a hidden interpreter reads as missing.
 - **The path-as-text hint is one rule, at the machine's `dispatch_exec`**
   (`offer_path_as_text`). It is offered only to a path head given no arguments,

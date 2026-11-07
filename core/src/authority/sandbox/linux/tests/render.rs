@@ -13,8 +13,8 @@ fn prefix(path: &str) -> FsAllow {
     )
 }
 
-fn excluding(path: &str) -> GrantPath<Excluded> {
-    GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+fn excluding(path: &str) -> FsDeny {
+    FsDeny(GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks"))
 }
 
 /// `policy`'s binds, opened over this host's tree, and the handoff
@@ -478,9 +478,7 @@ fn a_write_covering_a_run_place_leaves_one_writable_bind() {
             .read
             .push(FsAllow::RunPlace(crate::test_helper::real(&bin)));
     }
-    policy.exec = ExecProjection::Restricted(
-        std::iter::once(dir_rule(&crate::test_helper::real(&bin), true)).collect(),
-    );
+    policy.exec = kernel([dir_rule(&crate::test_helper::real(&bin), true)]);
     let binds = binds(&policy, WHOLE);
     let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
     assert_eq!(shown_within(&binds, &w), [(name(&w), Access::Writable)]);
@@ -519,9 +517,9 @@ fn a_write_through_a_link_is_masked_at_both_its_names() {
 fn a_deny_that_hides_proc_is_refused() {
     for (denied, refused) in [("/proc", true), ("/proc/sys", false)] {
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 deny: vec![excluding(denied)],
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             ..unrestricted()
         };
@@ -1142,10 +1140,10 @@ fn the_fresh_proc_and_dev_go_over_every_projection_bind() {
     let dir = workdir("proc-over-binds");
     let dir_s = dir.to_string_lossy().into_owned();
     let rooted = SandboxProjection {
-        fs: FsProjection::Restricted(FsRules {
+        fs: FsProjection::Restricted(FsLists {
             read: vec![prefix("/")],
             write: vec![prefix(&dir_s)],
-            ..FsRules::default()
+            ..FsLists::default()
         }),
         net: true,
         gpu: true,
@@ -1288,9 +1286,9 @@ fn the_envelope_binary_is_read_only_inside_every_envelope() {
 #[test]
 fn only_the_two_ownership_ties_distinguish_a_surrendered_launch() {
     let policy = SandboxProjection {
-        fs: FsProjection::Restricted(FsRules {
+        fs: FsProjection::Restricted(FsLists {
             read: vec![prefix("/usr")],
-            ..FsRules::default()
+            ..FsLists::default()
         }),
         net: false,
         gpu: true,

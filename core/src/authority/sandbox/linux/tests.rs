@@ -5,10 +5,10 @@ use super::{
 };
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};
-use crate::authority::policy::{ExecAllow, ExecDeny, GrantPath, Join, Rule};
+use crate::authority::policy::{ExecAllow, ExecDeny, ExecRules, FsDeny, GrantPath, Rule};
 use crate::authority::sandbox::launch::{Image, Ownership, admitted, enveloped};
 use crate::authority::sandbox::warrant::{Handoff, Slot, Slots};
-use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+use crate::authority::sandbox::{ExecProjection, FsLists, FsProjection, SandboxProjection};
 use crate::path::{CwdPath, Excluded, FrozenPath, RealPath, Trace};
 use crate::process::Unstarted;
 use crate::test_helper::confinement::skip;
@@ -27,7 +27,7 @@ fn host_system_reads() -> Baseline {
 }
 
 fn dir_rule(path: &RealPath, allow: bool) -> Rule {
-    let written = FrozenPath::of_real(path);
+    let written = FrozenPath::from_surface(crate::path::utf8(path.as_path()).unwrap());
     if allow {
         Rule::Allow(ExecAllow::Dir(
             GrantPath::<Trace>::walk(written).expect("a directory walks"),
@@ -37,6 +37,11 @@ fn dir_rule(path: &RealPath, allow: bool) -> Rule {
             GrantPath::<Excluded>::walk(written).expect("a directory walks"),
         )))
     }
+}
+
+/// `rules` as the kernel holds them, no support beside them.
+fn kernel(rules: impl IntoIterator<Item = Rule>) -> ExecProjection {
+    ExecProjection::Restricted(rules.into_iter().collect::<ExecRules>().for_kernel())
 }
 
 /// A bare Linux host.

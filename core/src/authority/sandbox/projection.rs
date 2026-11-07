@@ -5,10 +5,10 @@
 //! when the OS profile is written.  The in-process guard (`crate::authority::guard`)
 //! folds the same per-dimension tables afresh on every check: the fs
 //! [`region`] per op, the read one carrying the [`Baseline`] and the run places,
-//! and for exec the very table [`GrantStack::admit`] judged with.  So guard
-//! and profile cannot disagree about what the stack permits; all that
-//! separates them is when the fold runs.  `detach` gates a verb rather than an
-//! OS rule, so it reaches no projection.
+//! and for exec the stack's [`rules`], which [`GrantStack::admit`] judges by.
+//! So guard and profile cannot disagree about what the stack permits; all
+//! that separates them is when the fold runs.  `detach` gates a verb rather
+//! than an OS rule, so it reaches no projection.
 //!
 //! Support, what a launch needs beyond the policy to start a program
 //! (carriers, the Linux linker), is joined into both tables here, as allows
@@ -16,26 +16,25 @@
 
 #[cfg(unix)]
 use crate::authority::policy::Extent;
-use crate::authority::policy::GrantPath;
-#[cfg(unix)]
-use crate::authority::policy::Subject;
 use crate::authority::policy::{
-    Admitted, Baseline, ExecRules, FsAllow, FsOp, FsRules as FsTable, Gpu, GrantStack, Join,
-    region, rules,
+    Admitted, Baseline, ExecRules, FsAllow, FsDeny, FsOp, FsRules, Gpu, GrantStack, Join,
+    KernelRules, region, rules,
 };
-use crate::path::{Excluded, RealPath};
+#[cfg(unix)]
+use crate::authority::policy::{GrantPath, Subject, Withheld};
+use crate::path::RealPath;
 #[cfg(unix)]
 use crate::path::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
 use std::collections::BTreeSet;
 
-/// The fs half of a projection.
+/// The fs half of a projection: the lists a backend renders.
 ///
 /// Allowances and exclusions stay as the guard judges them, up to rendering:
 /// an exclusion with the objects its walk held.  `A` names an allowance and
-/// `X` an exclusion: [`FsAllow`] and [`GrantPath<Excluded>`] as folded,
-/// `Object` and `Rendered` as rendered.
+/// `X` an exclusion: [`FsAllow`] and [`FsDeny`] as folded, `Object` and
+/// `Rendered` as rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsRules<A = FsAllow, X = GrantPath<Excluded>> {
+pub struct FsLists<A = FsAllow, X = FsDeny> {
     /// The live read region: authored reads and writes, the run places, the
     /// live support and the [`Baseline`].
     pub(crate) read: Vec<A>,
@@ -56,7 +55,7 @@ pub struct FsRules<A = FsAllow, X = GrantPath<Excluded>> {
 /// Empty under any naming: rules over no paths, the shape a backend falls back
 /// to at the unrestricted top.  Hand-written because the derive would demand
 /// `A: Default`.
-impl<A, X> Default for FsRules<A, X> {
+impl<A, X> Default for FsLists<A, X> {
     fn default() -> Self {
         Self {
             read: Vec::new(),
@@ -67,6 +66,16 @@ impl<A, X> Default for FsRules<A, X> {
     }
 }
 
+#[cfg(unix)]
+impl FsLists {
+    /// The read table's verdict on `s`: what the kernel reads, live
+    /// support and the floor among it.  Dropping a dead allowance changes no
+    /// verdict, since one supports only what an exclusion already holds.
+    pub(crate) fn read_withheld(&self, s: crate::path::Subject<'_>) -> Option<Withheld<FsDeny>> {
+        FsRules::new(self.read.iter().cloned(), self.deny.iter().cloned()).withheld(s)
+    }
+}
+
 /// OS-renderable view of the meet-folded fs policy.
 ///
 /// `Unrestricted` is the lattice top: the stack writes the root and excludes
@@ -74,15 +83,15 @@ impl<A, X> Default for FsRules<A, X> {
 /// `file-write*` on macOS, `--dev-bind / /` on Linux. An empty `Restricted` is
 /// the other extreme: fs was attenuated to nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FsProjection<A = FsAllow, X = GrantPath<Excluded>> {
+pub enum FsProjection<A = FsAllow, X = FsDeny> {
     #[default]
     Unrestricted,
-    Restricted(FsRules<A, X>),
+    Restricted(FsLists<A, X>),
 }
 
 impl<A, X> FsProjection<A, X> {
-    /// The rules when restricted, `None` at the unrestricted top.
-    pub(crate) fn rules(&self) -> Option<&FsRules<A, X>> {
+    /// The lists when restricted, `None` at the unrestricted top.
+    pub(crate) fn lists(&self) -> Option<&FsLists<A, X>> {
         match self {
             Self::Unrestricted => None,
             Self::Restricted(r) => Some(r),
@@ -90,8 +99,9 @@ impl<A, X> FsProjection<A, X> {
     }
 }
 
-/// Exec rules for the kernel: the table the in-process guard judged with, its
-/// support joined as allows ([`ExecRules::for_kernel`]).
+/// Exec rules for the kernel: the stack's table as the kernel holds it, its
+/// support joined as allows ([`ExecRules::for_kernel`],
+/// [`KernelRules::with_support`]).
 ///
 /// `Unrestricted` where exec denotes `t`: the in-process guard alone checks,
 /// and its exclusions are the table's own.  `Restricted` closes the OS layer
@@ -104,7 +114,7 @@ impl<A, X> FsProjection<A, X> {
 pub(crate) enum ExecProjection {
     #[default]
     Unrestricted,
-    Restricted(ExecRules),
+    Restricted(KernelRules),
 }
 
 /// The OS-renderable projection of the effective grant, produced by
@@ -114,7 +124,7 @@ pub(crate) enum ExecProjection {
 /// the launching process. Unlike a [`GrantLayer`](crate::authority::policy::GrantLayer),
 /// no further composition can widen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxProjection<A = FsAllow, X = GrantPath<Excluded>> {
+pub struct SandboxProjection<A = FsAllow, X = FsDeny> {
     pub fs: FsProjection<A, X>,
     pub net: bool,
     /// Whether the GPU is in reach: no layer withholds it, or this host
@@ -129,7 +139,7 @@ pub(crate) type RenderedProjection = SandboxProjection<Object, Rendered>;
 #[cfg(target_os = "linux")]
 pub(crate) type RenderedFs = FsProjection<Object, Rendered>;
 #[cfg(target_os = "macos")]
-pub(crate) type RenderedRules = FsRules<Object, Rendered>;
+pub(crate) type RenderedLists = FsLists<Object, Rendered>;
 
 impl<A, X> Default for SandboxProjection<A, X> {
     fn default() -> Self {
@@ -170,15 +180,16 @@ impl SandboxProjection {
         let Self { fs, net, gpu, exec } = self;
         let fs = match fs {
             FsProjection::Unrestricted => FsProjection::Unrestricted,
-            FsProjection::Restricted(FsRules {
+            FsProjection::Restricted(FsLists {
                 read,
                 write,
                 deny,
                 // Derived below, so nothing a caller supplied is authority.
                 pinned_dirs: _,
             }) => {
-                let positions: Vec<_> =
-                    deny.iter().flat_map(|deny| deny.real.positions()).collect();
+                let positions: Vec<_> = (deny.iter())
+                    .flat_map(|deny| deny.grant().real.positions())
+                    .collect();
                 let prefixes: Vec<_> = (write.iter())
                     .map(|scope| {
                         scope
@@ -186,7 +197,7 @@ impl SandboxProjection {
                             .map_or_else(RealPath::universal, RealPath::clone)
                     })
                     .collect();
-                FsProjection::Restricted(FsRules {
+                FsProjection::Restricted(FsLists {
                     read: objects(read)?,
                     pinned_dirs: pinned_dirs(&positions, &prefixes)?,
                     write: objects(write)?,
@@ -204,18 +215,18 @@ impl SandboxProjection {
 
     /// Meet-fold the stack's fs, net, gpu, and exec dimensions into the
     /// OS-renderable projection; the GPU only where this host withholds it
-    /// ([`crate::authority::sandbox::WITHHOLDS_GPU`]).  Exec is projected from the table that
-    /// admitted `admitted`; a caller launching nothing passes `None`, and the
-    /// stack is compiled afresh.  An axis that denotes `t` projects as
-    /// unrestricted, though an `every` table's run places still reach the read
-    /// region.  `None` when no axis restricts, nor exec where the host's
-    /// backend renders it ([`crate::authority::sandbox::EXEC_ENFORCED`]), so the caller
-    /// can skip OS sandbox setup entirely.
+    /// ([`crate::authority::sandbox::WITHHOLDS_GPU`]).  Exec is the stack's
+    /// table, compiled here once, as the kernel holds it.  An axis that denotes
+    /// `t` projects as unrestricted, though an `every` table's run places still
+    /// reach the read region.  `None` when no axis restricts, nor exec where the
+    /// host's backend renders it ([`crate::authority::sandbox::EXEC_ENFORCED`]),
+    /// so the caller can skip OS sandbox setup entirely.
     ///
-    /// Support (carriers, and the Linux linker where exec is restricted) is
-    /// computed once for every launch with a restricted fs or exec, filtered to
-    /// the live files no exec or fs exclusion covers, and joined into the read
-    /// region as places and into the exec table as file allows.
+    /// Support (carriers of `admitted`'s file, and the Linux linker where exec
+    /// is restricted) is computed once for every launch with a restricted fs or
+    /// exec, filtered to the live files no exec or fs exclusion covers, and
+    /// joined into the read region as places and into the exec table as file
+    /// allows.  A caller launching nothing passes `None`.
     pub(crate) fn of(
         grants: &GrantStack,
         baseline: &Baseline,
@@ -230,38 +241,42 @@ impl SandboxProjection {
         let gpu =
             !(crate::authority::sandbox::WITHHOLDS_GPU && grants.gpu().any(|g| g == Gpu::Withheld));
 
-        let compiled = admitted.is_none().then(|| rules(grants)).flatten();
-        let table = admitted
-            .map_or(compiled.as_ref(), Admitted::rules)
-            .filter(|_| !grants.exec_is_top());
+        let kernel = rules(grants)
+            .filter(|_| !grants.exec_is_top())
+            .as_ref()
+            .map(ExecRules::for_kernel);
         // Attenuated exec is worth an OS sandbox exactly where a backend
         // carries the rules into the kernel, which is the backends' fact to
         // state and `authority::sandbox::EXEC_ENFORCED`'s to answer.  The in-process guard
         // runs on every platform regardless; the kernel layer is what sees the
         // re-execs it cannot (`sh -c`).
-        let exec_triggers_sandbox = crate::authority::sandbox::EXEC_ENFORCED && table.is_some();
+        let exec_triggers_sandbox = crate::authority::sandbox::EXEC_ENFORCED && kernel.is_some();
 
         if regions.is_none() && online && gpu && !exec_triggers_sandbox {
             return None;
         }
 
-        let live = live_support(table, regions.as_ref().map(|(read, _)| read), admitted);
-        let exec = table.map_or(ExecProjection::Unrestricted, |table| {
-            ExecProjection::Restricted(table.for_kernel(&live))
+        let live = live_support(
+            kernel.as_ref(),
+            regions.as_ref().map(|(read, _)| read),
+            admitted,
+        );
+        let exec = kernel.map_or(ExecProjection::Unrestricted, |kernel| {
+            ExecProjection::Restricted(kernel.with_support(&live))
         });
         let fs = match regions {
             Some((read, write)) => {
-                let read = read.join(FsTable::new(
+                let read = read.join(FsRules::new(
                     live.iter().map(|s| FsAllow::RunPlace(s.clone())),
                     [],
                 ));
-                FsProjection::Restricted(FsRules {
+                FsProjection::Restricted(FsLists {
                     read: read.live().cloned().collect(),
                     write: write.live().cloned().collect(),
                     // Both regions carry the same denies; a disk change between
                     // the two folds can only drop a write allow, which fails
                     // closed.
-                    deny: read.denies().map(|deny| deny.grant().clone()).collect(),
+                    deny: read.denies().cloned().collect(),
                     pinned_dirs: Vec::new(),
                 })
             }
@@ -294,13 +309,13 @@ fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
 
 /// The live support `S'`: the carriers of the launched file and, where exec is
 /// restricted, of every live file, with the Linux linkers, less every file an
-/// exec exclusion (`table`) or an fs exclusion (`read`) covers.  Support
+/// exec exclusion (`kernel`) or an fs exclusion (`read`) covers.  Support
 /// yields to every exclusion on either axis: a file that cannot be both run and
 /// read serves no launch.
 #[cfg(unix)]
 fn live_support(
-    table: Option<&ExecRules>,
-    read: Option<&FsTable>,
+    kernel: Option<&KernelRules>,
+    read: Option<&FsRules>,
     admitted: Option<&Admitted>,
 ) -> BTreeSet<RealPath> {
     use crate::authority::policy::Program;
@@ -308,14 +323,14 @@ fn live_support(
         Program::File { located, .. } => Some(located.real()),
         Program::Tool(_) => None,
     });
-    let files = table.into_iter().flat_map(ExecRules::allowed_files);
+    let files = kernel.into_iter().flat_map(KernelRules::allowed_files);
     let excluded = |trace: &crate::path::Trace| {
         let at = crate::path::Subject::Access(trace);
-        table.is_some_and(|t| t.excludes(Subject::Program(at)))
+        kernel.is_some_and(|k| k.excludes(Subject::Program(at)))
             || read.is_some_and(|r| r.excludes(at))
     };
     let mut support = super::carriers(launched.into_iter().chain(files), excluded);
-    if table.is_some() {
+    if kernel.is_some() {
         support.extend(super::carriers::linkers(excluded));
     }
     support
@@ -325,8 +340,8 @@ fn live_support(
 /// to carry.
 #[cfg(windows)]
 fn live_support(
-    _: Option<&ExecRules>,
-    _: Option<&FsTable>,
+    _: Option<&KernelRules>,
+    _: Option<&FsRules>,
     _: Option<&Admitted>,
 ) -> BTreeSet<RealPath> {
     BTreeSet::new()
@@ -336,7 +351,7 @@ fn live_support(
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod rendered_tests {
     use super::*;
-    use crate::path::{FrozenPath, Trace, utf8};
+    use crate::path::{Excluded, FrozenPath, Trace, utf8};
 
     fn prefix(path: &str) -> FsAllow {
         FsAllow::Prefix(
@@ -344,13 +359,16 @@ mod rendered_tests {
         )
     }
 
-    fn excluding(path: &str) -> GrantPath<Excluded> {
-        GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+    fn excluding(path: &str) -> FsDeny {
+        FsDeny(
+            GrantPath::<Excluded>::walk(FrozenPath::from_surface(path))
+                .expect("an exclusion walks"),
+        )
     }
 
     fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
         SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 read: Vec::new(),
                 write: write.iter().copied().map(prefix).collect(),
                 deny: deny.iter().copied().map(excluding).collect(),
@@ -368,8 +386,8 @@ mod rendered_tests {
         let out = projection(write, deny, carried)
             .rendered()
             .expect("ASCII paths render");
-        let rules = out.fs.rules().expect("restricted in, restricted out");
-        rules
+        let lists = out.fs.lists().expect("restricted in, restricted out");
+        lists
             .pinned_dirs
             .iter()
             .map(|r| r.as_str().to_string())
@@ -428,17 +446,17 @@ mod rendered_tests {
                 .expect("a link walks"),
         );
         let projection = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
+            fs: FsProjection::Restricted(FsLists {
                 read: vec![linked],
-                ..FsRules::default()
+                ..FsLists::default()
             }),
             net: true,
             gpu: true,
             exec: ExecProjection::default(),
         };
         let out = projection.rendered().expect("ASCII paths render");
-        let rules = out.fs.rules().expect("restricted");
-        let object = &rules.read[0];
+        let lists = out.fs.lists().expect("restricted");
+        let object = &lists.read[0];
         assert_eq!(object.real.as_str(), utf8(&real).unwrap());
         #[cfg(target_os = "macos")]
         assert!(object.names().all(|n| !n.as_str().contains("link")));
@@ -483,8 +501,38 @@ mod tests {
         let projection = project(authored(Some("/ral-test/w"), Some("/ral-test/bin")));
         let read = fs_read_paths(&projection.fs).expect("fs restricted");
         assert!(read.iter().any(|p| p == "/ral-test/bin"), "{read:?}");
-        let rules = projection.fs.rules().expect("fs restricted");
-        assert_eq!(rules.write, Vec::new());
+        let lists = projection.fs.lists().expect("fs restricted");
+        assert_eq!(lists.write, Vec::new());
+    }
+
+    /// The projection's read lists give the read table's verdict and witness,
+    /// its dead allowances dropped.
+    #[test]
+    fn the_read_lists_judge_as_the_read_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = crate::test_helper::Tree::lay(tmp.path(), &["/w/a/f", "/w/secret/f", "/x/f"]);
+        let at = |p: &str| FrozenPath::from_surface(&tree.at(p));
+        let grants = stack([layer(Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![at("/w"), at("/w/secret/f")],
+                write_prefixes: Vec::new(),
+                deny_paths: vec![at("/w/secret")],
+            }),
+            ..Capabilities::default()
+        })]);
+        let baseline = Baseline::default();
+        let projection = super::SandboxProjection::of(&grants, &baseline, None).unwrap();
+        let lists = projection.fs.lists().expect("fs restricted");
+        let table = super::region(&grants, &super::FsOp::Read, &baseline).unwrap();
+        assert!(
+            table.live().count() < table.allows().count(),
+            "a dead allowance"
+        );
+        for p in ["/w/a/f", "/w/secret/f", "/w/secret", "/x/f"] {
+            let access = crate::test_helper::trace(tree.path(p));
+            let s = crate::path::Subject::Access(&access);
+            assert_eq!(lists.read_withheld(s), table.withheld(s), "{p}");
+        }
     }
 
     /// Exec that denotes `t` projects as unrestricted, though its places
@@ -539,7 +587,7 @@ mod tests {
                 .expect("fs restricted")
                 .rendered()
                 .expect("system paths render");
-            let read = &rendered.fs.rules().expect("fs restricted").read;
+            let read = &rendered.fs.lists().expect("fs restricted").read;
             let carried = read
                 .iter()
                 .any(|o| o.real.as_str() == utf8(interp.as_path()).unwrap());
@@ -576,9 +624,9 @@ mod tests {
                 }
             };
             let grants = stack([layer(caps)]);
-            let exec = super::rules(&grants);
+            let kernel = super::rules(&grants).map(|exec| exec.for_kernel());
             let read = super::region(&grants, &super::FsOp::Read, &baseline);
-            let support = super::live_support(exec.as_ref(), read.as_ref(), Some(&admitted));
+            let support = super::live_support(kernel.as_ref(), read.as_ref(), Some(&admitted));
             assert!(
                 !support.contains(&interpreter),
                 "excluded seed contributed {interpreter}: {support:?}"
