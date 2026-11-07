@@ -6,7 +6,6 @@ use super::super::dispatch;
 use super::StageEval;
 use crate::ir::{Comp, CompKind};
 use crate::shell::runtime::{Break, Env, Settled, Shell, Value};
-use crate::source::Span;
 use std::sync::Arc;
 
 /// One stage's launch decision, frozen here and read by launch rather than
@@ -18,16 +17,6 @@ use std::sync::Arc;
 pub(super) enum StageLaunch {
     Direct { head: Head, args: Vec<Value> },
     Thread,
-}
-
-/// Per-stage analysis.  Edge transport is deliberately absent: the allocator
-/// `route::open_stage_routes` derives each edge from the stage's position
-/// alone.
-#[derive(Debug)]
-pub(super) struct StageSpec {
-    pub(super) launch: StageLaunch,
-    /// So a parent-side error points at this stage, not the whole pipeline.
-    pub(super) span: Option<Span>,
 }
 
 /// A thread unless the head is an external with no redirect and no
@@ -60,14 +49,9 @@ pub(super) fn resolve_pipeline(
     env: &Env,
     eval: StageEval,
     shell: &Shell,
-) -> Settled<Vec<StageSpec>> {
+) -> Settled<Vec<StageLaunch>> {
     stages
         .iter()
-        .map(|stage| {
-            Ok(StageSpec {
-                launch: resolve_launch(stage, env, eval, shell)?,
-                span: stage.span,
-            })
-        })
+        .map(|stage| resolve_launch(stage, env, eval, shell))
         .collect()
 }

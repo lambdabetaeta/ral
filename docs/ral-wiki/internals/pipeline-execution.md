@@ -557,7 +557,7 @@ cause: one the outer stage holds is the owner's, already sent to every
 member, and the tty's Ctrl-C is ral's own group's, already delivered; and, beside either, each
 confined stage's *envelope*, the payload group bwrap's `--new-session` put in
 a session of its own, which `Launch::spawn` learned from the `--info-fd` and
-`ExternalStage::envelope` kept. A key the tty already delivered
+`LiveExternal::landing` (`Landing::Owns`) kept. A key the tty already delivered
 (`pressed() >= cause`) leaves out the pipeline's own addresses, never the
 envelopes: the kernel already gave every member of the foreground group that
 signal, and a second copy would be a second interrupt — but an envelope's

@@ -295,7 +295,7 @@ fn a_collector_that_observed_every_stage_kills_nothing() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_dropped_collector_finishes_its_live_stages_jail() {
-    use super::super::stage::{ExternalStage, StageKind};
+    use super::super::stage::{ExternalEnd, LiveExternal, StageKind};
     let dir = tempfile::tempdir().unwrap();
     let (mut state, tx) = CollectState::for_step_test();
     let slot = Slot { ix: 0, tx };
@@ -304,16 +304,18 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
         .spawn()
         .expect("spawn /bin/sleep");
     state.push(StageHandle::new(
-        StageKind::External(ExternalStage {
+        StageKind::External(LiveExternal {
             watch: slot.watch(crate::process::ChildHandle::from_std(child)),
-            name: "sleep".to_string(),
-            audit: None,
-            jail: Some(crate::process::jail::JailCgroup::at(
-                dir.path().to_path_buf(),
-            )),
-            pumps: command::Pumps::default(),
             landing: crate::process::Landing::Joins,
-            claim: Claim::Unconfined,
+            end: ExternalEnd {
+                name: "sleep".to_string(),
+                audit: None,
+                jail: Some(crate::process::jail::JailCgroup::at(
+                    dir.path().to_path_buf(),
+                )),
+                pumps: command::Pumps::default(),
+                claim: Claim::Unconfined,
+            },
         }),
         None,
         slot,
@@ -581,13 +583,15 @@ fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
     let shell = crate::test_helper::core_shell();
     let settle = |start| {
         StageEnd::External {
-            audit: Some(Box::new(stage_audit(&shell, start))),
-            name: "ls".to_string(),
+            end: ExternalEnd {
+                name: "ls".to_string(),
+                audit: Some(Box::new(stage_audit(&shell, start))),
+                jail: None,
+                pumps: command::Pumps::default(),
+                claim: Claim::Unconfined,
+            },
             outcome: WaitOutcome::Exited(3),
-            jail: None,
-            pumps: command::Pumps::default(),
             sent: None,
-            claim: Claim::Unconfined,
         }
         .settle(
             &shell,
@@ -623,13 +627,15 @@ fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
 fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
     let shell = crate::test_helper::core_shell();
     let end = || StageEnd::External {
-        audit: Some(Box::new(stage_audit(&shell, None))),
-        name: "sleep".to_string(),
+        end: ExternalEnd {
+            name: "sleep".to_string(),
+            audit: Some(Box::new(stage_audit(&shell, None))),
+            jail: None,
+            pumps: command::Pumps::default(),
+            claim: Claim::Unconfined,
+        },
         outcome: WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGINT)),
-        jail: None,
-        pumps: command::Pumps::default(),
         sent: None,
-        claim: Claim::Unconfined,
     };
     let settled = |scope: &Scope| {
         end()
@@ -1963,13 +1969,15 @@ fn an_external_is_hinted_from_its_own_claim() {
         assert_eq!(alone.hint.as_deref(), hint.as_deref(), "alone, {confined}");
 
         let stage = StageEnd::External {
-            audit: Some(Box::new(stage_audit(&shell, None))),
-            name: "sh".into(),
+            end: ExternalEnd {
+                name: "sh".into(),
+                audit: Some(Box::new(stage_audit(&shell, None))),
+                jail: None,
+                pumps: command::Pumps::default(),
+                claim: claim(confined),
+            },
             outcome: WaitOutcome::Exited(128),
-            jail: None,
-            pumps: command::Pumps::default(),
             sent: None,
-            claim: claim(confined),
         };
         let staged = error(stage.settle(&shell, Instant::now(), &scope, None).end);
         assert_eq!(
@@ -2049,14 +2057,16 @@ fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
     let (sink, _bytes) = crate::io::new_buffer();
     let pumps = command::Pumps::new(Some(sink), None).start(&mut child, &shell.scope);
     let slot = Slot { ix: 0, tx };
-    let stage = ExternalStage {
+    let stage = LiveExternal {
         watch: slot.watch(child),
-        audit: Some(Box::new(stage_audit(&shell, None))),
-        name: "sh".into(),
-        jail: None,
-        pumps,
         landing: crate::process::Landing::Joins,
-        claim: Claim::Unconfined,
+        end: ExternalEnd {
+            name: "sh".into(),
+            audit: Some(Box::new(stage_audit(&shell, None))),
+            jail: None,
+            pumps,
+            claim: Claim::Unconfined,
+        },
     };
     collect.push(StageHandle::new(StageKind::External(stage), None, slot));
 

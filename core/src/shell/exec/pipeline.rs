@@ -28,7 +28,7 @@ pub(crate) use collect::lone_end;
 use collect::{CollectState, Event, Slot};
 use group::PipelineGroup;
 use launch::{LaunchCx, spawn_stage};
-use resolve::{StageSpec, resolve_pipeline};
+use resolve::{StageLaunch, resolve_pipeline};
 use route::open_stage_routes;
 
 /// What a stage needs of the machine, handed in by the evaluator so the
@@ -68,7 +68,7 @@ impl PipeNode {
         shell: &mut Shell,
     ) -> Settled<Value> {
         shell.poll()?;
-        let specs = resolve_pipeline(stages, env, eval, shell)?;
+        let launches = resolve_pipeline(stages, env, eval, shell)?;
 
         // Window start for the sandbox-denial reader.
         let started = Instant::now();
@@ -100,7 +100,7 @@ impl PipeNode {
             group: &node.group,
             holds_terminal: node.collect.holds_terminal(),
         };
-        let launched = launch(stages, specs, &mut cx, &mut node.collect, &tx);
+        let launched = launch(stages, launches, &mut cx, &mut node.collect, &tx);
         // The collector keeps no sender: `recv` sees the last producer go.
         drop(tx);
         if launched.is_err() {
@@ -157,15 +157,15 @@ pub(crate) fn join_lone(
 /// Spawn each stage in turn onto `collect`, stopping at the first that fails.
 fn launch(
     stages: &[Arc<Comp>],
-    specs: Vec<StageSpec>,
+    launches: Vec<StageLaunch>,
     cx: &mut LaunchCx<'_>,
     collect: &mut CollectState,
     tx: &Sender<Event>,
 ) -> Settled<()> {
     let routes = open_stage_routes(stages.len())?;
-    for (ix, ((stage, spec), route)) in stages.iter().zip(specs).zip(routes).enumerate() {
+    for (ix, ((stage, launch), route)) in stages.iter().zip(launches).zip(routes).enumerate() {
         cx.shell.poll()?;
-        let handle = spawn_stage(stage, spec, route, cx, Slot { ix, tx: tx.clone() })?;
+        let handle = spawn_stage(stage, launch, route, cx, Slot { ix, tx: tx.clone() })?;
         collect.push(handle);
     }
     Ok(())

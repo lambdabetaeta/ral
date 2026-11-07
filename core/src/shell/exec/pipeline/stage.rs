@@ -24,18 +24,24 @@ pub(super) struct StageHandle {
 }
 
 /// A direct external stage: no dedicated waiter thread — the reaper's
-/// [`Watch`] holds the wait and posts the outcome.
-pub(super) struct ExternalStage {
+/// [`Watch`] holds the wait and posts the outcome.  Filing its end reaps the
+/// watch and hands the rest on as an [`ExternalEnd`].
+pub(super) struct LiveExternal {
     pub(super) watch: Arc<Watch>,
+    /// Where it sits against its collector's group: in it (`Joins`), or
+    /// apart, behind a confining envelope, in its payload's own (`Owns`).
+    pub(super) landing: Landing,
+    pub(super) end: ExternalEnd,
+}
+
+/// What an external's settlement reads once its process is gone.
+pub(super) struct ExternalEnd {
     pub(super) name: String,
     /// Absent for a lone command, whose own door claims and records.
     pub(super) audit: Option<Box<StageAudit>>,
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
     pub(super) jail: Option<crate::process::jail::JailCgroup>,
     pub(super) pumps: command::Pumps,
-    /// Where it sits against its collector's group: in it (`Joins`), or
-    /// apart, behind a confining envelope, in its payload's own (`Owns`).
-    pub(super) landing: Landing,
     /// The deny lines its failure may claim, as its start knew them.
     pub(super) claim: Claim,
 }
@@ -50,7 +56,7 @@ pub(super) struct StageAudit {
 }
 
 pub(super) enum StageKind {
-    External(ExternalStage),
+    External(LiveExternal),
     Thread(ThreadStage),
 }
 
@@ -101,7 +107,7 @@ impl StageHandle {
     /// payload's, which no signal to the collector's group reaches.
     pub(super) fn own_group(&self) -> Option<Pgid> {
         match &self.kind {
-            StageKind::External(ExternalStage {
+            StageKind::External(LiveExternal {
                 landing: Landing::Owns(group),
                 ..
             }) => Some(*group),
@@ -111,7 +117,7 @@ impl StageHandle {
 
     pub(super) fn jail(&self) -> Option<&JailCgroup> {
         match &self.kind {
-            StageKind::External(e) => e.jail.as_ref(),
+            StageKind::External(e) => e.end.jail.as_ref(),
             StageKind::Thread(_) => None,
         }
     }
@@ -137,22 +143,14 @@ impl StageHandle {
         let Self {
             held, kind, sent, ..
         } = self;
-        let StageKind::External(e) = kind else {
+        let StageKind::External(LiveExternal { watch, end, .. }) = kind else {
             panic!("Event::Ended named a stage that was not spawned as an external");
         };
-        if let Ok(watch) = Arc::try_unwrap(e.watch) {
+        if let Ok(watch) = Arc::try_unwrap(watch) {
             let _ = watch.reap();
         }
         drop(held);
-        StageEnd::External {
-            audit: e.audit,
-            name: e.name,
-            outcome,
-            jail: e.jail,
-            pumps: e.pumps,
-            sent,
-            claim: e.claim,
-        }
+        StageEnd::External { end, outcome, sent }
     }
 
     /// The thread is already returning, so this reclaims the join rather than
@@ -172,14 +170,16 @@ impl StageHandle {
     #[cfg(test)]
     pub(super) fn for_test(slot: Slot, child: crate::process::ChildHandle) -> Self {
         Self::new(
-            StageKind::External(ExternalStage {
+            StageKind::External(LiveExternal {
                 watch: slot.watch(child),
-                name: "test".to_string(),
-                audit: None,
-                jail: None,
-                pumps: command::Pumps::default(),
                 landing: Landing::Joins,
-                claim: Claim::Unconfined,
+                end: ExternalEnd {
+                    name: "test".to_string(),
+                    audit: None,
+                    jail: None,
+                    pumps: command::Pumps::default(),
+                    claim: Claim::Unconfined,
+                },
             }),
             None,
             slot,
@@ -198,14 +198,16 @@ impl StageHandle {
             crate::process::ChildHandle::from_std(child).into_watch(tx, std::convert::identity),
         );
         Self::new(
-            StageKind::External(ExternalStage {
+            StageKind::External(LiveExternal {
                 watch,
-                name: "fake".to_string(),
-                audit: None,
-                jail: None,
-                pumps: command::Pumps::default(),
                 landing: Landing::Joins,
-                claim: Claim::Unconfined,
+                end: ExternalEnd {
+                    name: "fake".to_string(),
+                    audit: None,
+                    jail: None,
+                    pumps: command::Pumps::default(),
+                    claim: Claim::Unconfined,
+                },
             }),
             None,
             slot,

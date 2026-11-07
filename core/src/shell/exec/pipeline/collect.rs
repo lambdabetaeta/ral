@@ -6,7 +6,7 @@
 //! its group, and settled as a command ends ([`CollectState::settle_lone`]).
 
 use super::super::command::{self, Born, Claim};
-use super::stage::{ExternalStage, StageAudit, StageHandle, StageKind};
+use super::stage::{ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
 use crate::fact::AuditIo;
 use crate::io::Sink;
 use crate::process::jail::JailCgroup;
@@ -78,13 +78,9 @@ pub(super) enum StageEnd {
         stage: ScopeId,
     },
     External {
-        audit: Option<Box<StageAudit>>,
-        name: String,
+        end: ExternalEnd,
         outcome: WaitOutcome,
-        jail: Option<JailCgroup>,
-        pumps: command::Pumps,
         sent: Option<CancelCause>,
-        claim: Claim,
     },
 }
 
@@ -103,13 +99,16 @@ impl StageEnd {
             Self::Thread { obs, stage } if obs.names(&stage) => obs.forgiven(),
             Self::Thread { obs, .. } => obs,
             Self::External {
-                audit,
-                name,
+                end:
+                    ExternalEnd {
+                        name,
+                        audit,
+                        jail,
+                        pumps,
+                        claim,
+                    },
                 outcome,
-                jail,
-                pumps,
                 sent,
-                claim,
             } => {
                 let cause = drained(jail, pumps, sent, scope, owned);
                 finish_external_settlement(
@@ -427,15 +426,17 @@ impl CollectState {
             .owned()
             .is_some_and(|owned| owned.as_raw() == pid.cast_signed());
         let pin = leads.then(|| Arc::clone(&watch));
-        let stage = ExternalStage {
+        let stage = LiveExternal {
             watch,
-            name,
-            audit: None,
-            jail,
-            pumps,
             // In its collector's group, which is where it landed.
             landing: crate::process::Landing::Joins,
-            claim,
+            end: ExternalEnd {
+                name,
+                audit: None,
+                jail,
+                pumps,
+                claim,
+            },
         };
         let mut state = Self::new(
             rx,
@@ -801,13 +802,16 @@ impl CollectState {
     /// stop is the run's.
     pub(super) fn settle_lone(mut self) -> Settled<()> {
         let Some(Some(StageEnd::External {
-            name,
+            end:
+                ExternalEnd {
+                    name,
+                    jail,
+                    pumps,
+                    claim,
+                    ..
+                },
             outcome,
-            jail,
-            pumps,
             sent,
-            claim,
-            ..
         })) = self.observed.pop()
         else {
             return Err(Error::new("ral external vanished without reporting".to_string()).into());

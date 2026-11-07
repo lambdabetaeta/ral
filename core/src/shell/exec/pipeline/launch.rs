@@ -5,9 +5,9 @@ use super::super::command;
 use super::super::command::{Born, Head, Started};
 use super::collect::Slot;
 use super::group::PipelineGroup;
-use super::resolve::{StageLaunch, StageSpec};
+use super::resolve::StageLaunch;
 use super::route::{ByteIn, ByteOut, StageRoute};
-use super::stage::{ExternalStage, StageAudit, StageHandle, StageKind};
+use super::stage::{ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::fact::AuditIo;
 use crate::io::{Sink, Source, SourceReader};
@@ -106,7 +106,7 @@ pub(super) struct LaunchCx<'a> {
 /// stage's head leaves by value: nothing holds the program after it launches.
 pub(super) fn spawn_stage(
     stage: &Arc<crate::ir::Comp>,
-    spec: StageSpec,
+    launch: StageLaunch,
     route: StageRoute,
     cx: &mut LaunchCx<'_>,
     slot: Slot,
@@ -120,8 +120,8 @@ pub(super) fn spawn_stage(
         crate::ir::CompKind::Exec(exec) => exec.head.name().written(),
         _ => "pipeline".into(),
     };
-    let span = spec.span;
-    let kind = match spec.launch {
+    let span = stage.span;
+    let kind = match launch {
         StageLaunch::Direct { head, args } => {
             launch_external_stage_direct(head, &args, span, stdin, stdout, cx, &slot)
                 .map(StageKind::External)
@@ -143,7 +143,7 @@ fn launch_external_stage_direct(
     stdout: ByteOut,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
-) -> Settled<ExternalStage> {
+) -> Settled<LiveExternal> {
     let name = head.shown.clone();
     let mooring = cx.mooring;
     let group = cx.group;
@@ -190,18 +190,20 @@ fn launch_external_stage_direct(
                 },
         } = started;
         let pumps = pumps.start(&mut child, &shell.scope);
-        Ok(ExternalStage {
+        Ok(LiveExternal {
             watch: slot.watch(child),
-            name: shown,
-            audit: Some(Box::new(StageAudit {
-                prov: shell.local.audit.call_site().clone(),
-                start: audit_start,
-                args,
-            })),
-            jail,
-            pumps,
             landing,
-            claim,
+            end: ExternalEnd {
+                name: shown,
+                audit: Some(Box::new(StageAudit {
+                    prov: shell.local.audit.call_site().clone(),
+                    start: audit_start,
+                    args,
+                })),
+                jail,
+                pumps,
+                claim,
+            },
         })
     })
 }
