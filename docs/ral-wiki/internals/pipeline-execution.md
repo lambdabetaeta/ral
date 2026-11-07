@@ -86,9 +86,9 @@ the `HeldEdge`'s read end. The sentinel reads through a `Weak` of the hold's
 writer's filing drops the `HeldEdge`, or, if a read is in flight then, as that
 read returns. A `Thread` stage's
 `Sink::Pipe { writer, edge, stage }` checks the same edge itself after each
-chunk it lands, and raises `WriteStopped` — read back by `Shell::write_sink`
-as `Break::stopped(ReaderGone, Some(stage))`, a stop naming the writing
-stage's own node — so the break lands at the write, exactly;
+chunk it lands, and returns `WriteFault::Stopped(ReaderGone, stage)` —
+`Shell::write_sink` turns it into `Break::stopped(ReaderGone, Some(stage))`, a
+stop naming the writing stage's own node — so the break lands at the write, exactly;
 the sentinel hears the same chunk and its redundant `KillStage` finds a stage
 already unwinding. An external stage's write ral cannot see
 directly, so the sentinel is what hears it: it reads whatever bytes are

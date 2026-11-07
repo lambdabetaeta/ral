@@ -6,8 +6,8 @@
 //! bytes.
 
 use super::Streams;
-use super::edge::{Edge, WriteStopped};
-use crate::process::{CancelCause, Scope, ScopeId, StdioSpec};
+use super::edge::Edge;
+use crate::process::{CancelCause, Cancellation, Scope, ScopeId, StdioSpec};
 use crate::sync::LockExt as _;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -138,6 +138,39 @@ pub enum Sink {
     },
 }
 
+/// Why a write did not complete.  A dead edge is the writing stage's own
+/// reader-gone stop; a cause in force is the join the writer's scope read
+/// between slices; `BrokenPipe` is the reader gone from a pipe the writer
+/// does not own.
+#[derive(Debug)]
+pub(crate) enum WriteFault {
+    Stopped(Cancellation),
+    BrokenPipe,
+    Io(io::Error),
+}
+
+impl From<io::Error> for WriteFault {
+    fn from(e: io::Error) -> Self {
+        match e.kind() {
+            io::ErrorKind::BrokenPipe => Self::BrokenPipe,
+            _ => Self::Io(e),
+        }
+    }
+}
+
+impl From<Cancellation> for WriteFault {
+    fn from(c: Cancellation) -> Self {
+        Self::Stopped(c)
+    }
+}
+
+fn reader_gone(stage: &ScopeId) -> WriteFault {
+    WriteFault::Stopped(Cancellation {
+        cause: CancelCause::ReaderGone,
+        owner: stage.clone(),
+    })
+}
+
 /// Write `bytes` in `PIPE_BUF` chunks.  Before each chunk the writer's scope
 /// is read, so an always-ready pipe still polls once per chunk; a chunk that
 /// would block is waited for a slice at a time.  A chunk that lands on a dead
@@ -152,28 +185,24 @@ fn write_sliced(
     stage: &ScopeId,
     scope: &Scope,
     mut bytes: &[u8],
-) -> io::Result<()> {
+) -> Result<(), WriteFault> {
     use super::poll_slice;
     use rustix::event::PollFlags;
-    let stopped = |cause, owner| io::Error::other(WriteStopped { cause, owner });
-    let reader_gone = || stopped(CancelCause::ReaderGone, Some(stage.clone()));
     while !bytes.is_empty() {
-        if let Some((cause, owner)) = scope.in_force() {
-            return Err(stopped(cause, Some(owner)));
-        }
+        scope.poll()?;
         let Some(revents) = poll_slice(w, PollFlags::OUT)? else {
             if edge.is_dead() {
-                return Err(reader_gone());
+                return Err(reader_gone(stage));
             }
             continue;
         };
         if revents.intersects(PollFlags::ERR | PollFlags::HUP) {
-            return Err(io::ErrorKind::BrokenPipe.into());
+            return Err(WriteFault::BrokenPipe);
         }
         let n = (&*w).write(&bytes[..bytes.len().min(libc::PIPE_BUF)])?;
         bytes = &bytes[n..];
         if edge.is_dead() {
-            return Err(reader_gone());
+            return Err(reader_gone(stage));
         }
     }
     Ok(())
@@ -194,20 +223,16 @@ fn write_sliced(
     stage: &ScopeId,
     scope: &Scope,
     mut bytes: &[u8],
-) -> io::Result<()> {
-    let stopped = |cause, owner| io::Error::other(WriteStopped { cause, owner });
-    let reader_gone = || stopped(CancelCause::ReaderGone, Some(stage.clone()));
+) -> Result<(), WriteFault> {
     while !bytes.is_empty() {
-        if let Some((cause, owner)) = scope.in_force() {
-            return Err(stopped(cause, Some(owner)));
-        }
+        scope.poll()?;
         match (&*w).write(&bytes[..bytes.len().min(PIPE_CHUNK)]) {
             Ok(n) => bytes = &bytes[n..],
             Err(e) if super::aborted(&e) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
         if edge.is_dead() {
-            return Err(reader_gone());
+            return Err(reader_gone(stage));
         }
     }
     Ok(())
@@ -276,11 +301,11 @@ impl Sink {
     /// Write all of `bytes`, or error; no variant reports a short write.  A
     /// `Pipe` blocked on a full edge reads `scope` between slices, through
     /// `Tee`.
-    pub(crate) fn write_under(&mut self, scope: &Scope, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn write_under(&mut self, scope: &Scope, bytes: &[u8]) -> Result<(), WriteFault> {
         match self {
-            Self::Terminal => io::stdout().write_all(bytes),
-            Self::Stderr => io::stderr().write_all(bytes),
-            Self::File(f) => (&**f).write_all(bytes),
+            Self::Terminal => Ok(io::stdout().write_all(bytes)?),
+            Self::Stderr => Ok(io::stderr().write_all(bytes)?),
+            Self::File(f) => Ok((&**f).write_all(bytes)?),
             Self::Buffer(b) => {
                 b.append(bytes);
                 Ok(())
@@ -426,7 +451,7 @@ pub fn without_terminator(bytes: &[u8]) -> &[u8] {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     #[cfg(unix)]
-    use super::WriteStopped;
+    use super::WriteFault;
     use super::{CapturedBytes, Edge, OutFd, Retained, Sink, without_terminator};
     #[cfg(unix)]
     use crate::process::CancelCause;
@@ -550,8 +575,11 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn write_stopped(e: std::io::Error) -> WriteStopped {
-        e.downcast::<WriteStopped>().expect("a WriteStopped")
+    fn write_stopped(fault: WriteFault) -> crate::process::Cancellation {
+        match fault {
+            WriteFault::Stopped(stop) => stop,
+            other => panic!("expected a stop, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -562,7 +590,19 @@ mod tests {
         edge.mark_dead();
         let stop = write_stopped(sink.write_under(&node, b"x").expect_err("a dead edge"));
         assert_eq!(stop.cause, CancelCause::ReaderGone);
-        assert_eq!(stop.owner, Some(node.id()));
+        assert_eq!(stop.owner, node.id());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_to_a_closed_pipe_is_a_broken_pipe() {
+        let node = DurableRoot::default().worker();
+        let (reader, mut sink, ..) = pipe_sink(&node);
+        drop(reader);
+        assert!(matches!(
+            sink.write_under(&node, b"x"),
+            Err(WriteFault::BrokenPipe)
+        ));
     }
 
     #[cfg(unix)]
@@ -678,7 +718,7 @@ mod tests {
         let stop = write_stopped(sink.write_under(&shield, b"x").expect_err("stopped"));
         assert_eq!(
             (stop.cause, stop.owner),
-            (CancelCause::ReaderGone, Some(node.id()))
+            (CancelCause::ReaderGone, node.id())
         );
         assert!(start.elapsed() < crate::test_helper::NEVER_RETURNS);
     }

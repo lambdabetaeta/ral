@@ -1,7 +1,6 @@
 //! The fate of one interior pipeline edge, shared by its writer and the
 //! collector that holds the read end.
 
-use crate::process::{CancelCause, ScopeId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,20 +28,3 @@ impl Edge {
         self.dead.store(true, Ordering::SeqCst);
     }
 }
-
-/// Why a stage's write did not complete: the stop `Shell::write_sink`
-/// re-mints.  A dead edge is the writing stage's own reader-gone stop; a cause
-/// in force is the join the writer's scope read between slices.
-#[derive(Debug)]
-pub(crate) struct WriteStopped {
-    pub(crate) cause: CancelCause,
-    pub(crate) owner: Option<ScopeId>,
-}
-
-impl std::fmt::Display for WriteStopped {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.cause.message())
-    }
-}
-
-impl std::error::Error for WriteStopped {}

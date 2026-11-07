@@ -42,7 +42,7 @@ use super::mooring::{Mooring, TerminalAccess};
 use super::sig;
 use crate::authority::policy::GrantStack;
 use crate::host::EnvVars;
-use crate::io::{Io, WriteStopped};
+use crate::io::{Io, WriteFault};
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope};
 use crate::shell::runtime::Cradle;
@@ -339,17 +339,10 @@ impl Shell {
     ) -> Settled<()> {
         match sink.write_under(scope, bytes) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                if sink.is_stderr() {
-                    Ok(())
-                } else {
-                    Err(Break::stopped(CancelCause::ReaderGone, None))
-                }
-            }
-            Err(e) => Err(match e.downcast::<WriteStopped>() {
-                Ok(stop) => Break::stopped(stop.cause, stop.owner),
-                Err(e) => sig(format!("could not write to {what}: {e}")),
-            }),
+            Err(WriteFault::Stopped(stop)) => Err(stop.into()),
+            Err(WriteFault::BrokenPipe) if sink.is_stderr() => Ok(()),
+            Err(WriteFault::BrokenPipe) => Err(Break::stopped(CancelCause::ReaderGone, None)),
+            Err(WriteFault::Io(e)) => Err(sig(format!("could not write to {what}: {e}"))),
         }
     }
 
