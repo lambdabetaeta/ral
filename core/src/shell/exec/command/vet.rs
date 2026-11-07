@@ -1,39 +1,15 @@
-//! Pre-spawn planning: an admitted [`Head`] and its argv values become a
-//! [`SpawnPlan`], or a focused refusal.
+//! The argv shape gate: what a call's argument values become at the exec
+//! boundary, or a focused refusal.
 //!
-//! [`Head::admit`] has decided refusal, then 127/126, before argv shape.
-//! Every launch path reads that verdict here without probing again.
+//! [`Head::admit`](super::head::Head::admit) has decided refusal, then
+//! 127/126, before argv shape; [`super::process::prepare`] reads that
+//! verdict first, never probing again.
 
-use crate::authority::policy::Admitted;
 use crate::shell::runtime::{Break, Error, Settled, Value};
 use crate::ty::RefusedArg;
 
-use super::head::{Admission, Head};
-
-/// A vetted call, taken by [`super::process::build_launch`].  `shown` is the
-/// name diagnostics and audit report; `admitted` runs with `args`.
-pub(crate) struct SpawnPlan {
-    pub(crate) shown: String,
-    pub(crate) admitted: Admitted,
-    pub(crate) args: Vec<String>,
-}
-
-/// Plan an admitted head's launch, taking it: 127 when it names nothing,
-/// 126 when the walk stopped at a file lacking `+x` or the admitted file
-/// cannot be run — read off the head's own walk, never re-probed.
-pub(crate) fn vet(head: Head<Admission>, args: &[Value]) -> Settled<SpawnPlan> {
-    let Head { shown, program } = head;
-    let admitted = program.map_err(Break::Error)?;
-    let args = validate_argv(&shown, args)?;
-    Ok(SpawnPlan {
-        shown,
-        admitted,
-        args,
-    })
-}
-
 /// Stringify `args`, refusing any shape the syscall boundary cannot carry.
-fn validate_argv(cmd: &str, args: &[Value]) -> Settled<Vec<String>> {
+pub(super) fn validate_argv(cmd: &str, args: &[Value]) -> Settled<Vec<String>> {
     args.iter()
         .map(|arg| match reject_exec_arg(cmd, arg) {
             Some(refusal) => Err(refusal),
@@ -63,19 +39,23 @@ fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
+    use super::super::head::Head;
+    use super::super::process::{Prepared, prepare};
     use super::*;
     use crate::authority::policy::{
-        Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, Program,
+        Admitted, Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, Program,
     };
+    use crate::authority::sandbox::Ownership;
     use crate::fact::{Check, FailureCode as _, Observed, Resource};
     use crate::ir::CommandName;
     use crate::path::FrozenPath;
     use crate::shell::runtime::{CapturePolicy, Mooring, Shell};
     use std::path::Path;
 
-    /// A head admitted with no surface, then planned with no argv.
-    fn plan(head: Head, shell: &mut Shell) -> Settled<SpawnPlan> {
-        vet(head.admit(&Mooring::adrift(), shell)?, &[])
+    /// A head admitted with no surface, then prepared with no argv.
+    fn plan(head: Head, shell: &mut Shell) -> Settled<Prepared> {
+        let head = head.admit(&Mooring::adrift(), shell)?;
+        prepare(head, &[], Ownership::Kept, shell)
     }
 
     /// An executable a *bare-name* walk finds in `dir`; off Unix a bare name
@@ -98,7 +78,7 @@ mod tests {
         name
     }
 
-    /// The exit code `vet` refuses `head` with.
+    /// The error `prepare` refuses `head` with.
     fn refused(head: Head, shell: &mut Shell) -> Error {
         match plan(head, shell) {
             Err(Break::Error(e)) => e,
@@ -201,7 +181,7 @@ mod tests {
             head.program.as_ref().map(Admitted::program),
             Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name)
         ));
-        vet(head, &[]).expect("a resolved name must vet");
+        prepare(head, &[], Ownership::Kept, &shell).expect("a resolved name must prepare");
 
         shell.seed_cwd(
             crate::path::CwdPath::new(elsewhere.path().to_path_buf())
@@ -393,7 +373,8 @@ mod tests {
                 )
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant runs this directory");
-                let Err(Break::Error(e)) = vet(head, &[Value::Unit]) else {
+                let Err(Break::Error(e)) = prepare(head, &[Value::Unit], Ownership::Kept, shell)
+                else {
                     panic!("the admitted path cannot be run");
                 };
                 assert_eq!(e.failure_code().get(), code, "{e:?}");
@@ -418,7 +399,7 @@ mod tests {
             let head = Head::resolve(&CommandName::Bare("zzplain".into()), &shell.context)
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the non-executable file");
-            let Err(Break::Error(e)) = vet(head, &[Value::Unit]) else {
+            let Err(Break::Error(e)) = prepare(head, &[Value::Unit], Ownership::Kept, shell) else {
                 panic!("a non-executable candidate cannot be run");
             };
             assert_eq!(e.failure_code().get(), 126, "{e:?}");

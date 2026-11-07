@@ -18,9 +18,7 @@ pub(crate) fn shebang(file: File) -> Option<PathBuf> {
         .iter()
         .position(|&b| b == b'\n' || (cfg!(target_os = "macos") && b == b'#'))?;
     let blank = |b: &u8| *b == b' ' || *b == b'\t';
-    let line = &line[..end];
-    let start = line.iter().position(|b| !blank(b)).unwrap_or(line.len());
-    let interpreter = line[start..].split(blank).next()?;
+    let interpreter = line[..end].split(blank).find(|word| !word.is_empty())?;
     let interpreter = PathBuf::from(OsStr::from_bytes(interpreter));
     is_absolute(&interpreter).then_some(interpreter)
 }
@@ -41,6 +39,15 @@ mod tests {
     fn a_relative_interpreter_yields_nothing() {
         assert_eq!(shebang_of("#!sh\n"), None);
         assert_eq!(shebang_of("#!\n"), None);
+        assert_eq!(shebang_of("#! \t \n"), None);
+    }
+
+    #[test]
+    fn blanks_before_the_interpreter_are_skipped() {
+        assert_eq!(
+            shebang_of("#! \t/bin/sh -e\n"),
+            Some(PathBuf::from("/bin/sh"))
+        );
     }
 
     #[test]

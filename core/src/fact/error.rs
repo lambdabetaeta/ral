@@ -75,14 +75,13 @@ variant!(typed Unrunnable {
     Io(String): "io",
 });
 
-impl Unrunnable {
-    /// What an `io::Error` met launching a program means: a refusal is
-    /// permission denied, anything else is the OS's own words.
-    pub(crate) fn of_io(e: &std::io::Error) -> Self {
-        match e.kind() {
-            std::io::ErrorKind::PermissionDenied => Self::PermissionDenied,
-            _ => Self::Io(e.to_string()),
-        }
+impl Failure {
+    /// `found`, where the program was sought, cannot run for `why`.
+    pub(crate) fn not_runnable(found: impl Into<String>, why: Unrunnable) -> Self {
+        Self::NotRunnable(NotRunnable {
+            found: found.into(),
+            why,
+        })
     }
 }
 

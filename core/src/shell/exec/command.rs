@@ -24,7 +24,7 @@ mod vet;
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use head::{Admission, Head};
-pub(crate) use process::{Prepared, ending, prepare, start};
+pub(crate) use process::{Started, ending, prepare, start};
 pub(crate) use stdio::{ChildIo, ChildOut, TtyInputPermit, wire_stdio};
 
 use foreground::ForegroundDecision;
@@ -65,11 +65,14 @@ pub(crate) fn run(
     // whatever error reaches it, so a start failure needs no emission of
     // its own here.
     let prepared_loan = fg.prepare(shell, mooring);
-    let spawned = start(&mut prepared, fg.pgid_policy())?;
+    let Started {
+        shown,
+        args,
+        born: spawned,
+    } = start(prepared, fg.pgid_policy())?;
     // Its `Drop` restores ral's pgid on every path out of here, sparing the
     // next REPL tty read an EIO from a background pgroup.
     let loan = prepared_loan.and_then(|loan| loan.lend(spawned.child.id().cast_signed()));
-    let Prepared { shown, args, .. } = prepared;
 
     // Nothing fallible may run between `start` and here: until the collector
     // holds it the bare child leaks on an early return.

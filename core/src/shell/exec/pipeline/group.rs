@@ -7,7 +7,7 @@
 //! `Event::Heard` — the kernel having already given that signal to every
 //! other member — which only the pipeline's
 //! [`TerminalLoan`](crate::process::TerminalLoan) reads as a key.  On
-//! Windows a group a pipeline or a lone external owns is a [`Job`].
+//! Windows a group a pipeline or a lone external owns is a `Job`.
 
 use super::collect::Event;
 use crate::process::{Group, Landing, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};

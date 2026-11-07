@@ -144,13 +144,12 @@ pub(crate) fn sandboxed_command(
     cancel: &crate::process::cancel::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     #[cfg(target_os = "linux")]
-    let mut launch = linux_sandboxed_command(projection, baseline, image, args, ownership, cwd)?;
-    #[cfg(target_os = "macos")]
-    let mut launch = macos_sandboxed_command(projection, image, args)?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        launch.under(cancel.clone());
-        Ok(launch)
+        linux_sandboxed_command(projection, baseline, image, args, ownership, cwd, cancel)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_sandboxed_command(projection, image, args, cancel)
     }
     #[cfg(windows)]
     {
@@ -188,6 +187,7 @@ fn linux_sandboxed_command(
     args: &[String],
     ownership: Ownership,
     cwd: &CwdPath,
+    scope: &crate::process::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
     let own = super::reexec::own()?;
@@ -200,6 +200,7 @@ fn linux_sandboxed_command(
         args,
         Some(cwd),
         ownership,
+        scope,
     )
 }
 
@@ -207,6 +208,10 @@ fn linux_sandboxed_command(
 /// here, against what the envelope will show.  The trampoline is *us*:
 /// our boot pin, which bwrap execs by descriptor.
 #[cfg(target_os = "linux")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "independent inputs to one envelope launch"
+)]
 pub(super) fn enveloped(
     env: &Envelope<'_>,
     projection: &SandboxProjection,
@@ -215,6 +220,7 @@ pub(super) fn enveloped(
     args: &[String],
     chdir: Option<&CwdPath>,
     ownership: Ownership,
+    scope: &crate::process::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     let rendered = projection.rendered()?;
     let shown = super::linux::Shown::of(&rendered, baseline)?;
@@ -229,25 +235,28 @@ pub(super) fn enveloped(
     let (slots, report) = issue(&Warrant::new(confinement, image, args), &mut handoff)?;
     let (cmd, info) =
         super::linux::bwrap_command(env, shown, handoff, slots, &rendered, chdir, ownership)?;
-    Ok(bwrapped(cmd, info, report))
+    Ok(bwrapped(cmd, info, report, scope))
 }
 
 /// bwrap's `cmd` as a launch, with the payload's `--info-fd` peer and the
-/// trampoline's report.
+/// trampoline's report, whose first word is awaited under `scope`.
 #[cfg(target_os = "linux")]
 pub(super) fn bwrapped(
     cmd: Command,
     info: Option<super::linux::InfoFd>,
     report: Report,
+    scope: &crate::process::Scope,
 ) -> crate::process::Launch {
     let mut launch = crate::process::Launch::from_command(cmd);
     // A host package rather than part of ral, so it may simply be absent.
-    launch
-        .envelope(crate::process::launch::Envelope {
+    launch.confine(crate::process::launch::Confined {
+        report,
+        scope: scope.clone(),
+        envelope: Some(crate::process::launch::Envelope {
             program: super::linux::BWRAP,
             payload_pgid: info.map(|fd| Box::new(move || fd.payload_pgid()) as _),
-        })
-        .report(report);
+        }),
+    });
     launch
 }
 
@@ -261,28 +270,35 @@ fn macos_sandboxed_command(
     projection: &SandboxProjection,
     image: &Image,
     args: &[String],
+    scope: &crate::process::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     let own = super::reexec::own()?;
     own.verify()?;
     let profile = super::macos::build_profile(projection)?;
     let mut handoff = Handoff::default();
     let (slots, report) = issue(&Warrant::new(Seatbelt(profile), image, args), &mut handoff)?;
-    Ok(trampoline(own, handoff, slots, report))
+    Ok(trampoline(own, handoff, slots, report, scope))
 }
 
-/// The pinned ral, summoned to its slots.
+/// The pinned ral, summoned to its slots; its first word is awaited under
+/// `scope`.
 #[cfg(target_os = "macos")]
 pub(super) fn trampoline(
     own: &super::reexec::Pinned,
     handoff: Handoff,
     slots: Slots,
     report: Report,
+    scope: &crate::process::Scope,
 ) -> crate::process::Launch {
     let mut cmd = own.command();
     cmd.args(slots.argv());
     handoff.install(&mut cmd);
     let mut launch = crate::process::Launch::from_command(cmd);
-    launch.report(report);
+    launch.confine(crate::process::launch::Confined {
+        report,
+        scope: scope.clone(),
+        envelope: None,
+    });
     launch
 }
 
@@ -358,6 +374,12 @@ mod tests {
         Image::of(&admitted(program))
     }
 
+    /// A scope nothing stops.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn unstopped() -> crate::process::ScopeNode {
+        crate::process::DurableRoot::default().worker()
+    }
+
     // Needed only by the per-platform launch tests; elsewhere the two
     // refusals are the only tests, and they need no scaffolding.
     #[cfg(target_os = "macos")]
@@ -410,8 +432,13 @@ mod tests {
     #[test]
     fn a_macos_launch_is_the_warrant_trampoline_alone() {
         for program in [sh(), Program::Tool("ls")] {
-            let launch = macos_sandboxed_command(&restrictive(), &image(program), &["-l".into()])
-                .expect("build macOS command");
+            let launch = macos_sandboxed_command(
+                &restrictive(),
+                &image(program),
+                &["-l".into()],
+                &unstopped(),
+            )
+            .expect("build macOS command");
             let args = argv(&launch);
             let [flag, warrant, report] = &args[..] else {
                 panic!("not `--warrant <w> <r>`: {args:?}");
@@ -509,6 +536,7 @@ mod tests {
             &proj,
             &image(sh()),
             &["-c".into(), format!("echo x > {allowed_s}")],
+            &unstopped(),
         )
         .expect("build host command (inside)");
         assert!(run_confined(ok), "write into the write prefix must succeed");
@@ -521,6 +549,7 @@ mod tests {
             &proj,
             &image(sh()),
             &["-c".into(), format!("echo x > {denied_s}")],
+            &unstopped(),
         )
         .expect("build host command (outside)");
         assert!(
@@ -564,6 +593,7 @@ mod tests {
             &write_confined_to(&work.to_string_lossy()),
             &image(judged),
             &[mark.to_string_lossy().into_owned()],
+            &unstopped(),
         )
         .expect("build host command");
         assert!(run_confined(cmd), "the judged file must run");
@@ -591,6 +621,7 @@ mod tests {
                 "-c".into(),
                 format!("printf %s \"$0\" > {}", mark.display()),
             ],
+            &unstopped(),
         )
         .expect("build host command");
         assert!(run_confined(cmd), "the program must run");
@@ -612,8 +643,13 @@ mod tests {
 
         let allowed = work.join("sub");
         let allowed_s = allowed.to_string_lossy().into_owned();
-        let ok = macos_sandboxed_command(&proj, &image(Program::Tool("mkdir")), &[allowed_s])
-            .expect("build bundled command (inside)");
+        let ok = macos_sandboxed_command(
+            &proj,
+            &image(Program::Tool("mkdir")),
+            &[allowed_s],
+            &unstopped(),
+        )
+        .expect("build bundled command (inside)");
         assert!(run_confined(ok), "mkdir into the write prefix must succeed");
         assert!(allowed.is_dir(), "in-prefix mkdir should have landed");
 
@@ -624,6 +660,7 @@ mod tests {
             &proj,
             &image(Program::Tool("mkdir")),
             std::slice::from_ref(&denied_s),
+            &unstopped(),
         )
         .expect("build bundled command (outside)");
         assert!(
@@ -709,6 +746,7 @@ mod tests {
                 &confined_to(read, &[&mark], &[], every()),
                 &image(sh()),
                 &["-c".into(), line],
+                &unstopped(),
             )
             .expect("build host command");
             run_confined(cmd);
@@ -755,7 +793,8 @@ mod tests {
             confined_to(&[&work, Path::new("/bin")], &[&work], &["/bin/sh"], every())
         };
         let image = image(Program::file(script).expect("a script"));
-        let launch = macos_sandboxed_command(&projection, &image, &[]).expect("build host command");
+        let launch = macos_sandboxed_command(&projection, &image, &[], &unstopped())
+            .expect("build host command");
         let out = confined(launch);
         let Image::File {
             interpreter: Some(interpreter),
@@ -822,7 +861,7 @@ mod tests {
             .unwrap();
         let projection = SandboxProjection::of(&grants, &baseline, Some(&admitted)).unwrap();
         let image = Image::of(&admitted);
-        let launch = macos_sandboxed_command(&projection, &image, &[]).unwrap();
+        let launch = macos_sandboxed_command(&projection, &image, &[], &unstopped()).unwrap();
         std::fs::write(&script, "#!/usr/bin/false\n").unwrap();
         let out = confined(launch);
         assert!(refused(&out), "{out:?}");
@@ -887,7 +926,7 @@ mod tests {
             .expect("the grant admits the script");
         let projection = SandboxProjection::of(&stack, &baseline, Some(&admitted))
             .expect("a restricted fs sandboxes");
-        let launch = macos_sandboxed_command(&projection, &Image::of(&admitted), &[])
+        let launch = macos_sandboxed_command(&projection, &Image::of(&admitted), &[], &unstopped())
             .expect("build host command");
         let out = confined(launch);
         let _ = std::fs::remove_dir_all(&work);
@@ -957,9 +996,13 @@ mod tests {
             .expect("the grant admits the stub");
         let projection =
             SandboxProjection::of(&stack, &baseline, Some(&admitted)).expect("exec is restricted");
-        let launch =
-            macos_sandboxed_command(&projection, &Image::of(&admitted), &["--version".into()])
-                .expect("build host command");
+        let launch = macos_sandboxed_command(
+            &projection,
+            &Image::of(&admitted),
+            &["--version".into()],
+            &unstopped(),
+        )
+        .expect("build host command");
         let out = confined(launch).expect("the stub starts");
         assert!(out.status.success(), "{out:?}");
     }
@@ -987,7 +1030,8 @@ mod tests {
         let cat = Program::file("/bin/cat".into()).expect("/bin/cat exists");
         let args = [file.to_string_lossy().into_owned()];
         run_confined(
-            macos_sandboxed_command(&projection, &image(cat), &args).expect("build command"),
+            macos_sandboxed_command(&projection, &image(cat), &args, &unstopped())
+                .expect("build command"),
         )
     }
 
@@ -1085,6 +1129,7 @@ mod tests {
                 &["-l".into()],
                 Ownership::Kept,
                 &CwdPath::new("/".into()).expect("absolute cwd"),
+                &unstopped(),
             )
             .expect("build Linux command");
             let cmd = launch.command();

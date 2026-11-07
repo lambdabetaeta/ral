@@ -15,7 +15,7 @@ use crate::site::site;
 ///
 /// [`Self::into_watch`] is the way to the reaper, which owns the wait on
 /// both platforms; [`Self::reap`] is the blocking wait after a confirmed
-/// kill, whose status every caller discards.
+/// kill.
 pub struct ChildHandle {
     repr: ChildRepr,
     /// What a Linux supervisor will say of its program's end.

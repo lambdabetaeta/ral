@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
+use crate::fact::{Failure, NotRunnable, Unrunnable};
 use crate::io::{self, Sink};
 use crate::ir::Name;
 use crate::ir::Redirects;
@@ -336,33 +336,26 @@ pub(crate) fn close_redirects(
 }
 
 /// A directory or plain file ran as a command.
-fn names_no_program(b: &Break) -> bool {
-    let Break::Error(e) = b else { return false };
-    let Reason::Process(process) = &e.reason else {
-        return false;
-    };
+fn names_no_program(e: &Error) -> bool {
     matches!(
-        &process.failure,
-        Failure::NotRunnable(NotRunnable {
+        e.reason.failure(),
+        Some(Failure::NotRunnable(NotRunnable {
             why: Unrunnable::Directory | Unrunnable::NotExecutable,
             ..
-        })
+        }))
     )
 }
 
-/// `b`, offering a path head given no arguments as text: it was most likely
+/// `e`, offering a path head given no arguments as text: it was most likely
 /// meant as such.
-fn offer_path_as_text(b: Break, head: &CommandWord, argv: &[Value]) -> Break {
-    match (b, head.name()) {
-        (Break::Error(e), path @ (CommandName::Path(_) | CommandName::TildePath(_)))
-            if argv.is_empty() =>
-        {
-            Break::Error(e.append_hint(format!(
+fn offer_path_as_text(e: Error, head: &CommandWord, argv: &[Value]) -> Error {
+    match head.name() {
+        path @ (CommandName::Path(_) | CommandName::TildePath(_)) if argv.is_empty() => e
+            .append_hint(format!(
                 "to use the path as text, write `#'{}'#`",
                 path.written()
-            )))
-        }
-        (b, _) => b,
+            )),
+        _ => e,
     }
 }
 
@@ -885,7 +878,6 @@ impl Machine {
         shell.poll()?;
         let argv = close_argv(&exec.argv, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
-        let offer = |b| offer_path_as_text(b, &exec.head, &argv);
         match dispatch::resolve_command_word(&exec.head, env, shell) {
             Resolution::Env(Value::Native(entry)) if entry.decl.is_boundary() => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
@@ -915,9 +907,15 @@ impl Machine {
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::External(head) => {
-                let head = head.admit(mooring, shell).map_err(offer)?;
-                let v = dispatch::run_external(head, &argv, &redirs, span, mooring, shell)
-                    .map_err(|b| if names_no_program(&b) { offer(b) } else { b })?;
+                let offer = |e| offer_path_as_text(e, &exec.head, &argv);
+                let mut head = head.admit(mooring, shell).map_err(|b| match b {
+                    Break::Error(refused) => offer(refused).into(),
+                    stop @ Break::Escape(_) => stop,
+                })?;
+                head.program = head
+                    .program
+                    .map_err(|e| if names_no_program(&e) { offer(e) } else { e });
+                let v = dispatch::run_external(head, &argv, &redirs, span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
         }

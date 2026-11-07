@@ -17,7 +17,7 @@ use super::signal::KILL;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{SpawnError, spawn_with_pgid, spawn_with_pgid_after};
+pub(crate) use unix::{SpawnError, spawn_with_pgid};
 #[cfg(unix)]
 pub(crate) use unix::{Survivor, spawn_detached};
 
@@ -134,16 +134,6 @@ pub(crate) enum Landing {
 }
 
 impl Landing {
-    /// Where `policy` put a child whose spawn named `group`, `None` only
-    /// under `Inherit`.
-    pub(crate) fn of(policy: PgidPolicy, group: Option<Pgid>) -> Self {
-        match (policy, group) {
-            (PgidPolicy::Join(_), _) => Self::Joins,
-            (_, Some(group)) => Self::Owns(group),
-            (_, None) => Self::Shares,
-        }
-    }
-
     /// Who signals the child: the group it owns, the `stage`'s it joined, or
     /// ral's own, where only its pid addresses it.
     pub(crate) fn group(self, stage: Option<&Membership>) -> Group {
@@ -260,28 +250,16 @@ mod tests {
         assert!(!member.owes(CancelCause::TimedOut));
     }
 
-    /// A child owns what it, or its envelope's payload, leads; joins what it
-    /// only entered; and shares ral's group under `Inherit`.
+    /// A child's group is the one it owns, its stage's where it joined one,
+    /// or ral's own.  Where it lands is its spawn's to say
+    /// (`unix::tests::a_spawn_says_where_its_child_landed`).
     #[test]
-    fn a_child_owns_what_it_leads_and_joins_what_it_only_entered() {
+    fn a_landing_names_who_signals_the_child() {
         let (seven, nine) = (
             Pgid::from_raw(7).expect("positive"),
             Pgid::from_raw(9).expect("positive"),
         );
         let stage = Membership::new(seven, Scope::clone(&DurableRoot::default().worker()));
-        assert_eq!(
-            Landing::of(PgidPolicy::NewLeader, Some(nine)),
-            Landing::Owns(nine)
-        );
-        assert_eq!(
-            Landing::of(PgidPolicy::NewSession, Some(nine)),
-            Landing::Owns(nine)
-        );
-        assert_eq!(
-            Landing::of(PgidPolicy::Join(seven), Some(seven)),
-            Landing::Joins
-        );
-        assert_eq!(Landing::of(PgidPolicy::Inherit, None), Landing::Shares);
         assert!(matches!(
             Landing::Owns(nine).group(Some(&stage)),
             Group::Owns(g) if g == nine

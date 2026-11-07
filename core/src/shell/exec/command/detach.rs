@@ -21,7 +21,7 @@ use crate::shell::runtime::{
 };
 
 use super::head::Head;
-use super::process::{Prepared, prepare, start_detached};
+use super::process::{Started, prepare, start_detached};
 
 /// `detach <desc> <cmd> <args…>`, with `desc` already vetted by
 /// [`crate::shell::builtins::concurrency`].  The head is an exec image by
@@ -78,8 +78,11 @@ pub(crate) fn detach(
         .stdin(StdioSpec::null())
         .stdout(StdioSpec::null())
         .stderr(StdioSpec::null());
-    let survivor = start_detached(&mut prepared)?;
-    let Prepared { shown, args, .. } = prepared;
+    let Started {
+        shown,
+        args,
+        born: survivor,
+    } = start_detached(prepared)?;
     shell.observe(
         mooring,
         Observed::Command(Command::new(

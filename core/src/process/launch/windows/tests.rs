@@ -33,3 +33,23 @@ fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
         "expected entry {expected:?} not found in environment block"
     );
 }
+
+/// Only `CreateProcessW`'s own failure is the program's: a batch image and a
+/// NUL in an argument are ral's refusals.
+#[test]
+fn only_create_process_s_failure_is_the_program_s() {
+    let refused = |mut launch: Launch| {
+        matches!(
+            launch.spawn(PgidPolicy::Inherit),
+            Err(Unstarted::Refused(Refusal::Launch(_)))
+        )
+    };
+    assert!(refused(Launch::new(r"C:\ral-no-such-dir\tool.bat")));
+    let mut nul = Launch::new(r"C:\Windows\System32\cmd.exe");
+    nul.arg("a\0b");
+    assert!(refused(nul));
+    assert!(matches!(
+        Launch::new(r"C:\ral-no-such-dir\tool.exe").spawn(PgidPolicy::Inherit),
+        Err(Unstarted::Program(_))
+    ));
+}

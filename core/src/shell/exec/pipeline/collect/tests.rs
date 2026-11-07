@@ -203,7 +203,7 @@ fn spawn_stage_with_grandchild(
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.args(["-c", script]);
     cmd.stdout(std::process::Stdio::piped());
-    let (mut child, _pgid) = crate::process::spawn_with_pgid(
+    let (mut child, _landing) = crate::process::spawn_with_pgid(
         &mut cmd,
         crate::process::PgidPolicy::Join(group.leader_pgid()),
     )
@@ -1390,10 +1390,10 @@ fn lone_shell(scope: &Scope, stage: Option<Membership>) -> Shell {
 /// `cmd` spawned under `policy`, and where it landed.
 #[cfg(unix)]
 fn spawned(cmd: &mut std::process::Command, policy: crate::process::PgidPolicy) -> Spawned {
-    let (child, pgid) = crate::process::spawn_with_pgid(cmd, policy).expect("spawn");
+    let (child, landing) = crate::process::spawn_with_pgid(cmd, policy).expect("spawn");
     Spawned {
         child: crate::process::ChildHandle::from_std(child),
-        landing: crate::process::Landing::of(policy, pgid),
+        landing,
         jail: None,
     }
 }
@@ -1559,9 +1559,12 @@ fn interrupt_tears_down_external_subprocess_tree() {
     cmd.args(["-c", "sleep 30 & echo $!; wait"])
         .stdout(std::process::Stdio::piped());
 
-    let (mut child, pgid) = crate::process::spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
+    let (mut child, landing) = crate::process::spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
         .expect("spawn /bin/sh under new pgid");
-    assert!(pgid.is_some(), "NewLeader yields a tracked pgid");
+    assert!(
+        matches!(landing, crate::process::Landing::Owns(_)),
+        "NewLeader yields a group the child owns"
+    );
 
     // Take stdout before handing the child over: with no stdout sink planned
     // the collector would drop it.  `echo $!` flushes at startup, so the
@@ -1575,7 +1578,7 @@ fn interrupt_tears_down_external_subprocess_tree() {
     });
     let lone = Spawned {
         child: crate::process::ChildHandle::from_std(child),
-        landing: crate::process::Landing::of(PgidPolicy::NewLeader, pgid),
+        landing,
         jail: None,
     };
 
@@ -1666,9 +1669,12 @@ fn a_members_waiter_signals_only_what_its_owner_does_not_deliver() {
             ),
         ]);
         // Its own group stands in for the pipeline's it joined.
-        let (child, pgid) =
+        let (child, landing) =
             crate::process::spawn_with_pgid(&mut cmd, crate::process::PgidPolicy::NewLeader)
                 .expect("spawn the trapper");
+        let crate::process::Landing::Owns(pgid) = landing else {
+            panic!("NewLeader yields a group the child owns");
+        };
         let lone = Spawned {
             child: crate::process::ChildHandle::from_std(child),
             landing: crate::process::Landing::Joins,
@@ -1677,10 +1683,7 @@ fn a_members_waiter_signals_only_what_its_owner_does_not_deliver() {
 
         let stage = DurableRoot::default().worker();
         let own = stage.child();
-        let membership = Membership::new(
-            pgid.expect("NewLeader yields a tracked pgid"),
-            Scope::clone(&stage),
-        );
+        let membership = Membership::new(pgid, Scope::clone(&stage));
         let shell = lone_shell(&own, Some(membership));
         let striker = std::thread::spawn(move || {
             crate::test_helper::eventually(Duration::from_secs(5), || ready.exists().then_some(()))

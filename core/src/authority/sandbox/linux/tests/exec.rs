@@ -1169,6 +1169,7 @@ fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
         &["-c".to_string(), "echo RAN".to_string()],
         None,
         Ownership::Kept,
+        &crate::process::DurableRoot::default().worker(),
     );
     let Err(e) = launch else {
         panic!("a restricted exec grant needs Landlock");
@@ -1205,7 +1206,11 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
     handoff.install(&mut cmd);
     let mut launch = crate::process::Launch::from_command(cmd);
     launch
-        .report(report)
+        .confine(crate::process::launch::Confined {
+            report,
+            scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().worker()),
+            envelope: None,
+        })
         .stdin(crate::process::StdioSpec::null());
     let ran = launch.output();
     drop(withheld);

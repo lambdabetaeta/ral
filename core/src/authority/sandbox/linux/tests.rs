@@ -192,6 +192,7 @@ fn run_after(
         args,
         None,
         Ownership::Kept,
+        &crate::process::DurableRoot::default().worker(),
     )
     .expect("the launch builds");
     between();

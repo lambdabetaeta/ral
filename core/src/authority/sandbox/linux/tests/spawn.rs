@@ -376,6 +376,7 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
             &[],
             None,
             Ownership::Kept,
+            &crate::process::DurableRoot::default().worker(),
         )
         .unwrap();
         let late = HostPty::open();

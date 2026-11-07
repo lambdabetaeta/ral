@@ -2,7 +2,7 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::{Head, Prepared};
+use super::super::command::{Head, Started};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::{StageLaunch, StageSpec};
@@ -162,13 +162,17 @@ fn launch_external_stage_direct(
             shell,
         )?;
         let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
-        let Spawned {
-            mut child,
-            landing,
-            jail,
-        } = command::start(&mut prepared, PgidPolicy::Join(group.leader_pgid()))?;
+        let Started {
+            shown,
+            args,
+            born:
+                Spawned {
+                    mut child,
+                    landing,
+                    jail,
+                },
+        } = command::start(prepared, PgidPolicy::Join(group.leader_pgid()))?;
         let pumps = pumps.start(&mut child, &shell.scope);
-        let Prepared { shown, args, .. } = prepared;
         Ok(ExternalStage {
             watch: slot.watch(child),
             prov: shell.local.audit.call_site().clone(),

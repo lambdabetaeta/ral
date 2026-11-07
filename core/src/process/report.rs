@@ -107,14 +107,25 @@ impl Testimony {
     /// The trampoline's first word: `Ok` once its program runs.  On macOS
     /// EOF says so, the writer being close-on-exec; on Linux it is an
     /// envelope gone before its trampoline spoke, which `vanished` words.
-    /// A stop on `scope` ends the wait.
+    /// A stop on `scope` ends the wait: a Linux program can stop its
+    /// supervisor before it says `started`.
     pub(crate) fn first(
         &mut self,
-        scope: Option<&Scope>,
+        scope: &Scope,
         vanished: impl FnOnce() -> Refusal,
     ) -> Result<(), Unstarted> {
+        use rustix::event::PollFlags;
         let refused = |why: String| Err(Unstarted::Refused(Refusal::Unavailable(why)));
-        match self.heard(scope)?.and_then(|()| Record::read(&mut self.0)) {
+        // A readable report holds its first record whole, or soon: only
+        // `started`, one byte, is written once a program runs.
+        let heard = loop {
+            scope.poll().map_err(Unstarted::Stopped)?;
+            match crate::io::poll_slice(&self.0, PollFlags::IN) {
+                Ok(None) => {}
+                ready => break ready.and_then(|_| Record::read(&mut self.0)),
+            }
+        };
+        match heard {
             Ok(Some(Record::Started)) => Ok(()),
             Ok(None) if cfg!(target_os = "macos") => Ok(()),
             Ok(None) => Err(Unstarted::Refused(vanished())),
@@ -129,23 +140,6 @@ impl Testimony {
         }
     }
 
-    /// Wait until the report is readable, reading `scope` between slices: a
-    /// Linux program can stop its supervisor before it says `started`.  A
-    /// readable report holds its first record whole, or soon: only `started`,
-    /// one byte, is written once a program runs.
-    fn heard(&self, scope: Option<&Scope>) -> Result<io::Result<()>, Unstarted> {
-        use rustix::event::PollFlags;
-        loop {
-            if let Some(Err(stop)) = scope.map(Scope::poll) {
-                return Err(Unstarted::Stopped(stop));
-            }
-            match crate::io::poll_slice(&self.0, PollFlags::IN) {
-                Ok(None) => {}
-                ready => return Ok(ready.map(drop)),
-            }
-        }
-    }
-
     /// The program's end as its supervisor told it, else `envelope`, bwrap's
     /// own: a `128 + n` there with nothing told is the supervisor's death by
     /// `n`, and nothing else exits so silently.  Never waits, being read on
@@ -153,21 +147,11 @@ impl Testimony {
     #[cfg(target_os = "linux")]
     pub(crate) fn amend(mut self, envelope: super::WaitOutcome) -> super::WaitOutcome {
         use super::{Signal, WaitOutcome};
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
-        let now = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let mut fds = [PollFd::new(&self.0, PollFlags::IN)];
-        if !poll(&mut fds, Some(&now)).is_ok_and(|ready| ready > 0) {
+        if self.0.set_nonblocking(true).is_err() {
             return envelope;
         }
         match Record::read(&mut self.0) {
-            Ok(Some(Record::Ended(status))) => match (status.code(), status.signal()) {
-                (Some(code), _) => WaitOutcome::Exited(code),
-                (None, Some(signal)) => WaitOutcome::Signaled(Signal::new(signal)),
-                (None, None) => envelope,
-            },
+            Ok(Some(Record::Ended(status))) => WaitOutcome::from_exit_status(status),
             Ok(None) => match envelope {
                 WaitOutcome::Exited(code) => {
                     Signal::of_status(code).map_or(envelope, WaitOutcome::Signaled)
@@ -260,7 +244,7 @@ mod tests {
             std::thread::sleep(3 * POLL_SLICE);
             stopper.cancel(CancelCause::Interrupted);
         });
-        let heard = Testimony(reader).first(Some(&scope), || {
+        let heard = Testimony(reader).first(&scope, || {
             panic!("a report whose writer is open has not vanished")
         });
         stop.join().expect("the stopper");
@@ -268,6 +252,36 @@ mod tests {
             matches!(&heard, Err(Unstarted::Stopped(stop)) if stop.cause == CancelCause::Interrupted),
             "{heard:?}"
         );
+    }
+
+    /// The end is read without waiting: what the supervisor told, else a
+    /// silent supervisor's own signal death, else, with a writer still open,
+    /// bwrap's status as it is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_end_is_amended_by_what_was_told_and_never_waited_for() {
+        use crate::process::{Signal, WaitOutcome};
+        let told = |records: &[Record]| {
+            let (reader, mut writer) = crate::process::cloexec_socketpair().expect("socketpair");
+            for record in records {
+                writer
+                    .write_all(&record.bytes())
+                    .expect("a record is written");
+            }
+            (Testimony(reader), writer)
+        };
+        let bwrap = WaitOutcome::Exited(128 + libc::SIGKILL);
+        let (ended, writer) = told(&[Record::Ended(ExitStatus::from_raw(3 << 8))]);
+        drop(writer);
+        assert_eq!(ended.amend(bwrap), WaitOutcome::Exited(3));
+        let (silent, writer) = told(&[]);
+        drop(writer);
+        assert_eq!(
+            silent.amend(bwrap),
+            WaitOutcome::Signaled(Signal::new(libc::SIGKILL))
+        );
+        let (open, _writer) = told(&[]);
+        assert_eq!(open.amend(bwrap), bwrap);
     }
 
     #[test]

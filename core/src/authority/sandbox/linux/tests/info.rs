@@ -78,16 +78,21 @@ fn a_truncated_info_record_refuses_spawn_and_reaps_the_envelope() {
     let child_pid = pid.clone();
     let info = record(br#"{"child-pid":"#);
     let mut launch = Launch::from_command(command);
-    launch.envelope(crate::process::launch::Envelope {
-        program: "bwrap",
-        payload_pgid: Some(Box::new(move || {
-            let mut line = String::new();
-            std::io::BufReader::new(reader)
-                .read_line(&mut line)
-                .unwrap();
-            child_pid.store(line.trim().parse().unwrap(), Ordering::SeqCst);
-            info.payload_pgid()
-        })),
+    let (report, report_writer) = crate::process::cloexec_socketpair().unwrap();
+    launch.confine(crate::process::launch::Confined {
+        report: crate::process::report::Report::new(report, report_writer.into()),
+        scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().worker()),
+        envelope: Some(crate::process::launch::Envelope {
+            program: "bwrap",
+            payload_pgid: Some(Box::new(move || {
+                let mut line = String::new();
+                std::io::BufReader::new(reader)
+                    .read_line(&mut line)
+                    .unwrap();
+                child_pid.store(line.trim().parse().unwrap(), Ordering::SeqCst);
+                info.payload_pgid()
+            })),
+        }),
     });
     let Err(crate::process::Unstarted::Refused(why)) = launch.spawn(PgidPolicy::NewLeader) else {
         panic!("spawn must refuse");

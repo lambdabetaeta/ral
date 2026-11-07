@@ -12,7 +12,7 @@
 //! (`shell::exec::pipeline::group`), a pipeline's or a lone external's;
 //! pipeline stages borrow the pipeline's.
 
-use super::{Pgid, PgidPolicy};
+use super::{Landing, Pgid, PgidPolicy};
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Pipeline-group state ───────────────────────────────────────────────────
@@ -251,11 +251,11 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the Join arm holds the registry guard across `CloseHandle` on purpose: see the comment there"
     )]
-    pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) -> Option<i32> {
+    pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) -> super::Landing {
         let child_pid = child.id();
         let child_handle = child.raw_process_handle();
         match prepared {
-            PreparedGroup::None => None,
+            PreparedGroup::None => super::Landing::Shares,
             PreparedGroup::NewLeader {
                 job,
                 completion_port,
@@ -273,7 +273,8 @@ mod win_groups {
                         all_done: false,
                     },
                 ));
-                Some(leader_pid)
+                super::Pgid::from_raw(leader_pid)
+                    .map_or(super::Landing::Shares, super::Landing::Owns)
             }
             PreparedGroup::Join { leader, job } => {
                 // Lock held across the `CloseHandle` below: this duplicate may be
@@ -290,7 +291,7 @@ mod win_groups {
                 unsafe {
                     CloseHandle(job);
                 }
-                Some(leader)
+                super::Landing::Joins
             }
         }
     }
@@ -592,11 +593,12 @@ pub(crate) fn close_prepared_group(prepared: PreparedGroup) {
     win_groups::close_prepared(prepared);
 }
 
+/// Register `child` in the group `prepared` for it: where it landed.
 pub(crate) fn register_prepared_group(
     prepared: PreparedGroup,
     child: &crate::process::ChildHandle,
-) -> Option<Pgid> {
-    win_groups::register(prepared, child).and_then(Pgid::from_raw)
+) -> Landing {
+    win_groups::register(prepared, child)
 }
 
 // ── Group wait/signal primitives ────────────────────────────────────────────

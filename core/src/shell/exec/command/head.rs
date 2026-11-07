@@ -4,7 +4,7 @@
 
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
-use crate::fact::{Failure, NotRunnable, Unrunnable};
+use crate::fact::{Failure, Unrunnable};
 use crate::ir::CommandName;
 use crate::path::walk::failure_trace;
 use crate::path::{self, CwdPath, Kind, LeafMode, LexicalPath, walk};
@@ -193,7 +193,7 @@ fn probe(
                 (_, ErrorKind::NotFound | ErrorKind::NotADirectory)
                 | (CandidateKind::Search, _) => not_found(shown),
                 (CandidateKind::Path, _) => {
-                    unstartable(candidate_kind, shown, &arg0, Unrunnable::of_io(&error))
+                    unstartable(candidate_kind, shown, &arg0, unrunnable(&error))
                 }
             }));
         }
@@ -262,7 +262,16 @@ fn unstartable(kind: CandidateKind, shown: &str, arg0: &Path, why: Unrunnable) -
         CandidateKind::Path => shown.to_owned(),
         CandidateKind::Search => path::shown(arg0),
     };
-    Error::process(shown, Failure::NotRunnable(NotRunnable { found, why }))
+    Error::process(shown, Failure::not_runnable(found, why))
+}
+
+/// What an `io::Error` met launching a program means: a refusal is
+/// permission denied, anything else is the OS's own words.
+pub(super) fn unrunnable(e: &std::io::Error) -> Unrunnable {
+    match e.kind() {
+        ErrorKind::PermissionDenied => Unrunnable::PermissionDenied,
+        _ => Unrunnable::Io(e.to_string()),
+    }
 }
 
 /// Where the launcher's child finds `target`, a path head's native file:
@@ -283,6 +292,8 @@ fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
 mod tests {
     use super::*;
     use crate::authority::policy::{Baseline, Capabilities, ExecGrant, ExecKey, GrantStack};
+    #[cfg(unix)]
+    use crate::fact::NotRunnable;
     use crate::path::FrozenPath;
     use std::path::Path;
 

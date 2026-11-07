@@ -60,14 +60,15 @@ pub(crate) enum WaitOutcome {
 }
 
 impl WaitOutcome {
-    /// Classify a Windows `ExitStatus`.
-    #[cfg(windows)]
+    /// Classify an ended process's `ExitStatus`.
+    #[cfg(any(windows, target_os = "linux"))]
     pub(crate) fn from_exit_status(status: std::process::ExitStatus) -> Self {
-        match status.code() {
-            Some(code) => Self::Exited(code),
-            // A Windows status always has a code.
-            None => Self::Exited(1),
+        #[cfg(unix)]
+        if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+            return Self::Signaled(Signal::new(signal));
         }
+        // Only a stop, which no ended process leaves, has neither.
+        Self::Exited(status.code().unwrap_or(1))
     }
 
     #[cfg(all(test, unix))]
@@ -190,6 +191,22 @@ mod tests {
                 "status {code}"
             );
         }
+    }
+
+    /// An ended status is its signal death, or its exit code.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exit_status_is_its_signal_or_its_code() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        assert_eq!(
+            WaitOutcome::from_exit_status(ExitStatus::from_raw(139 << 8)),
+            WaitOutcome::Exited(139)
+        );
+        assert_eq!(
+            WaitOutcome::from_exit_status(ExitStatus::from_raw(libc::SIGSEGV)),
+            signaled(libc::SIGSEGV)
+        );
     }
 
     fn code(failure: Failure) -> u8 {

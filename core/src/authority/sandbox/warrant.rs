@@ -1070,7 +1070,13 @@ mod tests {
             let mut handoff = Handoff::default();
             let (slots, report) = super::super::launch::issue(warrant, &mut handoff)?;
             let own = super::super::reexec::own().unwrap();
-            let mut launch = super::super::launch::trampoline(own, handoff, slots, report);
+            let mut launch = super::super::launch::trampoline(
+                own,
+                handoff,
+                slots,
+                report,
+                &crate::process::DurableRoot::default().worker(),
+            );
             launch.stdin(crate::process::StdioSpec::null());
             Ok::<_, super::super::Refusal>(launch)
         };
