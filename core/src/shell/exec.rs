@@ -3,7 +3,7 @@
 //! `redirect`) a body runs inside.
 //!
 //! The seam with `crate::shell::evaluator` is narrow both ways.  Down, the machine
-//! enters at `pipeline::PipeNode::run`, `dispatch::classify_command`,
+//! enters at `pipeline::PipeNode::run`, `dispatch::resolve_command_word`,
 //! `run_base_frame`, `run_external`, and `redirect::scope`.  Up, a stage thread
 //! re-enters the machine through the `pipeline::StageEval` the evaluator hands
 //! `PipeNode::run`, so the recursion is irreducible but the runtime never

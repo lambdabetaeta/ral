@@ -2,9 +2,8 @@
 //!
 //! Order is env → handlers → external for a bare name; `^name` and a path
 //! head are the external directly, consulting neither the env nor the stack.
-//! `evaluator::machine`'s `Exec` rule is the entry that classifies and runs
-//! every arm; pipeline staging reaches
-//! `resolve_command_word`/`classify_command` directly.
+//! `evaluator::machine`'s `Exec` rule is the entry that resolves and runs
+//! every arm; pipeline staging reaches `resolve_command_word` directly.
 
 use crate::fact::{AuditIo, Command, ExitCode};
 use crate::ir::{CommandName, CommandWord};
@@ -14,7 +13,7 @@ use crate::shell::runtime::{
 };
 
 use super::capture::with_audit_capture;
-use super::command::{self, Admission, Head, Target};
+use super::command::{self, Admission, Head};
 use super::redirect::scope::with_redirects;
 use crate::ir::Redirects;
 use crate::source::Span;
@@ -22,8 +21,7 @@ use crate::source::Span;
 // ── Resolution ─────────────────────────────────────────────────────────
 
 /// One arm per place a command name can live.
-/// `P` is the external's target, or admission from [`classify_command`].
-pub(crate) enum Resolution<P = Target> {
+pub(crate) enum Resolution {
     Env(Value),
     /// `depth` counts handler frames from the top down to the matched one
     /// inclusive — what `strip_matched` takes.  Boxed: [`HandlerEntry`] would
@@ -34,13 +32,12 @@ pub(crate) enum Resolution<P = Target> {
     },
     /// A base handler frame — a manifest row from the argv half.
     Base(BuiltinEntry),
-    External(Head<P>),
+    External(Head),
 }
 
 /// Bare-name lookup: env → handlers → external.  A head like `f x` is a
 /// lexical name, so `env` — not `shell.env` — is what a bare name
-/// resolves through.  No admission check and no audit — those belong to
-/// [`classify_command`].
+/// resolves through.  No admission check and no audit.
 pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
     if let Some(value) = crate::shell::runtime::lookup(name, env, &shell.sig) {
         return Resolution::Env(value.clone());
@@ -65,24 +62,6 @@ pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell)
             Resolution::External(Head::resolve(name, &shell.context))
         }
     }
-}
-
-/// Resolution plus head admission, a plain call's one exec judgment:
-/// `Err` is the grant refusing the head before its redirects open or its
-/// call is recorded.  Grants govern exec alone, so the other arms pass
-/// unconditionally.
-pub(crate) fn classify_command(
-    head: &CommandWord,
-    env: &Env,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Resolution<Admission>> {
-    Ok(match resolve_command_word(head, env, shell) {
-        Resolution::External(head) => Resolution::External(head.admit(mooring, shell)?),
-        Resolution::Env(value) => Resolution::Env(value),
-        Resolution::Handler { entry, depth } => Resolution::Handler { entry, depth },
-        Resolution::Base(entry) => Resolution::Base(entry),
-    })
 }
 
 // ── Runners ─────────────────────────────────────────────────────────────

@@ -23,7 +23,7 @@ mod vet;
 pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
-pub(crate) use head::{Admission, Head, Target};
+pub(crate) use head::{Admission, Head};
 pub(crate) use process::{Prepared, ending, prepare, start};
 pub(crate) use stdio::{ChildIo, ChildOut, TtyInputPermit, wire_stdio};
 

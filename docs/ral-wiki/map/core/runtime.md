@@ -14,12 +14,12 @@ per-child confinement choice. It re-enters evaluation only through the
 closures, so the mutual recursion is irreducible, though `shell::exec` names no
 `shell::evaluator` item; the evaluator reaches it at
 `PipeNode::run` and, dispatching an `Exec` node, at
-`dispatch::classify_command` → `run_base_frame` / `run_external`, and the redirect scope
+`dispatch::resolve_command_word` → `run_base_frame` / `run_external`, and the redirect scope
 (`redirect::scope`), which the machine's `Frame::Redirect` enters
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
-- `dispatch.rs` — `classify_command`, the single site that resolves a head
-  (env → handlers → external) and admits it, and the runners
+- `dispatch.rs` — `resolve_command_word`, the single site that resolves a
+  head (env → handlers → external), and the runners
   (`run_base_frame`, `run_external`) the machine's `Exec` rule then calls for
   the chosen arm; the evaluator's down-seam for a bare command. There is no builtin arm: a native table entry is
   an `Env` hit on a native value, and a base-frame row is a `Base` hit on the

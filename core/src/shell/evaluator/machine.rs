@@ -886,7 +886,7 @@ impl Machine {
         let argv = close_argv(&exec.argv, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
         let offer = |b| offer_path_as_text(b, &exec.head, &argv);
-        match dispatch::classify_command(&exec.head, env, mooring, shell).map_err(offer)? {
+        match dispatch::resolve_command_word(&exec.head, env, shell) {
             Resolution::Env(Value::Native(entry)) if entry.decl.is_boundary() => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
                 let v = run_boundary(&entry, &argv, exec.site.as_ref(), span, mooring, shell)?;
@@ -915,6 +915,7 @@ impl Machine {
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::External(head) => {
+                let head = head.admit(mooring, shell).map_err(offer)?;
                 let v = dispatch::run_external(head, &argv, &redirs, span, mooring, shell)
                     .map_err(|b| if names_no_program(&b) { offer(b) } else { b })?;
                 Ok(Focus::Return(Terminal::Value(v)))
