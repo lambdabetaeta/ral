@@ -110,7 +110,7 @@ impl Image {
 pub(crate) fn interpreter_of(admitted: &Admitted) -> Option<PathBuf> {
     #[cfg(unix)]
     if let Program::File { located, .. } = admitted.program() {
-        return super::carriers::launched_shebang(located);
+        return located.interpreter();
     }
     None
 }
@@ -800,7 +800,7 @@ mod tests {
     /// the script's directory admits the interpreter, only support does.
     #[cfg(target_os = "macos")]
     fn system_script_elsewhere() -> Option<std::path::PathBuf> {
-        use super::super::carriers::{launched_shebang, trusted_real};
+        use super::super::carriers::trusted_real;
 
         let scripts = std::fs::read_dir("/usr/bin").ok()?;
         scripts.flatten().map(|e| e.path()).find(|script| {
@@ -812,7 +812,7 @@ mod tests {
                 return false;
             };
             trusted_real(script).is_some()
-                && launched_shebang(located).is_some_and(|interpreter| {
+                && located.interpreter().is_some_and(|interpreter| {
                     trusted_real(&interpreter).is_some() && interpreter.parent() != script.parent()
                 })
         })

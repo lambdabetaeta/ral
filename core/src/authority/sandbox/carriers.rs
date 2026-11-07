@@ -8,8 +8,9 @@
 //! program an `env` interpreter runs.  Kernel-only: the in-process guard
 //! never consults them.
 
+use crate::authority::policy::Ungoverned;
 use crate::path::walk::{Kind, Vetted, walk_with};
-use crate::path::{Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Trace};
+use crate::path::{LeafMode, LexicalPath, Located, ObjectId, RealPath, Trace};
 use crate::site::{Silent, site};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -55,7 +56,6 @@ pub(crate) fn linkers(_: impl Fn(&Trace) -> bool) -> Vec<RealPath> {
 /// admit a command directory.
 #[cfg(target_os = "linux")]
 pub(crate) fn linkers(excluded: impl Fn(&Trace) -> bool) -> Vec<RealPath> {
-    use crate::authority::policy::Ungoverned;
     const PATTERNS: &[&str] = &[
         "/lib/ld*.so*",
         "/lib64/ld*.so*",
@@ -97,7 +97,7 @@ fn hops(program: Located) -> Vec<PathBuf> {
     let mut hops = Vec::new();
     #[cfg(target_os = "macos")]
     hops.extend(shims(program.real()));
-    hops.extend(trusted_shebang(program));
+    hops.extend(site!(Silent::CarrierRead, Ungoverned::read(program)).interpreter());
     hops
 }
 
@@ -151,19 +151,6 @@ fn system_only(v: &Vetted<'_>, me: u32) -> bool {
             .is_err())
 }
 
-fn trusted_shebang(program: Located) -> Option<PathBuf> {
-    use crate::authority::policy::Ungoverned;
-    let program = site!(Silent::CarrierRead, Ungoverned::read(program));
-    crate::path::shebang(program.read().ok()?)
-}
-
-/// The interpreter on the `#!` line of the program that was judged, read
-/// through its own handle: the object the launch is admitted for, whatever the
-/// name holds by now.
-pub(crate) fn launched_shebang(program: &Located<Judged<Reading>>) -> Option<PathBuf> {
-    crate::path::shebang(program.read().ok()?)
-}
-
 /// What the system's own shims forward to: `/bin/sh` to the shell
 /// `/private/var/select/sh` selects, and a stub under `/usr/bin` to the real
 /// tool in the developer directory.  Never `DEVELOPER_DIR`: the confined code
@@ -207,7 +194,8 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
     .find_map(|script| {
         let script = trusted_real(&PathBuf::from(script))?;
         let script_real = script.real().clone();
-        let interp = trusted_real(&trusted_shebang(script)?)?;
+        let interpreter = site!(Silent::CarrierRead, Ungoverned::read(script)).interpreter()?;
+        let interp = trusted_real(&interpreter)?;
         Some((script_real, interp.real().clone()))
     })
 }
@@ -217,12 +205,7 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
 mod tests {
     use super::*;
     use crate::test_helper::{located, real};
-    use std::fs::File;
     use std::os::unix::fs::PermissionsExt;
-
-    fn shebang(path: &Path) -> Option<PathBuf> {
-        crate::path::shebang(File::open(path).ok()?)
-    }
 
     /// An executable `name` under `dir` holding `body`.
     fn file(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -281,14 +264,15 @@ mod tests {
         let Program::File { located, .. } = admitted.program() else {
             panic!("a script is a file")
         };
-        assert_eq!(launched_shebang(located), Some(PathBuf::from("/bin/sh")));
+        assert_eq!(located.interpreter(), Some(PathBuf::from("/bin/sh")));
         std::fs::rename(file(&root, "other", "#!/bin/other\n"), &script).expect("swap");
 
-        assert_eq!(shebang(&script), Some(PathBuf::from("/bin/other")));
+        let swapped = Ungoverned::read(crate::test_helper::located(&script)).interpreter();
+        assert_eq!(swapped, Some(PathBuf::from("/bin/other")));
         // Linux reads the held object; macOS opens the name, verifies it against
         // the held identity, and refuses the one that now leads elsewhere.
         let expected = (!cfg!(target_os = "macos")).then(|| PathBuf::from("/bin/sh"));
-        assert_eq!(launched_shebang(located), expected);
+        assert_eq!(located.interpreter(), expected);
     }
 
     /// Files in a temp dir are this uid's, who could write any interpreter

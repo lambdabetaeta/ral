@@ -165,6 +165,13 @@ impl<A: Reads> Located<A> {
         // A read makes nothing, so no visibility is asked.
         self.open(Access::Read, Visibility::Public)
     }
+
+    /// The interpreter of the leaf's `#!` line, read through its own handle:
+    /// the object judged, whatever its name holds by now.
+    #[cfg(unix)]
+    pub(crate) fn interpreter(&self) -> Option<PathBuf> {
+        crate::path::shebang(self.read().ok()?)
+    }
 }
 
 /// The discard device, opened by its fixed name — `/dev/null`, `\\.\NUL` —

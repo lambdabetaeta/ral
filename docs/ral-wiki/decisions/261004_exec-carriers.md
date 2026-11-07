@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: 6281520c
 verified_at_commit: 6281520c
-anchors: [carriers, trusted_real, trusted_shebang, launched_shebang, live_support, ExecAllow, allowed_files, emit_exec_rules, Warrant]
+anchors: [carriers, trusted_real, interpreter, live_support, ExecAllow, allowed_files, emit_exec_rules, Warrant]
 ---
 
 > **Amended 2026-10-06**
