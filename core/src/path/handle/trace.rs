@@ -207,7 +207,7 @@ impl RealPath {
     /// Never a lossy decoding, which would make such a file the one named
     /// with U+FFFD in its place.
     pub(crate) fn name(&self) -> Option<&str> {
-        site!(Silent::RealName, self.0.file_name()? => to_str())
+        site!(Silent::RealName, crate::path::file_name(&self.0)? => to_str())
     }
 
     /// The position above this one, `None` at a root.

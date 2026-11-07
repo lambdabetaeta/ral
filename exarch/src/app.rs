@@ -6,7 +6,7 @@ use ral_core::Shell;
 use ral_core::own::TestDir;
 use ral_core::own::{Entry, OwnDir, OwnError};
 use ral_core::path::{
-    GuestPath, Kind, NotUtf8, Visibility, XdgKind, app_dir, join_slash, project_slug,
+    GuestPath, Kind, NotUtf8, Visibility, XdgKind, app_dir, file_name, join_slash, project_slug,
     spelled_parent,
 };
 use std::cmp::Ordering;
@@ -578,7 +578,7 @@ pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
             ral_core::path::shown(target)
         ));
     };
-    let Some(sessions) = spelled_parent(target).and_then(Path::file_name) else {
+    let Some(sessions) = spelled_parent(target).and_then(file_name) else {
         return Ok(target.to_path_buf());
     };
     if sessions != "sessions" {

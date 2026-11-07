@@ -2,7 +2,7 @@
 generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-04
-anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, GuestJail::plan, Launch::apply_guest_jail, install_pre_exec, net_veto]
+anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, GuestJail::plan, Launch::apply_guest_jail, install_pre_exec, GrantStack::net]
 ---
 
 # Capability enforcement: one model, two enforcers

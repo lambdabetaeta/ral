@@ -136,7 +136,9 @@ pub fn locate(exe: &Path) -> Result<Layout, Error> {
         }
     }
     let checkout = site!(Silent::CheckoutRoot, exe => ancestors())
-        .find(|dir| dir.file_name().is_some_and(|name| name == "target"))
+        .find(|dir| {
+            site!(Silent::CheckoutRoot, dir => file_name()).is_some_and(|name| name == "target")
+        })
         .and_then(|target| site!(Silent::CheckoutRoot, target => parent()));
     if let Some(checkout) = checkout {
         let out = checkout.join("vm-image").join("out");

@@ -45,7 +45,7 @@ pub fn spelled_parent(path: &Path) -> Option<&Path> {
 /// ending in `..`.
 #[must_use]
 pub fn file_name(path: &Path) -> Option<&OsStr> {
-    path.file_name()
+    site!(Silent::SpelledName, path => file_name())
 }
 
 /// `shown` relative to `root`, its names slash-joined: a manifest's key,
@@ -101,7 +101,7 @@ pub fn utf8(path: &Path) -> Result<&str, NotUtf8> {
 /// file name or it is not UTF-8.  For callers that key on a command basename
 /// (exit hints, login-shell detection).
 pub fn basename(path: &str) -> &str {
-    let name = site!(Silent::Basename, Path::new(path)).file_name();
+    let name = file_name(site!(Silent::Basename, Path::new(path)));
     let name = name.and_then(|n| site!(Silent::Basename, n => to_str()));
     name.unwrap_or(path)
 }

@@ -50,6 +50,10 @@ pub(in crate::path) enum Silent {
     /// a program's own layout has one helper to ask, and `Path::parent` stays
     /// banned everywhere else.
     SpelledParent,
+    /// The by-spelling last name in `lex::file_name`: a lexical read of a name
+    /// that opens no object, so it raises no card.  `Path::file_name` stays
+    /// banned everywhere else.
+    SpelledName,
     /// A path's parent by spelling, with `.` standing in lexically for an
     /// empty one: a read of names that opens no object, so it raises no card.
     ParentOrCwd,
