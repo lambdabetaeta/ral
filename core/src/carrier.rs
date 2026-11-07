@@ -16,7 +16,9 @@ use std::time::Duration;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::engine::Scopes;
-use crate::process::{Ambient, CancelCause, Fatal, POLL_SLICE, Scope, ScopeNode, interrupt_epoch};
+use crate::process::{
+    Ambient, CancelCause, Fatal, POLL_SLICE, RootCause, Scope, ScopeNode, interrupt_epoch,
+};
 use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, Grants, PathEntry, Probe, WorkerRow};
 use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
@@ -591,9 +593,9 @@ impl ControlSender {
         self.send(Control::Strike(id, cause));
     }
 
-    /// End every run and every worker of the session, for good.
-    pub fn terminate(&self) {
-        self.send(Control::Terminate);
+    /// End every run and every worker of the session, for good, with `cause`.
+    pub fn end(&self, cause: RootCause) {
+        self.send(Control::End(cause));
     }
 
     /// Deliver one ambient cause to this session. Forwarding lags the key, so
@@ -608,7 +610,7 @@ impl ControlSender {
                     self.strike(id, CancelCause::Interrupted);
                 }
             }
-            Ambient::Root(cause) => self.send(Control::ending(cause)),
+            Ambient::Root(cause) => self.send(Control::End(cause)),
         }
     }
 

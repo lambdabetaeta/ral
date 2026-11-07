@@ -93,14 +93,15 @@ impl IdentityTransport {
         Ok(Self::over(Engine::new(shell, self.installer)))
     }
 
-    /// Terminate, wipe the roster under the session lock, and count surviving worker threads; idempotent.
+    /// End the root with `Cancelled`, its host's own teardown, wipe the roster
+    /// under the session lock, and count surviving worker threads; idempotent.
     ///
     /// # Errors
     /// [`Severed::Faulted`] naming how many worker threads outlived the grace
     /// period.
     pub fn end(&self) -> Result<(), Severed> {
         forbid_reentry(self);
-        self.control().terminate();
+        self.control().end(crate::process::RootCause::Cancelled);
         let survivors = {
             let workers = &self.engine.lock().shell.local.workers;
             workers.cancel_all();

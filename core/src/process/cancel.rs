@@ -65,6 +65,41 @@ pub enum CancelCause {
 
 crate::label!(typed CancelCause);
 
+/// Why a session's durable root ends; nothing else ends one.  Each shares
+/// its [`CancelCause`]'s encoding, so the two escalate alike.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    strum::FromRepr,
+    VariantArray,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u8)]
+pub enum RootCause {
+    /// Its host's own teardown: `IdentityTransport::end`, a wire engine's
+    /// session teardown, exarch's `Host::end`.
+    Cancelled = CancelCause::Cancelled as u8,
+    /// SIGTERM / SIGHUP, as its host forwards them.
+    Terminated = CancelCause::Terminated as u8,
+    /// Ctrl-`\` (SIGQUIT), as its host forwards it.
+    Aborted = CancelCause::Aborted as u8,
+}
+
+impl From<RootCause> for CancelCause {
+    fn from(cause: RootCause) -> Self {
+        match cause {
+            RootCause::Cancelled => Self::Cancelled,
+            RootCause::Terminated => Self::Terminated,
+            RootCause::Aborted => Self::Aborted,
+        }
+    }
+}
+
 /// How long ral's teardown waits between its cause signal and the kill that
 /// ends the argument.  Short — a cancelled call is already over budget — but
 /// enough for a test runner to print its summary and exit.
@@ -91,8 +126,8 @@ impl CancelCause {
 
 // ── The ambient causes ─────────────────────────────────────────────────────
 
-/// The process-wide shutdown request (SIGTERM / SIGHUP, Ctrl-\\).  Absolute and
-/// one-way, so a signal delivered before a host listens still reaches it.
+/// The process-wide shutdown request, a [`RootCause`]'s encoding.  Absolute
+/// and one-way, so a signal delivered before a host listens still reaches it.
 static REQUESTED_ROOT: AtomicU8 = AtomicU8::new(0);
 
 /// Interrupts raised so far.  Only its own modification order is load-bearing:
@@ -117,7 +152,7 @@ pub fn request_interrupt() {
 /// Request the session's end with `cause`, reaching every [`forward_ambient`]
 /// listener, whenever it registers.  Async-signal-safe, as
 /// [`request_interrupt`] is.
-pub fn request_root_cancel(cause: CancelCause) {
+pub fn request_root_cancel(cause: RootCause) {
     REQUESTED_ROOT.fetch_max(cause as u8, Ordering::Release);
     super::reaper::kick();
 }
@@ -137,7 +172,28 @@ pub(crate) fn clear_root_request() {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ambient {
     Interrupt,
-    Root(CancelCause),
+    Root(RootCause),
+}
+
+impl Ambient {
+    /// The cause a scope hearing this records.
+    #[cfg(unix)]
+    pub(crate) fn cause(self) -> CancelCause {
+        match self {
+            Self::Interrupt => CancelCause::Interrupted,
+            Self::Root(cause) => cause.into(),
+        }
+    }
+
+    /// Raise this for every listener.  Async-signal-safe, as
+    /// [`request_interrupt`] and [`request_root_cancel`] are.
+    #[cfg(unix)]
+    pub(crate) fn raise(self) {
+        match self {
+            Self::Interrupt => request_interrupt(),
+            Self::Root(cause) => request_root_cancel(cause),
+        }
+    }
 }
 
 /// A forwarder's high-water marks: the interrupts and the root request it has
@@ -199,7 +255,7 @@ pub(crate) fn scan_ambient() {
         }
         if root > l.root_heard {
             l.root_heard = root;
-            if let Some(cause) = CancelCause::from_repr(root) {
+            if let Some(cause) = RootCause::from_repr(root) {
                 let _ = l.tx.send(Ambient::Root(cause));
             }
         }
@@ -483,8 +539,8 @@ impl DurableRoot {
 
     /// Record `cause` on the root, reaching the foreground run and every
     /// worker at once.
-    pub fn cancel(&self, cause: CancelCause) {
-        self.0.cancel(cause);
+    pub fn cancel(&self, cause: RootCause) {
+        self.0.cancel(cause.into());
     }
 }
 
@@ -606,7 +662,7 @@ mod tests {
 
     #[test]
     fn parent_cancel_reaches_child() {
-        let parent = DurableRoot::default();
+        let parent = DurableRoot::default().worker();
         let child = parent.child();
         assert!(!child.is_cancelled(), "a fresh child starts uncancelled");
         parent.cancel(CancelCause::Interrupted);
@@ -680,7 +736,7 @@ mod tests {
             None,
             "a run's interrupt must not reach a worker"
         );
-        root.cancel(CancelCause::Terminated);
+        root.cancel(RootCause::Terminated);
         assert_eq!(
             worker.cause(),
             Some(CancelCause::Terminated),
@@ -688,8 +744,17 @@ mod tests {
         );
     }
 
-    fn pair() -> (DurableRoot, ScopeNode) {
-        let parent = DurableRoot::default();
+    /// A root cause escalates as the cause it records, so `REQUESTED_ROOT`'s
+    /// `fetch_max` keeps the strongest.
+    #[test]
+    fn a_root_cause_is_encoded_as_its_cause() {
+        for &root in RootCause::VARIANTS {
+            assert_eq!(root as u8, CancelCause::from(root) as u8, "{root:?}");
+        }
+    }
+
+    fn pair() -> (ScopeNode, ScopeNode) {
+        let parent = DurableRoot::default().worker();
         let node = parent.child();
         (parent, node)
     }
@@ -910,7 +975,7 @@ mod tests {
             }
             forwarded_tx.send(ambient).expect("record queued delivery");
         });
-        let causes = [Ambient::Interrupt, Ambient::Root(CancelCause::Terminated)];
+        let causes = [Ambient::Interrupt, Ambient::Root(RootCause::Terminated)];
         deliver_to_forwarder(&guard, &causes);
         entered_rx.recv_timeout(timeout).expect("callback entered");
 
@@ -1012,10 +1077,10 @@ mod tests {
             Ok(Ambient::Interrupt),
             "an interrupt raised after it is forwarded"
         );
-        request_root_cancel(CancelCause::Terminated);
+        request_root_cancel(RootCause::Terminated);
         assert_eq!(
             first.recv_timeout(owed),
-            Ok(Ambient::Root(CancelCause::Terminated)),
+            Ok(Ambient::Root(RootCause::Terminated)),
             "a shutdown request is forwarded"
         );
 
@@ -1024,7 +1089,7 @@ mod tests {
         clear_root_request();
         assert_eq!(
             standing,
-            Ok(Ambient::Root(CancelCause::Terminated)),
+            Ok(Ambient::Root(RootCause::Terminated)),
             "a shutdown request already standing is forwarded at once"
         );
         assert!(

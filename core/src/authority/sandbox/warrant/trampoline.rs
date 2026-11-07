@@ -128,7 +128,7 @@ impl Confined {
 #[cfg(target_os = "linux")]
 fn supervise(witness: Witness, pid: Pid) -> u8 {
     use std::os::unix::process::ExitStatusExt;
-    crate::process::ignore(libc::SIGPIPE);
+    let _ = crate::process::install(libc::SIGPIPE, crate::process::Disposition::Ignore);
     let running = witness.started();
     let Ok(ended) = crate::process::reap(pid) else {
         // Unreachable: the program is this process's own child.
@@ -149,11 +149,12 @@ fn supervise(witness: Witness, pid: Pid) -> u8 {
 #[cfg(target_os = "linux")]
 fn tool_child(tool: &'static str, args: Vec<OsString>, caught: &[c_int], supervisor: Pid) -> ! {
     use std::io::Write;
-    for &signal in caught {
-        crate::process::default(signal);
-    }
-    let begun =
-        nix::sys::signal::SigSet::empty().thread_set_mask().is_ok() && die_with(supervisor).is_ok();
+    let defaulted = caught.iter().all(|&signal| {
+        crate::process::install(signal, crate::process::Disposition::Default).is_ok()
+    });
+    let begun = defaulted
+        && nix::sys::signal::SigSet::empty().thread_set_mask().is_ok()
+        && die_with(supervisor).is_ok();
     let code = if begun {
         // 101: `std`'s exit for a panicking `main`.
         std::panic::catch_unwind(move || crate::uutils::serve(tool.as_ref(), args)).unwrap_or(101)
@@ -182,14 +183,13 @@ fn die_with(supervisor: Pid) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn outlive_group_signals() -> Vec<c_int> {
     extern "C" fn heard(_: c_int) {}
-    let caught: Vec<c_int> = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
+    [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
         .into_iter()
-        .filter(|&signal| !crate::process::signal::ignored(signal))
-        .collect();
-    for &signal in &caught {
-        crate::process::install(signal, heard);
-    }
-    caught
+        .filter(|&signal| {
+            !crate::process::signal::ignored(signal)
+                && crate::process::signal::catch(signal, heard).is_ok()
+        })
+        .collect()
 }
 
 #[cfg(test)]

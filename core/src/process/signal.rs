@@ -1,12 +1,12 @@
 //! Signal handling: the platform handlers, dispositions, the escalation ladder
 //! and the signals a teardown sends.
 //!
-//! The platform handlers translate SIGINT / SIGTERM / SIGHUP into a
-//! [`CancelCause`] on the scopes of [`cancel`](crate::process::cancel) — SIGINT
-//! on the foreground run, SIGTERM / SIGHUP on the durable root — while a
-//! separate ladder counts deliveries and forces `_exit` on the third.  `unix`
-//! and `windows` exist only on their own platform, so neither can be linked
-//! from this page.
+//! The platform handlers touch no scope: each raises the ambient cause its
+//! signal asks for (see [`cancel`](crate::process::cancel)), an interrupt or
+//! a request on the durable root, which a host forwards to its engine as
+//! `Control`; a separate ladder counts shutdown deliveries and forces `_exit`
+//! on the third.  `unix` and `windows` exist only on their own platform, so
+//! neither can be linked from this page.
 //!
 //! The two are exhaustive, here and throughout ral-core: `os_pipe` is an
 //! unconditional dependency and builds on Unix and Windows alone, so a
@@ -21,16 +21,15 @@ use super::outcome::Signal;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
+pub(crate) use unix::catch;
+#[cfg(unix)]
 use unix::gesture_signal;
 #[cfg(target_os = "linux")]
 pub(crate) use unix::ignored;
 #[cfg(unix)]
-pub(crate) use unix::{KILL, gesture, grace_signal};
+pub use unix::{Disposition, install, install_handlers, reset_child_signals};
 #[cfg(unix)]
-pub use unix::{
-    default, ignore, install, install_handlers, install_interrupt_handler, interrupt_handler,
-    quit_handler, reset_child_signals, term_handler,
-};
+pub(crate) use unix::{KILL, gesture, grace_signal};
 
 #[cfg(windows)]
 mod windows;
@@ -52,12 +51,12 @@ pub(crate) fn signals_of(cause: CancelCause) -> impl Iterator<Item = Signal> {
 
 // ── Escalation ladder ──────────────────────────────────────────────────────
 
-/// Termination signals delivered since the last [`clear`]; the third forces
+/// Shutdown signals delivered since the last [`clear`]; the third forces
 /// `_exit` in the platform handler.
 ///
-/// Not a delivery mechanism — the handlers deliver through the cancel scopes,
-/// which is all [`Shell::poll`](crate::shell::runtime::Shell::poll) reads.  A backstop for wedged cooperative delivery
-/// must not depend on what it backstops.
+/// Not a delivery mechanism — the handlers deliver through the ambient
+/// causes a host forwards.  A backstop for wedged cooperative delivery must
+/// not depend on what it backstops.
 pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 
 /// Reset the escalation ladder at an acknowledgment boundary — the REPL

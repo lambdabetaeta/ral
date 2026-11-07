@@ -72,15 +72,15 @@ no job table: ral does not suspend
 
 `session/boot.rs` is the process-level setup that precedes the engine and
 the frontend the rc settles on after it: `setup_signals` (the whole Unix
-disposition table in one place — SIGINT `interrupt_handler`, which raises the
-foreground interrupt and nothing else, SIGQUIT root-abort, SIGTERM/SIGHUP term
-handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore — every entry set through
-core's `process::ignore` / `process::install`, the one place that snapshots the
+disposition table in one place — SIGINT `Interrupt`, which raises the
+foreground interrupt and nothing else, SIGQUIT `Abort`, SIGTERM/SIGHUP
+`Shutdown`, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE `Ignore` — every entry set through
+core's `process::install(sig, Disposition)`, the one place that snapshots the
 inherited `SIG_IGN`s before the first change so `reset_child_signals` can hand
 them on: the nohup rule), `claim_terminal` (run after
 SIGTTOU is ignored, since its `tcsetpgrp` runs from a group not yet in the
 foreground, and before SIGTTIN is: it parks the shell on SIGTTIN until it is
-foregrounded (at most 64 parks, then an error asking whether ral was started in the background of a shell that has since exited; SIGTTIN is set to `SIG_DFL` through core's `process::default` first), so `ral &` does not seize the terminal from a parent shell's
+foregrounded (at most 64 parks, then an error asking whether ral was started in the background of a shell that has since exited; SIGTTIN is set through core's `install(SIGTTIN, Disposition::Default)` first), so `ral &` does not seize the terminal from a parent shell's
 current job; it answers a `TerminalClaim` naming the group it left, if it
 left one, which hands the terminal back on drop — else a parent doing no job
 control, `vim`'s `:sh` or `su`, stops on its next terminal read),

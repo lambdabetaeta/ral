@@ -12,7 +12,7 @@ use std::num::NonZeroU8;
 use crate::data::FOValue;
 use crate::io::{Captured, RunIo, RunStdin};
 use crate::path::EnginePath;
-use crate::process::{CancelCause, RequestedTerminalAccess};
+use crate::process::{CancelCause, RequestedTerminalAccess, RootCause};
 use crate::shell::runtime::{CapturePolicy, Error};
 use probe::Probe;
 
@@ -23,7 +23,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 42;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -377,22 +377,9 @@ pub enum Control {
     /// Strike only this dispatch with its cause, even one not yet arrived;
     /// a stale id strikes nothing.
     Strike(DispatchId, CancelCause),
-    /// Cancel the session's durable root: every run and every
-    /// worker, for good.
-    Terminate,
-    /// [`Terminate`](Self::Terminate), as Ctrl-`\` asks it: cause `RootAbort`.
-    Abort,
-}
-
-impl Control {
-    /// The verb a shutdown request asks of the session it reaches.
-    pub(crate) fn ending(cause: CancelCause) -> Self {
-        if cause == CancelCause::Aborted {
-            Self::Abort
-        } else {
-            Self::Terminate
-        }
-    }
+    /// Cancel the session's durable root with its cause: every run and
+    /// every worker, for good.
+    End(RootCause),
 }
 
 // ── The terminal frame ────────────────────────────────────────────────
@@ -441,6 +428,23 @@ impl Report {
         match self {
             Self::Static { status, .. } | Self::Faulted { status, .. } => status.get(),
             Self::Ran(ran) => ran.ending.code(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_wire_tests {
+    use super::*;
+    use strum::VariantArray as _;
+
+    /// A session's end crosses the wire with its cause, every one of them.
+    #[test]
+    fn an_end_round_trips_its_cause() {
+        for &cause in RootCause::VARIANTS {
+            let control = Control::End(cause);
+            let wire = serde_json::to_string(&control).expect("encode");
+            let back: Control = serde_json::from_str(&wire).expect("decode");
+            assert_eq!(back, control, "{wire}");
         }
     }
 }

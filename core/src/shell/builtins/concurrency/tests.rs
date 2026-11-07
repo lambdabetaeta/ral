@@ -263,7 +263,7 @@ fn root_cancel_reaches_the_worker() {
     let shell = crate::test_helper::core_shell();
     let root = shell.session.root.clone();
     let (observed, worker_scope) = spawn_polling_worker(&shell, move |_| {
-        root.cancel(crate::process::CancelCause::Aborted);
+        root.cancel(crate::process::RootCause::Aborted);
     });
     assert!(
         worker_scope.is_cancelled(),
@@ -2386,7 +2386,10 @@ fn a_top_level_birth_hangs_at_the_root() {
     )
     .unwrap();
     assert_eq!(shell.local.workers.snapshot()[0].owner, Owner::Session);
-    shell.session.root.cancel(CancelCause::Terminated);
+    shell
+        .session
+        .root
+        .cancel(crate::process::RootCause::Terminated);
     assert!(handle.cancel.is_cancelled(), "the root reaches it");
 }
 

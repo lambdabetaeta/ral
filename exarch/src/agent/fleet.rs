@@ -12,7 +12,7 @@ use ral_core::carrier::Severed;
 use ral_core::own::OwnDir;
 #[cfg(test)]
 use ral_core::own::TestDir;
-use ral_core::process::{CancelCause, DurableRoot};
+use ral_core::process::{DurableRoot, RootCause};
 use ral_core::sync::LockExt;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -258,10 +258,10 @@ impl Registry {
             .filter(|handle| handle.parent().is_none())
             .collect()
     }
-    pub(crate) fn end(&self, cause: CancelCause) {
+    pub(crate) fn end(&self, cause: RootCause) {
         self.root.cancel(cause);
         for handle in self.handles() {
-            handle.0.address.end(cause);
+            handle.0.address.end(cause.into());
         }
     }
     #[cfg(test)]

@@ -1,6 +1,6 @@
 use super::*;
 use crate::carrier::testkit::{BARE, boot_at};
-use crate::process::{CancelCause, DurableRoot};
+use crate::process::{CancelCause, DurableRoot, RootCause};
 use crate::source::SourceOrigin;
 use crate::test_helper::eventually;
 use std::time::Duration;
@@ -76,7 +76,7 @@ fn terminate_reaches_a_foreign_scope_before_open_and_mid_run() {
         let transport = at(dir.path());
         let within = DurableRoot::default().child();
         if before_open {
-            transport.control().terminate();
+            transport.control().end(RootCause::Terminated);
         }
 
         let report = std::thread::scope(|threads| {
@@ -85,13 +85,13 @@ fn terminate_reaches_a_foreign_scope_before_open_and_mid_run() {
                 assert!(
                     eventually(WAIT, || dir.path().join("running").exists().then_some(()))
                         .is_some(),
-                    "the child must start before Terminate"
+                    "the child must start before the end"
                 );
-                transport.control().terminate();
+                transport.control().end(RootCause::Terminated);
             }
             assert!(
                 eventually(WAIT, || running.is_finished().then_some(())).is_some(),
-                "Terminate must end a dispatch under a foreign scope; before_open={before_open}"
+                "a root end must end a dispatch under a foreign scope; before_open={before_open}"
             );
             running.join().unwrap()
         });

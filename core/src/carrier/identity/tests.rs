@@ -156,24 +156,24 @@ mod identity_cancel_tests {
         );
     }
 
-    /// Ctrl-`\` arrives as `Control::Abort`, ending the session with its own
-    /// cause: `RootAbort`, reported 131 rather than a SIGTERM's 143.
+    /// Ctrl-`\` arrives as `Control::End(Aborted)`, ending the session with
+    /// its own cause, reported 131 rather than a SIGTERM's 143.
     #[cfg(unix)]
     #[test]
     fn a_forwarded_root_abort_ends_the_session() {
         assert_eq!(
-            forwarded(|| crate::process::request_root_cancel(crate::process::CancelCause::Aborted)),
+            forwarded(|| crate::process::request_root_cancel(crate::process::RootCause::Aborted)),
             (131, Some(131)),
         );
     }
 
-    /// SIGTERM arrives as `Control::Terminate`.
+    /// SIGTERM arrives as `Control::End(Terminated)`.
     #[cfg(unix)]
     #[test]
     fn a_forwarded_terminate_ends_the_session() {
         assert_eq!(
             forwarded(|| crate::process::request_root_cancel(
-                crate::process::CancelCause::Terminated
+                crate::process::RootCause::Terminated
             )),
             (143, Some(143)),
         );
@@ -580,7 +580,9 @@ mod probe_tests {
     fn session_ended_reads_the_root_cause() {
         let transport = fresh();
         assert_eq!(transport.session_ended(), Ok(None));
-        transport.control().terminate();
+        transport
+            .control()
+            .end(crate::process::RootCause::Terminated);
         assert_eq!(transport.session_ended(), Ok(Some(143)));
     }
 

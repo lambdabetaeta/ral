@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
-use crate::process::{CancelCause, POLL_SLICE, Scope};
+use crate::process::{POLL_SLICE, RootCause, Scope};
 use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
@@ -365,7 +365,7 @@ fn engine_session(
         let scopes = engine.scopes().clone();
         crate::process::forward_ambient(move |ambient| {
             if let crate::process::Ambient::Root(cause) = ambient {
-                scopes.apply(Control::ending(cause));
+                scopes.apply(Control::End(cause));
             }
         })
     };
@@ -541,7 +541,7 @@ fn engine_session(
     // ── Teardown settle ────────────────────────────────────────────
     // The loop may have exited with a run in flight: cancel it and every
     // worker under the durable root, then wait.
-    scopes.end(CancelCause::Cancelled);
+    scopes.end(RootCause::Cancelled);
     drop(run_tx);
     let settle_by = Instant::now() + SETTLE_TIMEOUT;
     while !worker.is_finished() && Instant::now() < settle_by {
@@ -771,6 +771,7 @@ mod engine_session_tests {
     use crate::fact::ExitCode as _;
     use crate::host::env::test_support::env_guard;
     use crate::path::EnginePath;
+    use crate::process::CancelCause;
     use crate::process::cancel::REQUEST_SERIAL;
     use crate::protocol::Ran;
 
@@ -1033,7 +1034,7 @@ mod engine_session_tests {
         let _env = env_guard();
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
-        crate::process::request_root_cancel(CancelCause::Terminated);
+        crate::process::request_root_cancel(RootCause::Terminated);
         let report = host.run(2, "/bin/sleep 30");
         crate::process::cancel::clear_root_request();
         assert!(

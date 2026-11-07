@@ -172,9 +172,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives]]).
 - `reaper.rs` — the process-wide child watch, the one door onto a wait:
-  `ChildHandle::into_watch` is how a spawned child reaches it, `Reaper::
-  watch` how a bare pid does. A `SIGCHLD` handler on Unix (`reaper/unix.rs`)
-  whose whole body is a write to a self-pipe, and a thread that per wake
+  `ChildHandle::into_watch` is how every spawned child reaches it,
+  `spawn_detached`'s intermediate included, `reaper::watch` being private to
+  `process`. `Watch::kill` is `signal(KILL)`. A `SIGCHLD` handler on Unix
+  (`reaper/unix.rs`), without `SA_RESTART`, whose whole body is a write to a
+  self-pipe, and a thread that per wake
   asks each watched pid two `waitid` questions — a stop, consumed and
   answered with `SIGCONT` on the spot so it never reaches a subscriber and
   is never re-reported on every wake, and an exit, observed with `WNOWAIT`
@@ -211,29 +213,31 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   lock that records the cause, so a standing cause implies an ended life.
   A life bound after the latch is cancelled at once; `unbind` releases one
   unended. The carriers' severance and exarch's record writer are each one.
-- `signal.rs` — *signals are causes*: the platform handlers translate each
-  delivered signal into a `CancelCause` on the ambient causes — SIGINT →
-  foreground `Interrupted`, SIGTERM/SIGHUP → root `Terminated` — so one
+- `signal.rs` — *signals are causes*: the platform handlers raise each
+  delivered signal as an ambient cause a host forwards — SIGINT → foreground
+  interrupt, SIGQUIT → root `Aborted`, SIGTERM/SIGHUP → root `Terminated`, a
+  closed `RootCause` read from the `GESTURES` key table — so one
   cancel-aware wait loop serves user interrupts, timeouts, and termination
   alike ([[decisions/260706_signals-are-causes|signals-are-causes]]).
   The poll point is `Shell::poll`, scope-only; `clear` is the boundary
   acknowledgment; the `ESCALATION` counter backs only the third-delivery
   `_exit` ladder (`escalation_pending` is the probe), whose `_exit` reads
-  `CancelCause::code`. A raw-mode frontend's Esc drives the same
+  the signal's cause's code. A raw-mode frontend's Esc drives the same
   non-escalating foreground cancel
   ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
   `signals_of` is one function over each platform's `grace_signal`,
-  `gesture_signal` and `KILL`; `interrupt_handler` is the interactive SIGINT
-  disposition — a bare `request_interrupt()`, with no delivery of its own,
-  since a pipeline's processes hear a cancellation through the collector — and
-  `quit_handler` is the Ctrl-`\` root abort. Unix `install_interrupt_handler`
-  installs SIGINT without `SA_RESTART` so the REPL's blocked input can return
-  on interruption; it snapshots inherited ignored dispositions before changing
-  them. `grace_signal(cause)` is the one
+  `gesture_signal` and `KILL`. Unix's one install is `install(sig,
+  Disposition)`: `Interrupt` (a bare `request_interrupt()`, with no delivery
+  of its own, since a pipeline's processes hear a cancellation through the
+  collector), `Shutdown` (the signal's cause, ticking the ladder), `Abort`
+  (the signal's cause, unescalated: Ctrl-`\`), `Ignore`, `Default`. None
+  sets `SA_RESTART`, so a blocked call a handler cuts returns `EINTR` and ral
+  retries it; the first install snapshots the inherited ignored
+  dispositions. `grace_signal(cause)` is the one
   cause→signal table the one teardown reads (the collector's `cancel_all`):
-  `Interrupt` → SIGINT,
-  `Explicit`/`Deadline`/`Terminate` → SIGTERM (on Windows all four →
-  Ctrl-Break, named by its `STATUS_CONTROL_C_EXIT`), `ReaderGone`/`RootAbort`
+  `Interrupted` → SIGINT,
+  `Cancelled`/`TimedOut`/`Terminated` → SIGTERM (on Windows all four →
+  Ctrl-Break, named by its `STATUS_CONTROL_C_EXIT`), `ReaderGone`/`Aborted`
   → `None`, straight to the kill
   ([[decisions/260905_one-delivery-path|one-delivery-path]]).
   Platform handlers live in `signal/unix.rs` and `signal/windows.rs`; the
@@ -304,7 +308,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `ChildHandle` raw process wrapper
   ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
   The whole stop-work flow — the
-  `Interrupt < Explicit < Deadline < Terminate < RootAbort`
+  `ReaderGone < Interrupted < Cancelled < TimedOut < Terminated < Aborted`
   order — is narrated in
   [[internals/cancellation|cancellation]].
 - `jail.rs` — the *guest spawn jail*'s decision layer: `GuestJail::plan`

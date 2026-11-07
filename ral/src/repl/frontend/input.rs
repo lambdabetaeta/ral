@@ -262,6 +262,7 @@ impl Drop for SignalMask {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::process::{Disposition, install};
 
     /// Re-run test `name` alone in a child with `flag` set.  `--exact` that
     /// matches nothing exits 0, so demand the child's own "1 passed".
@@ -335,7 +336,7 @@ mod tests {
         }
         use std::io::{Read as _, Write as _};
         use std::os::fd::AsRawFd as _;
-        ral_core::process::install_interrupt_handler().unwrap();
+        install(libc::SIGINT, Disposition::Interrupt).unwrap();
         let (read, mut write) = ral_core::process::cloexec_pipe().unwrap();
         assert_eq!(unsafe { libc::dup2(read.as_raw_fd(), 0) }, 0);
         let epoch = interrupt_epoch();
@@ -369,7 +370,7 @@ mod tests {
             return;
         }
         use std::io::{Read as _, Write as _};
-        ral_core::process::install_interrupt_handler().unwrap();
+        install(libc::SIGINT, Disposition::Interrupt).unwrap();
         for other_thread in [false, true] {
             for nonblocking in [false, true] {
                 let (read, mut write) = ral_core::process::cloexec_pipe().unwrap();
@@ -440,7 +441,7 @@ mod tests {
             return;
         }
 
-        ral_core::process::install_interrupt_handler().unwrap();
+        install(libc::SIGINT, Disposition::Interrupt).unwrap();
         let (read, mut write) = ral_core::process::cloexec_pipe().unwrap();
         assert_eq!(
             unsafe { libc::dup2(read.as_raw_fd(), libc::STDIN_FILENO) },

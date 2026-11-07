@@ -58,7 +58,8 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   foretold it). `open(id, within)` parents beneath the host scope when supplied,
   otherwise beneath the dispatch root. `apply` gives `Strike(id, cause)` its
   one meaning: strike only that dispatch with the exact cause, or foretell it.
-  `Terminate` and `Abort` cancel the durable root and current dispatch,
+  `End(cause)` cancels the durable root and current dispatch with its
+  `RootCause`,
   including one beneath a foreign host scope.
 
 ## `core/src/protocol.rs`
@@ -113,8 +114,8 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `no_desk()` is the fixed wording for a host with nothing to answer, and
   `From<EnquiryError> for Error` the one way a refusal becomes the error
   both carriers' desks raise as plain `Reason::Raised`.
-- `Control` — `Strike(DispatchId, CancelCause)`, `Terminate`, `Abort` (a
-  `Terminate` whose cause is `Aborted`); applied by `Scopes::apply` under
+- `Control` — `Strike(DispatchId, CancelCause)` and `End(RootCause)`, the
+  closed `Cancelled | Terminated | Aborted`; applied by `Scopes::apply` under
   both carriers. Even a terminal dispatch-local cause never ends the engine.
 - `Report` — `Static { rendered, status }` before evaluation;
   `Ran(Ran { ending, rendered, single_command, captured, trail })` after it;
@@ -252,7 +253,8 @@ The two interpretations of the algebra, and what they share.
   `aim(id)` records the dispatch in flight with the `interrupt_epoch` it was
   sent at, until its `Aimed` guard drops; `interrupt()` names that dispatch,
   and `hear(ambient)` names it only if the epoch has moved since, sending
-  `Control::ending` for a root cause; `forward_signals()` holds a process
+  `Control::End(cause)` for a root cause; `end(cause)` sends one itself, and
+  `IdentityTransport::end` ends with `Cancelled`; `forward_signals()` holds a process
   listener forwarding through that route.
 - `EventReceiver` — the front-end's single-drainer event queue; its `stash`
   hands back an event a probe's or a desk's pre-drain read past, in arrival

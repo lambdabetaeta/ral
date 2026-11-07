@@ -36,7 +36,7 @@ pub fn install_handlers() {
 }
 
 /// The interactive shell's console handler, non-escalating as Unix's
-/// `interrupt_handler`: an idle Ctrl-C is the line editor's, a run in flight
+/// `Disposition::Interrupt`: an idle Ctrl-C is the line editor's, a run in flight
 /// hears it through its host's `Control`.
 pub fn install_interrupt_handler() {
     let _ = ctrlc::set_handler(request_interrupt);

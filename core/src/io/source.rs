@@ -124,13 +124,17 @@ fn read_interruptible(fd: &mut File, scope: &Scope, buf: &mut [u8]) -> io::Resul
     }
 }
 
-/// Read once the fd is ready within a slice; `None` if the slice ends first.
+/// Read once the fd is ready within a slice; `None` if the slice ends first,
+/// or a signal cuts the read.
 #[cfg(unix)]
 fn try_read(fd: &mut File, buf: &mut [u8]) -> io::Result<Option<usize>> {
     use rustix::event::PollFlags;
-    match super::poll_slice(&*fd, PollFlags::IN)? {
-        Some(_) => fd.read(buf).map(Some),
-        None => Ok(None),
+    if super::poll_slice(&*fd, PollFlags::IN)?.is_none() {
+        return Ok(None);
+    }
+    match fd.read(buf) {
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(None),
+        r => r.map(Some),
     }
 }
 

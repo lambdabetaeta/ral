@@ -13,7 +13,7 @@ use crate::port::Port;
 use crate::provider::Provider;
 use crate::record::{AgentId, Born, Resumed};
 use ral_core::own::OwnDir;
-use ral_core::process::{AmbientForward, CancelCause};
+use ral_core::process::{AmbientForward, RootCause};
 use std::{io, sync::Arc};
 
 /// Owns a fleet and joins the human's children.
@@ -142,7 +142,7 @@ impl Host {
     }
 
     fn finish(&mut self) -> Vec<String> {
-        self.fleet.registry.end(CancelCause::Cancelled);
+        self.fleet.registry.end(RootCause::Cancelled);
         drop(self.signals.take());
         self.fleet.join_children()
     }

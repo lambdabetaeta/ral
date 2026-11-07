@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::data::FOValue;
 use crate::path::CwdPath;
-use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
+use crate::process::{CancelCause, DurableRoot, RootCause, Scope, ScopeNode};
 use crate::protocol::channel::WriteError;
 use crate::protocol::{
     Attach, Control, DispatchId, EngineSpec, Event, Origin, PROTOCOL_VERSION, Report, Root, Run,
@@ -225,8 +225,7 @@ impl Scopes {
     pub(crate) fn apply(&self, control: Control) {
         match control {
             Control::Strike(id, cause) => self.aim(id, cause),
-            Control::Terminate => self.end(CancelCause::Terminated),
-            Control::Abort => self.end(CancelCause::Aborted),
+            Control::End(cause) => self.end(cause),
         }
     }
 
@@ -256,11 +255,11 @@ impl Scopes {
     }
 
     /// Cancel the durable root: every run, and every worker.
-    pub(crate) fn end(&self, cause: CancelCause) {
+    pub(crate) fn end(&self, cause: RootCause) {
         let slot = self.slot.lock_ignore_poison();
         self.root.cancel(cause);
         if let Some((_, node)) = &slot.current {
-            node.cancel(cause);
+            node.cancel(cause.into());
         }
     }
 }

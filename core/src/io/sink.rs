@@ -196,7 +196,8 @@ fn write_sliced(
 }
 
 /// Write one `PIPE_BUF` chunk if the pipe takes it within a slice; `None` if
-/// the slice ends first.  A hung-up reader is a broken pipe.
+/// the slice ends first, or a signal cuts the write.  A hung-up reader is a
+/// broken pipe.
 #[cfg(unix)]
 fn try_chunk(w: &os_pipe::PipeWriter, bytes: &[u8]) -> io::Result<Option<usize>> {
     use rustix::event::PollFlags;
@@ -206,9 +207,10 @@ fn try_chunk(w: &os_pipe::PipeWriter, bytes: &[u8]) -> io::Result<Option<usize>>
     if revents.intersects(PollFlags::ERR | PollFlags::HUP) {
         return Err(io::ErrorKind::BrokenPipe.into());
     }
-    (&*w)
-        .write(&bytes[..bytes.len().min(libc::PIPE_BUF)])
-        .map(Some)
+    match (&*w).write(&bytes[..bytes.len().min(libc::PIPE_BUF)]) {
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(None),
+        r => r.map(Some),
+    }
 }
 
 /// `CreatePipe`'s default buffer: a chunk fits a drained pipe whole, so the

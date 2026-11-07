@@ -239,7 +239,7 @@ pub(crate) fn panic_text(payload: &dyn std::any::Any) -> String {
 mod tests {
     use super::*;
     use crate::fact::Reason;
-    use crate::process::{CancelCause as C, DurableRoot, ScopeNode};
+    use crate::process::{CancelCause as C, DurableRoot, RootCause, ScopeNode};
     use crate::source::FileId;
 
     fn nz(n: u8) -> NonZeroU8 {
@@ -250,14 +250,14 @@ mod tests {
     fn cancellation_becomes_a_noncatchable_stop_naming_its_owner() {
         let root = DurableRoot::default();
         let child = root.child();
-        root.cancel(C::Interrupted);
-        child.cancel(C::Interrupted);
+        root.cancel(RootCause::Terminated);
+        child.cancel(C::Terminated);
 
         let stop = Break::from(child.poll().expect_err("cancelled"));
         assert!(matches!(
             stop,
             Break::Escape(Escape::Stopped(Stop {
-                cause: C::Interrupted,
+                cause: C::Terminated,
                 owner: Some(owner),
                 at: None,
             })) if owner == root.id()

@@ -388,10 +388,16 @@ impl<'a> Scanned<'a> {
 
 impl std::io::Read for Scanned<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.shell.poll().is_err() {
-            return Err(std::io::Error::other("stopped"));
-        }
-        let n = self.file.read(buf)?;
+        // grep-searcher does not retry a read a signal cuts.
+        let n = loop {
+            if self.shell.poll().is_err() {
+                return Err(std::io::Error::other("stopped"));
+            }
+            match self.file.read(buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                read => break read?,
+            }
+        };
         self.eol.feed(&buf[..n]);
         self.run.feed(&buf[..n]).map_err(std::io::Error::other)?;
         Ok(n)

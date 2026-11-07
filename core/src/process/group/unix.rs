@@ -206,12 +206,9 @@ fn survivor_pid(
     intermediate: std::process::Child,
     mut receipt: impl std::io::Read,
 ) -> std::io::Result<u32> {
-    let pid = intermediate.id();
     let (tx, rx) = std::sync::mpsc::channel();
-    let watch = crate::process::reaper::watch(pid, tx, std::convert::identity);
-    // Dropping a `std::process::Child` neither kills nor reaps: the watch
-    // above is what now owns its wait.
-    drop(intermediate);
+    let watch =
+        crate::process::ChildHandle::from_std(intermediate).into_watch(tx, std::convert::identity);
     let born = rx
         .recv()
         .map_err(|_| std::io::Error::other("the reaper never reported the intermediate's exit"))?;

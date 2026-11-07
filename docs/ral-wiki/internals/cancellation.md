@@ -1,7 +1,7 @@
 ---
 verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-06
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, join_lone, CollectState::settle_lone, Landing, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, join_lone, CollectState::settle_lone, Landing, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
 # Cancellation
@@ -28,14 +28,16 @@ The two pieces answer different questions:
   owner, which no `try` catches
   ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
 - **The ladder** (`ESCALATION: AtomicU8`) answers *"is the user escalating
-  toward kill?"* — the third delivery forces `_exit(128 + sig)`. It is a blunt,
+  toward kill?"* — the third delivery forces `_exit` with the signal's cause's
+  status (SIGINT 130, SIGTERM and SIGHUP 143). It is a blunt,
   host-agnostic floor for a process whose cooperative delivery is wedged, never
   a delivery mechanism itself.
 
 ## The escalation ladder
 
-The platform handler `fetch_add`s the ladder on every delivered termination
-signal; the third hit calls `libc::_exit(128 + sig)` — bypassing `atexit` so a
+The `Disposition::Shutdown` handler `fetch_add`s the ladder on every
+delivered signal; the third hit calls `libc::_exit` with the code of the
+cause the signal asks (`asked(sig).cause().failure_code()`) — bypassing `atexit` so a
 wedged process always dies. Nothing else reads it for control flow: `clear()`
 resets it at acknowledgment boundaries (a fresh prompt, a run compile, a
 session reboot), and `escalation_pending()` exposes it for observability only.
@@ -48,9 +50,10 @@ ladder signals a process: a child hears ral's teardown only from the scope
 that owns it, so nothing fans out around the tree.
 
 **The force-exit floor is reachable only in non-interactive paths.** The `ral`
-batch launcher binds SIGINT to `handler` (`batch.rs`, `install_handlers`); the
-interactive REPL rebinds SIGINT to the non-escalating `interrupt_handler`
-(below; on Windows, `install_interrupt_handler`), which never touches the ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
+batch launcher gives SIGINT `Disposition::Shutdown` (`batch.rs`,
+`install_handlers`); the interactive REPL gives it the non-escalating
+`Disposition::Interrupt` (below; on Windows, `install_interrupt_handler`),
+which never touches the ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
 hard kill — the escalation belongs to batch scripts and to external
 SIGTERM/SIGHUP.
 
@@ -183,11 +186,13 @@ signal context. The two are different kinds of proposition.
   listener hears only the interrupts raised after it registered, having been
   aimed at the run in flight then.
 - **No scope folds either.** `process::forward_ambient` hands a host thread
-  each cause as it lands (`Ambient::Interrupt`, `Ambient::Root(cause)`), the
-  handlers staying async-signal-safe and the reaper's wake running the scan.
-  `ControlSender::hear`, also used by `forward_signals`, maps a root
-  `Aborted` to `Abort` and any other root cause to `Terminate`, which cancel
-  the durable root, and an interrupt to `Control::Strike(id, Interrupted)`, naming the
+  each cause as it lands (`Ambient::Interrupt`, `Ambient::Root(cause)`, a
+  `RootCause`), the handlers staying async-signal-safe and the reaper's wake
+  running the scan. `RootCause` is closed, `Cancelled | Terminated | Aborted`,
+  each encoded as its `CancelCause`, so `REQUESTED_ROOT`'s `fetch_max` keeps
+  the strongest. `ControlSender::hear`, also used by `forward_signals`, maps a
+  root cause to `Control::End(cause)`, which cancels the durable root with it,
+  and an interrupt to `Control::Strike(id, Interrupted)`, naming the
   dispatch its front-end has in flight. The REPL and batch hold one for the
   session; exarch's `signals::face` instead interrupts root exchanges or
   cancels the fleet root, letting active dispatchers observe their scopes. A wire
@@ -212,7 +217,7 @@ signal context. The two are different kinds of proposition.
   forwarder calls `hear` before `Shutdown::end`: both readers are interrupted
   with thread-directed SIGINT until their exclusive registration ends. The
   minimal reader leaves stdin's shared flags untouched and checks shutdown
-  after `EINTR`; the interactive handler omits `SA_RESTART`. A user interrupt
+  after `EINTR`, which no ral disposition restarts (below). A user interrupt
   instead changes the logical prompt's epoch: the reader returns `Interrupted`
   and the frontend discards primary or continuation input immediately. This
   admits a fresh prompt without ending the session or consuming its root. Repeated delivery
@@ -564,13 +569,13 @@ The same two mechanisms are driven by different keys on different surfaces.
 
 | gesture | surface | what fires | effect |
 |---|---|---|---|
-| **Ctrl-C** | ral REPL, mid-eval | SIGINT → `interrupt_handler` | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)` — a pipeline's externals hear it through the collector; **counter untouched** |
+| **Ctrl-C** | ral REPL, mid-eval | SIGINT → `Interrupt` | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)` — a pipeline's externals hear it through the collector; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer; nothing is in flight, so nothing is sent; no signal |
-| **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `interrupt_handler` | the tty drops the partial line; the changed prompt epoch wakes a fresh prompt immediately and discards continuation input too; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
-| **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(Aborted)`, forwarded as `Control::Abort` — reaps foreground *and* every worker, latching if idle; the REPL loop observes the sticky root and exits |
+| **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `Interrupt` | the tty drops the partial line; the changed prompt epoch wakes a fresh prompt immediately and discards continuation input too; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
+| **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `Abort` | `request_root_cancel(Aborted)`, forwarded as `Control::End(Aborted)` — reaps foreground *and* every worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupted` / `Aborted` / `Terminated` on the run's node as it hears: the job is stopped, `try` never sees it, the session lives |
-| **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)`, + ladder `+1`; third press `_exit`s |
-| **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
+| **Ctrl-C** | ral batch / `-c` | SIGINT → `Shutdown` | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)`, + ladder `+1`; third press `_exit`s |
+| **SIGTERM / SIGHUP** | any ral host | `Shutdown` | `request_root_cancel(Terminated)`, forwarded as `Control::End(Terminated)` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |
 | **Ctrl-C / Esc** | exarch TUI, open job | `AgentHandle::stop(JobId)` on the focused address | cancels latest exchange with `Interrupted`, recalls queued human text losslessly ahead of the draft; helpers survive |
 | **Stop / Esc** | synod, open job | `AgentHandle::stop(JobId)` under the mailbox lock | matching job is marked stopped, latest exchange cancelled with `Interrupted`, human text recalled; helpers continue and reports can resume the root within the job |
@@ -583,18 +588,21 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to every live root's `AgentHandle::stop_current` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
-| **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `signals::face` to every live root's `AgentHandle::stop_current` |
-| **async SIGTERM / SIGHUP** | exarch | ral's `handler` | forwarded as `Fleet::end(Terminated)`; dispatchers observe exchange ancestry; ladder `+1` |
+| **async SIGINT** | exarch | ral's non-escalating `Interrupt` | forwarded by `signals::face` to every live root's `AgentHandle::stop_current` |
+| **async SIGTERM / SIGHUP** | exarch | ral's `Shutdown` | forwarded as `Fleet::end(Terminated)`; dispatchers observe exchange ancestry; ladder `+1` |
 
 ### ral interactive signal dispositions
 
 `boot::setup_signals` (`ral/src/repl/session/boot.rs`)
-fixes the interactive dispositions, each through core's `process::ignore` /
-`process::install` — the only door a disposition changes by, and the one that
-snapshots the inherited `SIG_IGN`s (once, before the first change) so every
-child gets them back in `reset_child_signals`:
+fixes the interactive dispositions, each through core's
+`process::install(sig, Disposition)` — the only door a disposition changes
+by, and the one that snapshots the inherited `SIG_IGN`s (once, before the
+first change) so every child gets them back in `reset_child_signals`. A
+handler's cause is read from `GESTURES`, the key table that also names a lent
+terminal's keys: SIGINT asks an interrupt, SIGQUIT the root's `Aborted`,
+SIGHUP its `Terminated`; SIGTERM, no key's, asks what a hangup does.
 
-- **SIGINT → `interrupt_handler`** (the `sigint_handler` it names). It raises
+- **SIGINT → `Interrupt`**. It raises
   the interrupt and does nothing else — no delivery of its own. The session
   forwards it as `Control::Strike(_, Interrupted)`, and ral's own delivery to a pipeline's
   processes is the cancel tree alone: the collector's `recv` reads the struck scope between
@@ -607,17 +615,34 @@ child gets them back in `reset_child_signals`:
   Raised while idle, it strikes only the settled run's dead scope, so the
   next run never sees it — and a session worker, off every run's chain, is
   spared outright.
-- **SIGQUIT → `sigquit_handler`**, the louder "reap everything" gesture
+- **SIGQUIT → `Abort`**, the louder "reap everything" gesture
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as
   *cancellation*, never deletion). It is a cooperative `request_root_cancel`, not
   the default core-dump — so it satisfies "Ctrl-`\` must not core-dump the shell"
   *by reaping*, not by ignoring.
-- **SIGTERM/SIGHUP → `handler`** — translates to a root `Terminated` (the whole
+- **SIGTERM/SIGHUP → `Shutdown`** — translates to a root `Terminated` (the whole
   session unwinds, the REPL loop exits 143) and walks the escalation ladder;
-  **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `SIG_IGN`** — the shell answers a stop
+  **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `Ignore`** — the shell answers a stop
   reaching one of its own children through `waitpid`/`SIGCONT` rather than
   ever being stopped itself, and rewrites terminal state without being
   stopped ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+
+**No disposition restarts a call it cuts.** Every handler ral installs (the
+three dispositions, the pipeline anchor's report, the Linux supervisor's
+no-op, the reaper's SIGCHLD) omits `SA_RESTART`: `signal::set` is the one
+`sigaction` the dispositions go through. A signal lands on whichever thread
+does not block it, so any blocked call in the process may return `EINTR`, a
+child's exit included, and every blocked call ral makes retries it:
+`poll_slice` against its slice's deadline; a sliced read or write after
+readiness by ending its slice unlanded (`io/source.rs`, `io/sink.rs`); std's
+`read_exact`, `write_all` and `io::copy`; `retry_on_intr` around `reap`'s
+`waitpid`, the jail's `flock` on its sequence file and a lent terminal's
+restoring `tcsetpgrp` and `tcsetattr(Drain)`; exarch's
+`Scanned::read`, since grep-searcher does not retry; the minimal REPL
+reader, which relies on `EINTR` to hear a SIGINT at all. What is left cannot
+see one: `waitid` and `waitpid` with `WNOHANG`, a write to cgroupfs or a
+one-byte pipe write in a forked child that has no children of its own, and a
+non-blocking socket whose caller already treats `Interrupted` as pending.
 
 ### exarch: life contains exchange
 
@@ -686,11 +711,11 @@ recorded busy period, not a scope
 
 A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor is
 unreachable from an interactive prompt.** Interactive SIGINT goes to
-`interrupt_handler`, which never ticks the ladder; the TUI's active-exchange
+`Disposition::Interrupt`, which never ticks the ladder; the TUI's active-exchange
 Ctrl-C goes to
 `AgentHandle::stop`, which never touches the ladder. Repeated presses re-write the same cause
 (`fetch_max`), never escalate. The hard
-floor exists for batch scripts (`handler`) and for external SIGTERM/SIGHUP. Interactive cancellation is cooperative
+floor exists for batch scripts (`Shutdown`) and for external SIGTERM/SIGHUP. Interactive cancellation is cooperative
 by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
 
 ## See also
@@ -701,7 +726,7 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
 - [[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]] —
   the shield and its budget from the strike.
 - [[decisions/260706_signals-are-causes|signals-are-causes]] — the collapse of
-  signal delivery onto the scope tree: `Terminate`, the scope-only `check`, the
+  signal delivery onto the scope tree: `Terminated`, the scope-only `check`, the
   one wait loop.
 - [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] — the
   root/foreground split and the `CancelCause` order.

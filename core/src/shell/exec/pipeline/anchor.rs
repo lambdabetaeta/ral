@@ -9,18 +9,18 @@
 /// outright, so the anchor never stops and never needs resuming.
 #[cfg(unix)]
 pub(crate) fn serve() -> u8 {
+    use crate::process::signal::{Disposition, catch, install};
     use std::io::Write;
 
     crate::uutils::init_signal_dispositions();
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
-        unsafe {
-            libc::signal(sig, report_signal as *const () as libc::sighandler_t);
-        }
-    }
-    for sig in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
-        unsafe {
-            libc::signal(sig, libc::SIG_IGN);
-        }
+    let caught = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
+        .into_iter()
+        .try_for_each(|sig| catch(sig, report_signal));
+    let ignored = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU]
+        .into_iter()
+        .try_for_each(|sig| install(sig, Disposition::Ignore));
+    if caught.and(ignored).is_err() {
+        return 1;
     }
     // Zero admits the terminal loan only after every handler is installed.
     let mut report = std::io::stdout().lock();

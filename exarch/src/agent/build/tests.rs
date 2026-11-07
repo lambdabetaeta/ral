@@ -4,7 +4,7 @@ use crate::bus::Emitter;
 use crate::provider::scripted::Script;
 use crate::record::{AgentId, AgentLog, Memory, RECORD, Selected, Voice};
 use genai::chat::ChatMessage;
-use ral_core::process::DurableRoot;
+use ral_core::process::{DurableRoot, RootCause};
 use ral_core::protocol::probe::Grants;
 use std::fs;
 
@@ -94,7 +94,7 @@ fn parent_terms_lend_launch_policy_or_helper_policy_and_saturating_fuel() {
             assert_eq!(helper.life.cause(), Some(CancelCause::Interrupted));
             assert!(parent.is_live());
         }
-        fleet.registry.root.cancel(CancelCause::Cancelled);
+        fleet.registry.root.cancel(RootCause::Cancelled);
         assert_eq!(human.life.cause(), Some(CancelCause::Cancelled));
     }
 }

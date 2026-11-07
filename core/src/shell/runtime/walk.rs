@@ -64,21 +64,21 @@ impl AdmittedWalk {
 mod tests {
     use super::*;
     use crate::path::{LexicalPath, utf8};
-    use crate::process::CancelCause;
+    use crate::process::{CancelCause, RootCause};
     use crate::shell::runtime::{Escape, Stop};
 
     #[test]
     fn an_admitted_walk_that_is_cancelled_aborts() {
         let shell = crate::test_helper::core_shell();
         let owner = shell.cancel_handle();
-        owner.cancel(CancelCause::Interrupted);
+        owner.cancel(RootCause::Cancelled);
         let root = shell.anchor(&shell.cwd());
         let mut walk = shell.admitted_walk(Walk::respecting_ignores(&root), "walk", ".");
         let stop = walk.next().expect_err("a cancelled scope aborts the walk");
         assert!(matches!(
             stop,
             Break::Escape(Escape::Stopped(Stop {
-                cause: CancelCause::Interrupted,
+                cause: CancelCause::Cancelled,
                 owner: Some(id),
                 at: None,
             })) if id == owner.id()
@@ -96,11 +96,11 @@ mod tests {
         assert_eq!(walk.next().unwrap().unwrap().depth, 0);
 
         let owner = shell.cancel_handle();
-        owner.cancel(CancelCause::TimedOut);
+        owner.cancel(RootCause::Cancelled);
         assert!(matches!(
             walk.next(),
             Err(Break::Escape(Escape::Stopped(Stop {
-                cause: CancelCause::TimedOut,
+                cause: CancelCause::Cancelled,
                 owner: Some(id),
                 at: None,
             }))) if id == owner.id()

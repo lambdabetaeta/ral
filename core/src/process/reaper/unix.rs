@@ -68,10 +68,11 @@ fn subs() -> &'static Mutex<HashMap<u32, Entry>> {
 fn install_sigchld() {
     let action = SigAction::new(
         SigHandler::Handler(sigchld_handler),
-        SaFlags::SA_RESTART,
+        SaFlags::empty(),
         SigSet::empty(),
     );
-    // SA_NOCLDSTOP deliberately absent: a stop must reach the handler too.
+    // SA_NOCLDSTOP absent: a stop must reach the handler too.  SA_RESTART
+    // absent as in every ral disposition: a cut call retries `EINTR` itself.
     unsafe { sigaction(NixSignal::SIGCHLD, &action) }.expect("install SIGCHLD handler");
 }
 
@@ -231,7 +232,7 @@ impl Watch {
 
     /// `SIGKILL` — the terminal escalation, on both platforms.
     pub(crate) fn kill(&self) {
-        unsafe { libc::kill(self.pid.cast_signed(), libc::SIGKILL) };
+        self.signal(crate::process::signal::KILL);
     }
 
     /// Unsubscribe and block for the child's exit, consuming its zombie.
@@ -287,6 +288,19 @@ mod tests {
     fn recv_timeout<E>(rx: &std::sync::mpsc::Receiver<E>) -> E {
         rx.recv_timeout(Duration::from_secs(5))
             .expect("event within timeout")
+    }
+
+    /// SIGCHLD cuts a blocked call rather than restarting it.
+    #[test]
+    fn sigchld_restarts_nothing() {
+        ensure_installed();
+        // SAFETY: zeroed is a valid `sigaction`, and a null action only reads.
+        let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &raw mut now) },
+            0
+        );
+        assert_eq!(now.sa_flags & libc::SA_RESTART, 0);
     }
 
     /// An exit is delivered through the reaper, without the subscriber

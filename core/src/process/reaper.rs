@@ -14,20 +14,25 @@
 //! its owner says otherwise.
 //!
 //! [`crate::process::ChildHandle::into_watch`] is the one door from a spawned
-//! child to a watch: the pipeline collector, every external's one waiter,
-//! and `spawn_detached`'s intermediate both watch through it.
+//! child to a watch, `watch` being private to `process`: the pipeline
+//! collector, every external's one waiter, and `spawn_detached`'s
+//! intermediate all watch through it.
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub(crate) use unix::{Watch, watch};
+pub(crate) use unix::Watch;
+#[cfg(unix)]
+pub(super) use unix::watch;
 #[cfg(unix)]
 pub(crate) use unix::{ensure_installed, kick};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{Watch, watch};
+pub(crate) use windows::Watch;
+#[cfg(windows)]
+pub(super) use windows::watch;
 
 /// No self-pipe on Windows: the console handler already runs on an ordinary
 /// thread, so a kick simply scans the forwarders itself.

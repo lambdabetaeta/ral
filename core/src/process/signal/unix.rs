@@ -1,122 +1,122 @@
 //! Unix signal handlers and dispositions — the platform half of `super`.
 //!
-//! A termination signal unwinds nothing by itself: the handler translates it
-//! into an ambient cause its host forwards to the engine as `Control`, and
-//! ticks an escalation ladder whose third delivery forces `_exit`.
+//! A signal unwinds nothing by itself: a handler raises the ambient cause the
+//! signal asks for, which its host forwards to the engine as `Control`, and a
+//! [`Disposition::Shutdown`] handler ticks the escalation ladder whose third
+//! delivery forces `_exit`.  No disposition restarts a syscall it cuts: every
+//! blocked call ral makes retries `EINTR` itself.
 
 use crate::fact::FailureCode as _;
+use std::io;
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ESCALATION;
 use crate::process::Signal;
-use crate::process::cancel::{CancelCause, request_interrupt, request_root_cancel};
+use crate::process::cancel::{Ambient, CancelCause, RootCause, request_interrupt};
 
-// ── Termination handler ────────────────────────────────────────────────────
+// ── Dispositions ───────────────────────────────────────────────────────────
 
-/// Install handlers for SIGINT, SIGTERM, SIGHUP.
+/// What a delivered signal does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// Interrupt the run in flight, whatever the signal; never escalates.
+    Interrupt,
+    /// Raise what the signal asks, and tick the escalation ladder.
+    Shutdown,
+    /// Raise what the signal asks (Ctrl-`\`: the root's abort); never
+    /// escalates.
+    Abort,
+    /// `SIG_IGN`.
+    Ignore,
+    /// `SIG_DFL`.
+    Default,
+}
+
+/// Give `sig` `disposition`.
 ///
-/// [`install`] snapshots the inherited `SIG_IGN` dispositions first, since
-/// afterwards ral's own are indistinguishable from the parent's.  Never name
-/// SIGWINCH here: crossterm's `signal-hook-registry` owns it, and a raw
-/// `signal(2)` install unhooks it for good.
+/// The inherited dispositions are snapshotted first, since afterwards ral's
+/// own are indistinguishable from the parent's.  Never name SIGWINCH:
+/// crossterm's `signal-hook-registry` owns it, and an install unhooks it for
+/// good.
+///
+/// # Errors
+/// `sig` is no signal, or one that cannot be caught.
+pub fn install(sig: libc::c_int, disposition: Disposition) -> io::Result<()> {
+    let handler: extern "C" fn(libc::c_int) = match disposition {
+        Disposition::Interrupt => interrupt,
+        Disposition::Shutdown => shutdown,
+        Disposition::Abort => abort,
+        Disposition::Ignore => return act(sig, libc::SIG_IGN),
+        Disposition::Default => return act(sig, libc::SIG_DFL),
+    };
+    catch(sig, handler)
+}
+
+/// Point `sig` at a handler of the caller's own, as [`install`] would.
+///
+/// # Errors
+/// `sig` is no signal, or one that cannot be caught.
+pub(crate) fn catch(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) -> io::Result<()> {
+    act(sig, handler as *const () as libc::sighandler_t)
+}
+
+fn act(sig: libc::c_int, action: libc::sighandler_t) -> io::Result<()> {
+    snapshot_once();
+    set(sig, action)
+}
+
+/// Point `sig` at `action` without `SA_RESTART`.  Async-signal-safe.
+fn set(sig: libc::c_int, action: libc::sighandler_t) -> io::Result<()> {
+    // SAFETY: zeroed is a valid `sigaction`: no flags, and its mask emptied.
+    let mut new: libc::sigaction = unsafe { std::mem::zeroed() };
+    new.sa_sigaction = action;
+    unsafe { libc::sigemptyset(&raw mut new.sa_mask) };
+    if unsafe { libc::sigaction(sig, &raw const new, std::ptr::null_mut()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// [`Disposition::Shutdown`] on SIGINT, SIGTERM and SIGHUP, with the reaper
+/// armed: a batch host's whole disposition table.
+///
+/// # Panics
+/// If one of the three cannot be caught, which no Unix allows.
 pub fn install_handlers() {
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        install(sig, handler);
+        install(sig, Disposition::Shutdown).expect("SIGINT, SIGTERM and SIGHUP are catchable");
     }
     crate::process::reaper::ensure_installed();
 }
 
-/// Ignore `sig`, snapshotting the inherited dispositions first.
-pub fn ignore(sig: libc::c_int) {
-    snapshot_once();
-    unsafe {
-        libc::signal(sig, libc::SIG_IGN);
-    }
-}
+// ── Handlers ───────────────────────────────────────────────────────────────
+//
+// Async-signal-safe throughout: atomic read-modify-writes on `static`s and a
+// reaper kick.
 
-/// Restore `sig` to its default disposition, snapshotting the inherited ones first.
-pub fn default(sig: libc::c_int) {
-    snapshot_once();
-    unsafe {
-        libc::signal(sig, libc::SIG_DFL);
-    }
-}
-
-/// Point `sig` at `handler`, snapshotting the inherited dispositions first.
-pub fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
-    snapshot_once();
-    unsafe {
-        libc::signal(sig, handler as *const () as libc::sighandler_t);
-    }
-}
-
-extern "C" fn handler(sig: libc::c_int) {
-    let cause = handler_cause(sig);
-    if ESCALATION.fetch_add(1, Ordering::Relaxed) >= 2 {
-        // `_exit`, not `exit`: atexit hooks run arbitrary code under a handler.
-        unsafe { libc::_exit(i32::from(cause.failure_code().get())) };
-    }
-    // Async-signal-safe: atomic read-modify-writes on `static`s.  SIGTERM/SIGHUP
-    // land on the durable root, so workers hear them too.
-    match cause {
-        CancelCause::Interrupted => request_interrupt(),
-        _ => request_root_cancel(cause),
-    }
-}
-
-/// The cause [`handler`] reads `sig` as.  Pure, so async-signal-safe.
-fn handler_cause(sig: libc::c_int) -> CancelCause {
-    if sig == libc::SIGINT {
-        CancelCause::Interrupted
-    } else {
-        CancelCause::Terminated
-    }
-}
-
-/// The termination handler, for a caller installing it signal by signal.
-pub fn term_handler() -> extern "C" fn(libc::c_int) {
-    handler
-}
-
-extern "C" fn sigint_handler(_: libc::c_int) {
-    // `Control::Strike(_, Interrupted)` spares idle input and workers.
+extern "C" fn interrupt(_: libc::c_int) {
     request_interrupt();
 }
 
-/// The SIGINT handler the interactive shell installs in place of `handler`:
-/// non-escalating, and no delivery of its own — a run in flight hears the
-/// interrupt through its host's `Control`.
-pub fn interrupt_handler() -> extern "C" fn(libc::c_int) {
-    sigint_handler
+extern "C" fn abort(sig: libc::c_int) {
+    asked(sig).raise();
 }
 
-/// Install the interactive SIGINT handler without restarting blocked reads.
-///
-/// # Errors
-/// The signal disposition could not be installed.
-pub fn install_interrupt_handler() -> std::io::Result<()> {
-    snapshot_once();
-    unsafe {
-        let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = sigint_handler as *const () as libc::sighandler_t;
-        libc::sigemptyset(&raw mut action.sa_mask);
-        if libc::sigaction(libc::SIGINT, &raw const action, std::ptr::null_mut()) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+extern "C" fn shutdown(sig: libc::c_int) {
+    let asked = asked(sig);
+    if ESCALATION.fetch_add(1, Ordering::Relaxed) >= 2 {
+        // `_exit`, not `exit`: atexit hooks run arbitrary code under a handler.
+        unsafe { libc::_exit(i32::from(asked.cause().failure_code().get())) };
     }
-    Ok(())
+    asked.raise();
 }
 
-extern "C" fn sigquit_handler(_: libc::c_int) {
-    // Ctrl-\ reaps the session: the root cause reaches the foreground run and
-    // every worker, and latches on an idle session, being one-way.
-    request_root_cancel(CancelCause::Aborted);
-}
-
-/// The SIGQUIT handler behind the interactive "reap everything" gesture.
-pub fn quit_handler() -> extern "C" fn(libc::c_int) {
-    sigquit_handler
+/// What a delivery of `sig` asks: its key's ambient cause, else (SIGTERM,
+/// which no terminal sends) the session's termination.  Pure.
+fn asked(sig: libc::c_int) -> Ambient {
+    key(sig).unwrap_or(Ambient::Root(RootCause::Terminated))
 }
 
 // ── Inherited dispositions and child-signal reset ──────────────────────────
@@ -140,8 +140,7 @@ static INHERITED_IGNORED: AtomicU64 = AtomicU64::new(0);
 
 static SNAPSHOT: Once = Once::new();
 
-/// The one snapshot, taken before the first disposition change [`ignore()`] or
-/// [`install()`] makes.
+/// The one snapshot, taken before ral's first disposition change.
 fn snapshot_once() {
     SNAPSHOT.call_once(snapshot_inherited_ignored);
 }
@@ -181,13 +180,9 @@ pub fn reset_child_signals() {
         } else {
             libc::SIG_DFL
         };
-        unsafe {
-            libc::signal(sig, target);
-        }
+        let _ = set(sig, target);
     }
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+    let _ = set(libc::SIGPIPE, libc::SIG_DFL);
 }
 
 /// The catchable signal a teardown opens with before its SIGKILL; `None` skips
@@ -204,27 +199,31 @@ pub(crate) fn grace_signal(cause: CancelCause) -> Option<Signal> {
 }
 
 /// What a terminal sends when Ctrl-C or Ctrl-\ is pressed on it, or it hangs
-/// up, and the cause each stands for.  SIGTERM is no terminal's.
-const GESTURES: [(i32, CancelCause); 3] = [
-    (libc::SIGINT, CancelCause::Interrupted),
-    (libc::SIGQUIT, CancelCause::Aborted),
-    (libc::SIGHUP, CancelCause::Terminated),
+/// up, and what each asks of the session.  SIGTERM is no terminal's.
+const GESTURES: [(i32, Ambient); 3] = [
+    (libc::SIGINT, Ambient::Interrupt),
+    (libc::SIGQUIT, Ambient::Root(RootCause::Aborted)),
+    (libc::SIGHUP, Ambient::Root(RootCause::Terminated)),
 ];
+
+fn key(sig: libc::c_int) -> Option<Ambient> {
+    GESTURES
+        .into_iter()
+        .find_map(|(number, asks)| (number == sig).then_some(asks))
+}
 
 /// The key `signal` is, read only by
 /// [`TerminalLoan::hear`](crate::process::TerminalLoan::hear): nothing but
 /// a terminal ral lent can report one.
 pub(crate) fn gesture(signal: Signal) -> Option<CancelCause> {
-    GESTURES
-        .into_iter()
-        .find_map(|(number, cause)| (number == signal.number()).then_some(cause))
+    key(signal.number()).map(Ambient::cause)
 }
 
 /// The key a terminal sends for `cause`, if any.
 pub(crate) fn gesture_signal(cause: CancelCause) -> Option<Signal> {
     GESTURES
         .into_iter()
-        .find_map(|(number, key)| (key == cause).then_some(Signal::new(number)))
+        .find_map(|(number, asks)| (asks.cause() == cause).then_some(Signal::new(number)))
 }
 
 /// The signal that ends every teardown.
@@ -282,10 +281,24 @@ mod tests {
             match gesture_signal(cause) {
                 Some(signal) => assert_eq!(gesture(signal), Some(cause), "{cause:?}"),
                 None => assert!(
-                    GESTURES.iter().all(|&(_, key)| key != cause),
+                    GESTURES.iter().all(|&(_, asks)| asks.cause() != cause),
                     "{cause:?} is some key's cause"
                 ),
             }
+        }
+    }
+
+    /// What each signal ral handles asks: SIGTERM, no key, asks what a
+    /// hangup does.
+    #[test]
+    fn a_signal_asks_its_keys_cause_or_termination() {
+        for (sig, expected) in [
+            (libc::SIGINT, Ambient::Interrupt),
+            (libc::SIGQUIT, Ambient::Root(RootCause::Aborted)),
+            (libc::SIGHUP, Ambient::Root(RootCause::Terminated)),
+            (libc::SIGTERM, Ambient::Root(RootCause::Terminated)),
+        ] {
+            assert_eq!(asked(sig), expected, "signal {sig}");
         }
     }
 
@@ -299,11 +312,53 @@ mod tests {
             (libc::SIGHUP, 143),
         ] {
             assert_eq!(
-                handler_cause(sig).failure_code().get(),
+                asked(sig).cause().failure_code().get(),
                 code,
                 "signal {sig}"
             );
         }
+    }
+
+    // ── Dispositions ───────────────────────────────────────────────────────
+
+    /// Every disposition is installed as asked and without `SA_RESTART`, so a
+    /// blocked call its handler cuts returns `EINTR`.  SIGUSR2 is nobody's in
+    /// the test binary, and is left at its default.
+    #[test]
+    fn no_disposition_restarts_a_syscall() {
+        let sig = libc::SIGUSR2;
+        let current = || {
+            // SAFETY: zeroed is a valid `sigaction`, and a null action only reads.
+            let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::sigaction(sig, std::ptr::null(), &raw mut now) },
+                0
+            );
+            now
+        };
+        let handler = |f: extern "C" fn(libc::c_int)| f as *const () as libc::sighandler_t;
+        for (disposition, expected) in [
+            (Disposition::Interrupt, handler(interrupt)),
+            (Disposition::Shutdown, handler(shutdown)),
+            (Disposition::Abort, handler(abort)),
+            (Disposition::Ignore, libc::SIG_IGN),
+            (Disposition::Default, libc::SIG_DFL),
+        ] {
+            install(sig, disposition).expect("SIGUSR2 is catchable");
+            let now = current();
+            assert_eq!(now.sa_sigaction, expected, "{disposition:?}");
+            assert_eq!(
+                now.sa_flags & libc::SA_RESTART,
+                0,
+                "{disposition:?} restarts"
+            );
+        }
+    }
+
+    /// An uncatchable signal is refused, not silently left as it was.
+    #[test]
+    fn an_uncatchable_signal_is_refused() {
+        assert!(install(libc::SIGKILL, Disposition::Shutdown).is_err());
     }
 
     // ── Signal translation ─────────────────────────────────────────────────
@@ -324,13 +379,12 @@ mod tests {
     /// SIGINT interrupts the run in flight and leaves the durable root — and
     /// with it every worker — untouched.
     #[test]
-    fn handler_translates_sigint_into_an_interrupt() {
-        use crate::process::Ambient;
+    fn shutdown_translates_sigint_into_an_interrupt() {
         let _serial = REQUEST_SERIAL.lock();
         clear();
         let (_guard, heard) = listen();
 
-        handler(libc::SIGINT);
+        shutdown(libc::SIGINT);
         // Read at once: a concurrent run's `compile_run` clears the ladder.
         assert!(
             escalation_pending(),
@@ -353,20 +407,19 @@ mod tests {
     /// SIGTERM and SIGHUP are one shutdown request, reaching the durable root
     /// and with it every worker.
     #[test]
-    fn handler_translates_sigterm_and_sighup_into_root_terminate() {
-        use crate::process::Ambient;
+    fn shutdown_translates_sigterm_and_sighup_into_root_terminate() {
         let _serial = REQUEST_SERIAL.lock();
         clear();
         clear_root_request();
         let (_guard, heard) = listen();
 
-        handler(libc::SIGTERM);
+        shutdown(libc::SIGTERM);
         assert_eq!(
             heard.recv_timeout(OWED),
-            Ok(Ambient::Root(CancelCause::Terminated)),
+            Ok(Ambient::Root(RootCause::Terminated)),
             "SIGTERM must terminate the session's durable root"
         );
-        handler(libc::SIGHUP);
+        shutdown(libc::SIGHUP);
         assert!(
             heard
                 .recv_timeout(std::time::Duration::from_millis(200))
@@ -374,6 +427,30 @@ mod tests {
             "SIGHUP is the same shutdown request as SIGTERM, already heard"
         );
         clear();
+        clear_root_request();
+    }
+
+    /// The calm handlers never tick the ladder: an interrupt reaches the run
+    /// in flight, Ctrl-`\` the durable root with its own cause.
+    #[test]
+    fn interrupt_and_abort_never_escalate() {
+        let _serial = REQUEST_SERIAL.lock();
+        clear();
+        clear_root_request();
+        let (_guard, heard) = listen();
+
+        interrupt(libc::SIGINT);
+        assert_eq!(heard.recv_timeout(OWED), Ok(Ambient::Interrupt));
+        abort(libc::SIGQUIT);
+        assert_eq!(
+            heard.recv_timeout(OWED),
+            Ok(Ambient::Root(RootCause::Aborted)),
+            "Ctrl-\\ must abort the session's durable root"
+        );
+        assert!(
+            !escalation_pending(),
+            "neither may tick the escalation ladder"
+        );
         clear_root_request();
     }
 }

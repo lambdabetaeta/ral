@@ -99,7 +99,7 @@ fn a_dropped_transport_leaves_no_owner_of_its_line() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    sender.terminate();
+    sender.end(crate::process::RootCause::Terminated);
     sender.cancel(DispatchId(1));
 }
 

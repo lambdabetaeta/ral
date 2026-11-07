@@ -69,12 +69,13 @@ asymmetries are semantic, not accidental, and are never smoothed into a fake
 mirror pair:
 
 - *Mood.* `Control` is imperative while `Surface` is indicative: this
-  happened, this is now true. `Control` has three verbs, each meaning one
+  happened, this is now true. `Control` has two verbs, each meaning one
   thing under either carrier (`Scopes::apply`): `Strike(id, cause)` unwinds
   only that dispatch with the exact cause, even before it has arrived, and a
   stale id strikes nothing. A dispatch-local terminal cause never ends the engine;
-  `Terminate` cancels the durable root — every run and every worker,
-  for good; `Abort` is `Terminate` as Ctrl-`\` asks it, cause `RootAbort`. No
+  `End(cause)` cancels the durable root — every run and every worker,
+  for good — with a `RootCause`, closed: `Cancelled`, `Terminated`
+  (SIGTERM/SIGHUP) or `Aborted` (Ctrl-`\`). No
   engine folds its process's signals: its front-end forwards them as these
   verbs (`ControlSender::forward_signals`), aiming an interrupt only at a
   dispatch it sent before the interrupt was raised, so a Ctrl-C struck between

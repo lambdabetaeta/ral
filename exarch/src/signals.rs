@@ -8,11 +8,11 @@
 //! human text. Helpers keep working; neither gesture ticks ral's escalation
 //! ladder.
 //!
-//! On Unix [`install`] points SIGINT at ral's *non-escalating*
-//! `interrupt_handler`, never the `term_handler` whose third delivery
+//! On Unix [`install`] gives SIGINT ral's *non-escalating*
+//! `Disposition::Interrupt`, never the `Shutdown` whose third delivery
 //! `_exit`s: a stray SIGINT reaching the supervising TUI must cancel the
-//! exchange, not kill exarch.  SIGTERM and SIGHUP keep `term_handler`, and
-//! cancel the fleet root, so every owner and dispatch observes the same cause.
+//! exchange, not kill exarch.  SIGTERM and SIGHUP keep `Shutdown`, and end
+//! the fleet root, so every owner and dispatch observes the same cause.
 //!
 //! Windows has no single disposition to replace — `SetConsoleCtrlHandler` keeps
 //! a list, run last-registered-first until one returns `TRUE` — so there
@@ -47,11 +47,12 @@ pub(crate) fn face(registry: &Arc<Registry>) -> AmbientForward {
     })
 }
 
-/// Point SIGINT at ral's non-escalating `interrupt_handler`, leaving SIGTERM
-/// and SIGHUP on the escalating `term_handler` `install_handlers` set.
+/// Give SIGINT ral's non-escalating `Interrupt`, leaving SIGTERM and SIGHUP
+/// on the escalating `Shutdown` `install_handlers` set.
 #[cfg(unix)]
 pub(crate) fn install() {
-    ral_core::process::install(libc::SIGINT, ral_core::process::interrupt_handler());
+    ral_core::process::install(libc::SIGINT, ral_core::process::Disposition::Interrupt)
+        .expect("SIGINT is catchable");
 }
 
 /// Whether a delivered Windows console-control event is an exchange-cancel

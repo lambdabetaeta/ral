@@ -2,7 +2,6 @@
 //! group and taking it back.
 
 use nix::sys::signal::{SigSet, SigmaskHow};
-use rustix::io::Errno;
 use rustix::process::Pid;
 use rustix::termios::{OptionalActions, Termios};
 
@@ -172,20 +171,14 @@ impl TerminalLoan {
     /// discard input typed during the child's final frame.
     fn restore(&self) {
         let _sigttou = SigttouBlock::new();
-        for _ in 0..3 {
-            match rustix::termios::tcsetpgrp(rustix::stdio::stdin(), self.saved_pgid) {
-                Ok(()) => break,
-                Err(err) => {
-                    if err != Errno::INTR {
-                        crate::dbg_trace!(
-                            "fg",
-                            "release: tcsetpgrp({}) failed: {err}",
-                            self.saved_pgid.as_raw_nonzero()
-                        );
-                        break;
-                    }
-                }
-            }
+        if let Err(err) = rustix::io::retry_on_intr(|| {
+            rustix::termios::tcsetpgrp(rustix::stdio::stdin(), self.saved_pgid)
+        }) {
+            crate::dbg_trace!(
+                "fg",
+                "release: tcsetpgrp({}) failed: {err}",
+                self.saved_pgid.as_raw_nonzero()
+            );
         }
         let cur = rustix::termios::tcgetpgrp(rustix::stdio::stdin())
             .map_or(-1, |fg| fg.as_raw_nonzero().get());
@@ -196,19 +189,12 @@ impl TerminalLoan {
                 self.saved_pgid.as_raw_nonzero()
             );
         }
-        if let Some(t) = self.saved_termios.as_ref() {
-            for _ in 0..3 {
-                match rustix::termios::tcsetattr(rustix::stdio::stdin(), OptionalActions::Drain, t)
-                {
-                    Ok(()) => return,
-                    Err(err) => {
-                        if err != Errno::INTR {
-                            crate::dbg_trace!("fg", "release: tcsetattr failed: {err}");
-                            return;
-                        }
-                    }
-                }
-            }
+        if let Some(t) = self.saved_termios.as_ref()
+            && let Err(err) = rustix::io::retry_on_intr(|| {
+                rustix::termios::tcsetattr(rustix::stdio::stdin(), OptionalActions::Drain, t)
+            })
+        {
+            crate::dbg_trace!("fg", "release: tcsetattr failed: {err}");
         }
     }
 }

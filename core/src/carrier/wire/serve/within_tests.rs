@@ -2,8 +2,8 @@ use super::*;
 use crate::carrier::{Transport as _, WireTransport, dispatch_to_report};
 use crate::host::env::test_support::env_guard;
 use crate::path::EnginePath;
-use crate::process::DurableRoot;
 use crate::process::cancel::REQUEST_SERIAL;
+use crate::process::{CancelCause, DurableRoot};
 use crate::protocol::channel::Liveness;
 use crate::protocol::{Ending, Ran};
 use crate::source::SourceOrigin;
@@ -193,7 +193,7 @@ fn dispatch_local_causes_preserve_the_wire_engine_and_their_cause() {
         assert!(
             !frames
                 .iter()
-                .any(|frame| matches!(frame, Frame::Control(Control::Terminate | Control::Abort)))
+                .any(|frame| matches!(frame, Frame::Control(Control::End(_))))
         );
     }
 }

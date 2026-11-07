@@ -274,7 +274,7 @@ fn a_parked_owner_observes_ancestor_cancellation() {
     let mailbox = configured_mailbox(Admission::Free, Recorder::none(), root.child(), None, false);
     let address = mailbox.address();
     let worker = std::thread::spawn(move || mailbox.next(QUIET));
-    root.cancel(CancelCause::Cancelled);
+    root.cancel(ral_core::process::RootCause::Cancelled);
     let finished = wait_until(|| worker.is_finished());
     address.end(CancelCause::Cancelled);
     assert!(matches!(worker.join().unwrap(), Next::Ended));

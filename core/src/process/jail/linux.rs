@@ -60,7 +60,9 @@ pub(crate) fn next_guest_seq(path: &Path) -> io::Result<Seq> {
             .read(true)
             .write(true) => open(path)
     )?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+    rustix::io::retry_on_intr(|| {
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+    })?;
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
     let count = Count::decode(&contents).ok_or_else(|| {

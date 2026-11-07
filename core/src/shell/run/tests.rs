@@ -607,7 +607,7 @@ fn cancelling_a_session_by_handle_reaches_its_aside() {
 
     shell
         .cancel_handle()
-        .cancel(crate::process::CancelCause::Cancelled);
+        .cancel(crate::process::RootCause::Cancelled);
 
     let ending = aside
         .run(Run::captured("let y = 1\nreturn $y", test_origin()))
@@ -638,7 +638,7 @@ fn a_session_is_deaf_to_the_ambient_causes() {
     let mut runtime = crate::test_helper::core_runtime();
     install_act(&mut runtime, "raise-ambient-causes", |_, _| {
         crate::process::request_interrupt();
-        crate::process::request_root_cancel(crate::process::CancelCause::Aborted);
+        crate::process::request_root_cancel(crate::process::RootCause::Aborted);
     });
     let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let report = shell.run(Run::captured(

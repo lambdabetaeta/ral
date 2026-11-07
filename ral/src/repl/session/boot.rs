@@ -19,36 +19,36 @@ use super::super::host::ReplHost;
 /// to its engine as `Control`.
 ///
 /// Unix disposition table:
-/// - SIGINT  → interrupt handler (no-op when idle; raises the foreground interrupt)
-/// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
-///   foreground run and every worker — instead of core-dumping)
-/// - SIGTERM/SIGHUP → term handler (cancels the durable root with `Terminate`;
+/// - SIGINT  → `Interrupt` (no-op when idle; raises the foreground interrupt)
+/// - SIGQUIT → `Abort` (Ctrl+\ ends the durable root with `Aborted` — reaping
+///   the foreground run and every worker — instead of core-dumping)
+/// - SIGTERM/SIGHUP → `Shutdown` (ends the durable root with `Terminated`;
 ///   the third delivery force-exits via the escalation ladder)
-/// - SIGTSTP → `SIG_IGN`  (the shell never suspends; a stop is answered with
+/// - SIGTSTP → `Ignore`  (the shell never suspends; a stop is answered with
 ///   `SIGCONT` by the reaper)
-/// - SIGTTOU → `SIG_IGN`  (shell writes terminal settings without being stopped)
-/// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
-/// - SIGPIPE → `SIG_IGN`  (as Rust leaves it: a write to a closed pipe is an error, and on
+/// - SIGTTOU → `Ignore`  (shell writes terminal settings without being stopped)
+/// - SIGTTIN → `Ignore`  (shell reads stdin without being stopped if not fg)
+/// - SIGPIPE → `Ignore`  (as Rust leaves it: a write to a closed pipe is an error, and on
 ///   the host's stdout the run's stop)
 ///
-/// Every disposition goes through core's signal installers, which snapshot
-/// the inherited ignores first so children get them back (the nohup rule).
+/// Every disposition goes through core's `install`, which snapshots the
+/// inherited ignores first so children get them back (the nohup rule).
 ///
 /// SIGWINCH (owned in-process by crossterm's `signal-hook-registry` master
 /// handler) must never be named here: a raw install would silently and
 /// permanently disconnect that registry's dispatch for it.
 ///
-/// Windows: `signal::install_interrupt_handler`, likewise non-escalating.
+/// Windows: `install_interrupt_handler`, likewise non-escalating.
 #[cfg_attr(windows, allow(clippy::unnecessary_wraps))]
 pub(super) fn setup_signals() -> std::io::Result<TerminalClaim> {
     #[cfg(unix)]
     {
-        use ral_core::process::{default, ignore, install};
+        use ral_core::process::{Disposition, install};
         // Ignore SIGTTOU before the claim, whose `tcsetpgrp` runs from a
         // group not yet in the foreground; SIGTTIN must stop the shell
         // until after, since the claim parks it there.
-        ignore(libc::SIGTTOU);
-        default(libc::SIGTTIN);
+        install(libc::SIGTTOU, Disposition::Ignore)?;
+        install(libc::SIGTTIN, Disposition::Default)?;
         let claim = claim_terminal().unwrap_or_else(|msg| {
             // A REPL that can't claim its tty is awkward (job control
             // won't work, ^C delivery may misroute) but not fatal — many
@@ -60,19 +60,19 @@ pub(super) fn setup_signals() -> std::io::Result<TerminalClaim> {
             ));
             TerminalClaim::default()
         });
-        // The non-escalating interrupt handler rather than SIG_IGN: a
-        // no-op between commands, and a cancel of the foreground scope —
-        // whence the pipeline's own teardown — during a run.
-        ral_core::process::install_interrupt_handler()?;
-        // Ctrl-\ cancels the durable root — the reap-everything gesture.
-        install(libc::SIGQUIT, ral_core::process::quit_handler());
-        install(libc::SIGTERM, ral_core::process::term_handler());
-        install(libc::SIGHUP, ral_core::process::term_handler());
+        // The non-escalating interrupt rather than SIG_IGN: a no-op between
+        // commands, and a cancel of the foreground scope — whence the
+        // pipeline's own teardown — during a run.
+        install(libc::SIGINT, Disposition::Interrupt)?;
+        // Ctrl-\ ends the durable root — the reap-everything gesture.
+        install(libc::SIGQUIT, Disposition::Abort)?;
+        install(libc::SIGTERM, Disposition::Shutdown)?;
+        install(libc::SIGHUP, Disposition::Shutdown)?;
         // The shell never suspends, and reads stdin without being stopped
         // when backgrounded.
-        ignore(libc::SIGTSTP);
-        ignore(libc::SIGTTIN);
-        ignore(libc::SIGPIPE);
+        install(libc::SIGTSTP, Disposition::Ignore)?;
+        install(libc::SIGTTIN, Disposition::Ignore)?;
+        install(libc::SIGPIPE, Disposition::Ignore)?;
         Ok(claim)
     }
     #[cfg(windows)]

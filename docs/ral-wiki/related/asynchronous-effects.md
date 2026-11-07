@@ -22,7 +22,7 @@ adds a scope at which signals wait.**
 - **Signals are `Surface`.** `↑op(V, M)` issues `op` and continues as `M`
   without waiting; `surface` hands the host a value and continues.
 - **Interrupts are `Control`.** `↓op(V, M)` arrives at any point of `M`, from
-  outside it; `Interrupt`, `Cancel`, `Terminate` and `Abort` arrive at any
+  outside it; `Strike(id, cause)` and `End(RootCause)` arrive at any
   point of a run, out of band.
 - **Promises are handles.** Æff's `promise … as p` yields a promise `p` and
   `await p until ⟨x⟩ in M` blocks on it; `spawn` yields a handle and `await`

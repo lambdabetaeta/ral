@@ -7,7 +7,7 @@ use ral_core::path::{
     Kind, LeafMode, LexicalPath, Stat, key_within, relative_key, shown, spelled, spelled_parent,
     utf8, walk,
 };
-use ral_core::process::{CancelCause, DurableRoot, Scope};
+use ral_core::process::{DurableRoot, RootCause, Scope};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -226,7 +226,7 @@ pub(crate) struct Stop(DurableRoot);
 impl Stop {
     /// Stop is irreversible; an abandoned walk is never resumed.
     pub(crate) fn stop(&self) {
-        self.0.cancel(CancelCause::Interrupted);
+        self.0.cancel(RootCause::Cancelled);
     }
 
     #[cfg(test)]

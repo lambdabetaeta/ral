@@ -922,7 +922,7 @@ fn root_cancel_unwinds_inflight_run_shell() {
         // Let the eval reach the blocking external wait, then cancel from
         // outside — the registry cascade's move.
         std::thread::sleep(std::time::Duration::from_millis(300));
-        control.terminate();
+        control.end(ral_core::process::RootCause::Terminated);
         worker.join().expect("run_shell worker")
     });
     let elapsed = t0.elapsed();

@@ -72,7 +72,7 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
     while got < 4 {
         match r.read(&mut len_buf[got..]) {
             // A signal cut the read before any byte moved: retry rather than
-            // abandon the channel.  Rare — `libc::signal` restarts syscalls.
+            // abandon the channel.
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(e),
             Ok(0) if got == 0 => return Ok(None),
