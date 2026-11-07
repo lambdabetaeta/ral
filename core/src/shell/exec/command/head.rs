@@ -19,7 +19,8 @@ pub(crate) struct Head<P = Target> {
     pub(crate) program: P,
 }
 
-pub(crate) type Admission = Result<Admitted, Missing>;
+/// An admitted program, or the 127/126 error the judged walk ends in.
+pub(crate) type Admission = Result<Admitted, Error>;
 
 #[derive(Debug)]
 pub(crate) enum Target {
@@ -36,14 +37,6 @@ pub(crate) enum Target {
 pub(crate) struct Denied {
     pub(crate) at: String,
     pub(crate) denial: Denial,
-}
-
-#[derive(Debug)]
-pub(crate) enum Missing {
-    /// No admitted program; `meant` is a runnable Windows sibling's spelling.
-    NotFound { meant: Option<String> },
-    /// A present file or directory that is no program.
-    NotRunnable(NotRunnable),
 }
 
 impl Head {
@@ -94,14 +87,9 @@ impl Head {
                     denial,
                 }),
             Target::Path(Some(file)) => {
-                let mut admission =
-                    probe(file.clone(), CandidateKind::Path, &shown, grants, baseline)?;
-                if cfg!(windows)
-                    && let Err(Missing::NotFound { meant }) = &mut admission
-                {
-                    *meant = path::WINDOWS_EXEC_EXTENSIONS
-                        .iter()
-                        .find(|ext| {
+                match probe(file.clone(), CandidateKind::Path, &shown, grants, baseline)? {
+                    Err(error) if cfg!(windows) && is_absent(&error) => {
+                        let meant = path::WINDOWS_EXEC_EXTENSIONS.iter().find(|ext| {
                             matches!(
                                 probe(
                                     path::with_appended_suffix(&file, ext),
@@ -112,10 +100,14 @@ impl Head {
                                 ),
                                 Ok(Ok(_))
                             )
-                        })
-                        .map(|ext| format!("{shown}.{ext}"));
+                        });
+                        Ok(Err(match meant {
+                            Some(ext) => error.with_hint(format!("did you mean '{shown}.{ext}'?")),
+                            None => error,
+                        }))
+                    }
+                    admission => Ok(admission),
                 }
-                Ok(admission)
             }
             Target::Search { path, cwd } => {
                 if let Some(hit) = path::locate(&shown, path.as_deref(), Some(&cwd))
@@ -132,7 +124,7 @@ impl Head {
                     )
                 }
             }
-            Target::Path(None) => Ok(Err(Missing::NOT_FOUND)),
+            Target::Path(None) => Ok(Err(not_found(&shown))),
         }?;
         Ok(Head { shown, program })
     }
@@ -163,13 +155,13 @@ fn select_candidates(
     for candidate in candidates {
         let failure = match probe(candidate, CandidateKind::Search, shown, grants, baseline) {
             Ok(Ok(admitted)) => return Ok(Ok(admitted)),
-            Ok(Err(Missing::NotFound { .. })) => continue,
-            Ok(Err(missing)) => Ok(missing),
+            Ok(Err(error)) if is_absent(&error) => continue,
+            Ok(Err(error)) => Ok(error),
             Err(denied) => Err(denied),
         };
         first.get_or_insert(failure);
     }
-    first.unwrap_or(Ok(Missing::NOT_FOUND)).map(Err)
+    first.unwrap_or_else(|| Ok(not_found(shown))).map(Err)
 }
 
 #[derive(Clone, Copy)]
@@ -186,7 +178,7 @@ fn probe(
     baseline: &Baseline,
 ) -> Result<Admission, Denied> {
     let Some(spelled) = LexicalPath::absolute(&arg0) else {
-        return Ok(Err(Missing::NOT_FOUND));
+        return Ok(Err(not_found(shown)));
     };
     let located = match walk(&spelled, LeafMode::Follow) {
         Ok(located) => located,
@@ -199,9 +191,9 @@ fn probe(
             }
             return Ok(Err(match (candidate_kind, error.kind()) {
                 (_, ErrorKind::NotFound | ErrorKind::NotADirectory)
-                | (CandidateKind::Search, _) => Missing::NOT_FOUND,
+                | (CandidateKind::Search, _) => not_found(shown),
                 (CandidateKind::Path, _) => {
-                    Missing::unstartable(candidate_kind, shown, &arg0, Unrunnable::of_io(&error))
+                    unstartable(candidate_kind, shown, &arg0, Unrunnable::of_io(&error))
                 }
             }));
         }
@@ -223,9 +215,9 @@ fn probe(
     if located.is_executable() {
         return Ok(Ok(admitted));
     }
-    let missing = match located.kind() {
+    let error = match located.kind() {
         Some(kind) if matches!(candidate_kind, CandidateKind::Path) || kind == Kind::File => {
-            Missing::unstartable(
+            unstartable(
                 candidate_kind,
                 shown,
                 arg0,
@@ -236,9 +228,9 @@ fn probe(
                 },
             )
         }
-        _ => Missing::NOT_FOUND,
+        _ => not_found(shown),
     };
-    Ok(Err(missing))
+    Ok(Err(error))
 }
 
 #[cfg(all(test, unix))]
@@ -255,32 +247,22 @@ impl Program {
     }
 }
 
-impl Missing {
-    const NOT_FOUND: Self = Self::NotFound { meant: None };
+fn not_found(shown: &str) -> Error {
+    Error::process(shown, Failure::NotFound)
+}
 
-    /// `arg0`, where the walk stopped, cannot run for `why`.  A path head
-    /// reports the name typed, a bare name the file the `PATH` walk found.
-    fn unstartable(kind: CandidateKind, shown: &str, arg0: &Path, why: Unrunnable) -> Self {
-        let found = match kind {
-            CandidateKind::Path => shown.to_owned(),
-            CandidateKind::Search => path::shown(arg0),
-        };
-        Self::NotRunnable(NotRunnable { found, why })
-    }
+fn is_absent(error: &Error) -> bool {
+    matches!(error.reason.failure(), Some(Failure::NotFound))
+}
 
-    /// Format the judged walk's 127/126 verdict without probing again.
-    pub(crate) fn error(self, shown: &str) -> Error {
-        match self {
-            Self::NotFound { meant } => {
-                let error = Error::process(shown, Failure::NotFound);
-                match meant {
-                    Some(meant) => error.with_hint(format!("did you mean '{meant}'?")),
-                    None => error,
-                }
-            }
-            Self::NotRunnable(failure) => Error::process(shown, Failure::NotRunnable(failure)),
-        }
-    }
+/// `arg0`, where the walk stopped, cannot run for `why`.  A path head
+/// reports the name typed, a bare name the file the `PATH` walk found.
+fn unstartable(kind: CandidateKind, shown: &str, arg0: &Path, why: Unrunnable) -> Error {
+    let found = match kind {
+        CandidateKind::Path => shown.to_owned(),
+        CandidateKind::Search => path::shown(arg0),
+    };
+    Error::process(shown, Failure::NotRunnable(NotRunnable { found, why }))
 }
 
 /// Where the launcher's child finds `target`, a path head's native file:
@@ -338,6 +320,14 @@ mod tests {
 
     fn path_head(file: &Path) -> CommandName {
         CommandName::Path(file.to_string_lossy().into_owned())
+    }
+
+    #[cfg(unix)]
+    fn is_not_runnable_at(error: &Error, at: &str) -> bool {
+        matches!(
+            error.reason.failure(),
+            Some(Failure::NotRunnable(NotRunnable { found, .. })) if found == at
+        )
     }
 
     fn file_of(head: &Head<Admission>) -> (&Path, &crate::path::RealPath) {
@@ -404,7 +394,7 @@ mod tests {
         let shell = crate::test_helper::core_shell();
         let head = std::env::temp_dir().join("no-such-dir").join("configure");
         let head = selected(Head::resolve(&path_head(&head), &shell.context));
-        assert!(matches!(head.program, Err(Missing::NotFound { .. })));
+        assert!(head.program.as_ref().is_err_and(is_absent));
     }
 
     /// The kernel refuses `file/` with ENOTDIR, so a trailing slash must not
@@ -417,7 +407,7 @@ mod tests {
         let shell = crate::test_helper::core_shell();
         let head = tmp.path().join(name).to_string_lossy().into_owned() + "/";
         let head = selected(Head::resolve(&CommandName::Path(head), &shell.context));
-        assert!(matches!(head.program, Err(Missing::NotFound { .. })));
+        assert!(head.program.as_ref().is_err_and(is_absent));
     }
 
     #[test]
@@ -537,9 +527,7 @@ mod tests {
             &baseline,
         )
         .unwrap_or_else(|_| panic!("the non-executable file precedes the refusal"));
-        assert!(
-            matches!(first, Err(Missing::NotRunnable(NotRunnable { found, .. })) if found == path::shown(&plain))
-        );
+        assert!(matches!(first, Err(error) if is_not_runnable_at(&error, &path::shown(&plain))));
     }
 
     /// A bare name runs what the walk found, never a same-named file in the
@@ -564,7 +552,7 @@ mod tests {
             &CommandName::Bare(name.into()),
             &shell.context,
         ));
-        assert!(matches!(head.program, Err(Missing::NotFound { .. })));
+        assert!(head.program.as_ref().is_err_and(is_absent));
     }
 
     /// The 126 case, which only a platform with an executable bit has.
@@ -587,7 +575,7 @@ mod tests {
             &shell.context,
         ));
         assert!(
-            matches!(head.program, Err(Missing::NotRunnable(NotRunnable { found, .. })) if found == path::shown(&file))
+            matches!(head.program, Err(error) if is_not_runnable_at(&error, &path::shown(&file)))
         );
     }
 

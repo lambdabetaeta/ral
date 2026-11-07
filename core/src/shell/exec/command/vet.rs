@@ -23,7 +23,7 @@ pub(crate) struct SpawnPlan {
 /// cannot be run — read off the head's own walk, never re-probed.
 pub(crate) fn vet(head: Head<Admission>, args: &[Value]) -> Settled<SpawnPlan> {
     let Head { shown, program } = head;
-    let admitted = program.map_err(|missing| Break::Error(missing.error(&shown)))?;
+    let admitted = program.map_err(Break::Error)?;
     let args = validate_argv(&shown, args)?;
     Ok(SpawnPlan {
         shown,
